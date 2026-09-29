@@ -118,6 +118,17 @@
         "apps/server/src/persistence/Migrations.test.ts",
         "apps/server/src/persistence/Layers/ProjectionRepositories.test.ts"
       ]
+    },
+    {
+      "id": "workbench.feature-import-boundary",
+      "surface": "repository-boundary",
+      "entryFiles": [
+        "scripts/check-workbench-boundary.ts",
+        "package.json",
+        ".github/workflows/ci.yml"
+      ],
+      "responsibility": "The static boundary check scans server and web workbench/features source imports. Native persistence, Provider runtime, orchestration and Agent Gateway internals must be accessed through explicit workbench/host integration; shared packages and UI imports remain available. The guard does not claim runtime isolation and does not cover runtimeLayer or registry assembly.",
+      "tests": ["scripts/check-workbench-boundary.test.ts", ".github/scripts/ci-contracts.test.mjs"]
     }
   ]
 }

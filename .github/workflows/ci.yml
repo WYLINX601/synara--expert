@@ -89,6 +89,9 @@ jobs:
       - name: Verify Windows runtime boundary
         run: bun run windows-runtime:check
 
+      - name: Verify Workbench feature boundaries
+        run: bun run workbench:check-boundaries
+
       - name: Format
         run: bun run fmt:check
 

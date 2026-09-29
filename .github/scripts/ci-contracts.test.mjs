@@ -59,6 +59,12 @@ test("required check, independent static lane and full-history lineage stay inta
   const staticJob = workflow.split("  static-fast:\n")[1].split("  static-typecheck:\n")[0];
   assert.ok(!staticJob.includes("needs:"));
   assert.ok(staticJob.includes("node scripts/release-smoke.ts"));
+  assert.ok(staticJob.includes("run: bun run workbench:check-boundaries"));
+  assert.ok(
+    read("../../package.json").includes(
+      '"workbench:check-boundaries": "node scripts/check-workbench-boundary.ts"',
+    ),
+  );
   assert.ok(!workflow.includes("  release_smoke:"));
   assert.ok(workflow.includes("fetch-depth: 0"));
   assert.ok(workflow.includes("git tag --list 'v[0-9]*'"));

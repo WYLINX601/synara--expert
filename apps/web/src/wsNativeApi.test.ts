@@ -179,6 +179,12 @@ describe("wsNativeApi", () => {
       threadId: "thread-1",
       includeDetails: true,
     });
+    requestMock.mockClear();
+    requestMock.mockResolvedValue(null);
+    await api.server.readExpertAppliedRuntime({ threadId: ThreadId.makeUnsafe("thread-1") });
+    expect(requestMock).toHaveBeenCalledExactlyOnceWith("server.readExpertAppliedRuntime", {
+      threadId: "thread-1",
+    });
   });
   it("checks paused readiness without dropping immediate control revocation", async () => {
     const { createWsNativeApi } = await import("./wsNativeApi");

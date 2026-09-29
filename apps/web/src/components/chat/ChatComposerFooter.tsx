@@ -39,6 +39,7 @@ interface ChatComposerFooterProps {
     busy: boolean;
     connecting: boolean;
     expired: boolean;
+    expertBlocked?: boolean;
     hasPendingCacheReview?: boolean;
     preparingImages: boolean;
     preparingWorktree: boolean;
@@ -188,6 +189,7 @@ export function ChatComposerFooter({
                   submission.busy ||
                   submission.connecting ||
                   submission.expired ||
+                  submission.expertBlocked ||
                   submission.hasPendingCacheReview
                 }
               >
@@ -203,6 +205,7 @@ export function ChatComposerFooter({
                     submission.busy ||
                     submission.connecting ||
                     submission.expired ||
+                    submission.expertBlocked ||
                     submission.hasPendingCacheReview
                   }
                 >
@@ -220,6 +223,7 @@ export function ChatComposerFooter({
                           submission.busy ||
                           submission.connecting ||
                           submission.expired ||
+                          submission.expertBlocked ||
                           submission.hasPendingCacheReview
                         }
                       />
@@ -233,6 +237,7 @@ export function ChatComposerFooter({
                         submission.busy ||
                         submission.connecting ||
                         submission.expired ||
+                        submission.expertBlocked ||
                         submission.hasPendingCacheReview
                       }
                       onClick={() => void submission.onImplementInNewThread()}
@@ -263,6 +268,7 @@ export function ChatComposerFooter({
                   submission.busy ||
                   submission.connecting ||
                   submission.expired ||
+                  submission.expertBlocked ||
                   submission.hasPendingCacheReview ||
                   voice.transcribing ||
                   submission.preparingImages ||
@@ -284,7 +290,9 @@ export function ChatComposerFooter({
                 title={
                   submission.hasPendingCacheReview
                     ? "Choose how to resume the held message above"
-                    : undefined
+                    : submission.expertBlocked
+                      ? "所选专家当前不可用，请查看专家预检或选择“通用”后发送"
+                      : undefined
                 }
               >
                 {submission.connecting || submission.busy || submission.preparingImages ? (

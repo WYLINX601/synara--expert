@@ -35,6 +35,14 @@ import {
   type ServerConfigStreamEvent,
   type ServerDiagnosticsResult,
   type ServerLifecycleStreamEvent,
+  type ExpertReadInput,
+  type ExpertSaveInput,
+  type ExpertArchiveInput,
+  type ExpertConnectionRemoveInput,
+  type ExpertConnectionSaveInput,
+  type ExpertPreviewInput,
+  type ExpertSnapshotReadInput,
+  type ExpertAppliedRuntimeReadInput,
 } from "@synara/contracts";
 import { clamp } from "effect/Number";
 import { Effect, FileSystem, Layer, Option, Path, Queue, Schema, Scope, Stream } from "effect";
@@ -125,6 +133,9 @@ import { ProfileStatsQuery } from "./profileStats";
 import { redactSensitiveProcessArgs } from "./processArgumentRedaction";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment";
 import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
+import { createExpertStore } from "./experts/ExpertStore.ts";
+import { createExpertConnectionStore } from "./experts/ExpertConnectionStore.ts";
+import { connectExpertMcp } from "./experts/ExpertMcpClient.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { ServerSettingsService } from "./serverSettings";
@@ -148,6 +159,8 @@ import { ThreadDiagnosticsQuery } from "./diagnostics/Services/ThreadDiagnostics
 import { makeOwnerThreadDiagnosticReader } from "./diagnostics/ownerThreadDiagnostics";
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore";
 import { ProviderRuntimeEventRepository } from "./persistence/Services/ProviderRuntimeEvents";
+import { ExpertAppliedRuntimeRepository } from "./persistence/Services/ExpertAppliedRuntimeRecords.ts";
+import { ExpertAppliedRuntimeRepositoryLive } from "./persistence/Layers/ExpertAppliedRuntimeRecords.ts";
 import { requireWsOwnerSession } from "./wsOwnerAuthorization";
 import { makeWsRequestAdmission } from "./wsRequestAdmission";
 import { voiceUploadAdmissionGate } from "./voiceUploadAdmission";
@@ -371,6 +384,8 @@ const makeWsRpcHandlersLayer = () =>
       const checkpointDiffQuery = yield* CheckpointDiffQuery;
       const automationService = yield* AutomationService;
       const config = yield* ServerConfig;
+      const expertStore = createExpertStore(config.stateDir);
+      const expertConnectionStore = createExpertConnectionStore(config.stateDir);
       const devServerManager = yield* DevServerManager;
       const fileSystem = yield* FileSystem.FileSystem;
       const externalMcp = yield* ExternalMcpService;
@@ -402,6 +417,7 @@ const makeWsRpcHandlersLayer = () =>
       const threadDiagnostics = yield* ThreadDiagnosticsQuery;
       const eventStore = yield* OrchestrationEventStore;
       const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
+      const expertAppliedRuntimeRepository = yield* ExpertAppliedRuntimeRepository;
       const readOwnerThreadDiagnostics = makeOwnerThreadDiagnosticReader({
         eventStore,
         providerRuntimeEvents,
@@ -1751,6 +1767,93 @@ const makeWsRpcHandlersLayer = () =>
           rpcEffect(serverSettings.getSettingsView, "Failed to load server settings"),
         [WS_METHODS.serverUpdateSettings]: (input) =>
           rpcEffect(serverSettings.updateSettingsView(input), "Failed to update server settings"),
+        [WS_METHODS.serverListExperts]: () =>
+          rpcEffect(
+            requireOwner.pipe(Effect.andThen(Effect.tryPromise(() => expertStore.list()))),
+            "Failed to list experts",
+          ),
+        [WS_METHODS.serverReadExpert]: (input: ExpertReadInput) =>
+          rpcEffect(
+            requireOwner.pipe(Effect.andThen(Effect.tryPromise(() => expertStore.read(input.id)))),
+            "Failed to read expert",
+          ),
+        [WS_METHODS.serverSaveExpert]: (input: ExpertSaveInput) =>
+          rpcEffect(
+            requireOwner.pipe(Effect.andThen(Effect.tryPromise(() => expertStore.save(input)))),
+            "Failed to save expert",
+          ),
+        [WS_METHODS.serverArchiveExpert]: (input: ExpertArchiveInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(
+                Effect.tryPromise(() => expertStore.archive(input.id, input.expectedRevision)),
+              ),
+            ),
+            "Failed to archive expert",
+          ),
+        [WS_METHODS.serverPreviewExpert]: (input: ExpertPreviewInput) =>
+          rpcEffect(
+            requireOwner.pipe(Effect.andThen(Effect.tryPromise(() => expertStore.preview(input)))),
+            "Failed to preview expert",
+          ),
+        [WS_METHODS.serverReadExpertSnapshot]: (input: ExpertSnapshotReadInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(Effect.tryPromise(() => expertStore.readSnapshot(input.snapshotId))),
+            ),
+            "Failed to read expert snapshot",
+          ),
+        [WS_METHODS.serverReadExpertAppliedRuntime]: (input: ExpertAppliedRuntimeReadInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(expertAppliedRuntimeRepository.getByThreadId(input)),
+              Effect.map(Option.getOrNull),
+            ),
+            "Failed to read Expert applied runtime",
+          ),
+        [WS_METHODS.serverListExpertConnections]: () =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(Effect.tryPromise(() => expertConnectionStore.list())),
+            ),
+            "Failed to list expert connections",
+          ),
+        [WS_METHODS.serverSaveExpertConnection]: (input: ExpertConnectionSaveInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(Effect.tryPromise(() => expertConnectionStore.save(input))),
+            ),
+            "Failed to save expert connection",
+          ),
+        [WS_METHODS.serverRemoveExpertConnection]: (input: ExpertConnectionRemoveInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(
+                Effect.tryPromise(() =>
+                  expertConnectionStore.remove(input.id, input.expectedRevision),
+                ),
+              ),
+            ),
+            "Failed to remove expert connection",
+          ),
+        [WS_METHODS.serverTestExpertConnection]: (input: ExpertReadInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(
+                Effect.tryPromise(async () => {
+                  const config = await expertConnectionStore.read(input.id);
+                  if (!config) throw new Error(`Expert connection not found: ${input.id}`);
+                  const client = await connectExpertMcp(config);
+                  try {
+                    return { tools: client.tools.map((tool) => tool.name) };
+                  } finally {
+                    await client.close();
+                  }
+                }),
+              ),
+            ),
+            "Failed to test expert connection",
+          ),
         [WS_METHODS.serverRefreshProviders]: () =>
           rpcEffect(
             providerHealth.refresh.pipe(Effect.map((providers) => ({ providers }))),
@@ -2196,7 +2299,10 @@ const makeWsRpcHandlersLayer = () =>
   );
 
 export const makeWsRpcLayer = () =>
-  Layer.merge(makeWsRpcHandlersLayer(), wsRequestAdmissionMiddlewareLayer);
+  Layer.merge(
+    makeWsRpcHandlersLayer().pipe(Layer.provideMerge(ExpertAppliedRuntimeRepositoryLive)),
+    wsRequestAdmissionMiddlewareLayer,
+  );
 
 const makeRpcWebSocketHttpEffect = RpcServer.toHttpEffectWebsocket(AdmittedWsFeatureRpcGroup, {
   spanPrefix: "ws.rpc",

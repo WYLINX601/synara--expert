@@ -662,6 +662,21 @@ export function createWsNativeApi(): NativeApi {
       getEnvironment: () => transport.request(WS_METHODS.serverGetEnvironment),
       getSettings: () => transport.request(WS_METHODS.serverGetSettings),
       updateSettings: (input) => transport.request(WS_METHODS.serverUpdateSettings, input),
+      listExperts: () => transport.request(WS_METHODS.serverListExperts),
+      readExpert: (input) => transport.request(WS_METHODS.serverReadExpert, input),
+      saveExpert: (input) => transport.request(WS_METHODS.serverSaveExpert, input),
+      archiveExpert: (input) => transport.request(WS_METHODS.serverArchiveExpert, input),
+      previewExpert: (input) => transport.request(WS_METHODS.serverPreviewExpert, input),
+      readExpertSnapshot: (input) => transport.request(WS_METHODS.serverReadExpertSnapshot, input),
+      readExpertAppliedRuntime: (input) =>
+        transport.request(WS_METHODS.serverReadExpertAppliedRuntime, input),
+      listExpertConnections: () => transport.request(WS_METHODS.serverListExpertConnections),
+      saveExpertConnection: (input) =>
+        transport.request(WS_METHODS.serverSaveExpertConnection, input),
+      removeExpertConnection: (input) =>
+        transport.request(WS_METHODS.serverRemoveExpertConnection, input),
+      testExpertConnection: (input) =>
+        transport.request(WS_METHODS.serverTestExpertConnection, input),
       getAuthSession: () => requestAuthJson<AuthSessionState>("/api/auth/session"),
       bootstrapAuth: (input: AuthBootstrapInput) =>
         requestAuthJson<AuthBootstrapResult>("/api/auth/bootstrap", {

@@ -27,6 +27,37 @@ const projectionThreadsColumnNames = (sql: SqlClient.SqlClient) =>
     SELECT name FROM pragma_table_info('projection_threads')
   `.pipe(Effect.map((rows) => rows.map((row) => row.name)));
 
+const expertAppliedRuntimeColumnInfo = (sql: SqlClient.SqlClient) =>
+  sql<{ readonly name: string; readonly pk: number }>`
+    SELECT name, pk FROM pragma_table_info('expert_applied_runtime_records') ORDER BY cid ASC
+  `;
+
+layer("expert applied runtime migration", (it) => {
+  it.effect("stores only the latest applied runtime summary keyed by thread", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const executed = yield* runMigrations();
+      assert.deepInclude(executed, [110, "ExpertAppliedRuntimeRecords"]);
+
+      const columns = yield* expertAppliedRuntimeColumnInfo(sql);
+      assert.deepStrictEqual(
+        columns.map(({ name }) => name),
+        [
+          "thread_id",
+          "snapshot_id",
+          "provider",
+          "model",
+          "runtime_component",
+          "runtime_version",
+          "lifecycle_generation",
+          "applied_at",
+        ],
+      );
+      assert.equal(columns.find(({ name }) => name === "thread_id")?.pk, 1);
+    }),
+  );
+});
+
 layer("reconcileMigrationLineage", (it) => {
   // An imported database whose tracker high-water
   // mark is at or beyond Synara's latest migration ID. The migrator's max-ID
@@ -310,6 +341,8 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
         [106, "ProjectImportOrigins"],
         [107, "ProjectionThreadsHumanMessage"],
         [108, "GatewayCompletions"],
+        [109, "ProjectionThreadsExpertBinding"],
+        [110, "ExpertAppliedRuntimeRecords"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -370,6 +403,8 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
           { migration_id: 106, name: "ProjectImportOrigins" },
           { migration_id: 107, name: "ProjectionThreadsHumanMessage" },
           { migration_id: 108, name: "GatewayCompletions" },
+          { migration_id: 109, name: "ProjectionThreadsExpertBinding" },
+          { migration_id: 110, name: "ExpertAppliedRuntimeRecords" },
         ],
       );
       const preserved = yield* sql<{ readonly count: number }>`
@@ -471,6 +506,8 @@ agentGatewayRetentionLegacyLayer(
           [106, "ProjectImportOrigins"],
           [107, "ProjectionThreadsHumanMessage"],
           [108, "GatewayCompletions"],
+          [109, "ProjectionThreadsExpertBinding"],
+          [110, "ExpertAppliedRuntimeRecords"],
         ]);
 
         const columns = yield* sql<{ readonly name: string }>`
@@ -574,6 +611,8 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [106, "ProjectImportOrigins"],
         [107, "ProjectionThreadsHumanMessage"],
         [108, "GatewayCompletions"],
+        [109, "ProjectionThreadsExpertBinding"],
+        [110, "ExpertAppliedRuntimeRecords"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -618,6 +657,8 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [106, "ProjectImportOrigins"],
           [107, "ProjectionThreadsHumanMessage"],
           [108, "GatewayCompletions"],
+          [109, "ProjectionThreadsExpertBinding"],
+          [110, "ExpertAppliedRuntimeRecords"],
         ],
       );
 
@@ -716,6 +757,8 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [106, "ProjectImportOrigins"],
         [107, "ProjectionThreadsHumanMessage"],
         [108, "GatewayCompletions"],
+        [109, "ProjectionThreadsExpertBinding"],
+        [110, "ExpertAppliedRuntimeRecords"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -756,6 +799,8 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [106, "ProjectImportOrigins"],
           [107, "ProjectionThreadsHumanMessage"],
           [108, "GatewayCompletions"],
+          [109, "ProjectionThreadsExpertBinding"],
+          [110, "ExpertAppliedRuntimeRecords"],
         ],
       );
       const preservedSpaces = yield* sql<{ readonly spaceId: string }>`

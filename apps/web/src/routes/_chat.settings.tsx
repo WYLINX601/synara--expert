@@ -61,6 +61,7 @@ import {
   SettingsSectionShell,
 } from "../components/settings/SettingsPanelPrimitives";
 import { SkillsSettingsPanel } from "../components/settings/SkillsSettingsPanel";
+import { ExpertsSettingsPanel } from "../components/settings/ExpertsSettingsPanel";
 import { ThemeModePicker } from "../components/settings/ThemeModePicker";
 import { ThemePackEditor } from "../components/ThemePackEditor";
 import {
@@ -1250,6 +1251,8 @@ function SettingsRouteView() {
         return <ProfileSettingsPanel />;
       case "skills":
         return <SkillsSettingsPanel />;
+      case "experts":
+        return <ExpertsSettingsPanel />;
       case "usage":
         return <ProviderUsageSettingsPanel />;
       default:

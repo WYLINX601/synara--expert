@@ -91,6 +91,7 @@ interface PreparedChatTurn {
   shouldResumeSettledLocalThread: boolean;
   currentActiveGitBranchForSend: string | null;
   queuedChatTurn: QueuedComposerChatTurn | null;
+  expertIdForSend: string | undefined;
   turnDispatchSettings: TurnDispatchSettings;
   computerControlSequenceForSend: number;
   promptForSend: string;
@@ -437,6 +438,7 @@ export function useChatTurnExecution({
               commandId: newCommandId(),
               threadId: threadIdForSend,
               projectId: targetProjectIdForSend,
+              ...(preparedTurn.expertIdForSend ? { expertId: preparedTurn.expertIdForSend } : {}),
               title,
               modelSelection: threadCreateModelSelection,
               runtimeMode: nextRuntimeModeForSend,

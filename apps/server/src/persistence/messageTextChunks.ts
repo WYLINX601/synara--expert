@@ -11,11 +11,15 @@ export const selectMessageTextChunks = (
   table: string,
   segment = false,
 ) => sql`
-  (SELECT json_group_array(json(chunks.text_json) ORDER BY chunks.event_sequence)
-   FROM message_text_chunks AS chunks
-   WHERE chunks.thread_id = ${sql.literal(table)}.thread_id
-     AND chunks.message_id = ${sql.literal(table)}.message_id
-     ${segment ? sql`AND chunks.segment_sequence = ${sql.literal(table)}.sequence` : sql``}) AS "textChunks"
+  (SELECT json_group_array(json(ordered.text_json))
+   FROM (
+     SELECT chunks.text_json
+     FROM message_text_chunks AS chunks
+     WHERE chunks.thread_id = ${sql.literal(table)}.thread_id
+       AND chunks.message_id = ${sql.literal(table)}.message_id
+       ${segment ? sql`AND chunks.segment_sequence = ${sql.literal(table)}.sequence` : sql``}
+     ORDER BY chunks.event_sequence
+   ) AS ordered) AS "textChunks"
 `;
 
 export const selectSegmentEndedAt = (sql: SqlClient.SqlClient, table: string) => sql`

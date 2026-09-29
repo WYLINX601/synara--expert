@@ -268,6 +268,36 @@ validationLayer("CodexAdapterLive validation", (it) => {
       });
     }),
   );
+  it.effect("passes the immutable Expert session to Codex", () =>
+    Effect.gen(function* () {
+      validationManager.startSessionImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+      const expertSession = {
+        snapshotId: "snapshot-codex",
+        persona: "Use the review checklist.",
+        skillsRoot: "/tmp/snapshot-codex/skills",
+        skills: [
+          {
+            name: "reviewer",
+            path: "/tmp/snapshot-codex/skills/reviewer/SKILL.md",
+          },
+        ],
+        references: ["handbook"],
+      };
+
+      yield* adapter.startSession({
+        provider: "codex",
+        threadId: asThreadId("thread-expert"),
+        expertSession,
+        runtimeMode: "full-access",
+      });
+
+      assert.deepStrictEqual(
+        validationManager.startSessionImpl.mock.calls[0]?.[0]?.expertSession,
+        expertSession,
+      );
+    }),
+  );
   it.effect("carries computer control into the manager's gateway lease facts", () =>
     Effect.gen(function* () {
       validationManager.startSessionImpl.mockClear();

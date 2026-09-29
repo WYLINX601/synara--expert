@@ -104,6 +104,7 @@ import { makeThreadReadTools } from "../threadReadTools.ts";
 import { makeThreadDiagnosticTools } from "../threadDiagnosticTools.ts";
 import { pruneProjectedArchivedManagedWorktrees } from "../../managedWorktrees.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import { makeExpertGatewayToolResolver } from "../../experts/ExpertGatewayTools.ts";
 
 // Providers already receive the versioned host policy exactly once in their
 // private prompt. MCP clients prepend initialize.instructions to every exposed
@@ -149,6 +150,8 @@ export const makeAgentGateway = Effect.gen(function* () {
   const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
   const diagnostics = yield* ThreadDiagnosticsQuery;
   const serverConfig = yield* ServerConfig;
+  const expertTools = makeExpertGatewayToolResolver({ stateDir: serverConfig.stateDir });
+  credentials.onSessionRevoked?.((sessionKey) => expertTools.closeSession(sessionKey));
   const browserAutomationHost = Option.getOrElse(
     yield* Effect.serviceOption(BrowserAutomationHost),
     () => makeBrowserAutomationHost({}),
@@ -1221,6 +1224,33 @@ export const makeAgentGateway = Effect.gen(function* () {
       credentials,
       snapshotQuery,
       tools,
+      resolveSessionTools: ({ sessionKey, threadId }) =>
+        snapshotQuery.getThreadShellById(ThreadId.makeUnsafe(threadId)).pipe(
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.succeed<ReadonlyArray<ToolEntry>>([]),
+              onSome: (shell) =>
+                shell.expertBinding
+                  ? Effect.tryPromise(() =>
+                      expertTools.resolve(sessionKey, shell.expertBinding!.snapshotId),
+                    ).pipe(
+                      Effect.catch((error) =>
+                        Effect.logWarning("expert gateway tool resolution failed", {
+                          error,
+                          threadId,
+                          snapshotId: shell.expertBinding!.snapshotId,
+                        }).pipe(Effect.as<ReadonlyArray<ToolEntry>>([])),
+                      ),
+                    )
+                  : Effect.succeed<ReadonlyArray<ToolEntry>>([]),
+            }),
+          ),
+          Effect.catch((error) =>
+            Effect.logWarning("expert gateway thread lookup failed", { error, threadId }).pipe(
+              Effect.as<ReadonlyArray<ToolEntry>>([]),
+            ),
+          ),
+        ),
       onCapabilityDenied: surfaceCapabilityDenial,
       // Namespace-insensitive: a session that never saw the catalog reaches
       // for prefixed spellings (synara_computer_click,

@@ -19,10 +19,12 @@
   // apps/desktop and apps/server sources on purpose and is bundled by bun, so
   // it stays outside the composite project list the way apps/desktop keeps
   // src/cuaFixtures out of its own.
+  // expert-p0 is a Bun-only verification fixture that imports server source;
+  // the scripts composite project cannot own those server files.
   "include": [
     "**/*.ts",
     "../apps/server/src/device/helperSandbox.ts",
     "../apps/desktop/src/desktopAppIcon.ts"
   ],
-  "exclude": ["computer-use-fixtures"]
+  "exclude": ["computer-use-fixtures", "expert-p0"]
 }

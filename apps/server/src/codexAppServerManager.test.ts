@@ -78,7 +78,10 @@ type SyntheticCodexRequest = {
   readonly params?: Record<string, unknown>;
 };
 
-function createSyntheticCodexAppServer(options?: { readonly forceFullHistoryResponse?: boolean }) {
+function createSyntheticCodexAppServer(options?: {
+  readonly forceFullHistoryResponse?: boolean;
+  readonly expertSkills?: ReadonlyArray<{ readonly name: string; readonly path: string }>;
+}) {
   const historySentinel = "SYNTHETIC_PRIVATE_HISTORY_SENTINEL";
   const persistedTranscript = Object.freeze([
     Object.freeze({ role: "user", text: historySentinel }),
@@ -143,6 +146,15 @@ function createSyntheticCodexAppServer(options?: { readonly forceFullHistoryResp
           respond({});
         } else if (request.method === "account/read") {
           respond({ account: { type: "apiKey" } });
+        } else if (request.method === "skills/extraRoots/set") {
+          respond({});
+        } else if (request.method === "skills/list") {
+          const cwd = String(
+            request.params?.cwd ??
+              (request.params?.cwds as string[] | undefined)?.[0] ??
+              process.cwd(),
+          );
+          respond({ data: [{ cwd, skills: options?.expertSkills ?? [] }] });
         } else if (request.method === "thread/resume" || request.method === "thread/fork") {
           const providerThreadId = String(request.params?.threadId ?? "provider-thread");
           if (options?.forceFullHistoryResponse === true || request.params?.excludeTurns !== true) {
@@ -197,10 +209,10 @@ function createSyntheticCodexManager(fake: ReturnType<typeof createSyntheticCode
     teardownProcessTree,
   });
   const internals = manager as unknown as {
-    assertSupportedCodexCliVersion: () => Promise<void>;
+    assertSupportedCodexCliVersion: () => Promise<string | undefined>;
     buildSessionProcessEnv: () => Promise<NodeJS.ProcessEnv>;
   };
-  vi.spyOn(internals, "assertSupportedCodexCliVersion").mockResolvedValue(undefined);
+  vi.spyOn(internals, "assertSupportedCodexCliVersion").mockResolvedValue("9.9.9");
   vi.spyOn(internals, "buildSessionProcessEnv").mockResolvedValue({});
   return { manager, teardownProcessTree };
 }
@@ -937,14 +949,17 @@ describe("codex CLI version gate", () => {
     reset();
     try {
       // Concurrent session starts must share one in-flight probe.
-      await Promise.all([
+      const concurrentVersions = await Promise.all([
         assertSupportedCodexCliVersion({ binaryPath, cwd: dir, homePath }),
         assertSupportedCodexCliVersion({ binaryPath, cwd: dir, homePath }),
       ]);
+      expect(concurrentVersions).toEqual(["9.9.9", "9.9.9"]);
       expect(probeCount()).toBe(1);
 
       // A later start/resume reuses the cached verdict instead of spawning again.
-      await assertSupportedCodexCliVersion({ binaryPath, cwd: dir, homePath });
+      await expect(
+        assertSupportedCodexCliVersion({ binaryPath, cwd: dir, homePath }),
+      ).resolves.toBe("9.9.9");
       expect(probeCount()).toBe(1);
 
       // The per-call working-directory precondition is never served from the cache.
@@ -1677,6 +1692,24 @@ describe("buildCodexThreadOpenRequest", () => {
     });
   });
 
+  it("sends Expert developer instructions on start and resume", () => {
+    const developerInstructions = "Use the immutable Expert snapshot persona.";
+    expect(buildCodexThreadOpenRequest({ sessionOverrides, developerInstructions })).toMatchObject({
+      method: "thread/start",
+      params: { developerInstructions },
+    });
+    expect(
+      buildCodexThreadOpenRequest({
+        resumeThreadId: "existing-thread",
+        sessionOverrides,
+        developerInstructions,
+      }),
+    ).toMatchObject({
+      method: "thread/resume",
+      params: { developerInstructions, threadId: "existing-thread" },
+    });
+  });
+
   it("starts a fresh thread with raw events disabled", () => {
     const request = buildCodexThreadOpenRequest({ sessionOverrides });
     expect(request).toEqual({
@@ -1834,6 +1867,107 @@ describe("resolveCodexModelForAccount", () => {
 });
 
 describe("startSession", () => {
+  it("loads required Expert skills and keeps persona across Codex recovery", async () => {
+    const skillRoot = mkdtempSync(path.join(os.tmpdir(), "synara-codex-expert-skills-"));
+    const skillPath = path.join(skillRoot, "reviewer", "SKILL.md");
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "synara-codex-expert-cwd-"));
+    mkdirSync(path.dirname(skillPath), { recursive: true });
+    writeFileSync(skillPath, "---\nname: reviewer\ndescription: review\n---\nReview.\n");
+    const persona = "Use the reviewer persona.";
+    const expertSession = {
+      snapshotId: "snapshot-codex",
+      persona,
+      skillsRoot: skillRoot,
+      skills: [{ name: "reviewer", path: skillPath }],
+      references: [],
+    };
+    const fake = createSyntheticCodexAppServer({
+      expertSkills: [{ name: "reviewer", path: skillPath }],
+    });
+    const { manager } = createSyntheticCodexManager(fake);
+
+    try {
+      const first = await manager.startSession({
+        threadId: asThreadId("thread-expert-codex"),
+        provider: "codex",
+        runtimeMode: "full-access",
+        cwd,
+        expertSession,
+        agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+      });
+      expect(
+        fake.requests.find((request) => request.method === "skills/extraRoots/set")?.params,
+      ).toEqual({ extraRoots: [skillRoot] });
+      expect(
+        fake.requests.find((request) => request.method === "thread/start")?.params,
+      ).toMatchObject({ developerInstructions: persona });
+
+      await manager.sendTurn({
+        threadId: first.threadId,
+        input: "Continue with the Expert.",
+        interactionMode: "default",
+      });
+      const turnInstructions = fake.requests.find((request) => request.method === "turn/start")
+        ?.params?.collaborationMode as
+        | { settings?: { developer_instructions?: string } }
+        | undefined;
+      expect(turnInstructions?.settings?.developer_instructions).toContain(persona);
+      await manager.stopSession(first.threadId);
+
+      await manager.startSession({
+        threadId: first.threadId,
+        provider: "codex",
+        runtimeMode: "full-access",
+        cwd,
+        resumeCursor: first.resumeCursor,
+        expertSession,
+        agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+      });
+      const resumed = fake.requests.find((request) => request.method === "thread/resume");
+      expect(resumed?.params).toMatchObject({
+        developerInstructions: persona,
+        threadId: "fresh-provider-thread",
+      });
+      expect(
+        fake.requests.filter((request) => request.method === "skills/extraRoots/set"),
+      ).toHaveLength(2);
+    } finally {
+      await manager.stopAll();
+      rmSync(skillRoot, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("fails startup when a required Expert skill is absent from skills/list", async () => {
+    const skillRoot = mkdtempSync(path.join(os.tmpdir(), "synara-codex-missing-expert-"));
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "synara-codex-missing-expert-cwd-"));
+    const skillPath = path.join(skillRoot, "reviewer", "SKILL.md");
+    const { manager } = createSyntheticCodexManager(createSyntheticCodexAppServer());
+
+    try {
+      await expect(
+        manager.startSession({
+          threadId: asThreadId("thread-missing-expert-skill"),
+          provider: "codex",
+          runtimeMode: "full-access",
+          cwd,
+          expertSession: {
+            snapshotId: "snapshot-missing",
+            persona: "Use the reviewer persona.",
+            skillsRoot: skillRoot,
+            skills: [{ name: "reviewer", path: skillPath }],
+            references: [],
+          },
+          agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+        }),
+      ).rejects.toThrow("Codex did not load required Expert skill 'reviewer'.");
+    } finally {
+      await manager.stopAll();
+      rmSync(skillRoot, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("resumes a synthetic large-history thread across restart without replay or payload exposure", async () => {
     const fake = createSyntheticCodexAppServer();
     const cwd = mkdtempSync(path.join(os.tmpdir(), "synara-codex-large-resume-"));
@@ -1869,6 +2003,8 @@ describe("startSession", () => {
       });
       expect(firstSession).toMatchObject({
         status: "ready",
+        runtimeComponent: "codex-cli",
+        runtimeVersion: "9.9.9",
         resumeCursor: { threadId: "provider-thread" },
       });
       await first.manager.sendTurn({
@@ -3516,12 +3652,14 @@ describe("thread checkpoint control", () => {
       versionCheckStarted = resolve;
     });
     vi.spyOn(
-      manager as unknown as { assertSupportedCodexCliVersion: () => Promise<void> },
+      manager as unknown as {
+        assertSupportedCodexCliVersion: () => Promise<string | undefined>;
+      },
       "assertSupportedCodexCliVersion",
     ).mockImplementation(() => {
       versionCheckStarted();
-      return new Promise<void>((resolve) => {
-        releaseVersionCheck = resolve;
+      return new Promise<string | undefined>((resolve) => {
+        releaseVersionCheck = () => resolve(undefined);
       });
     });
     const controller = new AbortController();
@@ -3688,7 +3826,9 @@ describe("thread checkpoint control", () => {
       process.env.SYNARA_HOME = path.join(homePath, "synara-home");
       const { manager, sendRequest } = createThreadControlHarness();
       vi.spyOn(
-        manager as unknown as { assertSupportedCodexCliVersion: () => Promise<void> },
+        manager as unknown as {
+          assertSupportedCodexCliVersion: () => Promise<string | undefined>;
+        },
         "assertSupportedCodexCliVersion",
       ).mockResolvedValue(undefined);
       sendRequest.mockResolvedValue({

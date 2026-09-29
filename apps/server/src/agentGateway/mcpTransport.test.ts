@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+
 import { assert, describe, it } from "@effect/vitest";
 import { ProjectId, ThreadId, TurnId, type OrchestrationThreadShell } from "@synara/contracts";
 import { Deferred, Effect, Fiber, Option } from "effect";
@@ -81,6 +83,10 @@ function makeTransport(input: {
   /** Full family-predicate override (e.g. the namespace-insensitive matcher). */
   readonly isComputerToolName?: (toolName: string) => boolean;
   readonly onCapabilityDenied?: (denial: McpTransportTestDenial) => Effect.Effect<void>;
+  readonly authorizeTool?: Parameters<typeof makeAgentGatewayMcpTransport>[0]["authorizeTool"];
+  readonly resolveSessionTools?: Parameters<
+    typeof makeAgentGatewayMcpTransport
+  >[0]["resolveSessionTools"];
 }) {
   const threads = new Map(input.threads.map((thread) => [String(thread.id), thread]));
   let nextSession = 0;
@@ -134,6 +140,7 @@ function makeTransport(input: {
   } as unknown as AgentGatewayCredentialsShape;
   const tokenAliases = new Map<string, string>();
   const sessionKeyAliases = new Map<string, string>();
+  const sessionKeyByTokenAlias = new Map<string, string>();
   const leases = new Map<string, AgentGatewaySessionLease>();
   const startRuntime = (threadId: string, tokenAlias: string): AgentGatewaySessionLease => {
     const lease = acquireAgentGatewaySessionLease(
@@ -147,6 +154,7 @@ function makeTransport(input: {
     const session = sessionRegistry.verify(lease.connection.bearerToken);
     if (!session) throw new Error("Expected registered gateway session");
     sessionKeyAliases.set(`session-${leases.size + 1}`, session.sessionKey);
+    sessionKeyByTokenAlias.set(tokenAlias, session.sessionKey);
     leases.set(threadId, lease);
     return lease;
   };
@@ -170,6 +178,8 @@ function makeTransport(input: {
       const thread = threads.get(threadId);
       return thread ? Effect.succeed(thread) : Effect.fail(new Error("missing thread"));
     },
+    ...(input.authorizeTool ? { authorizeTool: input.authorizeTool } : {}),
+    ...(input.resolveSessionTools ? { resolveSessionTools: input.resolveSessionTools } : {}),
     ...(input.onCapabilityDenied ? { onCapabilityDenied: input.onCapabilityDenied } : {}),
     ...(input.computerToolNames || input.isComputerToolName
       ? {
@@ -182,6 +192,11 @@ function makeTransport(input: {
   });
   return Object.assign(transport, {
     resolveToken: (token: string) => tokenAliases.get(token) ?? token,
+    sessionKeyForTokenAlias: (tokenAlias: string) => sessionKeyByTokenAlias.get(tokenAlias),
+    revokeTokenAlias: (tokenAlias: string) => {
+      const token = tokenAliases.get(tokenAlias);
+      if (token) credentials.revokeSessionToken(token);
+    },
     cancelTurn: (sessionKey: string, turnId: string) =>
       inFlightRequests.cancelTurn(sessionKeyAliases.get(sessionKey) ?? sessionKey, turnId),
     setThreadTurnState: (
@@ -674,6 +689,456 @@ describe("makeAgentGatewayMcpTransport tools/list", () => {
           ?.text,
         "ok",
       );
+    }),
+  );
+});
+
+describe("makeAgentGatewayMcpTransport Expert tool authorization", () => {
+  it.effect("resolves dynamic tools per verified session and preserves the call gates", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      const denials: Array<McpTransportTestDenial> = [];
+      const resolverSessions: Array<{ sessionKey: string; threadId: string; provider: string }> =
+        [];
+      let failResolver = false;
+      const dynamicTool = (name: string, owner: string): ToolEntry => ({
+        definition: {
+          name,
+          description: owner,
+          inputSchema: { type: "object" },
+        },
+        requiredCapability: "thread:read",
+        requiresActiveTurn: true,
+        sessionScoped: true,
+        handler: (_args, context) =>
+          Effect.sync(() => {
+            calls.push(`${name}:${context.callerThreadId}`);
+            return { content: [{ type: "text" as const, text: owner }] };
+          }),
+      });
+      const sessionATool = dynamicTool("expert_session_a", "owner-a");
+      const sessionBTool = dynamicTool("expert_session_b", "owner-b");
+      const sessionAComputerTool: ToolEntry = {
+        ...dynamicTool("expert_session_a_computer", "computer-a"),
+        requiredCapability: "computer:control",
+      };
+      const staticSharedTool: ToolEntry = {
+        definition: {
+          name: "expert_shared",
+          description: "static wins",
+          inputSchema: { type: "object" },
+        },
+        requiredCapability: "thread:read",
+        handler: (_args, context) =>
+          Effect.sync(() => {
+            calls.push(`expert_shared:${context.callerThreadId}`);
+            return { content: [{ type: "text" as const, text: "static" }] };
+          }),
+      };
+      const transport = makeTransport({
+        threads: [makeThread("thread-expert-a"), makeThread("thread-expert-b")],
+        tools: [staticSharedTool],
+        // Dynamic sessionScoped tools are authorized by the resolver itself.
+        authorizeTool: () => false,
+        resolveSessionTools: ({ sessionKey, threadId, provider }) =>
+          Effect.sync(() => {
+            if (failResolver) throw new Error("fixture resolver failure");
+            resolverSessions.push({ sessionKey, threadId, provider });
+            const sessionTools =
+              threadId === "thread-expert-a"
+                ? [sessionATool, sessionAComputerTool]
+                : threadId === "thread-expert-b"
+                  ? [sessionBTool]
+                  : [];
+            return [
+              ...sessionTools,
+              {
+                ...staticSharedTool,
+                definition: { ...staticSharedTool.definition, description: "dynamic duplicate" },
+              },
+            ];
+          }),
+        onCapabilityDenied: (denial) =>
+          Effect.sync(() => {
+            denials.push(denial);
+          }),
+      });
+
+      const listA = yield* post(transport, "token-1", {
+        jsonrpc: "2.0",
+        id: "list-a-dynamic",
+        method: "tools/list",
+      });
+      const toolsA = listedTools(listA.body);
+      assert.include(
+        toolsA.map((tool) => tool.name),
+        "expert_session_a",
+      );
+      assert.notInclude(
+        toolsA.map((tool) => tool.name),
+        "expert_session_b",
+      );
+      assert.notInclude(
+        toolsA.map((tool) => tool.name),
+        "expert_session_a_computer",
+      );
+      assert.equal(toolsA.filter((tool) => tool.name === "expert_shared").length, 1);
+      assert.equal(findToolOrThrow(toolsA, "expert_shared").description, "static wins");
+
+      const listB = yield* post(transport, "token-2", {
+        jsonrpc: "2.0",
+        id: "list-b-dynamic",
+        method: "tools/list",
+      });
+      const toolsB = listedTools(listB.body);
+      assert.include(
+        toolsB.map((tool) => tool.name),
+        "expert_session_b",
+      );
+      assert.notInclude(
+        toolsB.map((tool) => tool.name),
+        "expert_session_a",
+      );
+
+      const resolverCallsBeforeStaticCall = resolverSessions.length;
+      failResolver = true;
+      const staticCall = yield* post(transport, "token-1", toolCallBody("expert_shared"));
+      failResolver = false;
+      assert.equal(resolverSessions.length, resolverCallsBeforeStaticCall);
+      assert.equal(
+        (staticCall.body as { result: { content: Array<{ text: string }> } }).result.content[0]
+          ?.text,
+        "static",
+      );
+      const callA = yield* post(transport, "token-1", toolCallBody("expert_session_a"));
+      assert.equal(
+        (callA.body as { result: { content: Array<{ text: string }> } }).result.content[0]?.text,
+        "owner-a",
+      );
+      const crossSessionCall = yield* post(transport, "token-2", toolCallBody("expert_session_a"));
+      assert.equal(rpcErrorOf(crossSessionCall).code, -32602);
+      assert.equal(rpcErrorOf(crossSessionCall).message, 'Unknown tool "expert_session_a".');
+      const callB = yield* post(transport, "token-2", toolCallBody("expert_session_b"));
+      assert.equal(
+        (callB.body as { result: { content: Array<{ text: string }> } }).result.content[0]?.text,
+        "owner-b",
+      );
+
+      const capabilityDenied = yield* post(
+        transport,
+        "token-1",
+        toolCallBody("expert_session_a_computer"),
+      );
+      assert.equal(
+        (toolResultErrorOf(capabilityDenied).error as { code: string }).code,
+        "capability_denied",
+      );
+      assert.equal(denials.length, 1);
+
+      transport.setThreadTurnState("thread-expert-a", "completed");
+      const inactiveCall = yield* post(transport, "token-1", toolCallBody("expert_session_a"));
+      assert.equal(
+        (toolResultErrorOf(inactiveCall).error as { code: string }).code,
+        "caller_turn_inactive",
+      );
+      assert.deepEqual(calls, [
+        "expert_shared:thread-expert-a",
+        "expert_session_a:thread-expert-a",
+        "expert_session_b:thread-expert-b",
+      ]);
+      assert.isTrue(
+        resolverSessions.some(
+          (session) =>
+            session.sessionKey === transport.sessionKeyForTokenAlias("token-1") &&
+            session.threadId === "thread-expert-a" &&
+            session.provider === "codex",
+        ),
+      );
+      assert.isTrue(
+        resolverSessions.some(
+          (session) =>
+            session.sessionKey === transport.sessionKeyForTokenAlias("token-2") &&
+            session.threadId === "thread-expert-b" &&
+            session.provider === "codex",
+        ),
+      );
+    }),
+  );
+
+  it.effect(
+    "authorizes exact tools per verified session over HTTP and rejects stale authority",
+    () =>
+      Effect.gen(function* () {
+        const expertToolName = "expert_fixture_search";
+        const allowedBySession = new Map<string, ReadonlySet<string>>();
+        const expertOwnerBySession = new Map<string, string>();
+        const authorizationCalls: Array<{
+          readonly sessionKey: string;
+          readonly threadId: string;
+          readonly provider: string;
+          readonly toolName: string;
+        }> = [];
+        const downstreamCalls: Array<{
+          readonly sessionKey: string;
+          readonly threadId: string;
+          readonly expertOwner: string;
+          readonly args: Record<string, unknown>;
+        }> = [];
+        const expertTool: ToolEntry = {
+          definition: {
+            name: expertToolName,
+            description: "Search the fixture connection.",
+            inputSchema: { type: "object", properties: {} },
+          },
+          requiredCapability: "thread:read",
+          requiresActiveTurn: true,
+          sessionScoped: true,
+          handler: (args, context) =>
+            Effect.sync(() => {
+              const expertOwner = expertOwnerBySession.get(context.callerSessionKey);
+              if (!expertOwner)
+                throw new Error("Expected a fixture Expert connection for this session");
+              downstreamCalls.push({
+                sessionKey: context.callerSessionKey,
+                threadId: context.callerThreadId,
+                expertOwner,
+                args,
+              });
+              return {
+                content: [
+                  { type: "text" as const, text: `fixture downstream result for ${expertOwner}` },
+                ],
+              };
+            }),
+        };
+        const transport = makeTransport({
+          threads: [makeThread("thread-expert-a"), makeThread("thread-expert-b")],
+          tools: [
+            {
+              definition: {
+                name: "synara_read_thread",
+                description: "Read a Synara thread.",
+                inputSchema: { type: "object" },
+              },
+              requiredCapability: "thread:read",
+              handler: () => Effect.succeed({ content: [{ type: "text" as const, text: "ok" }] }),
+            },
+            expertTool,
+          ],
+          authorizeTool: (authorization) => {
+            authorizationCalls.push(authorization);
+            return (
+              allowedBySession.get(authorization.sessionKey)?.has(authorization.toolName) === true
+            );
+          },
+        });
+        const sessionKeyA = transport.sessionKeyForTokenAlias("token-1");
+        if (!sessionKeyA) throw new Error("Expected session A identity");
+        const sessionKeyB = transport.sessionKeyForTokenAlias("token-2");
+        if (!sessionKeyB) throw new Error("Expected session B identity");
+        allowedBySession.set(sessionKeyA, new Set([expertToolName]));
+        expertOwnerBySession.set(sessionKeyA, "expert-a");
+        expertOwnerBySession.set(sessionKeyB, "expert-b");
+
+        const httpServer = createServer(async (request, response) => {
+          try {
+            let rawBody = "";
+            for await (const chunk of request) rawBody += String(chunk);
+            const result = await Effect.runPromise(
+              transport({
+                authorizationHeader: request.headers.authorization,
+                body: JSON.parse(rawBody) as unknown,
+              }),
+            );
+            response.writeHead(result.status, { "content-type": "application/json" });
+            response.end(JSON.stringify(result.body ?? {}));
+          } catch {
+            response.writeHead(500).end();
+          }
+        });
+        httpServer.listen(0, "127.0.0.1");
+        yield* Effect.tryPromise({
+          try: () =>
+            new Promise<void>((resolve, reject) => {
+              httpServer.once("listening", resolve);
+              httpServer.once("error", reject);
+            }),
+          catch: (error) => error,
+        });
+        const address = httpServer.address();
+        if (!address || typeof address === "string") {
+          throw new Error("Expected the local HTTP fixture to bind to a TCP port");
+        }
+        const endpoint = `http://127.0.0.1:${address.port}/mcp`;
+        const postHttp = (tokenAlias: string, body: unknown) =>
+          Effect.tryPromise({
+            try: async () => {
+              const response = await fetch(endpoint, {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${transport.resolveToken(tokenAlias)}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(body),
+              });
+              return {
+                status: response.status,
+                body: (await response.json()) as Record<string, unknown>,
+              };
+            },
+            catch: (error) => error,
+          });
+        const closeServer = () =>
+          new Promise<void>((resolve, reject) =>
+            httpServer.close((error) => (error ? reject(error) : resolve())),
+          );
+
+        try {
+          const listA = yield* postHttp("token-1", {
+            jsonrpc: "2.0",
+            id: "list-a",
+            method: "tools/list",
+          });
+          const namesA = listedTools(listA.body).map((tool) => tool.name);
+          assert.include(namesA, expertToolName);
+          assert.include(namesA, "synara_read_thread");
+
+          const listB = yield* postHttp("token-2", {
+            jsonrpc: "2.0",
+            id: "list-b",
+            method: "tools/list",
+          });
+          const namesB = listedTools(listB.body).map((tool) => tool.name);
+          assert.notInclude(namesB, expertToolName);
+          assert.include(namesB, "synara_read_thread");
+
+          const callA = yield* postHttp("token-1", {
+            jsonrpc: "2.0",
+            id: "call-a",
+            method: "tools/call",
+            params: {
+              name: expertToolName,
+              arguments: { expertId: "expert-b", threadId: "thread-expert-b" },
+            },
+          });
+          const callAResult = callA.body as {
+            result: { content: Array<{ text: string }> };
+          };
+          assert.equal(
+            callAResult.result.content[0]?.text,
+            "fixture downstream result for expert-a",
+          );
+          assert.deepEqual(downstreamCalls, [
+            {
+              sessionKey: sessionKeyA,
+              threadId: "thread-expert-a",
+              expertOwner: "expert-a",
+              args: { expertId: "expert-b", threadId: "thread-expert-b" },
+            },
+          ]);
+
+          const callB = yield* postHttp("token-2", {
+            jsonrpc: "2.0",
+            id: "call-b",
+            method: "tools/call",
+            params: {
+              name: expertToolName,
+              arguments: { expertId: "expert-a", threadId: "thread-expert-a" },
+            },
+          });
+          const callBError = rpcErrorOf({ body: callB.body });
+          assert.equal(callBError.code, -32602);
+          assert.equal(callBError.message, `Unknown tool "${expertToolName}".`);
+          assert.lengthOf(downstreamCalls, 1);
+
+          assert.isTrue(
+            authorizationCalls.some(
+              (authorization) =>
+                authorization.sessionKey === sessionKeyA &&
+                authorization.threadId === "thread-expert-a" &&
+                authorization.provider === "codex" &&
+                authorization.toolName === expertToolName,
+            ),
+          );
+          assert.isTrue(
+            authorizationCalls.some(
+              (authorization) =>
+                authorization.sessionKey === sessionKeyB &&
+                authorization.threadId === "thread-expert-b" &&
+                authorization.provider === "codex" &&
+                authorization.toolName === expertToolName,
+            ),
+          );
+
+          transport.setThreadTurnState("thread-expert-a", "completed");
+          const inactiveA = yield* postHttp("token-1", {
+            jsonrpc: "2.0",
+            id: "call-a-inactive",
+            method: "tools/call",
+            params: { name: expertToolName, arguments: {} },
+          });
+          const inactiveError = toolResultErrorOf({ body: inactiveA.body }).error as {
+            code: string;
+          };
+          assert.equal(inactiveError.code, "caller_turn_inactive");
+          assert.lengthOf(downstreamCalls, 1);
+
+          transport.revokeTokenAlias("token-1");
+          const revokedA = yield* postHttp("token-1", {
+            jsonrpc: "2.0",
+            id: "list-a-revoked",
+            method: "tools/list",
+          });
+          assert.equal(revokedA.status, 401);
+          const revokedCallA = yield* postHttp("token-1", {
+            jsonrpc: "2.0",
+            id: "call-a-revoked",
+            method: "tools/call",
+            params: { name: expertToolName, arguments: {} },
+          });
+          assert.equal(revokedCallA.status, 401);
+          assert.lengthOf(downstreamCalls, 1);
+        } finally {
+          yield* Effect.tryPromise({ try: closeServer, catch: (error) => error });
+        }
+      }),
+  );
+
+  it.effect("fails closed for session-scoped tools when no authorizer is wired", () =>
+    Effect.gen(function* () {
+      let handlerCalls = 0;
+      const transport = makeTransport({
+        threads: [makeThread("thread-expert-default-deny")],
+        tools: [
+          {
+            definition: {
+              name: "expert_fixture_search",
+              description: "Search the fixture connection.",
+              inputSchema: { type: "object" },
+            },
+            requiredCapability: "thread:read",
+            requiresActiveTurn: true,
+            sessionScoped: true,
+            handler: () =>
+              Effect.sync(() => {
+                handlerCalls += 1;
+                return { content: [{ type: "text" as const, text: "unexpected" }] };
+              }),
+          },
+        ],
+      });
+
+      const listResponse = yield* post(transport, "token-1", {
+        jsonrpc: "2.0",
+        id: "list-scoped-default-deny",
+        method: "tools/list",
+      });
+      assert.deepEqual(listedTools(listResponse.body), []);
+      const callResponse = yield* post(transport, "token-1", toolCallBody("expert_fixture_search"));
+      const error = rpcErrorOf(callResponse);
+      assert.equal(error.code, -32602);
+      assert.equal(error.message, 'Unknown tool "expert_fixture_search".');
+      assert.equal(handlerCalls, 0);
     }),
   );
 });

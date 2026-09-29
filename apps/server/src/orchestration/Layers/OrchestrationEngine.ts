@@ -1,5 +1,6 @@
 import type {
   ChatAttachment,
+  ExpertBinding,
   OrchestrationEvent,
   OrchestrationReadModel,
   ProjectId,
@@ -25,6 +26,7 @@ import {
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "../../config.ts";
+import { createExpertStore } from "../../experts/ExpertStore.ts";
 import {
   toPersistenceSqlError,
   type OrchestrationEventStoreError,
@@ -166,6 +168,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const serverConfig = yield* ServerConfig;
+  const expertStore = createExpertStore(serverConfig.stateDir);
   const deciderWorkspacePaths = {
     homeDir: serverConfig.homeDir,
     chatWorkspaceRoot: serverConfig.chatWorkspaceRoot,
@@ -898,11 +901,48 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         }
       }
 
+      let expertBinding: ExpertBinding | undefined;
+      if (
+        (command.type === "thread.create" || command.type === "thread.handoff.create") &&
+        command.expertId
+      ) {
+        const requestedExpert = command.expertId;
+        const provider = command.modelSelection.provider;
+        if (provider !== "codex" && provider !== "pi") {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Experts currently support Codex and Pi, not '${provider}'.`,
+          });
+        }
+        const preview = yield* Effect.tryPromise({
+          try: () => expertStore.preview({ expertId: requestedExpert, provider }),
+          catch: (error) =>
+            new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Could not check expert '${requestedExpert}': ${String(error)}`,
+            }),
+        });
+        if (preview.status === "blocked" || preview.status === "incompatible") {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: preview.issues.join("; ") || `Expert '${requestedExpert}' is unavailable.`,
+          });
+        }
+        expertBinding = yield* Effect.tryPromise({
+          try: () => expertStore.prepareSnapshot(requestedExpert),
+          catch: (error) =>
+            new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Could not prepare expert '${requestedExpert}': ${String(error)}`,
+            }),
+        });
+      }
       const deciderReadModel = yield* buildDeciderReadModel(command);
       const eventBase = yield* decideOrchestrationCommand({
         command,
         readModel: deciderReadModel,
         workspacePaths: deciderWorkspacePaths,
+        expertBinding,
       });
       const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
       const transactionalCommitEffect: Effect.Effect<

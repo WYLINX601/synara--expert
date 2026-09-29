@@ -75,6 +75,12 @@ export interface ToolEntry {
    * permission: capability checks, approval and audit all apply unchanged.
    */
   readonly discoveryOnly?: boolean;
+  /**
+   * Requires an explicit per-session grant from the MCP transport. A scoped
+   * tool fails closed when that authorizer is not wired, preventing it from
+   * becoming globally callable by accident.
+   */
+  readonly sessionScoped?: true;
 }
 
 export interface McpToolEntry<Context, Capability extends string> {

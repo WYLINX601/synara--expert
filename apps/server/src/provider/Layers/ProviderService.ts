@@ -28,6 +28,8 @@ import {
   ProviderStartReviewInput,
   ProviderSteerTurnInput,
   ProviderSessionStartInput,
+  ProviderExpertSession,
+  type ExpertAppliedRuntimeRecord,
   ProviderStopSessionInput,
   ProviderStartOptions,
   TurnId,
@@ -76,6 +78,7 @@ import {
   ProviderRuntimeEventRepository,
   type PersistedProviderRuntimeEvent,
 } from "../../persistence/Services/ProviderRuntimeEvents.ts";
+import { ExpertAppliedRuntimeRepository } from "../../persistence/Services/ExpertAppliedRuntimeRecords.ts";
 import {
   classifyTerminalTurnApplicability,
   isStartedTurnApplicable,
@@ -116,6 +119,10 @@ export interface ProviderServiceLiveOptions {
   readonly persistRuntimeEvent?: (
     event: ProviderRuntimeEvent,
   ) => Effect.Effect<PersistedProviderRuntimeEvent, unknown>;
+  /** Store the latest successfully applied Expert runtime summary. */
+  readonly persistExpertAppliedRuntime?: (
+    record: ExpertAppliedRuntimeRecord,
+  ) => Effect.Effect<void, unknown>;
   /** Durable fallback for events that can never be accepted by the canonical journal. */
   readonly quarantineRuntimeEvent?: (
     event: ProviderRuntimeEvent,
@@ -272,9 +279,16 @@ function toRuntimePayloadFromSession(
     readonly lifecycleGeneration?: string;
   },
 ): Record<string, unknown> {
+  const lifecycleGeneration =
+    nonEmptyTrimmed(extra?.lifecycleGeneration) ?? nonEmptyTrimmed(session.lifecycleGeneration);
+  const runtimeComponent = nonEmptyTrimmed(session.runtimeComponent);
+  const runtimeVersion = nonEmptyTrimmed(session.runtimeVersion);
   return {
     cwd: session.cwd ?? null,
     model: session.model ?? null,
+    ...(runtimeComponent !== undefined ? { runtimeComponent } : {}),
+    ...(runtimeVersion !== undefined ? { runtimeVersion } : {}),
+    ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
     activeTurnId: nonEmptyTrimmed(session.activeTurnId) ?? null,
     // `thread.session.set` types both as trimmed-non-empty-or-null, so a blank
     // provider string has to become an explicit "absent" rather than reaching
@@ -288,9 +302,6 @@ function toRuntimePayloadFromSession(
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
       ? { lastRuntimeEventAt: extra.lastRuntimeEventAt }
-      : {}),
-    ...(extra?.lifecycleGeneration !== undefined
-      ? { lifecycleGeneration: extra.lifecycleGeneration }
       : {}),
   };
 }
@@ -307,6 +318,14 @@ function readPersistedProviderOptions(
 ): ProviderStartOptions | undefined {
   const raw = runtimePayloadRecord(runtimePayload).providerOptions;
   return Option.getOrUndefined(Schema.decodeUnknownOption(ProviderStartOptions)(raw));
+}
+
+function readPersistedExpertSession(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+): ProviderExpertSession | null | undefined {
+  const payload = runtimePayloadRecord(runtimePayload);
+  if (!Object.hasOwn(payload, "expertSession") || payload.expertSession === null) return undefined;
+  return Schema.is(ProviderExpertSession)(payload.expertSession) ? payload.expertSession : null;
 }
 
 function readPersistedComputerControl(
@@ -328,6 +347,26 @@ function runtimePayloadRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function runtimePayloadString(value: unknown, key: string): string | undefined {
+  const candidate = runtimePayloadRecord(value)[key];
+  return typeof candidate === "string" ? nonEmptyTrimmed(candidate) : undefined;
+}
+
+function persistedRuntimeMetadata(
+  binding: ProviderRuntimeBinding | undefined,
+): Record<string, string> {
+  const runtimeComponent = runtimePayloadString(binding?.runtimePayload, "runtimeComponent");
+  const runtimeVersion = runtimePayloadString(binding?.runtimePayload, "runtimeVersion");
+  const lifecycleGeneration =
+    nonEmptyTrimmed(binding?.lifecycleGeneration) ??
+    runtimePayloadString(binding?.runtimePayload, "lifecycleGeneration");
+  return {
+    ...(runtimeComponent !== undefined ? { runtimeComponent } : {}),
+    ...(runtimeVersion !== undefined ? { runtimeVersion } : {}),
+    ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
+  };
 }
 
 function runtimeEventRetiredGatewayTurnAuthority(event: ProviderRuntimeEvent): boolean {
@@ -455,6 +494,111 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
 
     const registry = yield* ProviderAdapterRegistry;
     const directory = yield* ProviderSessionDirectory;
+    const recordAppliedExpertRuntime = (
+      expertSession: ProviderExpertSession | undefined,
+      session: ProviderSession,
+      lifecycleGeneration: string,
+    ) => {
+      if (!expertSession) return Effect.void;
+      if (session.provider !== "codex" && session.provider !== "pi") {
+        return Effect.fail(
+          toValidationError(
+            "ProviderService.startSession",
+            `Expert sessions are not supported by provider '${session.provider}'.`,
+          ),
+        );
+      }
+      const persist = options?.persistExpertAppliedRuntime;
+      if (persist === undefined) return Effect.void;
+
+      return persist({
+        threadId: session.threadId,
+        snapshotId: expertSession.snapshotId,
+        provider: session.provider,
+        ...(session.model !== undefined ? { model: session.model } : {}),
+        ...(session.runtimeComponent !== undefined
+          ? { runtimeComponent: session.runtimeComponent }
+          : {}),
+        ...(session.runtimeVersion !== undefined ? { runtimeVersion: session.runtimeVersion } : {}),
+        lifecycleGeneration,
+        appliedAt: new Date().toISOString(),
+      });
+    };
+    const persistAppliedExpertRuntimeOrRetire = (input: {
+      readonly operation: string;
+      readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+      readonly expertSession: ProviderExpertSession | undefined;
+      readonly session: ProviderSession;
+      readonly lifecycleGeneration: string;
+    }) =>
+      recordAppliedExpertRuntime(
+        input.expertSession,
+        input.session,
+        input.lifecycleGeneration,
+      ).pipe(
+        Effect.catchCause((cause) =>
+          input.adapter.stopSession(input.session.threadId).pipe(
+            Effect.timeoutOption(PROVIDER_STOP_SESSION_TIMEOUT),
+            Effect.flatMap((stopped) =>
+              Option.match(stopped, {
+                onNone: () =>
+                  Effect.logError("provider.expert.applied_runtime_cleanup_timed_out", {
+                    threadId: input.session.threadId,
+                    provider: input.session.provider,
+                    lifecycleGeneration: input.lifecycleGeneration,
+                    timeoutMs: Duration.toMillis(PROVIDER_STOP_SESSION_TIMEOUT),
+                  }),
+                onSome: () =>
+                  withBindingWriteLock(
+                    input.session.threadId,
+                    Effect.gen(function* () {
+                      const binding = Option.getOrUndefined(
+                        yield* directory.getBinding(input.session.threadId),
+                      );
+                      if (binding?.lifecycleGeneration !== input.lifecycleGeneration) return;
+                      yield* directory.upsert({
+                        threadId: binding.threadId,
+                        provider: binding.provider,
+                        ...(binding.adapterKey !== undefined
+                          ? { adapterKey: binding.adapterKey }
+                          : {}),
+                        ...(binding.runtimeMode !== undefined
+                          ? { runtimeMode: binding.runtimeMode }
+                          : {}),
+                        status: "stopped",
+                        lifecycleGeneration: input.lifecycleGeneration,
+                        ...(binding.resumeCursor !== undefined
+                          ? { resumeCursor: binding.resumeCursor }
+                          : {}),
+                        runtimePayload: {
+                          ...runtimePayloadRecord(binding.runtimePayload),
+                          activeTurnId: null,
+                        },
+                      });
+                    }),
+                  ),
+              }),
+            ),
+            Effect.catchCause((stopCause) =>
+              Effect.logError("provider.expert.applied_runtime_cleanup_failed", {
+                threadId: input.session.threadId,
+                provider: input.session.provider,
+                lifecycleGeneration: input.lifecycleGeneration,
+                cause: Cause.pretty(stopCause),
+              }),
+            ),
+            Effect.andThen(
+              Effect.fail(
+                toValidationError(
+                  input.operation,
+                  `Failed to persist the applied Expert runtime record for thread '${input.session.threadId}'.`,
+                  Cause.pretty(cause),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
     type ResolvedProviderSessionStartInput = ProviderSessionStartInput & {
       readonly provider: ProviderKind;
     };
@@ -861,35 +1005,43 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       stoppedAt: string,
       session?: ProviderSession,
     ): Effect.Effect<void, ProviderSessionDirectoryWriteError> =>
-      session
-        ? directory.upsert({
+      Effect.gen(function* () {
+        const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        if (session) {
+          yield* directory.upsert({
             threadId,
             provider: session.provider,
             runtimeMode: session.runtimeMode,
             status: "stopped",
             ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
             runtimePayload: {
+              ...persistedRuntimeMetadata(binding),
               ...toRuntimePayloadFromSession(session, {
                 lastRuntimeEvent: "provider.stopAll",
                 lastRuntimeEventAt: stoppedAt,
+                ...(binding?.lifecycleGeneration !== undefined
+                  ? { lifecycleGeneration: binding.lifecycleGeneration }
+                  : {}),
               }),
               activeTurnId: null,
             },
-          })
-        : directory.getProvider(threadId).pipe(
-            Effect.flatMap((provider) =>
-              directory.upsert({
-                threadId,
-                provider,
-                status: "stopped",
-                runtimePayload: {
-                  activeTurnId: null,
-                  lastRuntimeEvent: "provider.stopAll",
-                  lastRuntimeEventAt: stoppedAt,
-                },
-              }),
-            ),
-          );
+          });
+          return;
+        }
+
+        const provider = binding?.provider ?? (yield* directory.getProvider(threadId));
+        yield* directory.upsert({
+          threadId,
+          provider,
+          status: "stopped",
+          runtimePayload: {
+            ...persistedRuntimeMetadata(binding),
+            activeTurnId: null,
+            lastRuntimeEvent: "provider.stopAll",
+            lastRuntimeEventAt: stoppedAt,
+          },
+        });
+      });
 
     let runtimeCursorWriteVersion = 0;
     let shutdownStartedAt: string | undefined;
@@ -1061,6 +1213,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             return;
           }
           const existingBinding = yield* directory.getBinding(input.threadId);
+          const existingRuntimePayload = Option.isSome(existingBinding)
+            ? runtimePayloadRecord(existingBinding.value.runtimePayload)
+            : {};
+          const runtimeComponent = runtimePayloadString(existingRuntimePayload, "runtimeComponent");
+          const runtimeVersion = runtimePayloadString(existingRuntimePayload, "runtimeVersion");
           const enableComputerControl =
             Option.isSome(existingBinding) &&
             readPersistedComputerControl(existingBinding.value.runtimePayload);
@@ -1074,6 +1231,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             lifecycle.currentGeneration(input.threadId) === input.lifecycleGeneration
               ? input.lifecycleGeneration
               : undefined;
+          const persistedLifecycleGeneration =
+            nonEmptyTrimmed(dispatchLifecycleGeneration) ??
+            (Option.isSome(existingBinding)
+              ? nonEmptyTrimmed(existingBinding.value.lifecycleGeneration)
+              : undefined) ??
+            runtimePayloadString(existingRuntimePayload, "lifecycleGeneration");
           const completedBeforePersistence = consumeRecentlyCompletedTurn(
             input.threadId,
             input.turnId,
@@ -1129,6 +1292,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             runtimePayload: {
               ...(input.modelSelection !== undefined
                 ? { modelSelection: input.modelSelection }
+                : {}),
+              ...(runtimeComponent !== undefined ? { runtimeComponent } : {}),
+              ...(runtimeVersion !== undefined ? { runtimeVersion } : {}),
+              ...(persistedLifecycleGeneration !== undefined
+                ? { lifecycleGeneration: persistedLifecycleGeneration }
                 : {}),
               ...(enableComputerControl ? { enableComputerControl: true } : {}),
               activeTurnId: input.turnId,
@@ -1326,6 +1494,15 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             // retain its cursor without reviving the durable runtime state.
             const preserveShutdownStop =
               shutdownStartedAt !== undefined && eventStatus === "running";
+            const existingRuntimePayload = runtimePayloadRecord(binding.runtimePayload);
+            const runtimeComponent = runtimePayloadString(
+              existingRuntimePayload,
+              "runtimeComponent",
+            );
+            const runtimeVersion = runtimePayloadString(existingRuntimePayload, "runtimeVersion");
+            const lifecycleGeneration =
+              nonEmptyTrimmed(binding.lifecycleGeneration) ??
+              runtimePayloadString(existingRuntimePayload, "lifecycleGeneration");
 
             yield* directory.upsert({
               threadId: event.threadId,
@@ -1338,6 +1515,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 ...(readPersistedComputerControl(binding.runtimePayload)
                   ? { enableComputerControl: true }
                   : {}),
+                ...(runtimeComponent !== undefined ? { runtimeComponent } : {}),
+                ...(runtimeVersion !== undefined ? { runtimeVersion } : {}),
+                ...(lifecycleGeneration !== undefined ? { lifecycleGeneration } : {}),
                 activeTurnId: preserveShutdownStop ? null : activeTurnId,
                 lastRuntimeEvent: preserveShutdownStop ? "provider.stopAll" : event.type,
                 lastRuntimeEventAt: preserveShutdownStop ? shutdownStartedAt : event.createdAt,
@@ -1616,6 +1796,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             const persistedModelSelection = readPersistedModelSelection(binding.runtimePayload);
             const persistedProviderOptions = readPersistedProviderOptions(binding.runtimePayload);
             const persistedComputerControl = readPersistedComputerControl(binding.runtimePayload);
+            const persistedExpertSession = readPersistedExpertSession(binding.runtimePayload);
+            if (persistedExpertSession === null) {
+              return yield* toValidationError(
+                input.operation,
+                `Cannot recover thread '${threadId}' because its persisted Expert snapshot configuration is invalid.`,
+              );
+            }
             yield* validateAutoRuntimeMode(
               input.operation,
               binding.provider,
@@ -1631,12 +1818,17 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
               ...(persistedProviderOptions ? { providerOptions: persistedProviderOptions } : {}),
               ...(persistedComputerControl ? { enableComputerControl: true } : {}),
+              ...(persistedExpertSession ? { expertSession: persistedExpertSession } : {}),
               ...(hasPersistedResumeCursor ? { resumeCursor: binding.resumeCursor } : {}),
               runtimeMode: binding.runtimeMode ?? "full-access",
             };
             // Prompt construction has already happened here. Only explicit startup
             // may replace lost native history and request a transcript recap.
-            const resumed = yield* adapter.startSession(resumeStartInput);
+            const startedSession = yield* adapter.startSession(resumeStartInput);
+            const resumed: ProviderSession = {
+              ...startedSession,
+              lifecycleGeneration: lease.generation,
+            };
             if (resumed.provider !== adapter.provider) {
               return yield* toValidationError(
                 input.operation,
@@ -1649,6 +1841,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               upsertSessionBinding(resumed, threadId, {
                 lifecycleGeneration: lease.generation,
                 ...(persistedComputerControl ? { enableComputerControl: true } : {}),
+                runtimePayload: { expertSession: persistedExpertSession ?? null },
               }).pipe(
                 Effect.andThen(
                   requiresCredentialRotation
@@ -1658,12 +1851,20 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                         runtimePayload: {
                           [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: false,
                           ...(persistedComputerControl ? { enableComputerControl: true } : {}),
+                          expertSession: persistedExpertSession ?? null,
                         },
                       })
                     : Effect.void,
                 ),
               ),
             );
+            yield* persistAppliedExpertRuntimeOrRetire({
+              operation: input.operation,
+              adapter,
+              expertSession: persistedExpertSession,
+              session: resumed,
+              lifecycleGeneration: lease.generation,
+            });
             lease.commit();
             return adapter;
           }),
@@ -1987,7 +2188,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     )}ms for thread '${threadId}'.`,
                   );
                 }
-                const { session, staleDevinFallbackOccurred } = started.value;
+                const { staleDevinFallbackOccurred } = started.value;
+                const session: ProviderSession = {
+                  ...started.value.session,
+                  lifecycleGeneration: lease.generation,
+                };
                 startupLifecycle.transition("ready");
                 replacementStarted = true;
                 const nativeResumeAttempted = hasResumeCursor(effectiveResumeCursor);
@@ -2018,10 +2223,18 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     runtimePayload: {
                       [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: false,
                       ...(effectiveComputerControl ? { enableComputerControl: true } : {}),
+                      expertSession: input.expertSession ?? null,
                       [PRIOR_TRANSCRIPT_BOOTSTRAP_PENDING]: priorTranscriptBootstrapPending,
                     },
                   }),
                 );
+                yield* persistAppliedExpertRuntimeOrRetire({
+                  operation: "ProviderService.startSession",
+                  adapter,
+                  expertSession: input.expertSession,
+                  session,
+                  lifecycleGeneration: lease.generation,
+                });
                 lease.commit();
                 startupLifecycle.transition("running");
                 const startupSnapshot = startupLifecycle.snapshot();
@@ -2087,7 +2300,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                         if (replacementStarted) {
                           yield* adapter.stopSession(threadId);
                         }
-                        const restored = yield* previousAdapter.startSession({
+                        const restoredSession = yield* previousAdapter.startSession({
                           threadId,
                           provider: persistedBinding.provider,
                           lifecycleGeneration: previousGeneration,
@@ -2104,6 +2317,10 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                             ? { resumeCursor: persistedBinding.resumeCursor }
                             : {}),
                         });
+                        const restored: ProviderSession = {
+                          ...restoredSession,
+                          lifecycleGeneration: previousGeneration,
+                        };
                         if (restored.provider !== previousAdapter.provider) {
                           return yield* toValidationError(
                             "ProviderService.startSession",
@@ -2255,7 +2472,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         yield* lifecycle.run(input.threadId, (lease) =>
           Effect.gen(function* () {
             if (forkedSession) {
-              yield* upsertSessionBinding(forkedSession, input.threadId, {
+              const session: ProviderSession = {
+                ...forkedSession,
+                lifecycleGeneration: lease.generation,
+              };
+              yield* upsertSessionBinding(session, input.threadId, {
                 lifecycleGeneration: lease.generation,
                 ...(input.modelSelection !== undefined
                   ? { modelSelection: input.modelSelection }
@@ -3595,9 +3816,12 @@ export function makeDurableProviderServiceLive(options?: ProviderServiceLiveOpti
     ProviderService,
     Effect.gen(function* () {
       const runtimeEvents = yield* ProviderRuntimeEventRepository;
+      const expertAppliedRuntime = yield* ExpertAppliedRuntimeRepository;
       return yield* makeProviderService({
         ...options,
         persistRuntimeEvent: (event) => runtimeEvents.append(event),
+        persistExpertAppliedRuntime:
+          options?.persistExpertAppliedRuntime ?? ((record) => expertAppliedRuntime.upsert(record)),
         quarantineRuntimeEvent: (event, cause) =>
           runtimeEvents
             .append({

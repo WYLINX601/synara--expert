@@ -1,4 +1,4 @@
-import { ThreadId, type OrchestrationThreadShell } from "@synara/contracts";
+import { ThreadId, type OrchestrationThreadShell, type ProviderKind } from "@synara/contracts";
 import { Cause, Deferred, Effect, Exit, Fiber, Option } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -99,6 +99,12 @@ export function makeAgentGatewayMcpTransport(input: {
   readonly requireThreadShell: (
     threadId: string,
   ) => Effect.Effect<OrchestrationThreadShell, unknown>;
+  /** Resolve tools already authorized for this verified provider session. */
+  readonly resolveSessionTools?: (session: {
+    readonly sessionKey: string;
+    readonly threadId: string;
+    readonly provider: ProviderKind;
+  }) => Effect.Effect<ReadonlyArray<ToolEntry>, never>;
   // Lets the gateway surface a capability denial to the user (e.g. as a thread
   // activity). Must not fail; the denial response is returned regardless.
   // Fires only for tool-call denials — never for authority 401s, which carry
@@ -120,6 +126,16 @@ export function makeAgentGatewayMcpTransport(input: {
    */
   readonly isComputerToolName?: (toolName: string) => boolean;
   readonly computerControlCapability?: AgentGatewayCapability;
+  /**
+   * Apply optional session-scoped tool grants after the bearer has been
+   * verified. Existing callers leave this unset and retain the current policy.
+   */
+  readonly authorizeTool?: (input: {
+    readonly sessionKey: string;
+    readonly threadId: string;
+    readonly provider: ProviderKind;
+    readonly toolName: string;
+  }) => boolean;
 }): AgentGatewayShape["handleMcpPost"] {
   const toolsByName = new Map(input.tools.map((tool) => [tool.definition.name, tool]));
   // The catalog is immutable after construction, so the sanitized `tools/list`
@@ -136,6 +152,36 @@ export function makeAgentGatewayMcpTransport(input: {
   }
   const handleRequest = (request: JsonRpcRequest, context: Omit<ToolContext, "jsonRpcRequestId">) =>
     Effect.gen(function* () {
+      const resolveDynamicTools = () =>
+        (
+          input.resolveSessionTools?.({
+            sessionKey: context.callerSessionKey,
+            threadId: context.callerThreadId,
+            provider: context.callerProvider,
+          }) ?? Effect.succeed<ReadonlyArray<ToolEntry>>([])
+        ).pipe(
+          Effect.map((tools) => {
+            const uniqueByName = new Map<string, ToolEntry>();
+            for (const tool of tools) {
+              const name = tool.definition.name;
+              if (!toolsByName.has(name) && !uniqueByName.has(name)) {
+                uniqueByName.set(name, tool);
+              }
+            }
+            return [...uniqueByName.values()];
+          }),
+        );
+      const isToolAuthorized = (tool: ToolEntry) => {
+        if (tool.sessionScoped !== true) return true;
+        return (
+          input.authorizeTool?.({
+            sessionKey: context.callerSessionKey,
+            threadId: context.callerThreadId,
+            provider: context.callerProvider,
+            toolName: tool.definition.name,
+          }) ?? false
+        );
+      };
       switch (request.method) {
         case "initialize":
           return jsonRpcResult(
@@ -148,28 +194,37 @@ export function makeAgentGatewayMcpTransport(input: {
           );
         case "ping":
           return jsonRpcResult(request.id, {});
-        case "tools/list":
+        case "tools/list": {
+          const dynamicTools = yield* resolveDynamicTools();
           return jsonRpcResult(request.id, {
-            tools: filterToolsByCapability(input.tools, context.callerCapabilities)
-              // Discovery-only tools stay callable by exact name — toolsByName
-              // is built from the unfiltered catalog — but do not advertise.
-              .filter((tool) => tool.discoveryOnly !== true)
-              .map(
-                (tool) =>
-                  servedDefinitionByToolName.get(tool.definition.name) ?? {
-                    ...tool.definition,
-                    inputSchema: sanitizeToolInputSchema(tool.definition.inputSchema) as Record<
-                      string,
-                      unknown
-                    >,
-                  },
+            tools: [
+              ...filterToolsByCapability(input.tools, context.callerCapabilities)
+                .filter(isToolAuthorized)
+                // Discovery-only tools stay callable by exact name — toolsByName
+                // is built from the unfiltered catalog — but do not advertise.
+                .filter((tool) => tool.discoveryOnly !== true),
+              ...filterToolsByCapability(dynamicTools, context.callerCapabilities).filter(
+                (tool) => tool.discoveryOnly !== true,
               ),
+            ].map(
+              (tool) =>
+                servedDefinitionByToolName.get(tool.definition.name) ??
+                Object.assign({}, tool.definition, {
+                  inputSchema: sanitizeToolInputSchema(tool.definition.inputSchema) as Record<
+                    string,
+                    unknown
+                  >,
+                }),
+            ),
           });
+        }
         case "tools/call": {
           const toolName = request.params.name;
           if (typeof toolName !== "string") {
             return jsonRpcError(request.id, JSON_RPC_INVALID_PARAMS, "Missing tool name.");
           }
+          const staticTool = toolsByName.get(toolName);
+          const dynamicTools = staticTool ? [] : yield* resolveDynamicTools();
           const readCallerAuthorityError = () =>
             context.assertCallerTurnActive().pipe(
               Effect.match({
@@ -188,7 +243,8 @@ export function makeAgentGatewayMcpTransport(input: {
                 ),
               ),
             );
-          const tool = toolsByName.get(toolName);
+          const tool =
+            staticTool ?? dynamicTools.find((candidate) => candidate.definition.name === toolName);
           if (!tool) {
             // Entirely-unknown names stay INVALID_PARAMS — except a computer
             // tool the caller's session was never granted: that is a
@@ -231,6 +287,13 @@ export function makeAgentGatewayMcpTransport(input: {
             if (authorityError !== null) {
               return jsonRpcResult(request.id, gatewayToolErrorResult(authorityError));
             }
+          }
+          // Keep turn authority ahead of per-session discovery. A caller with
+          // an inactive turn gets the same authority result as before, while a
+          // live caller without this exact grant sees the same response as an
+          // unknown tool so the catalog cannot be probed by name.
+          if (staticTool && !isToolAuthorized(staticTool)) {
+            return jsonRpcError(request.id, JSON_RPC_INVALID_PARAMS, `Unknown tool "${toolName}".`);
           }
           const requiredCapability = tool.requiredCapability;
           if (!context.callerCapabilities.has(requiredCapability)) {

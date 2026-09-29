@@ -5,6 +5,21 @@ import type {
   ListProjectImportsInput,
   ListProjectImportsResult,
 } from "./projectImport";
+import type {
+  ExpertArchiveInput,
+  ExpertAppliedRuntimeReadInput,
+  ExpertAppliedRuntimeRecord,
+  ExpertConnectionConfig,
+  ExpertConnectionRemoveInput,
+  ExpertConnectionSaveInput,
+  ExpertDefinition,
+  ExpertPreview,
+  ExpertPreviewInput,
+  ExpertReadInput,
+  ExpertSaveInput,
+  ExpertSnapshot,
+  ExpertSnapshotReadInput,
+} from "./expert";
 
 import type {
   AuthBearerBootstrapResult,
@@ -954,6 +969,19 @@ export interface NativeApi {
     getEnvironment: () => Promise<ServerGetEnvironmentResult>;
     getSettings: () => Promise<ServerGetSettingsResult>;
     updateSettings: (input: ServerUpdateSettingsInput) => Promise<ServerUpdateSettingsResult>;
+    listExperts: () => Promise<ReadonlyArray<ExpertDefinition>>;
+    readExpert: (input: ExpertReadInput) => Promise<ExpertDefinition | null>;
+    saveExpert: (input: ExpertSaveInput) => Promise<ExpertDefinition>;
+    archiveExpert: (input: ExpertArchiveInput) => Promise<ExpertDefinition>;
+    previewExpert: (input: ExpertPreviewInput) => Promise<ExpertPreview>;
+    readExpertSnapshot: (input: ExpertSnapshotReadInput) => Promise<ExpertSnapshot>;
+    readExpertAppliedRuntime: (
+      input: ExpertAppliedRuntimeReadInput,
+    ) => Promise<ExpertAppliedRuntimeRecord | null>;
+    listExpertConnections: () => Promise<ReadonlyArray<ExpertConnectionConfig>>;
+    saveExpertConnection: (input: ExpertConnectionSaveInput) => Promise<ExpertConnectionConfig>;
+    removeExpertConnection: (input: ExpertConnectionRemoveInput) => Promise<void>;
+    testExpertConnection: (input: ExpertReadInput) => Promise<{ tools: ReadonlyArray<string> }>;
     getAuthSession: () => Promise<AuthSessionState>;
     bootstrapAuth: (input: AuthBootstrapInput) => Promise<AuthBootstrapResult>;
     bootstrapBearerAuth: (input: AuthBootstrapInput) => Promise<AuthBearerBootstrapResult>;

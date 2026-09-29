@@ -1,0 +1,906 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Synara 专家交互线框</title>
+    <style>
+      :root {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #292d34;
+        background: #f7f8fa;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+      }
+      button,
+      input,
+      textarea,
+      select {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
+      }
+      button:focus-visible,
+      input:focus-visible,
+      textarea:focus-visible,
+      select:focus-visible {
+        outline: 2px solid #5577a8;
+        outline-offset: 2px;
+      }
+      .app {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: 220px minmax(0, 1fr);
+      }
+      .sidebar {
+        background: #f0f1f3;
+        border-right: 1px solid #dfe2e6;
+        padding: 18px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+      .brand {
+        font-weight: 720;
+        letter-spacing: -0.04em;
+        font-size: 22px;
+        padding: 4px 12px 24px;
+      }
+      .side-btn {
+        border: 0;
+        background: transparent;
+        width: 100%;
+        text-align: left;
+        padding: 10px 12px;
+        border-radius: 8px;
+        color: #444a54;
+      }
+      .side-btn:hover,
+      .side-btn.active {
+        background: #fff;
+        color: #22262d;
+      }
+      .side-caption {
+        padding: 18px 12px 5px;
+        color: #89909a;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+      }
+      .side-bottom {
+        margin-top: auto;
+        border-top: 1px solid #dadde1;
+        padding-top: 10px;
+      }
+      .side-note {
+        color: #89909a;
+        font-size: 12px;
+        line-height: 1.5;
+        padding: 8px 12px;
+      }
+      main {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .topbar {
+        height: 58px;
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 28px;
+        border-bottom: 1px solid #e2e4e8;
+        background: #fff;
+      }
+      .crumb {
+        font-size: 13px;
+        color: #68717c;
+      }
+      .prototype {
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        color: #697a92;
+        border: 1px solid #cfdae8;
+        background: #f1f5fa;
+        padding: 5px 9px;
+        border-radius: 999px;
+      }
+      .content {
+        flex: 1;
+        min-height: 0;
+        padding: 34px;
+      }
+      .center {
+        width: min(760px, 100%);
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 26px;
+        margin: 0 0 8px;
+        letter-spacing: -0.04em;
+      }
+      h2 {
+        font-size: 18px;
+        margin: 0 0 8px;
+      }
+      h3 {
+        font-size: 14px;
+        margin: 0 0 9px;
+      }
+      p {
+        line-height: 1.55;
+      }
+      .muted {
+        color: #777f89;
+      }
+      .small {
+        font-size: 12px;
+      }
+      .intro {
+        margin: 0 0 30px;
+        color: #777f89;
+        font-size: 14px;
+      }
+      .card {
+        border: 1px solid #dfe3e8;
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 2px 8px #15273c08;
+      }
+      .composer {
+        padding: 15px;
+      }
+      .prompt {
+        display: block;
+        width: 100%;
+        min-height: 120px;
+        resize: vertical;
+        border: 0;
+        outline: none;
+        padding: 7px 4px;
+        color: #30353b;
+        background: transparent;
+      }
+      .composer-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+        border-top: 1px solid #eef0f2;
+        padding-top: 13px;
+      }
+      .spacer {
+        flex: 1;
+      }
+      .pill,
+      .quiet,
+      .primary,
+      .danger,
+      .tab {
+        border-radius: 8px;
+        min-height: 34px;
+        padding: 6px 11px;
+        border: 1px solid #d8dde3;
+        background: #fff;
+        color: #3b4149;
+      }
+      .pill:hover,
+      .quiet:hover,
+      .tab:hover {
+        background: #f5f7f9;
+      }
+      .primary {
+        border-color: #333b46;
+        background: #333b46;
+        color: white;
+      }
+      .primary:hover {
+        background: #20262e;
+      }
+      .danger {
+        border-color: #d7a6a6;
+        color: #a24343;
+      }
+      .status {
+        font-size: 12px;
+        font-weight: 650;
+        border-radius: 999px;
+        padding: 3px 8px;
+        background: #edf2ed;
+        color: #45714b;
+        white-space: nowrap;
+      }
+      .status.partial {
+        background: #faf2e3;
+        color: #946922;
+      }
+      .status.blocked {
+        background: #fbeaea;
+        color: #a44e4e;
+      }
+      .status.neutral {
+        background: #eef0f3;
+        color: #69717a;
+      }
+      .notice {
+        border: 1px solid #e8dac0;
+        background: #fcf8ef;
+        color: #735e3b;
+        padding: 12px 14px;
+        border-radius: 10px;
+        margin: 14px 0;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .notice.blocked {
+        border-color: #edcccc;
+        background: #fff7f6;
+        color: #943e3e;
+      }
+      .notice button {
+        color: inherit;
+        border: 0;
+        background: none;
+        text-decoration: underline;
+        padding: 0;
+      }
+      .picker-wrap {
+        position: relative;
+      }
+      .picker {
+        position: absolute;
+        left: 0;
+        bottom: calc(100% + 8px);
+        z-index: 3;
+        width: min(380px, calc(100vw - 40px));
+        max-height: 440px;
+        overflow: auto;
+        border: 1px solid #d6dce2;
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 15px 45px #1f2e421f;
+        padding: 7px;
+      }
+      .picker-title {
+        font-size: 12px;
+        color: #848b94;
+        padding: 9px 10px 5px;
+      }
+      .pick {
+        width: 100%;
+        border: 0;
+        border-radius: 8px;
+        padding: 11px;
+        text-align: left;
+        background: #fff;
+        display: flex;
+        gap: 10px;
+        justify-content: space-between;
+        align-items: flex-start;
+      }
+      .pick:hover,
+      .pick.active {
+        background: #f3f5f8;
+      }
+      .pick strong {
+        display: block;
+        font-size: 13px;
+      }
+      .pick small {
+        display: block;
+        margin-top: 4px;
+        color: #838a93;
+        line-height: 1.4;
+      }
+      .picker-footer {
+        border-top: 1px solid #ecedef;
+        margin-top: 5px;
+        padding: 6px;
+      }
+      .picker-footer button {
+        border: 0;
+        background: none;
+        text-align: left;
+        width: 100%;
+        padding: 9px 5px;
+        color: #4c6690;
+      }
+      .summary {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 16px;
+        align-items: start;
+        margin-top: 20px;
+        padding: 18px;
+      }
+      .summary p {
+        margin: 7px 0 0;
+        font-size: 13px;
+        color: #727b86;
+      }
+      .summary-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .settings-layout {
+        display: grid;
+        grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+        gap: 20px;
+        max-width: 1120px;
+        margin: 0 auto;
+      }
+      .settings-head {
+        grid-column: 1 / -1;
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+        align-items: end;
+        margin-bottom: 2px;
+      }
+      .settings-head p {
+        margin: 0;
+        font-size: 13px;
+        color: #7d858f;
+      }
+      .list,
+      .editor {
+        min-height: 510px;
+      }
+      .list {
+        padding: 8px;
+      }
+      .list-item {
+        width: 100%;
+        border: 0;
+        background: transparent;
+        border-radius: 8px;
+        text-align: left;
+        padding: 12px;
+        margin-bottom: 3px;
+      }
+      .list-item:hover,
+      .list-item.active {
+        background: #f2f4f7;
+      }
+      .list-top {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        align-items: center;
+      }
+      .list-item p {
+        margin: 6px 0 0;
+        color: #818994;
+        font-size: 12px;
+      }
+      .editor {
+        padding: 20px;
+      }
+      .editor-head {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        gap: 12px;
+        padding-bottom: 18px;
+        border-bottom: 1px solid #e8eaed;
+      }
+      .editor-head p {
+        margin: 4px 0 0;
+        color: #7b838c;
+        font-size: 12px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+      }
+      .tabs {
+        display: flex;
+        gap: 3px;
+        flex-wrap: wrap;
+        padding: 16px 0;
+        border-bottom: 1px solid #e9ebef;
+      }
+      .tab {
+        border-color: transparent;
+        font-size: 12px;
+      }
+      .tab.active {
+        background: #edf1f6;
+        color: #334e72;
+      }
+      .form {
+        padding-top: 22px;
+        max-width: 620px;
+      }
+      .field {
+        display: block;
+        margin-bottom: 18px;
+        color: #505861;
+        font-size: 12px;
+        font-weight: 650;
+      }
+      .field input,
+      .field textarea,
+      .field select {
+        display: block;
+        width: 100%;
+        border: 1px solid #d6dce2;
+        border-radius: 8px;
+        background: white;
+        padding: 9px 10px;
+        color: #2e343b;
+        margin-top: 7px;
+        font-weight: 400;
+      }
+      .field textarea {
+        min-height: 95px;
+        resize: vertical;
+      }
+      .field-hint {
+        color: #89919b;
+        font-weight: 400;
+        margin-top: 5px;
+        display: block;
+      }
+      .setting-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 15px;
+        padding: 14px 0;
+        border-bottom: 1px solid #edf0f2;
+        font-size: 13px;
+      }
+      .setting-row small {
+        display: block;
+        margin-top: 4px;
+        color: #8a919a;
+      }
+      .setting-row input {
+        width: 18px;
+        height: 18px;
+      }
+      .form-foot {
+        display: flex;
+        justify-content: end;
+        gap: 8px;
+        padding-top: 20px;
+      }
+      .chat-layout {
+        max-width: 950px;
+        margin: 0 auto;
+      }
+      .chat-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 25px;
+      }
+      .message {
+        margin: 16px 0;
+        padding: 16px 18px;
+        max-width: 650px;
+      }
+      .message.user {
+        margin-left: auto;
+        background: #f4f5f7;
+      }
+      .message p {
+        margin: 7px 0 0;
+      }
+      .message.system {
+        border-style: dashed;
+      }
+      .drawer {
+        position: fixed;
+        z-index: 4;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        width: min(430px, 100%);
+        background: #fff;
+        box-shadow: -14px 0 45px #24344725;
+        overflow: auto;
+        padding: 25px;
+      }
+      .drawer-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: start;
+      }
+      .drawer-section {
+        padding: 20px 0;
+        border-bottom: 1px solid #e8eaed;
+      }
+      .drawer-section p {
+        color: #68727d;
+        font-size: 13px;
+        margin: 6px 0;
+      }
+      .scrim {
+        position: fixed;
+        z-index: 3;
+        inset: 0;
+        background: #1f28343f;
+      }
+      .dialog {
+        width: min(460px, calc(100vw - 32px));
+        margin: 16vh auto 0;
+        padding: 22px;
+      }
+      .dialog .pick {
+        border: 1px solid #e1e5e9;
+        margin-top: 8px;
+      }
+      .dialog-foot {
+        display: flex;
+        gap: 8px;
+        justify-content: end;
+        margin-top: 22px;
+      }
+      .review {
+        position: fixed;
+        left: 235px;
+        bottom: 15px;
+        font-size: 11px;
+        color: #9aa1aa;
+      }
+      @media (max-width: 760px) {
+        .app {
+          grid-template-columns: 64px minmax(0, 1fr);
+        }
+        .sidebar {
+          padding: 12px 7px;
+        }
+        .brand {
+          font-size: 16px;
+          padding: 8px 4px 18px;
+        }
+        .side-btn {
+          font-size: 0;
+          text-align: center;
+        }
+        .side-btn::first-letter {
+          font-size: 16px;
+        }
+        .side-caption,
+        .side-note {
+          display: none;
+        }
+        .content {
+          padding: 22px 14px;
+        }
+        .topbar {
+          padding: 0 15px;
+        }
+        .settings-layout {
+          grid-template-columns: 1fr;
+        }
+        .settings-head {
+          grid-column: 1;
+        }
+        .list,
+        .editor {
+          min-height: auto;
+        }
+        .review {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script>
+      const experts = [
+        {
+          id: "general",
+          name: "通用",
+          about: "不加载专家配置，按当前 Synara 设置运行。",
+          revision: 0,
+          principle: "",
+          skills: [],
+          provider: "跟随当前选择",
+          docs: false,
+          git: false,
+        },
+        {
+          id: "pm",
+          name: "产品经理",
+          about: "梳理需求、识别假设并撰写 PRD。",
+          revision: 3,
+          principle: "先区分事实与假设；输出决策依据和待验证问题。",
+          skills: ["需求澄清 · Synara", "PRD 写作 · 本地"],
+          provider: "Codex",
+          docs: true,
+          git: false,
+        },
+        {
+          id: "ui",
+          name: "UI 设计师",
+          about: "从任务流程出发，产出可评审的界面方案。",
+          revision: 2,
+          principle: "先画关键流程，再定组件细节；指出无障碍风险。",
+          skills: ["交互设计 · 本地"],
+          provider: "Codex",
+          docs: false,
+          git: false,
+        },
+        {
+          id: "review",
+          name: "代码审查员",
+          about: "检查改动的正确性、回归与可维护性。",
+          revision: 1,
+          principle: "先找能复现的问题，再说明影响和修复方向。",
+          skills: ["代码审查 · Synara"],
+          provider: "Pi",
+          docs: false,
+          git: true,
+        },
+      ];
+      const state = {
+        view: "new",
+        selected: "general",
+        edit: "pm",
+        tab: "basic",
+        picker: false,
+        drawer: false,
+        dialog: false,
+        dialogPick: "ui",
+        prompt: "",
+        provider: "Codex",
+        docsConnected: false,
+        gitConnected: false,
+        task: null,
+        draft: null,
+      };
+      const $ = (s) => document.querySelector(s);
+      const esc = (s) =>
+        String(s ?? "").replace(
+          /[&<>"']/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+        );
+      const get = (id) => experts.find((expert) => expert.id === id);
+      const draftFor = (expert) => ({
+        name: expert.name,
+        about: expert.about,
+        examples: expert.examples || "",
+        principle: expert.principle,
+        output: expert.output || "先给结论，再列出依据、风险和待确认事项。",
+        provider: expert.provider,
+      });
+      const editExpert = (id, tab = "basic") => {
+        state.edit = id;
+        state.tab = tab;
+        state.draft = draftFor(get(id));
+        state.view = "settings";
+      };
+      const readiness = (expert) =>
+        expert.id === "general"
+          ? ["通用", "neutral"]
+          : expert.git && !state.gitConnected
+            ? ["需连接", "blocked"]
+            : expert.docs && !state.docsConnected
+              ? ["部分能力可用", "partial"]
+              : ["可用", ""];
+      const badge = (expert) => {
+        const [label, kind] = readiness(expert);
+        return `<span class="status ${kind}">${label}</span>`;
+      };
+      const pickerItem = (expert, selected, action) =>
+        `<button type="button" class="pick ${selected === expert.id ? "active" : ""}" data-act="${action}" data-id="${expert.id}"><span><strong>${esc(expert.name)}</strong><small>${esc(expert.about)}</small></span>${badge(expert)}</button>`;
+      const head = (name) =>
+        `<header class="topbar"><span class="crumb">Synara / ${name}</span><span class="prototype">交互线框 · 示例数据</span></header>`;
+      function shell(content, title) {
+        return `<div class="app"><aside class="sidebar"><div class="brand">synara</div><button class="side-btn ${state.view === "new" ? "active" : ""}" data-act="view" data-id="new">＋ 新任务</button><div class="side-caption">任务</div><button class="side-btn ${state.view === "task" ? "active" : ""}" data-act="view" data-id="task" ${state.task ? "" : "disabled"}>▤ 当前任务</button><div class="side-bottom"><button class="side-btn ${state.view === "settings" ? "active" : ""}" data-act="view" data-id="settings">⚙ 专家设置</button><div class="side-note">本原型不连接模型，也不会创建真实任务或修改 Synara 配置。</div></div></aside><main>${head(title)}${content}</main></div>`;
+      }
+      function newView() {
+        const expert = get(state.selected),
+          [status, kind] = readiness(expert);
+        const blocked = kind === "blocked";
+        return shell(
+          `<div class="content"><div class="center"><h1>新任务</h1><p class="intro">先选专家，再描述要完成的事。专家配置会在任务首次发送时固定。</p><div class="card composer"><textarea class="prompt" id="prompt" aria-label="任务描述" placeholder="描述你想完成的任务…">${esc(state.prompt)}</textarea><div class="composer-row"><div class="picker-wrap"><button class="pill" data-act="picker" aria-expanded="${state.picker}">专家：${esc(expert.name)} ▾</button>${state.picker ? `<div class="picker"><div class="picker-title">选择本次任务使用的专家</div>${experts.map((x) => pickerItem(x, state.selected, "pick")).join("")}<div class="picker-footer"><button data-act="view" data-id="settings">管理专家 →</button></div></div>` : ""}</div><button class="pill" data-act="provider">${state.provider} ▾</button><span class="muted small">GPT 模型 · 当前设置</span><span class="spacer"></span><button class="primary" data-act="start" ${blocked ? "disabled" : ""}>开始任务 →</button></div></div>${expert.id !== "general" ? `<div class="notice ${kind === "blocked" ? "blocked" : ""}"><strong>${status}：</strong>${blocked ? "必需的 Git 连接尚未就绪，暂时不能开始。" : kind === "partial" ? "团队资料库未连接，可继续，但本次不能读取团队文档。" : "工作方式与技能已就绪。"} ${kind !== "" ? `<button data-act="edit-selected">查看依赖 →</button>` : ""}</div>` : ""}<div class="card summary"><div><div class="summary-row"><strong>${esc(expert.name)}</strong>${badge(expert)}</div><p>${esc(expert.about)}</p><p>${expert.id === "general" ? "使用当前 Synara 默认能力。" : `${expert.skills.length} 个技能 · ${expert.provider} 为首选运行环境 · 开始后固定版本 v${expert.revision}`}</p></div>${expert.id !== "general" ? `<button class="quiet" data-act="edit-selected">查看配置</button>` : ""}</div></div></div>`,
+          "新任务",
+        );
+      }
+      function settingsView() {
+        const expert = get(state.edit) || experts[1],
+          draft = state.draft || (state.draft = draftFor(expert));
+        const tabs = [
+          ["basic", "基本信息"],
+          ["persona", "工作方式"],
+          ["skills", "技能"],
+          ["tools", "工具与资料"],
+          ["runtime", "运行偏好"],
+        ];
+        const body =
+          state.tab === "basic"
+            ? `<label class="field">名称<input id="name" value="${esc(draft.name)}"></label><label class="field">用途<input id="about" value="${esc(draft.about)}"></label><label class="field">适用任务<textarea id="examples">${esc(draft.examples)}</textarea><span class="field-hint">让用户知道什么时候该选这个专家。</span></label>`
+            : state.tab === "persona"
+              ? `<label class="field">工作原则<textarea id="principle">${esc(draft.principle)}</textarea><span class="field-hint">只写稳定的角色原则；详细流程放在技能中。</span></label><label class="field">输出要求<textarea id="output">${esc(draft.output)}</textarea></label>`
+              : state.tab === "skills"
+                ? `<h3>已选技能</h3>${expert.skills.map((skill) => `<div class="setting-row"><span>${esc(skill)}<small>固定来源，避免同名技能在切换运行环境时改变内容</small></span><span class="status">已选</span></div>`).join("") || `<p class="muted small">尚未添加技能。</p>`}<div class="form-foot"><button class="quiet" data-act="toast">＋ 从现有技能选择</button></div>`
+                : state.tab === "tools"
+                  ? `<h3>连接状态（原型中可切换）</h3><div class="setting-row"><span>团队资料库<small>产品经理专家的可选依赖；未连接仍可开始任务</small></span><input type="checkbox" id="docs" ${state.docsConnected ? "checked" : ""} aria-label="模拟连接团队资料库"></div><div class="setting-row"><span>Git 连接<small>代码审查员专家的必需依赖；未连接会阻止开始</small></span><input type="checkbox" id="git" ${state.gitConnected ? "checked" : ""} aria-label="模拟连接 Git"></div><div class="notice">这里只模拟就绪状态；真实凭证仍由本机连接设置管理。</div>`
+                  : `<label class="field">首选运行环境<select id="preferred"><option ${draft.provider === "Codex" ? "selected" : ""}>Codex</option><option ${draft.provider === "Pi" ? "selected" : ""}>Pi</option></select><span class="field-hint">任务输入区手动选择的运行环境优先。</span></label><p class="muted small">模型选项继续使用 Synara 当前设置。</p>`;
+        return shell(
+          `<div class="content"><div class="settings-layout"><div class="settings-head"><div><h1>我的专家</h1><p>在这里维护模板；已开始的任务继续使用各自固定的版本。</p></div><button class="primary" data-act="create">＋ 新建专家</button></div><div class="card list">${experts
+            .filter((x) => x.id !== "general" && !x.archived)
+            .map(
+              (x) =>
+                `<button class="list-item ${state.edit === x.id ? "active" : ""}" data-act="edit" data-id="${x.id}"><div class="list-top"><strong>${esc(x.name)}</strong>${badge(x)}</div><p>${esc(x.about)}</p></button>`,
+            )
+            .join(
+              "",
+            )}</div><div class="card editor"><div class="editor-head"><div><h2>${esc(expert.name)}</h2><p>模板版本 v${expert.revision} · 编辑保存后生成新版本</p></div><div class="actions"><button class="quiet" data-act="duplicate">复制</button><button class="quiet" data-act="archive">归档</button></div></div><div class="tabs">${tabs.map(([id, name]) => `<button class="tab ${state.tab === id ? "active" : ""}" data-act="tab" data-id="${id}">${name}</button>`).join("")}</div><div class="form">${body}<div class="form-foot"><button class="quiet" data-act="view" data-id="new">返回新任务</button><button class="primary" data-act="save">保存新版本</button></div></div></div></div></div>`,
+          "设置 / 专家",
+        );
+      }
+      function taskView() {
+        if (!state.task) return newView();
+        const expert = get(state.task.expert),
+          changed = expert.revision > state.task.revision;
+        return shell(
+          `<div class="content"><div class="chat-layout"><div class="chat-head"><div><h2>当前任务</h2><span class="muted small">${state.task.parent ? "从上一任务接续 · " : ""}${esc(state.task.provider)} · GPT 模型</span></div><button class="pill" data-act="drawer">专家：${esc(state.task.name)} · 固定 v${state.task.revision} ▾</button></div>${state.task.partial ? `<div class="notice">本次任务未启用团队资料库；不会读取团队文档。</div>` : ""}<div class="card message user"><strong>你</strong><p>${esc(state.task.prompt)}</p></div><div class="card message system"><strong>原型状态</strong><p>已展示任务与专家的绑定方式。此线框不会调用模型或执行工具。</p></div>${changed ? `<div class="notice">专家模板已有 v${expert.revision}；当前任务仍使用 v${state.task.revision}。<button data-act="dialog">用新版继续 →</button></div>` : ""}</div></div>${state.drawer ? `<div class="scrim" data-act="close"></div><aside class="drawer" role="dialog" aria-label="本次任务的专家详情"><div class="drawer-head"><div><h2>${esc(state.task.name)}</h2><span class="status neutral">本次固定版本 v${state.task.revision}</span></div><button class="quiet" data-act="close">关闭</button></div><div class="drawer-section"><h3>工作方式</h3><p>${esc(state.task.principle)}</p></div><div class="drawer-section"><h3>实际加载的技能</h3>${state.task.skills.length ? state.task.skills.map((skill) => `<p>✓ ${esc(skill)}</p>`).join("") : `<p>未选技能</p>`}</div><div class="drawer-section"><h3>工具与资料</h3><p>${state.task.partial ? "团队资料库：未启用（可选连接未就绪）" : "所需连接：已就绪"}</p><p>运行环境：${esc(state.task.provider)}</p></div><div class="drawer-section"><h3>版本规则</h3><p>编辑专家模板不会改变本任务。换专家会创建新的接续任务。</p></div><div class="form-foot"><button class="primary" data-act="dialog">用其他专家继续 →</button></div></aside>` : ""}${
+            state.dialog
+              ? `<div class="scrim"><div class="card dialog" role="dialog" aria-label="用其他专家继续"><h2>用其他专家继续</h2><p class="muted small">将创建接续任务，保留原任务及其专家版本。新任务会重新加载所选专家。</p>${experts
+                  .filter((x) => x.id !== "general" && !x.archived)
+                  .map((x) => pickerItem(x, state.dialogPick, "dialog-pick"))
+                  .join(
+                    "",
+                  )}<div class="dialog-foot"><button class="quiet" data-act="close">取消</button><button class="primary" data-act="continue" ${readiness(get(state.dialogPick))[1] === "blocked" ? "disabled" : ""}>创建接续任务</button></div></div></div>`
+              : ""
+          }`,
+          "任务 / 专家",
+        );
+      }
+      function render() {
+        $("#app").innerHTML =
+          state.view === "settings"
+            ? settingsView()
+            : state.view === "task"
+              ? taskView()
+              : newView();
+      }
+      function save() {
+        const expert = get(state.edit);
+        const draft = state.draft;
+        if (!draft.name.trim()) {
+          $("#name")?.focus();
+          return;
+        }
+        Object.assign(expert, {
+          ...draft,
+          name: draft.name.trim(),
+          about: draft.about.trim(),
+          principle: draft.principle.trim(),
+        });
+        expert.revision += 1;
+        render();
+      }
+      document.addEventListener("input", (event) => {
+        if (event.target.id === "prompt") state.prompt = event.target.value;
+        else if (state.draft && event.target.id in state.draft)
+          state.draft[event.target.id] = event.target.value;
+      });
+      document.addEventListener("change", (event) => {
+        if (event.target.id === "docs") state.docsConnected = event.target.checked;
+        if (event.target.id === "git") state.gitConnected = event.target.checked;
+        if (event.target.id === "preferred") state.draft.provider = event.target.value;
+        render();
+      });
+      document.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-act]");
+        if (!button) return;
+        const { act, id } = button.dataset;
+        if (act === "view") {
+          state.view = id;
+          state.picker = false;
+        }
+        if (act === "picker") state.picker = !state.picker;
+        if (act === "pick") {
+          state.selected = id;
+          state.picker = false;
+        }
+        if (act === "provider") state.provider = state.provider === "Codex" ? "Pi" : "Codex";
+        if (act === "edit-selected") editExpert(state.selected, "tools");
+        if (act === "edit") editExpert(id);
+        if (act === "tab") state.tab = id;
+        if (act === "save") save();
+        if (act === "create" || act === "duplicate") {
+          const base =
+            act === "duplicate"
+              ? get(state.edit)
+              : {
+                  name: "新专家",
+                  about: "说明这个专家适合什么任务",
+                  principle: "",
+                  skills: [],
+                  provider: "Codex",
+                  docs: false,
+                  git: false,
+                };
+          const expert = {
+            ...base,
+            id: `local-${Date.now()}`,
+            name: act === "duplicate" ? `${base.name} 副本` : base.name,
+            skills: [...base.skills],
+            revision: 1,
+          };
+          experts.push(expert);
+          editExpert(expert.id);
+        }
+        if (act === "archive") {
+          get(state.edit).archived = true;
+          if (state.selected === state.edit) state.selected = "general";
+          editExpert(experts.find((x) => x.id !== "general" && !x.archived)?.id || "general");
+        }
+        if (act === "start") {
+          const expert = get(state.selected);
+          if (readiness(expert)[1] === "blocked" || !state.prompt.trim()) {
+            if (!state.prompt.trim()) $("#prompt")?.focus();
+            return;
+          }
+          state.task = {
+            expert: expert.id,
+            name: expert.name,
+            revision: expert.revision,
+            principle: expert.principle,
+            skills: [...expert.skills],
+            provider: state.provider,
+            partial: readiness(expert)[1] === "partial",
+            prompt: state.prompt.trim(),
+            parent: false,
+          };
+          state.view = "task";
+        }
+        if (act === "drawer") state.drawer = true;
+        if (act === "dialog") {
+          state.drawer = false;
+          state.dialog = true;
+          state.dialogPick =
+            get(state.task.expert).revision > state.task.revision ? state.task.expert : "ui";
+        }
+        if (act === "dialog-pick") state.dialogPick = id;
+        if (act === "continue") {
+          const expert = get(state.dialogPick);
+          if (readiness(expert)[1] === "blocked") return;
+          state.task = {
+            expert: expert.id,
+            name: expert.name,
+            revision: expert.revision,
+            principle: expert.principle,
+            skills: [...expert.skills],
+            provider: state.task.provider,
+            partial: readiness(expert)[1] === "partial",
+            prompt: `继续处理：${state.task.prompt}`,
+            parent: true,
+          };
+          state.dialog = false;
+          state.view = "task";
+        }
+        if (act === "close") {
+          state.drawer = false;
+          state.dialog = false;
+        }
+        if (act === "toast") alert("线框示意：这里将复用 Synara 现有技能选择器，并展示技能来源。");
+        render();
+      });
+      render();
+    </script>
+  </body>
+</html>

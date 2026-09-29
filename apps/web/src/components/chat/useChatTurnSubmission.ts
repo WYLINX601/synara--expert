@@ -54,6 +54,23 @@ import { resolveChatPromptCaptures } from "./resolveChatPromptCaptures";
 import { useChatTurnExecution } from "./useChatTurnExecution";
 import { useStore } from "../../store";
 import { getThreadFromState } from "../../threadDerivation";
+import type { ExpertPreview, ExpertPreviewInput } from "@synara/contracts";
+
+async function expertSendBlockReason(
+  previewExpert: (input: ExpertPreviewInput) => Promise<ExpertPreview>,
+  expertId: string,
+  provider: "codex" | "pi",
+): Promise<string | null> {
+  try {
+    const preview = await previewExpert({ expertId, provider });
+    if (preview.status !== "blocked" && preview.status !== "incompatible") return null;
+    return preview.issues.length > 0
+      ? `所选专家当前无法使用：${preview.issues.join("；")}`
+      : "所选专家当前无法用于此 Provider，请切换专家或选择“通用”后重试。";
+  } catch (error) {
+    return `无法检查所选专家：${error instanceof Error ? error.message : String(error)}`;
+  }
+}
 
 export function useChatTurnSubmission({
   threadId,
@@ -394,6 +411,27 @@ export function useChatTurnSubmission({
       const selectedModelSelectionForSend = dispatchSettings.modelSelection;
       const providerOptionsForDispatchForSend = dispatchSettings.providerOptions;
       const runtimeModeForSend = dispatchSettings.runtimeMode;
+      const expertIdForSend = isLocalDraftThread
+        ? useComposerDraftStore.getState().draftThreadsByThreadId[activeThread.id]?.expertId
+        : undefined;
+      if (expertIdForSend) {
+        if (selectedProviderForSend !== "codex" && selectedProviderForSend !== "pi") {
+          setThreadError(
+            threadId,
+            "当前 Provider 不支持所选专家。请切换到 Codex 或 Pi，或选择“通用”后再发送。",
+          );
+          return false;
+        }
+        const blockReason = await expertSendBlockReason(
+          api.server.previewExpert,
+          expertIdForSend,
+          selectedProviderForSend,
+        );
+        if (blockReason) {
+          setThreadError(threadId, blockReason);
+          return false;
+        }
+      }
       let interactionModeForSend = dispatchSettings.interactionMode;
       const envModeForSend = dispatchSettings.envMode;
       const {
@@ -926,6 +964,7 @@ export function useChatTurnSubmission({
         shouldResumeSettledLocalThread,
         currentActiveGitBranchForSend,
         queuedChatTurn,
+        expertIdForSend,
         promptForSend,
         composerImagesSnapshot,
         composerFilesSnapshot,
@@ -958,6 +997,7 @@ export function useChatTurnSubmission({
       threadWorkspaceCwd,
       refreshProviderStatuses,
       isServerThread,
+      isLocalDraftThread,
       hasNativeUserMessages,
       chatWorkspaceRoot,
       isHomeChatContainer,

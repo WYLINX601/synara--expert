@@ -896,6 +896,19 @@ function applyOrchestrationEvent(
       // Deletion is terminal for both active sidebar rows and archived settings rows.
       return removeDeletedThreadFromClientState(state, event.payload.threadId, event.sequence);
 
+    case "thread.created":
+      return applyThreadUpdate(
+        state,
+        event.payload.threadId,
+        (thread) => {
+          const expertBinding = event.payload.expertBinding ?? null;
+          return deepEqualJson(thread.expertBinding ?? null, expertBinding)
+            ? thread
+            : { ...thread, expertBinding };
+        },
+        { ...options, recomputeSummarySignals: false, updateSidebarSummary: false },
+      );
+
     case "thread.meta-updated":
       return applyThreadUpdate(
         state,

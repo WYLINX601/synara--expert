@@ -187,6 +187,7 @@ describe("orchestration projector", () => {
         sidechatLastActivityAt: null,
         sidechatExpiredAt: null,
         lastKnownPr: null,
+        expertBinding: null,
         latestTurn: null,
         createdAt: now,
         updatedAt: now,

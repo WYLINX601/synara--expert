@@ -65,6 +65,7 @@ import {
   type ComputerServiceShape,
 } from "../../computer/Services/ComputerService.ts";
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
+import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { TextGenerationError } from "../../git/Errors.ts";
 import {
   ProviderAdapterProcessError,
@@ -267,6 +268,18 @@ describe("ProviderCommandReactor", () => {
     }
     runtime = null;
     for (const stateDir of createdStateDirs) {
+      const snapshotsDir = path.join(stateDir, "experts", "snapshots");
+      const makeWritable = (entry: string): void => {
+        if (!fs.existsSync(entry)) return;
+        const stat = fs.lstatSync(entry);
+        if (stat.isDirectory()) {
+          fs.chmodSync(entry, 0o700);
+          for (const name of fs.readdirSync(entry)) makeWritable(path.join(entry, name));
+        } else if (stat.isFile()) {
+          fs.chmodSync(entry, 0o600);
+        }
+      };
+      makeWritable(snapshotsDir);
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
     createdStateDirs.clear();
@@ -9197,6 +9210,7 @@ describe("ProviderCommandReactor", () => {
       },
       runtimeMode: "approval-required",
     });
+    expect(harness.startSession.mock.calls[0]?.[1]).not.toHaveProperty("expertSession");
     const providerInput = harness.sendTurn.mock.calls[0]?.[0].input;
     expect(providerInput).toContain("<synara_goal>");
     expect(providerInput).toContain("Deliver &lt;all&gt; providers safely");
@@ -9208,6 +9222,180 @@ describe("ProviderCommandReactor", () => {
     // One scan rechecks the provider's live-turn race before dispatch; the
     // session ensure then performs the only full lookup needed for startup.
     expect(harness.listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("injects the immutable server-bound Expert snapshot after runtime recovery", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.makeUnsafe("thread-expert-binding");
+    const expertId = "bound-reviewer";
+    const skillPath = path.join(harness.stateDir, "expert-fixtures", "review-skill", "SKILL.md");
+    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+    fs.writeFileSync(skillPath, "---\nname: reviewer\ndescription: review\n---\nReview.\n");
+    const expertStore = createExpertStore(harness.stateDir);
+    const expertDefinition = {
+      id: expertId,
+      name: "Bound reviewer",
+      description: "Test expert binding",
+      useCases: "Review a change",
+      persona: "Separate facts from assumptions.",
+      outputRequirements: "Give a conclusion and evidence.",
+      skills: [{ name: "reviewer", path: skillPath }],
+      references: [],
+      connections: [],
+      preferredProvider: "codex" as const,
+    };
+    await expertStore.save(expertDefinition);
+    const now = new Date().toISOString();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("cmd-create-expert-bound-thread"),
+        threadId,
+        projectId: asProjectId("project-1"),
+        expertId,
+        title: "Expert-bound thread",
+        modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      }),
+    );
+
+    const boundThread = await readHarnessThread(harness, threadId);
+    expect(boundThread?.expertBinding).toMatchObject({ expertId, revision: 1 });
+    const binding = boundThread!.expertBinding!;
+    const snapshot = await expertStore.readSnapshot(binding.snapshotId);
+    await expertStore.save({
+      ...expertDefinition,
+      expectedRevision: 1,
+      persona: "This newer template must not replace the thread snapshot.",
+      outputRequirements: "Use a different output format.",
+    });
+
+    const startTurn = (suffix: string) =>
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe(`cmd-expert-binding-turn-${suffix}`),
+        threadId,
+        message: {
+          messageId: asMessageId(`user-expert-binding-${suffix}`),
+          role: "user",
+          text: `Review ${suffix}`,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: new Date().toISOString(),
+      });
+
+    await Effect.runPromise(startTurn("initial"));
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    const expectedExpertSession = {
+      snapshotId: binding.snapshotId,
+      persona: [
+        `Expert: ${snapshot.displayName}`,
+        snapshot.persona,
+        `Output requirements:\n${snapshot.outputRequirements}`,
+      ].join("\n\n"),
+      skillsRoot: snapshot.skillsRoot,
+      skills: snapshot.skills,
+      references: snapshot.references,
+    };
+    expect(harness.startSession.mock.calls[0]?.[1].expertSession).toEqual(expectedExpertSession);
+
+    // Simulate a provider runtime disappearing while the orchestration binding remains durable.
+    await Effect.runPromise(harness.stopRuntimeSession({ threadId }));
+    await Effect.runPromise(startTurn("recovered"));
+    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+
+    expect(harness.startSession.mock.calls[1]?.[1].expertSession).toEqual(expectedExpertSession);
+    expect((await readHarnessThread(harness, threadId))?.expertBinding).toEqual(binding);
+  });
+
+  it("fails closed when an Expert thread's pinned snapshot cannot be read", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.makeUnsafe("thread-expert-snapshot-missing");
+    const expertId = "missing-snapshot-reviewer";
+    const skillPath = path.join(harness.stateDir, "expert-fixtures", "missing-skill", "SKILL.md");
+    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+    fs.writeFileSync(skillPath, "---\nname: reviewer\ndescription: review\n---\nReview.\n");
+    const expertStore = createExpertStore(harness.stateDir);
+    await expertStore.save({
+      id: expertId,
+      name: "Snapshot-bound reviewer",
+      description: "Test expert snapshot failure",
+      useCases: "Review a change",
+      persona: "Use the pinned review principles.",
+      outputRequirements: "Give evidence.",
+      skills: [{ name: "reviewer", path: skillPath }],
+      references: [],
+      connections: [],
+      preferredProvider: "codex",
+    });
+    const now = new Date().toISOString();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("cmd-create-missing-snapshot-thread"),
+        threadId,
+        projectId: asProjectId("project-1"),
+        expertId,
+        title: "Snapshot failure thread",
+        modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      }),
+    );
+
+    const thread = await readHarnessThread(harness, threadId);
+    expect(thread?.expertBinding).toBeDefined();
+    const manifestPath = path.join(
+      harness.stateDir,
+      "experts",
+      "snapshots",
+      thread!.expertBinding!.snapshotId,
+      "snapshot.json",
+    );
+    fs.chmodSync(manifestPath, 0o600);
+    fs.writeFileSync(manifestPath, "{}\n");
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-start-with-missing-expert-snapshot"),
+        threadId,
+        message: {
+          messageId: asMessageId("user-missing-expert-snapshot"),
+          role: "user",
+          text: "Review this change",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+
+    await waitFor(
+      async () => (await readHarnessThread(harness, threadId))?.session?.status === "error",
+    );
+    const failedThread = await readHarnessThread(harness, threadId);
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect(failedThread?.session?.lastError).toContain("Could not load the pinned expert snapshot");
+    expect(
+      failedThread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+    ).toBe(true);
   });
 
   it("preserves existing threads while a provider is disabled and resumes after re-enabling", async () => {

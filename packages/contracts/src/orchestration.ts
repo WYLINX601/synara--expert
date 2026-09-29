@@ -1,4 +1,5 @@
 import { Option, Schema, SchemaIssue, SchemaTransformation, Struct } from "effect";
+import { ExpertBinding } from "./expert";
 import {
   ImportProjectInput,
   ImportProjectResult,
@@ -797,6 +798,9 @@ export const OrchestrationThread = Schema.Struct({
   claudeCacheReview: Schema.optional(Schema.NullOr(PendingClaudeCacheReview)),
   id: ThreadId,
   projectId: ProjectId,
+  expertBinding: Schema.optional(Schema.NullOr(ExpertBinding)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -890,6 +894,9 @@ export const OrchestrationThreadShell = Schema.Struct({
   claudeCacheReview: Schema.optional(Schema.NullOr(PendingClaudeCacheReview)),
   id: ThreadId,
   projectId: ProjectId,
+  expertBinding: Schema.optional(Schema.NullOr(ExpertBinding)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -1133,6 +1140,7 @@ const ThreadCreateCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   projectId: ProjectId,
+  expertId: Schema.optional(TrimmedNonEmptyString),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -1188,6 +1196,7 @@ const ThreadHandoffCreateCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   sourceThreadId: ThreadId,
+  expertId: Schema.optional(TrimmedNonEmptyString),
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
@@ -1904,6 +1913,9 @@ export const ProjectDeletedPayload = Schema.Struct({
 export const ThreadCreatedPayload = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
+  expertBinding: Schema.optional(Schema.NullOr(ExpertBinding)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(() => DEFAULT_RUNTIME_MODE)),

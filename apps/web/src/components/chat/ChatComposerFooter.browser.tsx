@@ -8,6 +8,8 @@ import { ChatComposerFooter } from "./ChatComposerFooter";
 function mountFooter(input: {
   phase: SessionPhase;
   connecting: boolean;
+  expertBlocked?: boolean;
+  hasContent?: boolean;
   onInterrupt?: () => void;
 }) {
   return render(
@@ -35,9 +37,10 @@ function mountFooter(input: {
         busy: false,
         connecting: input.connecting,
         expired: false,
+        expertBlocked: input.expertBlocked ?? false,
         preparingImages: false,
         preparingWorktree: false,
-        hasContent: false,
+        hasContent: input.hasContent ?? false,
         hasPendingUserInputs: false,
         showPlanFollowUp: false,
         hasPrompt: false,
@@ -74,6 +77,20 @@ describe("ChatComposerFooter stop control", () => {
       await expect.element(stop).toBeVisible();
       await stop.click();
       expect(onInterrupt).toHaveBeenCalledOnce();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("disables send when the selected expert preview is blocked", async () => {
+    const screen = await mountFooter({
+      phase: "ready",
+      connecting: false,
+      expertBlocked: true,
+      hasContent: true,
+    });
+    try {
+      await expect.element(page.getByRole("button", { name: "Send message" })).toBeDisabled();
     } finally {
       await screen.unmount();
     }

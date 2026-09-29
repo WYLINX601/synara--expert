@@ -17,6 +17,7 @@ export const SETTINGS_SECTION_IDS = [
   "models",
   "providers",
   "skills",
+  "experts",
   "usage",
   "integrations",
   "advanced",
@@ -167,6 +168,14 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     description: "Review reusable workflows discovered across all configured providers.",
     icon: "building-blocks",
     eyebrow: "Reusable workflows",
+  },
+  {
+    id: "experts",
+    group: "coding",
+    label: "Experts",
+    description: "Manage the role, skills, references, and runtime preference for new tasks.",
+    icon: "brain",
+    eyebrow: "Task specialists",
   },
   {
     id: "worktrees",

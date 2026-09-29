@@ -1,5 +1,15 @@
 import { Schema, Struct } from "effect";
 import { ImportProjectInput, ListProjectImportsInput } from "./projectImport";
+import {
+  ExpertArchiveInput,
+  ExpertAppliedRuntimeReadInput,
+  ExpertConnectionRemoveInput,
+  ExpertConnectionSaveInput,
+  ExpertPreviewInput,
+  ExpertReadInput,
+  ExpertSaveInput,
+  ExpertSnapshotReadInput,
+} from "./expert";
 import { NonNegativeInt, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
 
 import {
@@ -252,6 +262,17 @@ export const WS_METHODS = {
   serverGetEnvironment: "server.getEnvironment",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
+  serverListExperts: "server.listExperts",
+  serverReadExpert: "server.readExpert",
+  serverSaveExpert: "server.saveExpert",
+  serverArchiveExpert: "server.archiveExpert",
+  serverPreviewExpert: "server.previewExpert",
+  serverReadExpertSnapshot: "server.readExpertSnapshot",
+  serverReadExpertAppliedRuntime: "server.readExpertAppliedRuntime",
+  serverListExpertConnections: "server.listExpertConnections",
+  serverSaveExpertConnection: "server.saveExpertConnection",
+  serverRemoveExpertConnection: "server.removeExpertConnection",
+  serverTestExpertConnection: "server.testExpertConnection",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   serverListExternalMcpIntegrations: "server.listExternalMcpIntegrations",
@@ -474,6 +495,17 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverGetEnvironment, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverGetSettings, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverUpdateSettings, ServerUpdateSettingsInput),
+  tagRequestBody(WS_METHODS.serverListExperts, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverReadExpert, ExpertReadInput),
+  tagRequestBody(WS_METHODS.serverSaveExpert, ExpertSaveInput),
+  tagRequestBody(WS_METHODS.serverArchiveExpert, ExpertArchiveInput),
+  tagRequestBody(WS_METHODS.serverPreviewExpert, ExpertPreviewInput),
+  tagRequestBody(WS_METHODS.serverReadExpertSnapshot, ExpertSnapshotReadInput),
+  tagRequestBody(WS_METHODS.serverReadExpertAppliedRuntime, ExpertAppliedRuntimeReadInput),
+  tagRequestBody(WS_METHODS.serverListExpertConnections, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverSaveExpertConnection, ExpertConnectionSaveInput),
+  tagRequestBody(WS_METHODS.serverRemoveExpertConnection, ExpertConnectionRemoveInput),
+  tagRequestBody(WS_METHODS.serverTestExpertConnection, ExpertReadInput),
   tagRequestBody(WS_METHODS.serverRefreshProviders, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverUpdateProvider, ServerProviderUpdateInput),
   tagRequestBody(WS_METHODS.serverListExternalMcpIntegrations, Schema.Struct({})),

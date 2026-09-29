@@ -79,6 +79,10 @@ export interface AgentGatewayCredentialsShape {
   readonly retireSessionTurn: (token: string, turnId: string) => Promise<void>;
   /** Revoke exactly one provider session credential. */
   readonly revokeSessionToken: (token: string) => void;
+  /** Clean up resources owned by a provider session after its requests drain. */
+  readonly onSessionRevoked?: (
+    listener: (sessionKey: string) => void | Promise<void>,
+  ) => () => void;
   /** Convenience bundle used when injecting MCP config into provider sessions. */
   readonly connectionForThread: (
     threadId: ThreadId,

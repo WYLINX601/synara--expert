@@ -99,6 +99,7 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const sessionRegistry = yield* AgentGatewaySessionRegistry;
   const inFlightRequests = makeAgentGatewayInFlightRequestRegistry();
+  const revokedListeners = new Set<(sessionKey: string) => void | Promise<void>>();
 
   const endpoint = makeAgentGatewayEndpoint(config.host, config.port);
   const stdioProxyScriptPath = yield* ensureAgentGatewayStdioProxyScript(config.stateDir);
@@ -119,7 +120,13 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
     const session = sessionRegistry.verify(token);
     sessionRegistry.revoke(token);
     stdioBootstraps.revokeSession(token);
-    if (session) inFlightRequests.revokeSession(session.sessionKey);
+    if (session) {
+      void inFlightRequests
+        .revokeSession(session.sessionKey)
+        .settled.then(() =>
+          Promise.allSettled([...revokedListeners].map((listener) => listener(session.sessionKey))),
+        );
+    }
   };
 
   const issueStdioBootstrapToken: AgentGatewayCredentialsShape["issueStdioBootstrapToken"] = (
@@ -169,6 +176,10 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
     cancelSessionTurnRequests,
     retireSessionTurn,
     revokeSessionToken,
+    onSessionRevoked: (listener) => {
+      revokedListeners.add(listener);
+      return () => revokedListeners.delete(listener);
+    },
     connectionForThread: (threadId, provider, options) => ({
       url: endpoint.url,
       bearerToken: issueSessionToken(threadId, provider, options),

@@ -1,6 +1,7 @@
 import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import * as nodePath from "node:path";
 
 import {
   ApprovalRequestId,
@@ -26,6 +27,7 @@ import {
   TurnId,
   type ProviderApprovalDecision,
   type ProviderEvent,
+  type ProviderExpertSession,
   type ProviderSession,
   type ProviderSessionStartInput,
   type ProviderTurnStartResult,
@@ -184,6 +186,7 @@ type CodexSessionApprovalOverride = {
 
 interface CodexSessionContext {
   readonly enableComputerControl?: boolean;
+  readonly expertDeveloperInstructions?: string;
   readonly gatewaySessionLease?: AgentGatewaySessionLease;
   /** Set once this runtime's bearer is permanently fenced to a terminal turn. */
   gatewayCredentialRetired?: boolean;
@@ -319,6 +322,7 @@ export interface CodexAppServerStartSessionInput {
   readonly resumeCursor?: unknown;
   readonly forkSourceResumeCursor?: unknown;
   readonly providerOptions?: ProviderSessionStartInput["providerOptions"];
+  readonly expertSession?: ProviderExpertSession;
   /**
    * Session-start facts the gateway lease derives its capabilities from.
    * Required on purpose: a lease that forgets it fails silently (the
@@ -674,11 +678,15 @@ interface CodexThreadSessionOverrides {
 type CodexThreadOpenRequest =
   | {
       readonly method: "thread/start";
-      readonly params: CodexThreadSessionOverrides & { readonly experimentalRawEvents: false };
+      readonly params: CodexThreadSessionOverrides & {
+        readonly developerInstructions?: string;
+        readonly experimentalRawEvents: false;
+      };
     }
   | {
       readonly method: "thread/resume" | "thread/fork";
       readonly params: CodexThreadSessionOverrides & {
+        readonly developerInstructions?: string;
         readonly threadId: string;
         readonly excludeTurns: true;
       };
@@ -688,6 +696,7 @@ export function buildCodexThreadOpenRequest(input: {
   readonly forkSourceThreadId?: string;
   readonly resumeThreadId?: string;
   readonly sessionOverrides: CodexThreadSessionOverrides;
+  readonly developerInstructions?: string;
 }): CodexThreadOpenRequest {
   if (input.forkSourceThreadId && input.resumeThreadId) {
     throw new Error("A Codex session cannot resume and fork at the same time.");
@@ -697,6 +706,9 @@ export function buildCodexThreadOpenRequest(input: {
       method: "thread/fork",
       params: {
         ...input.sessionOverrides,
+        ...(input.developerInstructions !== undefined
+          ? { developerInstructions: input.developerInstructions }
+          : {}),
         threadId: input.forkSourceThreadId,
         excludeTurns: true,
       },
@@ -705,12 +717,25 @@ export function buildCodexThreadOpenRequest(input: {
   if (input.resumeThreadId) {
     return {
       method: "thread/resume",
-      params: { ...input.sessionOverrides, threadId: input.resumeThreadId, excludeTurns: true },
+      params: {
+        ...input.sessionOverrides,
+        ...(input.developerInstructions !== undefined
+          ? { developerInstructions: input.developerInstructions }
+          : {}),
+        threadId: input.resumeThreadId,
+        excludeTurns: true,
+      },
     };
   }
   return {
     method: "thread/start",
-    params: { ...input.sessionOverrides, experimentalRawEvents: false },
+    params: {
+      ...input.sessionOverrides,
+      ...(input.developerInstructions !== undefined
+        ? { developerInstructions: input.developerInstructions }
+        : {}),
+      experimentalRawEvents: false,
+    },
   };
 }
 
@@ -844,6 +869,7 @@ export function buildCodexCollaborationMode(input: {
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
   readonly effort?: string;
+  readonly expertInstructions?: string;
 }):
   | {
       mode: "default" | "plan";
@@ -863,21 +889,24 @@ export function buildCodexCollaborationMode(input: {
     nativeMode === "plan"
       ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
       : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS;
+  const modeInstructions =
+    input.enableComputerControl === true
+      ? instructions.replace(
+          SYNARA_GATEWAY_HARNESS_POLICY,
+          renderSynaraHarnessPolicy({
+            gatewayControlAvailable: true,
+            enableComputerControl: true,
+          }),
+        )
+      : instructions;
   return {
     mode: nativeMode,
     settings: {
       model,
       reasoning_effort: input.effort ?? "medium",
-      developer_instructions:
-        input.enableComputerControl === true
-          ? instructions.replace(
-              SYNARA_GATEWAY_HARNESS_POLICY,
-              renderSynaraHarnessPolicy({
-                gatewayControlAvailable: true,
-                enableComputerControl: true,
-              }),
-            )
-          : instructions,
+      developer_instructions: [modeInstructions, input.expertInstructions]
+        .filter((value): value is string => Boolean(value?.trim()))
+        .join("\n\n"),
     },
   };
 }
@@ -1126,23 +1155,58 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     return env;
   }
 
-  // Registers `~/.synara/skills` as a codex skill root so portable skills are
-  // first-class: skills/list returns them and turn/start `skill` items inject
-  // their instructions. Verified live: skill items with paths outside known
-  // roots are silently ignored by codex app-server, so this call is required.
-  private async registerSynaraSkillsRoot(context: CodexSessionContext): Promise<void> {
-    if (!this.synaraSkillsDir) {
+  // Codex ignores turn/start skill items outside registered roots.
+  private async registerSessionSkillRoots(
+    context: CodexSessionContext,
+    expertSession?: ProviderExpertSession,
+  ): Promise<void> {
+    const roots = [
+      ...new Set(
+        [this.synaraSkillsDir, expertSession?.skillsRoot].filter(
+          (root): root is string => root !== undefined,
+        ),
+      ),
+    ];
+    if (roots.length === 0) {
       return;
     }
     try {
       await this.sendRequest(context, "skills/extraRoots/set", {
-        extraRoots: [this.synaraSkillsDir],
+        extraRoots: roots,
       });
     } catch (error) {
-      if (!this.isContextRoutable(context)) throw error;
+      if (!this.isContextRoutable(context) || expertSession?.skills.length) throw error;
       // Older codex builds (< extra-roots support) keep working; Synara-only
       // skills simply stay invisible to codex on those versions.
       log.warn("skills/extraRoots/set unavailable", { error });
+    }
+    if (expertSession?.skills.length) {
+      const cwd = context.session.cwd ?? process.cwd();
+      let response: Record<string, unknown>;
+      try {
+        response = await this.sendRequest<Record<string, unknown>>(context, "skills/list", {
+          cwds: [cwd],
+          forceReload: true,
+        });
+      } catch (error) {
+        if (!shouldRetrySkillsListWithCwdFallback(error)) throw error;
+        response = await this.sendRequest<Record<string, unknown>>(context, "skills/list", {
+          cwd,
+          forceReload: true,
+        });
+      }
+      const loaded = parseCodexSkillsListResponse(response, cwd);
+      for (const required of expertSession.skills) {
+        if (
+          !loaded.some(
+            (skill) =>
+              skill.name === required.name &&
+              nodePath.resolve(skill.path) === nodePath.resolve(required.path),
+          )
+        ) {
+          throw new Error(`Codex did not load required Expert skill '${required.name}'.`);
+        }
+      }
     }
   }
 
@@ -1151,6 +1215,23 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       throw new Error(
         "Codex session start requires an explicit agentGatewayCapabilityInput. Pass AGENT_GATEWAY_NO_CAPABILITIES when the session leases no gateway capabilities.",
       );
+    }
+    if (input.expertSession?.skills.length) {
+      if (!input.expertSession.skillsRoot) {
+        throw new Error("Codex Expert skills require a snapshot skills root.");
+      }
+      const root = nodePath.resolve(input.expertSession.skillsRoot);
+      for (const skill of input.expertSession.skills) {
+        const relative = nodePath.relative(root, nodePath.resolve(skill.path));
+        if (
+          relative === "" ||
+          relative === ".." ||
+          relative.startsWith(`..${nodePath.sep}`) ||
+          nodePath.isAbsolute(relative)
+        ) {
+          throw new Error(`Codex Expert skill '${skill.name}' is outside its snapshot root.`);
+        }
+      }
     }
     const threadId = input.threadId;
     const now = new Date().toISOString();
@@ -1167,10 +1248,14 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
       const resolvedCwd = resolveScratchWorkspaceCwd(threadId, input.cwd);
 
-      const session: ProviderSession = {
+      let session: ProviderSession = {
         provider: "codex",
         status: "connecting",
         runtimeMode: input.runtimeMode,
+        runtimeComponent: "codex-cli",
+        ...(input.lifecycleGeneration !== undefined
+          ? { lifecycleGeneration: input.lifecycleGeneration }
+          : {}),
         model: normalizeCodexModelSlug(input.model),
         cwd: resolvedCwd,
         threadId,
@@ -1193,7 +1278,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       const codexOptions = readCodexProviderOptions(input);
       const codexBinaryPath = codexOptions.binaryPath ?? "codex";
       const codexHomePath = codexOptions.homePath;
-      await this.assertSupportedCodexCliVersion({
+      const runtimeVersion = await this.assertSupportedCodexCliVersion({
         binaryPath: codexBinaryPath,
         cwd: resolvedCwd,
         ...(minimumVersion
@@ -1207,6 +1292,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
           : {}),
         ...(codexHomePath ? { homePath: codexHomePath } : {}),
       });
+      if (runtimeVersion !== undefined) {
+        session = { ...session, runtimeVersion };
+      }
       gatewaySessionLease = this.agentGatewayMcp?.acquireSessionLease(
         threadId,
         input.agentGatewayCapabilityInput,
@@ -1224,6 +1312,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         enableComputerControl:
           gatewaySessionLease !== undefined &&
           input.agentGatewayCapabilityInput.enableComputerControl === true,
+        ...(input.expertSession
+          ? { expertDeveloperInstructions: input.expertSession.persona }
+          : {}),
         ...(gatewaySessionLease ? { gatewaySessionLease } : {}),
         session,
         ...(input.lifecycleGeneration !== undefined
@@ -1256,7 +1347,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       await this.sendRequest(context, "initialize", buildCodexInitializeParams());
 
       await this.writeMessage(context, { method: "initialized" });
-      await this.registerSynaraSkillsRoot(context);
+      await this.registerSessionSkillRoots(context, input.expertSession);
       // Model discovery is lazy and cached by ProviderDiscoveryService. Keeping model/list
       // out of this serial cold-start path avoids an otherwise unused request
       // with its own 20-second deadline.
@@ -1289,6 +1380,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ...(forkSourceThreadId ? { forkSourceThreadId } : {}),
         ...(resumeThreadId ? { resumeThreadId } : {}),
         sessionOverrides,
+        ...(input.expertSession ? { developerInstructions: input.expertSession.persona } : {}),
       });
       const previouslyBound =
         this.previouslyBoundThreadIds.has(threadId) || input.resumeCursor !== undefined;
@@ -1385,7 +1477,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
           recoverable: true,
           cause: error instanceof Error ? error.message : String(error),
         }).pipe(this.runPromise);
-        const fallbackRequest = buildCodexThreadOpenRequest({ sessionOverrides });
+        const fallbackRequest = buildCodexThreadOpenRequest({
+          sessionOverrides,
+          ...(input.expertSession ? { developerInstructions: input.expertSession.persona } : {}),
+        });
         threadOpenResponse = await this.sendRequest(
           context,
           fallbackRequest.method,
@@ -1529,6 +1624,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
       ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
       ...(input.effort !== undefined ? { effort: input.effort } : {}),
+      ...(context.expertDeveloperInstructions !== undefined
+        ? { expertInstructions: context.expertDeveloperInstructions }
+        : {}),
     });
     if (collaborationMode) {
       if (!turnStartParams.model) {
@@ -2065,10 +2163,14 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       }
 
       const resolvedCwd = input.cwd ?? ensureIsolatedScratchWorkspace(threadId);
-      const session: ProviderSession = {
+      let session: ProviderSession = {
         provider: "codex",
         status: "connecting",
         runtimeMode: input.runtimeMode,
+        runtimeComponent: "codex-cli",
+        ...(input.lifecycleGeneration !== undefined
+          ? { lifecycleGeneration: input.lifecycleGeneration }
+          : {}),
         model:
           input.modelSelection?.provider === "codex"
             ? normalizeCodexModelSlug(input.modelSelection.model)
@@ -2088,7 +2190,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         runtimeMode: input.runtimeMode,
         threadOpenMethod: "thread/fork",
       });
-      await this.assertSupportedCodexCliVersion({
+      const runtimeVersion = await this.assertSupportedCodexCliVersion({
         binaryPath: codexBinaryPath,
         cwd: resolvedCwd,
         ...(minimumVersion
@@ -2099,6 +2201,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
           : {}),
         ...(codexHomePath ? { homePath: codexHomePath } : {}),
       });
+      if (runtimeVersion !== undefined) {
+        session = { ...session, runtimeVersion };
+      }
       signal?.throwIfAborted();
       // A fork carries the same computer-control fact a start does, so the
       // forked runtime leases like-for-like capabilities instead of dropping
@@ -2148,7 +2253,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
       await this.sendRequest(context, "initialize", buildCodexInitializeParams());
       await this.writeMessage(context, { method: "initialized" });
-      await this.registerSynaraSkillsRoot(context);
+      await this.registerSessionSkillRoots(context);
       try {
         const accountReadResponse = await this.sendRequest(context, "account/read", {});
         context.account = readCodexAccountSnapshot(accountReadResponse);
@@ -3119,7 +3224,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     try {
       await this.sendRequest(context, "initialize", buildCodexInitializeParams());
       await this.writeMessage(context, { method: "initialized" });
-      await this.registerSynaraSkillsRoot(context);
+      await this.registerSessionSkillRoots(context);
       try {
         const accountReadResponse = await this.sendRequest(context, "account/read", {});
         context.account = readCodexAccountSnapshot(accountReadResponse);
@@ -4104,8 +4209,8 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     readonly homePath?: string;
     readonly minimumVersion?: string;
     readonly minimumVersionRequirement?: string;
-  }): Promise<void> {
-    await assertSupportedCodexCliVersion(input);
+  }): Promise<string | undefined> {
+    return assertSupportedCodexCliVersion(input);
   }
 
   private updateSession(context: CodexSessionContext, updates: Partial<ProviderSession>): void {
@@ -4638,13 +4743,18 @@ interface CodexCliBinaryFingerprint {
   readonly identity: string;
 }
 
+interface CodexCliVersionGateResult {
+  readonly parsedVersion: string | undefined;
+  readonly fingerprint: CodexCliBinaryFingerprint | null;
+}
+
 async function runCodexCliVersionGate(input: {
   readonly binaryPath: string;
   readonly cwd: string;
   readonly homePath?: string;
   readonly minimumVersion?: string;
   readonly minimumVersionRequirement?: string;
-}): Promise<CodexCliBinaryFingerprint | null> {
+}): Promise<CodexCliVersionGateResult> {
   const env = await buildCodexProcessEnv({
     ...(input.homePath ? { homePath: input.homePath } : {}),
   });
@@ -4693,11 +4803,14 @@ async function runCodexCliVersionGate(input: {
     throw new Error(formatCodexCliUpgradeMessage(parsedVersion, minimumVersion));
   }
 
-  return resolvedPath && identity ? { path: resolvedPath, identity } : null;
+  return {
+    parsedVersion: parsedVersion ?? undefined,
+    fingerprint: resolvedPath && identity ? { path: resolvedPath, identity } : null,
+  };
 }
 
 interface CodexCliVersionGateEntry {
-  promise: Promise<void>;
+  promise: Promise<CodexCliVersionGateResult>;
   /** 0 until the probe resolves successfully; failed verdicts are never reused. */
   expiresAt: number;
   /**
@@ -4742,7 +4855,7 @@ async function assertSupportedCodexCliVersion(input: {
   readonly homePath?: string;
   readonly minimumVersion?: string;
   readonly minimumVersionRequirement?: string;
-}): Promise<void> {
+}): Promise<string | undefined> {
   // Prefer an explicit cwd check before spawning. A missing working directory
   // produces ENOENT that is otherwise misreported as a missing Codex binary. This
   // is per-call state, so it must run even when the version verdict is cached.
@@ -4755,12 +4868,10 @@ async function assertSupportedCodexCliVersion(input: {
     // expiresAt === 0 means the probe is still in flight: concurrent session
     // starts share it instead of each spawning their own Codex process.
     if (existing.expiresAt === 0) {
-      await existing.promise;
-      return;
+      return (await existing.promise).parsedVersion;
     }
     if (existing.expiresAt > now && !isCodexCliVersionGateStale(existing)) {
-      await existing.promise;
-      return;
+      return (await existing.promise).parsedVersion;
     }
     codexCliVersionGates.delete(key);
   }
@@ -4772,14 +4883,15 @@ async function assertSupportedCodexCliVersion(input: {
   }
 
   const entry: CodexCliVersionGateEntry = {
-    promise: Promise.resolve(),
+    promise: Promise.resolve({ parsedVersion: undefined, fingerprint: null }),
     expiresAt: 0,
     fingerprint: null,
   };
   entry.promise = runCodexCliVersionGate(input).then(
-    (fingerprint) => {
-      entry.fingerprint = fingerprint;
+    (result) => {
+      entry.fingerprint = result.fingerprint;
       entry.expiresAt = Date.now() + CODEX_VERSION_CHECK_CACHE_TTL_MS;
+      return result;
     },
     (error: unknown) => {
       // Never cache a failure: the user may install or upgrade Codex at any time.
@@ -4790,7 +4902,7 @@ async function assertSupportedCodexCliVersion(input: {
     },
   );
   codexCliVersionGates.set(key, entry);
-  await entry.promise;
+  return (await entry.promise).parsedVersion;
 }
 
 export const __codexCliVersionGateTesting = {

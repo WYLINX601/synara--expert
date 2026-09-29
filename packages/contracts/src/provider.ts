@@ -38,6 +38,9 @@ export const ProviderSession = Schema.Struct({
   provider: ProviderKind,
   status: ProviderSessionStatus,
   runtimeMode: RuntimeMode,
+  runtimeComponent: Schema.optional(TrimmedNonEmptyString),
+  runtimeVersion: Schema.optional(TrimmedNonEmptyString),
+  lifecycleGeneration: Schema.optional(TrimmedNonEmptyString),
   cwd: Schema.optional(TrimmedNonEmptyString),
   model: Schema.optional(TrimmedNonEmptyString),
   threadId: ThreadId,
@@ -48,6 +51,15 @@ export const ProviderSession = Schema.Struct({
   lastError: Schema.optional(TrimmedNonEmptyString),
 });
 export type ProviderSession = typeof ProviderSession.Type;
+
+export const ProviderExpertSession = Schema.Struct({
+  snapshotId: TrimmedNonEmptyString,
+  persona: TrimmedNonEmptyString,
+  skillsRoot: Schema.optional(TrimmedNonEmptyString),
+  skills: Schema.Array(ProviderSkillReference),
+  references: Schema.Array(TrimmedNonEmptyString),
+});
+export type ProviderExpertSession = typeof ProviderExpertSession.Type;
 
 export const ProviderSessionStartInput = Schema.Struct({
   threadId: ThreadId,
@@ -62,6 +74,8 @@ export const ProviderSessionStartInput = Schema.Struct({
   providerOptions: Schema.optional(ProviderStartOptions),
   /** Explicit per-thread provisioning for the Linux computer MCP tools. */
   enableComputerControl: Schema.optional(Schema.Boolean),
+  /** Immutable Expert snapshot resolved server-side from the thread binding. */
+  expertSession: Schema.optional(ProviderExpertSession),
   runtimeMode: RuntimeMode,
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;

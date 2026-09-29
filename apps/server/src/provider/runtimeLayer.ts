@@ -25,6 +25,7 @@ import { makeDurableProviderServiceLive } from "./Layers/ProviderService";
 import { ProviderSessionDirectoryLive } from "./Layers/ProviderSessionDirectory";
 import { ProviderSessionRuntimeRepositoryLive } from "../persistence/Layers/ProviderSessionRuntime";
 import { ProviderRuntimeEventRepositoryLive } from "../persistence/Layers/ProviderRuntimeEvents";
+import { ExpertAppliedRuntimeRepositoryLive } from "../persistence/Layers/ExpertAppliedRuntimeRecords";
 
 export function makeServerProviderLayer(
   options: {
@@ -116,6 +117,7 @@ export function makeServerProviderLayer(
       Layer.provide(adapterRegistryLayer),
       Layer.provide(providerSessionDirectoryLayer),
       Layer.provide(ProviderRuntimeEventRepositoryLive),
+      Layer.provide(ExpertAppliedRuntimeRepositoryLive),
     );
     const providerDiscoveryLayer = ProviderDiscoveryServiceLive.pipe(
       Layer.provide(adapterRegistryLayer),

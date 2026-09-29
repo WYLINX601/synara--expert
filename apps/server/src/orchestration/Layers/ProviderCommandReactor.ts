@@ -2,6 +2,8 @@ import { appendAppSnapPromptContext } from "../../provider/appSnapPromptContext.
 import { computerActivationMetadata } from "../../computer/computerActivation.ts";
 import { parseComputerInvocation } from "@synara/shared/computerInvocation";
 import { AgentGatewaySessionRegistry } from "../../agentGateway/Services/AgentGatewaySessionRegistry";
+import { preflightExpertConnections } from "../../experts/ExpertGatewayTools.ts";
+import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { ComputerService } from "../../computer/Services/ComputerService";
 import { providerWorkspaceChanged } from "../projectRelocationPaths.ts";
 // FILE: ProviderCommandReactor.ts
@@ -794,6 +796,7 @@ const make = Effect.gen(function* () {
   });
   const managedAttachments = yield* ManagedAttachmentRepository;
   const serverConfig = yield* ServerConfig;
+  const expertStore = createExpertStore(serverConfig.stateDir);
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
     timeToLive: HANDLED_TURN_START_KEY_TTL,
@@ -1738,7 +1741,55 @@ const make = Effect.gen(function* () {
         issue: `${providerDisabledSettingsMessage(preferredProvider)} Re-enable it to continue this thread.`,
       });
     }
+    const activeSessionBeforeEnsure = yield* resolveActiveSession(threadId);
     const resolvedProviderOptions = providerStartOptionsFromServerSettings(settings);
+    const expertSnapshot = thread.expertBinding
+      ? yield* Effect.tryPromise({
+          try: () => expertStore.readSnapshot(thread.expertBinding!.snapshotId),
+          catch: (error) =>
+            new ProviderAdapterValidationError({
+              provider: preferredProvider,
+              operation: "thread.turn.start",
+              issue: `Could not load the pinned expert snapshot for thread '${threadId}': ${String(error)}`,
+            }),
+        })
+      : undefined;
+    const expertConnectionPreflight =
+      expertSnapshot && activeSessionBeforeEnsure === undefined
+        ? yield* Effect.tryPromise({
+            try: () =>
+              preflightExpertConnections(expertSnapshot, { stateDir: serverConfig.stateDir }),
+            catch: (error) =>
+              new ProviderAdapterValidationError({
+                provider: preferredProvider,
+                operation: "thread.turn.start",
+                issue: `Expert '${expertSnapshot.displayName}' cannot start because a required connection is unavailable: ${String(error instanceof Error ? error.message : error)}`,
+              }),
+          })
+        : undefined;
+    const expertSession = expertSnapshot
+      ? {
+          snapshotId: expertSnapshot.snapshotId,
+          persona: [
+            `Expert: ${expertSnapshot.displayName}`,
+            expertSnapshot.persona,
+            expertSnapshot.outputRequirements
+              ? `Output requirements:\n${expertSnapshot.outputRequirements}`
+              : "",
+            expertSnapshot.references.length > 0
+              ? `Reference files:\n${expertSnapshot.references.map((path) => `- ${path}`).join("\n")}`
+              : "",
+            expertConnectionPreflight && expertConnectionPreflight.optionalIssues.length > 0
+              ? `Unavailable optional connections:\n${expertConnectionPreflight.optionalIssues.map((issue) => `- ${issue}`).join("\n")}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+          skillsRoot: expertSnapshot.skillsRoot,
+          skills: expertSnapshot.skills,
+          references: expertSnapshot.references,
+        }
+      : undefined;
     const effectiveCwd = yield* resolveProjectedThreadWorkspaceCwd(thread);
     const workspaceState = resolveThreadWorkspaceState({
       envMode: thread.envMode,
@@ -1756,6 +1807,7 @@ const make = Effect.gen(function* () {
       ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
       modelSelection: desiredModelSelection,
       providerOptions: resolvedProviderOptions,
+      ...(expertSession ? { expertSession } : {}),
       ...(options?.enableComputerControl !== undefined
         ? { enableComputerControl: options.enableComputerControl }
         : {}),
@@ -1809,7 +1861,6 @@ const make = Effect.gen(function* () {
       });
 
     // Only reuse projected session state when the runtime still has a live session to attach to.
-    const activeSessionBeforeEnsure = yield* resolveActiveSession(threadId);
     const workspaceChanged =
       activeSessionBeforeEnsure !== undefined &&
       providerWorkspaceChanged(activeSessionBeforeEnsure.cwd, effectiveCwd);

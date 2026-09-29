@@ -146,6 +146,7 @@ export function threadShellsEqual(left: ThreadShell | undefined, right: ThreadSh
   return (
     left !== undefined &&
     left.id === right.id &&
+    deepEqualJson(left.expertBinding ?? null, right.expertBinding ?? null) &&
     left.codexThreadId === right.codexThreadId &&
     left.projectId === right.projectId &&
     left.title === right.title &&
@@ -1692,6 +1693,7 @@ export function normalizeThreadFromReadModel(
   if (
     previous &&
     previous.projectId === incoming.projectId &&
+    deepEqualJson(previous.expertBinding ?? null, incoming.expertBinding ?? null) &&
     previous.title === incoming.title &&
     previous.modelSelection === modelSelection &&
     previous.runtimeMode === incoming.runtimeMode &&
@@ -1750,6 +1752,7 @@ export function normalizeThreadFromReadModel(
 
   return {
     id: incoming.id,
+    expertBinding: incoming.expertBinding ?? null,
     codexThreadId: null,
     projectId: incoming.projectId,
     title: incoming.title,
@@ -1884,6 +1887,7 @@ export function normalizeThreadShellSnapshot(
   });
   const shell: ThreadShell = {
     id: incoming.id,
+    expertBinding: incoming.expertBinding ?? null,
     codexThreadId: previous?.codexThreadId ?? null,
     projectId: incoming.projectId,
     title: incoming.title,

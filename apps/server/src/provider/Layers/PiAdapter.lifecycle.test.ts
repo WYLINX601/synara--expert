@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import {
   createAssistantMessageEventStream,
   type AssistantMessage,
@@ -14,7 +15,13 @@ import type {
   InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { Effect, Layer, Schema, Stream } from "effect";
-import { ApprovalRequestId, ThreadId, ProviderRuntimeEvent, type TurnId } from "@synara/contracts";
+import {
+  ApprovalRequestId,
+  ThreadId,
+  ProviderRuntimeEvent,
+  type ProviderSessionStartInput,
+  type TurnId,
+} from "@synara/contracts";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   AgentGatewayCredentials,
@@ -51,7 +58,10 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
     ) =>
       sdk.createAgentSessionServices({
         ...options,
-        resourceLoaderOptions: { extensionFactories: captured.extensions },
+        resourceLoaderOptions: {
+          ...options.resourceLoaderOptions,
+          extensionFactories: captured.extensions,
+        },
       }),
     createAgentSessionFromServices: async (
       input: Parameters<typeof sdk.createAgentSessionFromServices>[0],
@@ -149,7 +159,11 @@ async function withAdapter(
   run: (adapter: PiAdapterShape, events: ProviderRuntimeEvent[], cwd: string) => Promise<void>,
   delayMs = 100,
   credentials?: AgentGatewayCredentialsShape,
-  startSessionOverrides?: { readonly enableComputerControl?: boolean },
+  startSessionOverrides?: {
+    readonly enableComputerControl?: boolean;
+    readonly expertSession?: ProviderSessionStartInput["expertSession"];
+    readonly lifecycleGeneration?: string;
+  },
   gatewayFetchOverride?: AgentGatewayMcpFetch,
 ) {
   vi.stubEnv("PI_OFFLINE", "1");
@@ -216,6 +230,12 @@ async function withAdapter(
         ...(startSessionOverrides?.enableComputerControl !== undefined
           ? { enableComputerControl: startSessionOverrides.enableComputerControl }
           : {}),
+        ...(startSessionOverrides?.expertSession
+          ? { expertSession: startSessionOverrides.expertSession }
+          : {}),
+        ...(startSessionOverrides?.lifecycleGeneration !== undefined
+          ? { lifecycleGeneration: startSessionOverrides.lifecycleGeneration }
+          : {}),
       });
       yield* Effect.promise(() => run(adapter, events, cwd));
     }).pipe(Effect.provide(layer), Effect.scoped),
@@ -225,6 +245,69 @@ async function withAdapter(
 async function send(adapter: PiAdapterShape) {
   return Effect.runPromise(adapter.sendTurn({ threadId, input: "Test this turn" }));
 }
+
+it("reports the loaded Pi SDK version and lifecycle generation on its session", async () => {
+  responses("success");
+  await withAdapter(
+    async (adapter) => {
+      const sessions = await Effect.runPromise(adapter.listSessions());
+      expect(sessions.find((session) => session.threadId === threadId)).toMatchObject({
+        runtimeComponent: "pi-sdk",
+        runtimeVersion: VERSION,
+        lifecycleGeneration: "pi-generation-1",
+      });
+    },
+    100,
+    undefined,
+    { lifecycleGeneration: "pi-generation-1" },
+  );
+});
+
+it("injects the Expert persona and snapshot skills through Pi's session ResourceLoader", async () => {
+  responses("success");
+  const skillsRoot = mkdtempSync(path.join(tmpdir(), "synara-pi-expert-skills-"));
+  dirs.push(skillsRoot);
+  const skillPath = path.join(skillsRoot, "reviewer", "SKILL.md");
+  mkdirSync(path.dirname(skillPath), { recursive: true });
+  writeFileSync(skillPath, "---\nname: reviewer\ndescription: review\n---\nReview the snapshot.\n");
+  const expertSession = {
+    snapshotId: "snapshot-pi",
+    persona: "Use the reviewer persona.",
+    skillsRoot,
+    skills: [{ name: "reviewer", path: skillPath }],
+    references: ["handbook"],
+  } satisfies NonNullable<ProviderSessionStartInput["expertSession"]>;
+
+  await withAdapter(
+    async () => {
+      const session = captured.sessions[0]!;
+      expect(session.resourceLoader.getAppendSystemPrompt()).toContain(expertSession.persona);
+      expect(session.resourceLoader.getSkills().skills).toContainEqual(
+        expect.objectContaining({ name: "reviewer", filePath: skillPath }),
+      );
+    },
+    100,
+    undefined,
+    { expertSession },
+  );
+});
+
+it("fails Pi startup when a required snapshot skill is missing", async () => {
+  responses("success");
+  const skillsRoot = mkdtempSync(path.join(tmpdir(), "synara-pi-missing-expert-skills-"));
+  dirs.push(skillsRoot);
+  const expertSession = {
+    snapshotId: "snapshot-pi-missing",
+    persona: "Use the reviewer persona.",
+    skillsRoot,
+    skills: [{ name: "missing-reviewer", path: path.join(skillsRoot, "missing", "SKILL.md") }],
+    references: [],
+  } satisfies NonNullable<ProviderSessionStartInput["expertSession"]>;
+
+  await expect(withAdapter(async () => {}, 100, undefined, { expertSession })).rejects.toThrow(
+    "Pi did not load required Expert skill 'missing-reviewer'.",
+  );
+});
 
 it.each([
   { toolName: "bash", args: { command: "printf hello \n" }, title: "printf hello" },

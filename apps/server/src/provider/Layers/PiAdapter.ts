@@ -865,6 +865,15 @@ function makeSessionSnapshot(context: PiSessionContext): ProviderSession {
     provider: PROVIDER,
     status: context.stopped ? "closed" : context.activeTurnId ? "running" : "ready",
     runtimeMode: context.session.runtimeMode,
+    ...(context.session.runtimeComponent !== undefined
+      ? { runtimeComponent: context.session.runtimeComponent }
+      : {}),
+    ...(context.session.runtimeVersion !== undefined
+      ? { runtimeVersion: context.session.runtimeVersion }
+      : {}),
+    ...(context.lifecycleGeneration !== undefined
+      ? { lifecycleGeneration: context.lifecycleGeneration }
+      : {}),
     threadId: context.session.threadId,
     createdAt: context.session.createdAt,
     updatedAt: new Date().toISOString(),
@@ -2679,6 +2688,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       thinkingLevel?: ThinkingLevel;
       processSupervisor: PiBashProcessSupervisor;
       gatewayTools?: ReadonlyArray<ToolDefinition>;
+      expertSession?: Parameters<PiAdapterShape["startSession"]>[0]["expertSession"];
       signal?: AbortSignal;
     }) => {
       const modelRuntime = await createPiModelRuntime(input.agentDir, input.sdk, input.signal);
@@ -2693,7 +2703,31 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           cwd,
           agentDir,
           modelRuntime,
+          ...(input.expertSession
+            ? {
+                resourceLoaderOptions: {
+                  appendSystemPrompt: [input.expertSession.persona],
+                  ...(input.expertSession.skillsRoot
+                    ? { additionalSkillPaths: [input.expertSession.skillsRoot] }
+                    : {}),
+                },
+              }
+            : {}),
         });
+        if (input.expertSession?.skills.length) {
+          const loadedSkills = services.resourceLoader.getSkills().skills;
+          for (const required of input.expertSession.skills) {
+            if (
+              !loadedSkills.some(
+                (skill) =>
+                  skill.name === required.name &&
+                  path.resolve(skill.filePath) === path.resolve(required.path),
+              )
+            ) {
+              throw new Error(`Pi did not load required Expert skill '${required.name}'.`);
+            }
+          }
+        }
         const registry = modelRegistryFacade(services.modelRuntime, input.sdk);
         const requested = parseModelReference(input.modelId);
         if (
@@ -2746,6 +2780,31 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
 
     const startSessionUnlocked = (input: Parameters<PiAdapterShape["startSession"]>[0]) =>
       Effect.gen(function* () {
+        if (input.expertSession?.skills.length) {
+          if (!input.expertSession.skillsRoot) {
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/start",
+              detail: "Pi Expert skills require a snapshot skills root.",
+            });
+          }
+          const root = path.resolve(input.expertSession.skillsRoot);
+          for (const skill of input.expertSession.skills) {
+            const relative = path.relative(root, path.resolve(skill.path));
+            if (
+              relative === "" ||
+              relative === ".." ||
+              relative.startsWith(`..${path.sep}`) ||
+              path.isAbsolute(relative)
+            ) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/start",
+                detail: `Pi Expert skill '${skill.name}' is outside its snapshot root.`,
+              });
+            }
+          }
+        }
         const cwd = trimToUndefined(input.cwd) ?? serverConfig.cwd;
         const piSdk = yield* loadPiSdk("session/start");
         const processSupervisor = makePiBashProcessSupervisor({
@@ -2853,6 +2912,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
                 ...(thinkingLevel ? { thinkingLevel } : {}),
                 processSupervisor,
                 ...(gatewayControlAvailable ? { gatewayTools } : {}),
+                ...(input.expertSession ? { expertSession: input.expertSession } : {}),
               }),
             catch: (cause) =>
               new ProviderAdapterRequestError({
@@ -2878,6 +2938,11 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           provider: PROVIDER,
           status: "ready",
           runtimeMode: input.runtimeMode,
+          runtimeComponent: "pi-sdk",
+          runtimeVersion: piSdk.VERSION,
+          ...(input.lifecycleGeneration !== undefined
+            ? { lifecycleGeneration: input.lifecycleGeneration }
+            : {}),
           cwd,
           threadId: input.threadId,
           createdAt: now,

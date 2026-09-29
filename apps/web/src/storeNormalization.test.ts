@@ -91,6 +91,28 @@ describe("Claude cache review normalization", () => {
   );
 });
 
+describe("Expert binding normalization", () => {
+  const expertBinding = {
+    expertId: "expert-1",
+    snapshotId: "exp_snapshot-1",
+    displayName: "Researcher",
+    revision: 3,
+  };
+
+  it("normalizes the binding from detail and shell snapshots and treats changes as significant", () => {
+    const incoming = makeReadModelThread({ expertBinding });
+    const thread = normalizeThreadFromReadModel(incoming, undefined);
+    expect(thread.expertBinding).toEqual(expertBinding);
+
+    const shell = normalizeThreadShellSnapshot(incoming, thread).shell;
+    expect(shell.expertBinding).toEqual(expertBinding);
+    expect(threadShellsEqual(shell, { ...shell, expertBinding: null })).toBe(false);
+
+    const cleared = normalizeThreadFromReadModel({ ...incoming, expertBinding: null }, thread);
+    expect(cleared.expertBinding).toBeNull();
+  });
+});
+
 interface FoldStep {
   readonly changed: boolean;
 }

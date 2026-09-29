@@ -48,6 +48,61 @@ import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Thread } from "./t
 import { applyOrchestrationEvents } from "./storeEventReducer";
 
 describe("store projection", () => {
+  it("keeps an expert binding on the shell through detail hydration and authoritative clearing", () => {
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const expertBinding = {
+      expertId: "expert-1",
+      snapshotId: "exp_snapshot-1",
+      displayName: "Researcher",
+      revision: 3,
+    };
+    const incoming = makeReadModelThread({ id: threadId, expertBinding });
+    let state = syncServerShellSnapshot(
+      makeState(makeThread({ id: threadId })),
+      makeShellSnapshot(incoming),
+    );
+
+    expect(state.threadShellById?.[threadId]?.expertBinding).toEqual(expertBinding);
+    expect(getThreadFromState(state, threadId)?.expertBinding).toEqual(expertBinding);
+
+    state = syncServerThreadDetailHotPath(state, incoming);
+    expect(getThreadFromState(state, threadId)?.expertBinding).toEqual(expertBinding);
+
+    state = syncServerReadModel(state, {
+      ...makeReadModel({ ...incoming, expertBinding: null }),
+      snapshotSequence: 3,
+    });
+    expect(getThreadFromState(state, threadId)?.expertBinding).toBeNull();
+  });
+
+  it("applies a thread-created expert binding to an already-projected thread", () => {
+    const thread = makeThread();
+    const expertBinding = {
+      expertId: "expert-1",
+      snapshotId: "exp_snapshot-1",
+      displayName: "Researcher",
+      revision: 3,
+    };
+    const state = applyOrchestrationEvents(makeState(thread), [
+      makeDomainEvent("thread.created", {
+        threadId: thread.id,
+        projectId: thread.projectId,
+        expertBinding,
+        title: thread.title,
+        modelSelection: thread.modelSelection,
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        branch: null,
+        worktreePath: null,
+        handoff: null,
+        createdAt: thread.createdAt,
+        updatedAt: thread.createdAt,
+      }),
+    ]);
+
+    expect(getThreadFromState(state, thread.id)?.expertBinding).toEqual(expertBinding);
+  });
+
   it("retains an active resend timestamp through binding updates and rollback", () => {
     const at = (minute: number) => `2026-09-17T10:0${minute}:00.000Z`;
     const messageId = MessageId.makeUnsafe("resent");

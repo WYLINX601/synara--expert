@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "integrationPoints": [
+    {
+      "id": "web.expert-settings-navigation",
+      "surface": "web",
+      "entryFiles": [
+        "apps/web/src/workbench/registry.ts",
+        "apps/web/src/settingsNavigation.ts",
+        "apps/web/src/routes/_chat.settings.tsx",
+        "apps/web/src/components/settings/ExpertsSettingsPanel.tsx"
+      ],
+      "responsibility": "The static Workbench registry owns the existing Experts settings section metadata and page id. Settings navigation and the TanStack settings route reuse that entry; the route still renders the existing ExpertsSettingsPanel directly.",
+      "tests": [
+        "apps/web/src/workbench/registry.test.ts",
+        "apps/web/src/components/SettingsSidebarNav.test.tsx"
+      ]
+    },
+    {
+      "id": "server.expert-rpc",
+      "surface": "server-rpc",
+      "entryFiles": [
+        "apps/server/src/wsRpc.ts",
+        "apps/server/src/workbench/runtimeLayer.ts",
+        "packages/contracts/src/ws.ts",
+        "packages/contracts/src/rpc.ts"
+      ],
+      "responsibility": "wsRpc registers the existing Expert RPC methods and retains requireOwner authorization plus rpcEffect error mapping. The Workbench runtime assembles existing Expert stores, the applied-runtime repository access, and the connection-test MCP lifecycle. RPC schemas and wire method names remain native contracts.",
+      "tests": [
+        "apps/server/src/workbench/runtimeLayer.test.ts",
+        "apps/server/src/wsRpc.auth.test.ts",
+        "apps/server/src/wsRpc.errors.test.ts"
+      ]
+    },
+    {
+      "id": "server.expert-before-session-start",
+      "surface": "session-start",
+      "entryFiles": [
+        "apps/server/src/orchestration/Layers/OrchestrationEngine.ts",
+        "apps/server/src/experts/ExpertStore.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts"
+      ],
+      "responsibility": "The existing orchestration command path validates the selected Expert and prepares an immutable snapshot before committing thread creation. Provider startup reads the thread binding and enforces required connection preflight; failures continue to block startup with the existing command errors.",
+      "tests": [
+        "apps/server/src/experts/ExpertStore.test.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts"
+      ]
+    },
+    {
+      "id": "server.expert-session-restore",
+      "surface": "session-restore",
+      "entryFiles": [
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts",
+        "apps/server/src/provider/Layers/ProviderService.ts",
+        "apps/server/src/provider/Services/ProviderAdapter.ts"
+      ],
+      "responsibility": "Resume reuses the persisted provider runtime payload and the thread's pinned Expert snapshot. It does not resolve the current Expert definition when restoring an existing session; provider-specific application remains owned by each adapter.",
+      "tests": [
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
+        "apps/server/src/provider/Layers/ProviderService.test.ts",
+        "apps/server/src/provider/Layers/CodexAdapter.test.ts",
+        "apps/server/src/provider/Layers/PiAdapter.lifecycle.test.ts"
+      ]
+    },
+    {
+      "id": "server.expert-agent-gateway",
+      "surface": "agent-gateway",
+      "entryFiles": [
+        "apps/server/src/agentGateway/Layers/AgentGateway.ts",
+        "apps/server/src/experts/ExpertGatewayTools.ts",
+        "apps/server/src/agentGateway/Services/AgentGatewaySessionRegistry.ts"
+      ],
+      "responsibility": "The existing Gateway resolves only tools listed in the immutable Expert snapshot, scopes connected clients to the Gateway session, and closes them when the session is revoked or released. Capability and RPC registration stay in their existing owners.",
+      "tests": [
+        "apps/server/src/experts/ExpertGatewayTools.test.ts",
+        "apps/server/src/agentGateway/Layers/AgentGateway.test.ts",
+        "apps/server/src/agentGateway/Layers/AgentGatewaySessionRegistry.test.ts"
+      ]
+    },
+    {
+      "id": "expert-binding-projection",
+      "surface": "projection",
+      "entryFiles": [
+        "packages/contracts/src/orchestration.ts",
+        "apps/server/src/orchestration/Layers/ProjectionPipeline.ts",
+        "apps/server/src/persistence/Services/ProjectionThreads.ts",
+        "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts",
+        "apps/web/src/storeProjection.ts",
+        "apps/web/src/storeNormalization.ts"
+      ],
+      "responsibility": "The thread-created event carries the Expert binding through the native projector, projection query and web store. Authoritative null bindings continue to clear the client projection after replay or hydration.",
+      "tests": [
+        "apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts",
+        "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.test.ts",
+        "apps/server/src/persistence/Layers/ProjectionRepositories.test.ts",
+        "apps/web/src/storeProjection.test.ts",
+        "apps/web/src/storeNormalization.test.ts"
+      ]
+    },
+    {
+      "id": "expert-persistence",
+      "surface": "persistence",
+      "entryFiles": [
+        "apps/server/src/experts/ExpertStore.ts",
+        "apps/server/src/experts/ExpertConnectionStore.ts",
+        "apps/server/src/persistence/Migrations/109_ProjectionThreadsExpertBinding.ts",
+        "apps/server/src/persistence/Migrations/110_ExpertAppliedRuntimeRecords.ts",
+        "apps/server/src/persistence/Layers/ExpertAppliedRuntimeRecords.ts",
+        "apps/server/src/persistence/Layers/ProjectionThreads.ts"
+      ],
+      "responsibility": "Expert definitions, connection configuration and immutable snapshots use private files below the selected state directory. Thread bindings remain in the native projection schema and applied runtime records remain in the existing SQLite repository. WB-03A does not change migration startup, backup, recovery, or migration ownership; those are WB-02 work.",
+      "revisitAfter": ["WB-02"],
+      "revisitReason": "Update native/custom migration ownership and any moved migration/test paths after WB-02 establishes the extension migration boundary.",
+      "tests": [
+        "apps/server/src/experts/ExpertStore.test.ts",
+        "apps/server/src/experts/ExpertConnectionStore.test.ts",
+        "apps/server/src/persistence/Layers/ExpertAppliedRuntimeRecords.test.ts",
+        "apps/server/src/persistence/Migrations.test.ts",
+        "apps/server/src/persistence/Layers/ProjectionRepositories.test.ts"
+      ]
+    }
+  ]
+}

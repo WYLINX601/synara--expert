@@ -112,6 +112,10 @@ import {
   settingRowAnchorId,
 } from "../settingsNavigation";
 import { SETTINGS_PAGE_BACKGROUND_CLASS_NAME } from "../settingsPanelStyles";
+import {
+  workbenchSettingsPageForSection,
+  type WorkbenchSettingsPageId,
+} from "../workbench/registry";
 
 // ── Settings taxonomy ──────────────────────────────────────────────────────
 
@@ -182,6 +186,16 @@ const FOLLOW_UP_BEHAVIOR_OPTIONS = [
   { value: "queue", label: "Queue" },
   { value: "steer", label: "Steer" },
 ] as const satisfies ReadonlyArray<{ value: FollowUpBehavior; label: string }>;
+
+function renderWorkbenchSettingsPage(pageId: WorkbenchSettingsPageId) {
+  switch (pageId) {
+    case "experts-settings":
+      return <ExpertsSettingsPanel />;
+  }
+
+  const exhaustivePageId: never = pageId;
+  return exhaustivePageId;
+}
 
 // ── Settings UI primitives ────────────────────────────────────────────────
 
@@ -1238,6 +1252,11 @@ function SettingsRouteView() {
   );
 
   const renderRouteOwnedPanel = () => {
+    const workbenchPageId = workbenchSettingsPageForSection(activeSection);
+    if (workbenchPageId !== undefined) {
+      return renderWorkbenchSettingsPage(workbenchPageId);
+    }
+
     switch (activeSection) {
       case "general":
         return renderGeneralPanel();
@@ -1251,8 +1270,6 @@ function SettingsRouteView() {
         return <ProfileSettingsPanel />;
       case "skills":
         return <SkillsSettingsPanel />;
-      case "experts":
-        return <ExpertsSettingsPanel />;
       case "usage":
         return <ProviderUsageSettingsPanel />;
       default:

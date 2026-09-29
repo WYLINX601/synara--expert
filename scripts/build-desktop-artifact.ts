@@ -30,7 +30,11 @@ import {
   SYNARA_PACKAGED_DESKTOP_FLAVORS,
   type SynaraPackagedDesktopFlavor,
 } from "@synara/shared/desktopIdentity";
-import { createDesktopArtifactIdentity } from "./lib/desktop-artifact-identity.ts";
+import {
+  createDesktopArtifactIdentity,
+  resolveDesktopArtifactPublishConfig,
+  type DesktopGitHubPublishConfig,
+} from "./lib/desktop-artifact-identity.ts";
 import { parseBooleanEnvValue } from "./lib/env-bool.ts";
 import { finalizeSignedMacDmg, rebuildUnsignedMacDmg } from "./lib/mac-dmg-finalize.ts";
 import { finalizeMacUpdateZip } from "./lib/mac-update-zip-finalize.ts";
@@ -620,14 +624,7 @@ function resolveDesktopRuntimeDependencies(
   return resolveCatalogDependencies(runtimeDependencies, catalog, "apps/desktop");
 }
 
-function resolveGitHubPublishConfig():
-  | {
-      readonly provider: "github";
-      readonly owner: string;
-      readonly repo: string;
-      readonly releaseType: "release";
-    }
-  | undefined {
+function resolveGitHubPublishConfig(): DesktopGitHubPublishConfig | undefined {
   const rawRepo =
     process.env.SYNARA_DESKTOP_UPDATE_REPOSITORY?.trim() ||
     process.env.GITHUB_REPOSITORY?.trim() ||
@@ -819,20 +816,15 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     },
     forceCodeSigning: signed,
   };
-  const publishConfig = resolveGitHubPublishConfig();
-  if (artifactIdentity.identity.usesScriptedUpdates) {
-    // Experimental bundles must never contain a Stable updater feed, even
-    // when built from a shell used by the release workflow.
-    buildConfig.publish = null;
-  } else if (publishConfig) {
-    buildConfig.publish = [publishConfig];
-  } else if (mockUpdates) {
-    buildConfig.publish = [
-      {
-        provider: "generic",
-        url: `http://localhost:${mockUpdateServerPort ?? 3000}`,
-      },
-    ];
+  const publishConfig = resolveDesktopArtifactPublishConfig({
+    usesScriptedUpdates: artifactIdentity.identity.usesScriptedUpdates,
+    githubPublishConfig: resolveGitHubPublishConfig(),
+    mockUpdates,
+    mockUpdateServerPort,
+  });
+  if (publishConfig !== undefined) {
+    // Script-updated bundles must never inherit a Stable or mock updater feed.
+    buildConfig.publish = publishConfig;
   }
 
   const windowsSigningConfig =
@@ -1384,7 +1376,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
 
 const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   flavor: Flag.choice("flavor", BuildFlavor.literals).pipe(
-    Flag.withDescription("Packaged identity: production (default), canary, or cua."),
+    Flag.withDescription(
+      "Packaged identity: production (default), canary, cua, workbench, or workbench-preview.",
+    ),
     Flag.optional,
   ),
   platform: Flag.choice("platform", BuildPlatform.literals).pipe(

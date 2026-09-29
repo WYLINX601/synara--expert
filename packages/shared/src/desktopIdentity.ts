@@ -8,6 +8,8 @@ export const SYNARA_DESKTOP_UPDATE_CHANNEL = "synara";
 export const SYNARA_PRODUCTION_BUNDLE_ID = "com.emanueledipietro.synara";
 export const SYNARA_DEVELOPMENT_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.dev`;
 export const SYNARA_CANARY_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.canary`;
+export const SYNARA_WORKBENCH_BUNDLE_ID = "com.wylinx.workbench";
+export const SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID = "com.wylinx.workbench.preview";
 /** Display/setup identity of the GUI host; this value does not confer native authority. */
 export const SYNARA_DESKTOP_BUNDLE_ID_ENV = "SYNARA_DESKTOP_BUNDLE_ID";
 export const SYNARA_CANARY_DESKTOP_SCHEME = "synara-canary";
@@ -17,11 +19,29 @@ export const SYNARA_CUA_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.cua`;
 export const SYNARA_CUA_DESKTOP_SCHEME = "synara-cua";
 export const SYNARA_CUA_DESKTOP_ORIGIN = `${SYNARA_CUA_DESKTOP_SCHEME}://app`;
 export const SYNARA_CUA_DESKTOP_ENTRY_URL = `${SYNARA_CUA_DESKTOP_ORIGIN}/index.html`;
+export const SYNARA_WORKBENCH_DESKTOP_SCHEME = "workbench";
+export const SYNARA_WORKBENCH_DESKTOP_ORIGIN = `${SYNARA_WORKBENCH_DESKTOP_SCHEME}://app`;
+export const SYNARA_WORKBENCH_DESKTOP_ENTRY_URL = `${SYNARA_WORKBENCH_DESKTOP_ORIGIN}/index.html`;
+export const SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME = "workbench-preview";
+export const SYNARA_WORKBENCH_PREVIEW_DESKTOP_ORIGIN = `${SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME}://app`;
+export const SYNARA_WORKBENCH_PREVIEW_DESKTOP_ENTRY_URL = `${SYNARA_WORKBENCH_PREVIEW_DESKTOP_ORIGIN}/index.html`;
 export const SYNARA_SOURCE_DESKTOP_BUILD_MARKER = "synara-source-desktop-build-v2";
 export const SYNARA_DESKTOP_SMOKE_USER_DATA_ENV = "SYNARA_DESKTOP_SMOKE_USER_DATA";
 
-export type SynaraDesktopFlavor = "production" | "development" | "canary" | "cua";
-export const SYNARA_PACKAGED_DESKTOP_FLAVORS = ["production", "canary", "cua"] as const;
+export type SynaraDesktopFlavor =
+  | "production"
+  | "development"
+  | "canary"
+  | "cua"
+  | "workbench"
+  | "workbench-preview";
+export const SYNARA_PACKAGED_DESKTOP_FLAVORS = [
+  "production",
+  "canary",
+  "cua",
+  "workbench",
+  "workbench-preview",
+] as const;
 export type SynaraPackagedDesktopFlavor = (typeof SYNARA_PACKAGED_DESKTOP_FLAVORS)[number];
 
 export interface SynaraDesktopIdentity {
@@ -48,6 +68,9 @@ export function resolveSynaraDesktopFlavor(input: {
   if (requestedFlavor === "canary") {
     return "canary";
   }
+  if (requestedFlavor === "workbench" || requestedFlavor === "workbench-preview") {
+    return requestedFlavor;
+  }
   if (
     requestedFlavor === "development" &&
     (input.isDevelopment || input.allowDevelopmentOverride === true)
@@ -67,7 +90,13 @@ export function resolveSynaraDesktopRuntimeFlavor(input: {
 }): SynaraDesktopFlavor {
   if (input.isPackaged && input.packagedFlavor !== undefined) {
     const flavor = input.packagedFlavor;
-    if (flavor === "production" || flavor === "canary" || flavor === "cua") {
+    if (
+      flavor === "production" ||
+      flavor === "canary" ||
+      flavor === "cua" ||
+      flavor === "workbench" ||
+      flavor === "workbench-preview"
+    ) {
       return flavor;
     }
     throw new Error("The packaged Synara desktop flavor is invalid. Rebuild the application.");
@@ -93,6 +122,32 @@ export function canOverrideDesktopSmokeUserData(input: {
 }
 
 export function synaraDesktopIdentity(flavor: SynaraDesktopFlavor): SynaraDesktopIdentity {
+  if (flavor === "workbench-preview") {
+    return {
+      flavor,
+      displayName: "Personal Workbench Preview",
+      bundleId: SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID,
+      scheme: SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME,
+      origin: SYNARA_WORKBENCH_PREVIEW_DESKTOP_ORIGIN,
+      entryUrl: SYNARA_WORKBENCH_PREVIEW_DESKTOP_ENTRY_URL,
+      userDataDirectoryName: "workbench-preview",
+      defaultHomeDirectoryName: ".synara-workbench-preview",
+      usesScriptedUpdates: true,
+    };
+  }
+  if (flavor === "workbench") {
+    return {
+      flavor,
+      displayName: "Personal Workbench",
+      bundleId: SYNARA_WORKBENCH_BUNDLE_ID,
+      scheme: SYNARA_WORKBENCH_DESKTOP_SCHEME,
+      origin: SYNARA_WORKBENCH_DESKTOP_ORIGIN,
+      entryUrl: SYNARA_WORKBENCH_DESKTOP_ENTRY_URL,
+      userDataDirectoryName: "workbench",
+      defaultHomeDirectoryName: ".synara-workbench",
+      usesScriptedUpdates: true,
+    };
+  }
   if (flavor === "cua") {
     return {
       flavor,

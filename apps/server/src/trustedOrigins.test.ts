@@ -54,6 +54,20 @@ describe("trustedOrigins", () => {
         config,
       }),
     ).toBe(true);
+    expect(
+      isTrustedAppOrigin({
+        origin: "workbench://app",
+        requestOrigin: "http://127.0.0.1:58090",
+        config,
+      }),
+    ).toBe(true);
+    expect(
+      isTrustedAppOrigin({
+        origin: "workbench-preview://app",
+        requestOrigin: "http://127.0.0.1:58090",
+        config,
+      }),
+    ).toBe(true);
   });
 
   it("rejects unrelated browser origins but allows non-browser requests without Origin", () => {
@@ -123,6 +137,8 @@ describe("trustedOrigins", () => {
     expect(normalizeCorsOrigin("synara://app/")).toBe("synara://app");
     expect(normalizeCorsOrigin("synara-canary://app/")).toBe("synara-canary://app");
     expect(normalizeCorsOrigin("synara-cua://app/")).toBe("synara-cua://app");
+    expect(normalizeCorsOrigin("workbench://app/")).toBe("workbench://app");
+    expect(normalizeCorsOrigin("workbench-preview://app/")).toBe("workbench-preview://app");
   });
 
   it("rejects present but untrusted request origins for websocket-style gates", () => {

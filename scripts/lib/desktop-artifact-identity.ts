@@ -3,6 +3,39 @@ import {
   type SynaraPackagedDesktopFlavor,
 } from "@synara/shared/desktopIdentity";
 
+export interface DesktopGitHubPublishConfig {
+  readonly provider: "github";
+  readonly owner: string;
+  readonly repo: string;
+  readonly releaseType: "release";
+}
+
+export function resolveDesktopArtifactPublishConfig(input: {
+  readonly usesScriptedUpdates: boolean;
+  readonly githubPublishConfig: DesktopGitHubPublishConfig | undefined;
+  readonly mockUpdates: boolean;
+  readonly mockUpdateServerPort: string | undefined;
+}):
+  | ReadonlyArray<DesktopGitHubPublishConfig | { provider: "generic"; url: string }>
+  | null
+  | undefined {
+  if (input.usesScriptedUpdates) {
+    return null;
+  }
+  if (input.githubPublishConfig) {
+    return [input.githubPublishConfig];
+  }
+  if (input.mockUpdates) {
+    return [
+      {
+        provider: "generic",
+        url: `http://localhost:${input.mockUpdateServerPort ?? 3000}`,
+      },
+    ];
+  }
+  return undefined;
+}
+
 export function createDesktopArtifactIdentity(input: {
   readonly platform: "mac" | "linux" | "win";
   readonly flavor: SynaraPackagedDesktopFlavor;

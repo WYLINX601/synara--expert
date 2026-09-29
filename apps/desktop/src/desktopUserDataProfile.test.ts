@@ -36,6 +36,15 @@ describe("desktopUserDataProfile", () => {
     expect(
       resolveDesktopUserDataPath({ appDataBase, userDataDirectoryName: "synara-canary" }),
     ).toBe("/Users/tester/Library/Application Support/synara-canary");
+    expect(resolveDesktopUserDataPath({ appDataBase, userDataDirectoryName: "workbench" })).toBe(
+      "/Users/tester/Library/Application Support/workbench",
+    );
+    expect(
+      resolveDesktopUserDataPath({
+        appDataBase,
+        userDataDirectoryName: "workbench-preview",
+      }),
+    ).toBe("/Users/tester/Library/Application Support/workbench-preview");
   });
 
   it("uses an explicit smoke profile instead of the development profile", () => {

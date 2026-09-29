@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DesktopUpdateState } from "@synara/contracts";
+import { synaraDesktopIdentity } from "@synara/shared/desktopIdentity";
 
 import {
   getCanRetryAfterDownloadFailure,
@@ -224,6 +225,22 @@ describe("getAutoUpdateDisabledReason", () => {
       }),
     ).toContain("SYNARA_DISABLE_AUTO_UPDATE");
   });
+
+  it.each(["workbench", "workbench-preview"] as const)(
+    "keeps %s on its scripted update path even if an update feed is present",
+    (flavor) => {
+      expect(
+        getAutoUpdateDisabledReason({
+          isDevelopment: false,
+          isPackaged: true,
+          platform: "darwin",
+          appImage: undefined,
+          disabledByEnv: synaraDesktopIdentity(flavor).usesScriptedUpdates,
+          hasUpdateFeedConfig: true,
+        }),
+      ).toContain("SYNARA_DISABLE_AUTO_UPDATE");
+    },
+  );
 
   it("reports linux non-AppImage builds as disabled", () => {
     expect(

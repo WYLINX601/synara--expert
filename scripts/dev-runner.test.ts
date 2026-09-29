@@ -218,6 +218,50 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
+    it.effect.each(["workbench", "workbench-preview"] as const)(
+      "keeps watched %s desktop home separate",
+      (flavor) =>
+        Effect.gen(function* () {
+          const env = yield* createDevRunnerEnv({
+            mode: "dev:desktop",
+            baseEnv: { SYNARA_DESKTOP_FLAVOR: flavor },
+            serverOffset: 0,
+            webOffset: 0,
+            synaraHome: undefined,
+            authToken: undefined,
+            noBrowser: undefined,
+            autoBootstrapProjectFromCwd: undefined,
+            logWebSocketEvents: undefined,
+            host: undefined,
+            port: undefined,
+            devUrl: undefined,
+          });
+
+          assert.equal(env.SYNARA_HOME, resolve(homedir(), `.synara-${flavor}`));
+        }),
+    );
+
+    it.effect("honors an explicit data home for a Workbench flavor", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev:desktop",
+          baseEnv: { SYNARA_DESKTOP_FLAVOR: "workbench-preview" },
+          serverOffset: 0,
+          webOffset: 0,
+          synaraHome: "/tmp/workbench-preview-data",
+          authToken: undefined,
+          noBrowser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+        });
+
+        assert.equal(env.SYNARA_HOME, "/tmp/workbench-preview-data");
+      }),
+    );
+
     it.effect("normalizes bracketed IPv6 hosts for listen and client URL syntax", () =>
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({

@@ -1,7 +1,7 @@
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { Effect } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -32,13 +32,27 @@ import {
   type MigrationDivergencePlan,
 } from "./MigrationDivergenceConsent.ts";
 export { MigrationDivergenceConsentRequiredError } from "./MigrationDivergenceConsent.ts";
+import { migrationEntries, planOfficialMigrationLineage } from "./Migrations.ts";
 import {
-  findFirstMigrationLineageDivergence,
-  LAST_SHARED_LINEAGE_MIGRATION_ID,
-  migrationEntries,
-  planLegacyMigration32Rename,
-  planMigrationLineageAliasRepairs,
-} from "./Migrations.ts";
+  LEGACY_EXPERT_OFFICIAL_MIGRATIONS,
+  WORKBENCH_SCHEMA_FORMAT_VERSION,
+  WORKBENCH_SCHEMA_METADATA_TABLE,
+  currentOfficialMigrationCount,
+  validateOfficialTrackerShape,
+  validateWorkbenchSchemaMetadataShape,
+  validateWorkbenchTrackerShape,
+  workbenchMigrationEntries,
+  type OfficialMigrationRecord,
+  type SqliteColumnInfo,
+  type WorkbenchMigrationRecord,
+} from "../workbench/persistence/WorkbenchMigrations.ts";
+import {
+  inspectWorkbenchUpgradePlan,
+  planWorkbenchUpgrade,
+  type WorkbenchUpgradePlan,
+  type WorkbenchUpgradeReadyPlan,
+} from "../workbench/persistence/WorkbenchUpgradePlan.ts";
+import { WorkbenchMigrationError } from "../workbench/persistence/WorkbenchMigrations.ts";
 
 /** Keep at most this many finished pre-migration SQLite backups (issue #618). */
 export const MIGRATION_BACKUP_RETENTION = 5;
@@ -187,7 +201,10 @@ async function assertBackupSpaceAvailable(
   }
 }
 
-type MigrationBackupPlan = MigrationDivergencePlan;
+type MigrationBackupPlan = MigrationDivergencePlan & {
+  readonly workbenchUpgrade?: WorkbenchUpgradeReadyPlan | undefined;
+  readonly consentTargetVersion?: number | undefined;
+};
 
 export type MigrationBackupResult = MigrationBackupPlan & {
   readonly backupPath: string;
@@ -199,13 +216,156 @@ const attemptPromise = <A>(tryPromise: () => Promise<A>) =>
 
 const latestMigrationId = Math.max(...migrationEntries.map(([id]) => id));
 
-function migrationLineageFingerprint(
-  recorded: ReadonlyArray<{ readonly migration_id: number; readonly name: string }>,
-): string {
-  return createHash("sha256")
-    .update(JSON.stringify(recorded.map(({ migration_id, name }) => [migration_id, name])))
-    .digest("hex");
+function migrationBackupPlanFromWorkbenchUpgrade(
+  upgrade: WorkbenchUpgradeReadyPlan,
+): MigrationBackupPlan {
+  const legacySuffix = upgrade.legacyOfficialMigrations
+    .map(({ officialId }) => `-legacy${officialId}`)
+    .join("");
+  return {
+    sourceVersion: upgrade.lineageDivergence
+      ? upgrade.official.sourceLabel
+      : `${upgrade.official.sourceLabel}-wb${upgrade.workbench.sourceVersion}` +
+        `-fmt${upgrade.format.sourceVersion}${legacySuffix}`,
+    targetVersion: upgrade.official.targetVersion,
+    lineageDivergence: upgrade.lineageDivergence,
+    workbenchUpgrade: upgrade,
+    consentTargetVersion: upgrade.official.replayTargetVersion,
+  };
 }
+
+function sourceVersionFromWorkbenchUpgrade(upgrade: WorkbenchUpgradeReadyPlan): string {
+  if (upgrade.lineageDivergence !== undefined) return upgrade.official.sourceLabel;
+  const legacySuffix = upgrade.legacyOfficialMigrations
+    .map(({ officialId }) => `-legacy${officialId}`)
+    .join("");
+  return (
+    `${upgrade.official.sourceLabel}-wb${upgrade.workbench.sourceVersion}` +
+    `-fmt${upgrade.format.sourceVersion}${legacySuffix}`
+  );
+}
+
+function assertBackupMatchesWorkbenchUpgrade(
+  inspection: SqliteMigrationBackupInspection,
+  expected: WorkbenchUpgradeReadyPlan,
+): void {
+  const actual = inspection.workbenchUpgrade;
+  if (actual.kind !== "ready") {
+    throw new Error(`Migration backup has an unrecognized workbench history: ${actual.reason}`);
+  }
+  if (
+    actual.official.sourceVersion !== expected.official.sourceVersion ||
+    actual.official.sourceLabel !== expected.official.sourceLabel ||
+    actual.workbench.sourceVersion !== expected.workbench.sourceVersion ||
+    actual.format.sourceVersion !== expected.format.sourceVersion ||
+    JSON.stringify(actual.legacyOfficialMigrations) !==
+      JSON.stringify(expected.legacyOfficialMigrations) ||
+    JSON.stringify(actual.lineageDivergence ?? null) !==
+      JSON.stringify(expected.lineageDivergence ?? null)
+  ) {
+    throw new Error("Migration backup does not match the inspected dual-version recovery point.");
+  }
+}
+
+const assertWorkbenchUpgradeTarget = (expected: WorkbenchUpgradeReadyPlan) =>
+  Effect.gen(function* () {
+    const actual = yield* inspectWorkbenchUpgradePlan;
+    if (actual.kind !== "ready") {
+      return yield* Effect.fail(new WorkbenchMigrationError({ reason: actual.reason }));
+    }
+    if (
+      actual.official.sourceVersion !== expected.official.targetVersion ||
+      actual.workbench.sourceVersion !== expected.workbench.targetVersion ||
+      actual.format.sourceVersion !== expected.format.targetVersion ||
+      actual.official.hasPendingMigrations ||
+      actual.workbench.hasPendingMigrations ||
+      actual.format.hasPendingUpgrade ||
+      actual.legacyOfficialMigrations.length > 0 ||
+      actual.workbench.adoptedMigrationIds.length > 0
+    ) {
+      return yield* Effect.fail(
+        new WorkbenchMigrationError({
+          reason:
+            "The database does not match the planned official, workbench, and data-format targets.",
+        }),
+      );
+    }
+  });
+
+const assertWorkbenchUpgradePlanCurrent = (expected: WorkbenchUpgradeReadyPlan) =>
+  Effect.gen(function* () {
+    const actual = yield* inspectWorkbenchUpgradePlan;
+    if (actual.kind !== "ready" || JSON.stringify(actual) !== JSON.stringify(expected)) {
+      return yield* Effect.fail(
+        new WorkbenchMigrationError({
+          reason:
+            "The inspected workbench upgrade plan is stale; inspect the database again before backup or migration.",
+        }),
+      );
+    }
+  });
+
+const assertRecordedWorkbenchUpgradeTarget = (payload: Record<string, unknown>) =>
+  Effect.gen(function* () {
+    const versions = migrationVersionsFromPayload(payload);
+    if (payload.version !== 2 || versions === null) {
+      return yield* Effect.fail(
+        new WorkbenchMigrationError({
+          reason: "The workbench recovery record has no dual-version target.",
+        }),
+      );
+    }
+    const actual = yield* inspectWorkbenchUpgradePlan;
+    if (
+      actual.kind !== "ready" ||
+      actual.official.sourceVersion !== versions.target.official ||
+      actual.workbench.sourceVersion !== versions.target.workbench ||
+      actual.format.sourceVersion !== versions.target.format ||
+      actual.official.hasPendingMigrations ||
+      actual.workbench.hasPendingMigrations ||
+      actual.format.hasPendingUpgrade ||
+      actual.legacyOfficialMigrations.length > 0 ||
+      actual.workbench.adoptedMigrationIds.length > 0
+    ) {
+      return yield* Effect.fail(
+        new WorkbenchMigrationError({
+          reason: "The live database does not match the dual-version recovery target.",
+        }),
+      );
+    }
+  });
+
+const assertRecordedWorkbenchUpgradeCanResume = (payload: Record<string, unknown>) =>
+  Effect.gen(function* () {
+    const versions = migrationVersionsFromPayload(payload);
+    if (payload.version !== 2 || versions === null) {
+      return yield* Effect.fail(
+        new WorkbenchMigrationError({
+          reason: "The workbench recovery record has no dual-version target.",
+        }),
+      );
+    }
+    const actual = yield* inspectWorkbenchUpgradePlan;
+    if (
+      actual.kind !== "ready" ||
+      actual.official.targetVersion !== versions.target.official ||
+      actual.workbench.targetVersion !== versions.target.workbench ||
+      actual.format.targetVersion !== versions.target.format ||
+      actual.official.sourceVersion < versions.source.official ||
+      actual.official.sourceVersion > versions.target.official ||
+      actual.workbench.sourceVersion < versions.source.workbench ||
+      actual.workbench.sourceVersion > versions.target.workbench ||
+      actual.format.sourceVersion < versions.source.format ||
+      actual.format.sourceVersion > versions.target.format
+    ) {
+      return yield* Effect.fail(
+        new WorkbenchMigrationError({
+          reason:
+            "The live database or migration program does not match the interrupted dual-version recovery target.",
+        }),
+      );
+    }
+  });
 
 export const inspectMigrationBackupPlan = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -242,52 +402,19 @@ export const inspectMigrationBackupPlan = Effect.gen(function* () {
       : { sourceVersion: "untracked", targetVersion: latestMigrationId };
   }
 
-  const recordedNames = new Map(recorded.map((row) => [row.migration_id, row.name] as const));
-  const highWaterMark = recorded[recorded.length - 1]!.migration_id;
-  const inspectedNames = new Map(recordedNames);
-  const migration32Rename = planLegacyMigration32Rename(recordedNames);
-  if (migration32Rename !== null) {
-    inspectedNames.set(32, migration32Rename);
-  }
-  for (const repair of planMigrationLineageAliasRepairs(inspectedNames)) {
-    if (repair.kind === "rename") {
-      inspectedNames.set(repair.migrationId, repair.name);
-    } else {
-      inspectedNames.delete(repair.migrationId);
-    }
-  }
-  const inspectedHighWaterMark = Math.max(...inspectedNames.keys(), 0);
-  // This is the same post-alias predicate the reconciler uses. Sharing it keeps
-  // "this database needs consent" and "this database will be replayed" aligned.
-  const firstDiverged = findFirstMigrationLineageDivergence(inspectedNames, inspectedHighWaterMark);
-  if (firstDiverged !== undefined) {
-    const [firstDivergedId, expectedName] = firstDiverged;
-    // Shared-lineage divergence is rejected before the migrator mutates data.
-    if (firstDivergedId <= LAST_SHARED_LINEAGE_MIGRATION_ID) {
-      return null;
-    }
+  const lineage = planOfficialMigrationLineage(recorded);
+  if (lineage.kind === "shared-divergence" || lineage.kind === "future-prefix") return null;
+  if (lineage.kind === "imported-divergence") {
+    if (lineage.divergence === undefined) return null;
     return {
-      sourceVersion:
-        migration32Rename === null
-          ? `imported-v${highWaterMark}-from${firstDivergedId}`
-          : `v${highWaterMark}-legacy32`,
+      sourceVersion: lineage.sourceVersion,
       targetVersion: latestMigrationId,
-      lineageDivergence: {
-        firstDivergedId,
-        expectedName,
-        recordedName: inspectedNames.get(firstDivergedId) ?? "<missing>",
-        highWaterMark,
-        lineageFingerprint: migrationLineageFingerprint(recorded),
-      },
+      lineageDivergence: lineage.divergence,
     };
   }
 
-  if (migration32Rename !== null) {
-    return { sourceVersion: `v${highWaterMark}-legacy32`, targetVersion: latestMigrationId };
-  }
-
-  if (highWaterMark < latestMigrationId) {
-    return { sourceVersion: `v${highWaterMark}`, targetVersion: latestMigrationId };
+  if (lineage.hasMetadataRepair || lineage.rawHighWaterMark < latestMigrationId) {
+    return { sourceVersion: lineage.sourceVersion, targetVersion: latestMigrationId };
   }
   return null;
 });
@@ -699,6 +826,10 @@ export const createMigrationBackup = (dbPath: string, plan: MigrationBackupPlan)
       yield* sql`VACUUM INTO ${temporaryPath}`;
       yield* attemptPromise(async () => {
         await ensurePrivateRegularFile(temporaryPath);
+        if (plan.workbenchUpgrade !== undefined) {
+          const inspection = await inspectSqliteMigrationBackup(temporaryPath);
+          assertBackupMatchesWorkbenchUpgrade(inspection, plan.workbenchUpgrade);
+        }
         await syncRegularFile(temporaryPath);
         await fs.rename(temporaryPath, backupPath);
         await syncDirectoryEntry(backupDirectory);
@@ -733,13 +864,31 @@ async function writePrivateJsonFile(filePath: string, payload: unknown): Promise
 }
 
 function migrationRecoveryPayload(dbPath: string, backup: MigrationBackupResult) {
+  const versionedUpgrade = backup.workbenchUpgrade;
   return {
-    version: 1,
+    version: versionedUpgrade === undefined ? 1 : 2,
     databasePath: dbPath,
     backupPath: backup.backupPath,
     sourceVersion: backup.sourceVersion,
     targetVersion: backup.targetVersion,
     lineageDivergence: backup.lineageDivergence ?? null,
+    ...(versionedUpgrade === undefined
+      ? {}
+      : {
+          migrationVersions: {
+            source: {
+              official: versionedUpgrade.official.sourceVersion,
+              workbench: versionedUpgrade.workbench.sourceVersion,
+              format: versionedUpgrade.format.sourceVersion,
+            },
+            target: {
+              official: versionedUpgrade.official.targetVersion,
+              workbench: versionedUpgrade.workbench.targetVersion,
+              format: versionedUpgrade.format.targetVersion,
+            },
+          },
+          legacyExpertMigrations: versionedUpgrade.legacyOfficialMigrations,
+        }),
     phase: "migration-in-progress",
     createdAt: backup.createdAt,
     resumeAttempts: 0,
@@ -759,7 +908,7 @@ const writeCompletedMigrationProvenance = (dbPath: string, payload: Record<strin
   attemptPromise(() =>
     writePrivateJsonFile(migrationBackupProvenancePath(dbPath), {
       ...payload,
-      version: 1,
+      version: typeof payload.version === "number" ? payload.version : 1,
       databasePath: dbPath,
       phase: "migration-completed",
       completedAt: new Date().toISOString(),
@@ -784,6 +933,8 @@ const removeRecoveryMarkerIfPresent = async (dbPath: string): Promise<void> => {
 
 export interface RunWithPreMigrationBackupOptions {
   readonly divergenceConsent?: string | undefined;
+  /** The exact read-only plan also consumed by the workbench migration executor. */
+  readonly upgradePlan?: WorkbenchUpgradePlan | undefined;
 }
 
 export const runWithPreMigrationBackup = <A, E, R>(
@@ -792,14 +943,32 @@ export const runWithPreMigrationBackup = <A, E, R>(
   options: RunWithPreMigrationBackupOptions = {},
 ) =>
   Effect.gen(function* () {
-    const plan = yield* inspectMigrationBackupPlan;
+    let plan: MigrationBackupPlan | null;
+    let upgradePlan: WorkbenchUpgradeReadyPlan | null = null;
+    if (options.upgradePlan === undefined) {
+      plan = yield* inspectMigrationBackupPlan;
+    } else if (options.upgradePlan.kind === "rejected") {
+      return yield* Effect.fail(
+        new WorkbenchMigrationError({ reason: options.upgradePlan.reason }),
+      );
+    } else {
+      upgradePlan = options.upgradePlan;
+      yield* assertWorkbenchUpgradePlanCurrent(upgradePlan);
+      plan = migrationBackupPlanFromWorkbenchUpgrade(upgradePlan);
+    }
     if (plan) {
-      const challenge = createMigrationDivergenceConsentChallenge(dbPath, plan);
+      const challenge = createMigrationDivergenceConsentChallenge(
+        dbPath,
+        plan.consentTargetVersion === undefined
+          ? plan
+          : { ...plan, targetVersion: plan.consentTargetVersion },
+      );
       if (challenge && options.divergenceConsent !== challenge.consentToken) {
         return yield* Effect.fail(new MigrationDivergenceConsentRequiredError(challenge));
       }
     }
-    const backup = plan ? yield* createMigrationBackup(dbPath, plan) : null;
+    const shouldTakeBackup = plan !== null && (upgradePlan === null || upgradePlan.requiresBackup);
+    const backup = shouldTakeBackup && plan ? yield* createMigrationBackup(dbPath, plan) : null;
     const recoveryPayload = backup ? migrationRecoveryPayload(dbPath, backup) : null;
     if (recoveryPayload) {
       // This write-ahead marker must be durable before migrations can mutate
@@ -808,6 +977,9 @@ export const runWithPreMigrationBackup = <A, E, R>(
       yield* writeRecoveryMarker(dbPath, recoveryPayload);
     }
     const result = yield* migration;
+    if (upgradePlan !== null) {
+      yield* assertWorkbenchUpgradeTarget(upgradePlan);
+    }
     if (recoveryPayload) {
       yield* writeCompletedMigrationProvenance(dbPath, recoveryPayload);
       yield* removeRecoveryMarker(dbPath);
@@ -824,12 +996,25 @@ const restoreSqliteMigrationBackup = (input: {
   readonly dbPath: string;
   readonly backupPath: string;
   readonly latestSupportedMigrationId: number;
+  readonly expectedVersionSource?:
+    | {
+        readonly sourceVersion: string;
+        readonly official: number;
+        readonly workbench: number;
+        readonly format: number;
+        readonly legacyExpertMigrations: WorkbenchUpgradeReadyPlan["legacyOfficialMigrations"];
+        readonly lineageDivergence?: MigrationDivergencePlan["lineageDivergence"] | undefined;
+      }
+    | undefined;
   readonly beforeLiveDatabaseSwap?: (() => Promise<void>) | undefined;
   readonly afterLiveDatabaseRollback?: (() => Promise<void>) | undefined;
 }) =>
   attemptPromise(async () => {
     const sourceInspection = await inspectSqliteMigrationBackup(input.backupPath);
     assertMigrationBackupCompatible(sourceInspection, input.latestSupportedMigrationId);
+    if (input.expectedVersionSource !== undefined) {
+      assertBackupMatchesRecordedSource(sourceInspection, input.expectedVersionSource);
+    }
     const dbDirectory = path.dirname(input.dbPath);
     const dbBasename = path.basename(input.dbPath);
     await removeStaleRegularFiles(
@@ -843,6 +1028,9 @@ const restoreSqliteMigrationBackup = (input: {
       await syncRegularFile(restoredTemporaryPath);
       const copiedInspection = await inspectSqliteMigrationBackup(restoredTemporaryPath);
       assertMigrationBackupCompatible(copiedInspection, input.latestSupportedMigrationId);
+      if (input.expectedVersionSource !== undefined) {
+        assertBackupMatchesRecordedSource(copiedInspection, input.expectedVersionSource);
+      }
       if (copiedInspection.migrationId !== sourceInspection.migrationId) {
         throw new Error(`Migration backup changed while it was copied: ${input.backupPath}`);
       }
@@ -894,6 +1082,11 @@ const restoreSqliteMigrationBackup = (input: {
 interface SqliteMigrationBackupInspection {
   readonly migrationId: number;
   readonly lineage: "canonical" | "imported" | "incompatible";
+  readonly workbenchUpgrade: WorkbenchUpgradePlan;
+}
+
+interface BackupDatabaseReader {
+  readonly all: <A>(query: string) => ReadonlyArray<A>;
 }
 
 async function inspectSqliteMigrationBackup(
@@ -938,41 +1131,166 @@ async function inspectSqliteMigrationBackup(
 function readBunMigrationInspection(
   database: import("bun:sqlite").Database,
 ): SqliteMigrationBackupInspection {
-  const tracker = database
-    .query(
-      "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'",
-    )
-    .get();
-  if (!tracker) return inspectMigrationRows([]);
-  return inspectMigrationRows(
-    database
-      .query(
-        "SELECT migration_id AS migrationId, name FROM effect_sql_migrations ORDER BY migration_id ASC",
-      )
-      .all(),
-  );
+  return inspectMigrationBackupDatabase({
+    all: <A>(query: string) => database.query(query).all() as ReadonlyArray<A>,
+  });
 }
 
 function readNodeMigrationInspection(
   database: import("node:sqlite").DatabaseSync,
 ): SqliteMigrationBackupInspection {
-  const tracker = database
-    .prepare(
-      "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'",
-    )
-    .get();
-  if (!tracker) return inspectMigrationRows([]);
-  return inspectMigrationRows(
-    database
-      .prepare(
-        "SELECT migration_id AS migrationId, name FROM effect_sql_migrations ORDER BY migration_id ASC",
-      )
-      .all(),
+  return inspectMigrationBackupDatabase({
+    all: <A>(query: string) => database.prepare(query).all() as unknown as ReadonlyArray<A>,
+  });
+}
+
+function inspectMigrationBackupDatabase(
+  reader: BackupDatabaseReader,
+): SqliteMigrationBackupInspection {
+  const tables = reader.all<{ readonly name: string }>(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+  );
+  const officialObject = reader.all<{ readonly type: string }>(
+    "SELECT type FROM sqlite_master WHERE name = 'effect_sql_migrations'",
+  )[0];
+  let officialTrackerValid = officialObject === undefined;
+  let officialRows: readonly OfficialMigrationRecord[] = [];
+  let readError: string | undefined;
+  if (officialObject !== undefined) {
+    if (officialObject.type !== "table") {
+      readError = "effect_sql_migrations exists but is not a table.";
+    } else {
+      const columns = readSqliteColumns(reader, "effect_sql_migrations");
+      officialTrackerValid = validateOfficialTrackerShape(columns);
+      if (officialTrackerValid) {
+        officialRows = reader.all<OfficialMigrationRecord>(
+          "SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id ASC",
+        );
+      }
+    }
+  }
+
+  const workbenchObject = reader.all<{ readonly type: string }>(
+    "SELECT type FROM sqlite_master WHERE name = 'workbench_sql_migrations'",
+  )[0];
+  let workbenchTrackerValid = workbenchObject === undefined;
+  let workbenchRows: readonly WorkbenchMigrationRecord[] = [];
+  if (workbenchObject !== undefined) {
+    if (workbenchObject.type !== "table") {
+      readError ??= "workbench_sql_migrations exists but is not a table.";
+    } else {
+      const columns = readSqliteColumns(reader, "workbench_sql_migrations");
+      workbenchTrackerValid = validateWorkbenchTrackerShape(columns);
+      if (workbenchTrackerValid) {
+        workbenchRows = reader.all<WorkbenchMigrationRecord>(
+          "SELECT module_id, migration_id, name, checksum, applied_at FROM workbench_sql_migrations ORDER BY module_id, migration_id",
+        );
+      }
+    }
+  }
+
+  let workbenchFormatExists = false;
+  let workbenchFormatValid = true;
+  let workbenchFormatVersion = 0;
+  const formatObject = reader.all<{ readonly type: string }>(
+    "SELECT type FROM sqlite_master WHERE name = 'workbench_schema_metadata'",
+  )[0];
+  if (formatObject !== undefined) {
+    workbenchFormatExists = true;
+    if (formatObject.type !== "table") {
+      workbenchFormatValid = false;
+    } else {
+      workbenchFormatValid = validateWorkbenchSchemaMetadataShape(
+        readSqliteColumns(reader, WORKBENCH_SCHEMA_METADATA_TABLE),
+      );
+      if (workbenchFormatValid) {
+        const versions = reader.all<{ readonly format_version: number }>(
+          "SELECT format_version FROM workbench_schema_metadata",
+        );
+        if (
+          versions.length !== 1 ||
+          !Number.isSafeInteger(versions[0]?.format_version) ||
+          (versions[0]?.format_version ?? -1) < 0
+        ) {
+          workbenchFormatValid = false;
+        } else {
+          workbenchFormatVersion = versions[0]!.format_version;
+        }
+      }
+    }
+  }
+
+  const projectionObject = reader.all<{ readonly type: string }>(
+    "SELECT type FROM sqlite_master WHERE name = 'projection_threads'",
+  )[0];
+  const runtimeObject = reader.all<{ readonly type: string }>(
+    "SELECT type FROM sqlite_master WHERE name = 'expert_applied_runtime_records'",
+  )[0];
+  if (projectionObject !== undefined && projectionObject.type !== "table") {
+    readError ??= "projection_threads exists but is not a table.";
+  }
+  if (runtimeObject !== undefined && runtimeObject.type !== "table") {
+    readError ??= "expert_applied_runtime_records exists but is not a table.";
+  }
+  const projectionColumns =
+    projectionObject?.type === "table" ? readSqliteColumns(reader, "projection_threads") : [];
+  const schemaState = {
+    projectionThreadsExists: projectionObject?.type === "table",
+    bindingColumn: projectionColumns.find(({ name }) => name === "expert_binding_json") ?? null,
+    runtimeRecordColumns:
+      runtimeObject?.type === "table"
+        ? readSqliteColumns(reader, "expert_applied_runtime_records")
+        : null,
+  };
+  const hasApplicationTables = tables.some(
+    ({ name }) =>
+      name !== "effect_sql_migrations" &&
+      name !== "workbench_sql_migrations" &&
+      name !== WORKBENCH_SCHEMA_METADATA_TABLE,
+  );
+  const databaseEmpty = tables.length === 0;
+  const workbenchUpgrade = planWorkbenchUpgrade({
+    databaseEmpty,
+    hasApplicationTables,
+    officialTrackerExists: officialObject !== undefined,
+    officialTrackerValid,
+    officialRows,
+    workbenchTrackerExists: workbenchObject !== undefined,
+    workbenchTrackerValid,
+    workbenchRows,
+    workbenchFormatExists,
+    workbenchFormatValid,
+    workbenchFormatVersion,
+    schemaState,
+    ...(readError === undefined ? {} : { readError }),
+  });
+  const migration = inspectMigrationRows(
+    officialRows.map(({ migration_id, name }) => ({ migrationId: migration_id, name })),
+  );
+  return { ...migration, workbenchUpgrade };
+}
+
+function readSqliteColumns(
+  reader: BackupDatabaseReader,
+  table: string,
+): readonly SqliteColumnInfo[] {
+  const safeTableNames = new Set([
+    "effect_sql_migrations",
+    "workbench_sql_migrations",
+    "workbench_schema_metadata",
+    "projection_threads",
+    "expert_applied_runtime_records",
+  ]);
+  if (!safeTableNames.has(table)) throw new Error(`Unsupported migration table: ${table}`);
+  return reader.all<SqliteColumnInfo>(
+    `SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('${table}') ORDER BY cid`,
   );
 }
 
-function inspectMigrationRows(rows: ReadonlyArray<unknown>): SqliteMigrationBackupInspection {
-  const recordedNames = new Map<number, string>();
+function inspectMigrationRows(
+  rows: ReadonlyArray<unknown>,
+): Pick<SqliteMigrationBackupInspection, "migrationId" | "lineage"> {
+  const recordedRows: Array<{ readonly migration_id: number; readonly name: string }> = [];
   for (const row of rows) {
     const migration = row as { readonly migrationId?: unknown; readonly name?: unknown };
     if (
@@ -983,26 +1301,19 @@ function inspectMigrationRows(rows: ReadonlyArray<unknown>): SqliteMigrationBack
     ) {
       throw new Error("Migration backup has an unreadable migration tracker.");
     }
-    recordedNames.set(migration.migrationId, migration.name);
+    recordedRows.push({ migration_id: migration.migrationId, name: migration.name });
   }
 
-  for (const repair of planMigrationLineageAliasRepairs(recordedNames)) {
-    if (repair.kind === "rename") {
-      recordedNames.set(repair.migrationId, repair.name);
-    } else {
-      recordedNames.delete(repair.migrationId);
-    }
-  }
-  const migrationId = Math.max(...recordedNames.keys(), 0);
-  const divergence = findFirstMigrationLineageDivergence(recordedNames, migrationId);
+  const lineagePlan = planOfficialMigrationLineage(recordedRows);
+  const migrationId = Math.max(...lineagePlan.rows.map(({ migration_id }) => migration_id), 0);
   return {
     migrationId,
     lineage:
-      divergence === undefined
-        ? "canonical"
-        : divergence[0] > LAST_SHARED_LINEAGE_MIGRATION_ID
+      lineagePlan.kind === "shared-divergence"
+        ? "incompatible"
+        : lineagePlan.kind === "imported-divergence"
           ? "imported"
-          : "incompatible",
+          : "canonical",
   };
 }
 
@@ -1010,14 +1321,130 @@ function assertMigrationBackupCompatible(
   inspection: SqliteMigrationBackupInspection,
   latestSupportedMigrationId: number,
 ): void {
-  if (inspection.lineage === "incompatible") {
-    throw new Error("Migration backup has an unrecognized migration lineage.");
+  const upgrade = inspection.workbenchUpgrade;
+  if (upgrade.kind !== "ready") {
+    throw new Error(`Migration backup has an unrecognized migration lineage: ${upgrade.reason}`);
   }
-  if (inspection.lineage === "canonical" && inspection.migrationId > latestSupportedMigrationId) {
+  if (
+    upgrade.official.sourceVersion > latestSupportedMigrationId ||
+    upgrade.workbench.sourceVersion > workbenchMigrationEntries.length ||
+    upgrade.format.sourceVersion > WORKBENCH_SCHEMA_FORMAT_VERSION
+  ) {
     throw new Error(
-      `Migration backup schema ${inspection.migrationId} is newer than this build ` +
-        `(latest supported migration: ${latestSupportedMigrationId}).`,
+      `Migration backup schema is newer than this build supports ` +
+        `(official: ${latestSupportedMigrationId}, workbench: ${workbenchMigrationEntries.length}, ` +
+        `format: ${WORKBENCH_SCHEMA_FORMAT_VERSION}).`,
     );
+  }
+}
+
+function assertBackupMatchesRecordedSource(
+  inspection: SqliteMigrationBackupInspection,
+  expected: {
+    readonly sourceVersion: string;
+    readonly official: number;
+    readonly workbench: number;
+    readonly format: number;
+    readonly legacyExpertMigrations: WorkbenchUpgradeReadyPlan["legacyOfficialMigrations"];
+    readonly lineageDivergence?: MigrationDivergencePlan["lineageDivergence"] | undefined;
+  },
+): void {
+  const actual = inspection.workbenchUpgrade;
+  if (
+    actual.kind !== "ready" ||
+    sourceVersionFromWorkbenchUpgrade(actual) !== expected.sourceVersion ||
+    actual.official.sourceVersion !== expected.official ||
+    actual.workbench.sourceVersion !== expected.workbench ||
+    actual.format.sourceVersion !== expected.format ||
+    JSON.stringify(actual.legacyOfficialMigrations) !==
+      JSON.stringify(expected.legacyExpertMigrations) ||
+    JSON.stringify(actual.lineageDivergence ?? null) !==
+      JSON.stringify(expected.lineageDivergence ?? null)
+  ) {
+    throw new Error("Migration backup does not match the versioned recovery record.");
+  }
+}
+
+function migrationVersionSourceFromPayload(payload: Record<string, unknown>) {
+  const versions = migrationVersionsFromPayload(payload);
+  if (versions === null || !Array.isArray(payload.legacyExpertMigrations)) {
+    throw new Error("The workbench recovery record has no valid source identity.");
+  }
+  return {
+    sourceVersion: payload.sourceVersion as string,
+    ...versions.source,
+    legacyExpertMigrations:
+      payload.legacyExpertMigrations as WorkbenchUpgradeReadyPlan["legacyOfficialMigrations"],
+    lineageDivergence: migrationLineageDivergenceFromPayload(payload),
+  };
+}
+
+function migrationLineageDivergenceFromPayload(
+  payload: Record<string, unknown>,
+): MigrationDivergencePlan["lineageDivergence"] {
+  const value = payload.lineageDivergence;
+  if (value === null || value === undefined) return undefined;
+  if (
+    !isRecord(value) ||
+    !isVersion(value.firstDivergedId) ||
+    value.firstDivergedId === 0 ||
+    typeof value.expectedName !== "string" ||
+    value.expectedName.length === 0 ||
+    typeof value.recordedName !== "string" ||
+    value.recordedName.length === 0 ||
+    !isVersion(value.highWaterMark) ||
+    typeof value.lineageFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(value.lineageFingerprint)
+  ) {
+    throw new Error("The workbench recovery record has no valid official lineage identity.");
+  }
+  return {
+    firstDivergedId: value.firstDivergedId,
+    expectedName: value.expectedName,
+    recordedName: value.recordedName,
+    highWaterMark: value.highWaterMark,
+    lineageFingerprint: value.lineageFingerprint,
+  };
+}
+
+function assertCompletedMigrationRecordMatchesLive(
+  payload: Record<string, unknown>,
+  live: SqliteMigrationBackupInspection,
+  recordPath: string,
+): void {
+  const mismatch = () =>
+    new Error(`Migration backup provenance does not describe the current database: ${recordPath}`);
+  const upgrade = live.workbenchUpgrade;
+  if (upgrade.kind !== "ready") throw mismatch();
+
+  if (payload.version === 2) {
+    const versions = migrationVersionsFromPayload(payload);
+    if (
+      versions === null ||
+      upgrade.official.sourceVersion !== versions.target.official ||
+      upgrade.workbench.sourceVersion !== versions.target.workbench ||
+      upgrade.format.sourceVersion !== versions.target.format ||
+      upgrade.lineageDivergence !== undefined ||
+      upgrade.legacyOfficialMigrations.length > 0 ||
+      upgrade.workbench.adoptedMigrationIds.length > 0
+    ) {
+      throw mismatch();
+    }
+    return;
+  }
+
+  if (
+    payload.version !== 1 ||
+    !matchesLegacyV1Target(payload, {
+      official: upgrade.official.sourceVersion,
+      workbench: upgrade.workbench.sourceVersion,
+      format: upgrade.format.sourceVersion,
+      rawOfficialVersion: live.migrationId,
+      legacyOfficialMigrations: upgrade.legacyOfficialMigrations,
+      adoptedMigrationIds: upgrade.workbench.adoptedMigrationIds,
+    })
+  ) {
+    throw mismatch();
   }
 }
 
@@ -1080,6 +1507,11 @@ async function readMigrationBackupRecord(
   if (record.databasePath !== dbPath || typeof record.backupPath !== "string") {
     throw new Error(`Invalid ${recordLabel}: ${recordPath}`);
   }
+  assertValidMigrationBackupRecordPayload(
+    record as Record<string, unknown>,
+    recordLabel,
+    recordPath,
+  );
   const resumeState = parseMigrationRecoveryResumeState(recordText);
   if (resumeState === null) {
     throw new Error(`${recordLabel} has an unreadable resume counter: ${recordPath}`);
@@ -1115,6 +1547,203 @@ async function readMigrationBackupRecord(
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isVersion(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function assertValidMigrationBackupRecordPayload(
+  payload: Record<string, unknown>,
+  label: string,
+  recordPath: string,
+): void {
+  const invalid = (): never => {
+    throw new Error(`Invalid ${label} version identity: ${recordPath}`);
+  };
+  if (typeof payload.sourceVersion !== "string" || payload.sourceVersion.length === 0) invalid();
+  if (!isVersion(payload.targetVersion)) invalid();
+
+  if (payload.version === 1) {
+    const oldestSupportedV1Target = Math.max(
+      ...LEGACY_EXPERT_OFFICIAL_MIGRATIONS.map(({ officialId }) => officialId),
+    );
+    if ((payload.targetVersion as number) > oldestSupportedV1Target) invalid();
+    return;
+  }
+  if (payload.version !== 2) invalid();
+
+  const versions = payload.migrationVersions;
+  if (!isRecord(versions)) invalid();
+  const versionsRecord = versions as Record<string, unknown>;
+  const sourceValue = versionsRecord.source;
+  const targetValue = versionsRecord.target;
+  if (!isRecord(sourceValue) || !isRecord(targetValue)) invalid();
+  const sourceRecord = sourceValue as Record<string, unknown>;
+  const targetRecord = targetValue as Record<string, unknown>;
+  for (const key of ["official", "workbench", "format"] as const) {
+    if (
+      !isVersion(sourceRecord[key]) ||
+      !isVersion(targetRecord[key]) ||
+      sourceRecord[key] > targetRecord[key]
+    ) {
+      invalid();
+    }
+  }
+  const source = {
+    official: sourceRecord.official as number,
+    workbench: sourceRecord.workbench as number,
+    format: sourceRecord.format as number,
+  };
+  const target = {
+    official: targetRecord.official as number,
+    workbench: targetRecord.workbench as number,
+    format: targetRecord.format as number,
+  };
+  if (target.official !== payload.targetVersion) invalid();
+  if (
+    target.official > currentOfficialMigrationCount() ||
+    target.workbench > workbenchMigrationEntries.length ||
+    target.format > WORKBENCH_SCHEMA_FORMAT_VERSION
+  ) {
+    invalid();
+  }
+
+  const legacy = payload.legacyExpertMigrations;
+  if (!Array.isArray(legacy)) invalid();
+  const legacyMigrations = legacy as readonly unknown[];
+  const expected = LEGACY_EXPERT_OFFICIAL_MIGRATIONS;
+  if (legacyMigrations.length > expected.length) invalid();
+  for (let index = 0; index < legacyMigrations.length; index += 1) {
+    const item = legacyMigrations[index];
+    const identity = expected[index];
+    if (
+      !isRecord(item) ||
+      identity === undefined ||
+      item.officialId !== identity.officialId ||
+      item.officialName !== identity.officialName ||
+      item.workbenchId !== identity.workbenchId
+    ) {
+      invalid();
+    }
+  }
+  if (
+    legacyMigrations.length > 0 &&
+    (source.official !== 108 ||
+      source.workbench !== 0 ||
+      target.workbench < legacyMigrations.length)
+  ) {
+    invalid();
+  }
+  if (!Object.hasOwn(payload, "lineageDivergence")) invalid();
+  const divergence = migrationLineageDivergenceFromPayload(payload);
+  if (
+    divergence !== undefined &&
+    (divergence.firstDivergedId <= 16 ||
+      divergence.highWaterMark < divergence.firstDivergedId ||
+      source.official !== divergence.firstDivergedId - 1 ||
+      legacyMigrations.length > 0)
+  ) {
+    invalid();
+  }
+}
+
+interface VersionedMigrationVersions {
+  readonly source: {
+    readonly official: number;
+    readonly workbench: number;
+    readonly format: number;
+  };
+  readonly target: {
+    readonly official: number;
+    readonly workbench: number;
+    readonly format: number;
+  };
+}
+
+function migrationVersionsFromPayload(
+  payload: Record<string, unknown>,
+): VersionedMigrationVersions | null {
+  if (!isRecord(payload.migrationVersions)) return null;
+  const source = payload.migrationVersions.source;
+  const target = payload.migrationVersions.target;
+  if (!isRecord(source) || !isRecord(target)) return null;
+  if (
+    !isVersion(source.official) ||
+    !isVersion(source.workbench) ||
+    !isVersion(source.format) ||
+    !isVersion(target.official) ||
+    !isVersion(target.workbench) ||
+    !isVersion(target.format)
+  ) {
+    return null;
+  }
+  return {
+    source: {
+      official: source.official,
+      workbench: source.workbench,
+      format: source.format,
+    },
+    target: {
+      official: target.official,
+      workbench: target.workbench,
+      format: target.format,
+    },
+  };
+}
+
+function matchesLegacyV1Target(
+  payload: Record<string, unknown>,
+  actual: {
+    readonly official: number;
+    readonly workbench: number;
+    readonly format: number;
+    readonly rawOfficialVersion?: number | undefined;
+    readonly legacyOfficialMigrations?:
+      | WorkbenchUpgradeReadyPlan["legacyOfficialMigrations"]
+      | undefined;
+    readonly adoptedMigrationIds?:
+      | WorkbenchUpgradeReadyPlan["workbench"]["adoptedMigrationIds"]
+      | undefined;
+  },
+): boolean {
+  if (!isVersion(payload.targetVersion)) return false;
+  const target = payload.targetVersion;
+  if (target <= 108) {
+    return (
+      target === actual.official &&
+      (actual.rawOfficialVersion === undefined || actual.rawOfficialVersion === target) &&
+      actual.workbench === 0 &&
+      actual.format <= WORKBENCH_SCHEMA_FORMAT_VERSION &&
+      (actual.legacyOfficialMigrations?.length ?? 0) === 0 &&
+      (actual.adoptedMigrationIds?.length ?? 0) === 0
+    );
+  }
+  if (target !== 109 && target !== 110) return false;
+  const expectedLegacy = LEGACY_EXPERT_OFFICIAL_MIGRATIONS.slice(0, target - 108);
+  const legacy = actual.legacyOfficialMigrations;
+  const adopted = actual.adoptedMigrationIds;
+  return (
+    actual.rawOfficialVersion === target &&
+    actual.official === 108 &&
+    actual.workbench === 0 &&
+    actual.format <= WORKBENCH_SCHEMA_FORMAT_VERSION &&
+    adopted !== undefined &&
+    adopted.length === expectedLegacy.length &&
+    adopted.every((migrationId, index) => migrationId === expectedLegacy[index]?.workbenchId) &&
+    legacy !== undefined &&
+    legacy.length === expectedLegacy.length &&
+    legacy.every(
+      (record, index) =>
+        record.officialId === expectedLegacy[index]?.officialId &&
+        record.officialName === expectedLegacy[index]?.officialName &&
+        record.workbenchId === expectedLegacy[index]?.workbenchId,
+    )
+  );
+}
+
 const readMigrationRecoveryMarker = (dbPath: string) =>
   readMigrationBackupRecord(
     dbPath,
@@ -1134,6 +1763,10 @@ export async function inspectCompletedMigrationBackupForSchemaTooNew(
   input: {
     readonly databaseMigrationId: number;
     readonly latestSupportedMigrationId: number;
+    readonly databaseWorkbenchMigrationId?: number | undefined;
+    readonly databaseWorkbenchFormatVersion?: number | undefined;
+    readonly latestSupportedWorkbenchMigrationId?: number | undefined;
+    readonly latestSupportedWorkbenchFormatVersion?: number | undefined;
   },
 ): Promise<MigrationSchemaTooNewRecovery> {
   let record: MigrationRecoveryMarker | null;
@@ -1145,10 +1778,7 @@ export async function inspectCompletedMigrationBackupForSchemaTooNew(
   if (!record) {
     return { kind: "restore-unavailable", reason: "missing-provenance" };
   }
-  if (
-    record.payload.phase !== "migration-completed" ||
-    record.payload.targetVersion !== input.databaseMigrationId
-  ) {
+  if (record.payload.phase !== "migration-completed") {
     return { kind: "restore-unavailable", reason: "invalid-provenance" };
   }
 
@@ -1158,10 +1788,69 @@ export async function inspectCompletedMigrationBackupForSchemaTooNew(
   } catch {
     return { kind: "restore-unavailable", reason: "invalid-backup" };
   }
+  const hasDualVersionInput =
+    input.databaseWorkbenchMigrationId !== undefined ||
+    input.databaseWorkbenchFormatVersion !== undefined ||
+    input.latestSupportedWorkbenchMigrationId !== undefined ||
+    input.latestSupportedWorkbenchFormatVersion !== undefined;
+  if (record.payload.version === 2) {
+    const versions = migrationVersionsFromPayload(record.payload);
+    if (
+      versions === null ||
+      input.databaseWorkbenchMigrationId === undefined ||
+      input.databaseWorkbenchFormatVersion === undefined ||
+      versions.target.official !== input.databaseMigrationId ||
+      versions.target.workbench !== input.databaseWorkbenchMigrationId ||
+      versions.target.format !== input.databaseWorkbenchFormatVersion
+    ) {
+      return { kind: "restore-unavailable", reason: "invalid-provenance" };
+    }
+    try {
+      assertBackupMatchesRecordedSource(
+        inspection,
+        migrationVersionSourceFromPayload(record.payload),
+      );
+    } catch {
+      return { kind: "restore-unavailable", reason: "invalid-provenance" };
+    }
+  } else {
+    let liveInspection: SqliteMigrationBackupInspection;
+    try {
+      liveInspection = await inspectSqliteMigrationBackup(dbPath);
+      assertCompletedMigrationRecordMatchesLive(record.payload, liveInspection, record.markerPath);
+    } catch {
+      return { kind: "restore-unavailable", reason: "invalid-provenance" };
+    }
+    if (record.payload.targetVersion !== input.databaseMigrationId) {
+      return { kind: "restore-unavailable", reason: "invalid-provenance" };
+    }
+    if (
+      hasDualVersionInput &&
+      (input.databaseWorkbenchMigrationId === undefined ||
+        input.databaseWorkbenchFormatVersion === undefined ||
+        liveInspection.workbenchUpgrade.kind !== "ready" ||
+        input.databaseWorkbenchMigrationId !==
+          liveInspection.workbenchUpgrade.workbench.sourceVersion ||
+        input.databaseWorkbenchFormatVersion !==
+          liveInspection.workbenchUpgrade.format.sourceVersion)
+    ) {
+      return { kind: "restore-unavailable", reason: "invalid-provenance" };
+    }
+  }
+
+  try {
+    assertMigrationBackupCompatible(inspection, input.latestSupportedMigrationId);
+  } catch {
+    return { kind: "restore-unavailable", reason: "incompatible-backup" };
+  }
+  const latestWorkbench =
+    input.latestSupportedWorkbenchMigrationId ?? workbenchMigrationEntries.length;
+  const latestFormat =
+    input.latestSupportedWorkbenchFormatVersion ?? WORKBENCH_SCHEMA_FORMAT_VERSION;
   if (
-    inspection.lineage === "incompatible" ||
-    (inspection.lineage === "canonical" &&
-      inspection.migrationId > input.latestSupportedMigrationId)
+    inspection.workbenchUpgrade.kind !== "ready" ||
+    inspection.workbenchUpgrade.workbench.sourceVersion > latestWorkbench ||
+    inspection.workbenchUpgrade.format.sourceVersion > latestFormat
   ) {
     return { kind: "restore-unavailable", reason: "incompatible-backup" };
   }
@@ -1170,6 +1859,12 @@ export async function inspectCompletedMigrationBackupForSchemaTooNew(
     backupPath: record.backupPath,
     provenancePath: record.markerPath,
     backupMigrationId: inspection.migrationId,
+    ...(inspection.workbenchUpgrade.kind === "ready"
+      ? {
+          backupWorkbenchMigrationId: inspection.workbenchUpgrade.workbench.sourceVersion,
+          backupWorkbenchFormatVersion: inspection.workbenchUpgrade.format.sourceVersion,
+        }
+      : {}),
   };
 }
 
@@ -1280,6 +1975,16 @@ export const resumeMarkedMigration = <A, E, R>(
   migration: Effect.Effect<A, E, R>,
 ) =>
   Effect.gen(function* () {
+    if (marker.payload.version === 2) {
+      yield* assertRecordedWorkbenchUpgradeCanResume(marker.payload);
+      yield* attemptPromise(async () => {
+        const inspection = await inspectSqliteMigrationBackup(marker.backupPath);
+        assertBackupMatchesRecordedSource(
+          inspection,
+          migrationVersionSourceFromPayload(marker.payload),
+        );
+      });
+    }
     yield* Effect.logWarning("Resuming an interrupted database migration", {
       databasePath: dbPath,
       backupPath: marker.backupPath,
@@ -1293,6 +1998,9 @@ export const resumeMarkedMigration = <A, E, R>(
     };
     yield* attemptPromise(() => writePrivateJsonFile(marker.markerPath, resumedPayload));
     const result = yield* migration;
+    if (marker.payload.version === 2) {
+      yield* assertRecordedWorkbenchUpgradeTarget(resumedPayload);
+    }
     yield* writeCompletedMigrationProvenance(dbPath, resumedPayload);
     yield* removeRecoveryMarker(dbPath);
     yield* Effect.logInfo("Interrupted database migration completed on resume", {
@@ -1371,16 +2079,20 @@ export const restoreMarkedMigrationBackup = (
           throw new Error(`Migration backup provenance is not restorable: ${record.markerPath}`);
         }
         const liveInspection = await inspectSqliteMigrationBackup(dbPath);
-        if (record.payload.targetVersion !== liveInspection.migrationId) {
-          throw new Error(
-            `Migration backup provenance does not describe the current database: ${record.markerPath}`,
-          );
-        }
+        assertCompletedMigrationRecordMatchesLive(
+          record.payload,
+          liveInspection,
+          record.markerPath,
+        );
       }
+      const versionedSource =
+        record.payload.version === 2
+          ? migrationVersionSourceFromPayload(record.payload)
+          : undefined;
       const restoreMarkerPath = migrationRecoveryMarkerPath(dbPath);
       const restoreMarkerPayload = {
         ...record.payload,
-        version: 1,
+        version: record.payload.version,
         databasePath: dbPath,
         backupPath: record.backupPath,
         phase: "migration-restore-in-progress",
@@ -1391,7 +2103,8 @@ export const restoreMarkedMigrationBackup = (
         restoreSqliteMigrationBackup({
           dbPath,
           backupPath: record.backupPath,
-          latestSupportedMigrationId: latestMigrationId,
+          latestSupportedMigrationId: currentOfficialMigrationCount(),
+          ...(versionedSource === undefined ? {} : { expectedVersionSource: versionedSource }),
           // Defer the fail-closed marker until the backup has been copied and
           // verified. If the live swap then rolls back completely, restore the
           // marker state that existed before this explicit attempt.
@@ -1404,7 +2117,7 @@ export const restoreMarkedMigrationBackup = (
       );
       await writePrivateJsonFile(migrationBackupProvenancePath(dbPath), {
         ...record.payload,
-        version: 1,
+        version: record.payload.version,
         databasePath: dbPath,
         phase: "migration-restored",
         restoredAt: new Date().toISOString(),

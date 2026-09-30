@@ -3,9 +3,15 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { createHash } from "node:crypto";
 
+import {
+  planLegacyMigration32Rename,
+  planMigrationLineageAliasRepairs,
+} from "../../persistence/Migrations.ts";
 import { migrationEntries } from "../../persistence/Migrations.ts";
 
 export const WORKBENCH_MIGRATIONS_TABLE = "workbench_sql_migrations";
+export const WORKBENCH_SCHEMA_METADATA_TABLE = "workbench_schema_metadata";
+export const WORKBENCH_SCHEMA_FORMAT_VERSION = 1;
 export const EXPERT_WORKBENCH_MODULE_ID = "expert";
 
 /**
@@ -50,6 +56,10 @@ const WORKBENCH_MIGRATIONS_DDL = `CREATE TABLE workbench_sql_migrations (
   PRIMARY KEY (module_id, migration_id)
 )`;
 
+const WORKBENCH_SCHEMA_METADATA_DDL = `CREATE TABLE workbench_schema_metadata (
+  format_version INTEGER NOT NULL
+)`;
+
 export class WorkbenchMigrationError extends Schema.TaggedErrorClass<WorkbenchMigrationError>()(
   "WorkbenchMigrationError",
   { reason: Schema.String },
@@ -86,6 +96,11 @@ export interface WorkbenchSchemaState {
   readonly runtimeRecordColumns: readonly SqliteColumnInfo[] | null;
 }
 
+export interface WorkbenchSchemaFormatState {
+  readonly exists: boolean;
+  readonly version: number;
+}
+
 export interface WorkbenchMigrationDefinition {
   readonly moduleId: string;
   readonly migrationId: number;
@@ -103,6 +118,11 @@ const currentOfficialMigrationEntries = () =>
   migrationEntries
     .filter(([id, name]) => !isLegacyExpertIdentity(id, name))
     .toSorted(([a], [b]) => a - b);
+
+export type OfficialMigrationCatalog = readonly (readonly [number, string, unknown])[];
+
+export const currentOfficialMigrationCatalog = (): OfficialMigrationCatalog =>
+  currentOfficialMigrationEntries();
 
 export const validateOfficialMigrationPrefixAgainstCatalog = (
   rows: readonly OfficialMigrationRecord[],
@@ -128,8 +148,37 @@ export const validateOfficialMigrationPrefixAgainstCatalog = (
 /** Validate against the current official catalog, excluding only the exact historical expert rows. */
 export const validateCurrentOfficialMigrationPrefix = (
   rows: readonly OfficialMigrationRecord[],
-): string | null =>
-  validateOfficialMigrationPrefixAgainstCatalog(rows, currentOfficialMigrationEntries());
+): string | null => {
+  const normalized = normalizeRecognizedOfficialMigrationRows(rows);
+  return validateOfficialMigrationPrefixAgainstCatalog(
+    normalized.rows,
+    currentOfficialMigrationEntries(),
+  );
+};
+
+/** Pure metadata repair view shared by pre-migration planning and the migrator. */
+export const normalizeRecognizedOfficialMigrationRows = (
+  rows: readonly OfficialMigrationRecord[],
+): { readonly rows: readonly OfficialMigrationRecord[]; readonly changed: boolean } => {
+  const names = new Map(rows.map(({ migration_id, name }) => [migration_id, name] as const));
+  let changed = false;
+  const migration32Name = planLegacyMigration32Rename(names);
+  if (migration32Name !== null) {
+    names.set(32, migration32Name);
+    changed = true;
+  }
+  for (const repair of planMigrationLineageAliasRepairs(names)) {
+    if (repair.kind === "rename") names.set(repair.migrationId, repair.name);
+    else names.delete(repair.migrationId);
+    changed = true;
+  }
+  return {
+    rows: [...names]
+      .toSorted(([left], [right]) => left - right)
+      .map(([migration_id, name]) => ({ migration_id, name })),
+    changed,
+  };
+};
 
 /** Validate the frozen official history that existed before expert IDs 109/110 were added. */
 export const validateFrozenLegacyOfficialPrefix = (
@@ -165,7 +214,14 @@ export const validateFrozenLegacyOfficialPrefix = (
   return null;
 };
 
-export const currentOfficialMigrationCount = () => currentOfficialMigrationEntries().length;
+export const officialMigrationCatalogHighWaterMark = (
+  catalog: readonly (readonly [number, string, unknown])[],
+) => Math.max(...catalog.map(([id]) => id), 0);
+
+export const currentOfficialMigrationCount = () =>
+  officialMigrationCatalogHighWaterMark(currentOfficialMigrationEntries());
+
+export const currentOfficialMigrationEntryCount = () => currentOfficialMigrationEntries().length;
 
 /**
  * Expert-owned extensions intentionally use local IDs. These checksums cover
@@ -403,6 +459,57 @@ export const validateWorkbenchTrackerShape = (columns: readonly SqliteColumnInfo
   return sameColumns(columns, expected);
 };
 
+export const validateWorkbenchSchemaMetadataShape = (columns: readonly SqliteColumnInfo[]) =>
+  sameColumns(columns, [
+    { name: "format_version", type: "INTEGER", notnull: 1, dflt_value: null, pk: 0 },
+  ]);
+
+export const readWorkbenchSchemaFormat = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const metadata = yield* inspectSqliteObject(sql, WORKBENCH_SCHEMA_METADATA_TABLE);
+  if (metadata === null) return { exists: false, version: 0 } as const;
+  if (metadata.type !== "table") {
+    return yield* fail("workbench_schema_metadata exists but is not a table.");
+  }
+  const columns = yield* inspectTableColumns(sql, WORKBENCH_SCHEMA_METADATA_TABLE);
+  if (!validateWorkbenchSchemaMetadataShape(columns)) {
+    return yield* fail("workbench_schema_metadata has an unsupported schema.");
+  }
+  const rows = yield* sql<{ readonly format_version: number }>`
+    SELECT format_version FROM workbench_schema_metadata
+  `;
+  if (
+    rows.length !== 1 ||
+    !Number.isSafeInteger(rows[0]?.format_version) ||
+    (rows[0]?.format_version ?? -1) < 0
+  ) {
+    return yield* fail("workbench_schema_metadata must contain exactly one valid format version.");
+  }
+  return { exists: true, version: rows[0]!.format_version } as const;
+});
+
+export const ensureWorkbenchSchemaFormat = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const state = yield* readWorkbenchSchemaFormat;
+  if (state.version > WORKBENCH_SCHEMA_FORMAT_VERSION) {
+    return yield* fail(
+      `Workbench data format ${state.version} is newer than this build supports (${WORKBENCH_SCHEMA_FORMAT_VERSION}).`,
+    );
+  }
+  if (!state.exists) {
+    yield* sql.unsafe(WORKBENCH_SCHEMA_METADATA_DDL);
+    yield* sql`
+      INSERT INTO workbench_schema_metadata (format_version)
+      VALUES (${WORKBENCH_SCHEMA_FORMAT_VERSION})
+    `;
+  } else if (state.version < WORKBENCH_SCHEMA_FORMAT_VERSION) {
+    yield* sql`
+      UPDATE workbench_schema_metadata
+      SET format_version = ${WORKBENCH_SCHEMA_FORMAT_VERSION}
+    `;
+  }
+});
+
 export const readWorkbenchTracker = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const tracker = yield* inspectSqliteObject(sql, WORKBENCH_MIGRATIONS_TABLE);
@@ -473,13 +580,11 @@ export const runWorkbenchMigrations = () =>
     const official = yield* readAndValidateOfficialMigrationState;
     const officialIssue = validateCurrentOfficialMigrationPrefix(official.rows);
     if (officialIssue !== null) return yield* fail(officialIssue);
-    if (official.rows.length !== currentOfficialMigrationCount()) {
+    if (official.rows.length !== currentOfficialMigrationEntryCount()) {
       return yield* fail(
         "The complete current official migration prefix must be applied before workbench migrations run.",
       );
     }
-
-    yield* sql.withTransaction(ensureWorkbenchTracker);
 
     const initialTracker = yield* readWorkbenchTracker;
     const initialPlan = planWorkbenchHistory(initialTracker.rows);
@@ -487,6 +592,12 @@ export const runWorkbenchMigrations = () =>
     const initialSchema = yield* readWorkbenchSchemaState;
     const schemaIssue = validateWorkbenchSchemaState(initialPlan.applied.length, initialSchema);
     if (schemaIssue !== null) return yield* fail(schemaIssue);
+    const initialFormat = yield* readWorkbenchSchemaFormat;
+    if (initialFormat.version > WORKBENCH_SCHEMA_FORMAT_VERSION) {
+      return yield* fail(
+        `Workbench data format ${initialFormat.version} is newer than this build supports (${WORKBENCH_SCHEMA_FORMAT_VERSION}).`,
+      );
+    }
 
     const executed: WorkbenchMigrationDefinition[] = [];
     for (const migration of workbenchMigrationEntries.slice(initialPlan.applied.length)) {
@@ -498,6 +609,8 @@ export const runWorkbenchMigrations = () =>
           if (plan.applied.length !== migration.migrationId - 1) {
             return yield* fail("Expert workbench migration history changed during upgrade.");
           }
+          yield* ensureWorkbenchTracker;
+          yield* ensureWorkbenchSchemaFormat;
           const schema = yield* readWorkbenchSchemaState;
           const issue = validateWorkbenchSchemaState(plan.applied.length, schema);
           if (issue !== null) return yield* fail(issue);
@@ -516,11 +629,24 @@ export const runWorkbenchMigrations = () =>
       executed.push(migration);
     }
 
+    if (initialPlan.applied.length === workbenchMigrationEntries.length) {
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* ensureWorkbenchTracker;
+          yield* ensureWorkbenchSchemaFormat;
+        }),
+      );
+    }
+
     const finalTracker = yield* readWorkbenchTracker;
     const finalPlan = planWorkbenchHistory(finalTracker.rows);
     if (!finalPlan.ok) return yield* fail(finalPlan.reason);
     const finalSchema = yield* readWorkbenchSchemaState;
     const finalIssue = validateWorkbenchSchemaState(finalPlan.applied.length, finalSchema);
     if (finalIssue !== null) return yield* fail(finalIssue);
+    const finalFormat = yield* readWorkbenchSchemaFormat;
+    if (finalFormat.version !== WORKBENCH_SCHEMA_FORMAT_VERSION) {
+      return yield* fail("The workbench data format was not initialized to the supported version.");
+    }
     return { executed };
   });

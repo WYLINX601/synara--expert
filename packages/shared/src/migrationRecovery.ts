@@ -119,6 +119,8 @@ export type MigrationSchemaTooNewRecovery =
       readonly backupPath: string;
       readonly provenancePath: string;
       readonly backupMigrationId: number;
+      readonly backupWorkbenchMigrationId?: number | undefined;
+      readonly backupWorkbenchFormatVersion?: number | undefined;
     }
   | {
       readonly kind: "restore-unavailable";
@@ -256,7 +258,11 @@ function isMigrationSchemaTooNewRecovery(value: unknown): value is MigrationSche
     return (
       isNonEmptyString(recovery.backupPath) &&
       isNonEmptyString(recovery.provenancePath) &&
-      isNonNegativeInteger(recovery.backupMigrationId)
+      isNonNegativeInteger(recovery.backupMigrationId) &&
+      (recovery.backupWorkbenchMigrationId === undefined ||
+        isNonNegativeInteger(recovery.backupWorkbenchMigrationId)) &&
+      (recovery.backupWorkbenchFormatVersion === undefined ||
+        isNonNegativeInteger(recovery.backupWorkbenchFormatVersion))
     );
   }
   return (

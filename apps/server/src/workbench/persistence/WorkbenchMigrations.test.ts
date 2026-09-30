@@ -9,6 +9,9 @@ import {
   LEGACY_EXPERT_OFFICIAL_MIGRATIONS,
   WorkbenchMigrationError,
   currentOfficialMigrationCount,
+  currentOfficialMigrationEntryCount,
+  officialMigrationCatalogHighWaterMark,
+  WORKBENCH_SCHEMA_FORMAT_VERSION,
   planWorkbenchHistory,
   runWorkbenchMigrations,
   validateCurrentOfficialMigrationPrefix,
@@ -167,6 +170,69 @@ it.effect("recognizes only the frozen 109/110 legacy identities and exact result
   }),
 );
 
+it.effect(
+  "allows a missing projection table only for a truly empty database or official versions 1 through 4",
+  () =>
+    Effect.sync(() => {
+      const missingProjectionSchema = {
+        projectionThreadsExists: false,
+        bindingColumn: null,
+        runtimeRecordColumns: null,
+      } as const;
+      const base = {
+        workbenchTrackerExists: false,
+        workbenchRows: [],
+        schemaState: missingProjectionSchema,
+      } as const;
+
+      assert.strictEqual(
+        planLegacyExpertMigrationAdoption({
+          ...base,
+          officialTrackerExists: false,
+          officialRows: [],
+          databaseEmpty: true,
+        }).kind,
+        "none",
+      );
+      assert.strictEqual(
+        planLegacyExpertMigrationAdoption({
+          ...base,
+          officialTrackerExists: true,
+          officialRows: frozenOfficialPrefix.slice(0, 4),
+          databaseEmpty: false,
+        }).kind,
+        "none",
+      );
+      assert.strictEqual(
+        planLegacyExpertMigrationAdoption({
+          ...base,
+          officialTrackerExists: true,
+          officialRows: frozenOfficialPrefix.slice(0, 5),
+          databaseEmpty: false,
+        }).kind,
+        "invalid",
+      );
+      assert.strictEqual(
+        planLegacyExpertMigrationAdoption({
+          ...base,
+          officialTrackerExists: true,
+          officialRows: [],
+          databaseEmpty: false,
+        }).kind,
+        "invalid",
+      );
+      assert.strictEqual(
+        planLegacyExpertMigrationAdoption({
+          ...base,
+          officialTrackerExists: false,
+          officialRows: [],
+          databaseEmpty: false,
+        }).kind,
+        "invalid",
+      );
+    }),
+);
+
 it.effect("allows an empty database to pass pre-migration history recognition", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
@@ -180,19 +246,22 @@ it.effect("allows an empty database to pass pre-migration history recognition", 
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );
 
-it.effect("accepts a current official catalog that has reused legacy numeric IDs", () =>
+it.effect("uses official migration IDs as versions even when the catalog reserves a gap", () =>
   Effect.sync(() => {
     const catalog = [
       ...migrationEntries.filter(([id]) => id <= 108),
-      [109, "OfficialChangeAfterSplit", Effect.void] as const,
+      [112, "OfficialChangeAfterSplit", Effect.void] as const,
     ];
     const rows: OfficialMigrationRecord[] = [
       ...frozenOfficialPrefix,
-      { migration_id: 109, name: "OfficialChangeAfterSplit" },
+      { migration_id: 112, name: "OfficialChangeAfterSplit" },
     ];
     assert.isNull(validateOfficialMigrationPrefixAgainstCatalog(rows, catalog));
     assert.isNull(validateCurrentOfficialMigrationPrefix(frozenOfficialPrefix));
     assert.strictEqual(currentOfficialMigrationCount(), 108);
+    assert.strictEqual(currentOfficialMigrationEntryCount(), 108);
+    assert.strictEqual(catalog.length, 109);
+    assert.strictEqual(officialMigrationCatalogHighWaterMark(catalog), 112);
   }),
 );
 
@@ -312,6 +381,7 @@ const freshUpgradeLayer = it.layer(NodeSqliteClient.layerMemory());
 freshUpgradeLayer("fresh workbench extension migration", (test) => {
   test.effect("runs static expert migrations once after the official baseline", () =>
     Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
       yield* runMigrations({ toMigrationInclusive: 108 });
       const first = yield* runWorkbenchMigrations();
       const second = yield* runWorkbenchMigrations();
@@ -320,6 +390,10 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
         [1, 2],
       );
       assert.deepStrictEqual(second.executed, []);
+      const format = yield* sql<{ readonly format_version: number }>`
+        SELECT format_version FROM workbench_schema_metadata
+      `;
+      assert.deepStrictEqual(format, [{ format_version: WORKBENCH_SCHEMA_FORMAT_VERSION }]);
     }),
   );
 });
@@ -354,11 +428,16 @@ rollbackLayer("transactional legacy expert handoff", (test) => {
       const newRows = yield* sql<{ readonly migration_id: number }>`
         SELECT migration_id FROM workbench_sql_migrations ORDER BY migration_id
       `;
+      const formatTable = yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'workbench_schema_metadata'
+      `;
       assert.deepStrictEqual(
         oldRows.map(({ migration_id }) => migration_id),
         [109],
       );
       assert.deepStrictEqual(newRows, []);
+      assert.deepStrictEqual(formatTable, []);
     }),
   );
 });
@@ -395,6 +474,31 @@ tooNewLayer("future workbench migration history", (test) => {
         FROM workbench_sql_migrations
       `;
       assert.deepStrictEqual(after, before);
+    }),
+  );
+
+  test.effect("refuses a future data format before creating extension history", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 108 });
+      yield* sql`CREATE TABLE workbench_schema_metadata (format_version INTEGER NOT NULL)`;
+      yield* sql`INSERT INTO workbench_schema_metadata (format_version) VALUES (2)`;
+
+      const before = yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'workbench_sql_migrations'
+      `;
+      const failure = yield* Effect.flip(runWorkbenchMigrations());
+      assert.isTrue(failure instanceof WorkbenchMigrationError);
+      const after = yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name = 'workbench_sql_migrations'
+      `;
+      assert.deepStrictEqual(after, before);
+      const version = yield* sql<{ readonly format_version: number }>`
+        SELECT format_version FROM workbench_schema_metadata
+      `;
+      assert.deepStrictEqual(version, [{ format_version: 2 }]);
     }),
   );
 });

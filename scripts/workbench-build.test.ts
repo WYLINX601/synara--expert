@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { runGit } from "./lib/workbench-sync/git.ts";
 import {
   buildWorkbenchArtifact,
+  parseSchemaVersions,
   type WorkbenchBuildFlavor,
   type WorkbenchBuildRequest,
 } from "./lib/workbench-build.ts";
@@ -161,6 +162,37 @@ function requestFor(
   };
 }
 
+function schemaCatalogSources(
+  officialEntries: string,
+  workbenchEntries: string,
+  extraDeclarations = "",
+): { readonly official: string; readonly workbench: string } {
+  return {
+    official: `export const migrationEntries = [\n${officialEntries}\n] as const;`,
+    workbench: [
+      'export const EXPERT_WORKBENCH_MODULE_ID = "expert";',
+      'export const LEGACY_EXPERT_OFFICIAL_MIGRATIONS = [{ officialId: 109, officialName: "Legacy109", workbenchId: 1 }] as const;',
+      "export const WORKBENCH_SCHEMA_FORMAT_VERSION = 1;",
+      extraDeclarations,
+      "export const workbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] = [",
+      workbenchEntries,
+      "];",
+    ].join("\n"),
+  };
+}
+
+function workbenchCatalogEntry(moduleId: string, migrationId: number, name: string): string {
+  return [
+    "  {",
+    `    moduleId: ${moduleId},`,
+    `    migrationId: ${migrationId},`,
+    `    name: ${JSON.stringify(name)},`,
+    `    checksum: "sha256:${"a".repeat(64)}",`,
+    '    statement: "SELECT 1",',
+    "  },",
+  ].join("\n");
+}
+
 function commitCandidateSource(
   fixture: BuildFixture,
   tag: string,
@@ -210,6 +242,91 @@ const fakeBuilder = {
 };
 
 describe("workbench build manifest", () => {
+  it("parses the current committed official and Workbench migration source without importing it", () => {
+    const schemas = parseSchemaVersions(
+      readFileSync(
+        new URL("../apps/server/src/persistence/Migrations.ts", import.meta.url),
+        "utf8",
+      ),
+      readFileSync(
+        new URL("../apps/server/src/workbench/persistence/WorkbenchMigrations.ts", import.meta.url),
+        "utf8",
+      ),
+    );
+
+    expect(schemas).toEqual({
+      officialMigrationHighWater: 108,
+      workbenchMigrationHighWaterByModule: { expert: 2 },
+      workbenchSchemaFormatVersion: 1,
+    });
+  });
+
+  it("resolves exported static module IDs and accepts literal IDs for new modules", () => {
+    const sources = schemaCatalogSources(
+      '[108, "Current"],\n  [109, "Legacy109"],',
+      [
+        workbenchCatalogEntry("EXPERT_WORKBENCH_MODULE_ID", 1, "Expert first"),
+        workbenchCatalogEntry('"files"', 1, "Files first"),
+        workbenchCatalogEntry("FILES_NEXT_MODULE_ID", 1, "Files next"),
+      ].join("\n"),
+      'export const FILES_NEXT_MODULE_ID = "files-next";',
+    );
+
+    expect(parseSchemaVersions(sources.official, sources.workbench)).toEqual({
+      officialMigrationHighWater: 108,
+      workbenchMigrationHighWaterByModule: { expert: 1, files: 1, "files-next": 1 },
+      workbenchSchemaFormatVersion: 1,
+    });
+  });
+
+  it("retains a future official migration that reuses a legacy numeric ID with a new name", () => {
+    const sources = schemaCatalogSources(
+      '[108, "Current"],\n  [109, "FutureOfficialMigration"],',
+      workbenchCatalogEntry("EXPERT_WORKBENCH_MODULE_ID", 1, "Expert first"),
+    );
+
+    expect(
+      parseSchemaVersions(sources.official, sources.workbench).officialMigrationHighWater,
+    ).toBe(109);
+  });
+
+  it.each([
+    [
+      "an unknown identifier",
+      schemaCatalogSources(
+        '[108, "Current"],\n  [109, "Legacy109"],',
+        workbenchCatalogEntry("UNKNOWN_MODULE_ID", 1, "Expert first"),
+        'const UNKNOWN_MODULE_ID = "expert";',
+      ),
+    ],
+    [
+      "a computed exported identifier",
+      schemaCatalogSources(
+        '[108, "Current"],\n  [109, "Legacy109"],',
+        workbenchCatalogEntry("COMPUTED_MODULE_ID", 1, "Expert first"),
+        'export const COMPUTED_MODULE_ID = "ex" + "pert";',
+      ),
+    ],
+  ] as const)("fails closed on %s", (_label, sources) => {
+    expect(() => parseSchemaVersions(sources.official, sources.workbench)).toThrow(
+      "workbench-schema-catalog-is-invalid",
+    );
+  });
+
+  it("fails closed instead of silently omitting a malformed later module entry", () => {
+    const sources = schemaCatalogSources(
+      '[108, "Current"],\n  [109, "Legacy109"],',
+      [
+        workbenchCatalogEntry("EXPERT_WORKBENCH_MODULE_ID", 1, "Expert first"),
+        `  { moduleId: "other", migrationId: 1, name: "Other first", checksum: "sha256:${"b".repeat(64)}" },`,
+      ].join("\n"),
+    );
+
+    expect(() => parseSchemaVersions(sources.official, sources.workbench)).toThrow(
+      "workbench-schema-catalog-is-invalid",
+    );
+  });
+
   it.each([
     ["workbench", "0.1.0"],
     ["workbench-preview", "0.1.0-preview.1"],

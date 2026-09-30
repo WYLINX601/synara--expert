@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as ts from "typescript";
 import { spawnProcessSync } from "@synara/shared/processRuntime";
 import {
   writeReleaseArtifactProvenance,
@@ -185,7 +186,114 @@ function parseBuildConfig(value: unknown): BuildConfig {
   return record as BuildConfig;
 }
 
-function parseSchemaVersions(
+function parseTypeScriptCatalog(source: string, fileName: string): ts.SourceFile {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const parseDiagnostics = (
+    sourceFile as ts.SourceFile & { readonly parseDiagnostics: ReadonlyArray<ts.Diagnostic> }
+  ).parseDiagnostics;
+  if (parseDiagnostics.length > 0) {
+    throw new Error("workbench-schema-catalog-source-is-invalid");
+  }
+  return sourceFile;
+}
+
+function hasModifier(node: ts.Node, kind: ts.SyntaxKind): boolean {
+  return (
+    ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some((item) => item.kind === kind)
+  );
+}
+
+function exportedConstDeclarations(sourceFile: ts.SourceFile): Map<string, ts.VariableDeclaration> {
+  const declarations = new Map<string, ts.VariableDeclaration>();
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isVariableStatement(statement) ||
+      !hasModifier(statement, ts.SyntaxKind.ExportKeyword) ||
+      (statement.declarationList.flags & ts.NodeFlags.Const) === 0
+    ) {
+      continue;
+    }
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name)) continue;
+      if (declarations.has(declaration.name.text))
+        throw new Error("workbench-schema-catalog-is-invalid");
+      declarations.set(declaration.name.text, declaration);
+    }
+  }
+  return declarations;
+}
+
+function unwrapStaticAssertion(expression: ts.Expression): ts.Expression {
+  let current = expression;
+  while (
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current)
+  ) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function exportedObjectArray(
+  declarations: ReadonlyMap<string, ts.VariableDeclaration>,
+  name: string,
+): Array<ReadonlyMap<string, ts.Expression>> {
+  const initializer = declarations.get(name)?.initializer;
+  if (!initializer) throw new Error("workbench-schema-catalog-could-not-be-read");
+  const value = unwrapStaticAssertion(initializer);
+  if (!ts.isArrayLiteralExpression(value))
+    throw new Error("workbench-schema-catalog-could-not-be-read");
+
+  return value.elements.map((element) => {
+    if (!ts.isObjectLiteralExpression(element))
+      throw new Error("workbench-schema-catalog-is-invalid");
+    const fields = new Map<string, ts.Expression>();
+    for (const property of element.properties) {
+      if (!ts.isPropertyAssignment(property))
+        throw new Error("workbench-schema-catalog-is-invalid");
+      const propertyName =
+        ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)
+          ? property.name.text
+          : undefined;
+      if (!propertyName || fields.has(propertyName))
+        throw new Error("workbench-schema-catalog-is-invalid");
+      fields.set(propertyName, property.initializer);
+    }
+    return fields;
+  });
+}
+
+function requireFields(
+  fields: ReadonlyMap<string, ts.Expression>,
+  expected: ReadonlyArray<string>,
+): void {
+  if (fields.size !== expected.length || expected.some((name) => !fields.has(name))) {
+    throw new Error("workbench-schema-catalog-is-invalid");
+  }
+}
+
+function stringLiteral(expression: ts.Expression | undefined): string | undefined {
+  if (!expression) return undefined;
+  const value = unwrapStaticAssertion(expression);
+  return ts.isStringLiteral(value) ? value.text : undefined;
+}
+
+function numberLiteral(expression: ts.Expression | undefined): number | undefined {
+  if (!expression) return undefined;
+  const literal = unwrapStaticAssertion(expression);
+  if (!ts.isNumericLiteral(literal)) return undefined;
+  const value = Number(literal.text);
+  return Number.isSafeInteger(value) ? value : undefined;
+}
+
+export function parseSchemaVersions(
   officialMigrationSource: string,
   workbenchMigrationSource: string,
 ): WorkbenchBuildManifest["schemas"] {
@@ -196,35 +304,61 @@ function parseSchemaVersions(
   if (findLineageStructureViolations(officialEntries).length > 0) {
     throw new Error("official-migration-catalog-is-not-ordered-and-unique");
   }
-  const legacyBlock =
-    /export const LEGACY_EXPERT_OFFICIAL_MIGRATIONS\s*=\s*\[([\s\S]*?)\]\s*as const;/u.exec(
-      workbenchMigrationSource,
-    )?.[1];
-  const workbenchBlock = /export const workbenchMigrationEntries:[^=]+?=\s*\[([\s\S]*?)\n\];/u.exec(
+  const workbenchSource = parseTypeScriptCatalog(
     workbenchMigrationSource,
-  )?.[1];
-  const formatVersion = /export const WORKBENCH_SCHEMA_FORMAT_VERSION\s*=\s*(\d+)\s*;/u.exec(
-    workbenchMigrationSource,
-  )?.[1];
-  if (legacyBlock === undefined || workbenchBlock === undefined || formatVersion === undefined) {
-    throw new Error("workbench-schema-catalog-could-not-be-read");
+    "WorkbenchMigrations.ts",
+  );
+  const declarations = exportedConstDeclarations(workbenchSource);
+  const stringConstants = new Map<string, string>();
+  for (const [name, declaration] of declarations) {
+    const initializer = declaration.initializer;
+    if (initializer) {
+      const value = stringLiteral(unwrapStaticAssertion(initializer));
+      if (value !== undefined) stringConstants.set(name, value);
+    }
   }
-  const legacyIdentities = [
-    ...legacyBlock.matchAll(
-      /\{\s*officialId:\s*(\d+),\s*officialName:\s*"([^"]+)",\s*workbenchId:\s*\d+\s*\}/gu,
-    ),
-  ].map((match) => ({ id: Number(match[1]), name: match[2]! }));
-  const workbenchEntries = [
-    ...workbenchBlock.matchAll(
-      /\{\s*moduleId:\s*"([^"]+)",\s*migrationId:\s*(\d+),\s*name:\s*"([^"]+)",\s*checksum:\s*"sha256:[0-9a-f]{64}",\s*statement:/gu,
-    ),
-  ].map((match) => ({ moduleId: match[1]!, id: Number(match[2]) }));
+  const legacyFields = exportedObjectArray(declarations, "LEGACY_EXPERT_OFFICIAL_MIGRATIONS");
+  const workbenchFields = exportedObjectArray(declarations, "workbenchMigrationEntries");
+  const formatVersionInitializer = declarations.get("WORKBENCH_SCHEMA_FORMAT_VERSION")?.initializer;
+  const formatVersion = numberLiteral(formatVersionInitializer);
+  if (formatVersion === undefined) throw new Error("workbench-schema-catalog-could-not-be-read");
+
+  const legacyIdentities = legacyFields.map((fields) => {
+    requireFields(fields, ["officialId", "officialName", "workbenchId"]);
+    const id = numberLiteral(fields.get("officialId"));
+    const name = stringLiteral(fields.get("officialName"));
+    const workbenchId = numberLiteral(fields.get("workbenchId"));
+    if (id === undefined || name === undefined || workbenchId === undefined)
+      throw new Error("workbench-schema-catalog-is-invalid");
+    return { id, name };
+  });
+  const workbenchEntries = workbenchFields.map((fields) => {
+    requireFields(fields, ["moduleId", "migrationId", "name", "checksum", "statement"]);
+    const moduleExpression = fields.get("moduleId");
+    const moduleId =
+      stringLiteral(moduleExpression) ??
+      (moduleExpression && ts.isIdentifier(moduleExpression)
+        ? stringConstants.get(moduleExpression.text)
+        : undefined);
+    const id = numberLiteral(fields.get("migrationId"));
+    const name = stringLiteral(fields.get("name"));
+    const checksum = stringLiteral(fields.get("checksum"));
+    if (
+      moduleId === undefined ||
+      id === undefined ||
+      name === undefined ||
+      checksum === undefined ||
+      !/^sha256:[0-9a-f]{64}$/u.test(checksum)
+    ) {
+      throw new Error("workbench-schema-catalog-is-invalid");
+    }
+    return { moduleId, id };
+  });
   if (legacyIdentities.length === 0 || workbenchEntries.length === 0) {
     throw new Error("workbench-schema-catalog-is-empty");
   }
   if (
-    !Number.isSafeInteger(Number(formatVersion)) ||
-    Number(formatVersion) < 1 ||
+    formatVersion < 1 ||
     legacyIdentities.some(
       ({ id, name }, index) =>
         !Number.isSafeInteger(id) ||
@@ -269,7 +403,7 @@ function parseSchemaVersions(
         left.localeCompare(right),
       ),
     ),
-    workbenchSchemaFormatVersion: Number(formatVersion),
+    workbenchSchemaFormatVersion: formatVersion,
   };
 }
 

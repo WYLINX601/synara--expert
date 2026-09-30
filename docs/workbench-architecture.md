@@ -1,8 +1,10 @@
 # 基于 Synara 的个人工作台架构
 
-状态：设计建议，尚未实施模块改造、上游合并或定时同步。  
-核实日期：2026-09-29。本地代码基线：`eaa61eded31b6755d4f30ba8eabc5d905cf817cb`，另有未提交的专家系统改动。  
-目标：保留 Synara 的日常能力，持续增加专家、业务看板等个人能力，每周检查并集成一次官方更新。
+状态：架构基线与分阶段实施记录。当前授权范围为 WB-00 至 WB-05；本轮不开展 WB-06。核实日期：2026-09-30。
+
+基线关系见 [WB-00 记录](../workbench/WB-00-baseline.md) 与 [上游历史补充](../workbench/WB-00-upstream-evidence.md)：工作区 HEAD 与官方 `upstream/main`、`v0.9.2` 的 merge-base 均为 `eaa61eded31b6755d4f30ba8eabc5d905cf817cb`；`upstream/main` 与 `v0.9.2` 的 merge-base 为 `a33435c18474eb7816582004e45f87382965ac8d`。锁定的 `v0.9.2` 仍是待集成候选，不表示已经合并或通过验证。
+
+当前状态按证据分开记录：WB-00 完整历史和 92 个发布标签已补齐，迁移 lineage 检查通过；WB-01 的图标来源与 GitHub Actions 权限已调查，但 Workbench app 身份尚未做候选包实测；WB-02 的模块迁移与升级规划代码已建立，统一启动/备份接线仍待审查并纳入集成；WB-03 的身份、注册表和导入边界代码已提交，真实 Provider 行为仍待候选运行；WB-04 的同步 CLI 已建立，最终 build manifest 和候选验证仍待完成；WB-05 workflow 代码已提交，但没有远端手动或定时运行证据。实际打包、Codex/Pi Provider 首轮、恢复演练和最终候选验收尚未完成，因此 M1/M2/M3 均不标记完成。具体检查范围见 [WB-01 证据](../workbench/WB-01-evidence.md)、[WB-04 runtime preflight](../workbench/WB-04-runtime-preflight.md)、[WB-05 自动化记录](../workbench/WB-05-automation.md) 和[实施计划](./workbench-implementation-plan.md)。
 
 后续实施见 [落地技术方案与计划](./workbench-implementation-plan.md)，其中已细化文件位置、迁移接管、验收与每周同步任务。
 
@@ -33,14 +35,14 @@
 
 ## 2. 现有能力与限制
 
-| 已核实事实                                                         | 对设计的影响                                       | 本地依据                                                                                                                    |
-| ------------------------------------------------------------------ | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Task/Thread 拥有对话、Provider session、环境和工作状态             | 自定义功能复用任务系统，不再建第二套执行器         | [核心概念](./core-concepts.md)                                                                                              |
-| 已有全局和项目 Kanban，由线程与草稿派生 Draft / In Progress / Done | 若只是管理 AI 任务，先复用；业务事项才新增模型     | [看板逻辑](../apps/web/src/components/kanban/kanban.logic.ts)、[看板页面](../apps/web/src/components/kanban/KanbanView.tsx) |
-| Plugins 页面使用 Provider 发现的插件和 Skills                      | 不能据此认定支持安装任意 React 页面或业务后端      | [PluginLibrary](../apps/web/src/components/PluginLibrary.tsx)                                                               |
-| 专家功能已跨协议、会话、Gateway、UI、持久化接入                    | 保留必要的深度接入；把新增业务逻辑从接入文件中收拢 | [专家方案](./expert-product-technical-design.md)                                                                            |
-| 专家迁移 109、110 被加入官方迁移序列                               | 建立独立扩展迁移记录，提前处理编号竞争             | [迁移入口](../apps/server/src/persistence/Migrations.ts)、[迁移历史检查](../scripts/check-migration-lineage.ts)             |
-| desktop 已集中管理应用身份；Canary 有独立目录与脚本更新            | 扩展已有机制，建立自己的安装身份和更新源           | [桌面身份](../packages/shared/src/desktopIdentity.ts)、[Canary](./canary.md)、[发布说明](./release.md)                      |
+| 已核实事实                                                         | 对设计的影响                                                                                                      | 本地依据                                                                                                                                                                                                                             |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Task/Thread 拥有对话、Provider session、环境和工作状态             | 自定义功能复用任务系统，不再建第二套执行器                                                                        | [核心概念](./core-concepts.md)                                                                                                                                                                                                       |
+| 已有全局和项目 Kanban，由线程与草稿派生 Draft / In Progress / Done | 若只是管理 AI 任务，先复用；业务事项才新增模型                                                                    | [看板逻辑](../apps/web/src/components/kanban/kanban.logic.ts)、[看板页面](../apps/web/src/components/kanban/KanbanView.tsx)                                                                                                          |
+| Plugins 页面使用 Provider 发现的插件和 Skills                      | 不能据此认定支持安装任意 React 页面或业务后端                                                                     | [PluginLibrary](../apps/web/src/components/PluginLibrary.tsx)                                                                                                                                                                        |
+| 专家功能已跨协议、会话、Gateway、UI、持久化接入                    | 保留必要的深度接入；把新增业务逻辑从接入文件中收拢                                                                | [专家方案](./expert-product-technical-design.md)                                                                                                                                                                                     |
+| 旧 fork 曾把专家迁移记为 109、110；官方 `v0.9.2` 发布清单止于 108  | 专家扩展改用 Workbench 自有迁移 ledger；仅按精确历史身份与 schema 接纳旧库中的 109、110，不把它们当成官方发布迁移 | [Workbench migrations](../apps/server/src/workbench/persistence/WorkbenchMigrations.ts)、[遗留迁移接纳](../apps/server/src/workbench/persistence/LegacyExpertMigrationAdoption.ts)、[WB-02 计划](./workbench-implementation-plan.md) |
+| desktop 已集中管理应用身份；Canary 有独立目录与脚本更新            | 扩展已有机制，建立自己的安装身份和更新源                                                                          | [桌面身份](../packages/shared/src/desktopIdentity.ts)、[Canary](./canary.md)、[发布说明](./release.md)                                                                                                                               |
 
 在线核实：截至核实日期，官方发布页将 `v0.9.2` 标为 Latest，`v0.9.3-beta.1` 标为预发布。`v0.9.2` 的官方迁移清单止于 108；尚不能据此声称已与我们的 109、110 发生实际编号冲突。[官方发布页](https://github.com/Emanuele-web04/synara/releases)、[v0.9.2 迁移源码](https://raw.githubusercontent.com/Emanuele-web04/synara/v0.9.2/apps/server/src/persistence/Migrations.ts)。
 
@@ -77,7 +79,7 @@ flowchart TB
 
 Provider 专有行为仍在各 Adapter 内。宿主适配层只收拢调用和兼容处理，不能假设 Codex 与 Pi 的资源加载、授权或恢复方式一致，也不能建立绕过原生权限的后门。
 
-建议目录，均为未来实施位置：
+以下目录中，Workbench 注册、专家迁移和同步工具已有实现；看板与个人首页仍是后续模块示例：
 
 ```text
 apps/web/src/workbench/

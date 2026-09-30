@@ -1,7 +1,8 @@
 # 个人工作台落地技术方案与实施计划
 
-状态：WB-00 基线已完成；WB-04 阶段 A、阶段 B 与集成候选退休修复已通过 review；B2 隔离构建清单实现待 review，尚未执行实际构建；其余计划项尚未完成。
-日期：2026-09-29。适用仓库：当前 Synara Expert fork。  
+状态：本轮范围为 WB-00 至 WB-05；不开展 WB-06。WB-00 上游完整历史、92 个发布标签与迁移 lineage 检查已有补充证据；WB-04 同步 CLI 已实现，build manifest 代码已提交但待统一 review/验收；WB-05 workflow 代码已提交但没有远端手动或定时运行证据。WB-01 实际打包身份、WB-02 统一启动/备份接线和真实恢复演练、WB-03 候选真实运行以及 WB-04 最终候选验证尚未完成。M1、M2、M3 均未完成。
+日期：2026-09-30。适用仓库：当前 Synara Expert fork。官方 `v0.9.2` 仍是未集成候选；锁定 SHA 不表示已合并、打包或运行验证。
+
 上位设计：[工作台架构](./workbench-architecture.md)。既有能力：[专家方案](./expert-product-technical-design.md)。
 
 ## 快速导航
@@ -20,9 +21,9 @@
 
 第一轮交付是一个可持续升级的个人工作台底座：当前专家能力继续可用，原生能力有回归验证，自定义应用与原版隔离，完成一次真实的官方版本集成，并建立每周候选更新流程。看板等新产品功能在此基础上继续增加。
 
-本次制定技术方案与计划；没有执行提交、配置远端、迁移数据、安装新应用、推送或启用定时任务。
+下表记录 2026-09-29 制定方案时的历史起点，不代表当前状态。之后已形成提交、补齐上游历史和发布标签；远端仍未推送或启用 workflow，也没有迁移活动用户数据或安装候选应用。
 
-当前已核实的实施起点：
+历史实施起点（2026-09-29）：
 
 | 项目       | 状态                                                                            | 实施影响                                         |
 | ---------- | ------------------------------------------------------------------------------- | ------------------------------------------------ |
@@ -33,6 +34,19 @@
 | 备份与锁   | 已有独占锁、迁移快照、中断恢复                                                  | 扩展现有机制，不从应用外并发连接活动数据库       |
 | 平台证据   | 专家旧记录包含 macOS 实测；Linux/Windows 仍有待实测项                           | 新版本重新验收；旧记录不能替代本次候选验证       |
 | Git 网络   | 本会话早先访问 GitHub 受本机代理连接失败影响                                    | WB-00 重新核实，失败只阻塞联网步骤               |
+
+当前分阶段状态（2026-09-30）：
+
+| 工作包 | 已有证据                                                                                                                                                                     | 尚未完成                                                                                                                               |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| WB-00  | [完整历史与 upstream 标签补充](../workbench/WB-00-upstream-evidence.md)记录 422 个上游 heads、92 个 `v*` tags，仓库不再是 shallow；`migrations:check` 检查全部发布标签通过。 | 原基线全量测试记录中有两项受并行/时序影响的失败，单项重跑通过；此项仍按原记录保留，不能写成全量套件全绿。                              |
+| WB-01  | [图标与 Actions 权限调查](../workbench/WB-01-evidence.md)及[运行环境 preflight](../workbench/WB-04-runtime-preflight.md)已记录身份实现、工具限制和可用配置。                 | 未构建最终候选 ZIP；身份、安装版并存、数据路径和 updater 行为未作候选实测。                                                            |
+| WB-02  | Workbench module migration ledger、升级计划及备份/恢复规划代码已建立。                                                                                                       | 统一 startup/backup 接线补丁 `cb4b6e7b3` 和 follow-up `6e8b7a93f` 尚待集成/统一验收；未做真实隔离数据库升级、中断恢复或 restore 演练。 |
+| WB-03  | 专家注册、runtime 接线与 feature import boundary 有独立提交和 focused 检查记录。                                                                                             | 尚未在最终官方候选上验证 Codex/Pi 普通/专家首轮、恢复、取消、MCP 和 session 隔离。                                                     |
+| WB-04  | 固定目标的 `check/prepare/bind/verify/status` CLI 与 candidate retirement 已提交；build manifest 实现见 `e3a9e090f`。                                                        | build manifest 待主审与统一候选验收；没有实际 Workbench ZIP build，CLI 的全候选固定门禁未在最终候选 SHA 上执行。                       |
+| WB-05  | workflow 与 helper 实现见提交 `9bb1e1240`，报告记录了仓库 token 与分支设置限制。                                                                                             | 未推送、未手动 dispatch、未定时运行；远端 branch write、artifact 保留和 PR 降级均无运行证据。                                          |
+
+官方候选锁、已集成基线和三者 merge-base 的准确关系见 [WB-00 upstream evidence](../workbench/WB-00-upstream-evidence.md)。以上状态不替代最终候选自动门禁、实际包身份检查、Provider 运行或数据恢复验收。
 
 第一轮优先完成当前 macOS 自用运行验证。平台无关代码继续遵循仓库边界，Linux/Windows 的支持状态按实际验证记录，不宣称已经覆盖。
 
@@ -66,15 +80,15 @@ WB-01 默认身份方案如下，实施时统一接入现有身份定义、打�
 
 按可独立验证的工作包推进，每个工作包形成明确提交边界和验收记录。主路径为 `WB-00 → WB-01/WB-02 → WB-03 → WB-04 → WB-05`；WB-01 与 WB-02 完成后共同进入真实升级验收。看板 WB-06 在底座通过首次升级后开始。
 
-| 工作包               | 具体交付                                                                          | 改动位置                                                                                                                                                                                                         | 完成条件                                                                 |
-| -------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| WB-00 基线与环境     | 专家改动清单与可恢复提交；upstream；完整历史与标签；工具链；运行实例/数据位置盘点 | Git 配置、现有代码审查、拟新增 `workbench/upstream.lock.json`                                                                                                                                                    | 能复现当前版本；共同祖先已确认；记录现有失败与平台缺口                   |
-| WB-01 应用与数据隔离 | 自定义日用/候选身份；独立 home、profile、端口；脚本更新模式                       | [desktopIdentity](../packages/shared/src/desktopIdentity.ts)、[desktop main](../apps/desktop/src/main.ts)、[构建器](../scripts/build-desktop-artifact.ts)、[Canary 工具](../scripts/canary.ts)                   | 原版和工作台可并存；实际构建的身份与更新策略正确；候选不占用日用数据     |
-| WB-02 迁移归属与恢复 | 扩展 migrator；109/110 历史接管；统一备份/恢复计划；双 schema 版本检查            | [SQLite 装配](../apps/server/src/persistence/Layers/Sqlite.ts)、[迁移](../apps/server/src/persistence/Migrations.ts)、[备份](../apps/server/src/persistence/MigrationBackup.ts)、拟新增 `workbench/persistence/` | 历史样本、崩溃重试和恢复测试通过；官方与自定义迁移不再竞争编号           |
-| WB-03 收拢接入       | 工作台入口注册、专家服务装配与依赖清单；接入边界检查                              | [wsRpc](../apps/server/src/wsRpc.ts)、[专家服务](../apps/server/src/experts/ExpertStore.ts)、[设置导航](../apps/web/src/settingsNavigation.ts)、拟新增 server/web `workbench/`                                   | 原生与专家行为不变；新模块可通过集中入口接入；没有新的执行器             |
-| WB-04 首次真实同步   | 同步脚本；固定官方候选；冲突适配；隔离构建；真实运行及恢复演练                    | 拟新增 `scripts/workbench-sync.ts` 与支持模块；复用现有测试、构建和恢复工具                                                                                                                                      | 官方 SHA、自定义 SHA、检查和实测证据对应同一候选；形成可安装版本         |
-| WB-05 每周自动准备   | 每周 workflow、并发控制、重复运行处理、候选报告、失败恢复入口                     | 拟新增 `.github/workflows/workbench-weekly-sync.yml`；复用 [CI](../.github/workflows/ci.yml) 和 setup-workspace                                                                                                  | 手动触发及一轮真实定时触发均有证据；同一候选不重复；不会自动替换日用程序 |
-| WB-06 业务看板       | WorkItem/线程关联、最小页面与“交给专家”操作                                       | 拟新增 `workbench/features/boards/`；复用 [原生 Kanban](../apps/web/src/components/kanban/KanbanView.tsx) 的适用组件                                                                                             | 事项与执行状态分开；崩溃重试不重复创建任务；进入下次周同步验证           |
+| 工作包               | 具体交付                                                                          | 改动位置                                                                                                                                                                                                                                                                                | 完成条件                                                                 |
+| -------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| WB-00 基线与环境     | 专家改动清单与可恢复提交；upstream；完整历史与标签；工具链；运行实例/数据位置盘点 | [基线记录](../workbench/WB-00-baseline.md)、[上游历史补充](../workbench/WB-00-upstream-evidence.md)、`workbench/upstream.lock.json`                                                                                                                                                     | 能复现当前版本；共同祖先已确认；记录现有失败与平台缺口                   |
+| WB-01 应用与数据隔离 | 自定义日用/候选身份；独立 home、profile、端口；脚本更新模式                       | [desktopIdentity](../packages/shared/src/desktopIdentity.ts)、[desktop main](../apps/desktop/src/main.ts)、[构建器](../scripts/build-desktop-artifact.ts)、[WB-01 证据](../workbench/WB-01-evidence.md)                                                                                 | 原版和工作台可并存；实际构建的身份与更新策略正确；候选不占用日用数据     |
+| WB-02 迁移归属与恢复 | 扩展 migrator；旧 109/110 精确接管；统一备份/恢复计划；双 schema 版本检查         | [SQLite 装配](../apps/server/src/persistence/Layers/Sqlite.ts)、[官方迁移目录](../apps/server/src/persistence/Migrations.ts)、[备份/恢复](../apps/server/src/persistence/MigrationBackup.ts)、[Workbench persistence](../apps/server/src/workbench/persistence/WorkbenchUpgradePlan.ts) | 历史样本、崩溃重试和恢复测试通过；官方与自定义迁移不再竞争编号           |
+| WB-03 收拢接入       | 工作台入口注册、专家服务装配与依赖清单；接入边界检查                              | [workbench runtime](../apps/server/src/workbench/runtimeLayer.ts)、[RPC](../apps/server/src/wsRpc.ts)、[注册表](../apps/web/src/workbench/registry.ts)、[边界检查](../scripts/check-workbench-boundary.ts)                                                                              | 原生与专家行为不变；新模块可通过集中入口接入；没有新的执行器             |
+| WB-04 首次真实同步   | 同步脚本；固定官方候选；冲突适配；隔离构建；真实运行及恢复演练                    | [sync CLI](../scripts/workbench-sync.ts)、[`workbench:sync`](../package.json)、[build manifest](../scripts/workbench-build.ts)；复用现有测试、构建和恢复工具                                                                                                                            | 官方 SHA、自定义 SHA、检查和实测证据对应同一候选；形成可安装版本         |
+| WB-05 每周自动准备   | 每周 workflow、并发控制、重复运行处理、候选报告、失败恢复入口                     | [weekly workflow](../.github/workflows/workbench-weekly-sync.yml)、[helper/tests](../.github/scripts/workbench-weekly.mjs)、[自动化记录](../workbench/WB-05-automation.md)                                                                                                              | 手动触发及一轮真实定时触发均有证据；同一候选不重复；不会自动替换日用程序 |
+| WB-06 业务看板       | WorkItem/线程关联、最小页面与“交给专家”操作                                       | 拟新增 `workbench/features/boards/`；复用 [原生 Kanban](../apps/web/src/components/kanban/KanbanView.tsx) 的适用组件                                                                                                                                                                    | 事项与执行状态分开；崩溃重试不重复创建任务；进入下次周同步验证           |
 
 WB-00 的提交前先审查代码、运行产物、密钥和机器路径，按实际依赖整理提交；本地提交与远程推送分别执行。若其他工作仍在修改当前目录，先明确文件归属并保存基线，再在独立工作区实施。
 
@@ -94,7 +108,7 @@ WB-00 的提交前先审查代码、运行产物、密钥和机器路径，按�
 
 专家绑定仍随原有事件与投影持久化，保留创建、fork/handoff、恢复和重放语义。未来确有列冲突或多模块需求时，再单独评估把扩展投影迁到旁表；本轮不叠加该搬迁。
 
-拟新增的 server 文件职责（目录前缀为 `apps/server/src/workbench/persistence/`）：
+已新增的 server 文件职责（目录前缀为 `apps/server/src/workbench/persistence/`）：
 
 | 文件                               | 职责                                                            |
 | ---------------------------------- | --------------------------------------------------------------- |
@@ -102,6 +116,8 @@ WB-00 的提交前先审查代码、运行产物、密钥和机器路径，按�
 | `LegacyExpertMigrationAdoption.ts` | 纯识别计划与受控接管，精确匹配旧 109/110 身份和 schema          |
 | `WorkbenchUpgradePlan.ts`          | 汇总官方升级、自定义升级、历史接管和备份要求                    |
 | 对应测试                           | 验证历史身份、事务、失败恢复、过新版本与数据保留                |
+
+代码状态：Workbench ledger 与只读升级计划已提交。SQLite 启动、迁移备份/恢复共享计划的接线提交 `cb4b6e7b3` 及 follow-up `6e8b7a93f` 尚待集成和统一验收；在这两项 review/测试完成前，不把 WB-02 标成可用于用户数据库升级，也不宣称恢复演练通过。
 
 `workbench_sql_migrations` 的计划字段为 `module_id`、`migration_id`、`name`、`checksum`、`applied_at`，主键为 `(module_id, migration_id)`。同一模块的历史记录必须构成有效前缀，已执行脚本不可改名、改号或修改校验内容。另设工作台数据格式版本，拒绝当前程序不能解释的版本。优先使用现有 migrator 可支持的表配置；不足的部分写局部适配，不增加新的数据库框架。
 
@@ -175,7 +191,7 @@ WB-00 的提交前先审查代码、运行产物、密钥和机器路径，按�
 
 ### 6.1 脚本接口
 
-接口状态：WB-04 阶段 A 的 `check`/`prepare`、阶段 B 的持久状态/`bind`/`verify`/`status`、集成候选退休与隔离构建清单脚本已实现；真实构建和运行仍待验收。
+接口状态：WB-04 阶段 A 的 `check`/`prepare`、阶段 B 的持久状态/`bind`/`verify`/`status`、集成候选退休已实现。build manifest 代码已提交，接口见下方命令；实现 review、真实构建和候选运行仍待统一验收。
 
 | 命令                                                                                                                                                    | 行为与输出                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -221,7 +237,7 @@ mise exec -- bun scripts/workbench-build.ts --flavor workbench --source-sha <cle
 
 - 构建清单：记录最终源代码 SHA、官方 SHA、工具链、两套 schema 版本及产物 hash；运行中显示的版本来自该构建。
 
-建议实现文件为 `scripts/workbench-sync.ts`，版本选择、Git 操作、状态和检查执行放 `scripts/lib/workbench-sync/`；沿用现有平台/进程封装与参数数组调用。
+当前实现位于 `scripts/workbench-sync.ts` 与 `scripts/lib/workbench-sync/`；版本选择、Git 操作、状态和检查执行沿用现有平台/进程封装与参数数组调用。
 
 ### 6.2 版本与候选规则
 
@@ -256,7 +272,7 @@ mise exec -- bun scripts/workbench-build.ts --flavor workbench --source-sha <cle
 
 第一版复用已有 CI/setup/build 入口；如需显式 workflow_dispatch，给既有验证入口增加精确候选 ref 的支持，或用共享检查脚本在周 workflow 内调用。不复制整份 CI 成为第二套易漂移的验证逻辑。
 
-需要处理的 GitHub 行为：定时 workflow 要存在于默认分支，执行可能延迟；自动 token 的 push 不能假设会触发另一轮 CI，自动创建 PR 的检查也可能等待批准。因此本次 workflow 必须显式关联候选 SHA 和检查运行，不把“PR 已创建”视为 CI 已启动。具体行为在启用时按仓库设置验证。[定时触发说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)、[工作流之间的触发规则](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow)。
+需要处理的 GitHub 行为：WB-01 的只读设置快照显示 Actions 已启用、默认 token 权限只读、没有返回 branch protection/ruleset；允许 `GITHUB_TOKEN` 创建和批准 PR 的仓库设置关闭。因此自动 PR 创建按不可用处理，默认保留候选分支、run artifact 和 job summary；候选分支写入仍要以真实 workflow 运行结果为准，不引入 PAT，也不改仓库设置。定时 workflow 要存在于默认分支且执行可能延迟；自动 token 的 push 不能假设会触发另一轮 CI。显式关联候选 SHA 和检查运行，不把“PR 已创建”视为 CI 已启动。[定时触发说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)、[工作流之间的触发规则](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow)。
 
 启用前检查仓库 Actions 开关、用量、默认分支、token 可用权限和候选分支规则。若暂不具备远程条件，先交付相同脚本的手动流程；M3 保持未完成，不能把本地成功当作定时已生效。
 
@@ -314,7 +330,7 @@ WB-06 只预留最小业务模型和接入方式，具体业务列、字段、�
 
 ## 9. 实施检查清单
 
-- [ ] WB-00：审查并保存基线，工具链匹配，upstream 与历史/标签可验证。
+- [x] WB-00：审查并保存基线，工具链匹配，upstream 与历史/标签可验证；全量并行测试的已记录失败与单项重跑结果仍保留在基线记录中。
 - [ ] WB-01：工作台日用版、候选版、原版的实际身份和数据目录隔离。
 - [ ] WB-02：独立迁移记录与 109/110 接管完成，备份和恢复故障矩阵通过。
 - [ ] WB-03：专家接入收拢，原生与专家回归通过，接入点有清单。

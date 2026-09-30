@@ -19,6 +19,10 @@ export const SYNARA_CUA_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.cua`;
 export const SYNARA_CUA_DESKTOP_SCHEME = "synara-cua";
 export const SYNARA_CUA_DESKTOP_ORIGIN = `${SYNARA_CUA_DESKTOP_SCHEME}://app`;
 export const SYNARA_CUA_DESKTOP_ENTRY_URL = `${SYNARA_CUA_DESKTOP_ORIGIN}/index.html`;
+export const SYNARA_BETA_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.beta`;
+export const SYNARA_BETA_DESKTOP_SCHEME = "synara-beta";
+export const SYNARA_BETA_DESKTOP_ORIGIN = `${SYNARA_BETA_DESKTOP_SCHEME}://app`;
+export const SYNARA_BETA_DESKTOP_ENTRY_URL = `${SYNARA_BETA_DESKTOP_ORIGIN}/index.html`;
 export const SYNARA_WORKBENCH_DESKTOP_SCHEME = "workbench";
 export const SYNARA_WORKBENCH_DESKTOP_ORIGIN = `${SYNARA_WORKBENCH_DESKTOP_SCHEME}://app`;
 export const SYNARA_WORKBENCH_DESKTOP_ENTRY_URL = `${SYNARA_WORKBENCH_DESKTOP_ORIGIN}/index.html`;
@@ -33,16 +37,27 @@ export type SynaraDesktopFlavor =
   | "development"
   | "canary"
   | "cua"
+  | "beta"
   | "workbench"
   | "workbench-preview";
 export const SYNARA_PACKAGED_DESKTOP_FLAVORS = [
   "production",
   "canary",
   "cua",
+  "beta",
   "workbench",
   "workbench-preview",
 ] as const;
 export type SynaraPackagedDesktopFlavor = (typeof SYNARA_PACKAGED_DESKTOP_FLAVORS)[number];
+
+/**
+ * electron-updater matches the update channel against the release tag's
+ * prerelease identifier, so the beta flavor must use the `beta` channel to see
+ * `vX.Y.Z-beta.N` releases. Every other flavor keeps the `synara` channel.
+ */
+export function desktopUpdateChannel(flavor: SynaraDesktopFlavor): string {
+  return flavor === "beta" ? "beta" : SYNARA_DESKTOP_UPDATE_CHANNEL;
+}
 
 export interface SynaraDesktopIdentity {
   readonly flavor: SynaraDesktopFlavor;
@@ -67,6 +82,9 @@ export function resolveSynaraDesktopFlavor(input: {
   }
   if (requestedFlavor === "canary") {
     return "canary";
+  }
+  if (requestedFlavor === "beta") {
+    return "beta";
   }
   if (requestedFlavor === "workbench" || requestedFlavor === "workbench-preview") {
     return requestedFlavor;
@@ -94,6 +112,7 @@ export function resolveSynaraDesktopRuntimeFlavor(input: {
       flavor === "production" ||
       flavor === "canary" ||
       flavor === "cua" ||
+      flavor === "beta" ||
       flavor === "workbench" ||
       flavor === "workbench-preview"
     ) {
@@ -116,6 +135,7 @@ export function canOverrideDesktopSmokeUserData(input: {
 }): boolean {
   return (
     input.packagedFlavor === "cua" ||
+    input.packagedFlavor === "beta" ||
     (input.packagedFlavor === undefined &&
       input.sourceBuildMarker === SYNARA_SOURCE_DESKTOP_BUILD_MARKER)
   );
@@ -172,6 +192,19 @@ export function synaraDesktopIdentity(flavor: SynaraDesktopFlavor): SynaraDeskto
       userDataDirectoryName: "synara-canary",
       defaultHomeDirectoryName: ".synara-canary",
       usesScriptedUpdates: true,
+    };
+  }
+  if (flavor === "beta") {
+    return {
+      flavor,
+      displayName: "Synara Beta",
+      bundleId: SYNARA_BETA_BUNDLE_ID,
+      scheme: SYNARA_BETA_DESKTOP_SCHEME,
+      origin: SYNARA_BETA_DESKTOP_ORIGIN,
+      entryUrl: SYNARA_BETA_DESKTOP_ENTRY_URL,
+      userDataDirectoryName: "synara-beta",
+      defaultHomeDirectoryName: ".synara-beta",
+      usesScriptedUpdates: false,
     };
   }
   if (flavor === "development") {

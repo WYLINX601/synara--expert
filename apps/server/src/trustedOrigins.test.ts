@@ -13,6 +13,8 @@ import {
   shouldRejectUntrustedRequestOrigin,
 } from "./trustedOrigins";
 
+// SAFETY: Tests that exercise host, publicUrl, or authToken spread this fixture
+// and override that field; the base only relies on devUrl plus undefined-safe checks.
 const config = {
   devUrl: new URL("http://localhost:5173/"),
 } as ServerConfigShape;
@@ -64,6 +66,13 @@ describe("trustedOrigins", () => {
     expect(
       isTrustedAppOrigin({
         origin: "workbench-preview://app",
+        requestOrigin: "http://127.0.0.1:58090",
+        config,
+      }),
+    ).toBe(true);
+    expect(
+      isTrustedAppOrigin({
+        origin: "synara-beta://app",
         requestOrigin: "http://127.0.0.1:58090",
         config,
       }),
@@ -139,6 +148,46 @@ describe("trustedOrigins", () => {
     expect(normalizeCorsOrigin("synara-cua://app/")).toBe("synara-cua://app");
     expect(normalizeCorsOrigin("workbench://app/")).toBe("workbench://app");
     expect(normalizeCorsOrigin("workbench-preview://app/")).toBe("workbench-preview://app");
+    expect(normalizeCorsOrigin("synara-beta://app/")).toBe("synara-beta://app");
+  });
+
+  it("trusts every packaged desktop flavor at the request gate and rejects lookalikes", () => {
+    for (const rawOrigin of [
+      "synara://app",
+      "synara-beta://app",
+      "synara-canary://app",
+      "synara-cua://app",
+      "workbench://app",
+      "workbench-preview://app",
+    ]) {
+      expect(
+        shouldRejectUntrustedRequestOrigin({
+          rawOrigin,
+          requestOrigin: "http://127.0.0.1:58090",
+          config,
+        }),
+      ).toBe(false);
+    }
+    for (const rawOrigin of [
+      "synara://evil.test",
+      "synara-beta://evil.test",
+      "synara-beta://app.evil.test",
+      "synara-betas://app",
+      "synara-canary://evil.test",
+      "synara-cua://evil.test",
+      "workbench://evil.test",
+      "workbench-preview://evil.test",
+      "workbench-preview://app.evil.test",
+      "workbench-previews://app",
+    ]) {
+      expect(
+        shouldRejectUntrustedRequestOrigin({
+          rawOrigin,
+          requestOrigin: "http://127.0.0.1:58090",
+          config,
+        }),
+      ).toBe(true);
+    }
   });
 
   it("rejects present but untrusted request origins for websocket-style gates", () => {

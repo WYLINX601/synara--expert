@@ -1,6 +1,6 @@
 # 个人工作台落地技术方案与实施计划
 
-状态：本轮范围为 WB-00 至 WB-05；不开展 WB-06。WB-00 上游完整历史、92 个发布标签与迁移 lineage 检查已有补充证据；WB-04 同步 CLI 已实现，build manifest 代码已提交但待统一 review/验收；WB-05 workflow 代码已提交但没有远端手动或定时运行证据。WB-02 统一启动/备份接线已在当前 integration 分支实现；真实升级/恢复演练和统一候选验收尚未完成。WB-01 实际打包身份、WB-03 候选真实运行以及 WB-04 最终候选验证也尚未完成。M1、M2、M3 均未完成。
+状态：本轮范围为 WB-00 至 WB-05；不开展 WB-06。WB-00 上游完整历史、92 个发布标签与迁移 lineage 检查已有补充证据；WB-02 统一启动/备份接线已集成，定向测试通过；WB-04 同步 CLI 已实现，build manifest 代码已提交但待统一 review/验收；WB-05 workflow 代码已提交但没有远端手动或定时运行证据。WB-01 实际打包身份、WB-02 真实升级/恢复演练、WB-03 候选真实运行以及 WB-04 最终候选验证尚未完成。M1、M2、M3 均未完成。
 日期：2026-09-30。适用仓库：当前 Synara Expert fork。官方 `v0.9.2` 仍是未集成候选；锁定 SHA 不表示已合并、打包或运行验证。
 上位设计：[工作台架构](./workbench-architecture.md)。既有能力：[专家方案](./expert-product-technical-design.md)。
 
@@ -24,26 +24,26 @@
 
 历史实施起点（2026-09-29）：
 
-| 项目       | 状态                                                                            | 实施影响                                         |
-| ---------- | ------------------------------------------------------------------------------- | ------------------------------------------------ |
-| Git        | `main` 基线为 `eaa61eded31b6755d4f30ba8eabc5d905cf817cb`；浅克隆；仅配置 origin | 先保存自定义改动、补齐历史和验证所需发布标签     |
-| 自定义代码 | 专家能力有大量未提交文件                                                        | 不能直接在活动工作区执行周同步                   |
-| Node / Bun | 当前为 22.23.1 / 1.4.0；[.mise.toml](../.mise.toml) 要求 24.13.1 / 1.4.2        | 验收使用仓库锁定工具链，避免环境差异造成误判     |
-| 数据迁移   | 旧专家版本曾使用官方序列中的 109、110；当前官方 catalog 截止 108                  | 新库使用独立工作台 tracker；旧历史只按冻结身份与 schema 精确接管 |
-| 备份与锁   | 已有独占锁、迁移快照、中断恢复                                                  | 扩展现有机制，不从应用外并发连接活动数据库       |
-| 平台证据   | 专家旧记录包含 macOS 实测；Linux/Windows 仍有待实测项                           | 新版本重新验收；旧记录不能替代本次候选验证       |
-| Git 网络   | 本会话早先访问 GitHub 受本机代理连接失败影响                                    | WB-00 重新核实，失败只阻塞联网步骤               |
+| 项目       | 状态                                                                            | 实施影响                                                         |
+| ---------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Git        | `main` 基线为 `eaa61eded31b6755d4f30ba8eabc5d905cf817cb`；浅克隆；仅配置 origin | 先保存自定义改动、补齐历史和验证所需发布标签                     |
+| 自定义代码 | 专家能力有大量未提交文件                                                        | 不能直接在活动工作区执行周同步                                   |
+| Node / Bun | 当前为 22.23.1 / 1.4.0；[.mise.toml](../.mise.toml) 要求 24.13.1 / 1.4.2        | 验收使用仓库锁定工具链，避免环境差异造成误判                     |
+| 数据迁移   | 旧专家版本曾使用官方序列中的 109、110；当前官方 catalog 截止 108                | 新库使用独立工作台 tracker；旧历史只按冻结身份与 schema 精确接管 |
+| 备份与锁   | 已有独占锁、迁移快照、中断恢复                                                  | 扩展现有机制，不从应用外并发连接活动数据库                       |
+| 平台证据   | 专家旧记录包含 macOS 实测；Linux/Windows 仍有待实测项                           | 新版本重新验收；旧记录不能替代本次候选验证                       |
+| Git 网络   | 本会话早先访问 GitHub 受本机代理连接失败影响                                    | WB-00 重新核实，失败只阻塞联网步骤                               |
 
 当前分阶段状态（2026-09-30）：
 
-| 工作包 | 已有证据                                                                                                                                                                     | 尚未完成                                                                                                                               |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| WB-00  | [完整历史与 upstream 标签补充](../workbench/WB-00-upstream-evidence.md)记录 422 个上游 heads、92 个 `v*` tags，仓库不再是 shallow；`migrations:check` 检查全部发布标签通过。 | 原基线全量测试记录中有两项受并行/时序影响的失败，单项重跑通过；此项仍按原记录保留，不能写成全量套件全绿。                              |
-| WB-01  | [图标与 Actions 权限调查](../workbench/WB-01-evidence.md)及[运行环境 preflight](../workbench/WB-04-runtime-preflight.md)已记录身份实现、工具限制和可用配置。                 | 未构建最终候选 ZIP；身份、安装版并存、数据路径和 updater 行为未作候选实测。                                                            |
-| WB-02  | Workbench module migration ledger、升级计划、统一 startup/backup/recovery 接线已集成到当前本地分支。                                                                          | 尚未做真实隔离数据库升级、中断恢复或 restore 演练；统一候选验收仍未完成。 |
-| WB-03  | 专家注册、runtime 接线与 feature import boundary 有独立提交和 focused 检查记录。                                                                                             | 尚未在最终官方候选上验证 Codex/Pi 普通/专家首轮、恢复、取消、MCP 和 session 隔离。                                                     |
-| WB-04  | 固定目标的 `check/prepare/bind/verify/status` CLI 与 candidate retirement 已提交；build manifest 实现见 `e3a9e090f`。                                                        | build manifest 待主审与统一候选验收；没有实际 Workbench ZIP build，CLI 的全候选固定门禁未在最终候选 SHA 上执行。                       |
-| WB-05  | workflow 与 helper 实现见提交 `9bb1e1240`，报告记录了仓库 token 与分支设置限制。                                                                                             | 未推送、未手动 dispatch、未定时运行；远端 branch write、artifact 保留和 PR 降级均无运行证据。                                          |
+| 工作包 | 已有证据                                                                                                                                                                                                                 | 尚未完成                                                                                                         |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| WB-00  | [完整历史与 upstream 标签补充](../workbench/WB-00-upstream-evidence.md)记录 422 个上游 heads、92 个 `v*` tags，仓库不再是 shallow；`migrations:check` 检查全部发布标签通过。                                             | 原基线全量测试记录中有两项受并行/时序影响的失败，单项重跑通过；此项仍按原记录保留，不能写成全量套件全绿。        |
+| WB-01  | [图标与 Actions 权限调查](../workbench/WB-01-evidence.md)及[运行环境 preflight](../workbench/WB-04-runtime-preflight.md)已记录身份实现、工具限制和可用配置。                                                             | 未构建最终候选 ZIP；身份、安装版并存、数据路径和 updater 行为未作候选实测。                                      |
+| WB-02  | Workbench module migration ledger、升级计划、统一 startup/backup/recovery 接线已集成。6 个 server focused test 文件 89 项通过；恢复约束 follow-up 另有 2 个文件 47 项通过，server typecheck 与 `migrations:check` 通过。 | 尚未做真实隔离数据库升级、中断恢复或 restore 演练；统一候选验收仍未完成。                                        |
+| WB-03  | 专家注册、runtime 接线与 feature import boundary 有独立提交和 focused 检查记录。                                                                                                                                         | 尚未在最终官方候选上验证 Codex/Pi 普通/专家首轮、恢复、取消、MCP 和 session 隔离。                               |
+| WB-04  | 固定目标的 `check/prepare/bind/verify/status` CLI 与 candidate retirement 已提交；build manifest 实现见 `e3a9e090f`。                                                                                                    | build manifest 待主审与统一候选验收；没有实际 Workbench ZIP build，CLI 的全候选固定门禁未在最终候选 SHA 上执行。 |
+| WB-05  | workflow 与 helper 实现见提交 `9bb1e1240`，报告记录了仓库 token 与分支设置限制。                                                                                                                                         | 未推送、未手动 dispatch、未定时运行；远端 branch write、artifact 保留和 PR 降级均无运行证据。                    |
 
 官方候选锁、已集成基线和三者 merge-base 的准确关系见 [WB-00 upstream evidence](../workbench/WB-00-upstream-evidence.md)。以上状态不替代最终候选自动门禁、实际包身份检查、Provider 运行或数据恢复验收。
 
@@ -116,7 +116,7 @@ WB-00 的提交前先审查代码、运行产物、密钥和机器路径，按�
 | `WorkbenchUpgradePlan.ts`          | 汇总官方升级、自定义升级、历史接管和备份要求                    |
 | 对应测试                           | 验证历史身份、事务、失败恢复、过新版本与数据保留                |
 
-代码状态：Workbench ledger 与只读升级计划，以及 SQLite 启动/备份/恢复共享计划的接线，均已集成到当前本地分支。代码仍待统一候选验收；未做真实隔离数据库升级、中断恢复或 restore 演练，不把 WB-02 标成可用于用户数据库升级，也不宣称恢复演练通过。
+代码状态：Workbench ledger 与只读升级计划，以及 SQLite 启动/备份/恢复共享计划的接线，均已集成到当前本地分支。定向测试命令 `mise exec -- bun run --cwd apps/server test -- src/persistence/Migrations.test.ts src/workbench/persistence/WorkbenchMigrations.test.ts src/workbench/persistence/WorkbenchUpgradePlan.test.ts src/persistence/MigrationBackup.test.ts src/persistence/Layers/Sqlite.test.ts src/persistence/MigrationSchemaTooNewRecovery.test.ts` 通过（6 个文件、89 项）；恢复约束修复后重跑 `mise exec -- bun run --cwd apps/server test -- src/persistence/MigrationBackup.test.ts src/workbench/persistence/WorkbenchUpgradePlan.test.ts` 通过（2 个文件、47 项）。server typecheck、`migrations:check`、相关文件格式检查及 diff check 均通过。上述是隔离/内存 SQLite 代码测试；未做真实隔离数据库升级、中断恢复或 restore 演练，统一候选验收仍未完成。
 
 `workbench_sql_migrations` 的计划字段为 `module_id`、`migration_id`、`name`、`checksum`、`applied_at`，主键为 `(module_id, migration_id)`。同一模块的历史记录必须构成有效前缀，已执行脚本不可改名、改号或修改校验内容。另设工作台数据格式版本，拒绝当前程序不能解释的版本。优先使用现有 migrator 可支持的表配置；不足的部分写局部适配，不增加新的数据库框架。
 

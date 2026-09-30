@@ -103,20 +103,27 @@
       "entryFiles": [
         "apps/server/src/experts/ExpertStore.ts",
         "apps/server/src/experts/ExpertConnectionStore.ts",
-        "apps/server/src/persistence/Migrations/109_ProjectionThreadsExpertBinding.ts",
-        "apps/server/src/persistence/Migrations/110_ExpertAppliedRuntimeRecords.ts",
         "apps/server/src/persistence/Layers/ExpertAppliedRuntimeRecords.ts",
-        "apps/server/src/persistence/Layers/ProjectionThreads.ts"
+        "apps/server/src/persistence/Layers/ProjectionThreads.ts",
+        "apps/server/src/persistence/Layers/Sqlite.ts",
+        "apps/server/src/persistence/Migrations.ts",
+        "apps/server/src/persistence/MigrationBackup.ts",
+        "apps/server/src/workbench/persistence/WorkbenchMigrations.ts",
+        "apps/server/src/workbench/persistence/LegacyExpertMigrationAdoption.ts",
+        "apps/server/src/workbench/persistence/WorkbenchUpgradePlan.ts"
       ],
-      "responsibility": "Expert definitions, connection configuration and immutable snapshots use private files below the selected state directory. Thread bindings remain in the native projection schema and applied runtime records remain in the existing SQLite repository. WB-03A does not change migration startup, backup, recovery, or migration ownership; those are WB-02 work.",
-      "revisitAfter": ["WB-02"],
-      "revisitReason": "Update native/custom migration ownership and any moved migration/test paths after WB-02 establishes the extension migration boundary.",
+      "responsibility": "Expert definitions, connection configuration and immutable snapshots use private files below the selected state directory. Thread bindings remain in the native projection schema and applied runtime records remain in the existing SQLite repository. WB-02 owns its migration ledger and read-only upgrade plan; integrated SqlitePersistence startup uses the existing connection/lifecycle lock and passes that plan through native pre-migration backup, resume and explicit restore. This native integration is required because the extension changes projection/table schema and must share the host's single SQLite ownership and recovery point. Focused startup/migration tests passed (6 files/89 tests, then 2 files/47 tests for the recovery follow-up); no real isolated-database upgrade or restore drill has run. The official v0.9.2 migration history ends at 108; old fork rows 109/110 are recognized only by exact legacy identity and resulting schema, then adopted into local expert migration IDs, never treated as official published migrations.",
       "tests": [
         "apps/server/src/experts/ExpertStore.test.ts",
         "apps/server/src/experts/ExpertConnectionStore.test.ts",
         "apps/server/src/persistence/Layers/ExpertAppliedRuntimeRecords.test.ts",
+        "apps/server/src/persistence/Layers/ProjectionRepositories.test.ts",
+        "apps/server/src/persistence/Layers/Sqlite.test.ts",
         "apps/server/src/persistence/Migrations.test.ts",
-        "apps/server/src/persistence/Layers/ProjectionRepositories.test.ts"
+        "apps/server/src/persistence/MigrationBackup.test.ts",
+        "apps/server/src/persistence/MigrationSchemaTooNewRecovery.test.ts",
+        "apps/server/src/workbench/persistence/WorkbenchMigrations.test.ts",
+        "apps/server/src/workbench/persistence/WorkbenchUpgradePlan.test.ts"
       ]
     },
     {

@@ -1,0 +1,191 @@
+name: Workbench weekly upstream sync
+
+on:
+  schedule:
+    - cron: "30 2 * * 6"
+  workflow_dispatch:
+    inputs:
+      candidate_ref:
+        description: Optional exact refs/heads/codex/sync-* branch to verify read-only
+        required: false
+        type: string
+
+concurrency:
+  group: workbench-weekly-sync
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  prepare:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.prepare.outputs.artifact_name }}
+      candidate_sha: ${{ steps.prepare.outputs.candidate_sha }}
+      candidate_branch: ${{ steps.prepare.outputs.candidate_branch }}
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+      target_sha: ${{ steps.prepare.outputs.target_sha }}
+      target_tag: ${{ steps.prepare.outputs.target_tag }}
+      publishable: ${{ steps.prepare.outputs.publishable }}
+      explicit_ref: ${{ steps.prepare.outputs.explicit_ref }}
+      status: ${{ steps.prepare.outputs.status }}
+      verification_bound: ${{ steps.prepare.outputs.verification_bound }}
+    steps:
+      - name: Checkout fixed default-branch snapshot
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup static workspace dependencies
+        uses: ./.github/actions/setup-workspace
+        with:
+          scope: static
+
+      - name: Run the focused automation fixture
+        shell: bash
+        run: bun run .github/scripts/workbench-weekly.test.mjs
+
+      - name: Select and prepare one fixed candidate
+        id: prepare
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+        run: node .github/scripts/workbench-weekly.mjs prepare
+
+      - name: Upload candidate and preparation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-weekly-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workbench-weekly-candidate-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 90
+
+  verify:
+    needs: prepare
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.prepare.outputs.candidate_sha != '' && needs.prepare.outputs.verification_bound == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.verify.outputs.artifact_name }}
+      candidate_sha: ${{ steps.verify.outputs.verify_candidate_sha }}
+      status: ${{ steps.verify.outputs.verify_status }}
+      verification_bound: ${{ steps.verify.outputs.verification_bound }}
+    steps:
+      - name: Checkout fixed default-branch snapshot
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+
+      - name: Download exact candidate bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: workbench-weekly-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workbench-weekly-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Preserve trusted verifier from fixed default branch
+        shell: bash
+        run: cp .github/scripts/workbench-weekly.mjs "$RUNNER_TEMP/workbench-weekly-main.mjs"
+
+      - name: Import candidate onto its expected branch
+        id: import
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: node "$RUNNER_TEMP/workbench-weekly-main.mjs" import-for-verify
+
+      - name: Setup candidate workspace
+        uses: ./.github/actions/setup-workspace
+        with:
+          scope: full
+
+      - name: Bind and verify this exact candidate SHA
+        id: verify
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: node "$RUNNER_TEMP/workbench-weekly-main.mjs" verify
+
+      - name: Upload exact-SHA verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-weekly-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workbench-weekly-verify-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 90
+
+  publish:
+    needs: [prepare, verify]
+    if: >-
+      ${{
+        always() &&
+        github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+        needs.prepare.result == 'success' &&
+        needs.prepare.outputs.publishable == 'true' &&
+        needs.prepare.outputs.explicit_ref != 'true' &&
+        needs.verify.outputs.verification_bound == 'true' &&
+        needs.verify.outputs.candidate_sha == needs.prepare.outputs.candidate_sha &&
+        (needs.verify.outputs.status == 'awaiting-runtime' || needs.verify.outputs.status == 'checks-failed')
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout trusted default-branch publisher
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download candidate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: workbench-weekly-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workbench-weekly-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Download exact-SHA verification report
+        uses: actions/download-artifact@v4
+        with:
+          name: workbench-weekly-verify-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workbench-weekly-verify-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Publish candidate branch with compare-and-swap
+        id: publish
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .github/scripts/workbench-weekly.mjs publish
+
+      - name: Upload candidate persistence report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workbench-weekly-publish-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workbench-weekly-publish-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 90

@@ -22,6 +22,13 @@ const runtimeInfo = {
 } as const;
 
 describe("updateMachine", () => {
+  it.each(["workbench", "workbench-preview"] as const)(
+    "preserves the %s identity in desktop update state",
+    (flavor) => {
+      expect(createInitialDesktopUpdateState("1.0.0", runtimeInfo, flavor).flavor).toBe(flavor);
+    },
+  );
+
   it("clears transient errors when a check starts", () => {
     const state = reduceDesktopUpdateStateOnCheckStart(
       {

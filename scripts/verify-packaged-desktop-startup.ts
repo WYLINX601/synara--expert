@@ -19,6 +19,15 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  resolveSynaraDesktopHomeDir,
+  SYNARA_BETA_HOME_ENV,
+  SYNARA_HOME_ENV,
+  SYNARA_PACKAGED_DESKTOP_FLAVORS,
+  SYNARA_WORKBENCH_HOME_ENV,
+  SYNARA_WORKBENCH_PREVIEW_HOME_ENV,
+  type SynaraPackagedDesktopFlavor,
+} from "@synara/shared/desktopIdentity";
 
 export type PackagedDesktopPlatform = "linux" | "mac" | "win";
 
@@ -29,6 +38,7 @@ export interface PackagedDesktopStartupOptions {
   readonly version: string;
   readonly timeoutMs: number;
   readonly executableName: string;
+  readonly desktopFlavor: SynaraPackagedDesktopFlavor;
 }
 
 export function parsePackagedDesktopStartupArgs(
@@ -50,6 +60,7 @@ export function parsePackagedDesktopStartupArgs(
     "--version",
     "--timeout-ms",
     "--executable-name",
+    "--desktop-flavor",
   ]);
   for (const name of values.keys()) {
     if (!known.has(name)) throw new Error(`Unknown packaged startup argument: ${name}.`);
@@ -71,6 +82,12 @@ export function parsePackagedDesktopStartupArgs(
   if (!/^[A-Za-z0-9._-]+$/.test(executableName) || executableName.includes("..")) {
     throw new Error(`Invalid packaged startup executable name: ${executableName}.`);
   }
+  const desktopFlavorValue =
+    values.get("--desktop-flavor")?.trim() ??
+    (executableName === "synara-beta" ? "beta" : "production");
+  if (!SYNARA_PACKAGED_DESKTOP_FLAVORS.some((flavor) => flavor === desktopFlavorValue)) {
+    throw new Error(`Unsupported packaged startup desktop flavor: ${desktopFlavorValue}.`);
+  }
   return {
     assetsDirectory: resolve(required("--assets-dir")),
     platform,
@@ -78,6 +95,7 @@ export function parsePackagedDesktopStartupArgs(
     version: required("--version"),
     timeoutMs,
     executableName,
+    desktopFlavor: desktopFlavorValue as SynaraPackagedDesktopFlavor,
   };
 }
 
@@ -270,7 +288,10 @@ function prepareLaunch(
 
 export function createPackagedDesktopSmokeEnvironment(
   root: string,
-  options: Pick<PackagedDesktopStartupOptions, "platform" | "version" | "executableName">,
+  options: Pick<
+    PackagedDesktopStartupOptions,
+    "platform" | "version" | "executableName" | "desktopFlavor"
+  >,
   inheritedEnvironment: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
@@ -282,8 +303,10 @@ export function createPackagedDesktopSmokeEnvironment(
     XDG_CONFIG_HOME: join(root, "xdg-config"),
     XDG_CACHE_HOME: join(root, "xdg-cache"),
     XDG_DATA_HOME: join(root, "xdg-data"),
-    SYNARA_HOME: join(root, "synara-home"),
-    SYNARA_BETA_HOME: join(root, "synara-beta-home"),
+    [SYNARA_HOME_ENV]: join(root, "synara-home"),
+    [SYNARA_BETA_HOME_ENV]: join(root, "synara-beta-home"),
+    [SYNARA_WORKBENCH_HOME_ENV]: join(root, "workbench-home"),
+    [SYNARA_WORKBENCH_PREVIEW_HOME_ENV]: join(root, "workbench-preview-home"),
     SYNARA_DISABLE_AUTO_UPDATE: "1",
     ELECTRON_ENABLE_LOGGING: "1",
   };
@@ -296,8 +319,10 @@ export function createPackagedDesktopSmokeEnvironment(
     env.XDG_CONFIG_HOME,
     env.XDG_CACHE_HOME,
     env.XDG_DATA_HOME,
-    env.SYNARA_HOME,
-    env.SYNARA_BETA_HOME,
+    env[SYNARA_HOME_ENV],
+    env[SYNARA_BETA_HOME_ENV],
+    env[SYNARA_WORKBENCH_HOME_ENV],
+    env[SYNARA_WORKBENCH_PREVIEW_HOME_ENV],
   ]) {
     if (path) mkdirSync(path, { recursive: true });
   }
@@ -411,9 +436,12 @@ export async function verifyPackagedDesktopStartup(
     const launch = prepareLaunch(options, extractionRoot);
     const env = createPackagedDesktopSmokeEnvironment(join(temporaryRoot, "state"), options);
     verifyPackagedRuntimeDependencies(launch.runtime, env, options.timeoutMs);
-    // Beta deliberately ignores SYNARA_HOME to avoid opening Stable's data.
-    const appHome =
-      options.executableName === "synara-beta" ? env.SYNARA_BETA_HOME! : env.SYNARA_HOME!;
+    const appHome = resolveSynaraDesktopHomeDir({
+      flavor: options.desktopFlavor,
+      homeDir: env.HOME!,
+      env,
+      joinPath: join,
+    });
     logDirectory = join(appHome, "userdata", "logs");
     const logPath = join(logDirectory, "desktop-main.log");
     child = spawn(launch.command, [...launch.args], {

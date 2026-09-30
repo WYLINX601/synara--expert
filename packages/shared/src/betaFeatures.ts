@@ -8,6 +8,10 @@ import {
   SYNARA_CUA_BUNDLE_ID,
   SYNARA_DEVELOPMENT_BUNDLE_ID,
   SYNARA_PRODUCTION_BUNDLE_ID,
+  SYNARA_WORKBENCH_BUNDLE_ID,
+  SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID,
+  SYNARA_WORKBENCH_DESKTOP_SCHEME,
+  SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME,
   type SynaraDesktopFlavor,
 } from "./desktopIdentity";
 
@@ -21,8 +25,8 @@ export const BETA_ONLY_FEATURES: readonly BetaOnlyFeature[] = ["omp"];
 
 /**
  * Whether a Beta-only feature is on for this host. Only the Stable
- * (production) desktop build turns them off: Beta, Cua, Canary, development
- * and non-desktop hosts (flavor "unknown") keep them.
+ * (production) desktop build turns them off: Beta, Cua, Canary, Workbench,
+ * development and non-desktop hosts (flavor "unknown") keep them.
  */
 export function isBetaFeatureEnabled(
   feature: BetaOnlyFeature,
@@ -46,6 +50,10 @@ export function desktopFlavorFromBundleId(
       return "cua";
     case SYNARA_BETA_BUNDLE_ID:
       return "beta";
+    case SYNARA_WORKBENCH_BUNDLE_ID:
+      return "workbench";
+    case SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID:
+      return "workbench-preview";
     default:
       return "unknown";
   }
@@ -68,6 +76,10 @@ export function desktopFlavorFromProtocol(
       return "canary";
     case "synara-cua:":
       return "cua";
+    case `${SYNARA_WORKBENCH_DESKTOP_SCHEME}:`:
+      return "workbench";
+    case `${SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME}:`:
+      return "workbench-preview";
     case "synara:":
       return isDevBuild ? "development" : "production";
     default:

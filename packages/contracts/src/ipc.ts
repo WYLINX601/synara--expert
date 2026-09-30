@@ -366,9 +366,9 @@ export interface DesktopUpdateState {
   errorContext: "check" | "download" | "install" | null;
   canRetry: boolean;
   installFailureCount: number;
-  // Build flavor of the running desktop app ("production" | "beta" | "canary" | "cua").
+  // Build flavor of the running desktop app; Workbench identities stay distinct from Stable.
   // The web UI uses it for beta-only branding; production builds never see it.
-  flavor: "production" | "beta" | "canary" | "cua";
+  flavor: "production" | "beta" | "canary" | "cua" | "workbench" | "workbench-preview";
   // Public URL where the user can manually download the release when the
   // in-app updater cannot apply it (silent installer failure, unsigned build,
   // read-only install location, unsupported platform). Null when no GitHub
@@ -395,7 +395,7 @@ export interface DesktopBetaChannelState {
   /** False on web builds and unsupported probing environments. */
   readonly supported: boolean;
   /** Flavor of the running desktop app; the card only acts on "production". */
-  readonly flavor: "production" | "beta" | "canary" | "cua";
+  readonly flavor: "production" | "beta" | "canary" | "cua" | "workbench" | "workbench-preview";
   readonly installed: boolean;
   readonly version: string | null;
   /** True when this platform can install beta in place (macOS today). */

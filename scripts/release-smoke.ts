@@ -316,6 +316,11 @@ function verifyReleaseWorkflowSafety(): void {
   );
   assertContains(
     workflow,
+    "--desktop-flavor",
+    "Expected packaged startup verification to receive the resolved desktop flavor.",
+  );
+  assertContains(
+    workflow,
     "--executable-name",
     "Expected packaged startup verification to resolve the flavor's executable name.",
   );

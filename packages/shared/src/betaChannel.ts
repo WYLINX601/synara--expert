@@ -3,6 +3,7 @@
 // Layer: Shared contracts (consumed by desktop main, server, and web settings UI)
 
 import { Schema } from "effect";
+export { SYNARA_BETA_HOME_ENV } from "./desktopIdentity";
 
 /** Beta's data home; stable writes the import marker here, the beta server consumes it. */
 export const SYNARA_BETA_HOME_DIR_NAME = ".synara-beta";
@@ -37,7 +38,6 @@ export const SYNARA_BETA_RELEASES_API_URL =
  * serving `beta-mac.yml` plus the files it lists; `SYNARA_BETA_INSTALL_DIR` and
  * `SYNARA_BETA_USER_DATA` relocate the app bundle and its Electron profile.
  */
-export const SYNARA_BETA_HOME_ENV = "SYNARA_BETA_HOME";
 export const SYNARA_BETA_FEED_URL_ENV = "SYNARA_BETA_FEED_URL";
 export const SYNARA_BETA_INSTALL_DIR_ENV = "SYNARA_BETA_INSTALL_DIR";
 export const SYNARA_BETA_USER_DATA_ENV = "SYNARA_BETA_USER_DATA";

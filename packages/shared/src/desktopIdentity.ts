@@ -10,6 +10,10 @@ export const SYNARA_DEVELOPMENT_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.dev`
 export const SYNARA_CANARY_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.canary`;
 export const SYNARA_WORKBENCH_BUNDLE_ID = "com.wylinx.workbench";
 export const SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID = "com.wylinx.workbench.preview";
+export const SYNARA_HOME_ENV = "SYNARA_HOME";
+export const SYNARA_BETA_HOME_ENV = "SYNARA_BETA_HOME";
+export const SYNARA_WORKBENCH_HOME_ENV = "SYNARA_WORKBENCH_HOME";
+export const SYNARA_WORKBENCH_PREVIEW_HOME_ENV = "SYNARA_WORKBENCH_PREVIEW_HOME";
 /** Display/setup identity of the GUI host; this value does not confer native authority. */
 export const SYNARA_DESKTOP_BUNDLE_ID_ENV = "SYNARA_DESKTOP_BUNDLE_ID";
 export const SYNARA_CANARY_DESKTOP_SCHEME = "synara-canary";
@@ -69,6 +73,27 @@ export interface SynaraDesktopIdentity {
   readonly userDataDirectoryName: string;
   readonly defaultHomeDirectoryName: string;
   readonly usesScriptedUpdates: boolean;
+}
+
+/** Resolve a desktop flavor's isolated home using the environment override meant for it. */
+export function resolveSynaraDesktopHomeDir(input: {
+  readonly flavor: SynaraDesktopFlavor;
+  readonly homeDir: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly joinPath: (homeDir: string, directoryName: string) => string;
+}): string {
+  const overrideName =
+    input.flavor === "beta"
+      ? SYNARA_BETA_HOME_ENV
+      : input.flavor === "workbench"
+        ? SYNARA_WORKBENCH_HOME_ENV
+        : input.flavor === "workbench-preview"
+          ? SYNARA_WORKBENCH_PREVIEW_HOME_ENV
+          : SYNARA_HOME_ENV;
+  return (
+    input.env[overrideName]?.trim() ||
+    input.joinPath(input.homeDir, synaraDesktopIdentity(input.flavor).defaultHomeDirectoryName)
+  );
 }
 
 export function resolveSynaraDesktopFlavor(input: {

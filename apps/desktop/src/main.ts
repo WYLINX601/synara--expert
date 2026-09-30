@@ -72,6 +72,7 @@ import {
   SYNARA_DESKTOP_BUNDLE_ID_ENV,
   SYNARA_SOURCE_DESKTOP_BUILD_MARKER,
   canOverrideDesktopSmokeUserData,
+  resolveSynaraDesktopHomeDir,
   resolveSynaraDesktopRuntimeFlavor,
   synaraDesktopIdentity,
 } from "@synara/shared/desktopIdentity";
@@ -368,13 +369,14 @@ const desktopFlavor = resolveSynaraDesktopRuntimeFlavor({
   allowDevelopmentOverride: isSourceDesktopBuild,
 });
 const desktopIdentity = synaraDesktopIdentity(desktopFlavor);
-// Beta never honors SYNARA_HOME: a globally exported stable home would make
-// beta open (and migrate) stable's database.
-const BASE_DIR =
-  (desktopFlavor === "beta"
-    ? process.env.SYNARA_BETA_HOME?.trim()
-    : process.env.SYNARA_HOME?.trim()) ||
-  Path.join(OS.homedir(), desktopIdentity.defaultHomeDirectoryName);
+// Beta and Workbench flavors only honor their own home override; an inherited
+// generic SYNARA_HOME must never point them at another install's database.
+const BASE_DIR = resolveSynaraDesktopHomeDir({
+  flavor: desktopFlavor,
+  homeDir: OS.homedir(),
+  env: process.env,
+  joinPath: (homeDir, directoryName) => Path.join(homeDir, directoryName),
+});
 const STATE_DIR = Path.join(BASE_DIR, "userdata");
 const DESKTOP_WINDOW_STATE_PATH = Path.join(STATE_DIR, "desktop-window-state.json");
 const DESKTOP_APP_ICON_PATH = Path.join(STATE_DIR, "desktop-app-icon");
@@ -5182,14 +5184,7 @@ function registerIpcHandlers(): void {
     platform: process.platform,
     homeDir: OS.homedir(),
     betaHomeDir: resolveBetaHomeDir(),
-    flavor:
-      desktopFlavor === "beta"
-        ? "beta"
-        : desktopFlavor === "canary"
-          ? "canary"
-          : desktopFlavor === "cua"
-            ? "cua"
-            : "production",
+    flavor: desktopFlavor === "development" ? "production" : desktopFlavor,
     feedUrlOverride: process.env.SYNARA_BETA_FEED_URL,
     installDirOverride: process.env.SYNARA_BETA_INSTALL_DIR,
     expectedTeamId: ownAppTeamId(),

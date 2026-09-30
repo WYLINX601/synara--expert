@@ -611,6 +611,7 @@ jobs:
             --platform "${{ matrix.platform }}" \
             --arch "${{ matrix.arch }}" \
             --version "${{ needs.preflight.outputs.version }}" \
+            --desktop-flavor "${{ needs.preflight.outputs.desktop_flavor }}" \
             --executable-name "${{ needs.preflight.outputs.desktop_flavor == 'beta' && 'synara-beta' || 'synara' }}"
 
       - name: Upload build artifacts

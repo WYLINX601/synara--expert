@@ -68,7 +68,7 @@ interface BetaChannelDeps {
   readonly homeDir: string;
   readonly betaHomeDir: string;
   /** Flavor of the running app; only "production" may initiate the handoff. */
-  readonly flavor: "production" | "beta" | "canary" | "cua";
+  readonly flavor: DesktopBetaChannelState["flavor"];
   /** Base URL serving beta-mac.yml and its files; falls back to GitHub releases. */
   readonly feedUrlOverride?: string | undefined;
   /** Install target for the macOS bundle; defaults to /Applications. */

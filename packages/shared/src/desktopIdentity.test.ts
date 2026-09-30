@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { join } from "node:path";
 
 import {
   desktopUpdateChannel,
+  resolveSynaraDesktopHomeDir,
   resolveSynaraDesktopFlavor,
   resolveSynaraDesktopRuntimeFlavor,
   canOverrideDesktopSmokeUserData,
@@ -18,12 +20,16 @@ import {
   SYNARA_DESKTOP_ENTRY_URL,
   SYNARA_DESKTOP_ORIGIN,
   SYNARA_DESKTOP_UPDATE_CHANNEL,
+  SYNARA_HOME_ENV,
+  SYNARA_BETA_HOME_ENV,
   SYNARA_DEVELOPMENT_BUNDLE_ID,
   SYNARA_PRODUCTION_BUNDLE_ID,
   SYNARA_WORKBENCH_BUNDLE_ID,
+  SYNARA_WORKBENCH_HOME_ENV,
   SYNARA_WORKBENCH_DESKTOP_ENTRY_URL,
   SYNARA_WORKBENCH_DESKTOP_ORIGIN,
   SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID,
+  SYNARA_WORKBENCH_PREVIEW_HOME_ENV,
   SYNARA_WORKBENCH_PREVIEW_DESKTOP_ENTRY_URL,
   SYNARA_WORKBENCH_PREVIEW_DESKTOP_ORIGIN,
   synaraDesktopIdentity,
@@ -267,5 +273,55 @@ describe("desktopIdentity", () => {
       ).toBe(false);
     }
     expect(canOverrideDesktopSmokeUserData({})).toBe(false);
+  });
+});
+
+describe("resolveSynaraDesktopHomeDir", () => {
+  it.each(["workbench", "workbench-preview"] as const)(
+    "%s ignores inherited SYNARA_HOME and uses its isolated default",
+    (flavor) => {
+      const identity = synaraDesktopIdentity(flavor);
+      expect(
+        resolveSynaraDesktopHomeDir({
+          flavor,
+          homeDir: "/home/test",
+          env: { [SYNARA_HOME_ENV]: "/stable-home" },
+          joinPath: join,
+        }),
+      ).toBe(join("/home/test", identity.defaultHomeDirectoryName));
+    },
+  );
+
+  it.each([
+    ["workbench", SYNARA_WORKBENCH_HOME_ENV, "/tmp/custom-workbench"] as const,
+    ["workbench-preview", SYNARA_WORKBENCH_PREVIEW_HOME_ENV, "/tmp/custom-preview"] as const,
+  ])("honors the dedicated %s home override", (flavor, envName, customHome) => {
+    expect(
+      resolveSynaraDesktopHomeDir({
+        flavor,
+        homeDir: "/home/test",
+        env: { [SYNARA_HOME_ENV]: "/stable-home", [envName]: customHome },
+        joinPath: join,
+      }),
+    ).toBe(customHome);
+  });
+
+  it("preserves Stable and Beta home overrides", () => {
+    expect(
+      resolveSynaraDesktopHomeDir({
+        flavor: "production",
+        homeDir: "/home/test",
+        env: { [SYNARA_HOME_ENV]: "/stable-home" },
+        joinPath: join,
+      }),
+    ).toBe("/stable-home");
+    expect(
+      resolveSynaraDesktopHomeDir({
+        flavor: "beta",
+        homeDir: "/home/test",
+        env: { [SYNARA_HOME_ENV]: "/stable-home", [SYNARA_BETA_HOME_ENV]: "/beta-home" },
+        joinPath: join,
+      }),
+    ).toBe("/beta-home");
   });
 });

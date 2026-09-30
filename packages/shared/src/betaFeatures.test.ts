@@ -12,12 +12,24 @@ import {
   SYNARA_CUA_BUNDLE_ID,
   SYNARA_DEVELOPMENT_BUNDLE_ID,
   SYNARA_PRODUCTION_BUNDLE_ID,
+  SYNARA_WORKBENCH_BUNDLE_ID,
+  SYNARA_WORKBENCH_DESKTOP_SCHEME,
+  SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID,
+  SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME,
 } from "./desktopIdentity";
 
 describe("isBetaFeatureEnabled", () => {
   it("turns a listed feature off only for the production flavor", () => {
     expect(BETA_ONLY_FEATURES).toContain("omp");
-    for (const flavor of ["development", "canary", "cua", "beta", "unknown"] as const) {
+    for (const flavor of [
+      "development",
+      "canary",
+      "cua",
+      "beta",
+      "workbench",
+      "workbench-preview",
+      "unknown",
+    ] as const) {
       expect(isBetaFeatureEnabled("omp", flavor)).toBe(true);
     }
     expect(isBetaFeatureEnabled("omp", "production")).toBe(false);
@@ -46,6 +58,8 @@ describe("desktopFlavorFromBundleId", () => {
     expect(desktopFlavorFromBundleId(SYNARA_CANARY_BUNDLE_ID)).toBe("canary");
     expect(desktopFlavorFromBundleId(SYNARA_CUA_BUNDLE_ID)).toBe("cua");
     expect(desktopFlavorFromBundleId(SYNARA_BETA_BUNDLE_ID)).toBe("beta");
+    expect(desktopFlavorFromBundleId(SYNARA_WORKBENCH_BUNDLE_ID)).toBe("workbench");
+    expect(desktopFlavorFromBundleId(SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID)).toBe("workbench-preview");
   });
 
   it("trims surrounding whitespace", () => {
@@ -65,6 +79,12 @@ describe("desktopFlavorFromProtocol", () => {
     expect(desktopFlavorFromProtocol("synara-beta:", false)).toBe("beta");
     expect(desktopFlavorFromProtocol("synara-canary:", false)).toBe("canary");
     expect(desktopFlavorFromProtocol("synara-cua:", false)).toBe("cua");
+    expect(desktopFlavorFromProtocol(`${SYNARA_WORKBENCH_DESKTOP_SCHEME}:`, false)).toBe(
+      "workbench",
+    );
+    expect(desktopFlavorFromProtocol(`${SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME}:`, false)).toBe(
+      "workbench-preview",
+    );
     expect(desktopFlavorFromProtocol("synara:", false)).toBe("production");
   });
 

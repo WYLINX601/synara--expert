@@ -76,7 +76,7 @@ afterEach(() => {
 
 const makeChannel = (
   root: string,
-  flavor: "production" | "beta" | "canary" = "production",
+  flavor: ConstructorParameters<typeof DesktopBetaChannel>[0]["flavor"] = "production",
   extra: Partial<ConstructorParameters<typeof DesktopBetaChannel>[0]> = {},
 ) =>
   new DesktopBetaChannel({
@@ -95,6 +95,36 @@ describe("DesktopBetaChannel", () => {
     expect((await beta.importAndLaunch(root)).error).toBe("not-supported");
     expect(beta.getState().flavor).toBe("beta");
   });
+
+  it.each(["workbench", "workbench-preview"] as const)(
+    "%s cannot install, launch, import, or leave through the beta channel",
+    async (flavor) => {
+      const root = makeRoot();
+      const betaHome = join(root, ".synara-beta");
+      const install = vi.fn(async () => "/Applications/Synara Beta.app");
+      const channel = makeChannel(root, flavor, { platform: "darwin", install });
+      const spawnCallCount = spawnCalls.length;
+
+      const results = await Promise.all([
+        channel.install(),
+        channel.launch(),
+        channel.importAndLaunch(join(root, "source-home")),
+        channel.leave(),
+      ]);
+
+      expect(results.map((result) => result.error)).toEqual([
+        "not-supported",
+        "not-supported",
+        "not-supported",
+        "not-supported",
+      ]);
+      expect(channel.getState().flavor).toBe(flavor);
+      expect(install).not.toHaveBeenCalled();
+      expect(spawnCalls).toHaveLength(spawnCallCount);
+      expect(existsSync(betaHome)).toBe(false);
+      expect(existsSync(join(betaHome, BETA_IMPORT_REQUEST_FILE_NAME))).toBe(false);
+    },
+  );
 
   it("reports not-installed on a clean machine", () => {
     const root = makeRoot();

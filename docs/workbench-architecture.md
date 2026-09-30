@@ -178,6 +178,8 @@ contracts 仅承载跨进程结构；运行逻辑放 server/web，公共运行�
 
 沿用现有 [desktopIdentity](../packages/shared/src/desktopIdentity.ts) 与构建配置建立自己的身份：名称、bundle ID、URL scheme、Electron userData、应用数据目录和更新渠道成套设置，不能只改显示名称。日用版、候选版、原版 Synara 分别使用数据目录，避免互相打开同一数据库。
 
+日用 Workbench 可用 `SYNARA_WORKBENCH_HOME` 覆盖自己的应用数据目录；候选版使用 `SYNARA_WORKBENCH_PREVIEW_HOME`。未设置时两者分别使用身份定义的默认目录，并忽略通用 `SYNARA_HOME`，避免继承到 Stable 的数据目录。Beta 仍读取 `SYNARA_BETA_HOME`，其他 flavor 保持原有 `SYNARA_HOME` 规则。
+
 第一阶段复用 Canary 的固定提交/脚本更新思路，但现有 Canary 命令不会自动完成官方合并、扩展兼容检查或数据回退；只有已验证的自定义提交才能成为安装目标。以后需要安装包分发时，再配置自己的发布仓库与更新元数据，复用现有打包器。设置更新仓库不能替代应用身份、签名或实机安装验证。构建检查应核对实际写入安装包的身份和更新地址，避免遗漏配置后回落到官方渠道。
 
 回退分为两种：

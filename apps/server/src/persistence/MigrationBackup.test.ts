@@ -21,6 +21,7 @@ import {
   MigrationDivergenceConsentRequiredError,
   MigrationRecoveryRequiredError,
   TRACKER_REPAIR_SNAPSHOT_RETENTION,
+  canonicalOfficialTargetForV1Record,
   createMigrationBackup,
   estimateMigrationBackupRequiredBytes,
   inspectPendingMigrationRecovery,
@@ -40,6 +41,7 @@ import { makeSqlitePersistenceLive } from "./Layers/Sqlite.ts";
 import { inspectWorkbenchUpgradePlan } from "../workbench/persistence/WorkbenchUpgradePlan.ts";
 import {
   LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
+  WorkbenchMigrationError,
   runWorkbenchMigrations,
 } from "../workbench/persistence/WorkbenchMigrations.ts";
 
@@ -870,6 +872,62 @@ describe("migration backups", () => {
     expect(await backupPaths(dbPath)).toEqual([]);
   });
 
+  it.each(["binding-column", "runtime-records-table"] as const)(
+    "rejects imported official history with an untracked expert %s before writes",
+    async (expertSchema) => {
+      const dbPath = await makeDbPath();
+      await runWithDatabase(
+        dbPath,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* runMigrations({ toMigrationInclusive: 16 });
+          const latestId = Math.max(...migrationEntries.map(([id]) => id));
+          for (let id = 17; id <= latestId; id += 1) {
+            yield* sql`
+              INSERT INTO effect_sql_migrations (migration_id, name)
+              VALUES (${id}, ${`ImportedMigration${id}`})
+            `;
+          }
+          if (expertSchema === "binding-column") {
+            yield* sql`ALTER TABLE projection_threads ADD COLUMN expert_binding_json TEXT`;
+          } else {
+            yield* sql`CREATE TABLE expert_applied_runtime_records (value TEXT NOT NULL)`;
+          }
+
+          const plan = yield* inspectWorkbenchUpgradePlan;
+          expect(plan.kind).toBe("rejected");
+          if (plan.kind !== "rejected") throw new Error("untracked expert schema was accepted");
+          const failure = yield* Effect.flip(
+            runWithPreMigrationBackup(
+              dbPath,
+              sql`CREATE TABLE should_not_be_created(value TEXT NOT NULL)`,
+              { upgradePlan: plan },
+            ),
+          );
+          expect(failure).toBeInstanceOf(WorkbenchMigrationError);
+        }),
+      );
+
+      expect(await backupPaths(dbPath)).toEqual([]);
+      await expect(fs.stat(migrationRecoveryMarkerPath(dbPath))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      const untouched = new DatabaseSync(dbPath, { readOnly: true });
+      try {
+        expect(
+          untouched
+            .prepare("SELECT name FROM sqlite_master WHERE name = 'should_not_be_created'")
+            .get(),
+        ).toBeUndefined();
+        expect(
+          untouched.prepare("SELECT name FROM effect_sql_migrations WHERE migration_id = 17").get(),
+        ).toMatchObject({ name: "ImportedMigration17" });
+      } finally {
+        untouched.close();
+      }
+    },
+  );
+
   it("keeps reviewed migration aliases on the automatic upgrade path", async () => {
     const dbPath = await makeDbPath();
 
@@ -1273,6 +1331,74 @@ describe("migration backups", () => {
       );
       const marker = await Effect.runPromise(inspectPendingMigrationRecovery(dbPath));
       expect(marker?.payload.targetVersion).toBe(112);
+    } finally {
+      mutableCatalog.pop();
+    }
+  });
+
+  it("does not let a frozen v1 expert target authorize new official migration 109", async () => {
+    const dbPath = await makeDbPath();
+    const backup = await runWithDatabase(
+      dbPath,
+      Effect.gen(function* () {
+        yield* runMigrations({ toMigrationInclusive: 108 });
+        return yield* createMigrationBackup(dbPath, {
+          sourceVersion: "v108",
+          targetVersion: 110,
+        });
+      }),
+    );
+    const legacyV1Record = {
+      version: 1,
+      databasePath: dbPath,
+      backupPath: backup.backupPath,
+      sourceVersion: "v108",
+      targetVersion: 110,
+      lineageDivergence: null,
+      phase: "migration-in-progress",
+      createdAt: backup.createdAt,
+      resumeAttempts: 0,
+    };
+    const markerPath = migrationRecoveryMarkerPath(dbPath);
+    const markerText = `${JSON.stringify(legacyV1Record)}\n`;
+    await fs.writeFile(markerPath, markerText, { mode: 0o600 });
+
+    const mutableCatalog = migrationEntries as unknown as Array<unknown>;
+    mutableCatalog.push([109, "NewOfficialMigration109", Effect.void]);
+    try {
+      const currentOfficialTarget = Math.max(...migrationEntries.map(([id]) => id));
+      expect(canonicalOfficialTargetForV1Record(110)).toBe(108);
+      expect(currentOfficialTarget).toBe(109);
+      expect(currentOfficialTarget).toBeGreaterThan(canonicalOfficialTargetForV1Record(110));
+
+      await expect(
+        runWithDatabase(
+          dbPath,
+          Effect.gen(function* () {
+            const marker = yield* inspectPendingMigrationRecovery(dbPath);
+            if (!marker) throw new Error("expected the v1 migration recovery marker");
+            const plan = yield* inspectWorkbenchUpgradePlan;
+            if (plan.kind !== "ready") throw new Error(plan.reason);
+            expect(plan.official.targetVersion).toBe(109);
+            yield* resumeMarkedMigration(dbPath, marker, Effect.void, {
+              workbenchUpgradePlan: plan,
+            });
+          }),
+        ),
+      ).rejects.toThrow("targets an older official schema");
+
+      expect(await fs.readFile(markerPath, "utf8")).toBe(markerText);
+      expect(await backupPaths(dbPath)).toEqual([backup.backupPath]);
+      const untouched = new DatabaseSync(dbPath, { readOnly: true });
+      try {
+        expect(
+          untouched
+            .prepare("SELECT name FROM sqlite_master WHERE name = 'workbench_sql_migrations'")
+            .get(),
+        ).toBeUndefined();
+      } finally {
+        untouched.close();
+      }
     } finally {
       mutableCatalog.pop();
     }

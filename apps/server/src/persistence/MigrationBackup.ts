@@ -36,6 +36,7 @@ import { migrationEntries, planOfficialMigrationLineage } from "./Migrations.ts"
 import {
   LEGACY_EXPERT_OFFICIAL_MIGRATIONS,
   LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
+  FROZEN_LEGACY_OFFICIAL_PREFIX_HIGH_WATER_MARK,
   WORKBENCH_SCHEMA_FORMAT_VERSION,
   WORKBENCH_SCHEMA_METADATA_TABLE,
   currentOfficialMigrationCatalog,
@@ -1977,6 +1978,17 @@ function knownV1Target(targetVersion: number): boolean {
   );
 }
 
+/**
+ * v1 used official IDs for both canonical Synara upgrades and the old expert
+ * migrations. The frozen expert IDs represented the canonical official 108
+ * target; keeping that distinction prevents an old expert marker from
+ * authorizing a future official migration that reuses ID 109 or 110.
+ */
+export const canonicalOfficialTargetForV1Record = (targetVersion: number): number =>
+  LEGACY_EXPERT_OFFICIAL_MIGRATIONS.some(({ officialId }) => officialId === targetVersion)
+    ? FROZEN_LEGACY_OFFICIAL_PREFIX_HIGH_WATER_MARK
+    : targetVersion;
+
 function assertV1WorkbenchResumeIdentity(
   marker: MigrationRecoveryMarker,
   backup: SqliteMigrationBackupInspection,
@@ -2107,7 +2119,8 @@ export const resumeMarkedMigration = <A, E, R>(
       payload = convertedPayload;
       if (
         isVersion(marker.payload.targetVersion) &&
-        live.official.targetVersion > marker.payload.targetVersion
+        live.official.targetVersion >
+          canonicalOfficialTargetForV1Record(marker.payload.targetVersion)
       ) {
         return yield* Effect.fail(
           new WorkbenchMigrationError({

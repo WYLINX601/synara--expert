@@ -180,6 +180,9 @@ export const planWorkbenchUpgrade = (
     const canUseExistingOfficialDivergenceConsent =
       observedLineage.kind === "imported-divergence" &&
       observedLineage.rawHighWaterMark <= supportedOfficialVersion &&
+      observation.workbenchRows.length === 0 &&
+      observation.schemaState.bindingColumn === null &&
+      observation.schemaState.runtimeRecordColumns === null &&
       !LEGACY_EXPERT_OFFICIAL_MIGRATIONS.some(
         ({ officialId }) => officialId === observedLineage.divergence?.firstDivergedId,
       ) &&

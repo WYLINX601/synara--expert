@@ -23,6 +23,7 @@ import { Schema, type Effect } from "effect";
 
 import { connectOwnerUrl } from "./computer-use-fixtures/packaged-client.ts";
 import { startWorkbenchRuntimeMcpFixture } from "./lib/workbench-runtime-mcp-fixture.ts";
+import { hasExpectedMcpToolActivity } from "./lib/workbench-runtime-probe-evidence.ts";
 import {
   authenticatedOwnerUrl,
   parseRuntimeProbeOptions,
@@ -623,23 +624,6 @@ function assertOrdinaryBinding(thread: OrchestrationThread): void {
   if (thread.expertBinding !== null) throw new ProbeFailure("ordinary-thread-has-expert-binding");
 }
 
-function hasToolActivity(
-  thread: OrchestrationThread,
-  expectedAlias: string,
-  provider: ProbeProvider,
-): boolean {
-  const expectedItemType = provider === "codex" ? "mcp_tool_call" : "dynamic_tool_call";
-  return thread.activities.some((activity) => {
-    if (activity.kind !== "tool.updated") return false;
-    const payload = activity.payload;
-    if (typeof payload !== "object" || payload === null || !("data" in payload)) return false;
-    if (!("itemType" in payload) || payload.itemType !== expectedItemType) return false;
-    const data = payload.data;
-    if (typeof data !== "object" || data === null || !("toolName" in data)) return false;
-    return typeof data.toolName === "string" && data.toolName.endsWith(expectedAlias);
-  });
-}
-
 function expertPrompt(tool: string, value: string): string {
   return [
     `Use the configured MCP tool named ${tool} exactly once with the JSON input ${JSON.stringify({ value })}.`,
@@ -719,7 +703,14 @@ async function runCancellation(
       "interrupted",
       30_000,
     );
-    if (!hasToolActivity(interruptedThread, thread.waitToolAlias, thread.provider))
+    if (
+      !hasExpectedMcpToolActivity(
+        interruptedThread.activities,
+        thread.waitToolAlias,
+        thread.provider,
+        started.turnId,
+      )
+    )
       throw new ProbeFailure("product-mcp-wait-tool-activity-missing");
     await fixture.waitForWaitAbort(30_000);
     const stats = fixture.stats();
@@ -894,7 +885,14 @@ function assertMcpEcho(
 ): number {
   const delta = fixture.stats().echoCalls - input.callsBefore;
   if (delta < 1) throw new ProbeFailure("mcp-echo-handler-not-called");
-  if (!hasToolActivity(outcome.thread, input.expectedAlias, input.provider))
+  if (
+    !hasExpectedMcpToolActivity(
+      outcome.thread.activities,
+      input.expectedAlias,
+      input.provider,
+      outcome.turnId,
+    )
+  )
     throw new ProbeFailure("product-mcp-tool-activity-missing");
   if (!outcome.assistantText.includes(fixture.echoMarker))
     throw new ProbeFailure("fixture-echo-marker-missing-from-assistant");

@@ -755,6 +755,37 @@ export async function bindWorkbenchCandidate(input: {
     } catch {
       return reject("upstream-lockfile-check", "repair-the-versioned-upstream-lock-before-binding");
     }
+    const matchesIntegratedBase =
+      input.targetTag === rootLock.integratedBase.tag &&
+      targetSha === rootLock.integratedBase.commit.toLowerCase();
+    const matchesLockedCandidate =
+      input.targetTag === rootLock.candidate.tag &&
+      targetSha === rootLock.candidate.commit.toLowerCase();
+    if (!matchesIntegratedBase && !matchesLockedCandidate) {
+      return reject(
+        "target-not-in-upstream-lock",
+        "bind-only-the-versioned-integrated-base-or-candidate-tag-and-sha",
+      );
+    }
+    if (!matchesIntegratedBase) {
+      const targetFollowsIntegratedBase = isAncestor(
+        repoRoot,
+        rootLock.integratedBase.commit.toLowerCase(),
+        targetSha,
+      );
+      if (targetFollowsIntegratedBase === false) {
+        return reject(
+          "target-not-after-integrated-base",
+          "select-a-locked-official-target-that-descends-from-integrated-base",
+        );
+      }
+      if (targetFollowsIntegratedBase === null) {
+        return reject(
+          "target-lineage-incomplete",
+          "fetch-enough-history-to-prove-target-descends-from-integrated-base",
+        );
+      }
+    }
     const officialTag = validateFixedOfficialTag(
       repoRoot,
       input.dependencies?.repository ?? rootLock.repository,

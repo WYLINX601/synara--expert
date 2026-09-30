@@ -207,6 +207,84 @@ async function runtimeEvidenceFor(
 }
 
 describe("workbench sync persisted workflow", () => {
+  it("rejects a locked release target older than the integrated base during bind", async () => {
+    const fixture = await makeFixture();
+    git(
+      fixture.repo,
+      "merge",
+      "--no-ff",
+      fixture.targetSha,
+      "-m",
+      "integrate newer official release",
+    );
+    await commitFile(
+      fixture.repo,
+      "workbench/upstream.lock.json",
+      `${JSON.stringify(
+        fixtureLock(fixture.targetSha, fixture.baseSha, "v0.9.1", "v0.9.2"),
+        null,
+        2,
+      )}\n`,
+      "lock an older target against the newer integrated base",
+    );
+    const currentMain = git(fixture.repo, "rev-parse", "HEAD");
+    const candidateHead = git(fixture.checkout, "rev-parse", "HEAD");
+
+    const bind = await bindWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: currentMain,
+      targetTag: "v0.9.1",
+      targetSha: fixture.baseSha,
+      candidateSha: candidateHead,
+      dependencies: { repository: fixture.remote },
+    });
+
+    expect(bind.status).toBe("bind-rejected");
+    expect(bind.stage).toBe("target-not-after-integrated-base");
+  });
+
+  it("rejects a locked release target that diverges from the integrated base during bind", async () => {
+    const fixture = await makeFixture();
+    git(fixture.seed, "switch", "--detach", fixture.baseSha);
+    git(fixture.seed, "switch", "-c", "divergent-release");
+    const divergentSha = await commitFile(
+      fixture.seed,
+      "divergent-release.txt",
+      "divergent release\n",
+      "create a divergent official release",
+    );
+    git(fixture.seed, "tag", "v0.9.3", divergentSha);
+    git(fixture.seed, "push", fixture.remote, "divergent-release", "--tags");
+    git(fixture.repo, "fetch", fixture.remote, "--tags");
+    git(fixture.repo, "merge", "--no-ff", fixture.targetSha, "-m", "integrate official baseline");
+    await commitFile(
+      fixture.repo,
+      "workbench/upstream.lock.json",
+      `${JSON.stringify(
+        fixtureLock(fixture.targetSha, divergentSha, "v0.9.3", "v0.9.2"),
+        null,
+        2,
+      )}\n`,
+      "lock a divergent target against the integrated base",
+    );
+    const currentMain = git(fixture.repo, "rev-parse", "HEAD");
+    const candidateHead = git(fixture.checkout, "rev-parse", "HEAD");
+
+    const bind = await bindWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: currentMain,
+      targetTag: "v0.9.3",
+      targetSha: divergentSha,
+      candidateSha: candidateHead,
+      dependencies: { repository: fixture.remote },
+    });
+
+    expect(bind.status).toBe("bind-rejected");
+    expect(bind.stage).toBe("target-not-after-integrated-base");
+  });
+
   it("checks a fixed target, prepares it, records bounded checks, and stays awaiting runtime", async () => {
     const fixture = await makeFixture();
     const { prepare } = await checkedAndPrepared(fixture);

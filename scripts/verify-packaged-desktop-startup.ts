@@ -26,6 +26,7 @@ import {
   SYNARA_PACKAGED_DESKTOP_FLAVORS,
   SYNARA_WORKBENCH_HOME_ENV,
   SYNARA_WORKBENCH_PREVIEW_HOME_ENV,
+  synaraDesktopIdentity,
   type SynaraPackagedDesktopFlavor,
 } from "@synara/shared/desktopIdentity";
 
@@ -331,7 +332,7 @@ export function createPackagedDesktopSmokeEnvironment(
       env.HOME!,
       "Library",
       "Application Support",
-      options.executableName === "synara-beta" ? "synara-beta" : "synara",
+      synaraDesktopIdentity(options.desktopFlavor).userDataDirectoryName,
     );
     mkdirSync(userDataPath, { recursive: true });
     // Prevent the packaged app's update-only icon repair from registering this

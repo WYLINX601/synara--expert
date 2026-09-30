@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -6,6 +6,7 @@ import {
   SYNARA_HOME_ENV,
   SYNARA_WORKBENCH_HOME_ENV,
   SYNARA_WORKBENCH_PREVIEW_HOME_ENV,
+  synaraDesktopIdentity,
 } from "@synara/shared/desktopIdentity";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -185,6 +186,44 @@ describe("packaged desktop startup verification", () => {
     expect(home).toBe(env[envName]);
     expect(home).not.toBe(env[SYNARA_HOME_ENV]);
     expect(existsSync(home)).toBe(true);
+  });
+
+  it.each(["workbench", "workbench-preview"] as const)(
+    "seeds the macOS launch version under the %s profile",
+    (desktopFlavor) => {
+      const root = mkdtempSync(join(tmpdir(), "synara-workbench-macos-profile-test-"));
+      temporaryRoots.push(root);
+
+      const env = createPackagedDesktopSmokeEnvironment(root, {
+        platform: "mac",
+        version: "1.2.3",
+        executableName: "synara",
+        desktopFlavor,
+      });
+      const appSupport = join(env.HOME!, "Library", "Application Support");
+      const profileName = synaraDesktopIdentity(desktopFlavor).userDataDirectoryName;
+      const versionPath = join(appSupport, profileName, "last-launch-version.json");
+
+      expect(readFileSync(versionPath, "utf8")).toBe('{\n  "version": "1.2.3"\n}\n');
+      expect(existsSync(join(appSupport, "synara"))).toBe(false);
+    },
+  );
+
+  it("retains Beta's macOS launch-version profile", () => {
+    const root = mkdtempSync(join(tmpdir(), "synara-beta-macos-profile-test-"));
+    temporaryRoots.push(root);
+
+    const env = createPackagedDesktopSmokeEnvironment(root, {
+      platform: "mac",
+      version: "1.2.3",
+      executableName: "synara-beta",
+      desktopFlavor: "beta",
+    });
+    const appSupport = join(env.HOME!, "Library", "Application Support");
+    const betaVersionPath = join(appSupport, "synara-beta", "last-launch-version.json");
+
+    expect(JSON.parse(readFileSync(betaVersionPath, "utf8"))).toEqual({ version: "1.2.3" });
+    expect(existsSync(join(appSupport, "synara"))).toBe(false);
   });
 
   it("rejects a missing packaged peer even when the development tree provides it", () => {

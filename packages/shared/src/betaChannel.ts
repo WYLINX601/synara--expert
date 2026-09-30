@@ -3,7 +3,7 @@
 // Layer: Shared contracts (consumed by desktop main, server, and web settings UI)
 
 import { Schema } from "effect";
-export { SYNARA_BETA_HOME_ENV } from "./desktopIdentity";
+export { SYNARA_BETA_HOME_ENV } from "./desktopIdentity.ts";
 
 /** Beta's data home; stable writes the import marker here, the beta server consumes it. */
 export const SYNARA_BETA_HOME_DIR_NAME = ".synara-beta";

@@ -1,0 +1,607 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  readRepositoryLockStatus,
+  resolveRepositoryStatePaths,
+  withRepositoryLock,
+  type RuntimeEvidence,
+} from "./lib/workbench-sync/state.ts";
+import { runGit } from "./lib/workbench-sync/git.ts";
+import {
+  AUTOMATIC_CHECKS,
+  bindWorkbenchCandidate,
+  checkWorkbenchSyncWorkflow,
+  prepareWorkbenchCandidate,
+  REQUIRED_RUNTIME_CHECKS,
+  statusWorkbenchSync,
+  verifyWorkbenchCandidate,
+} from "./lib/workbench-sync/workflow.ts";
+import type { WorkbenchSyncLock } from "./lib/workbench-sync/sync.ts";
+
+const temporaryDirectories: string[] = [];
+const OFFICIAL_REPOSITORY = "https://github.com/Emanuele-web04/synara.git";
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
+
+async function tempDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), `synara-workflow-${prefix}-`));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
+function git(cwd: string, ...args: string[]): string {
+  const result = runGit(cwd, args, 30_000);
+  if (!result.ok) throw new Error(`git ${args[0]} failed (${result.exitCode ?? "unknown"})`);
+  return result.stdout.trim();
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolvePromise!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromiseValue) => {
+    resolvePromise = resolvePromiseValue;
+  });
+  return { promise, resolve: resolvePromise };
+}
+
+async function commitFile(
+  repo: string,
+  file: string,
+  content: string,
+  message: string,
+): Promise<string> {
+  const path = join(repo, file);
+  await mkdir(join(path, ".."), { recursive: true });
+  await writeFile(path, content);
+  git(repo, "add", "--", file);
+  git(repo, "commit", "-m", message);
+  return git(repo, "rev-parse", "HEAD");
+}
+
+function fixtureLock(baseSha: string, targetSha: string): WorkbenchSyncLock {
+  return {
+    formatVersion: 1,
+    repository: OFFICIAL_REPOSITORY,
+    branch: "main",
+    updateChannel: "latest-stable-release",
+    integrationStrategy: "merge",
+    integratedBase: { tag: "v0.9.1", commit: baseSha },
+    candidate: { tag: "v0.9.2", commit: targetSha, status: "not-yet-integrated" },
+  };
+}
+
+function fakeFetcher(): () => Promise<Response> {
+  return async () =>
+    new Response(
+      JSON.stringify([
+        {
+          draft: false,
+          prerelease: false,
+          tag_name: "v0.9.2",
+          published_at: "2026-09-22T00:00:00Z",
+        },
+      ]),
+      { status: 200 },
+    );
+}
+
+type Fixture = {
+  readonly directory: string;
+  readonly remote: string;
+  readonly seed: string;
+  readonly repo: string;
+  readonly checkout: string;
+  readonly baseSha: string;
+  readonly targetSha: string;
+};
+
+async function makeFixture(conflict = false): Promise<Fixture> {
+  const directory = await tempDirectory("repo");
+  const seed = join(directory, "seed");
+  const remote = join(directory, "upstream.git");
+  const repo = join(directory, "repo");
+  const checkout = join(directory, "candidate");
+  git(directory, "init", "--bare", remote);
+  git(directory, "init", "-b", "main", seed);
+  git(seed, "config", "user.name", "Workbench Test");
+  git(seed, "config", "user.email", "workbench-test@example.invalid");
+  const baseFile = conflict ? "shared.txt" : "upstream.txt";
+  const baseSha = await commitFile(seed, baseFile, "base\n", "official base");
+  git(seed, "tag", "v0.9.1", baseSha);
+  const targetSha = await commitFile(
+    seed,
+    conflict ? baseFile : "release.txt",
+    conflict ? "official update\n" : "release\n",
+    "stable release",
+  );
+  git(seed, "tag", "v0.9.2", targetSha);
+  git(seed, "push", remote, "main", "--tags");
+
+  git(directory, "clone", "--no-checkout", remote, repo);
+  git(repo, "config", "user.name", "Workbench Test");
+  git(repo, "config", "user.email", "workbench-test@example.invalid");
+  git(repo, "switch", "-C", "main", baseSha);
+  await mkdir(join(repo, "workbench"), { recursive: true });
+  if (conflict) await writeFile(join(repo, baseFile), "custom update\n");
+  await writeFile(
+    join(repo, "workbench/upstream.lock.json"),
+    `${JSON.stringify(fixtureLock(baseSha, targetSha), null, 2)}\n`,
+  );
+  await writeFile(join(repo, ".mise.toml"), '[tools]\nnode = "24.13.1"\nbun = "1.4.2"\n');
+  await writeFile(join(repo, "bun.lock"), '{"lockfileVersion":1}\n');
+  git(repo, "add", "--", "workbench/upstream.lock.json", ".mise.toml", "bun.lock");
+  if (conflict) git(repo, "add", "--", baseFile);
+  git(repo, "commit", "-m", "workbench candidate fixture");
+  git(repo, "worktree", "add", "--detach", checkout, "main");
+  return { directory, remote, seed, repo, checkout, baseSha, targetSha };
+}
+
+async function checkedAndPrepared(fixture: Fixture) {
+  const check = await checkWorkbenchSyncWorkflow({
+    repoRoot: fixture.repo,
+    dependencies: { repository: fixture.remote, fetcher: fakeFetcher() },
+  });
+  expect(check.status).toBe("update-available");
+  const baseSha = check.mainSha!;
+  const prepare = await prepareWorkbenchCandidate({
+    repoRoot: fixture.repo,
+    checkout: fixture.checkout,
+    baseSha,
+    targetTag: "v0.9.2",
+    targetSha: fixture.targetSha,
+    dependencies: { repository: fixture.remote },
+  });
+  expect(prepare.status).toBe("candidate-ready");
+  expect(prepare.candidateSha).toBeTruthy();
+  expect(git(fixture.checkout, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+  return { baseSha, prepare };
+}
+
+const toolchain = { node: "24.13.1", bun: "1.4.2" };
+const allPassing = () => ({ exitCode: 0, stdout: "", stderr: "" });
+
+async function runtimeEvidenceFor(
+  fixture: Fixture,
+  candidateSha: string,
+  baseSha: string,
+): Promise<RuntimeEvidence> {
+  const hash = async (path: string) =>
+    createHash("sha256")
+      .update(await readFile(path))
+      .digest("hex");
+  return {
+    formatVersion: 1,
+    candidateSha,
+    baseSha,
+    mainRef: "refs/heads/main",
+    mainSha: baseSha,
+    target: { tag: "v0.9.2", commit: fixture.targetSha },
+    lockfileHashes: {
+      bunLock: await hash(join(fixture.checkout, "bun.lock")),
+      upstreamLock: await hash(join(fixture.checkout, "workbench/upstream.lock.json")),
+      miseToml: await hash(join(fixture.checkout, ".mise.toml")),
+    },
+    toolchain,
+    checks: REQUIRED_RUNTIME_CHECKS.map((id) => ({
+      id,
+      status: "passed",
+      evidenceSha256: createHash("sha256").update(id).digest("hex"),
+    })),
+  };
+}
+
+describe("workbench sync persisted workflow", () => {
+  it("checks a fixed target, prepares it, records bounded checks, and stays awaiting runtime", async () => {
+    const fixture = await makeFixture();
+    const { prepare } = await checkedAndPrepared(fixture);
+    const status = await statusWorkbenchSync({
+      repoRoot: fixture.repo,
+      dependencies: { readToolchain: () => toolchain },
+    });
+    expect(status.status).toBe("awaiting-verification");
+    expect(JSON.stringify(status)).not.toContain(fixture.checkout);
+
+    const commands: string[] = [];
+    const verified = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha: prepare.candidateSha!,
+      dependencies: {
+        readToolchain: () => toolchain,
+        commandRunner: (_cwd, command, args) => {
+          commands.push(`${command} ${args.join(" ")}`);
+          return allPassing();
+        },
+      },
+    });
+    expect(commands).toEqual(AUTOMATIC_CHECKS.map(({ script }) => `bun run ${script}`));
+    expect(verified.status).toBe("awaiting-runtime");
+    expect(verified.checks.every((check) => check.status === "passed")).toBe(true);
+    expect(verified.runtimeEvidence).toEqual({
+      status: "missing",
+      reason: "runtime-evidence-not-provided",
+    });
+  });
+
+  it("keeps failed automatic gates out of ready and records all fixed checks", async () => {
+    const fixture = await makeFixture();
+    const { prepare } = await checkedAndPrepared(fixture);
+    let calls = 0;
+    const verified = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha: prepare.candidateSha!,
+      dependencies: {
+        readToolchain: () => toolchain,
+        commandRunner: () => {
+          calls += 1;
+          return { exitCode: calls === 2 ? 1 : 0, stdout: "", stderr: "" };
+        },
+      },
+    });
+    expect(calls).toBe(AUTOMATIC_CHECKS.length);
+    expect(verified.status).toBe("checks-failed");
+    expect(verified.checks.map((check) => check.status)).toEqual([
+      "passed",
+      "failed",
+      "passed",
+      "passed",
+      "passed",
+      "passed",
+    ]);
+    expect((await statusWorkbenchSync({ repoRoot: fixture.repo })).status).toBe("checks-failed");
+  });
+
+  it("reports an appended candidate commit as needing bind without resetting the branch", async () => {
+    const fixture = await makeFixture();
+    const { baseSha } = await checkedAndPrepared(fixture);
+    const appendedSha = await commitFile(
+      fixture.checkout,
+      "manual-review.txt",
+      "retain this commit\n",
+      "append candidate review commit",
+    );
+    const report = await prepareWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha,
+      targetTag: "v0.9.2",
+      targetSha: fixture.targetSha,
+      dependencies: { repository: fixture.remote },
+    });
+    expect(report.status).toBe("candidate-busy");
+    expect(report.stage).toBe("candidate-rebind-required");
+    expect(git(fixture.checkout, "rev-parse", "HEAD")).toBe(appendedSha);
+    await expect(readFile(join(fixture.checkout, "manual-review.txt"), "utf8")).resolves.toBe(
+      "retain this commit\n",
+    );
+  });
+
+  it("invalidates candidate evidence when the checkout is dirty or the actual toolchain changes", async () => {
+    const dirtyFixture = await makeFixture();
+    const dirtyPrepared = await checkedAndPrepared(dirtyFixture);
+    await writeFile(join(dirtyFixture.checkout, "untracked-review.txt"), "keep this change\n");
+    const dirty = await verifyWorkbenchCandidate({
+      repoRoot: dirtyFixture.repo,
+      candidateSha: dirtyPrepared.prepare.candidateSha!,
+      dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
+    });
+    expect(dirty.status).toBe("candidate-stale");
+    expect(dirty.stage).toBe("candidate-dirty");
+    expect(await readFile(join(dirtyFixture.checkout, "untracked-review.txt"), "utf8")).toBe(
+      "keep this change\n",
+    );
+
+    const toolchainFixture = await makeFixture();
+    const toolchainPrepared = await checkedAndPrepared(toolchainFixture);
+    const changedToolchain = await verifyWorkbenchCandidate({
+      repoRoot: toolchainFixture.repo,
+      candidateSha: toolchainPrepared.prepare.candidateSha!,
+      dependencies: {
+        readToolchain: () => ({ node: "24.13.0", bun: "1.4.2" }),
+        commandRunner: () => allPassing(),
+      },
+    });
+    expect(changedToolchain.status).toBe("candidate-stale");
+    expect(changedToolchain.stage).toBe("toolchain-mismatch");
+    expect(
+      (
+        await statusWorkbenchSync({
+          repoRoot: toolchainFixture.repo,
+          dependencies: { readToolchain: () => ({ node: "24.13.0", bun: "1.4.2" }) },
+        })
+      ).status,
+    ).toBe("rebind-required");
+  });
+
+  it("refuses prepare when the official tag moved after the successful check", async () => {
+    const fixture = await makeFixture();
+    const check = await checkWorkbenchSyncWorkflow({
+      repoRoot: fixture.repo,
+      dependencies: { repository: fixture.remote, fetcher: fakeFetcher() },
+    });
+    expect(check.status).toBe("update-available");
+    const movedSha = await commitFile(fixture.seed, "moved.txt", "moved\n", "move official tag");
+    git(fixture.seed, "tag", "--force", "v0.9.2", movedSha);
+    git(fixture.seed, "push", "--force", fixture.remote, "refs/tags/v0.9.2");
+    const prepare = await prepareWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: check.mainSha!,
+      targetTag: "v0.9.2",
+      targetSha: fixture.targetSha,
+      dependencies: { repository: fixture.remote },
+    });
+    expect(prepare.status).toBe("candidate-target-moved");
+    expect(prepare.stage).toBe("official-tag-tag-moved");
+    expect(git(fixture.checkout, "branch", "--show-current")).toBe("");
+    expect(git(fixture.checkout, "rev-parse", "HEAD")).toBe(check.mainSha);
+  });
+
+  it("keeps a conflicting candidate merge open and reports conflict without cleanup", async () => {
+    const fixture = await makeFixture(true);
+    const check = await checkWorkbenchSyncWorkflow({
+      repoRoot: fixture.repo,
+      dependencies: { repository: fixture.remote, fetcher: fakeFetcher() },
+    });
+    const prepare = await prepareWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: check.mainSha!,
+      targetTag: "v0.9.2",
+      targetSha: fixture.targetSha,
+      dependencies: { repository: fixture.remote },
+    });
+    expect(prepare.status).toBe("candidate-conflict");
+    expect(git(fixture.checkout, "rev-parse", "MERGE_HEAD")).toBe(fixture.targetSha);
+    expect(await readFile(join(fixture.checkout, "shared.txt"), "utf8")).toContain("<<<<<<<");
+    const status = await statusWorkbenchSync({ repoRoot: fixture.repo });
+    expect(status.status).toBe("conflict");
+    expect(status.stage).toBe("merge-conflict-unresolved");
+    expect(git(fixture.checkout, "rev-parse", "MERGE_HEAD")).toBe(fixture.targetSha);
+  });
+
+  it("accepts runtime evidence only when it binds all exact candidate and toolchain values", async () => {
+    const fixture = await makeFixture();
+    const { baseSha, prepare } = await checkedAndPrepared(fixture);
+    const candidateSha = prepare.candidateSha!;
+    const evidence = await runtimeEvidenceFor(fixture, candidateSha, baseSha);
+    const evidencePath = join(fixture.directory, "runtime-evidence.json");
+    await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
+    const verified = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha,
+      runtimeEvidencePath: evidencePath,
+      dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
+    });
+    expect(verified.status).toBe("ready");
+    expect(verified.runtimeEvidence.status).toBe("accepted");
+
+    const incomplete = {
+      ...evidence,
+      checks: evidence.checks.filter((check) => check.id !== "migration-restore"),
+    };
+    await writeFile(evidencePath, `${JSON.stringify(incomplete, null, 2)}\n`);
+    const incompleteRejected = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha,
+      runtimeEvidencePath: evidencePath,
+      dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
+    });
+    expect(incompleteRejected.status).toBe("awaiting-runtime");
+    expect(incompleteRejected.runtimeEvidence.status).toBe("rejected");
+
+    const wrong = { ...evidence, candidateSha: fixture.baseSha };
+    await writeFile(evidencePath, `${JSON.stringify(wrong, null, 2)}\n`);
+    const rejected = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha,
+      runtimeEvidencePath: evidencePath,
+      dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
+    });
+    expect(rejected.status).toBe("awaiting-runtime");
+    expect(rejected.runtimeEvidence.status).toBe("rejected");
+  });
+
+  it("invalidates previous evidence when main advances and safely rebinds merged candidate history", async () => {
+    const fixture = await makeFixture();
+    const { baseSha, prepare } = await checkedAndPrepared(fixture);
+    const originalCandidateSha = prepare.candidateSha!;
+    const evidencePath = join(fixture.directory, "runtime-evidence.json");
+    await writeFile(
+      evidencePath,
+      `${JSON.stringify(await runtimeEvidenceFor(fixture, originalCandidateSha, baseSha), null, 2)}\n`,
+    );
+    const ready = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha: originalCandidateSha,
+      runtimeEvidencePath: evidencePath,
+      dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
+    });
+    expect(ready.status).toBe("ready");
+
+    const advancedMain = await commitFile(
+      fixture.repo,
+      "main-followup.txt",
+      "advance\n",
+      "advance isolated main ref",
+    );
+    await checkWorkbenchSyncWorkflow({
+      repoRoot: fixture.repo,
+      dependencies: { repository: fixture.remote, fetcher: fakeFetcher() },
+    });
+    expect(
+      (
+        await statusWorkbenchSync({
+          repoRoot: fixture.repo,
+          dependencies: { readToolchain: () => toolchain },
+        })
+      ).status,
+    ).toBe("rebind-required");
+    const invalidated = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha: originalCandidateSha,
+      dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
+    });
+    expect(invalidated.status).toBe("candidate-stale");
+    expect(invalidated.stage).toBe("main-ref-advanced");
+    const statePaths = await resolveRepositoryStatePaths(fixture.repo);
+    const persisted = JSON.parse(await readFile(statePaths.stateFile, "utf8")) as {
+      activeCandidate: { status: string; runtimeEvidence?: RuntimeEvidence };
+    };
+    expect(persisted.activeCandidate.status).toBe("rebind-required");
+    expect(persisted.activeCandidate.runtimeEvidence).toBeUndefined();
+
+    git(fixture.checkout, "merge", "--no-ff", "main", "-m", "merge newer main into sync candidate");
+    const branch = git(fixture.checkout, "branch", "--show-current");
+    await writeFile(
+      join(fixture.checkout, "workbench/sync-candidate.json"),
+      `${JSON.stringify(
+        {
+          formatVersion: 1,
+          baseSha: advancedMain,
+          target: { tag: "v0.9.2", commit: fixture.targetSha },
+          branch,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    git(fixture.checkout, "add", "--", "workbench/sync-candidate.json");
+    git(fixture.checkout, "commit", "-m", "record candidate identity metadata");
+    const metadataSha = git(fixture.checkout, "rev-parse", "HEAD");
+
+    const bind = await bindWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: advancedMain,
+      targetTag: "v0.9.2",
+      targetSha: fixture.targetSha,
+      candidateSha: metadataSha,
+      dependencies: { readToolchain: () => toolchain, repository: fixture.remote },
+    });
+    expect(bind.status).toBe("candidate-bound");
+    expect(bind.baseSha).toBe(advancedMain);
+    expect(bind.candidateSha).toBe(metadataSha);
+    expect(
+      (
+        await statusWorkbenchSync({
+          repoRoot: fixture.repo,
+          dependencies: { readToolchain: () => toolchain },
+        })
+      ).status,
+    ).toBe("awaiting-verification");
+  });
+
+  it("detects a crashed runner state that no longer matches the actual candidate HEAD", async () => {
+    const fixture = await makeFixture();
+    const { prepare } = await checkedAndPrepared(fixture);
+    const paths = await resolveRepositoryStatePaths(fixture.repo);
+    const state = JSON.parse(await readFile(paths.stateFile, "utf8")) as {
+      activeCandidate: { candidateSha: string };
+    };
+    state.activeCandidate.candidateSha = fixture.baseSha;
+    await writeFile(
+      paths.stateFile,
+      `${JSON.stringify({ formatVersion: 1, ...state }, null, 2)}\n`,
+    );
+    const status = await statusWorkbenchSync({
+      repoRoot: fixture.repo,
+      dependencies: { readToolchain: () => toolchain },
+    });
+    expect(status.status).toBe("rebind-required");
+    const report = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha: prepare.candidateSha!,
+      dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
+    });
+    expect(report.status).toBe("candidate-stale");
+  });
+});
+
+describe("workbench sync repository lock", () => {
+  it("makes concurrent mutating operations mutually exclusive", async () => {
+    const fixture = await makeFixture();
+    const started = deferred<void>();
+    const held = deferred<void>();
+    const first = withRepositoryLock(fixture.repo, "first-test", async () => {
+      started.resolve();
+      await held.promise;
+    });
+    await started.promise;
+    await expect(
+      withRepositoryLock(fixture.repo, "second-test", async () => undefined),
+    ).rejects.toMatchObject({
+      name: "RepositoryLockError",
+      state: "busy",
+    });
+    held.resolve();
+    await first;
+    const paths = await resolveRepositoryStatePaths(fixture.repo);
+    await expect(readRepositoryLockStatus(paths.lockDirectory)).resolves.toEqual({
+      status: "unlocked",
+    });
+  });
+
+  it("does not reclaim a lock with an untrusted or cross-host owner", async () => {
+    const fixture = await makeFixture();
+    const paths = await resolveRepositoryStatePaths(fixture.repo);
+    await mkdir(paths.lockDirectory, { recursive: true });
+    await writeFile(
+      join(paths.lockDirectory, "owner.json"),
+      `${JSON.stringify({
+        formatVersion: 1,
+        token: "remote-owner-token",
+        operation: "weekly-sync",
+        pid: 999_999_999,
+        host: "another-host",
+        startedAt: "2026-09-30T00:00:00Z",
+      })}\n`,
+    );
+    await expect(
+      withRepositoryLock(fixture.repo, "test", async () => undefined),
+    ).rejects.toMatchObject({
+      name: "RepositoryLockError",
+      state: "busy",
+    });
+    await expect(readRepositoryLockStatus(paths.lockDirectory)).resolves.toEqual({
+      status: "locked",
+      operation: "weekly-sync",
+    });
+  });
+
+  it("reclaims a same-host dead PID only after rechecking the owner token and directory", async () => {
+    const fixture = await makeFixture();
+    const paths = await resolveRepositoryStatePaths(fixture.repo);
+    await mkdir(paths.lockDirectory, { recursive: true });
+    await writeFile(
+      join(paths.lockDirectory, "owner.json"),
+      `${JSON.stringify({
+        formatVersion: 1,
+        token: "dead-owner-token",
+        operation: "interrupted-verify",
+        pid: 2_147_483_647,
+        host: hostname(),
+        startedAt: "2026-09-30T00:00:00Z",
+      })}\n`,
+    );
+    await withRepositoryLock(fixture.repo, "recovered-test", async () => {
+      await expect(readRepositoryLockStatus(paths.lockDirectory)).resolves.toEqual({
+        status: "locked",
+        operation: "recovered-test",
+      });
+    });
+    await expect(readRepositoryLockStatus(paths.lockDirectory)).resolves.toEqual({
+      status: "unlocked",
+    });
+  });
+});

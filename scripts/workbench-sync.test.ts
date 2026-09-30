@@ -170,6 +170,7 @@ describe("workbench sync check", () => {
 
   it("reports a descendant stable release as available", async () => {
     const fixture = await releaseRepo();
+    expect(git(fixture.checkout, "rev-parse", "--is-shallow-repository")).toBe("false");
     const report = await checkWorkbenchSync({
       repoRoot: fixture.checkout,
       repository: fixture.remote,
@@ -179,6 +180,7 @@ describe("workbench sync check", () => {
 
     expect(report.status).toBe("update-available");
     expect(report.release?.commit).toBe(fixture.candidateSha);
+    expect(git(fixture.checkout, "rev-parse", "--is-shallow-repository")).toBe("false");
   });
 
   it("reports a divergent stable release as blocked", async () => {
@@ -264,8 +266,19 @@ describe("workbench sync check", () => {
       "+refs/tags/v0.9.1:refs/tags/v0.9.1",
       "+refs/tags/v0.9.2:refs/tags/v0.9.2",
     );
+    const shallowCheckout = join(fixture.directory, "shallow-checkout");
+    await initRepo(shallowCheckout);
+    git(
+      shallowCheckout,
+      "fetch",
+      "--depth=1",
+      `file://${shallowRemote}`,
+      "+refs/tags/v0.9.1:refs/tags/v0.9.1",
+      "+refs/tags/v0.9.2:refs/tags/v0.9.2",
+    );
+    expect(git(shallowCheckout, "rev-parse", "--is-shallow-repository")).toBe("true");
     const report = await checkWorkbenchSync({
-      repoRoot: fixture.checkout,
+      repoRoot: shallowCheckout,
       repository: shallowRemote,
       lock: makeLock(fixture.baseSha, fixture.candidateSha),
       fetcher: fakeFetcher([stableRelease("v0.9.2")]),

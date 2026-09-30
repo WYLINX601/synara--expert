@@ -1,6 +1,6 @@
 # 个人工作台落地技术方案与实施计划
 
-状态：WB-00 基线已完成；WB-04 阶段 A（check/prepare）已实现，待 review；其余计划项尚未完成。
+状态：WB-00 基线已完成；WB-04 阶段 A（check/prepare）已通过 review，阶段 B（bind/verify/status 与状态恢复）已实现，待 review；其余计划项尚未完成。
 日期：2026-09-29。适用仓库：当前 Synara Expert fork。  
 上位设计：[工作台架构](./workbench-architecture.md)。既有能力：[专家方案](./expert-product-technical-design.md)。
 
@@ -175,22 +175,46 @@ WB-00 的提交前先审查代码、运行产物、密钥和机器路径，按�
 
 ### 6.1 脚本接口
 
-接口状态：`check` 与 `prepare` 已在 WB-04 阶段 A 实现；`verify` 与 `status` 尚未实现。
+接口状态：WB-04 阶段 A 的 `check`/`prepare` 与阶段 B 的持久状态、`bind`、`verify`、`status` 已实现；真实运行和构建清单仍待验收。
 
-| 命令                     | 行为与输出                                                                                |
-| ------------------------ | ----------------------------------------------------------------------------------------- |
-| `workbench:sync check`   | 获取官方版本信息与引用；判断无更新、目标可用、基线超前/分歧或网络失败；生成结构化报告     |
-| `workbench:sync prepare` | 在指定干净候选工作区从固定 base 合并固定 target；复用已有候选；遇到冲突输出文件清单并暂停 |
-| `workbench:sync verify`  | 对候选的准确 SHA 运行需要的检查，输出每项成功/失败/未运行及原因                           |
-| `workbench:sync status`  | 显示候选 SHA、官方目标、检查状态、待处理动作与证据路径                                    |
+| 命令                                                                                                                    | 行为与输出                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workbench:sync check [--main-ref REF]`                                                                                 | 读取当前 main ref SHA，检查官方稳定发布并持久化固定 tag/SHA 快照；不替换活动候选。默认 `refs/heads/main`。                                                                                                                                                                                                                                                                                                  |
+| `workbench:sync prepare --checkout PATH --base SHA --target-tag TAG --target-sha SHA [--main-ref REF]`                  | 要求上一条成功检查的 tag、SHA、main SHA 与锁文件 hash 全部相符；在指定 clean 候选 checkout 中对固定 target 做真实 `--no-ff` merge。冲突保留现场。只把同步状态写入 git common dir，不在候选工作树写额外文件。                                                                                                                                                                                                |
+| `workbench:sync bind --checkout PATH --base SHA --target-tag TAG --target-sha SHA --candidate-sha SHA [--main-ref REF]` | 在新 runner 或人工修复后重建本地状态。核对 branch、clean HEAD、准确 SHA、当前 main ref、候选 metadata 和真实 target merge 历史；不依赖临时 runner 的成功状态。                                                                                                                                                                                                                                              |
+| `workbench:sync verify --candidate-sha SHA [--runtime-evidence PATH]`                                                   | 只对绑定的准确 HEAD 运行固定门禁：格式、lint、typecheck、仓库测试、迁移与 Windows runtime 边界。逐项记录通过/失败/未运行。自动门禁全部通过后进入 `awaiting-runtime`；仅接受绑定相同候选、base、target、锁文件 hash 和 Node/Bun 版本的完整运行证据后进入 `ready`。运行证据必须逐项覆盖 Codex/Pi 普通与专家首轮、恢复、取消、MCP、session 隔离、打包身份和迁移恢复；每项均须 `passed` 并带 evidence SHA-256。 |
+| `workbench:sync status`                                                                                                 | 对照实际 Git、当前 main ref、锁文件和工具链展示候选及证据状态；不展示本机绝对 checkout 路径。                                                                                                                                                                                                                                                                                                               |
 
-第一版不把生产安装或推送藏在 check/prepare/verify 中。远程候选发布由已授权的 workflow 显式执行；本地安装使用单独的维护入口，复用现有构建/启动机制。
+常用命令需在仓库锁定工具链下运行，例如：
+
+```bash
+mise exec -- bun run workbench:sync check --main-ref refs/heads/main
+mise exec -- bun run workbench:sync prepare --checkout ../candidate --base <main-sha> --target-tag <tag> --target-sha <official-sha>
+mise exec -- bun run workbench:sync bind --checkout ../candidate --base <main-sha> --target-tag <tag> --target-sha <official-sha> --candidate-sha <candidate-head-sha>
+mise exec -- bun run workbench:sync verify --candidate-sha <candidate-head-sha>
+mise exec -- bun run workbench:sync status
+```
+
+第一版不把生产安装或推送藏在 check/prepare/bind/verify 中。远程候选发布由已授权的 workflow 显式执行；本地安装使用单独的维护入口，复用现有构建/启动机制。
 
 配置与状态分开：
 
 - `workbench/upstream.lock.json`：版本化记录官方仓库、release/tag、完整 SHA、更新渠道和格式版本。候选分支内可更新，只有通过验证并进入 main 才代表新集成基线。
 - `workbench/integration-points.json`：自定义代码接入官方文件的位置、职责、影响测试；只记录真实接入点。
-- 候选状态与验证日志：本机放 Git 忽略的独立状态目录；CI 使用候选分支/PR 标识和 workflow artifact。不能依赖 CI runner 的临时磁盘跨周存活。
+- 候选状态与验证日志：本机使用 Git common dir 下的 `workbench-sync/state.json` 和原子 `operation.lock`；CI 将状态作为 runner 本地缓存并用候选分支 metadata 恢复，不能依赖临时磁盘跨周存活。`check`、`prepare`、`bind`、`verify` 共用仓库级互斥锁；`status` 为只读。锁记录 PID、主机和 token，只在同主机确认进程已退出且再次核对目录 inode/token 后恢复；未知或跨主机锁保留人工检查。
+- 候选分支 metadata：周 workflow 在合并 main、解决冲突或更新候选后显式写入并提交 `workbench/sync-candidate.json`，随后对新 HEAD 执行 `bind`。文件不包含候选 SHA，避免 SHA 自指：
+
+  ```json
+  {
+    "formatVersion": 1,
+    "baseSha": "<current-main-sha>",
+    "target": { "tag": "<official-tag>", "commit": "<official-target-sha>" },
+    "branch": "codex/sync-<tag>-<short-sha>"
+  }
+  ```
+
+  `bind` 要求 metadata base 等于当前 `--main-ref` SHA，base 和 target 都是候选 HEAD 的祖先，并在历史中找到以固定 target 为第二父的真实 merge。候选 HEAD 可以包含该 merge 之后的 metadata/人工修复提交，或再合入较新的 main；新 base 必须仍沿祖先链成立。不同 target 的活动候选不能被新检查替换。
+
 - 构建清单：记录最终源代码 SHA、官方 SHA、工具链、两套 schema 版本及产物 hash；运行中显示的版本来自该构建。
 
 建议实现文件为 `scripts/workbench-sync.ts`，版本选择、Git 操作、状态和检查执行放 `scripts/lib/workbench-sync/`；沿用现有平台/进程封装与参数数组调用。
@@ -209,9 +233,9 @@ WB-00 的提交前先审查代码、运行产物、密钥和机器路径，按�
 
 ### 6.3 状态与恢复
 
-拟定状态：`checking → no-update / candidate-ready / selection-blocked`；候选进入 `merging → conflict / verifying → checks-failed / awaiting-runtime → ready`。安装另行记录 `installed` 和对应产物，不用“已创建 PR”代表“已升级”。
+状态：`check` 持久化 `no-update / update-available / selection-blocked / network-failure` 快照；候选经过 `merging → conflict / awaiting-verification → checks-failed / awaiting-runtime → ready`，发现证据失效时进入 `rebind-required`。main 前进、候选 HEAD/分支变化、工作树变脏、锁文件或工具链变化都会让旧证据失效并要求重新 bind/verify。自动门禁通过不等于真实运行通过；安装另行记录 `installed` 和对应产物，不用“已创建 PR”代表“已升级”。
 
-同一 base SHA、target SHA 和候选 SHA 的重复检查可复用有效证据；任何代码、依赖、迁移或工具链变化都会使相关证据失效。锁与状态写入采用原子方式，崩溃重启先检查实际 Git 和构建状态，再恢复流程，不能只信一个成功标记。
+相同固定 SHA 的重复 `prepare` 只在候选 branch、HEAD 和 clean 状态都完全匹配时复用候选；`verify` 每次重新运行固定门禁。任何代码、依赖、迁移或工具链变化都会使相关证据失效。锁与状态写入采用原子方式，崩溃重启先检查实际 Git 和构建状态，再恢复流程，不能只信一个成功标记。
 
 同步工具的必要测试覆盖：排除预发布、无更新与网络失败区分、祖先关系分歧、tag 移动、缺失发布标签、候选目录有改动、两个任务竞争、冲突后保留人工修复、main 前进使旧验证失效，以及检查失败不能进入 ready。使用本地临时 Git 仓库覆盖真实合并与恢复路径，不用纯 mock 代替 Git 行为。
 

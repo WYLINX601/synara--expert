@@ -1,93 +1,146 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { RepositoryLockError } from "./lib/workbench-sync/state.ts";
+import { resolveCandidateCheckout } from "./lib/workbench-sync/sync.ts";
 import {
-  checkWorkbenchSync,
-  prepareCandidate,
-  readSyncLock,
-  resolveCandidateCheckout,
-} from "./lib/workbench-sync/sync.ts";
+  bindWorkbenchCandidate,
+  checkWorkbenchSyncWorkflow,
+  parseMainRef,
+  prepareWorkbenchCandidate,
+  reportExitCode,
+  statusWorkbenchSync,
+  verifyWorkbenchCandidate,
+} from "./lib/workbench-sync/workflow.ts";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const lockPath = resolve(repositoryRoot, "workbench/upstream.lock.json");
+
+type ParsedOptions = Map<string, string>;
 
 function printReport(report: unknown): void {
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 }
 
-function parseOptions(args: readonly string[]): Map<string, string> | null {
-  if (args.length === 0 || args.length % 2 !== 0) return null;
+function parseOptions(
+  args: readonly string[],
+  allowed: readonly string[],
+  required: readonly string[],
+): ParsedOptions | null {
+  if (args.length % 2 !== 0) return null;
   const options = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     const value = args[index + 1];
-    if (
-      (key !== "--checkout" && key !== "--base") ||
-      !value ||
-      value.startsWith("--") ||
-      options.has(key)
-    ) {
+    if (!key || !allowed.includes(key) || !value || value.startsWith("--") || options.has(key))
       return null;
-    }
     options.set(key, value);
   }
-  return options;
+  return required.every((key) => options.has(key)) ? options : null;
+}
+
+function usageError(command: string, retryAction: string): number {
+  printReport({
+    command,
+    status: "usage-error",
+    stage: "argument-validation",
+    exitCode: null,
+    retryAction,
+  });
+  return 2;
 }
 
 async function main(): Promise<number> {
   const [command, ...args] = process.argv.slice(2);
-  let lock;
-  try {
-    lock = readSyncLock(lockPath);
-  } catch (error) {
-    printReport({
-      command: command ?? "unknown",
-      status: "configuration-error",
-      reason: error instanceof Error ? error.message : "lock-file-invalid",
-      stage: "lock-file-read",
-      exitCode: null,
-      retryAction: "repair-workbench-upstream-lock-json",
+  if (command === "check") {
+    const options = parseOptions(args, ["--main-ref"], []);
+    if (!options) return usageError("check", "use-check-with-an-optional-main-ref");
+    const report = await checkWorkbenchSyncWorkflow({
+      repoRoot: repositoryRoot,
+      mainRef: parseMainRef(options),
     });
-    return 2;
-  }
-
-  if (command === "check" && args.length === 0) {
-    const report = await checkWorkbenchSync({ repoRoot: repositoryRoot, lock });
     printReport(report);
     return report.status === "network-failure" ? 1 : report.status === "selection-blocked" ? 2 : 0;
   }
 
   if (command === "prepare") {
-    const options = parseOptions(args);
-    const checkoutArg = options?.get("--checkout");
-    const baseSha = options?.get("--base");
-    if (!checkoutArg || !baseSha || options?.size !== 2) {
-      printReport({
-        command: "prepare",
-        status: "usage-error",
-        stage: "argument-validation",
-        exitCode: null,
-        retryAction: "run-workbench-sync-prepare-with-explicit-checkout-and-base-sha",
-      });
-      return 2;
+    const options = parseOptions(
+      args,
+      ["--checkout", "--base", "--target-tag", "--target-sha", "--main-ref"],
+      ["--checkout", "--base", "--target-tag", "--target-sha"],
+    );
+    if (!options) {
+      return usageError(
+        "prepare",
+        "use-prepare-with-checkout-base-target-tag-target-sha-and-optional-main-ref",
+      );
     }
-    const report = prepareCandidate({
-      checkout: resolveCandidateCheckout(checkoutArg),
-      baseSha,
-      targetTag: lock.candidate.tag,
-      targetSha: lock.candidate.commit,
+    const report = await prepareWorkbenchCandidate({
+      repoRoot: repositoryRoot,
+      checkout: resolveCandidateCheckout(options.get("--checkout")!),
+      baseSha: options.get("--base")!,
+      targetTag: options.get("--target-tag")!,
+      targetSha: options.get("--target-sha")!,
+      ...(options.has("--main-ref") ? { mainRef: options.get("--main-ref")! } : {}),
     });
     printReport(report);
     return report.status === "candidate-ready" ? 0 : report.status === "prepare-failed" ? 1 : 2;
   }
 
-  printReport({
-    command: command ?? "unknown",
-    status: "usage-error",
-    stage: "command-dispatch",
-    exitCode: null,
-    retryAction: "use-workbench-sync-check-or-workbench-sync-prepare",
-  });
-  return 2;
+  if (command === "bind") {
+    const options = parseOptions(
+      args,
+      ["--checkout", "--base", "--target-tag", "--target-sha", "--candidate-sha", "--main-ref"],
+      ["--checkout", "--base", "--target-tag", "--target-sha", "--candidate-sha"],
+    );
+    if (!options) {
+      return usageError(
+        "bind",
+        "use-bind-with-checkout-base-target-tag-target-sha-candidate-sha-and-optional-main-ref",
+      );
+    }
+    const report = await bindWorkbenchCandidate({
+      repoRoot: repositoryRoot,
+      checkout: resolveCandidateCheckout(options.get("--checkout")!),
+      baseSha: options.get("--base")!,
+      targetTag: options.get("--target-tag")!,
+      targetSha: options.get("--target-sha")!,
+      candidateSha: options.get("--candidate-sha")!,
+      ...(options.has("--main-ref") ? { mainRef: options.get("--main-ref")! } : {}),
+    });
+    printReport(report);
+    return report.status === "candidate-bound" ? 0 : 2;
+  }
+
+  if (command === "verify") {
+    const options = parseOptions(
+      args,
+      ["--candidate-sha", "--runtime-evidence"],
+      ["--candidate-sha"],
+    );
+    if (!options) {
+      return usageError(
+        "verify",
+        "use-verify-with-candidate-sha-and-optional-runtime-evidence-file",
+      );
+    }
+    const report = await verifyWorkbenchCandidate({
+      repoRoot: repositoryRoot,
+      candidateSha: options.get("--candidate-sha")!,
+      ...(options.has("--runtime-evidence")
+        ? { runtimeEvidencePath: resolveCandidateCheckout(options.get("--runtime-evidence")!) }
+        : {}),
+    });
+    printReport(report);
+    return reportExitCode(report as unknown as Record<string, unknown>);
+  }
+
+  if (command === "status") {
+    if (args.length !== 0) return usageError("status", "use-status-without-options");
+    const report = await statusWorkbenchSync({ repoRoot: repositoryRoot });
+    printReport(report);
+    return 0;
+  }
+
+  return usageError(command ?? "unknown", "use-workbench-sync-check-prepare-bind-verify-or-status");
 }
 
 const requestedCommand = process.argv[2] ?? "unknown";
@@ -96,16 +149,26 @@ main()
   .then((exitCode) => {
     process.exitCode = exitCode;
   })
-  .catch(() => {
+  .catch((error: unknown) => {
+    if (error instanceof RepositoryLockError) {
+      printReport({
+        command: requestedCommand,
+        status: error.state === "busy" ? "operation-busy" : "operation-lock-owner-unknown",
+        stage: "repository-lock",
+        exitCode: null,
+        ...(error.owner ? { operation: error.owner.operation, pid: error.owner.pid } : {}),
+        retryAction:
+          error.state === "busy"
+            ? "wait-for-the-active-sync-operation-to-finish"
+            : "inspect-or-recover-the-operation-lock-manually",
+      });
+      process.exitCode = 2;
+      return;
+    }
     printReport({
       command: requestedCommand,
       status: "unexpected-error",
-      stage:
-        requestedCommand === "check"
-          ? "check-execution"
-          : requestedCommand === "prepare"
-            ? "prepare-execution"
-            : "command-dispatch",
+      stage: "command-execution",
       exitCode: null,
       retryAction: "inspect-local-git-and-filesystem-state-before-retrying",
     });

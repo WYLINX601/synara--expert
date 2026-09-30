@@ -49,6 +49,7 @@ export type PrepareReport = {
     | "candidate-dirty"
     | "candidate-base-mismatch"
     | "candidate-target-missing"
+    | "candidate-target-moved"
     | "candidate-busy"
     | "prepare-failed";
   readonly stage: string;
@@ -62,6 +63,21 @@ export type PrepareReport = {
 };
 
 type RemoteTag = { readonly objectSha: string; readonly commitSha: string };
+export type FixedTagResolution =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly reason: "remote-unavailable" | "tag-missing" | "tag-moved";
+      readonly exitCode: number | null;
+    };
+type TagFetchFailureStage = "tag-validation" | "shallow-state" | "tag-fetch" | "tag-resolution";
+type TagFetchResult =
+  | { readonly ok: true; readonly commitSha: string }
+  | {
+      readonly ok: false;
+      readonly exitCode: number | null;
+      readonly stage: TagFetchFailureStage;
+    };
 
 function asSha(value: unknown): string | null {
   return typeof value === "string" && SHA_PATTERN.test(value) ? value.toLowerCase() : null;
@@ -143,20 +159,45 @@ function resolveRemoteTags(
     : { ok: false, exitCode: result.exitCode };
 }
 
+export function validateFixedOfficialTag(
+  repoRoot: string,
+  repository: string,
+  tag: string,
+  expectedCommitSha: string,
+): FixedTagResolution {
+  const result = resolveRemoteTags(repoRoot, repository);
+  if (!result.ok) return { ok: false, reason: "remote-unavailable", exitCode: result.exitCode };
+  const current = result.tags.get(tag);
+  if (!current) return { ok: false, reason: "tag-missing", exitCode: null };
+  return current.commitSha === expectedCommitSha.toLowerCase()
+    ? { ok: true }
+    : { ok: false, reason: "tag-moved", exitCode: null };
+}
+
 function fetchTag(
   repoRoot: string,
   repository: string,
   tag: string,
   deepen?: number,
-):
-  | { readonly ok: true; readonly commitSha: string }
-  | { readonly ok: false; readonly exitCode: number | null } {
+): TagFetchResult {
   const tagCheck = runGit(repoRoot, ["check-ref-format", `refs/tags/${tag}`]);
-  if (!tagCheck.ok) return { ok: false, exitCode: tagCheck.exitCode };
+  if (!tagCheck.ok) {
+    return { ok: false, exitCode: tagCheck.exitCode, stage: "tag-validation" };
+  }
+
+  const shallowState = runGit(repoRoot, ["rev-parse", "--is-shallow-repository"]);
+  const shallowValue = shallowState.stdout.trim();
+  if (!shallowState.ok || (shallowValue !== "true" && shallowValue !== "false")) {
+    return { ok: false, exitCode: shallowState.exitCode, stage: "shallow-state" };
+  }
 
   const destination = tagDestination(tag);
   const depthArgs =
-    deepen === undefined ? [`--depth=${INITIAL_FETCH_DEPTH}`] : [`--deepen=${deepen}`];
+    shallowValue === "false"
+      ? []
+      : deepen === undefined
+        ? [`--depth=${INITIAL_FETCH_DEPTH}`]
+        : [`--deepen=${deepen}`];
   const args = [
     "fetch",
     "--no-tags",
@@ -169,13 +210,15 @@ function fetchTag(
     first.ok || process.env.SYNARA_WORKBENCH_SYNC_HTTP11_RETRY === "0"
       ? first
       : runGit(repoRoot, ["-c", "http.version=HTTP/1.1", ...args], MAX_GIT_FETCH_MS);
-  if (!fetched.ok) return { ok: false, exitCode: fetched.exitCode };
+  if (!fetched.ok) {
+    return { ok: false, exitCode: fetched.exitCode, stage: "tag-fetch" };
+  }
 
   const revision = runGit(repoRoot, ["rev-parse", "--verify", `${destination}^{commit}`]);
   const commitSha = revision.stdout.trim().toLowerCase();
   return revision.ok && SHA_PATTERN.test(commitSha)
     ? { ok: true, commitSha }
-    : { ok: false, exitCode: revision.exitCode };
+    : { ok: false, exitCode: revision.exitCode, stage: "tag-resolution" };
 }
 
 function hasRelevantShallowBoundary(repoRoot: string, revisions: readonly string[]): boolean {
@@ -296,7 +339,7 @@ export async function checkWorkbenchSync(input: {
       reason: "git-fetch-failed",
       integratedBase: lock.integratedBase,
       release: { ...release, commit: target.commitSha },
-      stage: "integrated-base-fetch",
+      stage: `integrated-base-${baseFetch.stage}`,
       exitCode: baseFetch.exitCode,
       retryAction: "rerun-workbench-sync-check",
     };
@@ -323,7 +366,7 @@ export async function checkWorkbenchSync(input: {
       reason: "git-fetch-failed",
       integratedBase: lock.integratedBase,
       release: { ...release, commit: target.commitSha },
-      stage: "release-target-fetch",
+      stage: `release-target-${targetFetch.stage}`,
       exitCode: targetFetch.exitCode,
       retryAction: "rerun-workbench-sync-check",
     };
@@ -385,7 +428,7 @@ export async function checkWorkbenchSync(input: {
           reason: "git-fetch-failed",
           integratedBase: lock.integratedBase,
           release: selectedRelease,
-          stage: "ancestry-deepen-base",
+          stage: `ancestry-deepen-base-${deepenedBase.stage}`,
           exitCode: deepenedBase.exitCode,
           retryAction: "rerun-workbench-sync-check",
         };
@@ -401,7 +444,7 @@ export async function checkWorkbenchSync(input: {
           reason: "git-fetch-failed",
           integratedBase: lock.integratedBase,
           release: selectedRelease,
-          stage: "ancestry-deepen-target",
+          stage: `ancestry-deepen-target-${deepenedTarget.stage}`,
           exitCode: deepenedTarget.exitCode,
           retryAction: "rerun-workbench-sync-check",
         };
@@ -476,7 +519,7 @@ function shortSha(sha: string): string {
   return sha.slice(0, 8).toLowerCase();
 }
 
-function expectedCandidateBranch(tag: string, targetSha: string): string {
+export function expectedCandidateBranch(tag: string, targetSha: string): string {
   return `codex/sync-${sanitizeBranchFragment(tag)}-${shortSha(targetSha)}`;
 }
 

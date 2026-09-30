@@ -19,6 +19,8 @@ describe("Workbench feature import boundary", () => {
         export { createThread } from "../../../orchestration/Services/OrchestrationEngine";
         const gateway = await import("../../../agentGateway/Layers/AgentGateway");
         const database = require("@effect/sql-sqlite-bun");
+        import * as SqlClient from "effect/unstable/sql/SqlClient";
+        const migrator = await import("effect/unstable/sql/Migrator");
       `,
     );
 
@@ -26,9 +28,16 @@ describe("Workbench feature import boundary", () => {
       "native persistence",
       "Provider runtime control",
       "task internals",
+      "native database access",
       "Agent Gateway runtime control",
       "native database access",
+      "native database access",
     ]);
+    expect(violations).toContainEqual({
+      file: "apps/server/src/workbench/features/boards/boardService.ts",
+      specifier: "effect/unstable/sql/SqlClient",
+      boundary: "native database access",
+    });
   });
 
   it("allows shared, UI and explicit host imports, and ignores commented examples", () => {
@@ -38,6 +47,8 @@ describe("Workbench feature import boundary", () => {
         import { Button } from "~/components/ui/button";
         import { Schema } from "@synara/contracts/ws";
         import { data } from "@synara/shared/format";
+        import { Effect, Layer } from "effect";
+        import * as EffectCore from "effect/Effect";
         import { threadQuery } from "../../host/threadQuery";
         // import { ProviderService } from "../../../server/src/provider/ProviderService";
         /* import { Sql } from "@effect/sql"; */

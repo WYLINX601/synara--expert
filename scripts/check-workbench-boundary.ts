@@ -20,6 +20,7 @@ const databasePackages = [
   "@effect/sql-sqlite-bun",
   "better-sqlite3",
   "bun:sqlite",
+  "effect/unstable/sql",
   "node:sqlite",
   "sqlite3",
 ] as const;

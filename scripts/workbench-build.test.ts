@@ -9,6 +9,7 @@ import {
   type WorkbenchBuildFlavor,
   type WorkbenchBuildRequest,
 } from "./lib/workbench-build.ts";
+import { expectedCandidateBranch } from "./lib/workbench-sync/sync.ts";
 
 const temporaryDirectories: string[] = [];
 const OFFICIAL_REPOSITORY = "https://github.com/Emanuele-web04/synara.git";
@@ -41,6 +42,7 @@ function commitFile(repo: string, file: string, content: string, message: string
 
 type BuildFixture = {
   readonly directory: string;
+  readonly remote: string;
   readonly repo: string;
   readonly baseSha: string;
   readonly candidateSha: string;
@@ -132,7 +134,14 @@ function makeFixture(): BuildFixture {
     "apps/server/src/workbench/persistence/WorkbenchMigrations.ts",
   );
   git(repo, "commit", "-m", "create clean workbench source fixture");
-  return { directory, repo, baseSha, candidateSha, sourceSha: git(repo, "rev-parse", "HEAD") };
+  return {
+    directory,
+    remote,
+    repo,
+    baseSha,
+    candidateSha,
+    sourceSha: git(repo, "rev-parse", "HEAD"),
+  };
 }
 
 function requestFor(
@@ -150,6 +159,44 @@ function requestFor(
     upstreamTag: "v0.9.1",
     upstreamSha: fixture.baseSha,
   };
+}
+
+function commitCandidateSource(
+  fixture: BuildFixture,
+  tag: string,
+  targetSha: string,
+  options: { readonly allowUnrelatedHistories?: boolean; readonly fetchTag?: boolean } = {},
+): string {
+  const branch = expectedCandidateBranch(tag, targetSha);
+  git(fixture.repo, "switch", "-c", branch);
+  if (options.fetchTag !== false) {
+    git(fixture.repo, "fetch", fixture.remote, `+refs/tags/${tag}:refs/tags/${tag}`);
+  }
+  git(
+    fixture.repo,
+    "merge",
+    "--no-ff",
+    ...(options.allowUnrelatedHistories ? ["--allow-unrelated-histories"] : []),
+    targetSha,
+    "-m",
+    `merge official ${tag}`,
+  );
+  commitFile(
+    fixture.repo,
+    "workbench/sync-candidate.json",
+    `${JSON.stringify(
+      {
+        formatVersion: 1,
+        baseSha: fixture.sourceSha,
+        target: { tag, commit: targetSha },
+        branch,
+      },
+      null,
+      2,
+    )}\n`,
+    "record candidate identity metadata",
+  );
+  return git(fixture.repo, "rev-parse", "HEAD");
 }
 
 const fakeBuilder = {
@@ -245,5 +292,99 @@ describe("workbench build manifest", () => {
         fakeBuilder,
       ),
     ).rejects.toThrow("upstream-target-is-not-an-ancestor-of-source");
+  });
+
+  it("builds from committed metadata for a newer official release beyond the stale lock candidate", async () => {
+    const fixture = makeFixture();
+    const nextTargetSha = commitFile(
+      join(fixture.directory, "official-seed"),
+      "release-next.txt",
+      "next release\n",
+      "next stable release",
+    );
+    git(join(fixture.directory, "official-seed"), "tag", "v0.9.3", nextTargetSha);
+    git(join(fixture.directory, "official-seed"), "push", fixture.remote, "main", "--tags");
+    const sourceSha = commitCandidateSource(fixture, "v0.9.3", nextTargetSha);
+    const { upstreamTag: _tag, upstreamSha: _sha, ...metadataRequest } = requestFor(fixture);
+
+    const result = await buildWorkbenchArtifact(
+      { ...metadataRequest, sourceSha, outputDir: join(fixture.directory, "next-release-output") },
+      { ...fakeBuilder, repository: fixture.remote },
+    );
+
+    expect(result.manifest.source.commit).toBe(sourceSha);
+    expect(result.manifest.upstream).toMatchObject({
+      tag: "v0.9.3",
+      commit: nextTargetSha,
+      selection: "candidate-metadata",
+    });
+  });
+
+  it("refuses candidate metadata whose claimed official tag is missing before invoking the builder", async () => {
+    const fixture = makeFixture();
+    const sourceSha = commitCandidateSource(fixture, "v0.9.3", fixture.candidateSha, {
+      fetchTag: false,
+    });
+    const { upstreamTag: _tag, upstreamSha: _sha, ...metadataRequest } = requestFor(fixture);
+    let builderCalled = false;
+
+    await expect(
+      buildWorkbenchArtifact(
+        { ...metadataRequest, sourceSha, outputDir: join(fixture.directory, "fake-tag-output") },
+        {
+          ...fakeBuilder,
+          repository: fixture.remote,
+          runBuilder: (repoRoot, args) => {
+            builderCalled = true;
+            return fakeBuilder.runBuilder(repoRoot, args);
+          },
+        },
+      ),
+    ).rejects.toThrow("candidate-metadata-official-tag-tag-missing");
+    expect(builderCalled).toBe(false);
+  });
+
+  it("keeps explicit upstream parameters restricted to the versioned lock without metadata", async () => {
+    const fixture = makeFixture();
+
+    await expect(
+      buildWorkbenchArtifact(
+        {
+          ...requestFor(fixture),
+          upstreamTag: "v0.9.3",
+          upstreamSha: fixture.candidateSha,
+        },
+        fakeBuilder,
+      ),
+    ).rejects.toThrow("explicit-upstream-target-does-not-match-versioned-lock");
+  });
+
+  it("rejects committed metadata for an official target that diverges from integratedBase", async () => {
+    const fixture = makeFixture();
+    const seed = join(fixture.directory, "official-seed");
+    git(seed, "switch", "--orphan", "older-release");
+    const divergentSha = commitFile(
+      seed,
+      "older-release.txt",
+      "older\n",
+      "older divergent release",
+    );
+    git(seed, "tag", "v0.9.0", divergentSha);
+    git(seed, "push", fixture.remote, "v0.9.0");
+    const sourceSha = commitCandidateSource(fixture, "v0.9.0", divergentSha, {
+      allowUnrelatedHistories: true,
+    });
+    const { upstreamTag: _tag, upstreamSha: _sha, ...metadataRequest } = requestFor(fixture);
+
+    await expect(
+      buildWorkbenchArtifact(
+        {
+          ...metadataRequest,
+          sourceSha,
+          outputDir: join(fixture.directory, "divergent-release-output"),
+        },
+        { ...fakeBuilder, repository: fixture.remote },
+      ),
+    ).rejects.toThrow("upstream-target-is-older-or-diverges-from-integrated-base");
   });
 });

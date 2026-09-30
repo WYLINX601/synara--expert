@@ -758,15 +758,6 @@ export async function bindWorkbenchCandidate(input: {
     const matchesIntegratedBase =
       input.targetTag === rootLock.integratedBase.tag &&
       targetSha === rootLock.integratedBase.commit.toLowerCase();
-    const matchesLockedCandidate =
-      input.targetTag === rootLock.candidate.tag &&
-      targetSha === rootLock.candidate.commit.toLowerCase();
-    if (!matchesIntegratedBase && !matchesLockedCandidate) {
-      return reject(
-        "target-not-in-upstream-lock",
-        "bind-only-the-versioned-integrated-base-or-candidate-tag-and-sha",
-      );
-    }
     if (!matchesIntegratedBase) {
       const targetFollowsIntegratedBase = isAncestor(
         repoRoot,

@@ -23,6 +23,7 @@ import { runGit } from "./workbench-sync/git.ts";
 import {
   expectedCandidateBranch,
   readSyncLock,
+  validateFixedOfficialTag,
   type WorkbenchSyncLock,
 } from "./workbench-sync/sync.ts";
 
@@ -107,6 +108,7 @@ type BuildConfig = {
 };
 
 export type WorkbenchBuildDependencies = {
+  readonly repository?: string;
   readonly readToolchain?: (repoRoot: string) => WorkbenchBuildToolchain | null;
   readonly runBuilder?: (
     repoRoot: string,
@@ -349,6 +351,7 @@ function resolveUpstreamTarget(
   repoRoot: string,
   lock: WorkbenchSyncLock,
   request: WorkbenchBuildRequest,
+  dependencies: WorkbenchBuildDependencies,
 ): UpstreamTarget {
   const hasExplicitTag = request.upstreamTag !== undefined;
   const hasExplicitSha = request.upstreamSha !== undefined;
@@ -390,8 +393,14 @@ function resolveUpstreamTarget(
     if (record.branch !== expectedBranch) {
       throw new Error("workbench-sync-candidate-branch-mismatch");
     }
-    if (details.tag !== lock.candidate.tag || targetSha !== lock.candidate.commit.toLowerCase()) {
-      throw new Error("candidate-metadata-does-not-match-upstream-lock");
+    const officialTag = validateFixedOfficialTag(
+      repoRoot,
+      dependencies.repository ?? lock.repository,
+      details.tag,
+      targetSha,
+    );
+    if (!officialTag.ok) {
+      throw new Error(`candidate-metadata-official-tag-${officialTag.reason}`);
     }
     if (
       hasExplicitTag &&
@@ -528,7 +537,7 @@ export async function buildWorkbenchArtifact(
     throw new Error("actual-toolchain-does-not-match-mise-pins");
   }
 
-  const upstream = resolveUpstreamTarget(repoRoot, lock, request);
+  const upstream = resolveUpstreamTarget(repoRoot, lock, request, dependencies);
   const externalNonSourceInputs = optionalExternalIconCatalog();
   const version = config.versions[request.flavor];
   const platformTarget = targetForPlatform(request.platform);

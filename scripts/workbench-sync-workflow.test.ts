@@ -207,6 +207,69 @@ async function runtimeEvidenceFor(
 }
 
 describe("workbench sync persisted workflow", () => {
+  it("binds a newly checked official release when the versioned candidate lock is stale", async () => {
+    const fixture = await makeFixture();
+    const nextTargetSha = await commitFile(
+      fixture.seed,
+      "release-next.txt",
+      "next release\n",
+      "next stable release",
+    );
+    git(fixture.seed, "tag", "v0.9.3", nextTargetSha);
+    git(fixture.seed, "push", fixture.remote, "main", "--tags");
+
+    const check = await checkWorkbenchSyncWorkflow({
+      repoRoot: fixture.repo,
+      dependencies: { repository: fixture.remote, fetcher: fakeFetcher("v0.9.3") },
+    });
+    expect(check.status).toBe("update-available");
+    expect(check.release).toMatchObject({ tag: "v0.9.3", commit: nextTargetSha });
+
+    const prepare = await prepareWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: check.mainSha!,
+      targetTag: "v0.9.3",
+      targetSha: nextTargetSha,
+      dependencies: { repository: fixture.remote },
+    });
+    expect(prepare.status).toBe("candidate-ready");
+    const metadata = {
+      formatVersion: 1,
+      baseSha: check.mainSha,
+      target: { tag: "v0.9.3", commit: nextTargetSha },
+      branch: prepare.branch,
+    };
+    await commitFile(
+      fixture.checkout,
+      "workbench/sync-candidate.json",
+      `${JSON.stringify(metadata, null, 2)}\n`,
+      "record next official candidate identity",
+    );
+    const candidateSha = git(fixture.checkout, "rev-parse", "HEAD");
+
+    const bind = await bindWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: check.mainSha!,
+      targetTag: "v0.9.3",
+      targetSha: nextTargetSha,
+      candidateSha,
+      dependencies: { repository: fixture.remote },
+    });
+
+    expect(bind.status).toBe("candidate-bound");
+    expect(bind.target).toEqual({ tag: "v0.9.3", commit: nextTargetSha });
+    const unchangedLock = JSON.parse(
+      await readFile(join(fixture.repo, "workbench/upstream.lock.json"), "utf8"),
+    ) as WorkbenchSyncLock;
+    expect(unchangedLock.candidate).toEqual({
+      tag: "v0.9.2",
+      commit: fixture.targetSha,
+      status: "not-yet-integrated",
+    });
+  });
+
   it("rejects a locked release target older than the integrated base during bind", async () => {
     const fixture = await makeFixture();
     git(

@@ -35,8 +35,10 @@ export { MigrationDivergenceConsentRequiredError } from "./MigrationDivergenceCo
 import { migrationEntries, planOfficialMigrationLineage } from "./Migrations.ts";
 import {
   LEGACY_EXPERT_OFFICIAL_MIGRATIONS,
+  LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
   WORKBENCH_SCHEMA_FORMAT_VERSION,
   WORKBENCH_SCHEMA_METADATA_TABLE,
+  currentOfficialMigrationCatalog,
   currentOfficialMigrationCount,
   validateOfficialTrackerShape,
   validateWorkbenchSchemaMetadataShape,
@@ -409,6 +411,7 @@ export const inspectMigrationBackupPlan = Effect.gen(function* () {
     return {
       sourceVersion: lineage.sourceVersion,
       targetVersion: latestMigrationId,
+      consentTargetVersion: Math.max(latestMigrationId, LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK),
       lineageDivergence: lineage.divergence,
     };
   }
@@ -1568,7 +1571,8 @@ function assertValidMigrationBackupRecordPayload(
 
   if (payload.version === 1) {
     const oldestSupportedV1Target = Math.max(
-      ...LEGACY_EXPERT_OFFICIAL_MIGRATIONS.map(({ officialId }) => officialId),
+      currentOfficialMigrationCount(),
+      LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
     );
     if ((payload.targetVersion as number) > oldestSupportedV1Target) invalid();
     return;
@@ -1953,6 +1957,121 @@ export const inspectPendingMigrationRecovery = (dbPath: string) =>
     return marker;
   });
 
+export interface ResumeMarkedMigrationOptions {
+  /** Supplied only by full workbench startup; generic v1 callers retain v1 behavior. */
+  readonly workbenchUpgradePlan?: WorkbenchUpgradeReadyPlan | undefined;
+}
+
+function rawOfficialVersionFromUpgrade(plan: WorkbenchUpgradeReadyPlan): number {
+  if (plan.lineageDivergence !== undefined) return plan.lineageDivergence.highWaterMark;
+  return Math.max(
+    plan.official.sourceVersion,
+    ...plan.legacyOfficialMigrations.map(({ officialId }) => officialId),
+  );
+}
+
+function knownV1Target(targetVersion: number): boolean {
+  return (
+    currentOfficialMigrationCatalog().some(([id]) => id === targetVersion) ||
+    LEGACY_EXPERT_OFFICIAL_MIGRATIONS.some(({ officialId }) => officialId === targetVersion)
+  );
+}
+
+function assertV1WorkbenchResumeIdentity(
+  marker: MigrationRecoveryMarker,
+  backup: SqliteMigrationBackupInspection,
+  live: WorkbenchUpgradeReadyPlan,
+  current: WorkbenchUpgradeReadyPlan,
+): Record<string, unknown> {
+  const payload = marker.payload;
+  const source = backup.workbenchUpgrade;
+  const targetVersion = payload.targetVersion;
+  const fail = (): never => {
+    throw new Error(
+      "The legacy migration recovery record, original backup, or live progress cannot be explained by this workbench build.",
+    );
+  };
+  if (
+    payload.version !== 1 ||
+    payload.phase !== "migration-in-progress" ||
+    source.kind !== "ready" ||
+    !isVersion(targetVersion) ||
+    !knownV1Target(targetVersion) ||
+    !isVersion(backup.migrationId) ||
+    backup.migrationId > targetVersion ||
+    rawOfficialVersionFromUpgrade(source) > targetVersion ||
+    source.workbench.sourceVersion !== 0 ||
+    source.format.sourceVersion !== 0
+  ) {
+    return fail();
+  }
+
+  const legacyHighWaterMark = Math.max(
+    0,
+    ...source.legacyOfficialMigrations.map(({ officialId }) => officialId),
+  );
+  const expectedV1Source =
+    legacyHighWaterMark > 0 ? `v${backup.migrationId}` : source.official.sourceLabel;
+  if (
+    payload.sourceVersion !== expectedV1Source ||
+    JSON.stringify(migrationLineageDivergenceFromPayload(payload) ?? null) !==
+      JSON.stringify(source.lineageDivergence ?? null)
+  ) {
+    return fail();
+  }
+
+  const liveRawVersion = rawOfficialVersionFromUpgrade(live);
+  const lowerBound = source.lineageDivergence ? source.official.sourceVersion : backup.migrationId;
+  const sourceDivergence = source.lineageDivergence;
+  const liveDivergence = live.lineageDivergence;
+  if (
+    live.workbench.sourceVersion !== source.workbench.sourceVersion ||
+    live.format.sourceVersion !== source.format.sourceVersion ||
+    liveRawVersion < lowerBound ||
+    liveRawVersion > targetVersion ||
+    (sourceDivergence === undefined && liveDivergence !== undefined) ||
+    (sourceDivergence !== undefined &&
+      liveDivergence !== undefined &&
+      JSON.stringify(liveDivergence) !== JSON.stringify(sourceDivergence)) ||
+    live.legacyOfficialMigrations.some(({ officialId }, index) => {
+      const expected = LEGACY_EXPERT_OFFICIAL_MIGRATIONS[index];
+      return (
+        expected === undefined || officialId !== expected.officialId || officialId > targetVersion
+      );
+    }) ||
+    live.legacyOfficialMigrations.length < source.legacyOfficialMigrations.length ||
+    source.legacyOfficialMigrations.some(
+      (migration, index) =>
+        JSON.stringify(migration) !== JSON.stringify(live.legacyOfficialMigrations[index]),
+    )
+  ) {
+    return fail();
+  }
+
+  return {
+    ...payload,
+    version: 2,
+    sourceVersion: sourceVersionFromWorkbenchUpgrade(source),
+    targetVersion: current.official.targetVersion,
+    lineageDivergence: source.lineageDivergence ?? null,
+    migrationVersions: {
+      source: {
+        official: source.official.sourceVersion,
+        workbench: source.workbench.sourceVersion,
+        format: source.format.sourceVersion,
+      },
+      target: {
+        official: current.official.targetVersion,
+        workbench: current.workbench.targetVersion,
+        format: current.format.targetVersion,
+      },
+    },
+    legacyExpertMigrations: source.legacyOfficialMigrations,
+    legacyV1Provenance: { ...payload },
+    resumeAttempts: marker.resumeAttempts,
+  };
+}
+
 /**
  * Re-runs the migration an earlier startup was interrupted during.
  *
@@ -1973,9 +2092,36 @@ export const resumeMarkedMigration = <A, E, R>(
   dbPath: string,
   marker: MigrationRecoveryMarker,
   migration: Effect.Effect<A, E, R>,
+  options: ResumeMarkedMigrationOptions = {},
 ) =>
   Effect.gen(function* () {
-    if (marker.payload.version === 2) {
+    let payload = marker.payload;
+    if (marker.payload.version === 1 && options.workbenchUpgradePlan !== undefined) {
+      const live = options.workbenchUpgradePlan;
+      const convertedPayload = yield* attemptPromise(async () => {
+        const inspection = await inspectSqliteMigrationBackup(marker.backupPath);
+        const converted = assertV1WorkbenchResumeIdentity(marker, inspection, live, live);
+        assertBackupMatchesRecordedSource(inspection, migrationVersionSourceFromPayload(converted));
+        return converted;
+      });
+      payload = convertedPayload;
+      if (
+        isVersion(marker.payload.targetVersion) &&
+        live.official.targetVersion > marker.payload.targetVersion
+      ) {
+        return yield* Effect.fail(
+          new WorkbenchMigrationError({
+            reason:
+              "The interrupted legacy migration targets an older official schema than this build. Restore its original backup, then start this build to plan a new upgrade.",
+          }),
+        );
+      }
+      yield* assertRecordedWorkbenchUpgradeCanResume(payload);
+      // Atomically upgrade the legacy marker only after its original snapshot,
+      // source identity, target, and current live progress all pass read-only
+      // validation. A failure above leaves the v1 marker byte-for-byte intact.
+      yield* attemptPromise(() => writePrivateJsonFile(marker.markerPath, payload));
+    } else if (marker.payload.version === 2) {
       yield* assertRecordedWorkbenchUpgradeCanResume(marker.payload);
       yield* attemptPromise(async () => {
         const inspection = await inspectSqliteMigrationBackup(marker.backupPath);
@@ -1991,14 +2137,14 @@ export const resumeMarkedMigration = <A, E, R>(
       previousAttempts: marker.resumeAttempts,
       remainingAttempts: MIGRATION_RECOVERY_MAX_RESUME_ATTEMPTS - marker.resumeAttempts,
     });
-    const resumedPayload = {
-      ...marker.payload,
+    const resumedPayload: Record<string, unknown> = {
+      ...payload,
       resumeAttempts: marker.resumeAttempts + 1,
       lastResumeAt: new Date().toISOString(),
     };
     yield* attemptPromise(() => writePrivateJsonFile(marker.markerPath, resumedPayload));
     const result = yield* migration;
-    if (marker.payload.version === 2) {
+    if (resumedPayload.version === 2) {
       yield* assertRecordedWorkbenchUpgradeTarget(resumedPayload);
     }
     yield* writeCompletedMigrationProvenance(dbPath, resumedPayload);

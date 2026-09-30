@@ -16,6 +16,8 @@ import {
   readWorkbenchSchemaFormat,
   currentOfficialMigrationCatalog,
   officialMigrationCatalogHighWaterMark,
+  LEGACY_EXPERT_OFFICIAL_MIGRATIONS,
+  LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
   WORKBENCH_SCHEMA_FORMAT_VERSION,
   WORKBENCH_SCHEMA_METADATA_TABLE,
   planWorkbenchHistory,
@@ -174,14 +176,31 @@ export const planWorkbenchUpgrade = (
     officialCatalog,
   });
   if (adoption.kind === "invalid") {
-    return observedLineage.kind === "future-prefix"
-      ? rejected(
-          `Official migration history is newer than this build supports (through ${observedLineage.rawHighWaterMark}).`,
-          "official-too-new",
-          observedLineage.rawHighWaterMark,
-          observedLineage.supportedVersion,
-        )
-      : rejected(adoption.reason);
+    const supportedOfficialVersion = officialMigrationCatalogHighWaterMark(officialCatalog);
+    const canUseExistingOfficialDivergenceConsent =
+      observedLineage.kind === "imported-divergence" &&
+      observedLineage.rawHighWaterMark <= supportedOfficialVersion &&
+      !LEGACY_EXPERT_OFFICIAL_MIGRATIONS.some(
+        ({ officialId }) => officialId === observedLineage.divergence?.firstDivergedId,
+      ) &&
+      observation.officialRows.every(
+        ({ migration_id }) => migration_id <= supportedOfficialVersion,
+      );
+    if (canUseExistingOfficialDivergenceConsent) {
+      // The original official-import consent flow owns imported lineages. It
+      // remains available only while every tracker ID is inside today's
+      // official catalog; it can never absorb unknown 109/110 history.
+    } else {
+      return observedLineage.rawHighWaterMark > supportedOfficialVersion ||
+        observedLineage.kind === "future-prefix"
+        ? rejected(
+            `Official migration history is newer than this build supports (through ${observedLineage.rawHighWaterMark}).`,
+            "official-too-new",
+            observedLineage.rawHighWaterMark,
+            supportedOfficialVersion,
+          )
+        : rejected(adoption.reason);
+    }
   }
 
   const workbenchHistory = planWorkbenchHistory(observation.workbenchRows);
@@ -216,6 +235,7 @@ export const planWorkbenchUpgrade = (
   const officialTargetVersion = officialMigrationCatalogHighWaterMark(officialCatalog);
   const replayTargetVersion = Math.max(
     officialTargetVersion,
+    LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
     ...migrationEntries.map(([id]) => id),
   );
   const workbenchSourceVersion = Math.max(

@@ -32,28 +32,26 @@ const expertAppliedRuntimeColumnInfo = (sql: SqlClient.SqlClient) =>
     SELECT name, pk FROM pragma_table_info('expert_applied_runtime_records') ORDER BY cid ASC
   `;
 
-layer("expert applied runtime migration", (it) => {
-  it.effect("stores only the latest applied runtime summary keyed by thread", () =>
+layer("official migration catalog", (it) => {
+  it.effect("keeps former expert migrations out of the official tracker", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const executed = yield* runMigrations();
-      assert.deepInclude(executed, [110, "ExpertAppliedRuntimeRecords"]);
-
-      const columns = yield* expertAppliedRuntimeColumnInfo(sql);
       assert.deepStrictEqual(
-        columns.map(({ name }) => name),
-        [
-          "thread_id",
-          "snapshot_id",
-          "provider",
-          "model",
-          "runtime_component",
-          "runtime_version",
-          "lifecycle_generation",
-          "applied_at",
-        ],
+        executed.map(([id]) => id),
+        migrationEntries.map(([id]) => id),
       );
-      assert.equal(columns.find(({ name }) => name === "thread_id")?.pk, 1);
+      assert.equal(Math.max(...migrationEntries.map(([id]) => id)), 108);
+      assert.notInclude(
+        executed.map(([, name]) => name),
+        "ProjectionThreadsExpertBinding",
+      );
+      assert.notInclude(
+        executed.map(([, name]) => name),
+        "ExpertAppliedRuntimeRecords",
+      );
+      assert.deepStrictEqual(yield* expertAppliedRuntimeColumnInfo(sql), []);
+      assert.notInclude(yield* projectionThreadsColumnNames(sql), "expert_binding_json");
     }),
   );
 });
@@ -341,8 +339,6 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
         [106, "ProjectImportOrigins"],
         [107, "ProjectionThreadsHumanMessage"],
         [108, "GatewayCompletions"],
-        [109, "ProjectionThreadsExpertBinding"],
-        [110, "ExpertAppliedRuntimeRecords"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -403,8 +399,6 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
           { migration_id: 106, name: "ProjectImportOrigins" },
           { migration_id: 107, name: "ProjectionThreadsHumanMessage" },
           { migration_id: 108, name: "GatewayCompletions" },
-          { migration_id: 109, name: "ProjectionThreadsExpertBinding" },
-          { migration_id: 110, name: "ExpertAppliedRuntimeRecords" },
         ],
       );
       const preserved = yield* sql<{ readonly count: number }>`
@@ -506,8 +500,6 @@ agentGatewayRetentionLegacyLayer(
           [106, "ProjectImportOrigins"],
           [107, "ProjectionThreadsHumanMessage"],
           [108, "GatewayCompletions"],
-          [109, "ProjectionThreadsExpertBinding"],
-          [110, "ExpertAppliedRuntimeRecords"],
         ]);
 
         const columns = yield* sql<{ readonly name: string }>`
@@ -611,8 +603,6 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [106, "ProjectImportOrigins"],
         [107, "ProjectionThreadsHumanMessage"],
         [108, "GatewayCompletions"],
-        [109, "ProjectionThreadsExpertBinding"],
-        [110, "ExpertAppliedRuntimeRecords"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -657,8 +647,6 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [106, "ProjectImportOrigins"],
           [107, "ProjectionThreadsHumanMessage"],
           [108, "GatewayCompletions"],
-          [109, "ProjectionThreadsExpertBinding"],
-          [110, "ExpertAppliedRuntimeRecords"],
         ],
       );
 
@@ -757,8 +745,6 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [106, "ProjectImportOrigins"],
         [107, "ProjectionThreadsHumanMessage"],
         [108, "GatewayCompletions"],
-        [109, "ProjectionThreadsExpertBinding"],
-        [110, "ExpertAppliedRuntimeRecords"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -799,8 +785,6 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [106, "ProjectImportOrigins"],
           [107, "ProjectionThreadsHumanMessage"],
           [108, "GatewayCompletions"],
-          [109, "ProjectionThreadsExpertBinding"],
-          [110, "ExpertAppliedRuntimeRecords"],
         ],
       );
       const preservedSpaces = yield* sql<{ readonly spaceId: string }>`

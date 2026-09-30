@@ -3,6 +3,8 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { migrationEntries, runMigrations } from "../../persistence/Migrations.ts";
+import LegacyExpertBindingMigration from "../../persistence/Migrations/109_ProjectionThreadsExpertBinding.ts";
+import ExpertAppliedRuntimeRecordsMigration from "../../persistence/Migrations/110_ExpertAppliedRuntimeRecords.ts";
 import * as NodeSqliteClient from "../../persistence/NodeSqliteClient.ts";
 import {
   EXPERT_WORKBENCH_MODULE_ID,
@@ -37,6 +39,24 @@ const legacyRows = (through: 109 | 110): readonly OfficialMigrationRecord[] => [
     ({ officialId: migration_id, officialName: name }) => ({ migration_id, name }),
   ),
 ];
+
+const seedLegacyExpertHistory = (through: 109 | 110 = 110) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 108 });
+    yield* LegacyExpertBindingMigration;
+    yield* sql`
+      INSERT INTO effect_sql_migrations (migration_id, name)
+      VALUES (109, 'ProjectionThreadsExpertBinding')
+    `;
+    if (through === 110) {
+      yield* ExpertAppliedRuntimeRecordsMigration;
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (110, 'ExpertAppliedRuntimeRecords')
+      `;
+    }
+  });
 
 const bindingColumn: SqliteColumnInfo = {
   name: "expert_binding_json",
@@ -289,7 +309,7 @@ fullAdoptionLayer("legacy expert migration handoff", (test) => {
   test.effect("moves exact 109/110 history transactionally and preserves schema data", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 109 });
+      yield* seedLegacyExpertHistory(110);
       yield* sql`
         INSERT INTO projection_threads (
           thread_id, project_id, title, model_selection_json, runtime_mode,
@@ -299,7 +319,6 @@ fullAdoptionLayer("legacy expert migration handoff", (test) => {
           'full-access', 'default', 'local', '2026-09-29', '2026-09-29', '{"expertId":"reviewer"}'
         )
       `;
-      yield* runMigrations();
       yield* sql`
         INSERT INTO expert_applied_runtime_records (
           thread_id, snapshot_id, provider, model, runtime_component,
@@ -360,7 +379,7 @@ partialAdoptionLayer("legacy 109 intermediate handoff", (test) => {
   test.effect("adopts 109 and applies only the missing extension migration", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 109 });
+      yield* seedLegacyExpertHistory(109);
       const adopted = yield* adoptLegacyExpertMigrations();
       assert.deepStrictEqual(adopted.adoptedMigrationIds, [1]);
 
@@ -403,7 +422,7 @@ rollbackLayer("transactional legacy expert handoff", (test) => {
   test.effect("retains legacy rows and rolls back partial ledger writes", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 109 });
+      yield* seedLegacyExpertHistory(109);
       yield* sql`
         CREATE TABLE workbench_sql_migrations (
           module_id TEXT NOT NULL,

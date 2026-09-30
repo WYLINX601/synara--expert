@@ -23,6 +23,9 @@ export const LEGACY_EXPERT_OFFICIAL_MIGRATIONS = [
   { officialId: 109, officialName: "ProjectionThreadsExpertBinding", workbenchId: 1 },
   { officialId: 110, officialName: "ExpertAppliedRuntimeRecords", workbenchId: 2 },
 ] as const;
+export const LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK = Math.max(
+  ...LEGACY_EXPERT_OFFICIAL_MIGRATIONS.map(({ officialId }) => officialId),
+);
 
 const FROZEN_LEGACY_OFFICIAL_PREFIX_LENGTH = 108;
 const FROZEN_LEGACY_OFFICIAL_PREFIX_SHA256 =
@@ -571,8 +574,9 @@ export interface RunWorkbenchMigrationsResult {
 }
 
 /**
- * Runs only the expert-owned extension migrations. Startup and backup/recovery
- * integration are intentionally left to the next WB-02 slice.
+ * Runs only the expert-owned extension migrations after the shared SQLite
+ * startup path has planned, backed up, adopted any frozen legacy rows, and run
+ * the official migrator.
  */
 export const runWorkbenchMigrations = () =>
   Effect.gen(function* () {

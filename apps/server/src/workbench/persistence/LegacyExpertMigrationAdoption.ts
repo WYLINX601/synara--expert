@@ -112,8 +112,11 @@ export const planLegacyExpertMigrationAdoption = (
   const isLegacyExpertTail =
     firstTail?.migration_id === firstLegacyIdentity.officialId &&
     firstTail.name === firstLegacyIdentity.officialName;
+  const currentCatalogOwnsLegacySlot = officialTail.some(({ migration_id }) =>
+    officialCatalog.some(([id]) => id === migration_id),
+  );
 
-  if (isLegacyExpertTail) {
+  if (isLegacyExpertTail && !currentCatalogOwnsLegacySlot) {
     const frozenPrefixIssue = validateFrozenLegacyOfficialPrefix(input.officialRows);
     if (frozenPrefixIssue !== null) {
       return { kind: "invalid", reason: frozenPrefixIssue };

@@ -33,11 +33,15 @@ import {
   runWithPreMigrationBackup,
 } from "./MigrationBackup.ts";
 import { migrationEntries, runMigrations } from "./Migrations.ts";
+import LegacyExpertBindingMigration from "./Migrations/109_ProjectionThreadsExpertBinding.ts";
+import ExpertAppliedRuntimeRecordsMigration from "./Migrations/110_ExpertAppliedRuntimeRecords.ts";
 import * as NodeSqliteClient from "./NodeSqliteClient.ts";
 import { makeSqlitePersistenceLive } from "./Layers/Sqlite.ts";
-import { adoptLegacyExpertMigrations } from "../workbench/persistence/LegacyExpertMigrationAdoption.ts";
 import { inspectWorkbenchUpgradePlan } from "../workbench/persistence/WorkbenchUpgradePlan.ts";
-import { runWorkbenchMigrations } from "../workbench/persistence/WorkbenchMigrations.ts";
+import {
+  LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
+  runWorkbenchMigrations,
+} from "../workbench/persistence/WorkbenchMigrations.ts";
 
 vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
@@ -63,6 +67,24 @@ async function makeDbPath(): Promise<string> {
 
 const runWithDatabase = <A, E>(dbPath: string, effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
   Effect.runPromise(effect.pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath }))));
+
+const seedLegacyExpertHistory = (through: 109 | 110 = 110) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 108 });
+    yield* LegacyExpertBindingMigration;
+    yield* sql`
+      INSERT INTO effect_sql_migrations (migration_id, name)
+      VALUES (109, 'ProjectionThreadsExpertBinding')
+    `;
+    if (through === 110) {
+      yield* ExpertAppliedRuntimeRecordsMigration;
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (110, 'ExpertAppliedRuntimeRecords')
+      `;
+    }
+  });
 
 async function backupPaths(dbPath: string): Promise<Array<string>> {
   const directory = migrationBackupDirectory(dbPath);
@@ -723,7 +745,7 @@ describe("migration backups", () => {
         const sql = yield* SqlClient.SqlClient;
         yield* sql`PRAGMA journal_mode = WAL`;
         yield* runMigrations({ toMigrationInclusive: 16 });
-        for (let id = 17; id <= latestId + 2; id += 1) {
+        for (let id = 17; id <= latestId; id += 1) {
           yield* sql`
             INSERT INTO effect_sql_migrations (migration_id, name)
             VALUES (${id}, ${`ImportedMigration${id}`})
@@ -749,15 +771,16 @@ describe("migration backups", () => {
         expect(blocked.challenge).toMatchObject({
           databasePath: dbPath,
           firstDivergedId: 17,
-          highWaterMark: latestId + 2,
+          highWaterMark: latestId,
           recordedName: "ImportedMigration17",
+          targetVersion: Math.max(latestId, LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK),
         });
         expect(yield* Effect.promise(() => backupPaths(dbPath))).toEqual([]);
 
         yield* sql`
           UPDATE effect_sql_migrations
           SET name = 'ChangedAfterInspection'
-          WHERE migration_id = ${latestId + 2}
+          WHERE migration_id = ${latestId}
         `;
         const staleConsent = yield* Effect.flip(
           runWithPreMigrationBackup(dbPath, runMigrations(), {
@@ -786,7 +809,7 @@ describe("migration backups", () => {
       expect(
         backup
           .prepare("SELECT name FROM effect_sql_migrations WHERE migration_id = ?")
-          .get(latestId + 2),
+          .get(latestId),
       ).toMatchObject({ name: "ChangedAfterInspection" });
     } finally {
       backup.close();
@@ -810,7 +833,7 @@ describe("migration backups", () => {
         executable: "synara-restore-migration-backup",
         arguments: [dbPath],
       },
-      sourceVersion: `imported-v${latestId + 2}-from17`,
+      sourceVersion: `imported-v${latestId}-from17`,
       targetVersion: latestId,
       lineageDivergence: {
         firstDivergedId: 17,
@@ -1072,23 +1095,22 @@ describe("migration backups", () => {
         dbPath,
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
-          yield* runMigrations({ toMigrationInclusive: legacyThrough });
+          yield* seedLegacyExpertHistory(legacyThrough);
           yield* sql`CREATE TABLE legacy_restore_probe(value TEXT NOT NULL)`;
           yield* sql`INSERT INTO legacy_restore_probe(value) VALUES ('legacy-before-adoption')`;
-          const plan = yield* inspectWorkbenchUpgradePlan;
-          if (plan.kind !== "ready") throw new Error(plan.reason);
-          expect(plan.legacyOfficialMigrations.map(({ officialId }) => officialId)).toEqual(
-            legacyThrough === 109 ? [109] : [109, 110],
-          );
-          yield* runWithPreMigrationBackup(
-            dbPath,
-            Effect.gen(function* () {
-              yield* adoptLegacyExpertMigrations();
-              yield* runWorkbenchMigrations();
-            }),
-            { upgradePlan: plan },
-          );
         }),
+      );
+
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{ readonly migration_id: number }>`
+            SELECT migration_id FROM workbench_sql_migrations ORDER BY migration_id
+          `;
+          expect(rows).toEqual([{ migration_id: 1 }, { migration_id: 2 }]);
+        }).pipe(
+          Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
+        ),
       );
 
       const provenance = JSON.parse(
@@ -1153,7 +1175,7 @@ describe("migration backups", () => {
       dbPath,
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        yield* runMigrations({ toMigrationInclusive: 110 });
+        yield* seedLegacyExpertHistory(110);
         yield* sql`CREATE TABLE legacy_v1_probe(value TEXT NOT NULL)`;
         yield* sql`INSERT INTO legacy_v1_probe(value) VALUES ('before-v1-upgrade')`;
         return yield* createMigrationBackup(dbPath, {
@@ -1217,6 +1239,242 @@ describe("migration backups", () => {
     } finally {
       restored.close();
     }
+  });
+
+  it("accepts a v1 target at a future sparse official high-water mark", async () => {
+    const dbPath = await makeDbPath();
+    const backup = await runWithDatabase(
+      dbPath,
+      Effect.gen(function* () {
+        yield* runMigrations({ toMigrationInclusive: 108 });
+        return yield* createMigrationBackup(dbPath, {
+          sourceVersion: "v108",
+          targetVersion: 108,
+        });
+      }),
+    );
+    const mutableCatalog = migrationEntries as unknown as Array<unknown>;
+    mutableCatalog.push([112, "OfficialMigrationAfterReservedGap", Effect.void]);
+    try {
+      await fs.writeFile(
+        migrationRecoveryMarkerPath(dbPath),
+        `${JSON.stringify({
+          version: 1,
+          databasePath: dbPath,
+          backupPath: backup.backupPath,
+          sourceVersion: "v108",
+          targetVersion: 112,
+          lineageDivergence: null,
+          phase: "migration-in-progress",
+          createdAt: backup.createdAt,
+          resumeAttempts: 0,
+        })}\n`,
+        { mode: 0o600 },
+      );
+      const marker = await Effect.runPromise(inspectPendingMigrationRecovery(dbPath));
+      expect(marker?.payload.targetVersion).toBe(112);
+    } finally {
+      mutableCatalog.pop();
+    }
+  });
+
+  it("converts a v1 file marker once, retries from its original snapshot, and completes WB startup", async () => {
+    const dbPath = await makeDbPath();
+    const backup = await runWithDatabase(
+      dbPath,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: 108 });
+        yield* sql`CREATE TABLE v1_resume_probe(value TEXT NOT NULL)`;
+        yield* sql`INSERT INTO v1_resume_probe(value) VALUES ('preserved-before-upgrade')`;
+        const snapshot = yield* createMigrationBackup(dbPath, {
+          sourceVersion: "v108",
+          targetVersion: 110,
+        });
+        // Model the old executor stopping after its first expert migration.
+        yield* LegacyExpertBindingMigration;
+        yield* sql`
+          INSERT INTO effect_sql_migrations (migration_id, name)
+          VALUES (109, 'ProjectionThreadsExpertBinding')
+        `;
+        return snapshot;
+      }),
+    );
+
+    const originalV1Record = {
+      version: 1,
+      databasePath: dbPath,
+      backupPath: backup.backupPath,
+      sourceVersion: "v108",
+      targetVersion: 110,
+      lineageDivergence: null,
+      phase: "migration-in-progress",
+      createdAt: backup.createdAt,
+      resumeAttempts: 0,
+      restore: {
+        executable: "synara-restore-migration-backup",
+        arguments: [dbPath],
+      },
+      recovery: "restore the original migration snapshot",
+    };
+    const markerPath = migrationRecoveryMarkerPath(dbPath);
+    await fs.writeFile(markerPath, `${JSON.stringify(originalV1Record)}\n`, { mode: 0o600 });
+
+    const mismatchedV1Record = { ...originalV1Record, sourceVersion: "v107" };
+    const mismatchedText = `${JSON.stringify(mismatchedV1Record)}\n`;
+    await fs.writeFile(markerPath, mismatchedText, { mode: 0o600 });
+    await expect(
+      runWithDatabase(
+        dbPath,
+        Effect.gen(function* () {
+          const marker = yield* inspectPendingMigrationRecovery(dbPath);
+          if (!marker) throw new Error("expected the mismatched v1 recovery marker");
+          const plan = yield* inspectWorkbenchUpgradePlan;
+          if (plan.kind !== "ready") throw new Error(plan.reason);
+          yield* resumeMarkedMigration(dbPath, marker, Effect.void, {
+            workbenchUpgradePlan: plan,
+          });
+        }),
+      ),
+    ).rejects.toThrow("legacy migration recovery record, original backup, or live progress");
+    expect(await fs.readFile(markerPath, "utf8")).toBe(mismatchedText);
+    expect(await backupPaths(dbPath)).toEqual([backup.backupPath]);
+    const beforeConversion = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(beforeConversion.prepare("SELECT value FROM v1_resume_probe").get()).toMatchObject({
+        value: "preserved-before-upgrade",
+      });
+    } finally {
+      beforeConversion.close();
+    }
+
+    await fs.writeFile(markerPath, `${JSON.stringify(originalV1Record)}\n`, { mode: 0o600 });
+
+    await expect(
+      runWithDatabase(
+        dbPath,
+        Effect.gen(function* () {
+          const marker = yield* inspectPendingMigrationRecovery(dbPath);
+          if (!marker) throw new Error("expected the v1 recovery marker");
+          const plan = yield* inspectWorkbenchUpgradePlan;
+          if (plan.kind !== "ready") throw new Error(plan.reason);
+          yield* resumeMarkedMigration(
+            dbPath,
+            marker,
+            Effect.fail(new Error("injected interruption after v1 marker conversion")),
+            { workbenchUpgradePlan: plan },
+          );
+        }),
+      ),
+    ).rejects.toThrow("injected interruption after v1 marker conversion");
+
+    const converted = JSON.parse(await fs.readFile(markerPath, "utf8")) as Record<string, unknown>;
+    expect(converted).toMatchObject({
+      version: 2,
+      phase: "migration-in-progress",
+      backupPath: backup.backupPath,
+      sourceVersion: "v108-wb0-fmt0",
+      targetVersion: 108,
+      resumeAttempts: 1,
+      migrationVersions: {
+        source: { official: 108, workbench: 0, format: 0 },
+        target: { official: 108, workbench: 2, format: 1 },
+      },
+      legacyExpertMigrations: [],
+      legacyV1Provenance: originalV1Record,
+    });
+    expect(await backupPaths(dbPath)).toEqual([backup.backupPath]);
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const rows = yield* sql<{ readonly value: string }>`
+          SELECT value FROM v1_resume_probe
+        `;
+        expect(rows).toEqual([{ value: "preserved-before-upgrade" }]);
+      }).pipe(
+        Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
+      ),
+    );
+
+    const completed = JSON.parse(
+      await fs.readFile(migrationBackupProvenancePath(dbPath), "utf8"),
+    ) as Record<string, unknown>;
+    expect(completed).toMatchObject({
+      version: 2,
+      phase: "migration-completed",
+      backupPath: backup.backupPath,
+      resumeAttempts: 2,
+      legacyV1Provenance: originalV1Record,
+    });
+    await expect(fs.stat(markerPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await backupPaths(dbPath)).toEqual([backup.backupPath]);
+
+    const upgraded = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(
+        upgraded
+          .prepare(
+            "SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id DESC LIMIT 1",
+          )
+          .get(),
+      ).toMatchObject({ migration_id: 108, name: "GatewayCompletions" });
+      expect(
+        upgraded
+          .prepare("SELECT migration_id FROM workbench_sql_migrations ORDER BY migration_id")
+          .all(),
+      ).toEqual([{ migration_id: 1 }, { migration_id: 2 }]);
+      expect(
+        upgraded.prepare("SELECT format_version FROM workbench_schema_metadata").get(),
+      ).toMatchObject({ format_version: 1 });
+      expect(
+        upgraded
+          .prepare(
+            "SELECT name FROM pragma_table_info('projection_threads') WHERE name = 'expert_binding_json'",
+          )
+          .all(),
+      ).toEqual([{ name: "expert_binding_json" }]);
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it("backs up and completes an extension-only file startup without changing business data", async () => {
+    const dbPath = await makeDbPath();
+    await runWithDatabase(
+      dbPath,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: 108 });
+        yield* sql`CREATE TABLE extension_only_probe(value TEXT NOT NULL)`;
+        yield* sql`INSERT INTO extension_only_probe(value) VALUES ('preserved')`;
+      }),
+    );
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const rows = yield* sql<{ readonly value: string }>`
+          SELECT value FROM extension_only_probe
+        `;
+        expect(rows).toEqual([{ value: "preserved" }]);
+      }).pipe(
+        Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
+      ),
+    );
+
+    const provenance = JSON.parse(
+      await fs.readFile(migrationBackupProvenancePath(dbPath), "utf8"),
+    ) as Record<string, unknown>;
+    expect(provenance).toMatchObject({
+      version: 2,
+      phase: "migration-completed",
+      migrationVersions: {
+        source: { official: 108, workbench: 0, format: 0 },
+        target: { official: 108, workbench: 2, format: 1 },
+      },
+    });
+    expect(await backupPaths(dbPath)).toEqual([provenance.backupPath]);
   });
 
   it("rejects an unknown legacy expert migration before backup or executor writes", async () => {

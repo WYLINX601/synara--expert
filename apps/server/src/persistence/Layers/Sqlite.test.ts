@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { makeSqlitePersistenceLive } from "./Sqlite.ts";
 import { resolveSqliteMemoryBudget } from "../sqliteMemoryBudget.ts";
+import { migrationEntries } from "../Migrations.ts";
 
 const tempDirectories: Array<string> = [];
 
@@ -26,8 +27,18 @@ async function createNormalWalSnapshot(dbPath: string): Promise<Buffer> {
     seed.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA wal_autocheckpoint = 0;
+      CREATE TABLE effect_sql_migrations (
+        migration_id INTEGER NOT NULL PRIMARY KEY,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        name VARCHAR(255) NOT NULL
+      );
+      CREATE TABLE projection_threads (thread_id TEXT NOT NULL);
       CREATE TABLE recovery_probe(value TEXT NOT NULL);
     `);
+    const insertMigration = seed.prepare(
+      "INSERT INTO effect_sql_migrations (migration_id, name) VALUES (?, ?)",
+    );
+    for (const [migrationId, name] of migrationEntries) insertMigration.run(migrationId, name);
     seed.prepare("INSERT INTO recovery_probe(value) VALUES (?)").run("survives-recovery");
     await Promise.all(
       ["", "-wal", "-shm"].map((suffix) =>

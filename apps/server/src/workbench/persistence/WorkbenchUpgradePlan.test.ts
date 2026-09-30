@@ -1,11 +1,15 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { migrationEntries } from "../../persistence/Migrations.ts";
+import LegacyExpertBindingMigration from "../../persistence/Migrations/109_ProjectionThreadsExpertBinding.ts";
+import ExpertAppliedRuntimeRecordsMigration from "../../persistence/Migrations/110_ExpertAppliedRuntimeRecords.ts";
 import * as NodeSqliteClient from "../../persistence/NodeSqliteClient.ts";
 import { runMigrations } from "../../persistence/Migrations.ts";
 import {
   LEGACY_EXPERT_OFFICIAL_MIGRATIONS,
+  LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
   currentOfficialMigrationCount,
   workbenchMigrationEntries,
   type OfficialMigrationRecord,
@@ -37,6 +41,24 @@ const workbenchRows = (through: 0 | 1 | 2): readonly WorkbenchMigrationRecord[] 
     checksum: migration.checksum,
     applied_at: "2026-09-29T12:00:00.000Z",
   }));
+
+const seedLegacyExpertHistory = (through: 109 | 110 = 110) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 108 });
+    yield* LegacyExpertBindingMigration;
+    yield* sql`
+      INSERT INTO effect_sql_migrations (migration_id, name)
+      VALUES (109, 'ProjectionThreadsExpertBinding')
+    `;
+    if (through === 110) {
+      yield* ExpertAppliedRuntimeRecordsMigration;
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, name)
+        VALUES (110, 'ExpertAppliedRuntimeRecords')
+      `;
+    }
+  });
 
 const emptySchema = {
   projectionThreadsExists: false,
@@ -110,7 +132,10 @@ it.effect("plans empty initialization without a meaningless backup", () =>
       sourceVersion: 0,
       sourceLabel: "v0",
       targetVersion: currentOfficialMigrationCount(),
-      replayTargetVersion: Math.max(...migrationEntries.map(([id]) => id)),
+      replayTargetVersion: Math.max(
+        LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
+        ...migrationEntries.map(([id]) => id),
+      ),
       hasPendingMigrations: true,
       hasLineageRepair: false,
     });
@@ -368,7 +393,7 @@ it.effect("accepts a real early official prefix before migration 5 creates proje
 
 it.effect("reads old 109/110 as an adoption-only upgrade with a required backup", () =>
   Effect.gen(function* () {
-    yield* runMigrations();
+    yield* seedLegacyExpertHistory(110);
     const plan = yield* inspectWorkbenchUpgradePlan;
     assert.strictEqual(plan.kind, "ready");
     if (plan.kind === "ready") {

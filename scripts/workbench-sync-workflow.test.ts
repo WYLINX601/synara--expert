@@ -412,6 +412,76 @@ describe("workbench sync persisted workflow", () => {
     expect(rejected.runtimeEvidence.status).toBe("rejected");
   });
 
+  it("does not report ready when persisted automatic or runtime checks are incomplete", async () => {
+    const fixture = await makeFixture();
+    const { baseSha, prepare } = await checkedAndPrepared(fixture);
+    const candidateSha = prepare.candidateSha!;
+    const evidence = await runtimeEvidenceFor(fixture, candidateSha, baseSha);
+    const evidencePath = join(fixture.directory, "runtime-evidence.json");
+    await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
+    const verified = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha,
+      runtimeEvidencePath: evidencePath,
+      dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
+    });
+    expect(verified.status).toBe("ready");
+
+    const statePaths = await resolveRepositoryStatePaths(fixture.repo);
+    const originalState = JSON.parse(await readFile(statePaths.stateFile, "utf8")) as {
+      formatVersion: 1;
+      activeCandidate: {
+        automaticChecks: Array<{
+          id: string;
+          status: string;
+          exitCode: number | null;
+          durationMs: number;
+        }>;
+        runtimeEvidence: RuntimeEvidence;
+        runtimeEvidenceHash: string;
+      };
+    };
+
+    const missingAutomaticCheck = structuredClone(originalState);
+    missingAutomaticCheck.activeCandidate.automaticChecks =
+      missingAutomaticCheck.activeCandidate.automaticChecks.slice(1);
+    await writeFile(statePaths.stateFile, `${JSON.stringify(missingAutomaticCheck, null, 2)}\n`);
+    const automaticStatus = await statusWorkbenchSync({
+      repoRoot: fixture.repo,
+      dependencies: { readToolchain: () => toolchain },
+    });
+    expect(automaticStatus.status).toBe("rebind-required");
+    expect(automaticStatus.invalidations).toContain("automatic-checks-incomplete-or-invalid");
+
+    const oldRuntimeEvidence: RuntimeEvidence = {
+      ...evidence,
+      checks: [
+        "codex-first-turn",
+        "pi-first-turn",
+        "recovery",
+        "cancellation",
+        "mcp",
+        "session-isolation",
+      ].map((id) => ({
+        id,
+        status: "passed",
+        evidenceSha256: createHash("sha256").update(id).digest("hex"),
+      })),
+    };
+    const oldRuntimeState = structuredClone(originalState);
+    oldRuntimeState.activeCandidate.runtimeEvidence = oldRuntimeEvidence;
+    oldRuntimeState.activeCandidate.runtimeEvidenceHash = createHash("sha256")
+      .update(JSON.stringify(oldRuntimeEvidence))
+      .digest("hex");
+    await writeFile(statePaths.stateFile, `${JSON.stringify(oldRuntimeState, null, 2)}\n`);
+    const runtimeStatus = await statusWorkbenchSync({
+      repoRoot: fixture.repo,
+      dependencies: { readToolchain: () => toolchain },
+    });
+    expect(runtimeStatus.status).toBe("rebind-required");
+    expect(runtimeStatus.invalidations).toContain("runtime-evidence-schema-invalid");
+  });
+
   it("invalidates previous evidence when main advances and safely rebinds merged candidate history", async () => {
     const fixture = await makeFixture();
     const { baseSha, prepare } = await checkedAndPrepared(fixture);

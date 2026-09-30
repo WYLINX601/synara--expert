@@ -928,6 +928,20 @@ function staleChecks(reason: string): VerificationCheck[] {
   return AUTOMATIC_CHECKS.map(({ id }) => makeCheck(id, "not-run", null, 0, reason));
 }
 
+function hasCompletePassedAutomaticChecks(
+  checks: readonly VerificationCheck[] | undefined,
+): boolean {
+  if (!checks || checks.length !== AUTOMATIC_CHECKS.length) return false;
+  const byId = new Map(checks.map((check) => [check.id, check]));
+  return (
+    byId.size === AUTOMATIC_CHECKS.length &&
+    AUTOMATIC_CHECKS.every(({ id }) => {
+      const check = byId.get(id);
+      return check?.status === "passed" && check.exitCode === 0;
+    })
+  );
+}
+
 export async function verifyWorkbenchCandidate(input: {
   readonly repoRoot: string;
   readonly candidateSha: string;
@@ -1294,21 +1308,27 @@ export async function statusWorkbenchSync(input: {
     invalidations.push("toolchain-not-pinned");
   }
   if (candidate.status === "ready") {
+    if (!hasCompletePassedAutomaticChecks(candidate.automaticChecks))
+      invalidations.push("automatic-checks-incomplete-or-invalid");
     if (!candidate.runtimeEvidence || !candidate.runtimeEvidenceHash)
       invalidations.push("runtime-evidence-missing");
-    else if (sha256(JSON.stringify(candidate.runtimeEvidence)) !== candidate.runtimeEvidenceHash) {
-      invalidations.push("runtime-evidence-hash-mismatch");
-    } else if (
-      toolchain &&
-      lockfileHashes &&
-      runtimeEvidenceReason(candidate.runtimeEvidence, candidate, {
-        candidateSha: candidate.candidateSha ?? "",
-        mainSha: mainSha ?? "",
-        lockfileHashes,
-        toolchain,
-      })
-    )
-      invalidations.push("runtime-evidence-binding-mismatch");
+    else {
+      const runtimeEvidence = parseRuntimeEvidence(candidate.runtimeEvidence);
+      if (!runtimeEvidence) invalidations.push("runtime-evidence-schema-invalid");
+      else if (sha256(JSON.stringify(runtimeEvidence)) !== candidate.runtimeEvidenceHash)
+        invalidations.push("runtime-evidence-hash-mismatch");
+      else if (
+        toolchain &&
+        lockfileHashes &&
+        runtimeEvidenceReason(runtimeEvidence, candidate, {
+          candidateSha: candidate.candidateSha ?? "",
+          mainSha: mainSha ?? "",
+          lockfileHashes,
+          toolchain,
+        })
+      )
+        invalidations.push("runtime-evidence-binding-mismatch");
+    }
   }
   const stateStatus = candidate.status;
   const status = invalidations.length > 0 ? "rebind-required" : stateStatus;

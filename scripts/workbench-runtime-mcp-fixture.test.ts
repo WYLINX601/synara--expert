@@ -40,6 +40,14 @@ function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<bo
   });
 }
 
+async function waitForCondition(condition: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error("condition-timed-out");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 describe("workbench runtime MCP fixture", () => {
   it("echoes its private marker and propagates real client cancellations through sequential waits", async () => {
     const fixture = await startWorkbenchRuntimeMcpFixture();
@@ -98,5 +106,110 @@ describe("workbench runtime MCP fixture", () => {
     expect(fixture.stats()).toMatchObject({ waitCalls: 1, cancelledWaits: 1, activeWaits: 0 });
     await expect(settlesWithin(pending, 2_000)).resolves.toBe(true);
     await expect(client.close()).resolves.toBeUndefined();
+  });
+
+  it("isolates concurrent sessions and accepts a new client after another closes", async () => {
+    const fixture = await startWorkbenchRuntimeMcpFixture();
+    fixtures.push(fixture);
+    const clientA = await connectFixtureClient(fixture);
+    const clientB = await connectFixtureClient(fixture);
+
+    const [echoA, echoB] = await Promise.all([
+      clientA.callTool({
+        name: "workbench_probe_echo",
+        arguments: { value: "client-a" },
+      }),
+      clientB.callTool({
+        name: "workbench_probe_echo",
+        arguments: { value: "client-b" },
+      }),
+    ]);
+    expect(echoA.structuredContent).toMatchObject({
+      echoMarker: fixture.echoMarker,
+      value: "client-a",
+    });
+    expect(echoB.structuredContent).toMatchObject({
+      echoMarker: fixture.echoMarker,
+      value: "client-b",
+    });
+    expect(fixture.stats().echoCalls).toBe(2);
+
+    const unknownSession = await fetch(fixture.url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "mcp-session-id": "unknown-workbench-fixture-session",
+      },
+      body: "{}",
+    });
+    expect(unknownSession.status).toBe(404);
+
+    const controllerA = new AbortController();
+    const controllerB = new AbortController();
+    const pendingA = clientA.callTool({ name: "workbench_probe_wait", arguments: {} }, undefined, {
+      signal: controllerA.signal,
+      timeout: 5_000,
+      maxTotalTimeout: 5_000,
+    });
+    const pendingB = clientB.callTool({ name: "workbench_probe_wait", arguments: {} }, undefined, {
+      signal: controllerB.signal,
+      timeout: 5_000,
+      maxTotalTimeout: 5_000,
+    });
+    await fixture.waitForWaitStart(2_000);
+    await waitForCondition(() => fixture.stats().activeWaits === 2, 2_000);
+
+    controllerA.abort();
+    await expect(pendingA).rejects.toThrow();
+    await waitForCondition(
+      () => fixture.stats().activeWaits === 1 && fixture.stats().cancelledWaits === 1,
+      2_000,
+    );
+    await expect(settlesWithin(pendingB, 75)).resolves.toBe(false);
+
+    controllerB.abort();
+    await expect(pendingB).rejects.toThrow();
+    await waitForCondition(
+      () => fixture.stats().activeWaits === 0 && fixture.stats().cancelledWaits === 2,
+      2_000,
+    );
+
+    await expect(clientA.close()).resolves.toBeUndefined();
+    const clientC = await connectFixtureClient(fixture);
+    const echoC = await clientC.callTool({
+      name: "workbench_probe_echo",
+      arguments: { value: "client-after-reconnect" },
+    });
+    expect(echoC.structuredContent).toMatchObject({
+      echoMarker: fixture.echoMarker,
+      value: "client-after-reconnect",
+    });
+    expect(fixture.stats()).toMatchObject({ echoCalls: 3, activeWaits: 0, cancelledWaits: 2 });
+
+    fixture.resetWait();
+    const closingWaitB = clientB.callTool(
+      { name: "workbench_probe_wait", arguments: {} },
+      undefined,
+      { timeout: 5_000, maxTotalTimeout: 5_000 },
+    );
+    const closingWaitC = clientC.callTool(
+      { name: "workbench_probe_wait", arguments: {} },
+      undefined,
+      { timeout: 5_000, maxTotalTimeout: 5_000 },
+    );
+    const closingWaitBSettled = settlesWithin(closingWaitB, 2_000);
+    const closingWaitCSettled = settlesWithin(closingWaitC, 2_000);
+    await fixture.waitForWaitStart(2_000);
+    await waitForCondition(() => fixture.stats().activeWaits === 2, 2_000);
+    await expect(fixture.close()).resolves.toBeUndefined();
+    await fixture.waitForWaitAbort(2_000);
+    await waitForCondition(
+      () => fixture.stats().activeWaits === 0 && fixture.stats().cancelledWaits === 2,
+      2_000,
+    );
+    await expect(closingWaitBSettled).resolves.toBe(true);
+    await expect(closingWaitCSettled).resolves.toBe(true);
+    await expect(clientB.close()).resolves.toBeUndefined();
+    await expect(clientC.close()).resolves.toBeUndefined();
   });
 });

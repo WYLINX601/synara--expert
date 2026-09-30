@@ -1,5 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type Server as HttpServer,
+  type ServerResponse,
+} from "node:http";
 import {
   createServer as createNetServer,
   type ListenOptions,
@@ -130,10 +135,9 @@ async function stopHttpServer(server: HttpServer, sockets: ReadonlySet<Socket>):
   await withTimeout(closed, CLOSE_TIMEOUT_MS, "http-fixture-close");
 }
 
-function makeHttpServer(
-  transport: StreamableHTTPServerTransport,
-  sockets: Set<Socket>,
-): HttpServer {
+type FixtureRequestHandler = (request: IncomingMessage, response: ServerResponse) => Promise<void>;
+
+function makeHttpServer(handleRequest: FixtureRequestHandler, sockets: Set<Socket>): HttpServer {
   const server = createHttpServer((request, response) => {
     let pathname: string;
     try {
@@ -146,16 +150,13 @@ function makeHttpServer(
       response.writeHead(404).end();
       return;
     }
-    void transport.handleRequest(request, response).catch(() => {
-      if (!response.headersSent) response.writeHead(500).end();
-      else response.destroy();
-    });
+    void handleRequest(request, response);
   });
   server.on("connection", (socket) => trackSocket(socket, sockets));
   return server;
 }
 
-async function reserveLoopbackPair(transport: StreamableHTTPServerTransport): Promise<{
+async function reserveLoopbackPair(handleRequest: FixtureRequestHandler): Promise<{
   readonly httpServer: HttpServer;
   readonly ipv6Guard: NetServer;
   readonly httpSockets: Set<Socket>;
@@ -188,7 +189,7 @@ async function reserveLoopbackPair(transport: StreamableHTTPServerTransport): Pr
     }
 
     const httpSockets = new Set<Socket>();
-    const httpServer = makeHttpServer(transport, httpSockets);
+    const httpServer = makeHttpServer(handleRequest, httpSockets);
     try {
       await listen(
         httpServer,
@@ -207,74 +208,152 @@ async function reserveLoopbackPair(transport: StreamableHTTPServerTransport): Pr
 
 export async function startWorkbenchRuntimeMcpFixture(): Promise<WorkbenchRuntimeMcpFixture> {
   const echoMarker = `wb-mcp-${randomBytes(24).toString("hex")}`;
-  const mcpServer = new McpServer({ name: "workbench-runtime-fixture", version: "1.0.0" });
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-    enableJsonResponse: true,
-  });
-
   let echoCalls = 0;
   let waitCalls = 0;
   let activeWaits = 0;
   let cancelledWaits = 0;
   let waitStartGate = makeSignalGate();
   let waitAbortGate = makeSignalGate();
+  type FixtureSession = {
+    readonly server: McpServer;
+    readonly transport: StreamableHTTPServerTransport;
+    close(): Promise<void>;
+  };
+  const sessionsById = new Map<string, FixtureSession>();
+  const openSessions = new Set<FixtureSession>();
+  let closing = false;
+
+  const removeSession = (session: FixtureSession): void => {
+    const sessionId = session.transport.sessionId;
+    if (sessionId && sessionsById.get(sessionId) === session) sessionsById.delete(sessionId);
+    openSessions.delete(session);
+  };
 
   const stringSchema = z.string() as unknown as AnySchema;
-  mcpServer.registerTool(
-    "workbench_probe_echo",
-    {
-      description: "Return a fixture-generated marker with the submitted value.",
-      inputSchema: { value: stringSchema },
-      outputSchema: { echoMarker: stringSchema, value: stringSchema },
-    },
-    ({ value }: { value: string }) => {
-      echoCalls += 1;
-      return {
-        content: [{ type: "text", text: echoMarker }],
-        structuredContent: { echoMarker, value },
-      };
-    },
-  );
-  mcpServer.registerTool(
-    "workbench_probe_wait",
-    {
-      description: "Remain pending until the MCP client cancels this tool request.",
-      inputSchema: {},
-      outputSchema: { cancelled: z.boolean() as unknown as AnySchema },
-    },
-    (_args, extra) => {
-      waitCalls += 1;
-      activeWaits += 1;
-      waitStartGate.resolve();
-      return new Promise((resolve) => {
-        let settled = false;
-        const onAbort = () => {
-          if (settled) return;
-          settled = true;
-          extra.signal.removeEventListener("abort", onAbort);
-          activeWaits -= 1;
-          cancelledWaits += 1;
-          waitAbortGate.resolve();
-          resolve({
-            content: [{ type: "text", text: "cancelled" }],
-            structuredContent: { cancelled: true },
-          });
+  const registerTools = (mcpServer: McpServer): void => {
+    mcpServer.registerTool(
+      "workbench_probe_echo",
+      {
+        description: "Return a fixture-generated marker with the submitted value.",
+        inputSchema: { value: stringSchema },
+        outputSchema: { echoMarker: stringSchema, value: stringSchema },
+      },
+      ({ value }: { value: string }) => {
+        echoCalls += 1;
+        return {
+          content: [{ type: "text", text: echoMarker }],
+          structuredContent: { echoMarker, value },
         };
-        if (extra.signal.aborted) onAbort();
-        else extra.signal.addEventListener("abort", onAbort, { once: true });
-      });
-    },
-  );
+      },
+    );
+    mcpServer.registerTool(
+      "workbench_probe_wait",
+      {
+        description: "Remain pending until the MCP client cancels this tool request.",
+        inputSchema: {},
+        outputSchema: { cancelled: z.boolean() as unknown as AnySchema },
+      },
+      (_args, extra) => {
+        waitCalls += 1;
+        activeWaits += 1;
+        waitStartGate.resolve();
+        return new Promise((resolve) => {
+          let settled = false;
+          const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            extra.signal.removeEventListener("abort", onAbort);
+            activeWaits -= 1;
+            cancelledWaits += 1;
+            waitAbortGate.resolve();
+            resolve({
+              content: [{ type: "text", text: "cancelled" }],
+              structuredContent: { cancelled: true },
+            });
+          };
+          if (extra.signal.aborted) onAbort();
+          else extra.signal.addEventListener("abort", onAbort, { once: true });
+        });
+      },
+    );
+  };
 
-  await mcpServer.connect(transport as unknown as Transport);
-  let listeners: Awaited<ReturnType<typeof reserveLoopbackPair>>;
-  try {
-    listeners = await reserveLoopbackPair(transport);
-  } catch (error) {
-    await mcpServer.close().catch(() => undefined);
-    throw error;
-  }
+  const createSession = async (): Promise<FixtureSession> => {
+    if (closing) throw new Error("workbench-mcp-fixture-is-closing");
+    const mcpServer = new McpServer({ name: "workbench-runtime-fixture", version: "1.0.0" });
+    let session!: FixtureSession;
+    let closePromise: Promise<void> | undefined;
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      enableJsonResponse: true,
+      onsessioninitialized: (sessionId) => {
+        sessionsById.set(sessionId, session);
+      },
+      onsessionclosed: (sessionId) => {
+        if (sessionsById.get(sessionId) === session) sessionsById.delete(sessionId);
+      },
+    });
+    registerTools(mcpServer);
+    session = {
+      server: mcpServer,
+      transport,
+      close: () => {
+        if (closePromise) return closePromise;
+        closePromise = (async () => {
+          try {
+            await withTimeout(mcpServer.close(), CLOSE_TIMEOUT_MS, "mcp-session-close");
+          } finally {
+            removeSession(session);
+          }
+        })();
+        return closePromise;
+      },
+    };
+    openSessions.add(session);
+    // MCP transport exposes onclose as a callback property instead of an EventTarget.
+    // oxlint-disable-next-line unicorn/prefer-add-event-listener
+    transport.onclose = () => removeSession(session);
+    try {
+      await mcpServer.connect(transport as unknown as Transport);
+    } catch (error) {
+      await session.close().catch(() => undefined);
+      throw error;
+    }
+    return session;
+  };
+
+  const handleMcpRequest: FixtureRequestHandler = async (request, response) => {
+    let session: FixtureSession | undefined;
+    try {
+      const sessionHeader = request.headers["mcp-session-id"];
+      if (typeof sessionHeader === "string") {
+        session = sessionsById.get(sessionHeader);
+        if (!session) {
+          request.resume();
+          response.writeHead(404, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: "unknown-session" }));
+          return;
+        }
+      } else if (sessionHeader !== undefined) {
+        request.resume();
+        response.writeHead(400, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "invalid-session-header" }));
+        return;
+      } else {
+        session = await createSession();
+      }
+      await session.transport.handleRequest(request, response);
+    } catch {
+      if (!response.headersSent) response.writeHead(500).end();
+      else response.destroy();
+    } finally {
+      // A request without a session ID must be an initialize request. Let the SDK
+      // validate it, then discard the temporary server if no session was created.
+      if (session && !session.transport.sessionId) await session.close().catch(() => undefined);
+    }
+  };
+
+  const listeners = await reserveLoopbackPair(handleMcpRequest);
   let closePromise: Promise<void> | undefined;
   return {
     url: `http://${FIXTURE_HOST}:${listeners.port}${FIXTURE_PATH}`,
@@ -294,10 +373,11 @@ export async function startWorkbenchRuntimeMcpFixture(): Promise<WorkbenchRuntim
     close: () => {
       if (closePromise) return closePromise;
       closePromise = (async () => {
+        closing = true;
         const httpClose = stopHttpServer(listeners.httpServer, listeners.httpSockets);
         const ipv6Close = stopNetServer(listeners.ipv6Guard, listeners.ipv6Sockets);
-        const mcpClose = withTimeout(mcpServer.close(), CLOSE_TIMEOUT_MS, "mcp-server-close");
-        const results = await Promise.allSettled([httpClose, ipv6Close, mcpClose]);
+        const sessionCloses = [...openSessions].map((session) => session.close());
+        const results = await Promise.allSettled([httpClose, ipv6Close, ...sessionCloses]);
         const errors = results.flatMap((result) =>
           result.status === "rejected" ? [result.reason] : [],
         );

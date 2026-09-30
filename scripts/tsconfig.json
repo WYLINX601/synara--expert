@@ -12,6 +12,7 @@
       }
     ]
   },
+  "files": ["computer-use-fixtures/packaged-client.ts"],
   // device-helper-smoke.ts spawns the helper through the server's sandbox
   // wrapper so the smoke run exercises the same confinement the app applies.
   // Duplicating that logic here is what would let the two drift.
@@ -21,6 +22,9 @@
   // src/cuaFixtures out of its own.
   // expert-p0 is a Bun-only verification fixture that imports server source;
   // the scripts composite project cannot own those server files.
+  // The workbench runtime probe reuses packaged-client's schema-checked RPC
+  // connection helper, so typecheck that leaf client without including the
+  // rest of the computer-use fixture family.
   "include": [
     "**/*.ts",
     "../apps/server/src/device/helperSandbox.ts",

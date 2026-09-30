@@ -1,7 +1,7 @@
 # 个人工作台落地技术方案与实施计划
 
-状态：本轮范围为 WB-00 至 WB-05；不开展 WB-06。WB-00 上游完整历史、92 个发布标签与迁移 lineage 检查已有补充证据；WB-02 统一启动/备份接线已集成，定向测试通过；WB-04 同步 CLI 已实现，build manifest 代码已提交但待统一 review/验收；WB-05 workflow 代码已提交但没有远端手动或定时运行证据。WB-01 实际打包身份、WB-02 真实升级/恢复演练、WB-03 候选真实运行以及 WB-04 最终候选验证尚未完成。M1、M2、M3 均未完成。
-日期：2026-09-30。适用仓库：当前 Synara Expert fork。官方 `v0.9.2` 仍是未集成候选；锁定 SHA 不表示已合并、打包或运行验证。
+状态：本轮范围为 WB-00 至 WB-05；WB-06 按用户决定延期。WB-00 完成，上游完整历史、92 个发布标签与迁移 lineage 检查均有证据。WB-01/02/03 的代码与定向检查已集成；最终候选包、真实隔离升级/恢复与 Provider 实测仍待完成。WB-04 已在隔离候选分支从 `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 官方 `v0.9.2`（`a33435c18474eb7816582004e45f87382965ac8d`），合并提交 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`；兼容修复、同步/构建工具与本地 runtime probe 已集成。最终构建、实机运行及候选门禁尚未执行。WB-05 workflow 与本地 fixture 已集成，但远端手动/定时运行未执行。`upstream.lock` 的 `integratedBase` 仍保留旧基线，等待完整验收后再推进。M1、M2、M3 均未完成。
+日期：2026-09-30。适用仓库：当前 Synara Expert fork。上述 `v0.9.2` merge 仅在隔离候选分支；它不代表已接受为集成基线、打包或运行验证。
 上位设计：[工作台架构](./workbench-architecture.md)。既有能力：[专家方案](./expert-product-technical-design.md)。
 
 ## 快速导航
@@ -36,18 +36,19 @@
 
 当前分阶段状态（2026-09-30）：
 
-| 工作包 | 已有证据                                                                                                                                                                                                                 | 尚未完成                                                                                                         |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| WB-00  | [完整历史与 upstream 标签补充](../workbench/WB-00-upstream-evidence.md)记录 422 个上游 heads、92 个 `v*` tags，仓库不再是 shallow；`migrations:check` 检查全部发布标签通过。                                             | 原基线全量测试记录中有两项受并行/时序影响的失败，单项重跑通过；此项仍按原记录保留，不能写成全量套件全绿。        |
-| WB-01  | [图标与 Actions 权限调查](../workbench/WB-01-evidence.md)及[运行环境 preflight](../workbench/WB-04-runtime-preflight.md)已记录身份实现、工具限制和可用配置。                                                             | 未构建最终候选 ZIP；身份、安装版并存、数据路径和 updater 行为未作候选实测。                                      |
-| WB-02  | Workbench module migration ledger、升级计划、统一 startup/backup/recovery 接线已集成。6 个 server focused test 文件 89 项通过；恢复约束 follow-up 另有 2 个文件 47 项通过，server typecheck 与 `migrations:check` 通过。 | 尚未做真实隔离数据库升级、中断恢复或 restore 演练；统一候选验收仍未完成。                                        |
-| WB-03  | 专家注册、runtime 接线与 feature import boundary 有独立提交和 focused 检查记录。                                                                                                                                         | 尚未在最终官方候选上验证 Codex/Pi 普通/专家首轮、恢复、取消、MCP 和 session 隔离。                               |
-| WB-04  | 固定目标的 `check/prepare/bind/verify/status` CLI 与 candidate retirement 已提交；build manifest 实现见 `e3a9e090f`。                                                                                                    | build manifest 待主审与统一候选验收；没有实际 Workbench ZIP build，CLI 的全候选固定门禁未在最终候选 SHA 上执行。 |
-| WB-05  | workflow 与 helper 实现见提交 `9bb1e1240`，报告记录了仓库 token 与分支设置限制。                                                                                                                                         | 未推送、未手动 dispatch、未定时运行；远端 branch write、artifact 保留和 PR 降级均无运行证据。                    |
+| 工作包 | 已有证据                                                                                                                                                                                                                                        | 尚未完成                                                                                                                                          |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WB-00  | [完整历史与 upstream 标签补充](../workbench/WB-00-upstream-evidence.md)记录 422 个上游 heads、92 个 `v*` tags，仓库不再是 shallow；`migrations:check` 检查全部发布标签通过。                                                                    | WB-00 基线工作完成。原基线全量测试记录中两项受并行/时序影响的失败及单项重跑通过结果仍保留；不将其写成全量套件全绿。                               |
+| WB-01  | 身份、隔离目录、更新策略代码及相关定向检查已集成；图标来源与 Actions 权限调查见[证据](../workbench/WB-01-evidence.md)。                                                                                                                         | 未构建最终候选 ZIP；实际 bundle identity、安装版并存、profile/home 隔离与 updater 行为尚未做候选包实测。                                          |
+| WB-02  | Workbench module migration ledger、升级计划、统一 startup/backup/recovery 接线已集成。6 个 server focused test 文件 89 项通过；恢复约束 follow-up 另有 2 个文件 47 项通过，server typecheck 与 `migrations:check` 通过。                        | 尚未做真实隔离数据库升级、中断恢复或 restore 演练；统一候选验收仍未完成。                                                                         |
+| WB-03  | 专家注册、runtime 接线与 feature import boundary 代码及 focused 检查已集成。候选 runtime probe 已建立，但尚未运行。                                                                                                                             | 尚未在最终官方候选上验证 Codex/Pi 普通/专家首轮、恢复、取消、MCP 和隔离行为。probe 的 `session.threadId` 证据不是 Provider 原生 session ID 证明。 |
+| WB-04  | 隔离候选从 base `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 固定官方 SHA `a33435c18474eb7816582004e45f87382965ac8d`，merge 为 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`；同步 CLI、候选兼容修复、build manifest 与 runtime probe 已集成。 | 尚未执行最终候选固定门禁、Workbench/Preview ZIP build、包身份检查、Provider live probe 或真实恢复验收；`upstream.lock` integrated base 暂不推进。 |
+| WB-05  | workflow、helper 与本地 Git fixture 已集成；候选选择和报告逻辑有本地检查。                                                                                                                                                                      | 未推送、未手动 dispatch、未定时运行；远端 branch write、artifact 保留和 PR 降级均无运行证据。                                                     |
+| WB-06  | 看板保持在架构草案中。                                                                                                                                                                                                                          | 按用户决定延期，不在当前授权范围内实施。                                                                                                          |
 
 官方候选锁、已集成基线和三者 merge-base 的准确关系见 [WB-00 upstream evidence](../workbench/WB-00-upstream-evidence.md)。以上状态不替代最终候选自动门禁、实际包身份检查、Provider 运行或数据恢复验收。
 
-第一轮优先完成当前 macOS 自用运行验证。平台无关代码继续遵循仓库边界，Linux/Windows 的支持状态按实际验证记录，不宣称已经覆盖。
+第一轮优先完成当前 macOS 自用运行验证。平台无关代码继续遵循仓库边界，Linux/Windows 的支持状态按实际验证记录，不宣称已经覆盖。当前尚无候选 build、包身份或 Provider live 结果；实际验证使用 Codex `gpt-6.1-sol`/`high` 与 Pi `openai-codex/gpt-5.6-sol`/`medium`，并记录实际安装 SDK 版本。
 
 ## 2. 实施决策
 
@@ -87,7 +88,7 @@ WB-01 默认身份方案如下，实施时统一接入现有身份定义、打�
 | WB-03 收拢接入       | 工作台入口注册、专家服务装配与依赖清单；接入边界检查                              | [workbench runtime](../apps/server/src/workbench/runtimeLayer.ts)、[RPC](../apps/server/src/wsRpc.ts)、[注册表](../apps/web/src/workbench/registry.ts)、[边界检查](../scripts/check-workbench-boundary.ts)                                                                              | 原生与专家行为不变；新模块可通过集中入口接入；没有新的执行器             |
 | WB-04 首次真实同步   | 同步脚本；固定官方候选；冲突适配；隔离构建；真实运行及恢复演练                    | [sync CLI](../scripts/workbench-sync.ts)、[`workbench:sync`](../package.json)、[build manifest](../scripts/workbench-build.ts)；复用现有测试、构建和恢复工具                                                                                                                            | 官方 SHA、自定义 SHA、检查和实测证据对应同一候选；形成可安装版本         |
 | WB-05 每周自动准备   | 每周 workflow、并发控制、重复运行处理、候选报告、失败恢复入口                     | [weekly workflow](../.github/workflows/workbench-weekly-sync.yml)、[helper/tests](../.github/scripts/workbench-weekly.mjs)、[自动化记录](../workbench/WB-05-automation.md)                                                                                                              | 手动触发及一轮真实定时触发均有证据；同一候选不重复；不会自动替换日用程序 |
-| WB-06 业务看板       | WorkItem/线程关联、最小页面与“交给专家”操作                                       | 拟新增 `workbench/features/boards/`；复用 [原生 Kanban](../apps/web/src/components/kanban/KanbanView.tsx) 的适用组件                                                                                                                                                                    | 事项与执行状态分开；崩溃重试不重复创建任务；进入下次周同步验证           |
+| WB-06 业务看板       | WorkItem/线程关联、最小页面与“交给专家”操作（按用户决定延期）                     | 拟新增 `workbench/features/boards/`；复用 [原生 Kanban](../apps/web/src/components/kanban/KanbanView.tsx) 的适用组件                                                                                                                                                                    | 事项与执行状态分开；崩溃重试不重复创建任务；进入下次周同步验证           |
 
 WB-00 的提交前先审查代码、运行产物、密钥和机器路径，按实际依赖整理提交；本地提交与远程推送分别执行。若其他工作仍在修改当前目录，先明确文件归属并保存基线，再在独立工作区实施。
 
@@ -193,7 +194,7 @@ v2 恢复记录记录官方、工作台和格式的源/目标版本、旧历史�
 
 ### 6.1 脚本接口
 
-接口状态：WB-04 阶段 A 的 `check`/`prepare`、阶段 B 的持久状态/`bind`/`verify`/`status`、集成候选退休已实现。build manifest 代码已提交，接口见下方命令；实现 review、真实构建和候选运行仍待统一验收。
+接口状态：WB-04 的 `check`/`prepare`/`bind`/`verify`/`status`、集成候选退休、build manifest 与候选 runtime probe 已集成。probe 加 fixture 的 6 项定向测试、scripts 工作区 typecheck、改动文件 lint 已通过。最终候选固定门禁、Workbench/Preview 实际构建、包身份检查、Provider live probe 与数据库 restore 仍待执行。
 
 | 命令                                                                                                                                                    | 行为与输出                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

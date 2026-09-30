@@ -1,10 +1,10 @@
 # 基于 Synara 的个人工作台架构
 
-状态：架构基线与分阶段实施记录。当前授权范围为 WB-00 至 WB-05；本轮不开展 WB-06。核实日期：2026-09-30。
+状态：架构基线与分阶段实施记录。当前范围为 WB-00 至 WB-05；WB-06 按用户决定延期。核实日期：2026-09-30。
 
-基线关系见 [WB-00 记录](../workbench/WB-00-baseline.md) 与 [上游历史补充](../workbench/WB-00-upstream-evidence.md)：工作区 HEAD 与官方 `upstream/main`、`v0.9.2` 的 merge-base 均为 `eaa61eded31b6755d4f30ba8eabc5d905cf817cb`；`upstream/main` 与 `v0.9.2` 的 merge-base 为 `a33435c18474eb7816582004e45f87382965ac8d`。锁定的 `v0.9.2` 仍是待集成候选，不表示已经合并或通过验证。
+基线关系见 [WB-00 记录](../workbench/WB-00-baseline.md) 与 [上游历史补充](../workbench/WB-00-upstream-evidence.md)：2026-09-29 原工作区基线为 `eaa61eded31b6755d4f30ba8eabc5d905cf817cb`，官方 `upstream/main` 与 `v0.9.2` 的共同基点为 `a33435c18474eb7816582004e45f87382965ac8d`。WB-04 已在隔离候选分支从 `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 固定的 `v0.9.2`，提交为 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`。`upstream.lock` 的 `integratedBase` 仍为旧基线，直到构建、包身份、Provider 与恢复验收完成前，不把候选 merge 提升为已验证基线。
 
-当前状态按证据分开记录：WB-00 完整历史和 92 个发布标签已补齐，迁移 lineage 检查通过；WB-01 的图标来源与 GitHub Actions 权限已调查，但 Workbench app 身份尚未做候选包实测；WB-02 模块 ledger 与 SQLite 启动/备份/恢复接线已集成，定向测试通过，真实隔离数据库升级与恢复演练仍未做；WB-03 的身份、注册表和导入边界代码已提交，真实 Provider 行为仍待候选运行；WB-04 的同步 CLI 已建立，build manifest review、实际构建和候选验证仍待完成；WB-05 workflow 代码已提交，但没有远端手动或定时运行证据。实际打包、Codex/Pi Provider 首轮、恢复演练和最终候选验收尚未完成，因此 M1/M2/M3 均不标记完成。具体检查范围见 [WB-01 证据](../workbench/WB-01-evidence.md)、[WB-04 runtime preflight](../workbench/WB-04-runtime-preflight.md)、[WB-05 自动化记录](../workbench/WB-05-automation.md) 和[实施计划](./workbench-implementation-plan.md)。
+当前状态按证据分开记录：WB-00 已完成完整历史、92 个发布标签与迁移 lineage 检查；WB-01/02/03 的代码和定向检查已集成，但最终包身份、隔离数据库升级/restore 与真实 Provider 行为尚未验收；WB-04 的固定 v0.9.2 候选 merge、兼容修复、同步/构建工具和候选 runtime probe 已集成，尚未运行最终自动门禁、打包或 live probe；WB-05 workflow 与本地 fixture 已集成，但没有远端手动或定时运行证据。runtime probe 设计为核对互异的产品 `session.threadId`、固定专家绑定与 persona 不串线；当前产品 RPC 不暴露 Provider 原生 session ID，该接口不在此 probe 的观测范围。WB-06 按用户决定延期。最终打包、Codex/Pi Provider 首轮、恢复演练和候选验收尚未完成，因此 M1/M2/M3 均不标记完成。具体检查范围见 [WB-01 证据](../workbench/WB-01-evidence.md)、[WB-04 runtime preflight](../workbench/WB-04-runtime-preflight.md)、[WB-05 自动化记录](../workbench/WB-05-automation.md) 和[实施计划](./workbench-implementation-plan.md)。
 
 后续实施见 [落地技术方案与计划](./workbench-implementation-plan.md)，其中已细化文件位置、迁移接管、验收与每周同步任务。
 

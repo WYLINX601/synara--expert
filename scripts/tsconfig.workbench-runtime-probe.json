@@ -1,0 +1,23 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "types": ["node", "bun"],
+    "lib": ["ES2023", "esnext.disposable"],
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "plugins": [
+      {
+        "name": "@effect/language-service"
+      }
+    ]
+  },
+  "include": [
+    "workbench-runtime-probe.ts",
+    "workbench-runtime-probe-input.test.ts",
+    "lib/workbench-runtime-probe-input.ts",
+    "lib/workbench-runtime-mcp-fixture.ts",
+    "workbench-runtime-mcp-fixture.test.ts",
+    "computer-use-fixtures/packaged-client.ts"
+  ]
+}

@@ -167,6 +167,7 @@ export async function connectOwnerUrl(rawUrl: string) {
   return {
     api,
     serverPort: Number(url.port),
+    serverInstanceId: compatibility.serverInstanceId,
     run: <A, E>(effect: Effect.Effect<A, E>) =>
       runtime.runPromise(effect.pipe(Effect.timeout(15_000))),
     close: async () => {

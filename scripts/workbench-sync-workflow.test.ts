@@ -69,26 +69,31 @@ async function commitFile(
   return git(repo, "rev-parse", "HEAD");
 }
 
-function fixtureLock(baseSha: string, targetSha: string): WorkbenchSyncLock {
+function fixtureLock(
+  baseSha: string,
+  targetSha: string,
+  candidateTag = "v0.9.2",
+  baseTag = "v0.9.1",
+): WorkbenchSyncLock {
   return {
     formatVersion: 1,
     repository: OFFICIAL_REPOSITORY,
     branch: "main",
     updateChannel: "latest-stable-release",
     integrationStrategy: "merge",
-    integratedBase: { tag: "v0.9.1", commit: baseSha },
-    candidate: { tag: "v0.9.2", commit: targetSha, status: "not-yet-integrated" },
+    integratedBase: { tag: baseTag, commit: baseSha },
+    candidate: { tag: candidateTag, commit: targetSha, status: "not-yet-integrated" },
   };
 }
 
-function fakeFetcher(): () => Promise<Response> {
+function fakeFetcher(tag = "v0.9.2"): () => Promise<Response> {
   return async () =>
     new Response(
       JSON.stringify([
         {
           draft: false,
           prerelease: false,
-          tag_name: "v0.9.2",
+          tag_name: tag,
           published_at: "2026-09-22T00:00:00Z",
         },
       ]),
@@ -231,6 +236,92 @@ describe("workbench sync persisted workflow", () => {
       status: "missing",
       reason: "runtime-evidence-not-provided",
     });
+  });
+
+  it("keeps unmerged candidates busy, then retires a merged candidate and prepares the next release", async () => {
+    const fixture = await makeFixture();
+    const { prepare: firstCandidate } = await checkedAndPrepared(fixture);
+    const nextTargetSha = await commitFile(
+      fixture.seed,
+      "release-next.txt",
+      "next release\n",
+      "next stable release",
+    );
+    git(fixture.seed, "tag", "v0.9.3", nextTargetSha);
+    git(fixture.seed, "push", fixture.remote, "main", "--tags");
+
+    await commitFile(
+      fixture.repo,
+      "main-followup.txt",
+      "advance without integrating candidate\n",
+      "advance main without candidate",
+    );
+    const unmergedCheck = await checkWorkbenchSyncWorkflow({
+      repoRoot: fixture.repo,
+      dependencies: { repository: fixture.remote, fetcher: fakeFetcher("v0.9.3") },
+    });
+    expect(unmergedCheck.status).toBe("update-available");
+    expect(unmergedCheck.retiredCandidate).toBeUndefined();
+
+    const blockedCheckout = join(fixture.directory, "candidate-before-integration");
+    git(fixture.repo, "worktree", "add", "--detach", blockedCheckout, "main");
+    const blockedPrepare = await prepareWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: blockedCheckout,
+      baseSha: unmergedCheck.mainSha!,
+      targetTag: "v0.9.3",
+      targetSha: nextTargetSha,
+      dependencies: { repository: fixture.remote },
+    });
+    expect(blockedPrepare.status).toBe("candidate-busy");
+    expect(blockedPrepare.stage).toBe("another-active-candidate");
+
+    git(fixture.repo, "merge", "--no-ff", firstCandidate.branch, "-m", "integrate first candidate");
+    await writeFile(
+      join(fixture.repo, "workbench/upstream.lock.json"),
+      `${JSON.stringify(fixtureLock(fixture.targetSha, nextTargetSha, "v0.9.3", "v0.9.2"), null, 2)}\n`,
+    );
+    git(fixture.repo, "add", "--", "workbench/upstream.lock.json");
+    git(fixture.repo, "commit", "-m", "record integrated upstream release");
+    const integrationMainSha = git(fixture.repo, "rev-parse", "HEAD");
+
+    const integratedCheck = await checkWorkbenchSyncWorkflow({
+      repoRoot: fixture.repo,
+      dependencies: { repository: fixture.remote, fetcher: fakeFetcher("v0.9.3") },
+    });
+    expect(integratedCheck.status, JSON.stringify(integratedCheck)).toBe("update-available");
+    expect(integratedCheck.retiredCandidate).toEqual({
+      candidateSha: firstCandidate.candidateSha,
+      target: { tag: "v0.9.2", commit: fixture.targetSha },
+      integrationMainSha,
+    });
+    const statePaths = await resolveRepositoryStatePaths(fixture.repo);
+    const state = JSON.parse(await readFile(statePaths.stateFile, "utf8")) as {
+      activeCandidate?: unknown;
+    };
+    expect(state.activeCandidate).toBeUndefined();
+    const archived = JSON.parse(
+      await readFile(join(statePaths.stateDirectory, "last-integrated-candidate.json"), "utf8"),
+    ) as {
+      activeCandidate: { candidateSha: string; target: { tag: string; commit: string } };
+      integrationMainSha: string;
+    };
+    expect(archived.activeCandidate.candidateSha).toBe(firstCandidate.candidateSha);
+    expect(archived.activeCandidate.target).toEqual({ tag: "v0.9.2", commit: fixture.targetSha });
+    expect(archived.integrationMainSha).toBe(integrationMainSha);
+
+    const nextCheckout = join(fixture.directory, "candidate-next-release");
+    git(fixture.repo, "worktree", "add", "--detach", nextCheckout, "main");
+    const nextPrepare = await prepareWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: nextCheckout,
+      baseSha: integratedCheck.mainSha!,
+      targetTag: "v0.9.3",
+      targetSha: nextTargetSha,
+      dependencies: { repository: fixture.remote },
+    });
+    expect(nextPrepare.status).toBe("candidate-ready");
+    expect(nextPrepare.target).toEqual({ tag: "v0.9.3", commit: nextTargetSha });
   });
 
   it("keeps failed automatic gates out of ready and records all fixed checks", async () => {

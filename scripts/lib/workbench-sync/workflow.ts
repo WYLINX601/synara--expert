@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnProcessSync } from "@synara/shared/processRuntime";
 import {
   readRepositoryLockStatus,
@@ -13,6 +13,7 @@ import {
   type RuntimeEvidence,
   type ToolchainSnapshot,
   type VerificationCheck,
+  type WorkbenchSyncState,
 } from "./state.ts";
 import { runGit } from "./git.ts";
 import {
@@ -74,6 +75,11 @@ export type CheckWorkflowReport = Omit<CheckReport, "stage" | "exitCode"> & {
   readonly mainSha?: string;
   readonly stage: string;
   readonly exitCode: number | null;
+  readonly retiredCandidate?: {
+    readonly candidateSha: string;
+    readonly target: { readonly tag: string; readonly commit: string };
+    readonly integrationMainSha: string;
+  };
 };
 
 export type PrepareWorkflowReport = PrepareReport & {
@@ -304,9 +310,41 @@ export async function checkWorkbenchSyncWorkflow(input: {
     };
     const state = await readWorkbenchSyncState(paths.stateFile);
     let activeCandidate = state.activeCandidate;
+    let retiredCandidate: CheckWorkflowReport["retiredCandidate"];
     if (activeCandidate) {
       const activeMainSha = resolveRefSha(repoRoot, activeCandidate.mainRef);
-      if (!activeMainSha || activeMainSha !== activeCandidate.mainSha) {
+      const candidateMergeHead = getCheckoutIdentity(activeCandidate.checkoutPath).mergeHead;
+      const candidateMerged =
+        activeCandidate.status !== "conflict" &&
+        activeCandidate.candidateSha !== undefined &&
+        candidateMergeHead === null &&
+        activeMainSha !== null &&
+        isAncestor(repoRoot, activeCandidate.candidateSha, activeMainSha) === true &&
+        isAncestor(repoRoot, activeCandidate.target.commit, activeMainSha) === true;
+      if (candidateMerged && activeCandidate.candidateSha && activeMainSha) {
+        const retiredAt = new Date().toISOString();
+        const archivedState = {
+          formatVersion: 1 as const,
+          activeCandidate,
+          integrationMainRef: activeCandidate.mainRef,
+          integrationMainSha: activeMainSha,
+          retiredAt,
+        } satisfies WorkbenchSyncState & {
+          readonly integrationMainRef: string;
+          readonly integrationMainSha: string;
+          readonly retiredAt: string;
+        };
+        await writeWorkbenchSyncState(
+          join(paths.stateDirectory, "last-integrated-candidate.json"),
+          archivedState,
+        );
+        retiredCandidate = {
+          candidateSha: activeCandidate.candidateSha,
+          target: activeCandidate.target,
+          integrationMainSha: activeMainSha,
+        };
+        activeCandidate = undefined;
+      } else if (!activeMainSha || activeMainSha !== activeCandidate.mainSha) {
         const {
           automaticChecks: _automaticChecks,
           runtimeEvidence: _runtimeEvidence,
@@ -320,8 +358,9 @@ export async function checkWorkbenchSyncWorkflow(input: {
         };
       }
     }
+    const { activeCandidate: _previousActiveCandidate, ...stateWithoutActiveCandidate } = state;
     await writeWorkbenchSyncState(paths.stateFile, {
-      ...state,
+      ...stateWithoutActiveCandidate,
       lastCheck: snapshot,
       ...(activeCandidate ? { activeCandidate } : {}),
     });
@@ -331,6 +370,7 @@ export async function checkWorkbenchSyncWorkflow(input: {
       exitCode: finalReport.exitCode ?? null,
       mainRef,
       mainSha,
+      ...(retiredCandidate ? { retiredCandidate } : {}),
     };
   });
 }

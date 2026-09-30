@@ -7,5 +7,13 @@
     "noEmit": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["src", "perf", "tsdown.config.ts", "scripts", "integration", "../../scripts/lib"]
+  "include": [
+    "src",
+    "perf",
+    "tsdown.config.ts",
+    "scripts",
+    "integration",
+    "../../scripts/lib",
+    "../../scripts/check-migration-lineage.ts"
+  ]
 }

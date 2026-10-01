@@ -15,8 +15,20 @@
 - `workflow_dispatch.candidate_ref` accepts only a full `refs/heads/codex/sync-*` ref and stays read-only. It is passed through an environment variable and validated before Git argument construction.
 - The trusted-main helper and the candidate verifier are separate copies. Candidate code and dependency installation run only in the read-only verification job. The publish token is exposed only to the trusted-main publisher step; Git receives it through an ephemeral extra-header environment entry, never a remote URL or report.
 
-## Local evidence
+## Earlier local evidence (source SHA not recorded)
 
 - `mise exec -- bun install --frozen-lockfile` completed in the isolated integration checkout; no lockfile change was made.
 - `mise exec -- bun run .github/scripts/workbench-weekly.test.mjs` passed a temporary real-Git fixture covering a complete-history official-tag fetch, bot identity in a new worktree without global Git identity, cross-job bundle import, expected-branch checkout, the real sync `bind` API, candidate branch creation/fast-forward, and refusal to overwrite a moved human-updated branch.
 - No GitHub Actions run, manual dispatch, timed run, candidate branch push, PR attempt, or enabled workflow has been performed. GitHub token write permission and artifact retention are still confirmed only by a read-only settings snapshot, not by a live publisher run.
+
+The earlier passing fixture result is retained as historical local evidence. Its source SHA was not recorded, so it does not supersede or contradict the source-bound run below.
+
+## 2026-10-01 source 9591 status
+
+One additional local fixture run was executed against clean source SHA `9591dcda2607b4d81574ac5c25bc6e8d30c7ca80` with Bun `1.4.2`. It failed at `.github/scripts/workbench-weekly.test.mjs:196`: expected `candidate-bound`, received `bind-rejected` (exit 1). The inspected fixture setup supplies a placeholder `integratedBase` (`aaaa…`) that does not satisfy the binder's ancestry check, so this run diagnoses a fixture precondition and is not evidence of a production bind defect. That source-9591 run remains failed; its corrected fixture was committed only in the direct child source 858, recorded below. The report SHA-256 is `686e3c4dbf580a793f529fac00e6582e23230ca9971278fde60b46eeaf705de3`; the stderr SHA-256 is `6ce249f5a6bb830f2dd44e1d09c7bdfaee5c6e801d7a4bffb65430840eca2c9f`; and the private evidence index SHA-256 is `6afad44c701069680dbd2d9120f1cbdce38f9190208a4b3e03e6037559266d28`. This ran only the fixture's synthetic local Git repository: it did not access or change real repository refs, GitHub, providers, or models. The failure is not remote success evidence. No remote workflow was dispatched from this source, no candidate branch was pushed, and no schedule fired.
+
+## 2026-10-01 source 858 fixture status
+
+The fixture correction is committed in source SHA `8584249e19313471fe4e22f7ae7eca277f5ccf14`, directly after 9591. That commit changes only `.github/scripts/workbench-weekly.test.mjs`: it gives the synthetic repository a valid integrated-base lineage so the real `workbench:sync bind` API can accept the fixture candidate. The production bind and compare-and-swap guards were not weakened. A single local fixture run on 858 passed with Bun `1.4.2`; stdout SHA-256 `57596ebbc0d283ae3915f4dbf4f626afb2c206f0edb351048c8fc3fb0e395905`, empty stderr SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. The structured weekly archive index is `8584249e1931-20261001/weekly/index.json`, SHA-256 `86bb64121732d691fbe778693fb550bde696b5eedc1a295b3c8eba1b2b8f8012`. It records a local synthetic-Git fixture pass, not a GitHub or remote workflow success.
+
+WB-05 still requires a real manual `workflow_dispatch` run and a separate real scheduled run after the workflow is enabled and the publisher's required write permission is available. The manual run must demonstrate the trusted-main publisher's compare-and-swap write and resulting report; the scheduled run must show the configured schedule actually triggered and produced the expected candidate/report behavior. Until those are observed, remote branch-write permission, artifact retention, and scheduled operation remain unverified. No token or repository setting was changed for the local checks.

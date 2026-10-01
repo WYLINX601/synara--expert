@@ -1,7 +1,7 @@
 # 个人工作台落地技术方案与实施计划
 
-状态：本轮范围为 WB-00 至 WB-05；WB-06 按用户决定延期。WB-00 完成，上游完整历史、92 个发布标签与迁移 lineage 检查均有证据。WB-01/02/03 的代码与定向检查已集成；最终候选包、真实隔离升级/恢复与 Provider 实测仍待完成。WB-04 已在隔离候选分支从 `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 官方 `v0.9.2`（`a33435c18474eb7816582004e45f87382965ac8d`），合并提交 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`；兼容修复、同步/构建工具与本地 runtime probe 已集成。最终构建、实机运行及候选门禁尚未执行。WB-05 workflow 与本地 fixture 已集成，但远端手动/定时运行未执行。`upstream.lock` 的 `integratedBase` 仍保留旧基线，等待完整验收后再推进。M1、M2、M3 均未完成。
-日期：2026-09-30。适用仓库：当前 Synara Expert fork。上述 `v0.9.2` merge 仅在隔离候选分支；它不代表已接受为集成基线、打包或运行验证。
+状态（2026-10-01，fee08 acceptance attempt）：本轮范围为 WB-00 至 WB-05；WB-06 按用户决定延期。WB-00 完成。WB-01 的两种 macOS arm64 unsigned 诊断包、身份/启动检查和三应用目录并存检查通过；这不是正式安装或发布。WB-02 的合成 file-backed SQLite 启动、故障重试和 restore CLI 三场景通过；未读取用户数据库，运行时为 pinned Node 而非 packaged Electron。WB-03 首个 Codex 普通首轮请求返回 HTTP 400 `invalid_request_error`（模型不支持），其余七项未运行；后续独立 cleanup audit 通过，不改变首次 supervisor 报告的 cleanup 失败。WB-04 固定 `v0.9.2` 候选六项门禁中四项通过、server typecheck 与 test 两项失败；仅针对这两项的未提交修复（TS6307 include 和大响应帧测试 helper）已通过对应聚焦检查。其他工具修复仍在验收；六项门禁尚未重跑，也没有基于修复构建新候选。WB-05 尚无远端手动或定时运行证据；WB-06 仍延期。`upstream.lock` 的 `integratedBase` 仍为 `v0.9.1`，M1、M2、M3 均未完成。详见下表和 [WB-01 证据](../workbench/WB-01-evidence.md)。
+日期：2026-10-01。适用仓库：当前 Synara Expert fork。隔离候选从 `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 固定官方 `v0.9.2`（`a33435c18474eb7816582004e45f87382965ac8d`），merge 提交为 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`；fee08 acceptance attempt 为 `fee08df24203698b9cf1ef5e7d2e0873795b3ae6`。候选尚未获接受为集成基线，`integratedBase` 未推进。
 上位设计：[工作台架构](./workbench-architecture.md)。既有能力：[专家方案](./expert-product-technical-design.md)。
 
 ## 快速导航
@@ -34,21 +34,21 @@
 | 平台证据   | 专家旧记录包含 macOS 实测；Linux/Windows 仍有待实测项                           | 新版本重新验收；旧记录不能替代本次候选验证                       |
 | Git 网络   | 本会话早先访问 GitHub 受本机代理连接失败影响                                    | WB-00 重新核实，失败只阻塞联网步骤                               |
 
-当前分阶段状态（2026-09-30）：
+当前分阶段状态（2026-10-01；证据绑定 fee08 acceptance attempt）：
 
-| 工作包 | 已有证据                                                                                                                                                                                                                                        | 尚未完成                                                                                                                                          |
-| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| WB-00  | [完整历史与 upstream 标签补充](../workbench/WB-00-upstream-evidence.md)记录 422 个上游 heads、92 个 `v*` tags，仓库不再是 shallow；`migrations:check` 检查全部发布标签通过。                                                                    | WB-00 基线工作完成。原基线全量测试记录中两项受并行/时序影响的失败及单项重跑通过结果仍保留；不将其写成全量套件全绿。                               |
-| WB-01  | 身份、隔离目录、更新策略代码及相关定向检查已集成；图标来源与 Actions 权限调查见[证据](../workbench/WB-01-evidence.md)。                                                                                                                         | 未构建最终候选 ZIP；实际 bundle identity、安装版并存、profile/home 隔离与 updater 行为尚未做候选包实测。                                          |
-| WB-02  | Workbench module migration ledger、升级计划、统一 startup/backup/recovery 接线已集成。6 个 server focused test 文件 89 项通过；恢复约束 follow-up 另有 2 个文件 47 项通过，server typecheck 与 `migrations:check` 通过。                        | 尚未做真实隔离数据库升级、中断恢复或 restore 演练；统一候选验收仍未完成。                                                                         |
-| WB-03  | 专家注册、runtime 接线与 feature import boundary 代码及 focused 检查已集成。候选 runtime probe 已建立，但尚未运行。                                                                                                                             | 尚未在最终官方候选上验证 Codex/Pi 普通/专家首轮、恢复、取消、MCP 和隔离行为。probe 的 `session.threadId` 证据不是 Provider 原生 session ID 证明。 |
-| WB-04  | 隔离候选从 base `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 固定官方 SHA `a33435c18474eb7816582004e45f87382965ac8d`，merge 为 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`；同步 CLI、候选兼容修复、build manifest 与 runtime probe 已集成。 | 尚未执行最终候选固定门禁、Workbench/Preview ZIP build、包身份检查、Provider live probe 或真实恢复验收；`upstream.lock` integrated base 暂不推进。 |
-| WB-05  | workflow、helper 与本地 Git fixture 已集成；候选选择和报告逻辑有本地检查。                                                                                                                                                                      | 未推送、未手动 dispatch、未定时运行；远端 branch write、artifact 保留和 PR 降级均无运行证据。                                                     |
-| WB-06  | 看板保持在架构草案中。                                                                                                                                                                                                                          | 按用户决定延期，不在当前授权范围内实施。                                                                                                          |
+| 工作包 | 已有证据                                                                                                                                                                                                                                                                                    | 尚未完成                                                                                                                                                                               |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WB-00  | [完整历史与 upstream 标签补充](../workbench/WB-00-upstream-evidence.md)记录 422 个上游 heads、92 个 `v*` tags，仓库不再是 shallow；`migrations:check` 检查全部发布标签通过。                                                                                                                | WB-00 基线工作完成。原基线全量测试记录中两项受并行/时序影响的失败及单项重跑通过结果仍保留；不将其写成全量套件全绿。                                                                    |
+| WB-01  | 两种 macOS arm64 unsigned 诊断包的 bundle/startup/plist 检查通过；工作台日用版、Preview 与原版在独立目录并存通过，未设置 updater-disable 环境变量时实际 updater 仍为 disabled。图标输入为已安装 catalog，非源码且不可复现；见[证据](../workbench/WB-01-evidence.md)。                       | 诊断包不是正式安装或发布；不据此宣称签名、Gatekeeper 或正式分发已验收。                                                                                                                |
+| WB-02  | 合成 file-backed SQLite 的真实启动升级、持久化快照后注入失败并用同一备份重试、独立 marker 通过 built restore CLI 恢复三场景均通过；精确接管旧官方 1..108+legacy 109/110，保留业务数据，终态为官方 108、Workbench 1/2、format 1。私有证据索引为 `fee08df24203-20261001`。                    | 仅合成隔离数据库；由 pinned Node 执行，未使用 packaged Electron，也未访问用户数据库。                                                                                                  |
+| WB-03  | 专家注册、runtime 接线、feature import boundary 和 probe 已集成。首个 Codex 普通首轮请求返回 HTTP 400 `invalid_request_error`（模型不支持；实际模型名 `gpt-6.1-sol`）；首次 supervisor 报告 cleanup 不完整，之后独立 cleanup audit 通过。                                                   | 其余七项——Codex 专家首轮、Pi 普通/专家首轮、恢复、取消、MCP、session isolation——均未运行，因此 Provider 行为尚未验收。probe 的 `session.threadId` 不是 Provider 原生 session ID 证明。 |
+| WB-04  | 固定候选 merge 为 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`，fee08 acceptance attempt 为 `fee08df24203698b9cf1ef5e7d2e0873795b3ae6`。六项固定门禁四项通过、server typecheck 与 test 失败；仅针对 TS6307 include 和大响应帧测试 helper 的未提交修复通过对应聚焦检查，其他工具修复仍在验收。 | 六项门禁尚未重跑，修复后候选尚未重建；当前候选非 ready。`upstream.lock` 的 `integratedBase` 仍为 `v0.9.1`。                                                                            |
+| WB-05  | workflow、helper 与本地 Git fixture 已集成；候选选择和报告逻辑有本地检查。                                                                                                                                                                                                                  | 未推送、未手动 dispatch、未定时运行；远端 branch write、artifact 保留和 PR 降级均无运行证据。                                                                                          |
+| WB-06  | 看板保持在架构草案中。                                                                                                                                                                                                                                                                      | 按用户决定延期，不在当前授权范围内实施。                                                                                                                                               |
 
-官方候选锁、已集成基线和三者 merge-base 的准确关系见 [WB-00 upstream evidence](../workbench/WB-00-upstream-evidence.md)。以上状态不替代最终候选自动门禁、实际包身份检查、Provider 运行或数据恢复验收。
+官方候选锁、已集成基线和三者 merge-base 的准确关系见 [WB-00 upstream evidence](../workbench/WB-00-upstream-evidence.md)。WB-02 报告和只读审计保存在本机私有持久证据归档条目 `fee08df24203-20261001`；归档只含脱敏 JSON，不含 SQLite/backup 数据库、凭据或原始 Provider 日志。以上部分通过不替代尚未完成的门禁重跑、修复后构建或 Provider 验收。
 
-第一轮优先完成当前 macOS 自用运行验证。平台无关代码继续遵循仓库边界，Linux/Windows 的支持状态按实际验证记录，不宣称已经覆盖。当前尚无候选 build、包身份或 Provider live 结果；实际验证使用 Codex `gpt-6.1-sol`/`high` 与 Pi `openai-codex/gpt-5.6-sol`/`medium`，并记录实际安装 SDK 版本。
+第一轮优先完成当前 macOS 自用运行验证。平台无关代码继续遵循仓库边界，Linux/Windows 的支持状态按实际验证记录，不宣称已经覆盖。fee08 已有两种 unsigned 诊断包及包身份结果，但不能作为正式候选构建验收。Provider probe 首次尝试使用实际模型 `gpt-6.1-sol`，收到 HTTP 400 `invalid_request_error`（模型不支持）；Pi 与其他 probe 项没有运行，不据计划配置推断为已验证。
 
 ## 2. 实施决策
 
@@ -117,7 +117,7 @@ WB-00 的提交前先审查代码、运行产物、密钥和机器路径，按�
 | `WorkbenchUpgradePlan.ts`          | 汇总官方升级、自定义升级、历史接管和备份要求                    |
 | 对应测试                           | 验证历史身份、事务、失败恢复、过新版本与数据保留                |
 
-代码状态：Workbench ledger 与只读升级计划，以及 SQLite 启动/备份/恢复共享计划的接线，均已集成到当前本地分支。定向测试命令 `mise exec -- bun run --cwd apps/server test -- src/persistence/Migrations.test.ts src/workbench/persistence/WorkbenchMigrations.test.ts src/workbench/persistence/WorkbenchUpgradePlan.test.ts src/persistence/MigrationBackup.test.ts src/persistence/Layers/Sqlite.test.ts src/persistence/MigrationSchemaTooNewRecovery.test.ts` 通过（6 个文件、89 项）；恢复约束修复后重跑 `mise exec -- bun run --cwd apps/server test -- src/persistence/MigrationBackup.test.ts src/workbench/persistence/WorkbenchUpgradePlan.test.ts` 通过（2 个文件、47 项）。server typecheck、`migrations:check`、相关文件格式检查及 diff check 均通过。上述是隔离/内存 SQLite 代码测试；未做真实隔离数据库升级、中断恢复或 restore 演练，统一候选验收仍未完成。
+代码状态：Workbench ledger 与只读升级计划，以及 SQLite 启动/备份/恢复共享计划的接线，均已集成到 fee08 acceptance attempt。既有定向测试命令 `mise exec -- bun run --cwd apps/server test -- src/persistence/Migrations.test.ts src/workbench/persistence/WorkbenchMigrations.test.ts src/workbench/persistence/WorkbenchUpgradePlan.test.ts src/persistence/MigrationBackup.test.ts src/persistence/Layers/Sqlite.test.ts src/persistence/MigrationSchemaTooNewRecovery.test.ts` 通过（6 个文件、89 项）；恢复约束修复后重跑 `mise exec -- bun run --cwd apps/server test -- src/persistence/MigrationBackup.test.ts src/workbench/persistence/WorkbenchUpgradePlan.test.ts` 通过（2 个文件、47 项）。此外，真实 file-backed SQLite 合成演练的成功启动、快照后故障/同备份重试、built restore CLI 三场景通过，业务数据和 tracker 断言保持；报告与只读审计见本机私有归档条目 `fee08df24203-20261001` 中的 `migration-rehearsal-report.json` 和 `migration-rehearsal-audit.json`。演练使用 pinned Node 而非 packaged Electron，且不涉及用户数据库。上述证据不代表活动用户库或 Electron 内迁移行为已验证。
 
 `workbench_sql_migrations` 的计划字段为 `module_id`、`migration_id`、`name`、`checksum`、`applied_at`，主键为 `(module_id, migration_id)`。同一模块的历史记录必须构成有效前缀，已执行脚本不可改名、改号或修改校验内容。另设工作台数据格式版本，拒绝当前程序不能解释的版本。优先使用现有 migrator 可支持的表配置；不足的部分写局部适配，不增加新的数据库框架。
 
@@ -194,7 +194,7 @@ v2 恢复记录记录官方、工作台和格式的源/目标版本、旧历史�
 
 ### 6.1 脚本接口
 
-接口状态：WB-04 的 `check`/`prepare`/`bind`/`verify`/`status`、集成候选退休、build manifest 与候选 runtime probe 已集成。probe 加 fixture 的 6 项定向测试、scripts 工作区 typecheck、改动文件 lint 已通过。最终候选固定门禁、Workbench/Preview 实际构建、包身份检查、Provider live probe 与数据库 restore 仍待执行。
+接口状态：WB-04 的 `check`/`prepare`/`bind`/`verify`/`status`、集成候选退休、build manifest 与候选 runtime probe 已集成。fee08 acceptance attempt 有两种 macOS arm64 unsigned 诊断包；该候选的六项固定门禁为四通过、两失败（server typecheck 和 test）。针对这两项失败的未提交修复仅包括 TS6307 include 与大响应帧测试 helper，对应聚焦检查已通过；其余工具修复仍在验收。六项门禁未重跑，也未基于这些修复重建包。候选仍非 ready，`upstream.lock` 的 `integratedBase` 仍为 `v0.9.1`。
 
 | 命令                                                                                                                                                    | 行为与输出                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -334,11 +334,11 @@ WB-06 只预留最小业务模型和接入方式，具体业务列、字段、�
 ## 9. 实施检查清单
 
 - [x] WB-00：审查并保存基线，工具链匹配，upstream 与历史/标签可验证；全量并行测试的已记录失败与单项重跑结果仍保留在基线记录中。
-- [ ] WB-01：工作台日用版、候选版、原版的实际身份和数据目录隔离。
-- [ ] WB-02：独立迁移记录与 109/110 接管完成，备份和恢复故障矩阵通过。
+- [x] WB-01：工作台日用版、候选版、原版的身份与目录隔离已由两种 unsigned macOS arm64 诊断包验证；不是正式安装或发布验收。
+- [x] WB-02：合成 file-backed SQLite 验证独立迁移记录、精确 109/110 接管、失败后复用原备份重试及 restore CLI 恢复；未访问用户数据库，未在 packaged Electron 内运行。
 - [ ] WB-03：专家接入收拢，原生与专家回归通过，接入点有清单。
 - [ ] WB-04：完成一次真实官方升级，形成准确版本证据和恢复记录。
 - [ ] WB-05：每周任务手动/定时实测通过，冲突与重复运行处理可靠。
 - [ ] WB-06：明确看板需求后实施，并纳入周更新验收。
 
-开始实施时先执行 WB-00，验收结果写入实际工作包记录；计划不预填“已通过”。每阶段记录代码版本、完成项、未完成项和下一阶段依赖，保留可追溯证据即可，无需另建一套项目管理系统。
+各工作包的勾选只代表该行列出的证据达到范围；诊断包、合成 SQLite、未运行的 Provider 项和失败的候选门禁分别注明，不推导为 M1/M2/M3 完成。每阶段记录代码版本、完成项、未完成项和下一阶段依赖，保留可追溯证据即可，无需另建一套项目管理系统。

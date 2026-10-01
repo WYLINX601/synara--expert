@@ -11,7 +11,7 @@
 ## Recovery and limits
 
 - New-candidate merge conflicts report the filenames and recovery commands that fetch and merge the exact official target SHA. Conflicts while resuming an existing candidate report commands that merge the fixed current-main SHA. Both paths state that manual resolution and a commit are still required; neither publishes an unresolved candidate.
-- Cross-run recovery data is in the remote candidate branch and its metadata; run artifacts retain the exact candidate bundle and structured reports for 90 days. The workflow blocks multiple active candidates and malformed active sync branches rather than guessing.
+- Cross-run recovery data is in the remote candidate branch and its metadata; run artifacts retain the exact candidate bundle and structured reports for 90 days. Verification artifacts contain sanitized check status/exit identifiers and local-log references/hashes, not raw check output. Each runner writes stdout, stderr, and runner-error logs only to its private Git common-dir archive; those files are not uploaded and are unavailable after the ephemeral runner exits. The workflow blocks multiple active candidates and malformed active sync branches rather than guessing.
 - `workflow_dispatch.candidate_ref` accepts only a full `refs/heads/codex/sync-*` ref and stays read-only. It is passed through an environment variable and validated before Git argument construction.
 - The trusted-main helper and the candidate verifier are separate copies. Candidate code and dependency installation run only in the read-only verification job. The publish token is exposed only to the trusted-main publisher step; Git receives it through an ephemeral extra-header environment entry, never a remote URL or report.
 

@@ -1,12 +1,18 @@
+import { createHash } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { parseArgs } from "node:util";
 
+import { CODEX_REASONING_EFFORT_OPTIONS, PI_THINKING_LEVEL_OPTIONS } from "@synara/contracts";
 import { synaraDesktopIdentity } from "@synara/shared/desktopIdentity";
 import { assertLoopbackUrl } from "../computer-use-fixtures/packaged-client.ts";
 
 export type RuntimeProbeOptions = {
   sourceSha: string;
   ownerUrl: string;
+  codexModel: string;
+  codexReasoningEffort: (typeof CODEX_REASONING_EFFORT_OPTIONS)[number];
+  piModel: string;
+  piThinkingLevel: (typeof PI_THINKING_LEVEL_OPTIONS)[number];
   instanceHome: string;
   outputDir: string;
   codexHome: string;
@@ -22,6 +28,38 @@ function required(values: Record<string, string | boolean | undefined>, name: st
   const value = values[name];
   if (typeof value !== "string" || value.trim().length === 0)
     throw new Error(`Missing required option: --${name}.`);
+  return value;
+}
+
+function requiredChoice<const T extends readonly string[]>(
+  values: Record<string, string | boolean | undefined>,
+  name: string,
+  choices: T,
+): T[number] {
+  const value = required(values, name);
+  if (!choices.includes(value)) throw new Error(`Invalid --${name} value.`);
+  return value as T[number];
+}
+
+function requiredModel(values: Record<string, string | boolean | undefined>, name: string): string {
+  const value = required(values, name);
+  if (value.length > 128 || /[\s\p{Cc}\p{Cf}]/u.test(value)) {
+    throw new Error(`--${name} must be a compact model identifier with no whitespace or controls.`);
+  }
+  return value;
+}
+
+function validatePiModelReference(value: string): string {
+  const separator = value.includes("/") ? "/" : value.includes(":") ? ":" : undefined;
+  if (!separator) {
+    throw new Error(
+      "--pi-model must include an explicit provider/model or provider:model reference.",
+    );
+  }
+  const separatorIndex = value.indexOf(separator);
+  if (separatorIndex === 0 || separatorIndex === value.length - 1) {
+    throw new Error("--pi-model must use a non-empty provider/model reference.");
+  }
   return value;
 }
 
@@ -57,6 +95,10 @@ export function parseRuntimeProbeOptions(argv: ReadonlyArray<string>): ParsedRun
     options: {
       "source-sha": { type: "string" },
       "owner-url": { type: "string" },
+      "codex-model": { type: "string" },
+      "codex-reasoning-effort": { type: "string" },
+      "pi-model": { type: "string" },
+      "pi-thinking-level": { type: "string" },
       "instance-home": { type: "string" },
       "output-dir": { type: "string" },
       "codex-home": { type: "string" },
@@ -89,11 +131,132 @@ export function parseRuntimeProbeOptions(argv: ReadonlyArray<string>): ParsedRun
   return {
     sourceSha: sourceSha.toLowerCase(),
     ownerBaseUrl,
+    codexModel: requiredModel(values, "codex-model"),
+    codexReasoningEffort: requiredChoice(
+      values,
+      "codex-reasoning-effort",
+      CODEX_REASONING_EFFORT_OPTIONS,
+    ),
+    piModel: validatePiModelReference(requiredModel(values, "pi-model")),
+    piThinkingLevel: requiredChoice(values, "pi-thinking-level", PI_THINKING_LEVEL_OPTIONS),
     instanceHome,
     outputDir,
     codexHome,
     piAgentDir,
     awaitServerRestart: values["await-server-restart"],
+  };
+}
+
+export type SafeTurnErrorEvidence = {
+  readonly providerErrorCategory: "model-unsupported" | "provider-error" | "unknown";
+  readonly originalMessageSha256: string | null;
+  readonly providerHttpStatus: number | null;
+};
+
+type ActivityLike = {
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly turnId: string | null;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function errorEnvelopeDetails(value: unknown): {
+  readonly message?: string;
+  readonly status?: number;
+} {
+  const envelope = asRecord(value);
+  if (!envelope) return {};
+  const error = asRecord(envelope.error);
+  const message =
+    (typeof envelope.providerMessage === "string" && envelope.providerMessage) ||
+    (typeof error?.message === "string" && error.message) ||
+    (typeof envelope.message === "string" && envelope.message) ||
+    undefined;
+  const candidateStatus =
+    typeof envelope.httpStatus === "number"
+      ? envelope.httpStatus
+      : typeof envelope.status === "number"
+        ? envelope.status
+        : typeof error?.status === "number"
+          ? error.status
+          : undefined;
+  const status =
+    candidateStatus !== undefined &&
+    Number.isInteger(candidateStatus) &&
+    candidateStatus >= 100 &&
+    candidateStatus <= 599
+      ? candidateStatus
+      : undefined;
+  return { ...(message ? { message } : {}), ...(status !== undefined ? { status } : {}) };
+}
+
+function safeErrorParts(messageValue: unknown): {
+  readonly sourceText?: string;
+  readonly providerMessage?: string;
+  readonly status?: number;
+} {
+  let sourceText: string | undefined;
+  let providerMessage: string | undefined;
+  let status: number | undefined;
+  const wrapper = asRecord(messageValue);
+  if (typeof messageValue === "string") sourceText = messageValue;
+  if (wrapper) {
+    if (typeof wrapper.text === "string") sourceText = wrapper.text;
+    const structured = errorEnvelopeDetails(wrapper.parsed);
+    providerMessage = structured.message;
+    status = structured.status;
+  }
+  if (sourceText) {
+    try {
+      const fromText = errorEnvelopeDetails(JSON.parse(sourceText) as unknown);
+      providerMessage ??= fromText.message;
+      status ??= fromText.status;
+    } catch {
+      // Plain provider error messages are still hashed and classified conservatively.
+    }
+  }
+  if (!providerMessage && typeof messageValue === "string") providerMessage = messageValue;
+  return {
+    ...(sourceText ? { sourceText } : {}),
+    ...(providerMessage ? { providerMessage } : {}),
+    ...(status !== undefined ? { status } : {}),
+  };
+}
+
+/** Reports a safe classification and digest for the matching turn's runtime error, never its body. */
+export function safeTurnErrorEvidence(
+  activities: ReadonlyArray<ActivityLike>,
+  turnId: string,
+): SafeTurnErrorEvidence {
+  const activity = activities
+    .toReversed()
+    .find((candidate) => candidate.kind === "runtime.error" && candidate.turnId === turnId);
+  const payload = activity ? asRecord(activity.payload) : undefined;
+  const parts = safeErrorParts(payload?.message);
+  const message = parts.providerMessage ?? parts.sourceText;
+  const modelUnsupported =
+    parts.status === 400 &&
+    typeof message === "string" &&
+    /(?:["'`][^"'`\s][^"'`]{0,127}["'`]\s+model\s+is\s+not\s+supported\b|\bmodel\s+["'`][^"'`\s][^"'`]{0,127}["'`]\s+is\s+not\s+supported\b)/iu.test(
+      message,
+    );
+  const providerErrorCategory = !message
+    ? "unknown"
+    : modelUnsupported
+      ? "model-unsupported"
+      : "provider-error";
+  const hashedText = parts.sourceText ?? parts.providerMessage;
+  return {
+    providerErrorCategory,
+    originalMessageSha256: hashedText
+      ? createHash("sha256").update(hashedText).digest("hex")
+      : null,
+    providerHttpStatus: parts.status ?? null,
   };
 }
 

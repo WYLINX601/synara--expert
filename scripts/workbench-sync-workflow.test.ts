@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -377,6 +377,154 @@ describe("workbench sync persisted workflow", () => {
       status: "missing",
       reason: "runtime-evidence-not-provided",
     });
+  });
+
+  it("stores private stdout and stderr logs with per-check hashes and a relative index", async () => {
+    const fixture = await makeFixture();
+    const { prepare } = await checkedAndPrepared(fixture);
+    let calls = 0;
+    const verified = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha: prepare.candidateSha!,
+      dependencies: {
+        readToolchain: () => toolchain,
+        commandRunner: () => {
+          calls += 1;
+          if (calls === 1) {
+            return {
+              exitCode: 0,
+              stdout: "format output\n",
+              stderr: "format diagnostic\n",
+            };
+          }
+          if (calls === 2) {
+            return {
+              exitCode: 1,
+              stdout: "lint output\n",
+              stderr: "lint diagnostic\n",
+            };
+          }
+          if (calls === 3) throw new Error("injected gate runner exception");
+          if (calls === 4) {
+            return {
+              exitCode: null,
+              stdout: "timeout partial output\n",
+              stderr: "timeout partial diagnostic\n",
+              runnerError: "spawnSync bun ETIMEDOUT\nspawnSignal=SIGTERM",
+            };
+          }
+          return allPassing();
+        },
+      },
+    });
+
+    expect(calls).toBe(AUTOMATIC_CHECKS.length);
+    expect(verified.status).toBe("checks-failed");
+    expect(verified.verificationLogs?.status).toBe("saved");
+    expect(verified.verificationLogs?.indexPath).toBe(
+      `workbench-sync/verification-logs/${prepare.candidateSha}/${verified.verificationLogs?.runId}/index.json`,
+    );
+    expect(verified.checks.map((check) => check.status)).toEqual([
+      "passed",
+      "failed",
+      "failed",
+      "failed",
+      "passed",
+      "passed",
+    ]);
+    expect(verified.checks[2]?.reason).toBe("gate-runner-threw");
+
+    const paths = await resolveRepositoryStatePaths(fixture.repo);
+    const resolveLogPath = (path: string) => join(paths.commonDirectory, path);
+    const readAndCheckLog = async (reference: {
+      readonly path: string;
+      readonly sha256: string;
+      readonly sizeBytes: number;
+    }) => {
+      expect(reference.path).not.toContain(fixture.repo);
+      const contents = await readFile(resolveLogPath(reference.path));
+      expect(createHash("sha256").update(contents).digest("hex")).toBe(reference.sha256);
+      expect(contents.byteLength).toBe(reference.sizeBytes);
+      if (process.platform !== "win32") {
+        expect((await stat(resolveLogPath(reference.path))).mode & 0o777).toBe(0o600);
+      }
+      return contents.toString("utf8");
+    };
+
+    const formatLogs = verified.checks[0]!.logs!;
+    expect(await readAndCheckLog(formatLogs.stdout!)).toBe("format output\n");
+    expect(await readAndCheckLog(formatLogs.stderr!)).toBe("format diagnostic\n");
+    const thrownRunnerError = verified.checks[2]!.logs!.runnerError!;
+    expect(await readAndCheckLog(thrownRunnerError)).toContain("injected gate runner exception");
+    const timeoutRunnerError = verified.checks[3]!.logs!.runnerError!;
+    expect(await readAndCheckLog(timeoutRunnerError)).toContain("ETIMEDOUT");
+
+    const indexPath = resolveLogPath(verified.verificationLogs!.indexPath!);
+    const indexContents = await readFile(indexPath);
+    expect(createHash("sha256").update(indexContents).digest("hex")).toBe(
+      verified.verificationLogs?.indexSha256,
+    );
+    expect(indexContents.byteLength).toBe(verified.verificationLogs?.indexSizeBytes);
+    expect(indexContents.toString("utf8")).not.toContain("format output");
+    const index = JSON.parse(indexContents.toString("utf8")) as {
+      readonly candidateSha: string;
+      readonly checks: readonly { readonly id: string; readonly logs?: unknown }[];
+    };
+    expect(index.candidateSha).toBe(prepare.candidateSha);
+    expect(index.checks.map((check) => check.id)).toEqual(AUTOMATIC_CHECKS.map(({ id }) => id));
+    expect(index.checks[0]?.logs).toEqual(formatLogs);
+    expect(JSON.stringify(verified)).not.toContain(fixture.repo);
+    if (process.platform !== "win32") {
+      expect(
+        (await stat(join(paths.commonDirectory, "workbench-sync/verification-logs"))).mode & 0o777,
+      ).toBe(0o700);
+      expect((await stat(indexPath)).mode & 0o777).toBe(0o600);
+    }
+    const status = await statusWorkbenchSync({ repoRoot: fixture.repo });
+    expect(status.status).toBe("checks-failed");
+    expect((status.candidate as { readonly verificationLogs: unknown }).verificationLogs).toEqual(
+      verified.verificationLogs,
+    );
+  });
+
+  it("keeps verification failed when the private log archive cannot be created", async () => {
+    const fixture = await makeFixture();
+    const { baseSha, prepare } = await checkedAndPrepared(fixture);
+    const paths = await resolveRepositoryStatePaths(fixture.repo);
+    await writeFile(join(paths.stateDirectory, "verification-logs"), "block the log directory");
+    const evidencePath = join(fixture.directory, "runtime-evidence.json");
+    await writeFile(
+      evidencePath,
+      `${JSON.stringify(
+        await runtimeEvidenceFor(fixture, prepare.candidateSha!, baseSha),
+        null,
+        2,
+      )}\n`,
+    );
+    let calls = 0;
+    const verified = await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha: prepare.candidateSha!,
+      runtimeEvidencePath: evidencePath,
+      dependencies: {
+        readToolchain: () => toolchain,
+        commandRunner: () => {
+          calls += 1;
+          return allPassing();
+        },
+      },
+    });
+
+    expect(calls).toBe(AUTOMATIC_CHECKS.length);
+    expect(verified.checks.every((check) => check.status === "passed")).toBe(true);
+    expect(verified.runtimeEvidence.status).toBe("accepted");
+    expect(verified.status).toBe("checks-failed");
+    expect(verified.exitCode).toBe(1);
+    expect(verified.verificationLogs).toMatchObject({
+      status: "failed",
+      reason: "log-directory-unavailable",
+    });
+    expect((await statusWorkbenchSync({ repoRoot: fixture.repo })).status).toBe("checks-failed");
   });
 
   it("keeps unmerged candidates busy, then retires a merged candidate and prepares the next release", async () => {

@@ -28,8 +28,10 @@ import {
   authenticatedOwnerUrl,
   parseRuntimeProbeOptions,
   protectedUserProfilePaths,
+  safeTurnErrorEvidence,
   validateProbeInstanceHome,
   validateProbePaths,
+  type ParsedRuntimeProbeOptions,
   type RuntimeProbeOptions,
 } from "./lib/workbench-runtime-probe-input.ts";
 
@@ -54,6 +56,18 @@ type CheckName = (typeof CHECK_NAMES)[number];
 type CheckStatus = "passed" | "failed" | "not-run";
 type ProbeProvider = "codex" | "pi";
 type ThreadKind = "ordinary" | "expert";
+type ProbeModelSelections = {
+  codex: {
+    provider: "codex";
+    model: string;
+    reasoningEffort: RuntimeProbeOptions["codexReasoningEffort"];
+  };
+  pi: {
+    provider: "pi";
+    model: string;
+    thinkingLevel: RuntimeProbeOptions["piThinkingLevel"];
+  };
+};
 
 type CheckRecord = {
   status: CheckStatus;
@@ -74,10 +88,7 @@ type ProbeReport = {
     bunVersion: string;
     piSdkVersion: string;
   };
-  modelSelections: {
-    codex: { provider: "codex"; model: "gpt-6.1-sol"; reasoningEffort: "high" };
-    pi: { provider: "pi"; model: "openai-codex/gpt-5.6-sol"; thinkingLevel: "medium" };
-  };
+  modelSelections: ProbeModelSelections;
   initialServerInstanceFingerprint?: string;
   restartedServerInstanceFingerprint?: string;
   instanceHomeConfigVerified?: boolean;
@@ -115,9 +126,11 @@ type TurnOutcome = {
 
 class ProbeFailure extends Error {
   readonly code: string;
-  constructor(code: string) {
+  readonly safeEvidence?: Record<string, string | number | boolean | null>;
+  constructor(code: string, safeEvidence?: Record<string, string | number | boolean | null>) {
     super(code);
     this.code = code;
+    if (safeEvidence) this.safeEvidence = safeEvidence;
   }
 }
 
@@ -135,6 +148,12 @@ function markNotRun(
 
 function failureCode(error: unknown, fallback: string): string {
   return error instanceof ProbeFailure ? error.code : fallback;
+}
+
+function safeFailureEvidence(
+  error: unknown,
+): Record<string, string | number | boolean | null> | undefined {
+  return error instanceof ProbeFailure ? error.safeEvidence : undefined;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -247,7 +266,12 @@ async function assertOwnerInstanceHome(owner: Owner, instanceHome: string): Prom
     throw new ProbeFailure("owner-instance-home-mismatch");
 }
 
-async function prepareOutputDirectory(options: RuntimeProbeOptions): Promise<{
+async function prepareOutputDirectory(
+  options: Pick<
+    ParsedRuntimeProbeOptions,
+    "instanceHome" | "outputDir" | "codexHome" | "piAgentDir"
+  >,
+): Promise<{
   readonly outputDir: string;
   readonly workspaceRoot: string;
 }> {
@@ -337,13 +361,20 @@ async function writeReport(outputDir: string, report: ProbeReport): Promise<void
   }
 }
 
-function makeModelSelection(provider: ProbeProvider): ModelSelection {
+function makeModelSelection(
+  provider: ProbeProvider,
+  selections: ProbeModelSelections,
+): ModelSelection {
   return provider === "codex"
-    ? { provider: "codex", model: "gpt-6.1-sol", options: { reasoningEffort: "high" } }
+    ? {
+        provider: "codex",
+        model: selections.codex.model,
+        options: { reasoningEffort: selections.codex.reasoningEffort },
+      }
     : {
         provider: "pi",
-        model: "openai-codex/gpt-5.6-sol",
-        options: { thinkingLevel: "medium" },
+        model: selections.pi.model,
+        options: { thinkingLevel: selections.pi.thinkingLevel },
       };
 }
 
@@ -531,7 +562,7 @@ async function waitForTerminalTurn(
     if (thread && turn?.turnId === turnId && thread.messages.some((m) => m.id === userMessageId)) {
       if (turn.state === "completed") return thread;
       if (turn.state === "interrupted") throw new ProbeFailure("turn-interrupted-unexpectedly");
-      if (turn.state === "error") throw new ProbeFailure("turn-error");
+      if (turn.state === "error") throw turnErrorFailure(thread, turnId, "turn-error");
     }
     await sleep(RPC_POLL_INTERVAL_MS);
   }
@@ -585,26 +616,43 @@ function assertCorrectSession(outcome: TurnOutcome, provider: ProbeProvider): vo
 function assertSelectedModel(
   thread: OrchestrationThread,
   provider: ProbeProvider,
+  expected: ModelSelection,
 ): { model: string; effort: string } {
   const selected = thread.modelSelection;
   if (provider === "codex") {
+    const expectedEffort =
+      expected.provider === "codex" ? expected.options?.reasoningEffort : undefined;
     if (
+      expected.provider !== "codex" ||
+      typeof expectedEffort !== "string" ||
       selected.provider !== "codex" ||
-      selected.model !== "gpt-6.1-sol" ||
-      selected.options?.reasoningEffort !== "high"
+      selected.model !== expected.model ||
+      selected.options?.reasoningEffort !== expectedEffort
     ) {
       throw new ProbeFailure("codex-model-or-effort-mismatch");
     }
-    return { model: selected.model, effort: selected.options.reasoningEffort };
+    return { model: selected.model, effort: expectedEffort };
   }
+  const expectedEffort = expected.provider === "pi" ? expected.options?.thinkingLevel : undefined;
   if (
+    expected.provider !== "pi" ||
+    typeof expectedEffort !== "string" ||
     selected.provider !== "pi" ||
-    selected.model !== "openai-codex/gpt-5.6-sol" ||
-    selected.options?.thinkingLevel !== "medium"
+    selected.model !== expected.model ||
+    selected.options?.thinkingLevel !== expectedEffort
   ) {
     throw new ProbeFailure("pi-model-or-effort-mismatch");
   }
-  return { model: selected.model, effort: selected.options.thinkingLevel };
+  return { model: selected.model, effort: expectedEffort };
+}
+
+function turnErrorFailure(thread: OrchestrationThread, turnId: string, code: string): ProbeFailure {
+  const diagnostic = safeTurnErrorEvidence(thread.activities, turnId);
+  return new ProbeFailure(code, {
+    providerErrorCategory: diagnostic.providerErrorCategory,
+    originalMessageSha256: diagnostic.originalMessageSha256,
+    providerHttpStatus: diagnostic.providerHttpStatus,
+  });
 }
 
 function assertExpertBinding(thread: OrchestrationThread, expected: ExpertBinding): void {
@@ -670,8 +718,10 @@ async function waitForTurnState(
     const thread = snapshot?.thread;
     if (thread?.latestTurn?.turnId === turnId) {
       if (thread.latestTurn.state === expected) return thread;
-      if (thread.latestTurn.state === "completed" || thread.latestTurn.state === "error")
-        throw new ProbeFailure(`turn-${thread.latestTurn.state}-before-${expected}`);
+      if (thread.latestTurn.state === "error")
+        throw turnErrorFailure(thread, turnId, `turn-error-before-${expected}`);
+      if (thread.latestTurn.state === "completed")
+        throw new ProbeFailure(`turn-completed-before-${expected}`);
     }
     await sleep(RPC_POLL_INTERVAL_MS);
   }
@@ -703,6 +753,9 @@ async function runCancellation(
       "interrupted",
       30_000,
     );
+    if (interruptedThread.session?.providerName !== thread.provider)
+      throw new ProbeFailure("provider-session-name-mismatch");
+    assertSelectedModel(interruptedThread, thread.provider, thread.modelSelection);
     if (
       !hasExpectedMcpToolActivity(
         interruptedThread.activities,
@@ -745,7 +798,12 @@ async function captureCheck(
     await writeReport(outputDir, report);
     return true;
   } catch (error) {
-    record(report, name, { status: "failed", reasonCode: failureCode(error, fallbackCode) });
+    const safeEvidence = safeFailureEvidence(error);
+    record(report, name, {
+      status: "failed",
+      reasonCode: failureCode(error, fallbackCode),
+      ...(safeEvidence ? { evidence: safeEvidence } : {}),
+    });
     await writeReport(outputDir, report);
     return false;
   }
@@ -770,6 +828,7 @@ async function makeThreadCases(input: {
   connectionId: string;
   codexHome: string;
   piAgentDir: string;
+  modelSelections: ProbeModelSelections;
   expertDefinitions: Record<ProbeProvider, ExpertDefinition>;
   personaMarkers: Record<ProbeProvider, string>;
 }): Promise<Record<string, ThreadCase>> {
@@ -779,7 +838,7 @@ async function makeThreadCases(input: {
       const key = `${provider}-${kind}`;
       const checkName = `${provider}-${kind}-first-turn` as CheckName;
       const threadId = ThreadId.makeUnsafe(randomUUID());
-      const modelSelection = makeModelSelection(provider);
+      const modelSelection = makeModelSelection(provider, input.modelSelections);
       const caseRecord: ThreadCase = {
         key,
         checkName,
@@ -972,7 +1031,11 @@ async function verifyRestartRecovery(input: {
       prompt: expertPrompt(threadCase.toolAlias, `resume-${randomUUID()}`),
     });
     assertCorrectSession(outcome, provider);
-    resumedModels[provider] = assertSelectedModel(outcome.thread, provider);
+    resumedModels[provider] = assertSelectedModel(
+      outcome.thread,
+      provider,
+      threadCase.modelSelection,
+    );
     assertExpertBinding(outcome.thread, threadCase.binding);
     assertAssistantMarker(outcome, {
       ownMarker: threadCase.personaMarker,
@@ -1016,7 +1079,14 @@ async function connectAfterRestart(ownerUrl: string, initialInstanceId: string):
   throw new ProbeFailure("server-instance-did-not-change-before-deadline");
 }
 
-function freshReport(sourceSha: string, toolchain: ProbeReport["toolchain"]): ProbeReport {
+function freshReport(
+  sourceSha: string,
+  toolchain: ProbeReport["toolchain"],
+  options: Pick<
+    ParsedRuntimeProbeOptions,
+    "codexModel" | "codexReasoningEffort" | "piModel" | "piThinkingLevel"
+  >,
+): ProbeReport {
   const now = new Date().toISOString();
   const checks = Object.fromEntries(
     CHECK_NAMES.map((name) => [name, { status: "not-run", reasonCode: "not-run" }]),
@@ -1030,8 +1100,16 @@ function freshReport(sourceSha: string, toolchain: ProbeReport["toolchain"]): Pr
     phase: "setup",
     toolchain,
     modelSelections: {
-      codex: { provider: "codex", model: "gpt-6.1-sol", reasoningEffort: "high" },
-      pi: { provider: "pi", model: "openai-codex/gpt-5.6-sol", thinkingLevel: "medium" },
+      codex: {
+        provider: "codex",
+        model: options.codexModel,
+        reasoningEffort: options.codexReasoningEffort,
+      },
+      pi: {
+        provider: "pi",
+        model: options.piModel,
+        thinkingLevel: options.piThinkingLevel,
+      },
     },
     checks,
   };
@@ -1078,15 +1156,12 @@ async function main(): Promise<void> {
       throw new ProbeFailure("probe-must-run-with-matching-bun");
     const piSdkVersion = await installedPiSdkVersion();
     output = await prepareOutputDirectory({
-      sourceSha: options.sourceSha,
-      ownerUrl: options.ownerBaseUrl,
       instanceHome: options.instanceHome,
       outputDir: options.outputDir,
       codexHome: options.codexHome,
       piAgentDir: options.piAgentDir,
-      awaitServerRestart: options.awaitServerRestart,
     });
-    report = freshReport(currentSourceSha, { nodeVersion, bunVersion, piSdkVersion });
+    report = freshReport(currentSourceSha, { nodeVersion, bunVersion, piSdkVersion }, options);
     await writeReport(output.outputDir, report);
 
     fixture = await startWorkbenchRuntimeMcpFixture();
@@ -1118,6 +1193,7 @@ async function main(): Promise<void> {
       connectionId,
       codexHome: options.codexHome,
       piAgentDir: options.piAgentDir,
+      modelSelections: report.modelSelections,
       expertDefinitions,
       personaMarkers: markers,
     });
@@ -1150,7 +1226,11 @@ async function main(): Promise<void> {
             const outcome = await runSuccessfulTurn(owner!, { thread: threadCase, prompt });
             outcomes[threadCase.key] = outcome;
             assertCorrectSession(outcome, provider);
-            const modelEvidence = assertSelectedModel(outcome.thread, provider);
+            const modelEvidence = assertSelectedModel(
+              outcome.thread,
+              provider,
+              threadCase.modelSelection,
+            );
             if (isExpert) {
               if (
                 !threadCase.binding ||
@@ -1384,9 +1464,11 @@ async function main(): Promise<void> {
         },
       });
     } catch (error) {
+      const safeEvidence = safeFailureEvidence(error);
       record(report, "recovery", {
         status: "failed",
         reasonCode: failureCode(error, "restart-recovery-failed"),
+        ...(safeEvidence ? { evidence: safeEvidence } : {}),
       });
       record(report, "mcp", {
         status: "failed",

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { spawnProcessSync } from "@synara/shared/processRuntime";
@@ -13,8 +13,15 @@ import {
   type RuntimeEvidence,
   type ToolchainSnapshot,
   type VerificationCheck,
+  type VerificationLogArchive,
+  type VerificationCheckLogs,
   type WorkbenchSyncState,
 } from "./state.ts";
+import {
+  createVerificationLogRun,
+  type VerificationLogIndex,
+  type VerificationLogRun,
+} from "./verificationLogs.ts";
 import { runGit } from "./git.ts";
 import {
   checkWorkbenchSync,
@@ -61,7 +68,12 @@ export type CommandRunner = (
   command: string,
   args: readonly string[],
   timeoutMs: number,
-) => { readonly exitCode: number | null; readonly stdout: string; readonly stderr: string };
+) => {
+  readonly exitCode: number | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly runnerError?: string;
+};
 
 type WorkflowDependencies = {
   readonly repository?: string;
@@ -115,6 +127,7 @@ export type VerifyWorkflowReport = {
   readonly lockfileHashes?: LockfileHashes;
   readonly toolchain?: ToolchainSnapshot;
   readonly checks: readonly VerificationCheck[];
+  readonly verificationLogs?: VerificationLogArchive;
   readonly runtimeEvidence: {
     readonly status: "accepted" | "missing" | "rejected";
     readonly reason?: string;
@@ -222,7 +235,27 @@ function defaultCommandRunner(
     exitCode: result.status,
     stdout: typeof result.stdout === "string" ? result.stdout : "",
     stderr: typeof result.stderr === "string" ? result.stderr : "",
+    ...(result.error
+      ? {
+          runnerError: describeProcessError(result.error, result.signal),
+        }
+      : {}),
   };
+}
+
+function describeProcessError(error: Error, signal: string | null): string {
+  const code = "code" in error ? String(error.code) : "unknown";
+  return `${error.stack ?? `${error.name}: ${error.message}`}\nspawnErrorCode=${code}\nspawnSignal=${signal ?? "none"}`;
+}
+
+function describeThrownError(error: unknown): string {
+  if (error instanceof Error) return error.stack ?? `${error.name}: ${error.message}`;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
 function makeCheck(
@@ -347,6 +380,7 @@ export async function checkWorkbenchSyncWorkflow(input: {
       } else if (!activeMainSha || activeMainSha !== activeCandidate.mainSha) {
         const {
           automaticChecks: _automaticChecks,
+          verificationLogs: _verificationLogs,
           runtimeEvidence: _runtimeEvidence,
           runtimeEvidenceHash: _runtimeEvidenceHash,
           ...withoutEvidence
@@ -1004,6 +1038,40 @@ function hasCompletePassedAutomaticChecks(
   );
 }
 
+function hasCompleteVerificationLogs(
+  candidateSha: string | undefined,
+  checks: readonly VerificationCheck[] | undefined,
+  archive: VerificationLogArchive | undefined,
+): boolean {
+  if (
+    !candidateSha ||
+    archive?.status !== "saved" ||
+    !checks ||
+    checks.length !== AUTOMATIC_CHECKS.length
+  ) {
+    return false;
+  }
+  const prefix = `workbench-sync/verification-logs/${candidateSha}/${archive.runId}/`;
+  if (
+    archive.indexPath !== `${prefix}index.json` ||
+    !archive.indexSha256 ||
+    archive.indexSizeBytes === undefined
+  ) {
+    return false;
+  }
+  const byId = new Map(checks.map((check) => [check.id, check]));
+  return (
+    byId.size === AUTOMATIC_CHECKS.length &&
+    AUTOMATIC_CHECKS.every(({ id }) => {
+      const logs = byId.get(id)?.logs;
+      return (
+        logs?.stdout?.path === `${prefix}${id}.stdout.log` &&
+        logs.stderr?.path === `${prefix}${id}.stderr.log`
+      );
+    })
+  );
+}
+
 export async function verifyWorkbenchCandidate(input: {
   readonly repoRoot: string;
   readonly candidateSha: string;
@@ -1023,6 +1091,7 @@ export async function verifyWorkbenchCandidate(input: {
       if (candidate && invalidate) {
         const {
           automaticChecks: _automaticChecks,
+          verificationLogs: _verificationLogs,
           runtimeEvidence: _runtimeEvidence,
           runtimeEvidenceHash: _runtimeEvidenceHash,
           ...withoutEvidence
@@ -1123,25 +1192,55 @@ export async function verifyWorkbenchCandidate(input: {
     }
 
     const commandRunner = input.dependencies?.commandRunner ?? defaultCommandRunner;
+    const verificationRunId = randomUUID();
+    const verificationStartedAt = new Date().toISOString();
+    let logRun: VerificationLogRun | undefined;
+    let logFailureReason: VerificationLogArchive["reason"];
+    try {
+      logRun = await createVerificationLogRun(paths, candidateSha, verificationRunId);
+    } catch {
+      logFailureReason = "log-directory-unavailable";
+    }
     const checks: VerificationCheck[] = [];
     for (const { id, script } of AUTOMATIC_CHECKS) {
       const startedAt = Date.now();
       let result: ReturnType<CommandRunner>;
+      let runnerThrew = false;
       try {
         result = commandRunner(checkout, "bun", ["run", script], MAX_GATE_MS);
-      } catch {
-        checks.push(makeCheck(id, "failed", null, Date.now() - startedAt, "gate-runner-threw"));
-        continue;
+      } catch (error) {
+        runnerThrew = true;
+        result = {
+          exitCode: null,
+          stdout: "",
+          stderr: "",
+          runnerError: describeThrownError(error),
+        };
       }
-      checks.push(
-        makeCheck(
-          id,
-          result.exitCode === 0 ? "passed" : "failed",
-          result.exitCode,
-          Date.now() - startedAt,
-          result.exitCode === 0 ? undefined : `bun-run-${script}-failed`,
-        ),
+      let check = makeCheck(
+        id,
+        !runnerThrew && result.exitCode === 0 ? "passed" : "failed",
+        result.exitCode,
+        Date.now() - startedAt,
+        runnerThrew
+          ? "gate-runner-threw"
+          : result.exitCode === 0
+            ? undefined
+            : `bun-run-${script}-failed`,
       );
+      if (logRun) {
+        try {
+          const logs: VerificationCheckLogs = await logRun.writeCheck(id, {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            ...(result.runnerError ? { runnerError: result.runnerError } : {}),
+          });
+          check = { ...check, logs };
+        } catch {
+          logFailureReason ??= "log-write-failed";
+        }
+      }
+      checks.push(check);
     }
 
     const postIdentity = getCheckoutIdentity(checkout);
@@ -1174,8 +1273,64 @@ export async function verifyWorkbenchCandidate(input: {
         ),
       );
 
+    let verificationLogs: VerificationLogArchive;
+    if (logRun) {
+      const indexedChecks: VerificationLogIndex["checks"][number][] = [];
+      for (const { id } of AUTOMATIC_CHECKS) {
+        const check = checks.find((entry) => entry.id === id)!;
+        indexedChecks.push({
+          id: check.id,
+          status: check.status,
+          exitCode: check.exitCode,
+          durationMs: check.durationMs,
+          ...(check.reason ? { reason: check.reason } : {}),
+          ...(check.logs ? { logs: check.logs } : {}),
+        });
+      }
+      const logIndex: VerificationLogIndex = {
+        formatVersion: 1,
+        runId: verificationRunId,
+        candidateSha,
+        startedAt: verificationStartedAt,
+        finishedAt: new Date().toISOString(),
+        checks: indexedChecks,
+      };
+      try {
+        const index = await logRun.writeIndex(logIndex);
+        verificationLogs = logFailureReason
+          ? {
+              status: "failed",
+              runId: verificationRunId,
+              indexPath: index.path,
+              indexSha256: index.sha256,
+              indexSizeBytes: index.sizeBytes,
+              reason: logFailureReason,
+            }
+          : {
+              status: "saved",
+              runId: verificationRunId,
+              indexPath: index.path,
+              indexSha256: index.sha256,
+              indexSizeBytes: index.sizeBytes,
+            };
+      } catch {
+        verificationLogs = {
+          status: "failed",
+          runId: verificationRunId,
+          reason: logFailureReason ?? "log-index-write-failed",
+        };
+      }
+    } else {
+      verificationLogs = {
+        status: "failed",
+        runId: verificationRunId,
+        reason: logFailureReason ?? "log-directory-unavailable",
+      };
+    }
+
     const automaticPassed =
       stable &&
+      verificationLogs.status === "saved" &&
       checks.length === AUTOMATIC_CHECKS.length &&
       checks.every((entry) => entry.status === "passed");
     const runtimeEvidencePath = input.runtimeEvidencePath
@@ -1245,6 +1400,7 @@ export async function verifyWorkbenchCandidate(input: {
       lockfileHashes,
       toolchain,
       automaticChecks: checks,
+      verificationLogs,
       ...(runtimeEvidence
         ? {
             runtimeEvidence,
@@ -1257,16 +1413,17 @@ export async function verifyWorkbenchCandidate(input: {
       ...state,
       activeCandidate: nextCandidate,
     });
-    const failed = checks.some((entry) => entry.status === "failed");
     return {
       command: "verify",
       status: !automaticPassed ? "checks-failed" : ready ? "ready" : "awaiting-runtime",
       stage: !automaticPassed
-        ? "automatic-checks"
+        ? verificationLogs.status === "failed" && checks.every((entry) => entry.status === "passed")
+          ? "verification-logs"
+          : "automatic-checks"
         : ready
           ? "runtime-evidence-accepted"
           : "awaiting-runtime-evidence",
-      exitCode: failed ? 1 : null,
+      exitCode: automaticPassed ? null : 1,
       candidateSha,
       baseSha: candidate.baseSha,
       mainRef: candidate.mainRef,
@@ -1275,9 +1432,12 @@ export async function verifyWorkbenchCandidate(input: {
       lockfileHashes,
       toolchain,
       checks,
+      verificationLogs,
       runtimeEvidence: evidenceStatus,
       retryAction: !automaticPassed
-        ? "repair-the-reported-check-failures-and-rerun-verify-on-this-exact-sha"
+        ? verificationLogs.status === "failed"
+          ? "repair-local-verification-log-storage-and-rerun-verify"
+          : "repair-the-reported-check-failures-and-rerun-verify-on-this-exact-sha"
         : ready
           ? "candidate-is-ready-for-explicit-integration-review"
           : "provide-strict-runtime-evidence-for-this-exact-candidate-sha",
@@ -1372,6 +1532,15 @@ export async function statusWorkbenchSync(input: {
   if (candidate.status === "ready") {
     if (!hasCompletePassedAutomaticChecks(candidate.automaticChecks))
       invalidations.push("automatic-checks-incomplete-or-invalid");
+    if (
+      !hasCompleteVerificationLogs(
+        candidate.candidateSha,
+        candidate.automaticChecks,
+        candidate.verificationLogs,
+      )
+    ) {
+      invalidations.push("verification-logs-incomplete-or-invalid");
+    }
     if (!candidate.runtimeEvidence || !candidate.runtimeEvidenceHash)
       invalidations.push("runtime-evidence-missing");
     else {
@@ -1412,6 +1581,7 @@ export async function statusWorkbenchSync(input: {
       lockfileHashes: candidate.lockfileHashes,
       toolchain: candidate.toolchain,
       automaticChecks: candidate.automaticChecks,
+      verificationLogs: candidate.verificationLogs,
       runtimeEvidenceHash: candidate.runtimeEvidenceHash,
       updatedAt: candidate.updatedAt,
     },

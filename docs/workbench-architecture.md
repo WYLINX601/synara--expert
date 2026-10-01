@@ -1,10 +1,10 @@
 # 基于 Synara 的个人工作台架构
 
-状态：架构基线与分阶段实施记录。当前范围为 WB-00 至 WB-05；WB-06 按用户决定延期。核实日期：2026-09-30。
+状态：架构基线与分阶段实施记录。当前范围为 WB-00 至 WB-05；WB-06 按用户决定延期。状态核实日期：2026-10-01，绑定 fee08 acceptance attempt。
 
-基线关系见 [WB-00 记录](../workbench/WB-00-baseline.md) 与 [上游历史补充](../workbench/WB-00-upstream-evidence.md)：2026-09-29 原工作区基线为 `eaa61eded31b6755d4f30ba8eabc5d905cf817cb`，官方 `upstream/main` 与 `v0.9.2` 的共同基点为 `a33435c18474eb7816582004e45f87382965ac8d`。WB-04 已在隔离候选分支从 `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 固定的 `v0.9.2`，提交为 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`。`upstream.lock` 的 `integratedBase` 仍为旧基线，直到构建、包身份、Provider 与恢复验收完成前，不把候选 merge 提升为已验证基线。
+基线关系见 [WB-00 记录](../workbench/WB-00-baseline.md) 与 [上游历史补充](../workbench/WB-00-upstream-evidence.md)：2026-09-29 原工作区基线为 `eaa61eded31b6755d4f30ba8eabc5d905cf817cb`，官方 `upstream/main` 与 `v0.9.2` 的共同基点为 `a33435c18474eb7816582004e45f87382965ac8d`。WB-04 在隔离候选分支从 `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 固定的 `v0.9.2`，merge 提交为 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`；当前 fee08 acceptance attempt 为 `fee08df24203698b9cf1ef5e7d2e0873795b3ae6`。fee08 六项固定门禁四项通过、server typecheck 与 test 失败；仅针对这两项的未提交修复（TS6307 include 和大响应帧测试 helper）已通过对应聚焦检查，其他工具修复仍在验收。六项门禁未重跑，也没有基于修复重建候选。`upstream.lock` 的 `integratedBase` 仍是 `v0.9.1`，候选尚未提升为已验证基线。
 
-当前状态按证据分开记录：WB-00 已完成完整历史、92 个发布标签与迁移 lineage 检查；WB-01/02/03 的代码和定向检查已集成，但最终包身份、隔离数据库升级/restore 与真实 Provider 行为尚未验收；WB-04 的固定 v0.9.2 候选 merge、兼容修复、同步/构建工具和候选 runtime probe 已集成，尚未运行最终自动门禁、打包或 live probe；WB-05 workflow 与本地 fixture 已集成，但没有远端手动或定时运行证据。runtime probe 设计为核对互异的产品 `session.threadId`、固定专家绑定与 persona 不串线；当前产品 RPC 不暴露 Provider 原生 session ID，该接口不在此 probe 的观测范围。WB-06 按用户决定延期。最终打包、Codex/Pi Provider 首轮、恢复演练和候选验收尚未完成，因此 M1/M2/M3 均不标记完成。具体检查范围见 [WB-01 证据](../workbench/WB-01-evidence.md)、[WB-04 runtime preflight](../workbench/WB-04-runtime-preflight.md)、[WB-05 自动化记录](../workbench/WB-05-automation.md) 和[实施计划](./workbench-implementation-plan.md)。
+当前状态按证据分开记录：WB-00 已完成。WB-01 两种 macOS arm64 unsigned 诊断包的身份/启动检查及与原版三应用目录并存检查通过；这不是正式安装或发布。WB-02 合成 file-backed SQLite 启动、故障后同备份重试与 built restore CLI 三场景通过，使用 pinned Node 而非 packaged Electron，未访问用户数据库。WB-03 首个 Codex 普通首轮请求返回 HTTP 400 `invalid_request_error`（模型不支持），其余七项未运行；后续独立 cleanup audit 通过，但首次 supervisor 结果仍记录为 cleanup 不完整。WB-04 当前 fee08 acceptance attempt 的六项固定门禁四项通过、两项失败；仅针对 TS6307 include 与大响应帧测试 helper 的未提交修复通过对应聚焦检查，其他工具修复仍在验收，整体门禁和修复后构建尚未完成。WB-05 workflow 与本地 fixture 已集成，但没有远端手动或定时运行证据。runtime probe 设计为核对互异的产品 `session.threadId`、固定专家绑定与 persona 不串线；当前产品 RPC 不暴露 Provider 原生 session ID，该接口不在此 probe 的观测范围。WB-06 按用户决定延期。M1/M2/M3 均不标记完成。WB-02 报告与只读审计位于本机私有持久证据归档条目 `fee08df24203-20261001`；详见 [WB-01 证据](../workbench/WB-01-evidence.md)、[WB-04 runtime preflight](../workbench/WB-04-runtime-preflight.md)、[WB-05 自动化记录](../workbench/WB-05-automation.md) 和[实施计划](./workbench-implementation-plan.md)。
 
 后续实施见 [落地技术方案与计划](./workbench-implementation-plan.md)，其中已细化文件位置、迁移接管、验收与每周同步任务。
 
@@ -201,6 +201,6 @@ contracts 仅承载跨进程结构；运行逻辑放 server/web，公共运行�
 
 实施后跟踪每次同步的冲突文件、实际适配位置、验证耗时和阻塞原因。两到三次同步后，再用真实记录判断是否需要抽出更多接口；现在不承诺固定分钟数或零维护成本。
 
-## 本次设计验证范围
+## 初始设计验证范围（历史快照）
 
-已检查当前源码中的任务所有权、看板、插件页面、专家接入、迁移历史、应用身份和更新机制，并在线核实官方稳定/预发布信息。没有计算完整的本地与官方差异，没有执行 merge、运行真实升级或验证新架构。当前 `origin` 是唯一配置的远端，Git 仍是浅克隆；本会话此前通过 Git 访问 GitHub 时代理连接失败，实施同步前需重新验证连接。
+方案形成初期已检查源码中的任务所有权、看板、插件页面、专家接入、迁移历史、应用身份和更新机制，并在线核实官方稳定/预发布信息；当时尚未计算完整的本地与官方差异或执行 merge/真实升级。该初始设计快照中的“未执行 merge”“仅配置 origin”“Git 仍是浅克隆”及 GitHub 代理连接失败是当时记录的历史状态；尤其浅克隆与远端配置的观察反映 WB-00 补齐历史之前的起点，已被后续工作取代，不表示当前状态。当前候选及运行证据以本文开头的 fee08 acceptance attempt 摘要和 [实施计划](./workbench-implementation-plan.md) 为准。

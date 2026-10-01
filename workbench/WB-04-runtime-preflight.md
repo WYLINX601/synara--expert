@@ -30,7 +30,7 @@ The existing P0 live reports date from 2026-09-25 through 2026-09-27 and use old
 
 ## Preflight disposition
 
-At this historical preflight, the older P0 Pi lifecycle script still used `thinkingLevel: minimal`, while the configured setting was `medium`; it was not suitable as-is. The candidate probe now pins the configured selections to Codex `gpt-6.1-sol` with `high` reasoning effort and Pi `openai-codex/gpt-5.6-sol` with `medium` thinking level. The preflight did not establish authentication or provider reachability. Isolated local runtime verification is authorized for this task; availability of provider credentials remains unverified.
+At this historical preflight, the older P0 Pi lifecycle script still used `thinkingLevel: minimal`, while the configured setting was `medium`; it was not suitable as-is. The first fee08 probe draft hard-coded the configured selections, so it is being changed to require explicit operator model and effort arguments with no default or fallback. Its report records those exact inputs and checks each product thread against them. A later fee08 live attempt using Codex `gpt-6.1-sol` with `high` reasoning failed on the first turn with HTTP 400 because that model is unsupported for the configured ChatGPT account; no later provider cases ran. That failure remains historical failure evidence and does not authorize changing the selected model. Authentication and provider reachability for any other selection remain unverified.
 
 ## Candidate-bound runtime probe
 
@@ -40,12 +40,18 @@ The candidate source contains [`scripts/workbench-runtime-probe.ts`](../scripts/
 SYNARA_WORKBENCH_PROBE_OWNER_TOKEN=<isolated-owner-token> mise exec -- bun scripts/workbench-runtime-probe.ts \
   --source-sha <full-candidate-sha> \
   --owner-url ws://127.0.0.1:<isolated-server-port> \
+  --codex-model <operator-selected-codex-model> \
+  --codex-reasoning-effort <contract-supported-effort> \
+  --pi-model <operator-selected-provider/model> \
+  --pi-thinking-level <contract-supported-thinking-level> \
   --instance-home <isolated-workbench-home> \
   --output-dir <external-probe-output> \
   --codex-home <isolated-codex-home> \
   --pi-agent-dir <isolated-pi-agent-dir> \
   --await-server-restart
 ```
+
+All four model/effort arguments are required. Model identifiers must be nonempty, compact values; Codex effort and Pi thinking level must match the current contract options, and Pi requires an explicit adapter-supported `provider/model` or `provider:model` reference. The probe has no personal model defaults or automatic fallback. Its source-bound JSON report records the explicit selections, and each first-turn and resumed thread must match its provider's exact selected model and effort. On a turn error, it includes only a safe error category, HTTP status when present, and SHA-256 of the matching `runtime.error` message; it never writes the error body. A failed provider turn still stops later model calls.
 
 The owner token is accepted only through `SYNARA_WORKBENCH_PROBE_OWNER_TOKEN`, never an argument, and is removed from the probe process environment after use. The probe checks the checkout SHA, pinned Bun runtime, actual installed Pi SDK version, configured server home and separate provider profiles before creating test data. It records a source-bound JSON report for four real first turns (Codex/Pi ordinary and expert), cancellation, MCP round trips, product session/persona isolation, and recovery after an owner-controlled server restart. With `--await-server-restart`, the probe emits `ready-for-owned-server-restart` after initial checks and waits for an externally controlled restart; it does not stop the server itself.
 

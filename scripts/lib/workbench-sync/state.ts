@@ -11,6 +11,8 @@ const LOCK_RECOVERY_FILE_NAME = "operation-recovery.lock";
 const MAX_LOCK_RECOVERY_ATTEMPTS = 3;
 const SHA_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
+const VERIFICATION_RUN_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type CheckSnapshot = {
   readonly status: "no-update" | "update-available" | "selection-blocked" | "network-failure";
@@ -33,6 +35,28 @@ export type VerificationCheck = {
   readonly exitCode: number | null;
   readonly durationMs: number;
   readonly reason?: string;
+  readonly logs?: VerificationCheckLogs;
+};
+
+export type VerificationLogFile = {
+  readonly path: string;
+  readonly sha256: string;
+  readonly sizeBytes: number;
+};
+
+export type VerificationCheckLogs = {
+  readonly stdout?: VerificationLogFile;
+  readonly stderr?: VerificationLogFile;
+  readonly runnerError?: VerificationLogFile;
+};
+
+export type VerificationLogArchive = {
+  readonly status: "saved" | "failed";
+  readonly runId: string;
+  readonly indexPath?: string;
+  readonly indexSha256?: string;
+  readonly indexSizeBytes?: number;
+  readonly reason?: "log-directory-unavailable" | "log-write-failed" | "log-index-write-failed";
 };
 
 export type ToolchainSnapshot = {
@@ -83,6 +107,7 @@ export type ActiveCandidate = {
   readonly lockfileHashes?: LockfileHashes;
   readonly toolchain?: ToolchainSnapshot;
   readonly automaticChecks?: readonly VerificationCheck[];
+  readonly verificationLogs?: VerificationLogArchive;
   readonly runtimeEvidenceHash?: string;
   readonly runtimeEvidence?: RuntimeEvidence;
   readonly updatedAt: string;
@@ -134,6 +159,97 @@ function isSha(value: unknown): value is string {
 
 function isSha256(value: unknown): value is string {
   return typeof value === "string" && SHA256_PATTERN.test(value);
+}
+
+function isVerificationLogFile(
+  value: unknown,
+  candidateSha: string,
+  runId: string,
+  fileName: string,
+): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    value.path === `workbench-sync/verification-logs/${candidateSha}/${runId}/${fileName}` &&
+    isSha256(value.sha256) &&
+    typeof value.sizeBytes === "number" &&
+    Number.isSafeInteger(value.sizeBytes) &&
+    value.sizeBytes >= 0
+  );
+}
+
+function isVerificationLogArchive(
+  value: unknown,
+  candidateSha: unknown,
+): value is VerificationLogArchive {
+  if (
+    !isRecord(value) ||
+    (value.status !== "saved" && value.status !== "failed") ||
+    typeof value.runId !== "string" ||
+    !VERIFICATION_RUN_ID_PATTERN.test(value.runId) ||
+    !isSha(candidateSha)
+  ) {
+    return false;
+  }
+  const expectedIndexPath = `workbench-sync/verification-logs/${candidateSha}/${value.runId}/index.json`;
+  if (value.indexPath !== undefined && value.indexPath !== expectedIndexPath) return false;
+  if (
+    (value.indexSha256 !== undefined && !isSha256(value.indexSha256)) ||
+    (value.indexSizeBytes !== undefined &&
+      (typeof value.indexSizeBytes !== "number" ||
+        !Number.isSafeInteger(value.indexSizeBytes) ||
+        value.indexSizeBytes < 0)) ||
+    (value.indexPath !== undefined) !== (value.indexSha256 !== undefined) ||
+    (value.indexPath !== undefined) !== (value.indexSizeBytes !== undefined)
+  ) {
+    return false;
+  }
+  if (
+    value.reason !== undefined &&
+    value.reason !== "log-directory-unavailable" &&
+    value.reason !== "log-write-failed" &&
+    value.reason !== "log-index-write-failed"
+  ) {
+    return false;
+  }
+  return value.status === "saved"
+    ? value.indexPath === expectedIndexPath &&
+        value.indexSha256 !== undefined &&
+        value.indexSizeBytes !== undefined &&
+        value.reason === undefined
+    : value.reason !== undefined;
+}
+
+function isVerificationCheckLogs(
+  value: unknown,
+  candidateSha: unknown,
+  runId: unknown,
+  checkId: unknown,
+): value is VerificationCheckLogs {
+  if (
+    !isRecord(value) ||
+    !isSha(candidateSha) ||
+    typeof runId !== "string" ||
+    !VERIFICATION_RUN_ID_PATTERN.test(runId) ||
+    typeof checkId !== "string" ||
+    !/^[a-z0-9-]+$/.test(checkId)
+  ) {
+    return false;
+  }
+  const prefix = `workbench-sync/verification-logs/${candidateSha}/${runId}/`;
+  return (
+    isVerificationLogFile(value.stdout, candidateSha, runId, `${checkId}.stdout.log`) &&
+    isVerificationLogFile(value.stderr, candidateSha, runId, `${checkId}.stderr.log`) &&
+    (value.runnerError === undefined ||
+      isVerificationLogFile(
+        value.runnerError,
+        candidateSha,
+        runId,
+        `${checkId}.runner-error.log`,
+      )) &&
+    [value.stdout, value.stderr, value.runnerError]
+      .filter(isRecord)
+      .every((entry) => typeof entry.path === "string" && entry.path.startsWith(prefix))
+  );
 }
 
 function parseOwner(value: unknown): RepositoryLockOwner | null {
@@ -226,8 +342,19 @@ function parseState(value: unknown): WorkbenchSyncState {
                 entry.status === "failed" ||
                 entry.status === "not-run") &&
               (entry.exitCode === null || typeof entry.exitCode === "number") &&
-              typeof entry.durationMs === "number",
+              typeof entry.durationMs === "number" &&
+              (entry.logs === undefined ||
+                isVerificationCheckLogs(
+                  entry.logs,
+                  candidate.candidateSha,
+                  isRecord(candidate.verificationLogs)
+                    ? candidate.verificationLogs.runId
+                    : undefined,
+                  entry.id,
+                )),
           ))) ||
+      (candidate.verificationLogs !== undefined &&
+        !isVerificationLogArchive(candidate.verificationLogs, candidate.candidateSha)) ||
       (candidate.runtimeEvidenceHash !== undefined && !isSha256(candidate.runtimeEvidenceHash)) ||
       (candidate.runtimeEvidence !== undefined &&
         (!isRecord(candidate.runtimeEvidence) ||

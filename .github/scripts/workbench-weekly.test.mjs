@@ -71,6 +71,11 @@ async function main() {
     git(sandbox, "init", "--bare", "--initial-branch=main", candidateRemote);
     git(sandbox, "init", "-b", "main", source);
     configureIdentity(source);
+    writeFileSync(join(source, "official-base.txt"), "official base\n");
+    const officialBaseSha = commitAll(source, "fixture: official base");
+    git(source, "remote", "add", "official", officialRemote);
+    git(source, "push", "official", "main");
+
     mkdirSync(join(source, "workbench"), { recursive: true });
     writeFileSync(join(source, "bun.lock"), "fixture-lock\n");
     writeFileSync(join(source, ".mise.toml"), 'node = "24.13.1"\nbun = "1.4.2"\n');
@@ -80,16 +85,14 @@ async function main() {
       branch: "main",
       updateChannel: "latest-stable-release",
       integrationStrategy: "merge",
-      integratedBase: { tag: "v0.9.1", commit: "a".repeat(40) },
+      integratedBase: { tag: "v0.9.1", commit: officialBaseSha },
       candidate: { tag, commit: "b".repeat(40), status: "not-yet-integrated" },
     });
-    const baseSha = commitAll(source, "fixture: main base");
+    const baseSha = commitAll(source, "fixture: integrated lock baseline");
     git(source, "remote", "add", "origin", candidateRemote);
     git(source, "push", "origin", "main");
-    git(source, "remote", "add", "official", officialRemote);
-    git(source, "push", "official", "main");
 
-    git(source, "switch", "-c", "release-fixture", baseSha);
+    git(source, "switch", "-c", "release-fixture", officialBaseSha);
     writeFileSync(join(source, "official-release.txt"), "fixed target\n");
     const targetSha = commitAll(source, "fixture: official target");
     git(source, "tag", "-a", tag, targetSha, "-m", "fixture release");
@@ -193,7 +196,11 @@ async function main() {
         readToolchain: () => ({ node: "24.13.1", bun: "1.4.2" }),
       },
     });
-    assert.equal(bound.status, "candidate-bound");
+    assert.equal(
+      bound.status,
+      "candidate-bound",
+      `candidate binding rejected at ${bound.stage}: ${bound.retryAction}`,
+    );
     assert.equal(bound.candidateSha, candidateSha);
     assert.equal(bound.branch, branch);
 

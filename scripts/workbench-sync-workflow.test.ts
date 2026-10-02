@@ -207,6 +207,7 @@ async function runtimeEvidenceFor(
 }
 
 describe("workbench sync persisted workflow", () => {
+  // The composed Git fixture needs a 30s test budget matching its per-command Git timeout.
   it("binds a newly checked official release when the versioned candidate lock is stale", async () => {
     const fixture = await makeFixture();
     const nextTargetSha = await commitFile(
@@ -268,7 +269,7 @@ describe("workbench sync persisted workflow", () => {
       commit: fixture.targetSha,
       status: "not-yet-integrated",
     });
-  });
+  }, 30_000);
 
   it("rejects a locked release target older than the integrated base during bind", async () => {
     const fixture = await makeFixture();
@@ -348,6 +349,7 @@ describe("workbench sync persisted workflow", () => {
     expect(bind.stage).toBe("target-not-after-integrated-base");
   });
 
+  // The composed Git fixture needs a 30s test budget matching its per-command Git timeout.
   it("checks a fixed target, prepares it, records bounded checks, and stays awaiting runtime", async () => {
     const fixture = await makeFixture();
     const { prepare } = await checkedAndPrepared(fixture);
@@ -377,8 +379,9 @@ describe("workbench sync persisted workflow", () => {
       status: "missing",
       reason: "runtime-evidence-not-provided",
     });
-  });
+  }, 30_000);
 
+  // The composed Git fixture needs a 30s test budget matching its per-command Git timeout.
   it("stores private stdout and stderr logs with per-check hashes and a relative index", async () => {
     const fixture = await makeFixture();
     const { prepare } = await checkedAndPrepared(fixture);
@@ -485,7 +488,7 @@ describe("workbench sync persisted workflow", () => {
     expect((status.candidate as { readonly verificationLogs: unknown }).verificationLogs).toEqual(
       verified.verificationLogs,
     );
-  });
+  }, 30_000);
 
   it("keeps verification failed when the private log archive cannot be created", async () => {
     const fixture = await makeFixture();
@@ -527,6 +530,7 @@ describe("workbench sync persisted workflow", () => {
     expect((await statusWorkbenchSync({ repoRoot: fixture.repo })).status).toBe("checks-failed");
   });
 
+  // The composed Git fixture needs a 30s test budget matching its per-command Git timeout.
   it("keeps unmerged candidates busy, then retires a merged candidate and prepares the next release", async () => {
     const fixture = await makeFixture();
     const { prepare: firstCandidate } = await checkedAndPrepared(fixture);
@@ -611,7 +615,7 @@ describe("workbench sync persisted workflow", () => {
     });
     expect(nextPrepare.status).toBe("candidate-ready");
     expect(nextPrepare.target).toEqual({ tag: "v0.9.3", commit: nextTargetSha });
-  });
+  }, 30_000);
 
   it("keeps failed automatic gates out of ready and records all fixed checks", async () => {
     const fixture = await makeFixture();
@@ -666,6 +670,7 @@ describe("workbench sync persisted workflow", () => {
     );
   });
 
+  // The composed Git fixture needs a 30s test budget matching its per-command Git timeout.
   it("invalidates candidate evidence when the checkout is dirty or the actual toolchain changes", async () => {
     const dirtyFixture = await makeFixture();
     const dirtyPrepared = await checkedAndPrepared(dirtyFixture);
@@ -701,7 +706,7 @@ describe("workbench sync persisted workflow", () => {
         })
       ).status,
     ).toBe("rebind-required");
-  });
+  }, 30_000);
 
   it("refuses prepare when the official tag moved after the successful check", async () => {
     const fixture = await makeFixture();

@@ -254,6 +254,7 @@ describe("workbench sync check", () => {
     expect(JSON.stringify(report)).not.toContain("network unavailable");
   });
 
+  // The composed Git fixture needs a 30s test budget matching its per-command Git timeout.
   it("does not mislabel ancestry as divergent when the fetched source is shallow", async () => {
     const fixture = await releaseRepo();
     const shallowRemote = join(fixture.directory, "shallow-upstream.git");
@@ -286,7 +287,7 @@ describe("workbench sync check", () => {
 
     expect(report.status).toBe("selection-blocked");
     expect(report.reason).toBe("history-incomplete");
-  });
+  }, 30_000);
 });
 
 describe("workbench sync prepare", () => {

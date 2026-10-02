@@ -411,6 +411,7 @@ describe("workbench build manifest", () => {
     ).rejects.toThrow("upstream-target-is-not-an-ancestor-of-source");
   });
 
+  // The composed Git fixture needs a 30s test budget matching its per-command Git timeout.
   it("builds from committed metadata for a newer official release beyond the stale lock candidate", async () => {
     const fixture = makeFixture();
     const nextTargetSha = commitFile(
@@ -435,7 +436,7 @@ describe("workbench build manifest", () => {
       commit: nextTargetSha,
       selection: "candidate-metadata",
     });
-  });
+  }, 30_000);
 
   it("refuses candidate metadata whose claimed official tag is missing before invoking the builder", async () => {
     const fixture = makeFixture();

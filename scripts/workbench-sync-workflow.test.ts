@@ -117,7 +117,7 @@ async function makeFixture(conflict = false): Promise<Fixture> {
   const remote = join(directory, "upstream.git");
   const repo = join(directory, "repo");
   const checkout = join(directory, "candidate");
-  git(directory, "init", "--bare", remote);
+  git(directory, "init", "--bare", "-b", "main", remote);
   git(directory, "init", "-b", "main", seed);
   git(seed, "config", "user.name", "Workbench Test");
   git(seed, "config", "user.email", "workbench-test@example.invalid");

@@ -3,7 +3,10 @@
 The required check remains **Format, Lint, Typecheck, Test, Browser Test, Build**.
 It aggregates results only. Static checks start independently. Normal code
 changes run typechecking, five unit partitions, six stable browser partitions,
-desktop build, native Windows regression and migration lineage. Docs-only
+desktop build, native Windows regression and migration lineage. Forked CI fetches
+official `v*` tags read-only from the [Synara repository](https://github.com/Emanuele-web04/synara.git)
+for lineage verification; checkout credentials stay disabled and the guard still
+rejects missing tags. Docs-only
 detection and nightly geometry ownership are unchanged.
 
 The Linux PTY dependency smoke runs once, on the first server shard; the Windows

@@ -1,4 +1,4 @@
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -27,12 +27,44 @@ function connectionConfig(transport: ExpertConnectionConfig["transport"]): Exper
   };
 }
 
-async function makeHttpFixture() {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function makeHttpFixture(options: { hangCancellationNotificationResponse?: boolean } = {}) {
   const mcpServer = new McpServer({ name: "expert-fixture", version: "1.0.0" });
   let startedWait!: () => void;
   let cancelledWait!: () => void;
+  let cancellationNotificationHeld!: () => void;
+  let cancellationNotificationClosed!: () => void;
   const waitStarted = new Promise<void>((resolve) => (startedWait = resolve));
   const waitCancelled = new Promise<void>((resolve) => (cancelledWait = resolve));
+  const waitCancellationNotificationHeld = new Promise<void>(
+    (resolve) => (cancellationNotificationHeld = resolve),
+  );
+  const waitCancellationNotificationClosed = new Promise<void>(
+    (resolve) => (cancellationNotificationClosed = resolve),
+  );
+  let cancellationObserved = false;
+  let heldCancellationNotificationPosts = 0;
+  let cancellationNotificationResponsesClosedBeforeEnd = 0;
+  const heldResponses = new Set<ServerResponse>();
+  const interceptedResponses = new WeakSet<ServerResponse>();
 
   mcpServer.registerTool(
     "echo",
@@ -55,6 +87,7 @@ async function makeHttpFixture() {
         extra.signal.addEventListener(
           "abort",
           () => {
+            cancellationObserved = true;
             cancelledWait();
             resolve({ content: [{ type: "text", text: "cancelled" }] });
           },
@@ -77,6 +110,31 @@ async function makeHttpFixture() {
       return;
     }
     authorizedRequests += 1;
+    const originalEnd = response.end;
+    response.end = ((...args: unknown[]) => {
+      // The Streamable HTTP server returns 202 for notification-only POSTs.
+      // Hold that response after this fixture's wait handler observed cancellation.
+      if (
+        options.hangCancellationNotificationResponse &&
+        cancellationObserved &&
+        response.statusCode === 202 &&
+        !interceptedResponses.has(response)
+      ) {
+        interceptedResponses.add(response);
+        heldCancellationNotificationPosts += 1;
+        heldResponses.add(response);
+        response.once("close", () => {
+          heldResponses.delete(response);
+          if (!response.writableEnded) {
+            cancellationNotificationResponsesClosedBeforeEnd += 1;
+            cancellationNotificationClosed();
+          }
+        });
+        cancellationNotificationHeld();
+        return response;
+      }
+      return Reflect.apply(originalEnd, response, args) as ServerResponse;
+    }) as typeof response.end;
     void transport.handleRequest(request, response).catch((error: unknown) => {
       if (!response.headersSent) response.writeHead(500).end(String(error));
     });
@@ -93,8 +151,17 @@ async function makeHttpFixture() {
     url: `http://127.0.0.1:${address.port}/mcp`,
     waitStarted,
     waitCancelled,
+    waitCancellationNotificationHeld,
+    waitCancellationNotificationClosed,
+    heldCancellationNotificationPosts: () => heldCancellationNotificationPosts,
+    heldCancellationNotificationResponses: () => heldResponses.size,
+    cancellationNotificationResponsesClosedBeforeEnd: () =>
+      cancellationNotificationResponsesClosedBeforeEnd,
     authorizedRequests: () => authorizedRequests,
     close: async () => {
+      for (const response of heldResponses) {
+        if (!response.destroyed && !response.writableEnded) response.destroy();
+      }
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
@@ -143,6 +210,115 @@ describe("connectExpertMcp", () => {
       else process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = previousToken;
     }
   });
+
+  it("forwards an HTTP tool abort when the client closes immediately", async () => {
+    const previousToken = process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
+    process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = "fixture-token";
+    const fixture = await makeHttpFixture();
+    let client: Awaited<ReturnType<typeof connectExpertMcp>> | undefined;
+
+    try {
+      client = await connectExpertMcp(
+        connectionConfig({
+          type: "http",
+          url: fixture.url,
+          headersFromHost: [
+            { name: "authorization", envVar: "SYNARA_EXPERT_MCP_TEST_TOKEN", prefix: "Bearer " },
+          ],
+        }),
+      );
+      const controller = new AbortController();
+      const pending = client.callTool("wait", {}, controller.signal);
+      const pendingRejection = expect(
+        withTimeout(pending, 5_000, "aborted MCP call"),
+      ).rejects.toThrow();
+      void pendingRejection.catch(() => undefined);
+      await fixture.waitStarted;
+
+      controller.abort();
+      const closing = client.close();
+      void closing.catch(() => undefined);
+      await Promise.all([
+        withTimeout(fixture.waitCancelled, 5_000, "downstream HTTP tool abort"),
+        pendingRejection,
+        withTimeout(closing, 5_000, "immediate MCP client close"),
+      ]);
+
+      expect(fixture.authorizedRequests()).toBeGreaterThan(0);
+    } finally {
+      await client?.close().catch(() => undefined);
+      await fixture.close();
+      if (previousToken === undefined) delete process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
+      else process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = previousToken;
+    }
+  });
+
+  it("bounds close and closes its HTTP connection when a cancellation notification POST hangs", async () => {
+    const previousToken = process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
+    process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = "fixture-token";
+    const fixture = await makeHttpFixture({ hangCancellationNotificationResponse: true });
+    let client: Awaited<ReturnType<typeof connectExpertMcp>> | undefined;
+
+    try {
+      client = await connectExpertMcp(
+        connectionConfig({
+          type: "http",
+          url: fixture.url,
+          headersFromHost: [
+            { name: "authorization", envVar: "SYNARA_EXPERT_MCP_TEST_TOKEN", prefix: "Bearer " },
+          ],
+        }),
+      );
+      const controller = new AbortController();
+      const pending = client.callTool("wait", {}, controller.signal);
+      const pendingRejection = expect(
+        withTimeout(pending, 5_000, "aborted MCP call"),
+      ).rejects.toThrow();
+      void pendingRejection.catch(() => undefined);
+      await fixture.waitStarted;
+
+      controller.abort();
+      const closing = client.close();
+      void closing.catch(() => undefined);
+      await Promise.all([
+        withTimeout(fixture.waitCancelled, 5_000, "downstream HTTP tool abort"),
+        withTimeout(
+          fixture.waitCancellationNotificationHeld,
+          5_000,
+          "hanging cancellation notification POST",
+        ),
+        pendingRejection,
+      ]);
+
+      expect(fixture.heldCancellationNotificationPosts()).toBe(1);
+      expect(fixture.heldCancellationNotificationResponses()).toBe(1);
+      let closeSettled = false;
+      void closing.then(
+        () => {
+          closeSettled = true;
+        },
+        () => {
+          closeSettled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(closeSettled).toBe(false);
+
+      await withTimeout(closing, 15_000, "bounded MCP client close");
+      await withTimeout(
+        fixture.waitCancellationNotificationClosed,
+        2_000,
+        "client closing the held cancellation response",
+      );
+      expect(fixture.cancellationNotificationResponsesClosedBeforeEnd()).toBe(1);
+      expect(fixture.heldCancellationNotificationResponses()).toBe(0);
+    } finally {
+      await client?.close().catch(() => undefined);
+      await fixture.close();
+      if (previousToken === undefined) delete process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
+      else process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = previousToken;
+    }
+  }, 30_000);
 
   it("fails before connecting when a referenced environment variable is missing", async () => {
     delete process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;

@@ -2343,8 +2343,18 @@ describe("ChatView transcript geometry (full app)", () => {
       try {
         for (const id of [1, 2, 3]) {
           await page.getByRole("button", { name: new RegExp(`Choice ${id}`) }).click();
-          if (id < 3)
-            await page.getByRole("button", { name: "Next question", exact: true }).first().click();
+          if (id < 3) {
+            if (navigation === "auto-advance") {
+              await expect
+                .element(page.getByRole("button", { name: new RegExp(`Choice ${id + 1}`) }))
+                .toBeVisible();
+            } else {
+              await page
+                .getByRole("button", { name: "Next question", exact: true })
+                .first()
+                .click();
+            }
+          }
         }
         if (navigation === "custom") {
           await userEvent.click(await waitForComposerEditor());

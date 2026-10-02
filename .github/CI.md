@@ -22,6 +22,10 @@ reader's filtered compilation test and native Bun PTY probe remain separate.
 
 ## Install scopes and caches
 
+The shared setup action reads exact Node and Bun versions from .mise.toml before
+dependency installation, so CI follows the repository's explicit tool pins
+instead of the broader package.json engine ranges.
+
 The shared setup action defaults to `full`. Typecheck, Linux unit/browser and
 desktop build jobs keep the entire workspace. Only verified consumers opt into
 smaller installs:

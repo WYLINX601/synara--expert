@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { parseMiseToolchainPins } from "./read-toolchain-pins.mjs";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
+const toolchainReader = fileURLToPath(new URL("./read-toolchain-pins.mjs", import.meta.url));
 const workflow = read("../workflows/ci.yml");
 const setup = read("../actions/setup-workspace/action.yml");
 const gate = workflow.match(
@@ -125,6 +129,56 @@ test("Windows install uses the runner-volume cache without changing other platfo
     );
   }
 });
+test("workspace setup uses exact Node and Bun pins from mise and rejects bad pins", () => {
+  const mise = read("../../.mise.toml");
+  const pins = parseMiseToolchainPins(mise);
+  assert.deepEqual(Object.keys(pins), ["node", "bun"]);
+  assert.match(pins.node, /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/);
+  assert.match(pins.bun, /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/);
+
+  const command = spawnSync(process.execPath, [toolchainReader, ".mise.toml"], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+  });
+  assert.equal(command.status, 0, command.stderr);
+  assert.equal(command.stdout, "node=" + pins.node + "\nbun=" + pins.bun + "\n");
+
+  const readerStep = setup.indexOf("id: toolchain");
+  assert.ok(readerStep >= 0);
+  assert.ok(readerStep < setup.indexOf("- name: Setup Bun"));
+  assert.ok(readerStep < setup.indexOf("- name: Setup Node"));
+  assert.ok(
+    setup.includes(
+      'run: node .github/scripts/read-toolchain-pins.mjs .mise.toml >> "$GITHUB_OUTPUT"',
+    ),
+  );
+  assert.ok(setup.includes("bun-version: ${{ steps.toolchain.outputs.bun }}"));
+  assert.ok(setup.includes("node-version: ${{ steps.toolchain.outputs.node }}"));
+  assert.ok(!setup.includes("bun-version-file: package.json"));
+  assert.ok(!setup.includes("node-version-file: package.json"));
+
+  const nodeAssignment = mise.match(/^\s*node\s*=.*$/m)?.[0];
+  assert.ok(nodeAssignment);
+  const bunLine = mise.match(/^\s*bun\s*=.*(?:\r?\n|$)/m)?.[0];
+  assert.ok(bunLine);
+  const invalidNode = nodeAssignment.replace(/=\s*["'][^"']*["']\s*$/, '= "^' + pins.node + '"');
+  assert.notEqual(invalidNode, nodeAssignment);
+  assert.throws(() => parseMiseToolchainPins(mise.replace(nodeAssignment, invalidNode)), {
+    code: "node-pin-not-an-exact-version",
+  });
+  assert.throws(
+    () =>
+      parseMiseToolchainPins(mise.replace(nodeAssignment, nodeAssignment + "\n" + nodeAssignment)),
+    { code: "node-pin-duplicate" },
+  );
+  assert.throws(() => parseMiseToolchainPins(mise.replace(bunLine, "")), {
+    code: "bun-pin-missing",
+  });
+  assert.throws(() => parseMiseToolchainPins(mise.replace(/^\[tools\]\s*$/m, "[other]")), {
+    code: "tools-table-missing",
+  });
+});
+
 test("native Windows runtime and recovery tests are not replaced with Linux checks", () => {
   const windows = workflow.split("  windows_process:\n")[1].split("  migration_lineage:\n")[0];
   for (const file of [

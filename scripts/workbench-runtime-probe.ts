@@ -23,7 +23,18 @@ import { Schema, type Effect } from "effect";
 
 import { connectOwnerUrl } from "./computer-use-fixtures/packaged-client.ts";
 import { startWorkbenchRuntimeMcpFixture } from "./lib/workbench-runtime-mcp-fixture.ts";
-import { hasExpectedMcpToolActivity } from "./lib/workbench-runtime-probe-evidence.ts";
+import {
+  canContinueAfterProbeApproval,
+  hasExpectedMcpToolActivity,
+  inspectProbeApproval,
+  probeApprovalCompletionFailure,
+  probeApprovalResponseKey,
+  respondToProbeApprovalOnce,
+  trackProbeApprovalSettlement,
+  waitForFixtureWaitStart,
+  type ProbeApprovalDecision,
+  type ProbeApprovalScope,
+} from "./lib/workbench-runtime-probe-evidence.ts";
 import {
   authenticatedOwnerUrl,
   parseRuntimeProbeOptions,
@@ -111,6 +122,7 @@ type ThreadCase = {
   personaMarker?: string;
   otherPersonaMarker?: string;
   binding?: ExpertBinding;
+  connectionId?: string;
   toolAlias?: string;
   waitToolAlias?: string;
 };
@@ -122,6 +134,7 @@ type TurnOutcome = {
   assistantText: string;
   assistantTextSha256: string;
   turnId: string;
+  approvalEvidence: Record<string, string | number | boolean | null>;
 };
 
 class ProbeFailure extends Error {
@@ -547,11 +560,148 @@ async function createTurn(
   return { userMessageId, turnId: latestTurn.turnId, thread: started.thread };
 }
 
+type TurnApprovalMonitor = {
+  observe(thread: OrchestrationThread): Promise<void>;
+  readyForToolContinuation(): boolean;
+  assertCompleted(): Record<string, string | number | boolean | null>;
+};
+
+function createTurnApprovalMonitor(input: {
+  owner: Owner;
+  thread: ThreadCase;
+  userMessageId: string;
+  turnId: string;
+  prompt: string;
+  fixtureTool?: { readonly tool: "echo" | "wait"; readonly value?: string };
+}): TurnApprovalMonitor {
+  const sentResponses = new Map<string, ProbeApprovalDecision>();
+  const observedSettlements = new Set<string>();
+  const unsettledApprovals = new Set<string>();
+  const counts = { requests: 0, accepted: 0, declined: 0, settled: 0 };
+  if (input.fixtureTool && (!input.thread.connectionId || !input.thread.binding)) {
+    throw new ProbeFailure("fixture-approval-scope-incomplete");
+  }
+  const scope: ProbeApprovalScope = {
+    provider: input.thread.provider,
+    threadId: input.thread.threadId,
+    turnId: input.turnId,
+    userMessageId: input.userMessageId,
+    userMessageText: input.prompt,
+    ...(input.fixtureTool && input.thread.connectionId && input.thread.binding
+      ? {
+          fixture: {
+            connectionId: input.thread.connectionId,
+            expertBinding: {
+              expertId: input.thread.binding.expertId,
+              snapshotId: input.thread.binding.snapshotId,
+              revision: input.thread.binding.revision,
+            },
+            ...input.fixtureTool,
+          },
+        }
+      : {}),
+  };
+  const evidence = () => ({
+    approvalRequests: counts.requests,
+    acceptedFixtureApprovals: counts.accepted,
+    declinedApprovals: counts.declined,
+    settledFixtureApprovals: counts.settled,
+  });
+
+  return {
+    readyForToolContinuation() {
+      return canContinueAfterProbeApproval({
+        unsettled: unsettledApprovals,
+        accepted: counts.accepted,
+        declined: counts.declined,
+        settled: counts.settled,
+      });
+    },
+    async observe(thread) {
+      const inspection = inspectProbeApproval(thread, scope, sentResponses, observedSettlements);
+      if (inspection.kind === "none") return;
+      if (inspection.kind === "failure") {
+        throw new ProbeFailure("provider-approval-scope-invalid", {
+          ...evidence(),
+          approvalReasonCode: inspection.reasonCode,
+        });
+      }
+      if (inspection.kind === "settled") {
+        const key = probeApprovalResponseKey({
+          threadId: scope.threadId,
+          turnId: scope.turnId,
+          lifecycleGeneration: inspection.lifecycleGeneration,
+          requestId: inspection.requestId,
+          decision: inspection.decision,
+        });
+        if (inspection.decision !== "accept") {
+          throw new ProbeFailure("provider-approval-was-not-accepted", evidence());
+        }
+        trackProbeApprovalSettlement(unsettledApprovals, scope, inspection);
+        if (!observedSettlements.has(key)) {
+          observedSettlements.add(key);
+          counts.settled += 1;
+        }
+        return;
+      }
+
+      trackProbeApprovalSettlement(unsettledApprovals, scope, inspection);
+      if (inspection.kind === "wait") return;
+
+      const response = {
+        threadId: scope.threadId,
+        turnId: scope.turnId,
+        lifecycleGeneration: inspection.lifecycleGeneration,
+        requestId: inspection.requestId,
+        decision: inspection.decision,
+      } as const;
+      try {
+        const sent = await respondToProbeApprovalOnce(response, sentResponses, async (command) => {
+          await dispatch(input.owner, {
+            type: "thread.approval.respond",
+            commandId: randomUUID(),
+            threadId: command.threadId,
+            requestId: command.requestId,
+            lifecycleGeneration: command.lifecycleGeneration,
+            decision: command.decision,
+            createdAt: new Date().toISOString(),
+          });
+        });
+        if (!sent) return;
+      } catch {
+        throw new ProbeFailure("approval-response-dispatch-failed", evidence());
+      }
+      counts.requests += 1;
+      if (inspection.decision === "accept") counts.accepted += 1;
+      else counts.declined += 1;
+      if (inspection.decision === "decline") {
+        throw new ProbeFailure("unexpected-provider-approval-declined", {
+          ...evidence(),
+          approvalRequestType: inspection.requestType,
+          approvalReasonCode: inspection.reasonCode ?? "approval-not-authorized",
+          fixtureConnectionBound: inspection.fixtureConnectionBound,
+        });
+      }
+    },
+    assertCompleted() {
+      const failure = probeApprovalCompletionFailure({
+        unsettled: unsettledApprovals,
+        accepted: counts.accepted,
+        declined: counts.declined,
+        settled: counts.settled,
+      });
+      if (failure) throw new ProbeFailure(failure, evidence());
+      return evidence();
+    },
+  };
+}
+
 async function waitForTerminalTurn(
   owner: Owner,
   threadId: ThreadId,
   userMessageId: string,
   turnId: string,
+  approvalMonitor: TurnApprovalMonitor,
   timeoutMs = PROVIDER_TURN_TIMEOUT_MS,
 ): Promise<OrchestrationThread> {
   const deadline = Date.now() + timeoutMs;
@@ -560,6 +710,7 @@ async function waitForTerminalTurn(
     const thread = snapshot?.thread;
     const turn = thread?.latestTurn;
     if (thread && turn?.turnId === turnId && thread.messages.some((m) => m.id === userMessageId)) {
+      await approvalMonitor.observe(thread);
       if (turn.state === "completed") return thread;
       if (turn.state === "interrupted") throw new ProbeFailure("turn-interrupted-unexpectedly");
       if (turn.state === "error") throw turnErrorFailure(thread, turnId, "turn-error");
@@ -575,6 +726,7 @@ async function runSuccessfulTurn(
   input: {
     thread: ThreadCase;
     prompt: string;
+    fixtureTool?: { readonly tool: "echo" | "wait"; readonly value?: string };
   },
 ): Promise<TurnOutcome> {
   const started = await createTurn(owner, {
@@ -584,12 +736,22 @@ async function runSuccessfulTurn(
     providerOptions: input.thread.providerOptions,
     prompt: input.prompt,
   });
+  const approvalMonitor = createTurnApprovalMonitor({
+    owner,
+    thread: input.thread,
+    userMessageId: started.userMessageId,
+    turnId: started.turnId,
+    prompt: input.prompt,
+    ...(input.fixtureTool ? { fixtureTool: input.fixtureTool } : {}),
+  });
   const completedThread = await waitForTerminalTurn(
     owner,
     input.thread.threadId,
     started.userMessageId,
     started.turnId,
+    approvalMonitor,
   );
+  const approvalEvidence = approvalMonitor.assertCompleted();
   const turn = completedThread.latestTurn;
   if (!turn || turn.state !== "completed" || !turn.assistantMessageId)
     throw new ProbeFailure("assistant-turn-not-completed");
@@ -605,6 +767,7 @@ async function runSuccessfulTurn(
     assistantText: assistant.text,
     assistantTextSha256: sha256(assistant.text),
     turnId: turn.turnId,
+    approvalEvidence,
   };
 }
 
@@ -711,12 +874,14 @@ async function waitForTurnState(
   turnId: string,
   expected: "running" | "interrupted",
   timeoutMs: number,
+  approvalMonitor: TurnApprovalMonitor,
 ): Promise<OrchestrationThread> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const snapshot = await snapshotThread(owner, threadId).catch(() => null);
     const thread = snapshot?.thread;
     if (thread?.latestTurn?.turnId === turnId) {
+      await approvalMonitor.observe(thread);
       if (thread.latestTurn.state === expected) return thread;
       if (thread.latestTurn.state === "error")
         throw turnErrorFailure(thread, turnId, `turn-error-before-${expected}`);
@@ -726,6 +891,32 @@ async function waitForTurnState(
     await sleep(RPC_POLL_INTERVAL_MS);
   }
   throw new ProbeFailure(`turn-${expected}-timeout`);
+}
+
+async function waitForToolApprovalSettlement(
+  owner: Owner,
+  threadId: ThreadId,
+  turnId: string,
+  approvalMonitor: TurnApprovalMonitor,
+  activeWait: () => boolean,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const thread = (await snapshotThread(owner, threadId).catch(() => null))?.thread;
+    if (thread?.latestTurn?.turnId === turnId) {
+      await approvalMonitor.observe(thread);
+      if (thread.latestTurn.state === "error")
+        throw turnErrorFailure(thread, turnId, "wait-tool-turn-error");
+      if (thread.latestTurn.state !== "running") {
+        throw new ProbeFailure("wait-tool-turn-not-running-before-interrupt");
+      }
+      if (!activeWait()) throw new ProbeFailure("mcp-wait-ended-before-interrupt");
+      if (approvalMonitor.readyForToolContinuation()) return;
+    }
+    await sleep(RPC_POLL_INTERVAL_MS);
+  }
+  throw new ProbeFailure("fixture-approval-settlement-timeout");
 }
 
 async function runCancellation(
@@ -742,9 +933,40 @@ async function runCancellation(
     providerOptions: thread.providerOptions,
     prompt: cancellationPrompt(thread.waitToolAlias),
   });
+  const prompt = cancellationPrompt(thread.waitToolAlias);
+  const approvalMonitor = createTurnApprovalMonitor({
+    owner,
+    thread,
+    userMessageId: started.userMessageId,
+    turnId: started.turnId,
+    prompt,
+    fixtureTool: { tool: "wait" },
+  });
   try {
-    await fixture.waitForWaitStart(PROVIDER_TURN_TIMEOUT_MS);
-    await waitForTurnState(owner, thread.threadId, started.turnId, "running", 15_000);
+    await waitForFixtureWaitStart({
+      readSnapshot: async () =>
+        (await snapshotThread(owner, thread.threadId).catch(() => null))?.thread ?? null,
+      observeSnapshot: (snapshot) => approvalMonitor.observe(snapshot),
+      stats: fixture.stats,
+      timeoutMs: PROVIDER_TURN_TIMEOUT_MS,
+      pollIntervalMs: RPC_POLL_INTERVAL_MS,
+    });
+    await waitForTurnState(
+      owner,
+      thread.threadId,
+      started.turnId,
+      "running",
+      15_000,
+      approvalMonitor,
+    );
+    await waitForToolApprovalSettlement(
+      owner,
+      thread.threadId,
+      started.turnId,
+      approvalMonitor,
+      () => fixture.stats().activeWaits > 0,
+      15_000,
+    );
     await interruptBestEffort(owner, thread.threadId, started.turnId);
     const interruptedThread = await waitForTurnState(
       owner,
@@ -752,6 +974,7 @@ async function runCancellation(
       started.turnId,
       "interrupted",
       30_000,
+      approvalMonitor,
     );
     if (interruptedThread.session?.providerName !== thread.provider)
       throw new ProbeFailure("provider-session-name-mismatch");
@@ -769,6 +992,7 @@ async function runCancellation(
     const stats = fixture.stats();
     if (stats.cancelledWaits < 1 || stats.activeWaits !== 0)
       throw new ProbeFailure("mcp-abort-signal-not-observed");
+    const approvalEvidence = approvalMonitor.assertCompleted();
     return {
       provider: thread.provider,
       interrupted: true,
@@ -776,6 +1000,7 @@ async function runCancellation(
       waitCalls: stats.waitCalls,
       cancelledWaits: stats.cancelledWaits,
       activeWaits: stats.activeWaits,
+      ...approvalEvidence,
     };
   } catch (error) {
     await interruptBestEffort(owner, thread.threadId, started.turnId);
@@ -852,6 +1077,7 @@ async function makeThreadCases(input: {
               expertId: input.expertDefinitions[provider].id,
               personaMarker: input.personaMarkers[provider],
               otherPersonaMarker: input.personaMarkers[provider === "codex" ? "pi" : "codex"],
+              connectionId: input.connectionId,
               toolAlias: toolAlias(input.connectionId, "echo"),
               waitToolAlias: toolAlias(input.connectionId, "wait"),
             }
@@ -1016,6 +1242,7 @@ async function verifyRestartRecovery(input: {
   }
 
   const echoDeltas = {} as Record<ProbeProvider, number>;
+  const approvalCounts = {} as Record<ProbeProvider, number>;
   for (const provider of ["codex", "pi"] as const) {
     const threadCase = input.cases[`${provider}-expert`];
     if (
@@ -1026,10 +1253,13 @@ async function verifyRestartRecovery(input: {
     )
       throw new ProbeFailure("expert-recovery-case-incomplete");
     const callsBefore = input.fixture.stats().echoCalls;
+    const nonce = "resume-" + randomUUID();
     const outcome = await runSuccessfulTurn(input.owner, {
       thread: threadCase,
-      prompt: expertPrompt(threadCase.toolAlias, `resume-${randomUUID()}`),
+      prompt: expertPrompt(threadCase.toolAlias, nonce),
+      fixtureTool: { tool: "echo", value: nonce },
     });
+    approvalCounts[provider] = outcome.approvalEvidence.approvalRequests as number;
     assertCorrectSession(outcome, provider);
     resumedModels[provider] = assertSelectedModel(
       outcome.thread,
@@ -1059,6 +1289,8 @@ async function verifyRestartRecovery(input: {
       codexEffort: resumedModels.codex.effort,
       piModel: resumedModels.pi.model,
       piEffort: resumedModels.pi.effort,
+      codexApprovalRequests: approvalCounts.codex,
+      piApprovalRequests: approvalCounts.pi,
     },
     echoDeltas,
   };
@@ -1220,10 +1452,17 @@ async function main(): Promise<void> {
           async () => {
             const isExpert = threadCase.kind === "expert";
             const echoCallsBefore = isExpert ? fixture!.stats().echoCalls : undefined;
+            const nonce = isExpert ? "initial-" + randomUUID() : undefined;
             const prompt = isExpert
-              ? expertPrompt(threadCase.toolAlias!, `initial-${randomUUID()}`)
+              ? expertPrompt(threadCase.toolAlias!, nonce!)
               : "Say hello in one short sentence.";
-            const outcome = await runSuccessfulTurn(owner!, { thread: threadCase, prompt });
+            const outcome = await runSuccessfulTurn(owner!, {
+              thread: threadCase,
+              prompt,
+              ...(isExpert && nonce
+                ? { fixtureTool: { tool: "echo" as const, value: nonce } }
+                : {}),
+            });
             outcomes[threadCase.key] = outcome;
             assertCorrectSession(outcome, provider);
             const modelEvidence = assertSelectedModel(
@@ -1267,6 +1506,7 @@ async function main(): Promise<void> {
               ...modelEvidence,
               assistantMessagePersisted: true,
               assistantTextSha256: outcome.assistantTextSha256,
+              ...outcome.approvalEvidence,
             };
           },
           `${threadCase.key}-first-turn-failed`,

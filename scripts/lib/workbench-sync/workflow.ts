@@ -1217,23 +1217,27 @@ export async function verifyWorkbenchCandidate(input: {
           runnerError: describeThrownError(error),
         };
       }
+      const runnerError = result.runnerError;
+      const runnerReportedError = runnerError !== undefined;
       let check = makeCheck(
         id,
-        !runnerThrew && result.exitCode === 0 ? "passed" : "failed",
+        !runnerThrew && !runnerReportedError && result.exitCode === 0 ? "passed" : "failed",
         result.exitCode,
         Date.now() - startedAt,
         runnerThrew
           ? "gate-runner-threw"
-          : result.exitCode === 0
-            ? undefined
-            : `bun-run-${script}-failed`,
+          : runnerReportedError
+            ? "gate-runner-reported-error"
+            : result.exitCode === 0
+              ? undefined
+              : `bun-run-${script}-failed`,
       );
       if (logRun) {
         try {
           const logs: VerificationCheckLogs = await logRun.writeCheck(id, {
             stdout: result.stdout,
             stderr: result.stderr,
-            ...(result.runnerError ? { runnerError: result.runnerError } : {}),
+            ...(runnerReportedError ? { runnerError } : {}),
           });
           check = { ...check, logs };
         } catch {

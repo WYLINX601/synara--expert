@@ -382,7 +382,7 @@ describe("workbench sync persisted workflow", () => {
   }, 30_000);
 
   // The composed Git fixture needs a 30s test budget matching its per-command Git timeout.
-  it("stores private stdout and stderr logs with per-check hashes and a relative index", async () => {
+  it("stores private check logs and fails a runner error even when the command exits zero", async () => {
     const fixture = await makeFixture();
     const { prepare } = await checkedAndPrepared(fixture);
     let calls = 0;
@@ -416,6 +416,14 @@ describe("workbench sync persisted workflow", () => {
               runnerError: "spawnSync bun ETIMEDOUT\nspawnSignal=SIGTERM",
             };
           }
+          if (calls === 5) {
+            return {
+              exitCode: 0,
+              stdout: "migration output\n",
+              stderr: "migration diagnostic\n",
+              runnerError: "synthetic spawn error after exit code 0",
+            };
+          }
           return allPassing();
         },
       },
@@ -432,10 +440,13 @@ describe("workbench sync persisted workflow", () => {
       "failed",
       "failed",
       "failed",
-      "passed",
+      "failed",
       "passed",
     ]);
+    expect(verified.checks[1]?.reason).toBe("bun-run-lint-failed");
     expect(verified.checks[2]?.reason).toBe("gate-runner-threw");
+    expect(verified.checks[4]?.exitCode).toBe(0);
+    expect(verified.checks[4]?.reason).toBe("gate-runner-reported-error");
 
     const paths = await resolveRepositoryStatePaths(fixture.repo);
     const resolveLogPath = (path: string) => join(paths.commonDirectory, path);
@@ -461,6 +472,10 @@ describe("workbench sync persisted workflow", () => {
     expect(await readAndCheckLog(thrownRunnerError)).toContain("injected gate runner exception");
     const timeoutRunnerError = verified.checks[3]!.logs!.runnerError!;
     expect(await readAndCheckLog(timeoutRunnerError)).toContain("ETIMEDOUT");
+    const zeroExitRunnerError = verified.checks[4]!.logs!.runnerError!;
+    expect(await readAndCheckLog(zeroExitRunnerError)).toContain(
+      "synthetic spawn error after exit code 0",
+    );
 
     const indexPath = resolveLogPath(verified.verificationLogs!.indexPath!);
     const indexContents = await readFile(indexPath);
@@ -471,11 +486,22 @@ describe("workbench sync persisted workflow", () => {
     expect(indexContents.toString("utf8")).not.toContain("format output");
     const index = JSON.parse(indexContents.toString("utf8")) as {
       readonly candidateSha: string;
-      readonly checks: readonly { readonly id: string; readonly logs?: unknown }[];
+      readonly checks: readonly {
+        readonly id: string;
+        readonly status: string;
+        readonly exitCode: number | null;
+        readonly reason?: string;
+        readonly logs?: unknown;
+      }[];
     };
     expect(index.candidateSha).toBe(prepare.candidateSha);
     expect(index.checks.map((check) => check.id)).toEqual(AUTOMATIC_CHECKS.map(({ id }) => id));
     expect(index.checks[0]?.logs).toEqual(formatLogs);
+    expect(index.checks[4]).toMatchObject({
+      status: "failed",
+      exitCode: 0,
+      reason: "gate-runner-reported-error",
+    });
     expect(JSON.stringify(verified)).not.toContain(fixture.repo);
     if (process.platform !== "win32") {
       expect(

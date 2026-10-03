@@ -30,15 +30,20 @@ runs:
           exit 1
         fi
 
+    - name: Read pinned toolchain
+      id: toolchain
+      shell: bash
+      run: node .github/scripts/read-toolchain-pins.mjs .mise.toml >> "$GITHUB_OUTPUT"
+
     - name: Setup Bun
       uses: oven-sh/setup-bun@v2
       with:
-        bun-version-file: package.json
+        bun-version: ${{ steps.toolchain.outputs.bun }}
 
     - name: Setup Node
       uses: actions/setup-node@v6
       with:
-        node-version-file: package.json
+        node-version: ${{ steps.toolchain.outputs.node }}
 
     # Small filtered installs cost less than archive transfer/extraction. Never
     # restore a full tree into a filtered lane or save it under the full key.

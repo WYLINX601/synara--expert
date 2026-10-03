@@ -662,6 +662,21 @@ export function createWsNativeApi(): NativeApi {
       getEnvironment: () => transport.request(WS_METHODS.serverGetEnvironment),
       getSettings: () => transport.request(WS_METHODS.serverGetSettings),
       updateSettings: (input) => transport.request(WS_METHODS.serverUpdateSettings, input),
+      listExperts: () => transport.request(WS_METHODS.serverListExperts),
+      readExpert: (input) => transport.request(WS_METHODS.serverReadExpert, input),
+      saveExpert: (input) => transport.request(WS_METHODS.serverSaveExpert, input),
+      archiveExpert: (input) => transport.request(WS_METHODS.serverArchiveExpert, input),
+      previewExpert: (input) => transport.request(WS_METHODS.serverPreviewExpert, input),
+      readExpertSnapshot: (input) => transport.request(WS_METHODS.serverReadExpertSnapshot, input),
+      readExpertAppliedRuntime: (input) =>
+        transport.request(WS_METHODS.serverReadExpertAppliedRuntime, input),
+      listExpertConnections: () => transport.request(WS_METHODS.serverListExpertConnections),
+      saveExpertConnection: (input) =>
+        transport.request(WS_METHODS.serverSaveExpertConnection, input),
+      removeExpertConnection: (input) =>
+        transport.request(WS_METHODS.serverRemoveExpertConnection, input),
+      testExpertConnection: (input) =>
+        transport.request(WS_METHODS.serverTestExpertConnection, input),
       getAuthSession: () => requestAuthJson<AuthSessionState>("/api/auth/session"),
       bootstrapAuth: (input: AuthBootstrapInput) =>
         requestAuthJson<AuthBootstrapResult>("/api/auth/bootstrap", {
@@ -712,7 +727,11 @@ export function createWsNativeApi(): NativeApi {
         transport.request(WS_METHODS.serverRevokeExternalMcpIntegration, input),
       refreshExternalMcpPairing: (input: ExternalMcpRefreshPairingInput) =>
         transport.request(WS_METHODS.serverRefreshExternalMcpPairing, input),
-      refreshProviders: () => transport.request(WS_METHODS.serverRefreshProviders),
+      // Claude runs sequential CLI and auth probes, so a refresh can exceed the
+      // generic 60-second RPC deadline. Keep this bounded while allowing slow
+      // probes to finish; onboarding shows an error if this deadline expires.
+      refreshProviders: () =>
+        transport.request(WS_METHODS.serverRefreshProviders, undefined, { timeoutMs: 180_000 }),
       // Provider updates run up to 2 minutes server-side; callers wrap this in
       // withProviderUpdateTimeout, which owns the client-side watchdog.
       updateProvider: (input) =>

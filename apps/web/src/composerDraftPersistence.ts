@@ -344,6 +344,7 @@ type LegacyPersistedComposerDraftStoreState = PersistedComposerDraftStoreState &
 
 const PersistedDraftThreadState = Schema.Struct({
   projectId: ProjectId,
+  expertId: Schema.optionalKey(Schema.String),
   createdAt: Schema.String,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -867,6 +868,11 @@ function normalizePersistedDraftThreads(
         typeof candidateDraftThread.goal === "string" && candidateDraftThread.goal.trim().length > 0
           ? candidateDraftThread.goal
           : undefined;
+      const expertId =
+        typeof candidateDraftThread.expertId === "string" &&
+        candidateDraftThread.expertId.trim().length > 0
+          ? candidateDraftThread.expertId.trim()
+          : undefined;
       const isTemporary = candidateDraftThread.isTemporary === true ? true : undefined;
       const promotedTo =
         typeof candidateDraftThread.promotedTo === "string" &&
@@ -878,6 +884,7 @@ function normalizePersistedDraftThreads(
       }
       draftThreadsByThreadId[threadId as ThreadId] = {
         projectId: projectId as ProjectId,
+        ...(expertId ? { expertId } : {}),
         createdAt:
           typeof createdAt === "string" && createdAt.length > 0
             ? createdAt

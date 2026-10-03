@@ -3,6 +3,7 @@ import type {
   OrchestrationEvent,
   OrchestrationReadModel,
   OrchestrationThread,
+  ExpertBinding,
   ProjectKind,
   ThreadGoalAchievement,
 } from "@synara/contracts";
@@ -548,11 +549,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   command,
   readModel,
   workspacePaths,
+  expertBinding,
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
   /** Reserved container roots; when provided, space assignment rejects legacy chat containers. */
   readonly workspacePaths?: SpaceAssignmentWorkspacePaths | undefined;
+  /** Resolved by the server before admission; never copied from a client command. */
+  readonly expertBinding?: ExpertBinding | undefined;
 }): Effect.fn.Return<
   Omit<OrchestrationEvent, "sequence"> | ReadonlyArray<Omit<OrchestrationEvent, "sequence">>,
   OrchestrationCommandInvariantError
@@ -1034,6 +1038,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.create": {
+      if (command.expertId && !expertBinding) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Expert '${command.expertId}' was not prepared by the server.`,
+        });
+      }
       const project = yield* requireProject({
         readModel,
         command,
@@ -1062,6 +1072,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           projectId: command.projectId,
+          expertBinding:
+            expertBinding ??
+            (command.parentThreadId
+              ? (readModel.threads.find((thread) => thread.id === command.parentThreadId)
+                  ?.expertBinding ?? null)
+              : null),
           title: command.title,
           modelSelection: command.modelSelection,
           runtimeMode: command.runtimeMode,
@@ -1127,6 +1143,22 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Source thread '${command.sourceThreadId}' must contain at least one native chat message after handoff before it can be handed off again.`,
         });
       }
+      if (command.expertId && !expertBinding) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Expert '${command.expertId}' was not prepared by the server.`,
+        });
+      }
+      if (
+        (expertBinding ?? sourceThread.expertBinding) &&
+        command.modelSelection.provider !== "codex" &&
+        command.modelSelection.provider !== "pi"
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Expert tasks can currently continue only with Codex or Pi.",
+        });
+      }
 
       const createdEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...withEventBase({
@@ -1139,6 +1171,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           projectId: command.projectId,
+          expertBinding: expertBinding ?? sourceThread.expertBinding ?? null,
           title: command.title,
           modelSelection: command.modelSelection,
           runtimeMode: command.runtimeMode,
@@ -1235,6 +1268,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           projectId: command.projectId,
+          expertBinding: sourceThread.expertBinding ?? null,
           title: command.sidechatSourceThreadId
             ? command.title
             : buildForkThreadTitle(

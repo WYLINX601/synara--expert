@@ -207,6 +207,7 @@ export interface ComposerThreadDraftState {
 
 export interface DraftThreadState {
   projectId: ProjectId;
+  expertId?: string;
   createdAt: string;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
@@ -224,6 +225,8 @@ export interface DraftThreadState {
 }
 
 export interface DraftThreadMutationOptions {
+  /** Empty string clears the expert selection before the first send. */
+  expertId?: string;
   branch?: string | null;
   worktreePath?: string | null;
   workingDirectory?: string | null;
@@ -475,9 +478,14 @@ export function buildDraftThreadState(input: {
   const nextPromotedTo = existingThread?.promotedTo;
   const nextGoal =
     options?.goal === undefined ? existingThread?.goal : options.goal.trim() || undefined;
+  const nextExpertId =
+    options?.expertId === undefined
+      ? existingThread?.expertId
+      : options.expertId.trim() || undefined;
 
   return {
     projectId: input.projectId,
+    ...(nextExpertId ? { expertId: nextExpertId } : {}),
     createdAt: resolveDraftThreadCreatedAt({
       createdAt: options?.createdAt,
       existingThread,
@@ -516,6 +524,7 @@ export function draftThreadStatesEqual(
 
   return (
     left.projectId === right.projectId &&
+    left.expertId === right.expertId &&
     left.createdAt === right.createdAt &&
     left.runtimeMode === right.runtimeMode &&
     left.interactionMode === right.interactionMode &&

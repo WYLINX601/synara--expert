@@ -3,6 +3,7 @@
 // Layer: Desktop update tests
 
 import { describe, expect, it, vi } from "vitest";
+import { synaraDesktopIdentity } from "@synara/shared/desktopIdentity";
 
 import {
   PendingUpdateCacheClearQueue,
@@ -18,6 +19,14 @@ describe("resolveElectronUpdaterCacheDirName", () => {
     expect(
       resolveElectronUpdaterCacheDirName({ updaterCacheDirName: "Synara-updater" }, "Synara"),
     ).toBe("Synara-updater");
+  });
+
+  it("derives distinct fallback update-cache names from each Workbench app identity", () => {
+    const names = (["workbench", "workbench-preview"] as const).map((flavor) =>
+      resolveElectronUpdaterCacheDirName(null, synaraDesktopIdentity(flavor).displayName),
+    );
+    expect(new Set(names).size).toBe(2);
+    expect(names).toEqual(["Personal Workbench", "Personal Workbench Preview"]);
   });
 });
 

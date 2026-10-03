@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="drawio" version="26.0.0">
+  <diagram name="01 工作台运行架构" id="01 工作台运行架构">
+    <mxGraphModel dx="1200" dy="1050" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="1050" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="个人工作台：复用 Synara，集中维护扩展接入" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#f5f5f5;strokeColor=#666666;strokeColor=none;fillColor=none;fontSize=24;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="60" y="20" width="1080" height="55" />
+        </mxCell>
+        <mxCell id="shell" value="同一个工作台界面 / 现有应用外壳" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#f5f5f5;strokeColor=#666666;swimlane;startSize=40;container=1;pointerEvents=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="60" y="100" width="1080" height="195" />
+        </mxCell>
+        <mxCell id="native" value="原生界面&#10;对话 · 文件 · 终端 · AI 任务看板" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="shell">
+          <mxGeometry as="geometry" x="25" y="65" width="475" height="100" />
+        </mxCell>
+        <mxCell id="custom" value="自定义界面&#10;专家入口 · 业务看板 · 个人首页" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="shell">
+          <mxGeometry as="geometry" x="580" y="65" width="475" height="100" />
+        </mxCell>
+        <mxCell id="core" value="Synara 任务与运行内核&#10;任务 / 会话 / 审批 / 取消 / 恢复" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="85" y="500" width="475" height="115" />
+        </mxCell>
+        <mxCell id="modules" value="工作台模块服务&#10;事项 / 专家 / 业务规则" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="640" y="350" width="475" height="90" />
+        </mxCell>
+        <mxCell id="bridge" value="集中维护的宿主适配层&#10;任务命令 / 查询 / 状态 / 必要生命周期" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="640" y="500" width="475" height="115" />
+        </mxCell>
+        <mxCell id="runtime" value="现有 Provider 与工具运行时&#10;沿用会话所有权和权限" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="85" y="705" width="475" height="90" />
+        </mxCell>
+        <mxCell id="db" value="原生事件与任务数据&#10;官方迁移记录" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="85" y="875" width="475" height="90" />
+        </mxCell>
+        <mxCell id="customdb" value="扩展业务表与独立迁移记录&#10;专家源文件与不可变快照" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="640" y="705" width="475" height="90" />
+        </mxCell>
+        <mxCell id="note" value="数据表可使用同一 SQLite 事务；迁移记录分别管理。&#10;适配层为本 fork 维护的内部边界，并非官方稳定插件 SDK。" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="640" y="875" width="475" height="90" />
+        </mxCell>
+        <mxCell id="e1" value="" source="native" target="core" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e2" value="" source="custom" target="modules" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e3" value="" source="modules" target="bridge" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e4" value="复用既有命令与授权" source="bridge" target="core" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;exitX=0;exitY=0.5;entryX=1;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e5" value="" source="core" target="runtime" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e6" value="持久化" source="core" target="db" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;exitX=0;exitY=0.8;entryX=0;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="e7" value="自定义数据" source="modules" target="customdb" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;exitX=1;exitY=0.5;entryX=1;entryY=0.5;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="02 每周集成与安装" id="02 每周集成与安装">
+    <mxGraphModel dx="1200" dy="1160" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="1160" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="每周检查一次：候选验证通过后更新日用版" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#f5f5f5;strokeColor=#666666;strokeColor=none;fillColor=none;fontSize=24;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="60" y="20" width="1080" height="55" />
+        </mxCell>
+        <mxCell id="upstream" value="官方最新稳定版&#10;锁定 tag 与完整 SHA" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="70" y="110" width="460" height="100" />
+        </mxCell>
+        <mxCell id="ours" value="我们的已验证版本&#10;Synara + 自定义能力" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="670" y="110" width="460" height="100" />
+        </mxCell>
+        <mxCell id="candidate" value="独立同步工作区&#10;合并官方变化 / 处理冲突与接口适配" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="220" y="295" width="760" height="105" />
+        </mxCell>
+        <mxCell id="gates" value="自动检查 + 隔离运行验证&#10;原生能力 / 专家 / 数据升级 / 看板关联" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="220" y="495" width="760" height="105" />
+        </mxCell>
+        <mxCell id="release" value="已验证的工作台构建&#10;记录两个源码 SHA 与 schema 版本" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="220" y="695" width="760" height="105" />
+        </mxCell>
+        <mxCell id="install" value="空闲时安装到日用工作台&#10;自己的应用身份、数据目录和更新渠道" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="220" y="895" width="760" height="105" />
+        </mxCell>
+        <mxCell id="foot" value="失败时保留原日用版并继续修复候选。回退涉及不兼容数据迁移时，需恢复配套数据备份。&#10;本图描述目标流程；定时任务、分支合并和生产安装尚未配置。" style="rounded=1;whiteSpace=wrap;html=1;fontFamily=Helvetica;fontSize=16;spacing=12;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="100" y="1040" width="1000" height="70" />
+        </mxCell>
+        <mxCell id="a1" value="每周取一次快照" source="upstream" target="candidate" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;entryX=0.25;entryY=0;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="a2" value="保留自定义代码" source="ours" target="candidate" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;entryX=0.75;entryY=0;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="a3" value="" source="candidate" target="gates" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="a4" value="通过" source="gates" target="release" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="a5" value="一致性备份 / 已授权安装" source="release" target="install" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="a6" value="失败后修复" source="gates" target="candidate" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;fontSize=13;exitX=0;exitY=0.5;entryX=0;entryY=0.5;dashed=1;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

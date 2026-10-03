@@ -5,6 +5,21 @@ import type {
   ListProjectImportsInput,
   ListProjectImportsResult,
 } from "./projectImport";
+import type {
+  ExpertArchiveInput,
+  ExpertAppliedRuntimeReadInput,
+  ExpertAppliedRuntimeRecord,
+  ExpertConnectionConfig,
+  ExpertConnectionRemoveInput,
+  ExpertConnectionSaveInput,
+  ExpertDefinition,
+  ExpertPreview,
+  ExpertPreviewInput,
+  ExpertReadInput,
+  ExpertSaveInput,
+  ExpertSnapshot,
+  ExpertSnapshotReadInput,
+} from "./expert";
 
 import type {
   AuthBearerBootstrapResult,
@@ -351,6 +366,9 @@ export interface DesktopUpdateState {
   errorContext: "check" | "download" | "install" | null;
   canRetry: boolean;
   installFailureCount: number;
+  // Build flavor of the running desktop app; Workbench identities stay distinct from Stable.
+  // The web UI uses it for beta-only branding; production builds never see it.
+  flavor: "production" | "beta" | "canary" | "cua" | "workbench" | "workbench-preview";
   // Public URL where the user can manually download the release when the
   // in-app updater cannot apply it (silent installer failure, unsigned build,
   // read-only install location, unsupported platform). Null when no GitHub
@@ -362,6 +380,55 @@ export interface DesktopUpdateActionResult {
   accepted: boolean;
   completed: boolean;
   state: DesktopUpdateState;
+}
+
+/** In-flight or failed beta download/install reported by the stable side. */
+export interface DesktopBetaInstallProgress {
+  readonly phase: "downloading" | "verifying" | "installing" | "opening" | "error";
+  /** 0-100 while the download reports a content length; null when indeterminate. */
+  readonly percent: number | null;
+  readonly message?: string;
+}
+
+/** Result of a stable-side probe for a parallel Synara Beta install. */
+export interface DesktopBetaChannelState {
+  /** False on web builds and unsupported probing environments. */
+  readonly supported: boolean;
+  /** Flavor of the running desktop app; the card only acts on "production". */
+  readonly flavor: "production" | "beta" | "canary" | "cua" | "workbench" | "workbench-preview";
+  readonly installed: boolean;
+  readonly version: string | null;
+  /** True when this platform can install beta in place (macOS today). */
+  readonly canInstall: boolean;
+  /** Beta's server pid is alive (its launch marker/runtime file says so). */
+  readonly running: boolean;
+  /** Timestamp of the last completed data import reported by the beta app. */
+  readonly lastImportAt: string | null;
+  readonly lastImportError: string | null;
+  /** Public download page handed to the user when beta is not installed. */
+  readonly downloadUrl: string;
+  /** Live download/install progress; an `error` phase stays until the next attempt. */
+  readonly install: DesktopBetaInstallProgress | null;
+  /** Beta only: a stable Synara app was found to switch back to. */
+  readonly stableInstalled: boolean;
+  /** Beta only: leaving can also move the beta app to the Trash (macOS). */
+  readonly canMoveBetaToTrash: boolean;
+  /** Stable download page offered from beta when stable is not installed. */
+  readonly stableDownloadUrl: string;
+}
+
+export type DesktopBetaActionError =
+  | "not-supported"
+  | "not-installed"
+  | "beta-running"
+  | "install-failed"
+  | "launch-failed"
+  | "internal";
+
+export interface DesktopBetaActionResult {
+  readonly ok: boolean;
+  readonly error?: DesktopBetaActionError;
+  readonly message?: string;
 }
 
 export interface BrowserTabState {
@@ -753,6 +820,23 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
+  /** Stable→Beta opt-in surface. Absent on builds that do not ship it. */
+  beta?: {
+    getState: () => Promise<DesktopBetaChannelState>;
+    /** Downloads and installs Synara Beta when missing (macOS), then opens it. */
+    install: () => Promise<DesktopBetaActionResult>;
+    /**
+     * Installs Synara Beta when missing (macOS), writes the import marker, and
+     * launches it to consume the import.
+     */
+    importAndLaunch: () => Promise<DesktopBetaActionResult>;
+    launch: () => Promise<DesktopBetaActionResult>;
+    /**
+     * Beta only: opens stable Synara, optionally moves the beta app to the
+     * Trash (macOS), then quits beta. Beta data stays in the beta home.
+     */
+    leave: (input: { readonly moveToTrash: boolean }) => Promise<DesktopBetaActionResult>;
+  };
   notifications: {
     isSupported: () => Promise<boolean>;
     show: (input: DesktopNotificationInput) => Promise<boolean>;
@@ -954,6 +1038,19 @@ export interface NativeApi {
     getEnvironment: () => Promise<ServerGetEnvironmentResult>;
     getSettings: () => Promise<ServerGetSettingsResult>;
     updateSettings: (input: ServerUpdateSettingsInput) => Promise<ServerUpdateSettingsResult>;
+    listExperts: () => Promise<ReadonlyArray<ExpertDefinition>>;
+    readExpert: (input: ExpertReadInput) => Promise<ExpertDefinition | null>;
+    saveExpert: (input: ExpertSaveInput) => Promise<ExpertDefinition>;
+    archiveExpert: (input: ExpertArchiveInput) => Promise<ExpertDefinition>;
+    previewExpert: (input: ExpertPreviewInput) => Promise<ExpertPreview>;
+    readExpertSnapshot: (input: ExpertSnapshotReadInput) => Promise<ExpertSnapshot>;
+    readExpertAppliedRuntime: (
+      input: ExpertAppliedRuntimeReadInput,
+    ) => Promise<ExpertAppliedRuntimeRecord | null>;
+    listExpertConnections: () => Promise<ReadonlyArray<ExpertConnectionConfig>>;
+    saveExpertConnection: (input: ExpertConnectionSaveInput) => Promise<ExpertConnectionConfig>;
+    removeExpertConnection: (input: ExpertConnectionRemoveInput) => Promise<void>;
+    testExpertConnection: (input: ExpertReadInput) => Promise<{ tools: ReadonlyArray<string> }>;
     getAuthSession: () => Promise<AuthSessionState>;
     bootstrapAuth: (input: AuthBootstrapInput) => Promise<AuthBootstrapResult>;
     bootstrapBearerAuth: (input: AuthBootstrapInput) => Promise<AuthBearerBootstrapResult>;

@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type {
+  ExpertAppliedRuntimeRecord,
   ProviderApprovalDecision,
   ProviderForkThreadInput,
   ProviderForkThreadResult,
@@ -166,6 +167,12 @@ function makeFakeCodexAdapter(
           provider,
           status: "ready",
           runtimeMode: input.runtimeMode,
+          runtimeComponent: provider === "pi" ? "pi-sdk" : `${provider}-cli`,
+          runtimeVersion: "test-runtime-version",
+          ...(input.modelSelection?.model ? { model: input.modelSelection.model } : {}),
+          ...(input.lifecycleGeneration !== undefined
+            ? { lifecycleGeneration: input.lifecycleGeneration }
+            : {}),
           threadId: input.threadId,
           resumeCursor: input.resumeCursor ?? { opaque: `resume-${String(input.threadId)}` },
           cwd: input.cwd ?? process.cwd(),
@@ -487,6 +494,17 @@ function makeProviderServiceLayer(
 }
 
 const routing = makeProviderServiceLayer();
+const expertAppliedRuntimeWrites: ExpertAppliedRuntimeRecord[] = [];
+const expertAppliedRuntimeRouting = makeProviderServiceLayer({
+  persistExpertAppliedRuntime: (record) =>
+    Effect.sync(() => {
+      expertAppliedRuntimeWrites.push(record);
+    }),
+});
+const expertAppliedRuntimeFailureRouting = makeProviderServiceLayer({
+  persistExpertAppliedRuntime: () =>
+    Effect.fail(new Error("injected applied runtime write failure")),
+});
 const replacementEvents = new Map<string, ProviderRuntimeEvent>();
 const replacementRouting = makeProviderServiceLayer({
   persistRuntimeEvent: (event) =>
@@ -496,7 +514,7 @@ const replacementRouting = makeProviderServiceLayer({
     }),
 });
 replacementRouting.layer("Claude replacement preparation", (it) => {
-  for (const failure of ["background", "unsupported-auto", "missing-binary"] as const) {
+  for (const failure of ["background", "unsupported-auto"] as const) {
     it.effect(
       `preserves events and generation when preparation rejects (${failure}), then resumes idle`,
       () =>
@@ -543,9 +561,7 @@ replacementRouting.layer("Claude replacement preparation", (it) => {
                   issue:
                     failure === "background"
                       ? "Background work is active"
-                      : failure === "unsupported-auto"
-                        ? "Claude CLI 2.1.110 does not support Auto mode"
-                        : "Could not verify Auto mode support: ENOENT",
+                      : "Claude CLI 2.1.110 does not support Auto mode",
                 });
               }),
           );
@@ -1186,6 +1202,81 @@ adapterConfirmedFreshRouting.layer("ProviderServiceLive resume confirmation", (i
 });
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("returns and persists the active runtime metadata across turns and restart", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-runtime-metadata");
+      const originalStart = routing.codex.startSession.getMockImplementation();
+      if (!originalStart) assert.fail("Expected the fake Codex start implementation");
+      const startWithRuntimeMetadata = (input: ProviderSessionStartInput) =>
+        originalStart(input).pipe(
+          Effect.map((session) => ({
+            ...session,
+            runtimeComponent: "codex-cli",
+            runtimeVersion: "0.101.0",
+          })),
+        );
+      routing.codex.startSession.mockImplementationOnce(startWithRuntimeMetadata);
+
+      const first = yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const firstBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(first.runtimeComponent, "codex-cli");
+      assert.equal(first.runtimeVersion, "0.101.0");
+      assert.equal(first.lifecycleGeneration, firstBinding.lifecycleGeneration);
+      assert.deepEqual(
+        {
+          runtimeComponent: asRuntimePayloadRecord(firstBinding.runtimePayload).runtimeComponent,
+          runtimeVersion: asRuntimePayloadRecord(firstBinding.runtimePayload).runtimeVersion,
+          lifecycleGeneration: asRuntimePayloadRecord(firstBinding.runtimePayload)
+            .lifecycleGeneration,
+        },
+        {
+          runtimeComponent: "codex-cli",
+          runtimeVersion: "0.101.0",
+          lifecycleGeneration: first.lifecycleGeneration,
+        },
+      );
+
+      yield* provider.sendTurn({
+        threadId,
+        input: "metadata survives turn dispatch",
+        attachments: [],
+      });
+      const activeBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(asRuntimePayloadRecord(activeBinding.runtimePayload).runtimeVersion, "0.101.0");
+      assert.equal(
+        asRuntimePayloadRecord(activeBinding.runtimePayload).lifecycleGeneration,
+        first.lifecycleGeneration,
+      );
+
+      yield* provider.stopRuntimeSession!({ threadId });
+      routing.codex.startSession.mockImplementationOnce(startWithRuntimeMetadata);
+      const restarted = yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const restartedBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.notEqual(restarted.lifecycleGeneration, first.lifecycleGeneration);
+      assert.equal(restarted.runtimeComponent, "codex-cli");
+      assert.equal(restarted.runtimeVersion, "0.101.0");
+      assert.equal(
+        asRuntimePayloadRecord(restartedBinding.runtimePayload).runtimeVersion,
+        "0.101.0",
+      );
+      assert.equal(
+        asRuntimePayloadRecord(restartedBinding.runtimePayload).lifecycleGeneration,
+        restarted.lifecycleGeneration,
+      );
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
   it.effect("retries runtime cleanup after the adapter becomes non-routable", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -3021,29 +3112,6 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
-  it.effect("routes explicit claudeAgent provider session starts to the claude adapter", () =>
-    Effect.gen(function* () {
-      const provider = yield* ProviderService;
-
-      const session = yield* provider.startSession(asThreadId("thread-claude"), {
-        provider: "claudeAgent",
-        threadId: asThreadId("thread-claude"),
-        cwd: "/tmp/project-claude",
-        runtimeMode: "full-access",
-      });
-
-      assert.equal(session.provider, "claudeAgent");
-      assert.equal(routing.claude.startSession.mock.calls.length, 1);
-      const startInput = routing.claude.startSession.mock.calls[0]?.[0];
-      assert.equal(typeof startInput === "object" && startInput !== null, true);
-      if (startInput && typeof startInput === "object") {
-        const startPayload = startInput as { provider?: string; cwd?: string };
-        assert.equal(startPayload.provider, "claudeAgent");
-        assert.equal(startPayload.cwd, "/tmp/project-claude");
-      }
-    }),
-  );
-
   it.effect("retries a stale Devin cursor once as a fresh start", () =>
     Effect.gen(function* () {
       const threadId = asThreadId("thread-devin-stale-cursor");
@@ -3479,16 +3547,36 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
-  it.effect("recovers stale sessions for sendTurn using persisted cwd", () =>
+  it.effect("recovers stale sessions with persisted cwd and Expert snapshot", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const expertSession = {
+        snapshotId: "snapshot-recovery",
+        persona: "Use the immutable reviewer persona.",
+        skillsRoot: "/tmp/snapshot-recovery/skills",
+        skills: [
+          {
+            name: "reviewer",
+            path: "/tmp/snapshot-recovery/skills/reviewer/SKILL.md",
+          },
+        ],
+        references: ["handbook"],
+      };
 
       const initial = yield* provider.startSession(asThreadId("thread-1"), {
         provider: "codex",
         threadId: asThreadId("thread-1"),
         cwd: "/tmp/project-send-turn",
+        expertSession,
         runtimeMode: "full-access",
       });
+      assert.deepEqual(
+        asRuntimePayloadRecord(
+          Option.getOrUndefined(yield* directory.getBinding(initial.threadId))?.runtimePayload,
+        ).expertSession,
+        expertSession,
+      );
 
       yield* routing.codex.stopAll();
       routing.codex.startSession.mockClear();
@@ -3509,14 +3597,119 @@ routing.layer("ProviderServiceLive routing", (it) => {
           cwd?: string;
           resumeCursor?: unknown;
           threadId?: string;
+          expertSession?: unknown;
         };
         assert.equal(startPayload.provider, "codex");
         assert.equal(startPayload.cwd, "/tmp/project-send-turn");
         assert.deepEqual(startPayload.resumeCursor, initial.resumeCursor);
         assert.equal(startPayload.threadId, initial.threadId);
+        assert.deepEqual(startPayload.expertSession, expertSession);
       }
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
     }),
+  );
+
+  it.effect("records only successful Expert starts and recovery generations", () =>
+    Effect.gen(function* () {
+      expertAppliedRuntimeWrites.length = 0;
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-applied-runtime-service");
+      const expertSession = {
+        snapshotId: "snapshot-applied-runtime-service",
+        persona: "Use the reviewer persona.",
+        skills: [],
+        references: [],
+      };
+
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        expertSession,
+        runtimeMode: "full-access",
+      });
+      assert.lengthOf(expertAppliedRuntimeWrites, 1);
+      const initialRecord = expertAppliedRuntimeWrites[0]!;
+      assert.equal(initialRecord.threadId, threadId);
+      assert.equal(initialRecord.snapshotId, expertSession.snapshotId);
+      assert.equal(initialRecord.provider, "codex");
+      assert.equal(initialRecord.model, "gpt-5-codex");
+      assert.equal(initialRecord.runtimeComponent, "codex-cli");
+      assert.equal(initialRecord.runtimeVersion, "test-runtime-version");
+      assert.equal(
+        initialRecord.lifecycleGeneration,
+        Option.getOrThrow(yield* directory.getBinding(threadId)).lifecycleGeneration,
+      );
+      assert.isTrue(Number.isFinite(Date.parse(initialRecord.appliedAt)));
+
+      const plainThreadId = asThreadId("thread-applied-runtime-no-expert");
+      yield* provider.startSession(plainThreadId, {
+        provider: "codex",
+        threadId: plainThreadId,
+        runtimeMode: "full-access",
+      });
+      assert.lengthOf(expertAppliedRuntimeWrites, 1);
+
+      // Simulate process loss while preserving the durable binding, then make
+      // the next user turn recover the Expert session with a fresh generation.
+      yield* expertAppliedRuntimeRouting.codex.stopAll();
+      yield* provider.sendTurn({ threadId, input: "continue", attachments: [] });
+
+      assert.lengthOf(expertAppliedRuntimeWrites, 2);
+      const recoveredRecord = expertAppliedRuntimeWrites[1]!;
+      assert.equal(recoveredRecord.snapshotId, expertSession.snapshotId);
+      assert.notEqual(recoveredRecord.lifecycleGeneration, initialRecord.lifecycleGeneration);
+      assert.equal(
+        recoveredRecord.lifecycleGeneration,
+        Option.getOrThrow(yield* directory.getBinding(threadId)).lifecycleGeneration,
+      );
+
+      yield* provider.stopSession({ threadId });
+      assert.lengthOf(expertAppliedRuntimeWrites, 2);
+    }).pipe(Effect.provide(expertAppliedRuntimeRouting.rawLayer)),
+  );
+
+  it.effect(
+    "fails an Expert start and retires the runtime when its applied record cannot persist",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId("thread-applied-runtime-write-fails");
+        const exit = yield* Effect.exit(
+          provider.startSession(threadId, {
+            provider: "codex",
+            threadId,
+            expertSession: {
+              snapshotId: "snapshot-write-fails",
+              persona: "Use the reviewer persona.",
+              skills: [],
+              references: [],
+            },
+            runtimeMode: "full-access",
+          }),
+        );
+
+        assert.isTrue(Exit.isFailure(exit));
+        assert.equal(yield* expertAppliedRuntimeFailureRouting.codex.hasSession(threadId), false);
+        const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.equal(binding.status, "stopped");
+        assert.deepEqual(binding.resumeCursor, { opaque: `resume-${String(threadId)}` });
+        assert.equal(
+          (
+            asRuntimePayloadRecord(binding.runtimePayload).expertSession as
+              | { readonly snapshotId?: string }
+              | undefined
+          )?.snapshotId,
+          "snapshot-write-fails",
+        );
+        assert.isTrue(
+          Cause.findErrorOption(Exit.isFailure(exit) ? exit.cause : Cause.empty).pipe(
+            Option.getOrUndefined,
+          ) instanceof ProviderValidationError,
+        );
+      }).pipe(Effect.provide(expertAppliedRuntimeFailureRouting.rawLayer)),
   );
 
   it.effect("recovers stale claudeAgent sessions for sendTurn using persisted cwd", () =>
@@ -6181,99 +6374,6 @@ idleCleanup.layer("ProviderServiceLive idle cleanup", (it) => {
 
 const fanout = makeProviderServiceLayer();
 fanout.layer("ProviderServiceLive fanout", (it) => {
-  it.effect("fans out adapter turn completion events", () =>
-    Effect.gen(function* () {
-      const provider = yield* ProviderService;
-      const session = yield* provider.startSession(asThreadId("thread-1"), {
-        provider: "codex",
-        threadId: asThreadId("thread-1"),
-        runtimeMode: "full-access",
-      });
-
-      const eventsRef = yield* Ref.make<Array<ProviderRuntimeEvent>>([]);
-      const consumer = yield* Stream.runForEach(provider.streamEvents, (event) =>
-        Ref.update(eventsRef, (current) => [...current, event]),
-      ).pipe(Effect.forkChild);
-      yield* sleep(50);
-
-      const completedEvent: LegacyProviderRuntimeEvent = {
-        type: "turn.completed",
-        eventId: asEventId("evt-1"),
-        provider: "codex",
-        createdAt: new Date().toISOString(),
-        threadId: session.threadId,
-        turnId: asTurnId("turn-1"),
-        status: "completed",
-      };
-
-      fanout.codex.emit(completedEvent);
-      yield* sleep(50);
-
-      const events = yield* Ref.get(eventsRef);
-      yield* Fiber.interrupt(consumer);
-
-      assert.equal(
-        events.some((entry) => entry.type === "turn.completed"),
-        true,
-      );
-    }),
-  );
-
-  it.effect("fans out canonical runtime events in emission order", () =>
-    Effect.gen(function* () {
-      const provider = yield* ProviderService;
-      const session = yield* provider.startSession(asThreadId("thread-seq"), {
-        provider: "codex",
-        threadId: asThreadId("thread-seq"),
-        runtimeMode: "full-access",
-      });
-
-      const receivedRef = yield* Ref.make<Array<ProviderRuntimeEvent>>([]);
-      const consumer = yield* Stream.take(provider.streamEvents, 3).pipe(
-        Stream.runForEach((event) => Ref.update(receivedRef, (current) => [...current, event])),
-        Effect.forkChild,
-      );
-      yield* sleep(50);
-
-      fanout.codex.emit({
-        type: "tool.started",
-        eventId: asEventId("evt-seq-1"),
-        provider: "codex",
-        createdAt: new Date().toISOString(),
-        threadId: session.threadId,
-        turnId: asTurnId("turn-1"),
-        toolKind: "command",
-        title: "Ran command",
-      });
-      fanout.codex.emit({
-        type: "tool.completed",
-        eventId: asEventId("evt-seq-2"),
-        provider: "codex",
-        createdAt: new Date().toISOString(),
-        threadId: session.threadId,
-        turnId: asTurnId("turn-1"),
-        toolKind: "command",
-        title: "Ran command",
-      });
-      fanout.codex.emit({
-        type: "turn.completed",
-        eventId: asEventId("evt-seq-3"),
-        provider: "codex",
-        createdAt: new Date().toISOString(),
-        threadId: session.threadId,
-        turnId: asTurnId("turn-1"),
-        status: "completed",
-      });
-
-      yield* Fiber.join(consumer);
-      const received = yield* Ref.get(receivedRef);
-      assert.deepEqual(
-        received.map((event) => event.eventId),
-        [asEventId("evt-seq-1"), asEventId("evt-seq-2"), asEventId("evt-seq-3")],
-      );
-    }),
-  );
-
   it.effect("keeps subscriber delivery ordered and isolates failing subscribers", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;

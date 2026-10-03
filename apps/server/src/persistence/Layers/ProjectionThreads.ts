@@ -14,6 +14,7 @@ import {
 } from "../Services/ProjectionThreads.ts";
 import {
   ModelSelection,
+  ExpertBinding,
   OrchestrationThreadPullRequest,
   PendingClaudeCacheReview,
   ThreadPinnedMessages,
@@ -42,6 +43,7 @@ const ProjectionThreadDbRow = ProjectionThread.mapFields(
       Schema.NullOr(Schema.fromJsonString(ThreadGoalAchievements)),
     ).pipe(Schema.withDecodingDefault(() => null)),
     modelSelection: Schema.fromJsonString(ModelSelection),
+    expertBinding: Schema.NullOr(Schema.fromJsonString(ExpertBinding)),
   }),
 );
 type ProjectionThreadDbRow = typeof ProjectionThreadDbRow.Type;
@@ -70,6 +72,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           create_branch_flow_completed,
           is_pinned,
           parent_thread_id,
+          expert_binding_json,
           creation_source,
           source_thread_id,
           source_turn_id,
@@ -120,6 +123,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.createBranchFlowCompleted ? 1 : 0},
           ${row.isPinned ? 1 : 0},
           ${row.parentThreadId ?? null},
+          ${row.expertBinding ? JSON.stringify(row.expertBinding) : null},
           ${row.creationSource ?? null},
           ${row.sourceThreadId ?? null},
           ${row.sourceTurnId ?? null},
@@ -170,6 +174,11 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           create_branch_flow_completed = excluded.create_branch_flow_completed,
           is_pinned = excluded.is_pinned,
           parent_thread_id = excluded.parent_thread_id,
+          expert_binding_json = CASE
+            WHEN ${row.expertBinding === undefined ? 1 : 0} = 1
+              THEN projection_threads.expert_binding_json
+            ELSE excluded.expert_binding_json
+          END,
           creation_source = excluded.creation_source,
           source_thread_id = excluded.source_thread_id,
           source_turn_id = excluded.source_turn_id,
@@ -234,6 +243,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           create_branch_flow_completed AS "createBranchFlowCompleted",
           is_pinned AS "isPinned",
           parent_thread_id AS "parentThreadId",
+          expert_binding_json AS "expertBinding",
           creation_source AS "creationSource",
           source_thread_id AS "sourceThreadId",
           source_turn_id AS "sourceTurnId",
@@ -293,6 +303,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           create_branch_flow_completed AS "createBranchFlowCompleted",
           is_pinned AS "isPinned",
           parent_thread_id AS "parentThreadId",
+          expert_binding_json AS "expertBinding",
           creation_source AS "creationSource",
           source_thread_id AS "sourceThreadId",
           source_turn_id AS "sourceTurnId",

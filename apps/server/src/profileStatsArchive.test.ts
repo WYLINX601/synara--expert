@@ -530,6 +530,15 @@ describe("ProfileStatsArchive", () => {
         yield* seedTwoThreadsWithActivity;
         yield* acknowledgeProviderCommandJournal(sql);
         yield* sql`
+          INSERT INTO expert_applied_runtime_records (
+            thread_id, snapshot_id, provider, model, runtime_component,
+            runtime_version, lifecycle_generation, applied_at
+          ) VALUES (
+            'thread-purge', 'snapshot-purge', 'codex', 'gpt-5-codex', 'codex-cli',
+            '1.2.3', 'generation-purge', '2026-06-13T17:00:00.000Z'
+          )
+        `;
+        yield* sql`
           INSERT INTO external_mcp_integrations (
             integration_id, name, audience, client_kind, credential_hash,
             capabilities_json, created_at, expires_at, rate_limit_per_minute,
@@ -578,6 +587,7 @@ describe("ProfileStatsArchive", () => {
           readonly threads: number;
           readonly messages: number;
           readonly turns: number;
+          readonly expertRuntimeRecords: number;
         }>`
           SELECT
             (SELECT COUNT(*) FROM projection_threads WHERE thread_id = 'thread-purge') AS threads,
@@ -586,9 +596,19 @@ describe("ProfileStatsArchive", () => {
               FROM projection_thread_messages
               WHERE thread_id = 'thread-purge'
             ) AS messages,
-            (SELECT COUNT(*) FROM projection_turns WHERE thread_id = 'thread-purge') AS turns
+            (SELECT COUNT(*) FROM projection_turns WHERE thread_id = 'thread-purge') AS turns,
+            (
+              SELECT COUNT(*)
+              FROM expert_applied_runtime_records
+              WHERE thread_id = 'thread-purge'
+            ) AS "expertRuntimeRecords"
         `;
-        expect(remaining[0]).toMatchObject({ threads: 0, messages: 0, turns: 0 });
+        expect(remaining[0]).toMatchObject({
+          threads: 0,
+          messages: 0,
+          turns: 0,
+          expertRuntimeRecords: 0,
+        });
         expect(
           yield* sql<{ readonly status: string; readonly activeClaims: number }>`
             SELECT

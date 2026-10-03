@@ -13,6 +13,13 @@ import {
   type MigrationRecoveryMarker,
 } from "../MigrationBackup.ts";
 import { createMigrationSchemaTooNewStartupBlockError } from "../MigrationSchemaTooNewStartupBlock.ts";
+import { inspectWorkbenchUpgradePlan } from "../../workbench/persistence/WorkbenchUpgradePlan.ts";
+import {
+  WorkbenchMigrationError,
+  currentOfficialMigrationCount,
+  runWorkbenchMigrations,
+} from "../../workbench/persistence/WorkbenchMigrations.ts";
+import { adoptLegacyExpertMigrations } from "../../workbench/persistence/LegacyExpertMigrationAdoption.ts";
 import { ensurePrivateFileSync, repairPrivateFile } from "../../privatePathPermissions.ts";
 import { resolveSqliteMemoryBudget } from "../sqliteMemoryBudget.ts";
 import { ServerConfig } from "../../config.ts";
@@ -137,14 +144,69 @@ const makeSetup = ({
         yield* sql`BEGIN EXCLUSIVE;`;
         yield* sql`COMMIT;`;
       }
+      const upgradePlan = yield* inspectWorkbenchUpgradePlan;
+      if (upgradePlan.kind === "rejected") {
+        if (upgradePlan.rejectionKind === "official-too-new") {
+          const tooNew = new MigrationSchemaTooNewError({
+            databaseMigrationId: upgradePlan.databaseVersion ?? 0,
+            latestSupportedMigrationId:
+              upgradePlan.supportedVersion ?? currentOfficialMigrationCount(),
+          });
+          if (dbPath) {
+            return yield* Effect.promise(() =>
+              createMigrationSchemaTooNewStartupBlockError(dbPath, tooNew),
+            ).pipe(Effect.flatMap(Effect.fail));
+          }
+          return yield* Effect.fail(tooNew);
+        }
+        return yield* Effect.fail(new WorkbenchMigrationError({ reason: upgradePlan.reason }));
+      }
+
+      // Adoption is deliberately after the recovery snapshot and before the
+      // official migrator. The shared read-only plan is also passed to backup
+      // and resume so inspection, recovery, and execution use one decision.
+      const fullUpgrade = Effect.gen(function* () {
+        if (upgradePlan.legacyOfficialMigrations.length > 0) {
+          yield* adoptLegacyExpertMigrations();
+        }
+        yield* runMigrations();
+        yield* runWorkbenchMigrations();
+        const finalPlan = yield* inspectWorkbenchUpgradePlan;
+        if (
+          finalPlan.kind !== "ready" ||
+          finalPlan.official.sourceVersion !== upgradePlan.official.targetVersion ||
+          finalPlan.workbench.sourceVersion !== upgradePlan.workbench.targetVersion ||
+          finalPlan.format.sourceVersion !== upgradePlan.format.targetVersion ||
+          finalPlan.official.hasPendingMigrations ||
+          finalPlan.workbench.hasPendingMigrations ||
+          finalPlan.format.hasPendingUpgrade ||
+          finalPlan.legacyOfficialMigrations.length > 0 ||
+          finalPlan.workbench.adoptedMigrationIds.length > 0
+        ) {
+          return yield* Effect.fail(
+            new WorkbenchMigrationError({
+              reason:
+                finalPlan.kind === "rejected"
+                  ? finalPlan.reason
+                  : "The database does not match the planned official, workbench, and data-format targets.",
+            }),
+          );
+        }
+      });
+
       // A pending marker means an earlier startup was interrupted mid-migration.
       // Resuming reuses that attempt's snapshot instead of taking a second one,
       // so the fallback stays the last known-good database.
       const migrations = dbPath
         ? pendingRecovery
-          ? resumeMarkedMigration(dbPath, pendingRecovery, runMigrations())
-          : runWithPreMigrationBackup(dbPath, runMigrations(), { divergenceConsent })
-        : runMigrations();
+          ? resumeMarkedMigration(dbPath, pendingRecovery, fullUpgrade, {
+              workbenchUpgradePlan: upgradePlan,
+            })
+          : runWithPreMigrationBackup(dbPath, fullUpgrade, {
+              divergenceConsent,
+              upgradePlan,
+            })
+        : fullUpgrade;
       yield* migrations.pipe(
         Effect.catch((cause) =>
           cause instanceof MigrationSchemaTooNewError && dbPath

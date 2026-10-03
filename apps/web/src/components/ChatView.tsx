@@ -118,6 +118,7 @@ import { useHandleNewChat } from "../hooks/useHandleNewChat";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useTheme } from "../hooks/useTheme";
 import { useThreadHandoff } from "../hooks/useThreadHandoff";
+import { ExpertTaskControl } from "./chat/ExpertTaskControl";
 import { useThreadUnblock } from "../hooks/useThreadUnblock";
 import { useThreadWorkspaceHandoff } from "../hooks/useThreadWorkspaceHandoff";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
@@ -275,6 +276,11 @@ import {
   ComposerModelPicker,
   type ComposerModelSelectionOptions,
 } from "./chat/ComposerModelPicker";
+import {
+  ExpertComposerPicker,
+  ExpertComposerSummary,
+  useExpertComposerPreview,
+} from "./chat/ExpertComposerPicker";
 import { ComposerPendingApprovalPanel } from "./chat/ComposerPendingApprovalPanel";
 import {
   ComposerClaudeCacheReviewPanel,
@@ -1926,6 +1932,7 @@ export default function ChatView({
     providerOptionsForDispatch,
     gitCwd,
     piAgentDir: settings.piAgentDir,
+    ompAgentDir: settings.ompAgentDir,
     discoverNativeCompaction:
       selectedProvider === "claudeAgent" &&
       (isContextWindowMeterOpen || activeThread?.claudeCacheReview != null),
@@ -4251,40 +4258,75 @@ export default function ChatView({
     },
     [setIsModelPickerOpen, setIsTraitsPickerOpen, handleModelPickerOpenChange],
   );
-  const composerPickerControls = showComposerModelBootstrapSkeleton ? (
-    selectedProviderRuntimeModelDiscoveryPending ? (
-      <ComposerModelLoadingControl widthClassName={composerModelEffortPickerWidthClassName} />
-    ) : (
-      <ComposerControlSkeleton widthClassName={composerModelEffortPickerWidthClassName} />
-    )
-  ) : (
-    <ComposerModelPicker
-      hideModelLabel={!composerFooterControlsPlan.showModelLabel}
-      hideStatusLabel={!composerFooterControlsPlan.showTraitsLabel}
-      contextWindowLabel={composerContextWindowLabel}
-      effortControl={settings.composerEffortSlider ? "slider" : "menu"}
-      provider={selectedProvider}
-      model={selectedModelForPickerWithCustomFallback}
-      lockedProvider={lockedProvider}
-      providers={providerStatuses}
-      modelOptionsByProvider={modelOptionsByProvider}
-      loadingModelProviders={loadingModelProviders}
-      discoveryErrorsByProvider={discoveryErrorsByProvider}
-      hiddenProviders={settings.hiddenProviders}
-      providerOrder={settings.providerOrder}
-      threadId={threadId}
-      runtimeModel={selectedRuntimeModel}
-      runtimeModelsByProvider={runtimeModelsByProvider}
-      runtimeAgents={dynamicAgents}
-      modelOptions={selectedProviderModelOptions}
-      prompt={prompt}
-      onPromptChange={setPromptFromTraits}
-      onProviderModelChange={onProviderModelSelect}
-      onSelectionCommitted={scheduleComposerFocus}
-      open={isComposerModelEffortPickerOpen}
-      onOpenChange={handleComposerModelEffortPickerOpenChange}
-      shortcutLabel={modelPickerShortcutLabel}
-    />
+  const composerExpertId = isLocalDraftThread ? draftThread?.expertId : undefined;
+  const composerExpertPreview = useExpertComposerPreview(
+    composerExpertId,
+    selectedProvider,
+    isLocalDraftThread && Boolean(composerExpertId),
+  );
+  const composerExpertSendBlocked =
+    Boolean(composerExpertId) &&
+    (composerExpertPreview.unsupportedProvider ||
+      composerExpertPreview.preview?.status === "blocked" ||
+      composerExpertPreview.preview?.status === "incompatible");
+  const handleComposerExpertSelect = useCallback(
+    (expertId: string | undefined) => {
+      if (isLocalDraftThread) {
+        setDraftThreadContext(threadId, { expertId: expertId ?? "" });
+      }
+    },
+    [isLocalDraftThread, setDraftThreadContext, threadId],
+  );
+  const composerPickerControls = (
+    <>
+      {isLocalDraftThread ? (
+        <ExpertComposerPicker
+          expertId={composerExpertId}
+          provider={selectedProvider}
+          preview={composerExpertPreview.preview}
+          previewFetching={composerExpertPreview.isFetching}
+          previewError={composerExpertPreview.isError}
+          unsupportedProvider={composerExpertPreview.unsupportedProvider}
+          onSelect={handleComposerExpertSelect}
+          onSelectionCommitted={scheduleComposerFocus}
+        />
+      ) : null}
+      {showComposerModelBootstrapSkeleton ? (
+        selectedProviderRuntimeModelDiscoveryPending ? (
+          <ComposerModelLoadingControl widthClassName={composerModelEffortPickerWidthClassName} />
+        ) : (
+          <ComposerControlSkeleton widthClassName={composerModelEffortPickerWidthClassName} />
+        )
+      ) : (
+        <ComposerModelPicker
+          hideModelLabel={!composerFooterControlsPlan.showModelLabel}
+          hideStatusLabel={!composerFooterControlsPlan.showTraitsLabel}
+          contextWindowLabel={composerContextWindowLabel}
+          effortControl={settings.composerEffortSlider ? "slider" : "menu"}
+          provider={selectedProvider}
+          model={selectedModelForPickerWithCustomFallback}
+          lockedProvider={lockedProvider}
+          providers={providerStatuses}
+          modelOptionsByProvider={modelOptionsByProvider}
+          loadingModelProviders={loadingModelProviders}
+          discoveryErrorsByProvider={discoveryErrorsByProvider}
+          hiddenProviders={settings.hiddenProviders}
+          providerOrder={settings.providerOrder}
+          threadId={threadId}
+          runtimeModel={selectedRuntimeModel}
+          runtimeModelsByProvider={runtimeModelsByProvider}
+          runtimeAgents={dynamicAgents}
+          modelOptions={selectedProviderModelOptions}
+          prompt={prompt}
+          onPromptChange={setPromptFromTraits}
+          onProviderModelChange={onProviderModelSelect}
+          onSelectionCommitted={scheduleComposerFocus}
+          open={isComposerModelEffortPickerOpen}
+          onOpenChange={handleComposerModelEffortPickerOpenChange}
+          shortcutLabel={modelPickerShortcutLabel}
+        />
+      )}
+    </>
   );
   const toggleFastMode = useCallback(() => {
     if (!composerTraitSelection.caps.supportsFastMode) {
@@ -5351,6 +5393,16 @@ export default function ChatView({
                   }}
                 />
               ) : null}
+              {isLocalDraftThread && composerExpertId ? (
+                <ExpertComposerSummary
+                  expertId={composerExpertId}
+                  provider={selectedProvider}
+                  preview={composerExpertPreview.preview}
+                  previewFetching={composerExpertPreview.isFetching}
+                  previewError={composerExpertPreview.isError}
+                  unsupportedProvider={composerExpertPreview.unsupportedProvider}
+                />
+              ) : null}
               {emptyLandingControls}
             </div>
             <div
@@ -5612,6 +5664,7 @@ export default function ChatView({
                       busy: isSendBusy,
                       connecting: isConnecting,
                       expired: isSidechatExpired,
+                      expertBlocked: composerExpertSendBlocked,
                       hasPendingCacheReview: activeThread?.claudeCacheReview != null,
                       preparingImages: isPreparingComposerImages,
                       preparingWorktree: isPreparingWorktree,
@@ -5703,6 +5756,24 @@ export default function ChatView({
           availableEditors={availableEditors}
           diffToggleShortcutLabel={diffPanelShortcutLabel}
           handoffBadgeLabel={handoffBadgeLabel}
+          expertControl={
+            activeThread.expertBinding ? (
+              <ExpertTaskControl
+                threadId={activeThread.id}
+                binding={activeThread.expertBinding}
+                provider={activeThread.session?.provider ?? activeThread.modelSelection.provider}
+                model={activeThread.modelSelection.model}
+                canContinue={!handoffDisabled}
+                onContinue={async (expertId) => {
+                  await createThreadHandoff(
+                    activeThread,
+                    activeThread.session?.provider ?? activeThread.modelSelection.provider,
+                    { expertId },
+                  );
+                }}
+              />
+            ) : null
+          }
           handoffActionLabel={handoffActionLabel}
           handoffDisabled={handoffDisabled}
           handoffActionTargetProviders={handoffTargetProviders}

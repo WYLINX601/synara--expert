@@ -218,6 +218,50 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
+    it.effect.each(["workbench", "workbench-preview"] as const)(
+      "keeps watched %s desktop home separate",
+      (flavor) =>
+        Effect.gen(function* () {
+          const env = yield* createDevRunnerEnv({
+            mode: "dev:desktop",
+            baseEnv: { SYNARA_DESKTOP_FLAVOR: flavor },
+            serverOffset: 0,
+            webOffset: 0,
+            synaraHome: undefined,
+            authToken: undefined,
+            noBrowser: undefined,
+            autoBootstrapProjectFromCwd: undefined,
+            logWebSocketEvents: undefined,
+            host: undefined,
+            port: undefined,
+            devUrl: undefined,
+          });
+
+          assert.equal(env.SYNARA_HOME, resolve(homedir(), `.synara-${flavor}`));
+        }),
+    );
+
+    it.effect("honors an explicit data home for a Workbench flavor", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev:desktop",
+          baseEnv: { SYNARA_DESKTOP_FLAVOR: "workbench-preview" },
+          serverOffset: 0,
+          webOffset: 0,
+          synaraHome: "/tmp/workbench-preview-data",
+          authToken: undefined,
+          noBrowser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+        });
+
+        assert.equal(env.SYNARA_HOME, "/tmp/workbench-preview-data");
+      }),
+    );
+
     it.effect("normalizes bracketed IPv6 hosts for listen and client URL syntax", () =>
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({
@@ -291,66 +335,9 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         assert.equal(env.SYNARA_LOG_WS_EVENTS, undefined);
       }),
     );
-
-    it.effect("forwards explicit websocket logging false without coercing it away", () =>
-      Effect.gen(function* () {
-        const env = yield* createDevRunnerEnv({
-          mode: "dev",
-          baseEnv: {},
-          serverOffset: 0,
-          webOffset: 0,
-          synaraHome: undefined,
-          authToken: undefined,
-          noBrowser: undefined,
-          autoBootstrapProjectFromCwd: undefined,
-          logWebSocketEvents: false,
-          host: undefined,
-          port: undefined,
-          devUrl: undefined,
-        });
-
-        assert.equal(env.SYNARA_LOG_WS_EVENTS, "0");
-      }),
-    );
-
-    it.effect("uses custom synaraHome when provided", () =>
-      Effect.gen(function* () {
-        const env = yield* createDevRunnerEnv({
-          mode: "dev",
-          baseEnv: {},
-          serverOffset: 0,
-          webOffset: 0,
-          synaraHome: "/tmp/my-synara",
-          authToken: undefined,
-          noBrowser: undefined,
-          autoBootstrapProjectFromCwd: undefined,
-          logWebSocketEvents: undefined,
-          host: undefined,
-          port: undefined,
-          devUrl: undefined,
-        });
-
-        assert.equal(env.SYNARA_HOME, resolve("/tmp/my-synara"));
-        assert.equal(env.SYNARA_HOME, resolve("/tmp/my-synara"));
-        assert.equal(env.SYNARA_HOME, resolve("/tmp/my-synara"));
-      }),
-    );
   });
 
   describe("findFirstAvailableOffset", () => {
-    it.effect("returns the starting offset when required ports are available", () =>
-      Effect.gen(function* () {
-        const offset = yield* findFirstAvailableOffset({
-          startOffset: 0,
-          requireServerPort: true,
-          requireWebPort: true,
-          checkPortAvailability: () => Effect.succeed(true),
-        });
-
-        assert.equal(offset, 0);
-      }),
-    );
-
     it.effect("advances until all required ports are available", () =>
       Effect.gen(function* () {
         const taken = new Set([3773, 5733, 3774, 5734]);

@@ -539,6 +539,7 @@ export function projectEvent(
           {
             id: payload.threadId,
             projectId: payload.projectId,
+            expertBinding: payload.expertBinding ?? null,
             title: payload.title,
             modelSelection: payload.modelSelection,
             runtimeMode: payload.runtimeMode,

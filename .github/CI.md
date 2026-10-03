@@ -3,10 +3,28 @@
 The required check remains **Format, Lint, Typecheck, Test, Browser Test, Build**.
 It aggregates results only. Static checks start independently. Normal code
 changes run typechecking, five unit partitions, six stable browser partitions,
-desktop build, native Windows regression and migration lineage. Docs-only
+desktop build, native Windows regression and migration lineage. Forked CI fetches
+official `v*` tags read-only from the [Synara repository](https://github.com/Emanuele-web04/synara.git)
+for lineage verification; checkout credentials stay disabled and the guard still
+rejects missing tags. Docs-only
 detection and nightly geometry ownership are unchanged.
 
+The Linux PTY dependency smoke runs once, on the first server shard; the Windows
+PTY smoke remains a separate native check. The desktop lifecycle smoke exercises
+the real Electron browser integration. The synthetic Energy Cloud A/B benchmark
+runs only through its dedicated workflow, not on every PR build: it measures
+copied baseline/candidate algorithms and adds no application regression assertion.
+This removes twelve ten-second measurement waits from the blocking build lane.
+
+Windows checks are grouped by package, removing six separate Vitest startups
+while keeping the same runtime, lifecycle and migration test files. The credential
+reader's filtered compilation test and native Bun PTY probe remain separate.
+
 ## Install scopes and caches
+
+The shared setup action reads exact Node and Bun versions from .mise.toml before
+dependency installation, so CI follows the repository's explicit tool pins
+instead of the broader package.json engine ranges.
 
 The shared setup action defaults to `full`. Typecheck, Linux unit/browser and
 desktop build jobs keep the entire workspace. Only verified consumers opt into
@@ -33,8 +51,9 @@ Test and typecheck task results remain uncached.
 
 Release smoke shares the static runner, removing one checkout/install/runner and
 one duplicate identity scan. The platform-independent Windows boundary scanner
-runs there once; native Windows validation is not removed. Release preflight
-still installs the full workspace and runs all tests. Signing, notarization,
+runs there once; native Windows validation is not removed. Release quality lanes
+still install the full workspace and run the audited test suite while unsigned
+preparation proceeds in parallel. Packaging waits for every quality gate. Signing, notarization,
 source provenance, publication and production dependency staging are unchanged.
 
 ## Cross-platform setup measurements: September 14, 2026

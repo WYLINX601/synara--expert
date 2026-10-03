@@ -35,6 +35,7 @@ export function useThreadHandoff() {
   const createThreadHandoff = async (
     thread: Thread,
     targetProvider: ProviderKind,
+    options?: { expertId?: string },
   ): Promise<Thread["id"]> => {
     const api = readNativeApi();
     if (!api) {
@@ -54,7 +55,15 @@ export function useThreadHandoff() {
       statuses: providerStatuses,
       refreshStatuses: () => refreshProviderStatuses({ silent: true }),
     });
+    const sameProviderExpertContinuation =
+      options?.expertId !== undefined && targetProvider === thread.modelSelection.provider;
     if (
+      !(
+        sameProviderExpertContinuation &&
+        (targetProvider === "codex" || targetProvider === "pi") &&
+        targetAvailability.usable &&
+        serverSettingsQuery.data?.providers[targetProvider].enabled
+      ) &&
       !isEligibleHandoffTargetProvider({
         sourceProvider: thread.modelSelection.provider,
         targetProvider,
@@ -81,14 +90,17 @@ export function useThreadHandoff() {
       commandId: newCommandId(),
       threadId: nextThreadId,
       sourceThreadId: thread.id,
+      ...(options?.expertId ? { expertId: options.expertId } : {}),
       projectId: thread.projectId,
       title: resolveThreadHandoffTitle(thread),
-      modelSelection: resolveThreadHandoffModelSelection({
-        sourceThread: thread,
-        targetProvider,
-        projectDefaultModelSelection: project.defaultModelSelection,
-        stickyModelSelectionByProvider,
-      }),
+      modelSelection: sameProviderExpertContinuation
+        ? thread.modelSelection
+        : resolveThreadHandoffModelSelection({
+            sourceThread: thread,
+            targetProvider,
+            projectDefaultModelSelection: project.defaultModelSelection,
+            stickyModelSelectionByProvider,
+          }),
       runtimeMode: thread.runtimeMode,
       interactionMode: thread.interactionMode,
       envMode: thread.envMode ?? (thread.worktreePath ? "worktree" : "local"),

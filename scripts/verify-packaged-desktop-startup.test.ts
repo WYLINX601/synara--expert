@@ -1,6 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  resolveSynaraDesktopHomeDir,
+  SYNARA_HOME_ENV,
+  SYNARA_WORKBENCH_HOME_ENV,
+  SYNARA_WORKBENCH_PREVIEW_HOME_ENV,
+  synaraDesktopIdentity,
+} from "@synara/shared/desktopIdentity";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -8,7 +15,6 @@ import {
   createPackagedDesktopSmokeEnvironment,
   parsePackagedDesktopStartupArgs,
   readPackagedStartupLogTails,
-  resolveNativePackagedDesktopPlatform,
   verifyPackagedRuntimeDependencies,
 } from "./verify-packaged-desktop-startup.ts";
 
@@ -51,7 +57,56 @@ describe("packaged desktop startup verification", () => {
       arch: "x64",
       version: "1.2.3",
       timeoutMs: 60_000,
+      executableName: "synara",
+      desktopFlavor: "production",
     });
+
+    expect(
+      parsePackagedDesktopStartupArgs([
+        "--assets-dir",
+        "./release-publish",
+        "--platform",
+        "linux",
+        "--arch",
+        "x64",
+        "--version",
+        "1.2.3",
+        "--executable-name",
+        "synara-beta",
+      ]),
+    ).toMatchObject({ executableName: "synara-beta", desktopFlavor: "beta" });
+
+    expect(
+      parsePackagedDesktopStartupArgs([
+        "--assets-dir",
+        "./release-publish",
+        "--platform",
+        "linux",
+        "--arch",
+        "x64",
+        "--version",
+        "1.2.3",
+        "--desktop-flavor",
+        "workbench-preview",
+      ]),
+    ).toMatchObject({ desktopFlavor: "workbench-preview" });
+
+    for (const bad of ["../outside", "a/b", "..", "synara\\beta"]) {
+      expect(() =>
+        parsePackagedDesktopStartupArgs([
+          "--assets-dir",
+          "./release-publish",
+          "--platform",
+          "linux",
+          "--arch",
+          "x64",
+          "--version",
+          "1.2.3",
+          "--executable-name",
+          bad,
+        ]),
+      ).toThrow("Invalid packaged startup executable name");
+    }
 
     expect(() =>
       parsePackagedDesktopStartupArgs([
@@ -75,7 +130,12 @@ describe("packaged desktop startup verification", () => {
 
     const env = createPackagedDesktopSmokeEnvironment(
       root,
-      { platform: "linux", version: "1.2.3" },
+      {
+        platform: "linux",
+        version: "1.2.3",
+        executableName: "synara-beta",
+        desktopFlavor: "beta",
+      },
       {
         PATH: process.env.PATH,
         SYNARA_AUTH_TOKEN: "must-not-leak",
@@ -93,17 +153,77 @@ describe("packaged desktop startup verification", () => {
       "XDG_CONFIG_HOME",
       "XDG_CACHE_HOME",
       "XDG_DATA_HOME",
-      "SYNARA_HOME",
+      SYNARA_HOME_ENV,
+      "SYNARA_BETA_HOME",
+      SYNARA_WORKBENCH_HOME_ENV,
+      SYNARA_WORKBENCH_PREVIEW_HOME_ENV,
     ] as const) {
       expect(env[name]?.startsWith(root)).toBe(true);
       expect(existsSync(env[name]!)).toBe(true);
     }
+    expect(env.SYNARA_BETA_HOME).not.toBe(env.SYNARA_HOME);
   });
 
-  it("maps Node host platforms to release platform names", () => {
-    expect(resolveNativePackagedDesktopPlatform("darwin")).toBe("mac");
-    expect(resolveNativePackagedDesktopPlatform("win32")).toBe("win");
-    expect(resolveNativePackagedDesktopPlatform("linux")).toBe("linux");
+  it.each([
+    ["workbench", SYNARA_WORKBENCH_HOME_ENV],
+    ["workbench-preview", SYNARA_WORKBENCH_PREVIEW_HOME_ENV],
+  ] as const)("prepares the %s startup smoke with its dedicated home", (desktopFlavor, envName) => {
+    const root = mkdtempSync(join(tmpdir(), "synara-workbench-startup-smoke-test-"));
+    temporaryRoots.push(root);
+
+    const env = createPackagedDesktopSmokeEnvironment(
+      root,
+      { platform: "linux", version: "1.2.3", executableName: "synara", desktopFlavor },
+      { SYNARA_HOME: "/inherited-stable-home" },
+    );
+    const home = resolveSynaraDesktopHomeDir({
+      flavor: desktopFlavor,
+      homeDir: env.HOME!,
+      env,
+      joinPath: join,
+    });
+
+    expect(home).toBe(env[envName]);
+    expect(home).not.toBe(env[SYNARA_HOME_ENV]);
+    expect(existsSync(home)).toBe(true);
+  });
+
+  it.each(["workbench", "workbench-preview"] as const)(
+    "seeds the macOS launch version under the %s profile",
+    (desktopFlavor) => {
+      const root = mkdtempSync(join(tmpdir(), "synara-workbench-macos-profile-test-"));
+      temporaryRoots.push(root);
+
+      const env = createPackagedDesktopSmokeEnvironment(root, {
+        platform: "mac",
+        version: "1.2.3",
+        executableName: "synara",
+        desktopFlavor,
+      });
+      const appSupport = join(env.HOME!, "Library", "Application Support");
+      const profileName = synaraDesktopIdentity(desktopFlavor).userDataDirectoryName;
+      const versionPath = join(appSupport, profileName, "last-launch-version.json");
+
+      expect(readFileSync(versionPath, "utf8")).toBe('{\n  "version": "1.2.3"\n}\n');
+      expect(existsSync(join(appSupport, "synara"))).toBe(false);
+    },
+  );
+
+  it("retains Beta's macOS launch-version profile", () => {
+    const root = mkdtempSync(join(tmpdir(), "synara-beta-macos-profile-test-"));
+    temporaryRoots.push(root);
+
+    const env = createPackagedDesktopSmokeEnvironment(root, {
+      platform: "mac",
+      version: "1.2.3",
+      executableName: "synara-beta",
+      desktopFlavor: "beta",
+    });
+    const appSupport = join(env.HOME!, "Library", "Application Support");
+    const betaVersionPath = join(appSupport, "synara-beta", "last-launch-version.json");
+
+    expect(JSON.parse(readFileSync(betaVersionPath, "utf8"))).toEqual({ version: "1.2.3" });
+    expect(existsSync(join(appSupport, "synara"))).toBe(false);
   });
 
   it("rejects a missing packaged peer even when the development tree provides it", () => {

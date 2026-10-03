@@ -3,6 +3,8 @@
 // Layer: Route/UI support
 // Exports: section ids, nav items, and search normalization helper
 
+import { WORKBENCH_MODULES, WORKBENCH_SETTINGS_SECTION_IDS } from "./workbench/registry";
+
 export const SETTINGS_SECTION_IDS = [
   "general",
   "profile",
@@ -17,6 +19,7 @@ export const SETTINGS_SECTION_IDS = [
   "models",
   "providers",
   "skills",
+  ...WORKBENCH_SETTINGS_SECTION_IDS,
   "usage",
   "integrations",
   "advanced",
@@ -168,6 +171,7 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     icon: "building-blocks",
     eyebrow: "Reusable workflows",
   },
+  ...WORKBENCH_MODULES.map((module) => ({ id: module.id, ...module.settings.navigation })),
   {
     id: "worktrees",
     group: "coding",

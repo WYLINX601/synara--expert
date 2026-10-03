@@ -114,6 +114,22 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
         WHERE thread_id = ${threadId}
       `;
       assert.isNull(row?.review);
+      const expertBinding = {
+        expertId: "reviewer",
+        snapshotId: "exp_pinned",
+        displayName: "Reviewer",
+        revision: 1,
+      };
+      yield* threads.upsert({ ...thread, expertBinding });
+      assert.deepStrictEqual(
+        Option.getOrNull(yield* threads.getById({ threadId }))?.expertBinding,
+        expertBinding,
+      );
+      yield* threads.upsert({ ...thread, title: "Updated without rebinding" });
+      assert.deepStrictEqual(
+        Option.getOrNull(yield* threads.getById({ threadId }))?.expertBinding,
+        expertBinding,
+      );
     }),
   );
 

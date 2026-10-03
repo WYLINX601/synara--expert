@@ -4,10 +4,13 @@ import {
   resolveSynaraDesktopRuntimeFlavor,
   synaraDesktopIdentity,
 } from "@synara/shared/desktopIdentity";
-import { createDesktopArtifactIdentity } from "./lib/desktop-artifact-identity.ts";
+import {
+  createDesktopArtifactIdentity,
+  resolveDesktopArtifactPublishConfig,
+} from "./lib/desktop-artifact-identity.ts";
 
 describe("desktop artifact identity", () => {
-  it.each(["mac", "linux", "win"] as const)(
+  it.each(["mac", "win"] as const)(
     "preserves the production %s package and artifact names",
     (platform) => {
       const result = createDesktopArtifactIdentity({ platform, flavor: "production" });
@@ -26,9 +29,20 @@ describe("desktop artifact identity", () => {
     },
   );
 
-  it.each(["canary", "cua"] as const)(
+  it.each([
+    ["canary", "Synara Canary", "synara-canary", "synara-canary", ".synara-canary"],
+    ["cua", "Synara Cua", "synara-cua", "synara-cua", ".synara-cua"],
+    ["workbench", "Personal Workbench", "workbench", "workbench", ".synara-workbench"],
+    [
+      "workbench-preview",
+      "Personal Workbench Preview",
+      "workbench-preview",
+      "workbench-preview",
+      ".synara-workbench-preview",
+    ],
+  ] as const)(
     "keeps packaged %s metadata, native identity, origin, storage and updater policy aligned",
-    (flavor) => {
+    (flavor, displayName, profileName, scheme, homeName) => {
       const result = createDesktopArtifactIdentity({ platform: "mac", flavor });
       const packagedJson = JSON.parse(JSON.stringify(result.packageMetadata));
       const runtimeFlavor = resolveSynaraDesktopRuntimeFlavor({
@@ -41,19 +55,21 @@ describe("desktop artifact identity", () => {
       expect(runtimeIdentity).toEqual(result.identity);
       expect(result.buildConfig.appId).toBe(runtimeIdentity.bundleId);
       expect(result.packageMetadata.productName).toBe(result.buildConfig.productName);
+      expect(result.packageMetadata.productName).toBe(displayName);
       expect(result.packageMetadata.name).toBe(`synara-desktop-${flavor}`);
       expect(result.buildConfig.protocols).toEqual([
         { name: runtimeIdentity.displayName, schemes: [runtimeIdentity.scheme] },
       ]);
-      expect(runtimeIdentity.userDataDirectoryName).toBe(`synara-${flavor}`);
-      expect(runtimeIdentity.defaultHomeDirectoryName).toBe(`.synara-${flavor}`);
+      expect(runtimeIdentity.scheme).toBe(scheme);
+      expect(runtimeIdentity.userDataDirectoryName).toBe(profileName);
+      expect(runtimeIdentity.defaultHomeDirectoryName).toBe(homeName);
       expect(runtimeIdentity.usesScriptedUpdates).toBe(true);
       expect(result.releaseDirectoryName).toBe(`release-${flavor}`);
       expect(result.buildConfig.artifactName).not.toBe("Synara-${version}-${arch}.${ext}");
     },
   );
 
-  it.each(["canary", "cua"] as const)(
+  it.each(["canary", "cua", "workbench", "workbench-preview"] as const)(
     "refuses %s on Windows until it has an isolated installer registration",
     (flavor) => {
       expect(() => createDesktopArtifactIdentity({ platform: "win", flavor })).toThrow(
@@ -61,4 +77,57 @@ describe("desktop artifact identity", () => {
       );
     },
   );
+
+  it("keeps official and mock update metadata out of script-updated artifacts", () => {
+    const githubPublishConfig = {
+      provider: "github" as const,
+      owner: "synara-org",
+      repo: "official-feed",
+      releaseType: "release" as const,
+    };
+    for (const flavor of ["workbench", "workbench-preview"] as const) {
+      const identity = createDesktopArtifactIdentity({ platform: "mac", flavor }).identity;
+      expect(
+        resolveDesktopArtifactPublishConfig({
+          usesScriptedUpdates: identity.usesScriptedUpdates,
+          githubPublishConfig,
+          mockUpdates: true,
+          mockUpdateServerPort: "4170",
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("preserves the Stable publisher and explicit mock feed behavior", () => {
+    const githubPublishConfig = {
+      provider: "github" as const,
+      owner: "synara-org",
+      repo: "stable-feed",
+      releaseType: "release" as const,
+    };
+    expect(
+      resolveDesktopArtifactPublishConfig({
+        usesScriptedUpdates: false,
+        githubPublishConfig,
+        mockUpdates: true,
+        mockUpdateServerPort: "4170",
+      }),
+    ).toEqual([githubPublishConfig]);
+    expect(
+      resolveDesktopArtifactPublishConfig({
+        usesScriptedUpdates: false,
+        githubPublishConfig: undefined,
+        mockUpdates: true,
+        mockUpdateServerPort: "4170",
+      }),
+    ).toEqual([{ provider: "generic", url: "http://localhost:4170" }]);
+    expect(
+      resolveDesktopArtifactPublishConfig({
+        usesScriptedUpdates: false,
+        githubPublishConfig: undefined,
+        mockUpdates: false,
+        mockUpdateServerPort: undefined,
+      }),
+    ).toBeUndefined();
+  });
 });

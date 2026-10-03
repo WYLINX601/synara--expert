@@ -27,6 +27,7 @@ import type {
   ProviderMentionReference,
   ProviderSkillReference,
   ProviderKind,
+  ExpertBinding,
   CheckpointRef,
   ProviderInteractionMode,
   ProjectKind,
@@ -234,6 +235,7 @@ export interface ThreadWorkspacePatch {
 
 export interface Thread extends ThreadWorkspaceState {
   id: ThreadId;
+  expertBinding?: ExpertBinding | null;
   codexThreadId: string | null;
   projectId: ProjectId;
   title: string;
@@ -285,6 +287,7 @@ export interface Thread extends ThreadWorkspaceState {
 
 export interface ThreadShell extends ThreadWorkspaceState {
   id: ThreadId;
+  expertBinding?: ExpertBinding | null;
   codexThreadId: string | null;
   projectId: ProjectId;
   title: string;

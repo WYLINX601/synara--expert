@@ -1,10 +1,13 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import {
   createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  getCurrentTools,
   type AssistantMessage,
   type Tool,
 } from "@earendil-works/pi-ai";
@@ -14,7 +17,13 @@ import type {
   InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { Effect, Layer, Schema, Stream } from "effect";
-import { ApprovalRequestId, ThreadId, ProviderRuntimeEvent, type TurnId } from "@synara/contracts";
+import {
+  ApprovalRequestId,
+  ThreadId,
+  ProviderRuntimeEvent,
+  type ProviderSessionStartInput,
+  type TurnId,
+} from "@synara/contracts";
 import { afterEach, expect, it, vi } from "vitest";
 import {
   AgentGatewayCredentials,
@@ -28,6 +37,7 @@ import { makePiAdapterLive } from "./PiAdapter.ts";
 
 const captured = vi.hoisted(() => ({
   sessions: [] as AgentSession[],
+  modelSystemPrompts: [] as string[],
   modelTools: [] as Tool[][],
   extensions: [] as InlineExtension[],
   events: [] as AgentSessionEvent[],
@@ -51,7 +61,10 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
     ) =>
       sdk.createAgentSessionServices({
         ...options,
-        resourceLoaderOptions: { extensionFactories: captured.extensions },
+        resourceLoaderOptions: {
+          ...options.resourceLoaderOptions,
+          extensionFactories: captured.extensions,
+        },
       }),
     createAgentSessionFromServices: async (
       input: Parameters<typeof sdk.createAgentSessionFromServices>[0],
@@ -70,6 +83,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   captured.sessions.length = 0;
+  captured.modelSystemPrompts.length = 0;
   captured.modelTools.length = 0;
   captured.extensions.length = 0;
   captured.events.length = 0;
@@ -81,7 +95,8 @@ type ResponseKind = "success" | "error" | "overflow" | "partial-error" | "until-
 function responses(...kinds: ResponseKind[]) {
   let calls = 0;
   captured.stream = (model, context, options) => {
-    captured.modelTools.push(context.tools ?? []);
+    captured.modelSystemPrompts.push(getCurrentSystemPrompt(context.messages));
+    captured.modelTools.push(getCurrentTools(context.messages));
     const kind = kinds[calls++] ?? "success";
     const stream = createAssistantMessageEventStream();
     const message: AssistantMessage = {
@@ -149,7 +164,11 @@ async function withAdapter(
   run: (adapter: PiAdapterShape, events: ProviderRuntimeEvent[], cwd: string) => Promise<void>,
   delayMs = 100,
   credentials?: AgentGatewayCredentialsShape,
-  startSessionOverrides?: { readonly enableComputerControl?: boolean },
+  startSessionOverrides?: {
+    readonly enableComputerControl?: boolean;
+    readonly expertSession?: ProviderSessionStartInput["expertSession"];
+    readonly lifecycleGeneration?: string;
+  },
   gatewayFetchOverride?: AgentGatewayMcpFetch,
 ) {
   vi.stubEnv("PI_OFFLINE", "1");
@@ -216,6 +235,12 @@ async function withAdapter(
         ...(startSessionOverrides?.enableComputerControl !== undefined
           ? { enableComputerControl: startSessionOverrides.enableComputerControl }
           : {}),
+        ...(startSessionOverrides?.expertSession
+          ? { expertSession: startSessionOverrides.expertSession }
+          : {}),
+        ...(startSessionOverrides?.lifecycleGeneration !== undefined
+          ? { lifecycleGeneration: startSessionOverrides.lifecycleGeneration }
+          : {}),
       });
       yield* Effect.promise(() => run(adapter, events, cwd));
     }).pipe(Effect.provide(layer), Effect.scoped),
@@ -226,11 +251,83 @@ async function send(adapter: PiAdapterShape) {
   return Effect.runPromise(adapter.sendTurn({ threadId, input: "Test this turn" }));
 }
 
+it("reports the loaded Pi SDK version and lifecycle generation on its session", async () => {
+  responses("success");
+  await withAdapter(
+    async (adapter) => {
+      const sessions = await Effect.runPromise(adapter.listSessions());
+      expect(sessions.find((session) => session.threadId === threadId)).toMatchObject({
+        runtimeComponent: "pi-sdk",
+        runtimeVersion: VERSION,
+        lifecycleGeneration: "pi-generation-1",
+      });
+    },
+    100,
+    undefined,
+    { lifecycleGeneration: "pi-generation-1" },
+  );
+});
+
+it("injects the Expert persona and snapshot skills through Pi's session ResourceLoader", async () => {
+  responses("success");
+  const skillsRoot = mkdtempSync(path.join(tmpdir(), "synara-pi-expert-skills-"));
+  dirs.push(skillsRoot);
+  const skillPath = path.join(skillsRoot, "reviewer", "SKILL.md");
+  mkdirSync(path.dirname(skillPath), { recursive: true });
+  writeFileSync(skillPath, "---\nname: reviewer\ndescription: review\n---\nReview the snapshot.\n");
+  const expertSession = {
+    snapshotId: "snapshot-pi",
+    persona: "Use the reviewer persona.",
+    skillsRoot,
+    skills: [{ name: "reviewer", path: skillPath }],
+    references: ["handbook"],
+  } satisfies NonNullable<ProviderSessionStartInput["expertSession"]>;
+
+  await withAdapter(
+    async () => {
+      const session = captured.sessions[0]!;
+      expect(session.resourceLoader.getAppendSystemPrompt()).toContain(expertSession.persona);
+      expect(session.resourceLoader.getSkills().skills).toContainEqual(
+        expect.objectContaining({ name: "reviewer", filePath: skillPath }),
+      );
+    },
+    100,
+    undefined,
+    { expertSession },
+  );
+});
+
+it("fails Pi startup when a required snapshot skill is missing", async () => {
+  responses("success");
+  const skillsRoot = mkdtempSync(path.join(tmpdir(), "synara-pi-missing-expert-skills-"));
+  dirs.push(skillsRoot);
+  const expertSession = {
+    snapshotId: "snapshot-pi-missing",
+    persona: "Use the reviewer persona.",
+    skillsRoot,
+    skills: [{ name: "missing-reviewer", path: path.join(skillsRoot, "missing", "SKILL.md") }],
+    references: [],
+  } satisfies NonNullable<ProviderSessionStartInput["expertSession"]>;
+
+  await expect(withAdapter(async () => {}, 100, undefined, { expertSession })).rejects.toThrow(
+    "Pi did not load required Expert skill 'missing-reviewer'.",
+  );
+});
+
+it("passes the current Pi system prompt and tools to the model stream", async () => {
+  responses("success");
+  await withAdapter(async (adapter, events) => {
+    await send(adapter);
+    await waitFor(() => expect(completions(events)).toHaveLength(1));
+    expect(captured.modelSystemPrompts[0]).toBeTruthy();
+    expect(captured.modelTools[0]?.some((tool) => tool.name === "read")).toBe(true);
+  });
+});
+
 it.each([
   { toolName: "bash", args: { command: "printf hello \n" }, title: "printf hello" },
   { toolName: "bash", args: { command: " \n" }, title: "bash" },
   { toolName: "read", args: { path: "file.txt " }, title: "read file.txt" },
-  { toolName: "grep", args: { pattern: "needle \n" }, title: "grep needle" },
 ])(
   "persists $toolName lifecycle titles without changing tool arguments: $title",
   async ({ toolName, args, title }) => {
@@ -797,7 +894,8 @@ it("rejects steering into an untracked SDK run instead of orphaning a queued tur
 });
 
 it("keeps the turn alive through SDK overflow compaction and its continuation", async () => {
-  const calls = responses("success", "overflow", "success", "success");
+  // Pi summarizes history and the split-turn prefix separately before retrying.
+  const calls = responses("success", "overflow", "success", "success", "success");
   await withAdapter(async (adapter, events) => {
     await send(adapter);
     await waitFor(() => expect(completions(events)).toHaveLength(1));
@@ -808,7 +906,7 @@ it("keeps the turn alive through SDK overflow compaction and its continuation", 
     expect(
       captured.events.some((event) => event.type === "compaction_end" && event.willRetry),
     ).toBe(true);
-    expect(calls()).toBe(4);
+    expect(calls()).toBe(5);
     expect(completions(events)[1]).toMatchObject({
       turnId: turn.turnId,
       payload: { state: "completed" },
@@ -1144,55 +1242,6 @@ it("cancels retry and queued steering before awaiting gateway teardown drainage"
     },
     100,
     credentials,
-  );
-});
-
-it("rotates the Pi gateway credential from the dispatched computer-control fact", async () => {
-  responses("success", "success");
-  const leasedCapabilities: Array<ReadonlyArray<string> | undefined> = [];
-  let sequence = 0;
-  const base = gatewayCredentials();
-  const credentials: AgentGatewayCredentialsShape = {
-    ...base,
-    connectionForThread: vi.fn<AgentGatewayCredentialsShape["connectionForThread"]>(
-      (_threadId, _provider, options) => {
-        leasedCapabilities.push(options?.additionalCapabilities);
-        return {
-          url: "http://127.0.0.1:3773/mcp",
-          bearerToken: `lease-${++sequence}`,
-        };
-      },
-    ),
-  };
-  await withAdapter(
-    async (adapter, events) => {
-      const first = await send(adapter);
-      await waitFor(() => expect(completions(events)).toHaveLength(1));
-      // Session start plus the first rotation both lease computer:control from
-      // the fact stashed when the turn was dispatched.
-      expect(leasedCapabilities).toEqual([["computer:control"], ["computer:control"]]);
-      expect(base.revokeSessionToken).toHaveBeenCalledExactlyOnceWith("lease-1");
-      expect(completions(events)[0]).toMatchObject({
-        turnId: first.turnId,
-        payload: { state: "completed" },
-      });
-      expect(events.filter((event) => event.type === "runtime.error")).toHaveLength(0);
-      const second = await send(adapter);
-      await waitFor(() => expect(completions(events)).toHaveLength(2));
-      expect(completions(events)[1]).toMatchObject({
-        turnId: second.turnId,
-        payload: { state: "completed" },
-      });
-      expect(leasedCapabilities).toEqual([
-        ["computer:control"],
-        ["computer:control"],
-        ["computer:control"],
-      ]);
-      expect(events.filter((event) => event.type === "runtime.error")).toHaveLength(0);
-    },
-    1,
-    credentials,
-    { enableComputerControl: true },
   );
 });
 

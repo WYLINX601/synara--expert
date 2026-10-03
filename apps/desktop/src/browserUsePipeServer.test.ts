@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import { createConnection, type Socket } from "node:net";
 import { endianness, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -34,19 +35,44 @@ const connect = (pipePath: string): Promise<Socket> =>
 
 const readMessage = (socket: Socket): Promise<Record<string, unknown>> =>
   new Promise((resolve, reject) => {
-    let pending = Buffer.alloc(0);
-    const onData = (chunk: Buffer) => {
-      pending = Buffer.concat([pending, chunk]);
-      if (pending.length < 4) return;
-      const length = endianness() === "BE" ? pending.readUInt32BE(0) : pending.readUInt32LE(0);
-      if (pending.length < 4 + length) return;
-      socket.off("error", onError);
+    const chunks: Buffer[] = [];
+    let pendingBytes = 0;
+    let expectedFrameBytes: number | null = null;
+    const cleanup = () => {
       socket.off("data", onData);
-      resolve(JSON.parse(pending.subarray(4, 4 + length).toString("utf8")));
+      socket.off("error", onError);
     };
     const onError = (error: Error) => {
-      socket.off("data", onData);
+      cleanup();
       reject(error);
+    };
+    const onData = (chunk: Buffer) => {
+      chunks.push(chunk);
+      pendingBytes += chunk.length;
+
+      if (expectedFrameBytes === null) {
+        if (pendingBytes < 4) return;
+        const header = Buffer.allocUnsafe(4);
+        let copiedBytes = 0;
+        for (const pendingChunk of chunks) {
+          const count = Math.min(pendingChunk.length, 4 - copiedBytes);
+          pendingChunk.copy(header, copiedBytes, 0, count);
+          copiedBytes += count;
+          if (copiedBytes === 4) break;
+        }
+        const payloadBytes =
+          endianness() === "BE" ? header.readUInt32BE(0) : header.readUInt32LE(0);
+        expectedFrameBytes = 4 + payloadBytes;
+      }
+      if (pendingBytes < expectedFrameBytes) return;
+
+      const frame = chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks, pendingBytes);
+      cleanup();
+      try {
+        resolve(JSON.parse(frame.subarray(4, expectedFrameBytes).toString("utf8")));
+      } catch (error) {
+        reject(error);
+      }
     };
     socket.on("data", onData);
     socket.once("error", onError);
@@ -89,6 +115,25 @@ async function withPipeServer(
     await rm(directory, { recursive: true, force: true });
   }
 }
+
+describe("browser host pipe test response reader", () => {
+  it("reads a frame when the native-endian header and payload are fragmented", async () => {
+    const socket = new EventEmitter();
+    const message = { jsonrpc: "2.0", id: 7, result: { payload: "split across chunks" } };
+    const frame = encodeRequest(message);
+    const response = readMessage(socket as unknown as Socket);
+
+    socket.emit("data", frame.subarray(0, 1));
+    socket.emit("data", frame.subarray(1, 3));
+    socket.emit("data", frame.subarray(3, 4));
+    socket.emit("data", frame.subarray(4, 9));
+    socket.emit("data", frame.subarray(9));
+
+    await expect(response).resolves.toEqual(message);
+    expect(socket.listenerCount("data")).toBe(0);
+    expect(socket.listenerCount("error")).toBe(0);
+  });
+});
 
 describe("canonical browser host pipe resolution", () => {
   it("creates a private unguessable Unix socket path", () => {
@@ -494,7 +539,9 @@ describe("canonical browser host RPC", () => {
             arguments: {},
           },
         });
-        expect((response.result as { payload: string }).payload).toHaveLength(payload.length);
+        const receivedPayload = (response.result as { payload: string }).payload;
+        expect(receivedPayload).toHaveLength(payload.length);
+        expect(receivedPayload).toBe(payload);
         expect(socket.destroyed).toBe(false);
       },
     );

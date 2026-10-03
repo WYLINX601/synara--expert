@@ -77,6 +77,7 @@ export type ProjectMatchPolicy = "id-only" | "id-or-cwd";
 function toThreadShell(thread: Thread): ThreadShell {
   return {
     id: thread.id,
+    expertBinding: thread.expertBinding ?? null,
     codexThreadId: thread.codexThreadId,
     projectId: thread.projectId,
     title: thread.title,

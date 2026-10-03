@@ -23,6 +23,7 @@ import {
   type DeviceEvent,
   type ComputerEvent,
   type GitActionProgressEvent,
+  type GitRemoveWorktreeInput,
   type GitHubProjectProvisionProgressEvent,
   type GitWorktreeSetupProgressEvent,
   type OrchestrationCommand,
@@ -35,6 +36,14 @@ import {
   type ServerConfigStreamEvent,
   type ServerDiagnosticsResult,
   type ServerLifecycleStreamEvent,
+  type ExpertReadInput,
+  type ExpertSaveInput,
+  type ExpertArchiveInput,
+  type ExpertConnectionRemoveInput,
+  type ExpertConnectionSaveInput,
+  type ExpertPreviewInput,
+  type ExpertSnapshotReadInput,
+  type ExpertAppliedRuntimeReadInput,
 } from "@synara/contracts";
 import { clamp } from "effect/Number";
 import { Effect, FileSystem, Layer, Option, Path, Queue, Schema, Scope, Stream } from "effect";
@@ -90,7 +99,15 @@ import {
 import { Keybindings } from "./keybindings";
 import { createLocalPreviewGrant } from "./localImageFiles";
 import { listLocalServers, stopLocalServer } from "./localServerMonitor";
-import { listManagedWorktrees, pruneProjectedArchivedManagedWorktrees } from "./managedWorktrees";
+import {
+  archivedWorktreeHasNoOtherOwners,
+  discardEmptyManagedWorktreeParent,
+  discardManagedWorktreeResidue,
+  isManagedWorktreePathCanonical,
+  listManagedWorktrees,
+  managedWorktreeSnapshotsDir,
+  pruneProjectedArchivedManagedWorktrees,
+} from "./managedWorktrees";
 import {
   attachmentPrincipalForSession,
   CurrentManagedAttachmentPrincipal,
@@ -125,6 +142,7 @@ import { ProfileStatsQuery } from "./profileStats";
 import { redactSensitiveProcessArgs } from "./processArgumentRedaction";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment";
 import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
+import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { ServerSettingsService } from "./serverSettings";
@@ -148,6 +166,8 @@ import { ThreadDiagnosticsQuery } from "./diagnostics/Services/ThreadDiagnostics
 import { makeOwnerThreadDiagnosticReader } from "./diagnostics/ownerThreadDiagnostics";
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore";
 import { ProviderRuntimeEventRepository } from "./persistence/Services/ProviderRuntimeEvents";
+import { ExpertAppliedRuntimeRepository } from "./persistence/Services/ExpertAppliedRuntimeRecords.ts";
+import { ExpertAppliedRuntimeRepositoryLive } from "./persistence/Layers/ExpertAppliedRuntimeRecords.ts";
 import { requireWsOwnerSession } from "./wsOwnerAuthorization";
 import { makeWsRequestAdmission } from "./wsRequestAdmission";
 import { voiceUploadAdmissionGate } from "./voiceUploadAdmission";
@@ -402,6 +422,11 @@ const makeWsRpcHandlersLayer = () =>
       const threadDiagnostics = yield* ThreadDiagnosticsQuery;
       const eventStore = yield* OrchestrationEventStore;
       const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
+      const expertAppliedRuntimeRepository = yield* ExpertAppliedRuntimeRepository;
+      const workbenchExpertRuntime = createWorkbenchExpertRuntime({
+        stateDir: config.stateDir,
+        expertAppliedRuntimeRepository,
+      });
       const readOwnerThreadDiagnostics = makeOwnerThreadDiagnosticReader({
         eventStore,
         providerRuntimeEvents,
@@ -775,6 +800,79 @@ const makeWsRpcHandlersLayer = () =>
           Effect.forkDetach,
           Effect.asVoid,
         );
+
+      const validateArchiveWorktreeRemoval = (input: GitRemoveWorktreeInput) =>
+        Effect.gen(function* () {
+          if (!input.archiveCleanup) return;
+          const { threadId, archiveSequence } = input.archiveCleanup;
+          const events = yield* Stream.runCollect(
+            orchestrationEngine.readThreadEventsThrough(
+              threadId,
+              Math.max(0, archiveSequence - 1),
+              archiveSequence,
+              ["thread.archived"],
+            ),
+          );
+          const archiveEvent = [...events].find((event) => event.sequence === archiveSequence);
+          const shell = Option.getOrUndefined(
+            yield* projectionReadModelQuery.getThreadShellById(threadId),
+          );
+          if (
+            archiveEvent?.type !== "thread.archived" ||
+            !archiveEvent.payload.archivedAt ||
+            !shell ||
+            shell.archivedAt !== archiveEvent.payload.archivedAt ||
+            (shell.session !== null && shell.session.status !== "stopped")
+          ) {
+            return yield* Effect.fail(
+              new WsRpcError({ message: "Archive cleanup is no longer safe for this task." }),
+            );
+          }
+          if (
+            !(yield* isManagedWorktreePathCanonical({
+              worktreesDir: config.worktreesDir,
+              worktreePath: input.path,
+            }))
+          ) {
+            return yield* Effect.fail(
+              new WsRpcError({ message: "Archive cleanup only removes managed worktrees." }),
+            );
+          }
+          // A detached HEAD may contain commits with no branch reference. Do
+          // not silently make those commits unreachable through auto-cleanup.
+          const branchContext = yield* git.readBranchContext(input.path);
+          if (!branchContext.isRepo || branchContext.branch === null) {
+            return yield* Effect.fail(
+              new WsRpcError({ message: "Archive cleanup kept a worktree without a branch." }),
+            );
+          }
+          const owners = yield* projectionReadModelQuery.listManagedWorktreeThreads();
+          if (
+            !(yield* archivedWorktreeHasNoOtherOwners({
+              worktreePath: input.path,
+              threadId,
+              threads: owners,
+            }))
+          ) {
+            return yield* Effect.fail(
+              new WsRpcError({ message: "Another task still refers to this worktree." }),
+            );
+          }
+          // Archive's terminal reactor is asynchronous. Close only sessions
+          // opened before this archive event, preserving a newer restored one.
+          yield* terminalManager.closeSessionsOpenedAtOrBefore({
+            threadId,
+            openedAtOrBefore: archiveEvent.payload.archivedAt,
+          });
+          const afterTerminalCleanup = Option.getOrUndefined(
+            yield* projectionReadModelQuery.getThreadShellById(threadId),
+          );
+          if (afterTerminalCleanup?.archivedAt !== archiveEvent.payload.archivedAt) {
+            return yield* Effect.fail(
+              new WsRpcError({ message: "The task was restored during archive cleanup." }),
+            );
+          }
+        });
 
       const pruneManagedWorktrees = pruneProjectedArchivedManagedWorktrees({
         homeDir: config.homeDir,
@@ -1591,7 +1689,42 @@ const makeWsRpcHandlersLayer = () =>
           rpcEffect(
             refreshGitStatusAfter(
               input.cwd,
-              git.withMutation(input.cwd, git.removeWorktree(input)),
+              git.withMutation(
+                input.cwd,
+                validateArchiveWorktreeRemoval(input).pipe(
+                  Effect.andThen(
+                    git.removeWorktree(
+                      input.archiveCleanup
+                        ? { ...input, force: false, reclaimTemporaryBranch: false }
+                        : input,
+                    ),
+                  ),
+                  // Automatic archive cleanup preserves recovery data; an
+                  // explicit removal discards snapshots and empty directories.
+                  Effect.tap(() =>
+                    isManagedWorktreePathCanonical({
+                      worktreesDir: config.worktreesDir,
+                      worktreePath: input.path,
+                    }).pipe(
+                      Effect.flatMap((managed) =>
+                        !managed
+                          ? Effect.void
+                          : input.archiveCleanup
+                            ? discardEmptyManagedWorktreeParent({
+                                worktreesDir: config.worktreesDir,
+                                worktreePath: input.path,
+                              })
+                            : discardManagedWorktreeResidue({
+                                worktreesDir: config.worktreesDir,
+                                snapshotsDir: managedWorktreeSnapshotsDir(config.homeDir),
+                                worktreePath: input.path,
+                              }),
+                      ),
+                      Effect.catch(() => Effect.void),
+                    ),
+                  ),
+                ),
+              ),
             ),
             "Failed to remove worktree",
           ),
@@ -1751,6 +1884,104 @@ const makeWsRpcHandlersLayer = () =>
           rpcEffect(serverSettings.getSettingsView, "Failed to load server settings"),
         [WS_METHODS.serverUpdateSettings]: (input) =>
           rpcEffect(serverSettings.updateSettingsView(input), "Failed to update server settings"),
+        [WS_METHODS.serverListExperts]: () =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(Effect.tryPromise(() => workbenchExpertRuntime.experts.list())),
+            ),
+            "Failed to list experts",
+          ),
+        [WS_METHODS.serverReadExpert]: (input: ExpertReadInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(
+                Effect.tryPromise(() => workbenchExpertRuntime.experts.read(input.id)),
+              ),
+            ),
+            "Failed to read expert",
+          ),
+        [WS_METHODS.serverSaveExpert]: (input: ExpertSaveInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(Effect.tryPromise(() => workbenchExpertRuntime.experts.save(input))),
+            ),
+            "Failed to save expert",
+          ),
+        [WS_METHODS.serverArchiveExpert]: (input: ExpertArchiveInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(
+                Effect.tryPromise(() =>
+                  workbenchExpertRuntime.experts.archive(input.id, input.expectedRevision),
+                ),
+              ),
+            ),
+            "Failed to archive expert",
+          ),
+        [WS_METHODS.serverPreviewExpert]: (input: ExpertPreviewInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(
+                Effect.tryPromise(() => workbenchExpertRuntime.experts.preview(input)),
+              ),
+            ),
+            "Failed to preview expert",
+          ),
+        [WS_METHODS.serverReadExpertSnapshot]: (input: ExpertSnapshotReadInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(
+                Effect.tryPromise(() =>
+                  workbenchExpertRuntime.experts.readSnapshot(input.snapshotId),
+                ),
+              ),
+            ),
+            "Failed to read expert snapshot",
+          ),
+        [WS_METHODS.serverReadExpertAppliedRuntime]: (input: ExpertAppliedRuntimeReadInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(workbenchExpertRuntime.readAppliedRuntime(input)),
+              Effect.map(Option.getOrNull),
+            ),
+            "Failed to read Expert applied runtime",
+          ),
+        [WS_METHODS.serverListExpertConnections]: () =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(Effect.tryPromise(() => workbenchExpertRuntime.connections.list())),
+            ),
+            "Failed to list expert connections",
+          ),
+        [WS_METHODS.serverSaveExpertConnection]: (input: ExpertConnectionSaveInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(
+                Effect.tryPromise(() => workbenchExpertRuntime.connections.save(input)),
+              ),
+            ),
+            "Failed to save expert connection",
+          ),
+        [WS_METHODS.serverRemoveExpertConnection]: (input: ExpertConnectionRemoveInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(
+                Effect.tryPromise(() =>
+                  workbenchExpertRuntime.connections.remove(input.id, input.expectedRevision),
+                ),
+              ),
+            ),
+            "Failed to remove expert connection",
+          ),
+        [WS_METHODS.serverTestExpertConnection]: (input: ExpertReadInput) =>
+          rpcEffect(
+            requireOwner.pipe(
+              Effect.andThen(
+                Effect.tryPromise(() => workbenchExpertRuntime.testConnection(input.id)),
+              ),
+            ),
+            "Failed to test expert connection",
+          ),
         [WS_METHODS.serverRefreshProviders]: () =>
           rpcEffect(
             providerHealth.refresh.pipe(Effect.map((providers) => ({ providers }))),
@@ -2196,7 +2427,10 @@ const makeWsRpcHandlersLayer = () =>
   );
 
 export const makeWsRpcLayer = () =>
-  Layer.merge(makeWsRpcHandlersLayer(), wsRequestAdmissionMiddlewareLayer);
+  Layer.merge(
+    makeWsRpcHandlersLayer().pipe(Layer.provideMerge(ExpertAppliedRuntimeRepositoryLive)),
+    wsRequestAdmissionMiddlewareLayer,
+  );
 
 const makeRpcWebSocketHttpEffect = RpcServer.toHttpEffectWebsocket(AdmittedWsFeatureRpcGroup, {
   spanPrefix: "ws.rpc",

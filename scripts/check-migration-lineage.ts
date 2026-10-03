@@ -64,6 +64,12 @@ const HANDLED_RELEASED_DIVERGENCES: readonly MigrationLineageAllowance[] = [
   // renames the tracker row back to the canonical name whenever the rows below
   // it are canonical, which is the only way this pair can occur.
   { id: 32, name: "ReconcileLegacyT3SchemaImport" },
+  // These were shipped as official IDs before WB-02 moved the exact histories
+  // into the expert-owned workbench ledger. Startup recognizes their frozen
+  // names/schema, snapshots the original database, then adopts them before the
+  // official migrator runs. Their IDs are no longer in today's official list.
+  { id: 109, name: "ProjectionThreadsExpertBinding" },
+  { id: 110, name: "ExpertAppliedRuntimeRecords" },
 ];
 
 const entriesBlockPattern = /export const migrationEntries\s*=\s*\[([\s\S]*?)\]\s*as const;/u;

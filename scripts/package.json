@@ -4,8 +4,9 @@
   "type": "module",
   "scripts": {
     "prepare": "effect-language-service patch",
-    "typecheck": "node ../node_modules/@typescript/native/bin/tsc --noEmit --tsBuildInfoFile node_modules/.cache/typescript-native.tsbuildinfo && bun run typecheck:computer-measurement",
+    "typecheck": "node ../node_modules/@typescript/native/bin/tsc --noEmit --tsBuildInfoFile node_modules/.cache/typescript-native.tsbuildinfo && bun run typecheck:computer-measurement && bun run typecheck:workbench-runtime-probe",
     "typecheck:computer-measurement": "node ../node_modules/@typescript/native/bin/tsc --project tsconfig.computer-measurement.json",
+    "typecheck:workbench-runtime-probe": "node ../node_modules/@typescript/native/bin/tsc --project tsconfig.workbench-runtime-probe.json",
     "typecheck:native": "bun run typecheck",
     "typecheck:legacy": "tsc --noEmit",
     "test": "vitest run"
@@ -19,9 +20,11 @@
   "devDependencies": {
     "@effect/language-service": "catalog:",
     "@effect/vitest": "catalog:",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@types/bun": "catalog:",
     "electron-builder": "26.15.3",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "zod": "4.3.6"
   }
 }

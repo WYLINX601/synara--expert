@@ -5,6 +5,7 @@ import {
 } from "../../persistence/messageTextChunks.ts";
 import {
   CheckpointRef,
+  ExpertBinding,
   IsoDateTime,
   MessageId,
   NonNegativeInt,
@@ -121,6 +122,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
       Schema.NullOr(Schema.fromJsonString(ThreadGoalAchievements)),
     ).pipe(Schema.withDecodingDefault(() => null)),
     modelSelection: ModelSelectionJsonUnknown,
+    expertBinding: Schema.NullOr(Schema.fromJsonString(ExpertBinding)),
   }),
 );
 const {
@@ -139,6 +141,7 @@ const ProjectionThreadShellDbRowSchema = Schema.Struct(ProjectionThreadShellFiel
     ),
     lastKnownPr: Schema.NullOr(Schema.fromJsonString(OrchestrationThreadPullRequest)),
     modelSelection: ModelSelectionJsonUnknown,
+    expertBinding: Schema.NullOr(Schema.fromJsonString(ExpertBinding)),
   }),
 );
 /**
@@ -668,6 +671,7 @@ function toProjectedThreadShellFromStoredSummary(input: {
   return {
     id: threadRow.threadId,
     projectId: threadRow.projectId,
+    expertBinding: threadRow.expertBinding,
     title: threadRow.title,
     modelSelection: threadRow.modelSelection,
     runtimeMode: threadRow.runtimeMode,
@@ -731,6 +735,7 @@ function toProjectedThread(input: {
   return {
     id: threadRow.threadId,
     projectId: threadRow.projectId,
+    expertBinding: threadRow.expertBinding,
     title: threadRow.title,
     modelSelection: threadRow.modelSelection,
     runtimeMode: threadRow.runtimeMode,
@@ -920,6 +925,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           goal_paused_at AS "goalPausedAt",
           goal_achievements_json AS "goalAchievements",
           parent_thread_id AS "parentThreadId",
+          expert_binding_json AS "expertBinding",
           creation_source AS "creationSource",
           source_thread_id AS "sourceThreadId",
           source_turn_id AS "sourceTurnId",
@@ -973,6 +979,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           create_branch_flow_completed AS "createBranchFlowCompleted",
           is_pinned AS "isPinned",
           parent_thread_id AS "parentThreadId",
+          expert_binding_json AS "expertBinding",
           creation_source AS "creationSource",
           source_thread_id AS "sourceThreadId",
           source_turn_id AS "sourceTurnId",
@@ -1615,6 +1622,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           goal_paused_at AS "goalPausedAt",
           goal_achievements_json AS "goalAchievements",
           parent_thread_id AS "parentThreadId",
+          expert_binding_json AS "expertBinding",
           creation_source AS "creationSource",
           source_thread_id AS "sourceThreadId",
           source_turn_id AS "sourceTurnId",
@@ -1676,6 +1684,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           goal_paused_at AS "goalPausedAt",
           goal_achievements_json AS "goalAchievements",
           parent_thread_id AS "parentThreadId",
+          expert_binding_json AS "expertBinding",
           creation_source AS "creationSource",
           source_thread_id AS "sourceThreadId",
           source_turn_id AS "sourceTurnId",
@@ -2006,6 +2015,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           goal_paused_at AS "goalPausedAt",
           goal_achievements_json AS "goalAchievements",
           parent_thread_id AS "parentThreadId",
+          expert_binding_json AS "expertBinding",
           creation_source AS "creationSource",
           source_thread_id AS "sourceThreadId",
           source_turn_id AS "sourceTurnId",

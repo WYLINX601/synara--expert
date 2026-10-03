@@ -12,6 +12,7 @@ import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { createHash } from "node:crypto";
 
 import { MigrationLineageError, MigrationSchemaTooNewError } from "./Errors.ts";
 
@@ -273,7 +274,7 @@ export const makeMigrationLoader = (throughId?: number) =>
  * prevented at the source instead, by `scripts/check-migration-lineage.ts`.
  */
 export const LAST_SHARED_LINEAGE_MIGRATION_ID = 16;
-const LATEST_MIGRATION_ID = Math.max(...migrationEntries.map(([id]) => id));
+export const LATEST_MIGRATION_ID = Math.max(...migrationEntries.map(([id]) => id));
 
 const canonicalMigrationNamesById: ReadonlyMap<number, string> = new Map(
   migrationEntries.map(([id, name]) => [id, name] as const),
@@ -309,8 +310,106 @@ export function planLegacyMigration32Rename(
 export const findFirstMigrationLineageDivergence = (
   recordedNamesById: ReadonlyMap<number, string>,
   highWaterMark: number,
-) =>
-  migrationEntries.find(([id, name]) => id <= highWaterMark && recordedNamesById.get(id) !== name);
+  catalog: readonly (readonly [number, string, unknown])[] = migrationEntries,
+) => catalog.find(([id, name]) => id <= highWaterMark && recordedNamesById.get(id) !== name);
+
+export interface OfficialMigrationLineageDivergence {
+  readonly firstDivergedId: number;
+  readonly expectedName: string;
+  readonly recordedName: string;
+  readonly highWaterMark: number;
+  readonly lineageFingerprint: string;
+}
+
+export type OfficialMigrationLineagePlan = {
+  readonly kind: "canonical" | "imported-divergence" | "shared-divergence" | "future-prefix";
+  readonly rows: readonly { readonly migration_id: number; readonly name: string }[];
+  readonly sourceVersion: string;
+  readonly sourceVersionNumber: number;
+  readonly highWaterMark: number;
+  readonly rawHighWaterMark: number;
+  readonly supportedVersion: number;
+  readonly hasMetadataRepair: boolean;
+  readonly divergence?: OfficialMigrationLineageDivergence | undefined;
+};
+
+/**
+ * Read-only counterpart to reconcileMigrationLineage. The backup planner and
+ * the workbench upgrade planner share this classification so they agree on
+ * canonical prefixes, reviewed metadata repairs, imported-lineage consent,
+ * and unsupported future prefixes.
+ */
+export const planOfficialMigrationLineage = (
+  rows: readonly { readonly migration_id: number; readonly name: string }[],
+  catalog: readonly (readonly [number, string, unknown])[] = migrationEntries,
+): OfficialMigrationLineagePlan => {
+  const ordered = rows.toSorted((left, right) => left.migration_id - right.migration_id);
+  const recordedNames = new Map(
+    ordered.map(({ migration_id, name }) => [migration_id, name] as const),
+  );
+  const rawHighWaterMark = ordered.at(-1)?.migration_id ?? 0;
+  const inspectedNames = new Map(recordedNames);
+  const migration32Rename = planLegacyMigration32Rename(recordedNames);
+  if (migration32Rename !== null) {
+    inspectedNames.set(IMPORTED_SCHEMA_RECONCILIATION_MIGRATION_ID, migration32Rename);
+  }
+  const aliasRepairs = planMigrationLineageAliasRepairs(inspectedNames);
+  for (const repair of aliasRepairs) {
+    if (repair.kind === "rename") inspectedNames.set(repair.migrationId, repair.name);
+    else inspectedNames.delete(repair.migrationId);
+  }
+
+  const highWaterMark = Math.max(...inspectedNames.keys(), 0);
+  const normalizedRows = [...inspectedNames]
+    .toSorted(([left], [right]) => left - right)
+    .map(([migration_id, name]) => ({ migration_id, name }));
+  const latestSupportedId = Math.max(...catalog.map(([id]) => id), 0);
+  const hasMetadataRepair = migration32Rename !== null || aliasRepairs.length > 0;
+  const sourceVersion =
+    migration32Rename !== null ? `v${rawHighWaterMark}-legacy32` : `v${rawHighWaterMark}`;
+  const common = {
+    rows: normalizedRows,
+    sourceVersion,
+    sourceVersionNumber: highWaterMark,
+    highWaterMark,
+    rawHighWaterMark,
+    supportedVersion: latestSupportedId,
+    hasMetadataRepair,
+  } as const;
+
+  const firstDiverged = findFirstMigrationLineageDivergence(inspectedNames, highWaterMark, catalog);
+  if (firstDiverged !== undefined) {
+    const [firstDivergedId, expectedName] = firstDiverged;
+    const divergence: OfficialMigrationLineageDivergence = {
+      firstDivergedId,
+      expectedName,
+      recordedName: inspectedNames.get(firstDivergedId) ?? "<missing>",
+      highWaterMark: rawHighWaterMark,
+      lineageFingerprint: createHash("sha256")
+        .update(JSON.stringify(ordered.map(({ migration_id, name }) => [migration_id, name])))
+        .digest("hex"),
+    };
+    return {
+      ...common,
+      kind:
+        firstDivergedId <= LAST_SHARED_LINEAGE_MIGRATION_ID
+          ? "shared-divergence"
+          : firstDivergedId > latestSupportedId
+            ? "future-prefix"
+            : "imported-divergence",
+      sourceVersion:
+        migration32Rename !== null
+          ? `v${rawHighWaterMark}-legacy32`
+          : `imported-v${rawHighWaterMark}-from${firstDivergedId}`,
+      divergence,
+    };
+  }
+
+  if (highWaterMark > latestSupportedId) {
+    return { ...common, kind: "future-prefix" };
+  }
+  return { ...common, kind: "canonical" };
+};
 
 /**
  * A tracker identity that a *released* Synara build wrote for a migration whose

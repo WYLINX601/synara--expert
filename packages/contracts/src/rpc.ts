@@ -24,6 +24,21 @@ import {
 } from "./automation";
 import { OpenInEditorInput } from "./editor";
 import {
+  ExpertArchiveInput,
+  ExpertAppliedRuntimeReadInput,
+  ExpertAppliedRuntimeRecord,
+  ExpertConnectionConfig,
+  ExpertConnectionRemoveInput,
+  ExpertConnectionSaveInput,
+  ExpertDefinition,
+  ExpertPreview,
+  ExpertPreviewInput,
+  ExpertReadInput,
+  ExpertSaveInput,
+  ExpertSnapshot,
+  ExpertSnapshotReadInput,
+} from "./expert";
+import {
   ExternalMcpCreateIntegrationInput,
   ExternalMcpCreateIntegrationResult,
   ExternalMcpIntegration,
@@ -1222,6 +1237,72 @@ export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSetting
   error: WsRpcError,
 });
 
+export const WsServerListExpertsRpc = Rpc.make(WS_METHODS.serverListExperts, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(ExpertDefinition),
+  error: WsRpcError,
+});
+
+export const WsServerReadExpertRpc = Rpc.make(WS_METHODS.serverReadExpert, {
+  payload: ExpertReadInput,
+  success: Schema.NullOr(ExpertDefinition),
+  error: WsRpcError,
+});
+
+export const WsServerSaveExpertRpc = Rpc.make(WS_METHODS.serverSaveExpert, {
+  payload: ExpertSaveInput,
+  success: ExpertDefinition,
+  error: WsRpcError,
+});
+
+export const WsServerArchiveExpertRpc = Rpc.make(WS_METHODS.serverArchiveExpert, {
+  payload: ExpertArchiveInput,
+  success: ExpertDefinition,
+  error: WsRpcError,
+});
+
+export const WsServerPreviewExpertRpc = Rpc.make(WS_METHODS.serverPreviewExpert, {
+  payload: ExpertPreviewInput,
+  success: ExpertPreview,
+  error: WsRpcError,
+});
+
+export const WsServerReadExpertSnapshotRpc = Rpc.make(WS_METHODS.serverReadExpertSnapshot, {
+  payload: ExpertSnapshotReadInput,
+  success: ExpertSnapshot,
+  error: WsRpcError,
+});
+
+export const WsServerReadExpertAppliedRuntimeRpc = Rpc.make(
+  WS_METHODS.serverReadExpertAppliedRuntime,
+  {
+    payload: ExpertAppliedRuntimeReadInput,
+    success: Schema.NullOr(ExpertAppliedRuntimeRecord),
+    error: WsRpcError,
+  },
+);
+
+export const WsServerListExpertConnectionsRpc = Rpc.make(WS_METHODS.serverListExpertConnections, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(ExpertConnectionConfig),
+  error: WsRpcError,
+});
+export const WsServerSaveExpertConnectionRpc = Rpc.make(WS_METHODS.serverSaveExpertConnection, {
+  payload: ExpertConnectionSaveInput,
+  success: ExpertConnectionConfig,
+  error: WsRpcError,
+});
+export const WsServerRemoveExpertConnectionRpc = Rpc.make(WS_METHODS.serverRemoveExpertConnection, {
+  payload: ExpertConnectionRemoveInput,
+  success: Schema.Void,
+  error: WsRpcError,
+});
+export const WsServerTestExpertConnectionRpc = Rpc.make(WS_METHODS.serverTestExpertConnection, {
+  payload: ExpertReadInput,
+  success: Schema.Struct({ tools: Schema.Array(Schema.String) }),
+  error: WsRpcError,
+});
+
 export const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
   payload: Schema.Struct({}),
   success: ServerRefreshProvidersResult,
@@ -1613,6 +1694,17 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsServerGetEnvironmentRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
+  WsServerListExpertsRpc,
+  WsServerReadExpertRpc,
+  WsServerSaveExpertRpc,
+  WsServerArchiveExpertRpc,
+  WsServerPreviewExpertRpc,
+  WsServerReadExpertSnapshotRpc,
+  WsServerReadExpertAppliedRuntimeRpc,
+  WsServerListExpertConnectionsRpc,
+  WsServerSaveExpertConnectionRpc,
+  WsServerRemoveExpertConnectionRpc,
+  WsServerTestExpertConnectionRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsServerListExternalMcpIntegrationsRpc,

@@ -7,17 +7,19 @@
 const importRuntimeModule = (specifier: string): Promise<unknown> =>
   Function("specifier", "return import(specifier)")(specifier) as Promise<unknown>;
 
-interface ReadonlyStatement {
+export interface ReadonlyStatement {
   get: (...params: ReadonlyArray<unknown>) => unknown;
+  all?: (...params: ReadonlyArray<unknown>) => unknown;
 }
 
-interface ReadonlyDatabase {
+export interface ReadonlyDatabase {
   query?: (sql: string) => ReadonlyStatement; // bun:sqlite
   prepare?: (sql: string) => ReadonlyStatement; // node:sqlite
+  exec?: (sql: string) => unknown;
   close: () => unknown;
 }
 
-async function openReadOnlyDatabase(dbPath: string): Promise<ReadonlyDatabase> {
+export async function openReadOnlyDatabase(dbPath: string): Promise<ReadonlyDatabase> {
   if (process.versions.bun !== undefined) {
     const { Database } = (await importRuntimeModule("bun:sqlite")) as {
       Database: new (path: string, options: { readonly: boolean }) => ReadonlyDatabase;

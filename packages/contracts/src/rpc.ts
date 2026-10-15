@@ -30,14 +30,28 @@ import {
   ExpertConnectionConfig,
   ExpertConnectionRemoveInput,
   ExpertConnectionSaveInput,
+  ExpertConnectionTestInput,
+  ExpertConnectionTestResult,
+  ExpertDeleteInput,
   ExpertDefinition,
   ExpertPreview,
   ExpertPreviewInput,
   ExpertReadInput,
+  ExpertRestoreInput,
   ExpertSaveInput,
   ExpertSnapshot,
   ExpertSnapshotReadInput,
 } from "./expert";
+import {
+  ExpertConnectionReferencesInputSchema,
+  ExpertConnectionReferencesResultSchema,
+  McpDiscoveryRequestSchema,
+  McpDiscoveryResultSchema,
+  McpImportRequestSchema,
+  McpImportResultSchema,
+  McpConnectionSetStateInputSchema,
+  McpConnectionStateSchema,
+} from "./mcp";
 import {
   ExternalMcpCreateIntegrationInput,
   ExternalMcpCreateIntegrationResult,
@@ -1261,6 +1275,18 @@ export const WsServerArchiveExpertRpc = Rpc.make(WS_METHODS.serverArchiveExpert,
   error: WsRpcError,
 });
 
+export const WsServerRestoreExpertRpc = Rpc.make(WS_METHODS.serverRestoreExpert, {
+  payload: ExpertRestoreInput,
+  success: ExpertDefinition,
+  error: WsRpcError,
+});
+
+export const WsServerDeleteExpertRpc = Rpc.make(WS_METHODS.serverDeleteExpert, {
+  payload: ExpertDeleteInput,
+  success: Schema.Void,
+  error: WsRpcError,
+});
+
 export const WsServerPreviewExpertRpc = Rpc.make(WS_METHODS.serverPreviewExpert, {
   payload: ExpertPreviewInput,
   success: ExpertPreview,
@@ -1298,8 +1324,44 @@ export const WsServerRemoveExpertConnectionRpc = Rpc.make(WS_METHODS.serverRemov
   error: WsRpcError,
 });
 export const WsServerTestExpertConnectionRpc = Rpc.make(WS_METHODS.serverTestExpertConnection, {
-  payload: ExpertReadInput,
-  success: Schema.Struct({ tools: Schema.Array(Schema.String) }),
+  payload: ExpertConnectionTestInput,
+  success: ExpertConnectionTestResult,
+  error: WsRpcError,
+});
+
+export const WsServerGetExpertConnectionStateRpc = Rpc.make(
+  WS_METHODS.serverGetExpertConnectionState,
+  {
+    payload: ExpertConnectionReferencesInputSchema,
+    success: McpConnectionStateSchema,
+    error: WsRpcError,
+  },
+);
+export const WsServerSetExpertConnectionStateRpc = Rpc.make(
+  WS_METHODS.serverSetExpertConnectionState,
+  {
+    payload: McpConnectionSetStateInputSchema,
+    success: McpConnectionStateSchema,
+    error: WsRpcError,
+  },
+);
+export const WsServerReadExpertConnectionReferencesRpc = Rpc.make(
+  WS_METHODS.serverReadExpertConnectionReferences,
+  {
+    payload: ExpertConnectionReferencesInputSchema,
+    success: ExpertConnectionReferencesResultSchema,
+    error: WsRpcError,
+  },
+);
+
+export const WsServerDiscoverMcpConnectionsRpc = Rpc.make(WS_METHODS.serverDiscoverMcpConnections, {
+  payload: McpDiscoveryRequestSchema,
+  success: McpDiscoveryResultSchema,
+  error: WsRpcError,
+});
+export const WsServerImportMcpConnectionsRpc = Rpc.make(WS_METHODS.serverImportMcpConnections, {
+  payload: McpImportRequestSchema,
+  success: McpImportResultSchema,
   error: WsRpcError,
 });
 
@@ -1698,6 +1760,8 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsServerReadExpertRpc,
   WsServerSaveExpertRpc,
   WsServerArchiveExpertRpc,
+  WsServerRestoreExpertRpc,
+  WsServerDeleteExpertRpc,
   WsServerPreviewExpertRpc,
   WsServerReadExpertSnapshotRpc,
   WsServerReadExpertAppliedRuntimeRpc,
@@ -1705,6 +1769,11 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsServerSaveExpertConnectionRpc,
   WsServerRemoveExpertConnectionRpc,
   WsServerTestExpertConnectionRpc,
+  WsServerGetExpertConnectionStateRpc,
+  WsServerSetExpertConnectionStateRpc,
+  WsServerReadExpertConnectionReferencesRpc,
+  WsServerDiscoverMcpConnectionsRpc,
+  WsServerImportMcpConnectionsRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsServerListExternalMcpIntegrationsRpc,

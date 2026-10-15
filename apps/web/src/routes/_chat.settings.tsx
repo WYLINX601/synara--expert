@@ -7,7 +7,7 @@ import { PROVIDER_DISPLAY_NAMES, type ProviderKind } from "@synara/contracts";
 import { VISIBLE_PROVIDER_DESCRIPTORS } from "../betaFeatures";
 import { sameAppSnapShortcut } from "@synara/shared/appSnapShortcut";
 import { SafariAccessSetupButton } from "../components/SafariAccessOnboarding";
-import { createFileRoute, useSearch } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, useRouterState, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 
 import {
@@ -50,7 +50,6 @@ import ReleaseHistoryDialog from "../components/ReleaseHistoryDialog";
 import { KeyboardShortcutsSettingsPanel } from "../components/settings/KeyboardShortcutsSettingsPanel";
 import { ProfileSettingsPanel } from "../components/settings/ProfileSettingsPanel";
 import { ProviderUsageSettingsPanel } from "../components/settings/ProviderUsageSettingsPanel";
-import { ExternalMcpSettingsPanel } from "../components/settings/ExternalMcpSettingsPanel";
 import {
   SettingResetButton,
   SettingsSegmentedControl,
@@ -62,7 +61,6 @@ import {
   SettingsSectionShell,
 } from "../components/settings/SettingsPanelPrimitives";
 import { SkillsSettingsPanel } from "../components/settings/SkillsSettingsPanel";
-import { ExpertsSettingsPanel } from "../components/settings/ExpertsSettingsPanel";
 import { ThemeModePicker } from "../components/settings/ThemeModePicker";
 import { ThemePackEditor } from "../components/ThemePackEditor";
 import {
@@ -107,16 +105,20 @@ import {
 import { ensureNativeApi, readNativeApi } from "../nativeApi";
 import { sameProviderOrder } from "../providerOrdering";
 import {
-  normalizeSettingsSection,
+  validateSettingsRouteSearch,
   SETTINGS_NAV_ITEMS,
   SETTINGS_TARGETS,
   settingRowAnchorId,
 } from "../settingsNavigation";
 import { SETTINGS_PAGE_BACKGROUND_CLASS_NAME } from "../settingsPanelStyles";
 import {
-  workbenchSettingsPageForSection,
-  type WorkbenchSettingsPageId,
-} from "../workbench/registry";
+  canonicalizeSettingsMcpSearch,
+  resolveSettingsHostRoute,
+  settingsSearchForExpertFromMcp,
+  settingsSearchForMcpFromExpert,
+  settingsSearchForMcpTab,
+} from "../workbench/host/settings";
+import { WorkbenchSettingsPage } from "../workbench/settingsPages";
 
 // ── Settings taxonomy ──────────────────────────────────────────────────────
 
@@ -188,16 +190,6 @@ const FOLLOW_UP_BEHAVIOR_OPTIONS = [
   { value: "steer", label: "Steer" },
 ] as const satisfies ReadonlyArray<{ value: FollowUpBehavior; label: string }>;
 
-function renderWorkbenchSettingsPage(pageId: WorkbenchSettingsPageId) {
-  switch (pageId) {
-    case "experts-settings":
-      return <ExpertsSettingsPanel />;
-  }
-
-  const exhaustivePageId: never = pageId;
-  return exhaustivePageId;
-}
-
 // ── Settings UI primitives ────────────────────────────────────────────────
 
 // Shared settings controls live in ~/components/settings/SettingControls.
@@ -216,9 +208,29 @@ type BooleanSettingKey = {
 
 function SettingsRouteView() {
   const routeSearch = useSearch({ strict: false }) as Record<string, unknown>;
-  const activeSection = normalizeSettingsSection(routeSearch.section);
+  const rawRouteSearch = useRouterState({
+    select: (state) => state.location.search as Record<string, unknown>,
+  });
+  const navigate = useNavigate();
+  const settingsRoute = resolveSettingsHostRoute(routeSearch, rawRouteSearch);
+  const activeSection = settingsRoute.activeSection;
+  const mcpTab = settingsRoute.mcpTab;
   const settingsTarget = typeof routeSearch.target === "string" ? routeSearch.target : null;
   const activeSectionItem = SETTINGS_NAV_ITEMS.find((item) => item.id === activeSection)!;
+
+  useEffect(() => {
+    if (!settingsRoute.shouldCanonicalizeMcpRoute) return;
+    void navigate({
+      to: "/settings",
+      replace: true,
+      search: (previous) => canonicalizeSettingsMcpSearch(previous),
+    });
+  }, [
+    navigate,
+    rawRouteSearch.section,
+    rawRouteSearch.tab,
+    settingsRoute.shouldCanonicalizeMcpRoute,
+  ]);
 
   const {
     isDefaultActiveTheme,
@@ -1266,9 +1278,72 @@ function SettingsRouteView() {
   );
 
   const renderRouteOwnedPanel = () => {
-    const workbenchPageId = workbenchSettingsPageForSection(activeSection);
+    const workbenchPageId = settingsRoute.pageId;
     if (workbenchPageId !== undefined) {
-      return renderWorkbenchSettingsPage(workbenchPageId);
+      const onReturnToSettings = () => {
+        void navigate({
+          to: "/settings",
+          search: { section: "general" } as never,
+        });
+      };
+      const onOpenConnections = (expertId: string, connectionId?: string) => {
+        void navigate({
+          to: "/settings",
+          search: settingsSearchForMcpFromExpert({
+            expertId,
+            ...(connectionId ? { connectionId } : {}),
+          }) as never,
+        });
+      };
+
+      if (workbenchPageId === "experts-settings") {
+        return (
+          <WorkbenchSettingsPage
+            pageId="experts-settings"
+            onReturnToSettings={onReturnToSettings}
+            onOpenConnections={onOpenConnections}
+            {...(settingsRoute.expertId === undefined
+              ? {}
+              : { initialExpertId: settingsRoute.expertId })}
+          />
+        );
+      }
+
+      return (
+        <WorkbenchSettingsPage
+          pageId="mcp-settings"
+          onReturnToSettings={onReturnToSettings}
+          initialTab={mcpTab}
+          {...(settingsRoute.connectionId === undefined
+            ? {}
+            : { initialConnectionId: settingsRoute.connectionId })}
+          {...(settingsRoute.expertId === undefined
+            ? {}
+            : { initialExpertId: settingsRoute.expertId })}
+          {...(settingsRoute.initialSearch === undefined
+            ? {}
+            : { initialSearch: settingsRoute.initialSearch })}
+          {...(settingsRoute.returnExpertId === undefined
+            ? {}
+            : { returnExpertId: settingsRoute.returnExpertId })}
+          onTabChange={(tab) => {
+            void navigate({
+              to: "/settings",
+              replace: true,
+              search: (previous) => settingsSearchForMcpTab(previous, tab),
+            });
+          }}
+          onReturnToExpert={({ expertId, connectionId }) => {
+            void navigate({
+              to: "/settings",
+              search: settingsSearchForExpertFromMcp({
+                expertId,
+                ...(connectionId ? { connectionId } : {}),
+              }) as never,
+            });
+          }}
+        />
+      );
     }
 
     switch (activeSection) {
@@ -1330,7 +1405,7 @@ function SettingsRouteView() {
                 activeSection === "profile" ? "max-w-3xl" : "max-w-2xl",
               )}
             >
-              {activeSection !== "profile" ? (
+              {activeSection !== "profile" && settingsRoute.pageId !== "experts-settings" ? (
                 <div className="mb-8 flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <h1 className="flex items-center gap-2 text-xl font-medium tracking-tight text-foreground">
@@ -1400,7 +1475,6 @@ function SettingsRouteView() {
                   updateSettingsAndWait={updateSettingsAndWait}
                   resetEpoch={resetEpoch}
                 />
-                <ExternalMcpSettingsPanel active={activeSection === "integrations"} />
                 <AdvancedSettingsPanel
                   active={activeSection === "advanced"}
                   onOpenReleaseHistory={() => setReleaseHistoryOpen(true)}
@@ -1424,5 +1498,6 @@ function SettingsRouteView() {
 }
 
 export const Route = createFileRoute("/_chat/settings")({
+  validateSearch: validateSettingsRouteSearch,
   component: SettingsRouteView,
 });

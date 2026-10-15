@@ -1,27 +1,72 @@
-# Synara Expert 项目上下文
+# Linx / Synara Expert 项目上下文
 
-更新日期：2026-09-29  
-范围：在现有 Synara 中实现跨 Codex / Pi 的 Expert 能力。本文只负责项目路由和当前状态；产品与技术细节以链接的权威文档为准。
+更新日期：2026-10-10
+
+范围：以 Linx V2.0 组织长期方向管理、专业任务执行与能力进化，并在现有 Synara Expert / MCP / 工作台适配层上增量推进。本文只负责项目路由、设计边界与当前状态；产品、技术和验收细节以链接的权威文档为准。
 
 ## 当前目标
 
+按 [Linx V2.0](../docs/linx-product-design-v2.md)构建面向个人学习、研究与工作的 AI-native 工作台，让长期负责与专业执行形成连续闭环。当前 V2.0 完成原文归档与 context 路由，尚未启动其新增功能实施；既有 Expert 技术目标继续保留如下。
+
 把 Expert 作为可复用、可检查、可固定版本的工作能力配置，组合 Persona、Skills 和 MCP 工具；Task 在首次启动时绑定不可变快照，并记录实际生效的 Provider、模型、SDK / CLI 版本和 lifecycle generation。
 
-当前实现已达到 P2 主体范围，下一阶段是补齐跨平台和发布候选实测，而不是继续扩大首版功能。
+现有开发候选是已批准的轻量适配层首期 A0–A4：代码实施与受控演练已完成，完整门禁仍有两项既有桌面失败，候选尚未提交、安装或发布。Expert P2 主体与跨平台发布缺口继续保留，旧证据不能自动算作本轮候选验收。
+
+## 当前产品方案：Linx V2.0（2026-10-10 归档）
+
+来源：Linx 在 2026-10-10 直接提供《Linx 个人 AI 工作台｜产品设计方案 V2.0》并要求归档与更新 context。[V2.0 原文](../docs/linx-product-design-v2.md)完整保留用户提供的内容，是当前 Linx 产品方向与 MVP 规划的权威设计来源；本文只是路由摘要。原文中的建议与待验证接口仍保留其设计状态，本次归档不等于代码实现、运行验证或发布。
+
+- **产品组织**：Space → Project → Task / Run；日常事项也可直接进入 Space 或全局 Inbox。Space 表达长期方向，Project 表达阶段目标；每个 Space 一个主要 Owner，Project 默认属于一个 Space。
+- **职责分离**：全局 Personal Assistant 负责跨方向协调，Space Owner 负责方向持续推进，Expert 负责具体任务，Agent Team 为复杂任务的可选模式。Hermes 优先作为 Persistent Agent Service 接入；长期身份不等于每个 Space 一个操作系统进程，也不把 Hermes 仅作为普通 Provider 呈现。
+- **复用底座**：保留 Synara Project Workspace、Expert / Skills 配置与已有任务执行能力，增量增加 Space、AgentAssignment、Hermes 服务连接及 Skill Evolution。Linx 持有核心业务对象关系，外部 Runtime 配置不作为业务模型基础。
+- **Context 按需组装**：Personal、Space、Project、Expert 四类上下文有各自范围；任务加载目标、必要项目资料、选定技能和少量相关方向背景，不自动继承 Owner 的全部记忆或历史会话。Obsidian 保存权威知识，其他对象保留索引、引用与必要摘要。
+- **权限与版本**：主动读取、分析和建议依据授权范围；创建任务、状态修改与外部写入按授权执行。Skill Evolution 独立于 Provider 和 Hermes Runtime，从 Run / 反馈提出 Skill 新建或 Patch，用户审核 Diff 后生效，可回滚并追溯来源 Run；运行中固定 Skill 版本，不自动覆盖已发布 Skill。
+- **UI 方向**：Home、Spaces、Tasks、Experts、Settings；Space Overview 提供目标、负责人、重点、项目与关键更新，负责人通过侧边对话面板协作，专业工作继续进入原 Project Workspace。
+- **MVP 顺序**：两条 P0 为 Space + Hermes Owner 基础体验与手动 Skill Evolution；P1 补授权任务推进、主动阻塞发现及定期汇报；P2 再扩展 Expert Team、Coordinator 和自动进化。Team 的首个形态为主 Expert 执行 + 独立 Expert 审查，多 Agent 不是默认执行方式。
+- **范围边界**：不另建知识库、不为所有 Expert 添加长期记忆、不强制每个 Project 创建 Hermes、不默认每次任务启动 Team、不自动发布 Skill 修改、不重建 Synara 已有 Project / 执行功能、不先建设复杂数字员工层级。
+
+### 设计与现有实现的衔接
+
+- V2.0 描述产品目标与阶段规划；下面的 Expert、MCP 和适配层记录描述已有候选及历史证据。原有检查、失败与未发布状态不因归档而改变。
+- 既有 Expert 的快照、工具授权和 Provider Adapter 细节继续查阅[Expert 产品与技术方案](../docs/expert-product-technical-design.md)。其中“不另建 Agent Runtime”限定既有 Expert 首版；V2.0 的 Hermes 外部常驻服务是新增设计，不能据此声称已接入或修改 Expert Runtime 边界。
+- V2.0 的 Task、Run、Thread 是产品层对象划分，不能仅凭此文档认定现有数据模型已有对应独立实体。实施前需核对映射、数据关系及增量迁移需求。
+- 尚需核对当前 Hermes Fork 的 API / MCP、Profile 与记忆隔离、项目状态查询、授权与定时能力；AgentAssignment 字段、空间归属迁移及 Skill 版本存储仍需技术方案。原文中的“插件”定位不证明 Synara 已具备动态插件 SDK。
+- P0 验收以原文第 13 节为准：一个学术 Space 关联两个 Project，Owner 基于实际项目数据持续汇报；一次任务中的有效改进提炼为 Skill 并在另一任务复用。当前没有上述场景的实现或验收完成结论。
+
+## 既有候选进度（2026-10-09 核对）
+
+本节摘要依据 [2026-10-08 适配层实施验收](../docs/workbench-adaptation-acceptance.md)及其源码交付清单；详细检查与限制只维护在验收文档。预览修复前核对候选与记录的交付 tree 无差异；下述 10 月 9 日修复随后改变候选源码，旧 tree 不代表修复后内容。
+
+- **A0 已完成**：保存此前专家 UI、全局 MCP、本机发现/导入的完整未提交候选基线，可恢复源码；归档不包含依赖、索引或应用数据。
+- **A1–A3 已完成**：统一 UI 注册、搜索和惰性页面装配，收拢窄客户端与服务端静态 handler 接入，扩大依赖检查。现有草稿、缓存、原生认证、CAS 与任务生命周期继续沿用；保留深层依赖逐项登记。
+- **A4 已完成，范围有限**：在独立副本模拟链接参数改名，只改一个宿主产品源文件，12 个 Expert/MCP 功能组件内容保持不变；宿主 6 项单测及真实专家面板 7 项 browser 通过，数据 API 为 mock。这不是一次真实官方升级验收。
+- **本轮检查**：使用 Node 24.13.1 / Bun 1.4.2。格式、lint（0 errors，仍有 warnings）、7 个 workspace 类型检查、22 项候选 browser、6519 项服务端测试及依赖边界检查通过。
+- **完整门禁未绿色**：全量首次执行为 13258 通过、19 失败、36 跳过；降低并发复跑 275 项全部通过，其中 17 项首次失败未再复现。剩余两项 `betaChannel.test.ts` 失败在实施前源码也已复现：安装后启动路径选中本机应用、安装失败用例返回成功。不得把复跑结果改写成完整绿色门禁。
+- **未交付到生产**：没有集成官方新版本、安装或发布候选；本轮没有重验真实 Provider、跨平台安装包或数据迁移。受控演练不能证明任意官方变更均可隔离，也不能推导长期节省比例。
+
+## 当前预览（2026-10-09）
+
+- 应用户要求打开候选，在 `http://localhost:17733/settings?section=experts` 启动独立开发预览；服务端端口 15773。数据目录为 `/Users/wangyuelin/.codex/task-artifacts/workbench-preview-2026-10-09/home`，不复用日用数据库。预览地址只在进程运行期间有效。
+- 实机首次打开专家页时发现持续显示 Loading，已把两页 lazy 组件身份移至 Suspense 边界之外；候选新增正常并发根下的首加载回归。首页、专家列表及产品经理编辑页已实际显示；没有发起模型任务、安装应用或升级官方源码。
+- 修复检查与限制记录在[适配层实施验收的 10 月 9 日补充](../docs/workbench-adaptation-acceptance.md#2026-10-09-开发预览与首加载修复)。10 月 8 日归档和完整门禁结果保留原样，不作为修复后候选的完整验收。
 
 ## 当前权威材料
 
-| 材料                                                         | 角色               | 当前用途                                                    |
-| ------------------------------------------------------------ | ------------------ | ----------------------------------------------------------- |
-| [产品与技术方案](../docs/expert-product-technical-design.md) | 当前产品与架构基线 | 产品定位、对象边界、交互、数据模型、Provider 适配和阶段范围 |
-| [P0 技术验证记录](../docs/expert-p0/README.md)               | 当前验证结论入口   | Codex / Pi、恢复、取消、Gateway 与真实模型证据              |
-| [发布故障矩阵](../docs/expert-p0/release-fault-matrix.md)    | 当前验收与缺口清单 | 区分自动化、本机实测和待平台实测                            |
-| [交互线框](../docs/expert-interaction-wireframe.html)        | 已确认的交互参考   | 新任务选专家、专家管理和任务详情的首版流程                  |
-| [架构图](../docs/expert-architecture.drawio)                 | 可编辑架构参考     | Expert、Task、Provider、Gateway 和连接的关系                |
+| 材料                                                         | 角色               | 当前用途                                                         |
+| ------------------------------------------------------------ | ------------------ | ---------------------------------------------------------------- |
+| [Linx V2.0 原文](../docs/linx-product-design-v2.md) | 当前 Linx 产品设计来源 | 长期工作方向、Hermes / Expert 分工、Context、进化、UI 与 MVP；未实现内容保留设计状态 |
+| [Expert 产品与技术方案](../docs/expert-product-technical-design.md) | 既有 Expert 子系统基线 | Expert 对象、交互、数据模型、Provider 适配和阶段范围 |
+| [P0 技术验证记录](../docs/expert-p0/README.md)               | 当前验证结论入口   | Codex / Pi、恢复、取消、Gateway 与真实模型证据                   |
+| [发布故障矩阵](../docs/expert-p0/release-fault-matrix.md)    | 当前验收与缺口清单 | 区分自动化、本机实测和待平台实测                                 |
+| [交互线框](../docs/expert-interaction-wireframe.html)        | 已确认的交互参考   | 新任务选专家、专家管理和任务详情的首版流程                       |
+| [架构图](../docs/expert-architecture.drawio)                 | 可编辑架构参考     | Expert、Task、Provider、Gateway 和连接的关系                     |
+| [轻量适配层方案](../docs/workbench-adaptation-plan.md)       | 已确认的首期设计   | A0–A4 范围、UI / 服务端适配与保留的深层接入                      |
+| [适配层实施验收](../docs/workbench-adaptation-acceptance.md) | 当前进度与验证入口 | 候选源码、实际检查、遗留失败与受控演练；完整日志不复制到 context |
+| [工作台开发流程](../docs/workbench-development-workflow.md)  | 开发与验证约定     | 按影响选择检查、证据有效性和完成报告                             |
 
-## 已确认的产品与架构决定
+## 既有 Expert 子系统已确认决定
 
-以下决定的权威说明均在[产品与技术方案](../docs/expert-product-technical-design.md)：
+以下为既有 Expert 范围内的决定，不代替上面的 Linx V2.0 产品规划。权威说明均在[产品与技术方案](../docs/expert-product-technical-design.md)：
 
 - Expert 是一级产品对象，Task 仍是实际工作的承载者；首版不另建独立 Agent Runtime。
 - Expert 组合 Persona、Skills、连接和运行偏好；凭证不进入 Expert 定义或快照。
@@ -31,7 +76,7 @@
 - 第三方工具统一经过 Synara Gateway。`tools/list` 与 `tools/call` 都按已验证的会话身份和固定快照授权，不能信任工具参数中的 Expert 或 thread 标识。
 - Provider 自带的环境 Skill 可能继续出现；产品只声明专家提供的固定技能来源，不把专家技能清单描述为严格工具沙箱。
 
-## 当前实现状态
+## 2026-09-29 实现记录（历史基线）
 
 以下是 2026-09-29 工作树中的机械事实，产品语义仍由上面的方案文档解释：
 
@@ -52,27 +97,38 @@
 - 专家管理与技能编辑：[ExpertsSettingsPanel.tsx](../apps/web/src/components/settings/ExpertsSettingsPanel.tsx)
 - 任务诊断：[ExpertTaskControl.tsx](../apps/web/src/components/chat/ExpertTaskControl.tsx)
 
-## 当前验证状态
+## 2026-09-29 验证记录（历史证据）
 
 - P0 技术可行性已通过：macOS 上 Codex / Pi 真实模型的 Persona、Skill、工具调用、恢复和取消已有证据；两端经过 Gateway 调用本地 MCP、会话 A/B 授权、下游取消与退出清理也已有证据。边界见[P0 技术验证记录](../docs/expert-p0/README.md)。
 - 2026-09-29 本地检查中，格式、lint、类型检查、Windows runtime 静态边界检查、Expert 定向测试、完整 Web 测试和完整 server 测试通过。
-- 仓库根完整测试没有形成全绿结论：五个工作区完成，desktop 工作区卡在 Electron `install.js`，8 分 25 秒无进展后终止。后续应在依赖完整的环境单独复跑 desktop 全套测试。
-- 迁移检查命令正常退出，但当前 checkout 没有可访问的发布标签，因此没有完成历史发布链比较。
-- 当前机器 Node 22.23.1、Bun 1.4.0 低于仓库声明的 Node 24.13.1、Bun 1.4.2；发布候选需要在声明版本复跑。
+- 当时仓库根完整测试没有形成全绿结论：五个工作区完成，desktop 工作区卡在 Electron `install.js`，8 分 25 秒无进展后终止。2026-10-08 全量执行已完成，当前桌面失败改由本轮验收记录说明。
+- 迁移检查命令正常退出，但当时 checkout 没有可访问的发布标签，因此没有完成历史发布链比较。
+- 当时默认工具为 Node 22.23.1 / Bun 1.4.0，低于仓库声明版本；2026-10-08 适配层检查已使用声明的 Node 24.13.1 / Bun 1.4.2。该检查不等同于签名安装包或跨平台发布验收。
 
 ## 当前工作状态与边界
 
-- 当前分支为 `main`，基线提交为 `eaa61ed`。Expert 实现及文档仍在工作树中，尚未提交或发布；继续工作前先查看 `git status`，不要把文档中的完成状态误认为已有远端提交。
+- 主目录 `/Users/wangyuelin/synara-expert`：`main`，HEAD `8e5c12b963e3dd143837aa751e1749b5b55f5d73`；保留原有未提交文档与其他内容，应用源码没有被候选覆盖。
+- 实施目录 `/Users/wangyuelin/.codex/worktrees/expert-frontend-redesign/synara-expert`：`codex/workbench-adaptation`，HEAD `61df29b094d3e5f2877f7787613655220a4f72a2`；最新功能与适配层仍未提交。继续代码工作必须使用这个候选目录并先查看 `git status`，不能只依据 HEAD 判断完整实现。
+- 实施前源码 tree 为 `560487726a8dffb4432f3d46b8262b3bbe7332f5`，本轮交付 tree 为 `490e1320a7a193fb486479e254e24304ce2f8c61`（本次 context 更新之前）。本机归档、增量 diff 与检查清单在 `/Users/wangyuelin/.codex/task-artifacts/workbench-adaptation-2026-10-08/`。context 更新不重新生成或替换历史验收 tree。
+- 2026-09-29 本页曾记录 `main/eaa61ed` 工作基线；该记录已被上面的双目录状态取代，不代表当前源码位置。
 - 不重置用户数据库，不复用生产状态做验证。启动产品实例时使用独立 `SYNARA_HOME` 和未占用端口，并先检查开发启动器的 dry-run。
 - 连接配置只保存环境变量或凭证引用；诊断、日志、导出和 context 不保存凭证值。
 - 真实 Provider 成功、进程退出和取消清理必须由对应运行证据确认；mock、类型检查和本地构建不能替代产品实测。
 
 ## 下一步
 
-1. 在 Linux 隔离实例完成保存连接、绑定专家、首回合、恢复、取消和凭据撤销清理。
-2. 在 Windows 打包应用中覆盖可执行文件解析、参数与环境继承、stdio / HTTP MCP、取消及进程树退出。
-3. 用真实远端或受控局域网 Streamable HTTP MCP 服务补充 macOS 远端链路实测。
-4. 在仓库声明的 Node / Bun 版本和发布候选上复跑完整检查，并解决或隔离 desktop Electron 安装脚本挂起。
-5. 完成上述发布门槛后，再决定提交、发布及是否进入 P3。P3 的导出分享、Git 来源、OAuth、团队分发和项目默认专家仍是按需求启动的后续范围。
+### Linx V2.0 待开展
 
-执行时先从本文件选择权威材料，再只读取当前任务需要的章节。若方案文档、P0 证据或发布故障矩阵发生变化，应重新核对本页对应摘要，不以本页日期代替新证据。
+1. 以 V2.0 第 13 节验收场景为目标，核对现有 Synara 对象与当前 Hermes Fork 能力，形成 Space / AgentAssignment / Context / 权限的增量技术方案。
+2. 分别细化 Space + Owner 与 Skill Evolution 两条 P0 的范围、依赖和验收；本次归档没有启动开发、安装或自动化。
+3. 产品原文变化时重新核对本页摘要与后续技术方案；原文中的建议不通过摘要自动变成新增实现约束。
+
+### 既有候选收尾与验证
+
+1. 在候选目录核对并处理两项既有 Beta 测试失败，形成相应的桌面检查与完整门禁结论；保留首次全量失败和复跑证据，不降低断言或用 skip 隐藏问题。
+2. 合并审查候选中此前的专家 UI / 全局 MCP / 本机导入与本轮适配层变更，固定后续源码提交；提交、构建、安装与发布分别记录实际状态，不能互相替代。
+3. 按实际交付目标补齐当前源码的真实 Provider、取消/恢复、MCP、跨平台安装包和迁移验证；保留 Linux、Windows 与远端 HTTP MCP 的历史缺口，不搬用旧 SHA 的成功结论。
+4. 后续两到三次真实官方升级记录改动类型、需语义适配的宿主/模块文件、修复与验证时间，评估本层维护成本。没有本轮官方升级或长期收益的完成结论。
+5. P3 导出分享、Git 来源、OAuth、团队分发和项目默认专家，以及已延期的业务看板，仍按实际需求另行启动。
+
+执行时先从本文件选择权威材料，再只读取当前任务需要的章节。后续阶段完成、检查结果变化或源码交接时，及时更新本页进度摘要与证据链接；方案、验收、P0 证据或发布故障矩阵变化时重新核对对应摘要，不以本页日期代替新证据。

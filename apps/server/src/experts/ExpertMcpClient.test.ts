@@ -1,3 +1,6 @@
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, type ServerResponse } from "node:http";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -8,7 +11,10 @@ import type { ExpertConnectionConfig } from "@synara/contracts";
 import * as z from "zod/v4";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
+import { createExpertMcpCredentialStore } from "./ExpertMcpCredentials.ts";
 import { connectExpertMcp } from "./ExpertMcpClient.ts";
+import { createLocalMcpDiscovery } from "./LocalMcpDiscovery.ts";
 
 const originalToken = process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
 
@@ -25,6 +31,20 @@ function connectionConfig(transport: ExpertConnectionConfig["transport"]): Exper
     revision: 1,
     updatedAt: "2026-09-26T00:00:00.000Z",
   };
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Fixture child process did not exit before the deadline.");
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -171,6 +191,35 @@ async function makeHttpFixture(options: { hangCancellationNotificationResponse?:
 }
 
 describe("connectExpertMcp", () => {
+  it("uses Synara-owned credentials for HTTP headers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synara-mcp-http-secret-"));
+    const credentials = createExpertMcpCredentialStore(join(root, "state"));
+    const credentialId = await credentials.create({
+      env: {},
+      headers: { authorization: "Bearer fixture-token" },
+    });
+    const fixture = await makeHttpFixture();
+    let client: Awaited<ReturnType<typeof connectExpertMcp>> | undefined;
+
+    try {
+      client = await connectExpertMcp(
+        connectionConfig({
+          type: "http",
+          url: fixture.url,
+          headersFromHost: [],
+          headersFromSecret: { credentialId, names: ["authorization"] },
+        }),
+        { credentials },
+      );
+      expect(client.tools.map((tool) => tool.name)).toContain("echo");
+      expect(fixture.authorizedRequests()).toBeGreaterThan(0);
+    } finally {
+      await client?.close().catch(() => undefined);
+      await fixture.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("lists and calls HTTP tools, forwards cancellation, and closes the connection", async () => {
     const previousToken = process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
     process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = "fixture-token";
@@ -320,6 +369,101 @@ describe("connectExpertMcp", () => {
     }
   }, 30_000);
 
+  it("imports Codex literal env references and verifies stdio cwd, timeouts, and child cleanup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "synara-mcp-stdio-source-"));
+    const sourcePath = join(root, "config.toml");
+    const stateDir = join(root, "state");
+    const cwd = join(root, "workspace");
+    const markerPath = join(root, "fixture-result.txt");
+    await mkdir(cwd);
+    const expectedCwd = await realpath(cwd);
+    const envNames = Array.from(
+      { length: 16 },
+      (_, index) => `FIXTURE_ENV_${String(index + 1).padStart(2, "0")}`,
+    );
+    const sourceSecrets = Object.fromEntries(
+      envNames.map((name, index) => [name, `source-literal-secret-${index + 1}`]),
+    );
+    const expectedNames = JSON.stringify(envNames);
+    const script = [
+      `const fs = require("node:fs");`,
+      `const names = ${expectedNames};`,
+      `const envOk = names.every((name) => Object.hasOwn(process.env, name) && process.env[name].length > 0);`,
+      `const cwdOk = process.cwd() === ${JSON.stringify(expectedCwd)};`,
+      `fs.writeFileSync(${JSON.stringify(markerPath)}, JSON.stringify({ envOk, cwdOk }));`,
+      `const readline = require("node:readline");`,
+      `const input = readline.createInterface({ input: process.stdin });`,
+      `input.on("line", (line) => {`,
+      `  let request; try { request = JSON.parse(line); } catch { return; }`,
+      `  if (request.id === undefined) return;`,
+      `  let result = {};`,
+      `  if (request.method === "initialize") result = { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "local-fixture", version: "1" } };`,
+      `  if (request.method === "tools/list") result = { tools: [{ name: "fixture", description: "pid:" + process.pid, inputSchema: { type: "object", properties: {} } }] };`,
+      `  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");`,
+      `});`,
+    ].join("");
+    const envToml = Object.entries(sourceSecrets)
+      .map(([name, value]) => `${name} = ${JSON.stringify(value)}`)
+      .join("\n");
+    await writeFile(
+      sourcePath,
+      `[mcp_servers.fixture]\ncommand = ${JSON.stringify(process.execPath)}\nargs = ["-e", ${JSON.stringify(script)}]\ncwd = ${JSON.stringify(cwd)}\nstartup_timeout_sec = 15\ntool_timeout_sec = 5\n[mcp_servers.fixture.env]\n${envToml}\n`,
+    );
+
+    const connections = createExpertConnectionStore(stateDir);
+    const credentials = createExpertMcpCredentialStore(stateDir);
+    const discovery = createLocalMcpDiscovery({ connections, credentials, homeDir: root });
+    const scan = await discovery.discover({ sources: [{ kind: "codex", path: sourcePath }] });
+    const candidate = scan.candidates.find((entry) => entry.name === "fixture");
+    expect(candidate).toMatchObject({ status: "ready", sourceEntryId: "fixture" });
+    expect(JSON.stringify(scan)).not.toContain("source-literal-secret");
+
+    const imported = await discovery.importSelected({
+      scanId: scan.scanId,
+      items: [
+        { candidateId: candidate!.candidateId, targetId: "mcp_codex_fixture", mode: "create" },
+      ],
+    });
+    expect(imported.items).toMatchObject([{ status: "imported", revision: 1 }]);
+    const stored = await connections.read("mcp_codex_fixture");
+    expect(stored?.transport).toMatchObject({
+      type: "stdio",
+      cwd,
+      startupTimeoutMs: 15_000,
+      toolTimeoutMs: 5_000,
+      envFromHost: [],
+      envFromSecret: { credentialId: expect.any(String), names: envNames },
+    });
+    expect(stored?.importedFrom).toEqual([{ kind: "codex", path: sourcePath, entryId: "fixture" }]);
+    expect(JSON.stringify(stored)).not.toContain("source-literal-secret");
+    await rm(sourcePath);
+
+    let client: Awaited<ReturnType<typeof connectExpertMcp>> | undefined;
+    let childPid: number | undefined;
+    try {
+      const reopenedConnections = createExpertConnectionStore(stateDir);
+      const reopenedCredentials = createExpertMcpCredentialStore(stateDir);
+      const reopenedStored = await reopenedConnections.read("mcp_codex_fixture");
+      expect(reopenedStored).toEqual(stored);
+      client = await connectExpertMcp(reopenedStored!, { credentials: reopenedCredentials });
+      expect(client.tools.map((tool) => tool.name)).toContain("fixture");
+      const pidDescription =
+        client.tools.find((tool) => tool.name === "fixture")?.description ?? "";
+      const match = /^pid:(\d+)$/u.exec(pidDescription);
+      expect(match).not.toBeNull();
+      childPid = Number(match![1]);
+      expect(JSON.parse(await readFile(markerPath, "utf8"))).toEqual({ envOk: true, cwdOk: true });
+      expect(JSON.stringify(client.tools)).not.toContain("source-literal-secret");
+      await client.close();
+      client = undefined;
+      await waitForProcessExit(childPid, 2_000);
+    } finally {
+      await client?.close().catch(() => undefined);
+      if (childPid !== undefined) await waitForProcessExit(childPid, 2_000).catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 15_000);
+
   it("fails before connecting when a referenced environment variable is missing", async () => {
     delete process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
     await expect(
@@ -332,6 +476,6 @@ describe("connectExpertMcp", () => {
           ],
         }),
       ),
-    ).rejects.toThrow(/SYNARA_EXPERT_MCP_TEST_TOKEN/u);
+    ).rejects.toThrow("Expert MCP credential is unavailable or invalid.");
   });
 });

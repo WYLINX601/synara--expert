@@ -2,7 +2,16 @@
 // Purpose: Shared create/edit dialog for a Space name and curated Central icon.
 
 import { SPACE_NAME_MAX_LENGTH } from "@synara/contracts";
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ComponentProps,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 
 import { DEFAULT_SPACE_ICON, DEFAULT_VOID_SPACE_ICON } from "~/lib/spaceGrouping";
 import { suggestSpaceIcon } from "~/lib/spaceIconSuggestion";
@@ -52,10 +61,23 @@ export function SpaceEditorDialog(props: {
   existingNames: ReadonlyArray<string>;
   onOpenChange: (open: boolean) => void;
   onSubmit: (value: SpaceEditorValue) => Promise<void> | void;
+  /** Reports the current name and icon draft so a parent can include it in dirty-state guards. */
+  onValueChange?: ((value: SpaceEditorValue) => void) | undefined;
+  /** Optional fields rendered only while editing a stored Space. */
+  bodyContent?: ReactNode;
+  /** Optional return target when the original menu item is no longer mounted. */
+  finalFocus?: ComponentProps<typeof DialogPopup>["finalFocus"];
+  /** Parent-owned validation or persistence can keep Save unavailable. */
+  submitDisabled?: boolean;
+  /** Preserve the legacy submitting behavior unless a parent opts into field/close locking. */
+  lockWhileSubmitting?: boolean;
+  /** Prevents Escape, outside press, and the close affordance from dismissing the dialog. */
+  closeDisabled?: boolean;
 }) {
   const isVoid = props.mode === "void";
   const iconOptions = isVoid ? VOID_SPACE_ICON_OPTIONS : SPACE_ICON_OPTIONS;
   const defaultIcon: SpaceIconValue = isVoid ? DEFAULT_VOID_SPACE_ICON : DEFAULT_SPACE_ICON;
+  const onValueChange = props.onValueChange;
   const [name, setName] = useState("");
   const [icon, setIcon] = useState<SpaceIconValue>(defaultIcon);
   /**
@@ -80,8 +102,11 @@ export function SpaceEditorDialog(props: {
     if (props.open === openedRef.current) return;
     openedRef.current = props.open;
     if (!props.open) return;
-    setName(props.initialValue?.name ?? "");
-    setIcon(props.initialValue?.icon ?? defaultIcon);
+    const initialName = props.initialValue?.name ?? "";
+    const initialIcon = props.initialValue?.icon ?? defaultIcon;
+    setName(initialName);
+    setIcon(initialIcon);
+    onValueChange?.({ name: initialName, icon: initialIcon });
     setIconPinned(props.mode !== "create");
     setSubmitting(false);
     setSubmitError(null);
@@ -89,7 +114,14 @@ export function SpaceEditorDialog(props: {
     // has to happen after that lands or it is immediately undone. Matches PickerPanelShell.
     const frame = requestAnimationFrame(() => nameInputRef.current?.select());
     return () => cancelAnimationFrame(frame);
-  }, [defaultIcon, props.initialValue?.icon, props.initialValue?.name, props.mode, props.open]);
+  }, [
+    defaultIcon,
+    props.initialValue?.icon,
+    props.initialValue?.name,
+    props.mode,
+    onValueChange,
+    props.open,
+  ]);
 
   const trimmedName = name.trim();
   const duplicateName = props.existingNames.some(
@@ -107,7 +139,7 @@ export function SpaceEditorDialog(props: {
   const visibleNameError = name.length > 0 ? nameError : null;
 
   const submit = async () => {
-    if (nameError || submitting) return;
+    if (nameError || submitting || props.submitDisabled) return;
     setSubmitting(true);
     setSubmitError(null);
     try {
@@ -148,9 +180,18 @@ export function SpaceEditorDialog(props: {
     cells[nextIndex]?.click();
   }, []);
 
+  const handleOpenChange = (open: boolean) => {
+    if (!open && (props.closeDisabled || (props.lockWhileSubmitting && submitting))) return;
+    props.onOpenChange(open);
+  };
+
   return (
-    <Dialog open={props.open} onOpenChange={props.onOpenChange}>
-      <DialogPopup className="max-w-sm">
+    <Dialog open={props.open} onOpenChange={handleOpenChange}>
+      <DialogPopup
+        finalFocus={props.finalFocus}
+        className="max-w-sm"
+        showCloseButton={!(props.closeDisabled || (props.lockWhileSubmitting && submitting))}
+      >
         <DialogHeader>
           <DialogTitle>
             {props.mode === "create" ? "New space" : isVoid ? "Edit unfiled group" : "Edit space"}
@@ -176,13 +217,17 @@ export function SpaceEditorDialog(props: {
               id={nameInputId}
               ref={nameInputRef}
               value={name}
+              disabled={props.lockWhileSubmitting && submitting}
               maxLength={SPACE_NAME_MAX_LENGTH}
               aria-invalid={Boolean(visibleNameError)}
               {...(visibleNameError ? { "aria-describedby": nameErrorId } : {})}
               onChange={(event) => {
-                setName(event.target.value);
+                const nextName = event.target.value;
+                const nextIcon = iconPinned ? icon : suggestSpaceIcon(nextName);
+                setName(nextName);
                 // The icon follows the name until the user pins one from the grid.
-                if (!iconPinned) setIcon(suggestSpaceIcon(event.target.value));
+                if (!iconPinned) setIcon(nextIcon);
+                props.onValueChange?.({ name: nextName, icon: nextIcon });
               }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -221,9 +266,11 @@ export function SpaceEditorDialog(props: {
                     aria-label={option.label}
                     // Roving tabindex: the whole grid is one tab stop.
                     tabIndex={selected ? 0 : -1}
+                    disabled={props.lockWhileSubmitting && submitting}
                     onClick={() => {
                       setIcon(option.name);
                       setIconPinned(true);
+                      props.onValueChange?.({ name, icon: option.name });
                     }}
                     className={cn(
                       ICON_CELL_CLASS_NAME,
@@ -238,6 +285,7 @@ export function SpaceEditorDialog(props: {
               })}
             </div>
           </fieldset>
+          {props.mode === "edit" && props.bodyContent !== undefined ? props.bodyContent : null}
           {submitError ? (
             <p role="alert" className="text-ui-xs text-destructive">
               {submitError}
@@ -245,10 +293,17 @@ export function SpaceEditorDialog(props: {
           ) : null}
         </DialogPanel>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => props.onOpenChange(false)} disabled={submitting}>
+          <Button
+            variant="ghost"
+            onClick={() => handleOpenChange(false)}
+            disabled={submitting || props.closeDisabled}
+          >
             Cancel
           </Button>
-          <Button onClick={() => void submit()} disabled={Boolean(nameError) || submitting}>
+          <Button
+            onClick={() => void submit()}
+            disabled={Boolean(nameError) || submitting || props.submitDisabled}
+          >
             {submitting ? "Saving…" : props.mode === "create" ? "Create space" : "Save"}
           </Button>
         </DialogFooter>

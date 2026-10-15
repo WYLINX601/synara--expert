@@ -15,6 +15,7 @@ import { useEffect, useId, useRef, useState, type ChangeEvent, type ReactNode } 
 
 import {
   ArrowLeftIcon,
+  BookOpenIcon,
   BugIcon,
   CheckIcon,
   ChevronRightIcon,
@@ -45,6 +46,7 @@ const ROW_PLAN = "extras:mode:plan";
 const ROW_DEBUG = "extras:mode:debug";
 const ROW_FAST = "extras:fast";
 const ROW_BACK = "extras:back";
+const ROW_CONTEXT = "extras:context";
 const WINDOW_ROW_PREFIX = "extras:window:";
 
 const CHECK = <CheckIcon className="size-3.5 text-foreground/70" />;
@@ -71,6 +73,8 @@ export function ComposerExtrasPanel(props: {
   onInteractionModeChange: (mode: ProviderInteractionMode) => void;
   /** Turns the draft into a `/goal` command so the goal chip flow is the same as typing it. */
   onInsertGoal: () => void;
+  /** Opens the parent-owned Context detail surface from the root + menu. */
+  onViewContext?: (() => void) | undefined;
   onClose: () => void;
   panelId: string;
 }) {
@@ -192,6 +196,15 @@ export function ComposerExtrasPanel(props: {
                     },
                   ]
                 : []),
+              ...(props.onViewContext
+                ? [
+                    {
+                      id: ROW_CONTEXT,
+                      icon: <BookOpenIcon className={GLYPH} />,
+                      title: "查看上下文",
+                    },
+                  ]
+                : []),
             ],
           },
         ];
@@ -226,6 +239,11 @@ export function ComposerExtrasPanel(props: {
     if (rowId === ROW_GOAL) {
       props.onInsertGoal();
       props.onClose();
+      return;
+    }
+    if (rowId === ROW_CONTEXT) {
+      props.onClose();
+      props.onViewContext?.();
       return;
     }
     if (rowId === ROW_PLAN || rowId === ROW_DEBUG) {

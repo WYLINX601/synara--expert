@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { WsBootstrapRpcGroup, WsFeatureRpcGroup, WsComputerRpcGroup } from "./rpc";
 import { COMPUTER_WS_METHODS } from "./computer";
 import { ORCHESTRATION_WS_METHODS } from "./orchestration";
+import { WS_METHODS } from "./ws";
 
 describe("WS RPC contracts", () => {
   it("keeps bootstrap and feature RPCs in separate groups", () => {
@@ -20,5 +21,24 @@ describe("WS RPC contracts", () => {
     for (const method of Object.values(COMPUTER_WS_METHODS)) {
       expect(WsComputerRpcGroup.requests.has(method)).toBe(true);
     }
+  });
+
+  it("registers revision-guarded expert restore in the feature RPC group", () => {
+    expect(WsFeatureRpcGroup.requests.has(WS_METHODS.serverRestoreExpert)).toBe(true);
+  });
+
+  it("registers revision-guarded expert delete in the feature RPC group", () => {
+    expect(WsFeatureRpcGroup.requests.has(WS_METHODS.serverDeleteExpert)).toBe(true);
+  });
+
+  it("registers the fixed expert connection state and references RPCs", () => {
+    expect(WsFeatureRpcGroup.requests.has("server.getExpertConnectionState")).toBe(true);
+    expect(WsFeatureRpcGroup.requests.has("server.setExpertConnectionState")).toBe(true);
+    expect(WsFeatureRpcGroup.requests.has("server.readExpertConnectionReferences")).toBe(true);
+  });
+
+  it("registers owner MCP discovery and import RPCs", () => {
+    expect(WsFeatureRpcGroup.requests.has(WS_METHODS.serverDiscoverMcpConnections)).toBe(true);
+    expect(WsFeatureRpcGroup.requests.has(WS_METHODS.serverImportMcpConnections)).toBe(true);
   });
 });

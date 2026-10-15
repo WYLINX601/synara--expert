@@ -8,12 +8,22 @@
         "apps/web/src/workbench/registry.ts",
         "apps/web/src/settingsNavigation.ts",
         "apps/web/src/routes/_chat.settings.tsx",
-        "apps/web/src/components/settings/ExpertsSettingsPanel.tsx"
+        "apps/web/src/components/settings/ExpertsSettingsPanel.tsx",
+        "apps/web/src/workbench/settingsPages.tsx",
+        "apps/web/src/workbench/host/settings.ts",
+        "apps/web/src/settingsSearchIndex.ts",
+        "apps/web/src/components/settings/GlobalMcpSettingsPanel.tsx",
+        "apps/web/src/components/settings/LocalMcpDiscoveryPanel.tsx"
       ],
-      "responsibility": "The static Workbench registry owns the existing Experts settings section metadata and page id. Settings navigation and the TanStack settings route reuse that entry; the route still renders the existing ExpertsSettingsPanel directly.",
+      "responsibility": "Static registry owns Expert/MCP navigation and search metadata. settingsPages lazily assembles existing panels with route context from workbench/host/settings. The native route retains its shell, canonical URL behavior and browser history; feature panels retain their existing dirty draft guard and cache.",
       "tests": [
         "apps/web/src/workbench/registry.test.ts",
-        "apps/web/src/components/SettingsSidebarNav.test.tsx"
+        "apps/web/src/components/SettingsSidebarNav.test.tsx",
+        "apps/web/src/workbench/host/settings.test.ts",
+        "apps/web/src/components/settings/WorkbenchSettingsPages.browser.tsx",
+        "apps/web/src/settingsSearchIndex.test.ts",
+        "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
+        "apps/web/src/components/settings/GlobalMcpSettingsPanel.browser.tsx"
       ]
     },
     {
@@ -23,13 +33,18 @@
         "apps/server/src/wsRpc.ts",
         "apps/server/src/workbench/runtimeLayer.ts",
         "packages/contracts/src/ws.ts",
-        "packages/contracts/src/rpc.ts"
+        "packages/contracts/src/rpc.ts",
+        "apps/server/src/workbench/host/expertRpc.ts",
+        "apps/web/src/workbench/host/expertClient.ts",
+        "apps/web/src/wsNativeApi.ts"
       ],
-      "responsibility": "wsRpc registers the existing Expert RPC methods and retains requireOwner authorization plus rpcEffect error mapping. The Workbench runtime assembles existing Expert stores, the applied-runtime repository access, and the connection-test MCP lifecycle. RPC schemas and wire method names remain native contracts.",
+      "responsibility": "wsRpc owns authenticated connection context, admission, requireOwner and the distinct rpcEffect/expertRpcEffect error mappings. A static host assembly supplies Expert/MCP handlers using the existing Workbench runtime and projection read capability. Web feature consumers use the existing NativeApi server ExpertClient type subset without a second transport/cache. Wire method names, schemas and durable ownership remain unchanged.",
       "tests": [
         "apps/server/src/workbench/runtimeLayer.test.ts",
         "apps/server/src/wsRpc.auth.test.ts",
-        "apps/server/src/wsRpc.errors.test.ts"
+        "apps/server/src/wsRpc.errors.test.ts",
+        "apps/server/src/wsRequestAdmission.test.ts",
+        "apps/web/src/wsNativeApi.test.ts"
       ]
     },
     {
@@ -134,8 +149,65 @@
         "package.json",
         ".github/workflows/ci.yml"
       ],
-      "responsibility": "The static boundary check scans server and web workbench/features source imports. Native persistence, Provider runtime, orchestration and Agent Gateway internals must be accessed through explicit workbench/host integration; shared packages and UI imports remain available. The guard does not claim runtime isolation and does not cover runtimeLayer or registry assembly.",
-      "tests": ["scripts/check-workbench-boundary.test.ts", ".github/scripts/ci-contracts.test.mjs"]
+      "responsibility": "Static direct import check covers server/web workbench/features, existing server experts and named Expert/MCP Web surfaces. New full native client, task store/router, database, Provider, orchestration, Gateway, auth and provider-usage imports are refused. Host files assemble native capabilities. Exact retained imports below preserve established lifecycle and credential ownership. This guard is not runtime isolation or a transitive security check; registry/runtime/host assembly remain outside the feature scan.",
+      "tests": [
+        "scripts/check-workbench-boundary.test.ts",
+        ".github/scripts/ci-contracts.test.mjs"
+      ],
+      "retainedImports": [
+        {
+          "file": "apps/server/src/experts/ExpertGatewayTools.ts",
+          "specifiers": ["../agentGateway/protocol.ts", "../agentGateway/toolRuntime.ts"],
+          "owner": "Agent Gateway session tool contracts",
+          "reason": "Existing typed tool resolution and session ownership; no lifecycle relocation.",
+          "tests": ["apps/server/src/experts/ExpertGatewayTools.test.ts"]
+        },
+        {
+          "file": "apps/server/src/experts/ExpertMcpCredentials.ts",
+          "specifiers": [
+            "../auth/Layers/ServerSecretStore.ts",
+            "../auth/Services/ServerSecretStore.ts"
+          ],
+          "owner": "ServerSecretStore",
+          "reason": "Reuse native credential storage and failure semantics.",
+          "tests": [
+            "apps/server/src/experts/ExpertMcpCredentials.test.ts",
+            "apps/server/src/auth/Layers/ServerSecretStore.test.ts"
+          ]
+        },
+        {
+          "file": "apps/server/src/experts/McpConfigSource.ts",
+          "specifiers": ["../providerUsage/sqlite.ts"],
+          "owner": "Read-only SQLite opener",
+          "reason": "Existing read-only imported configuration source access; no new DB owner.",
+          "tests": ["apps/server/src/experts/McpConfigSource.test.ts"]
+        },
+        {
+          "file": "apps/web/src/components/settings/useExpertDraftGuard.tsx",
+          "specifiers": ["@tanstack/react-router"],
+          "owner": "Existing draft guard",
+          "reason": "Native navigation blocking, save/discard/cancel and beforeunload remain one implementation.",
+          "tests": [
+            "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
+            "apps/web/src/components/settings/GlobalMcpSettingsPanel.browser.tsx"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "web.expert-chat-slots",
+      "surface": "web",
+      "entryFiles": [
+        "apps/web/src/components/ChatView.tsx",
+        "apps/web/src/components/chat/ExpertComposerPicker.tsx",
+        "apps/web/src/components/chat/ExpertTaskControl.tsx"
+      ],
+      "responsibility": "Reuse existing typed props for picker and task controls. ChatView owns draft/thread identity, disabled state and handoff command; feature UI reads only ExpertClient capabilities. No empty wrapper, store duplication or transcript dispatch was introduced. Deep task binding remains in native orchestration.",
+      "tests": [
+        "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
+        "apps/web/src/components/ChatView.logic.test.ts",
+        "apps/web/src/components/ChatView.queuedAutoDispatch.test.ts"
+      ]
     }
   ]
 }

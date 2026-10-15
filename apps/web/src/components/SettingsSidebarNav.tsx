@@ -88,7 +88,10 @@ function SettingsSearchResultRow(props: {
 export function SettingsSidebarNav(props: {
   activeSection: SettingsSectionId;
   onBack: () => void;
-  onSelectSection: (section: SettingsSectionId, options?: { target?: string }) => void;
+  onSelectSection: (
+    section: SettingsSectionId,
+    options?: { target?: string; query?: Readonly<Record<string, string>> },
+  ) => void;
   /**
    * Which conditionally-rendered rows exist on this machine, so the search
    * cannot offer a row the panel does not draw. Passed in rather than read here:
@@ -109,7 +112,11 @@ export function SettingsSidebarNav(props: {
 
   const handleSelectResult = (entry: SettingsSearchEntry) => {
     const target = settingsSearchEntryTarget(entry);
-    onSelectSection(entry.section, target ? { target } : undefined);
+    const options = {
+      ...(target ? { target } : {}),
+      ...(entry.query ? { query: entry.query } : {}),
+    };
+    onSelectSection(entry.section, Object.keys(options).length > 0 ? options : undefined);
     setQuery("");
   };
 

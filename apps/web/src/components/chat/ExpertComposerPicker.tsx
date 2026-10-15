@@ -1,12 +1,7 @@
-import {
-  PROVIDER_DISPLAY_NAMES,
-  type ExpertDefinition,
-  type ExpertPreview,
-  type ProviderKind,
-} from "@synara/contracts";
+import { type ExpertDefinition, type ExpertPreview, type ProviderKind } from "@synara/contracts";
 import { useQuery } from "@tanstack/react-query";
 
-import { ensureNativeApi } from "~/nativeApi";
+import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { CheckIcon, ChevronDownIcon } from "~/lib/icons";
 import { Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuTrigger } from "../ui/menu";
 import { ComposerPickerMenuPopup } from "./ComposerPickerMenuPopup";
@@ -27,7 +22,7 @@ export function useExpertComposerPreview(
   const query = useQuery({
     queryKey: [...EXPERTS_QUERY_KEY, "preview", expertId ?? null, provider],
     queryFn: () =>
-      ensureNativeApi().server.previewExpert({
+      ensureExpertClient().previewExpert({
         expertId: expertId ?? "",
         provider: previewProvider ?? "codex",
       }),
@@ -46,7 +41,7 @@ export function useExpertComposerPreview(
 export function useExpertDefinitions(enabled: boolean) {
   return useQuery({
     queryKey: EXPERTS_QUERY_KEY,
-    queryFn: () => ensureNativeApi().server.listExperts(),
+    queryFn: () => ensureExpertClient().listExperts(),
     enabled,
     staleTime: 30_000,
   });
@@ -81,62 +76,31 @@ interface ExpertComposerSummaryProps {
   unsupportedProvider: boolean;
 }
 
-export function ExpertComposerSummary({
-  expertId,
-  provider,
-  preview,
-  previewFetching,
-  previewError,
-  unsupportedProvider,
-}: ExpertComposerSummaryProps) {
+export function ExpertComposerSummary({ expertId }: ExpertComposerSummaryProps) {
   const expertsQuery = useExpertDefinitions(Boolean(expertId));
   if (!expertId) return null;
 
   const expert = expertsQuery.data?.find((definition) => definition.id === expertId);
-  const status = unsupportedProvider ? "incompatible" : preview?.status;
-  const description = expert?.description.trim() || expert?.useCases.trim();
-  const readiness = unsupportedProvider
-    ? "当前 Provider 不支持专家"
-    : status
-      ? statusLabel(status)
-      : previewFetching
-        ? "正在检查"
-        : previewError
-          ? "暂时无法检查"
-          : "等待预检结果";
+  const name = expert?.name ?? "已选专家";
+  const description = expert?.description.trim() || expert?.useCases.trim() || "";
 
   return (
     <div
-      className="mb-2 flex min-w-0 items-start justify-between gap-3 rounded-xl border border-border/60 bg-[var(--color-background-elevated-secondary)] px-3 py-2"
+      className="mb-2 flex min-w-0 items-center gap-2 rounded-xl border border-border/60 bg-[var(--color-background-elevated-secondary)] px-3 py-2"
       role="status"
       aria-live="polite"
     >
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-2 text-ui-sm font-medium">
-          <span className="truncate">{expert?.name ?? "已选专家"}</span>
-          {expert ? (
-            <span className="shrink-0 text-ui-xs font-normal text-muted-foreground">
-              v{expert.revision}
-            </span>
-          ) : null}
-        </div>
-        <p className="mt-0.5 line-clamp-2 text-ui-xs text-muted-foreground">
-          {description || (expertsQuery.isLoading ? "正在读取专家信息…" : "尚无用途说明。")}
-        </p>
-        {preview?.issues.length ? (
-          <p className="mt-1 line-clamp-2 break-words text-ui-xs text-muted-foreground">
-            {preview.issues.slice(0, 2).join("；")}
-          </p>
-        ) : null}
-      </div>
-      <div className="min-w-0 shrink-0 text-right">
-        <div className={`text-ui-xs font-medium ${statusTone(status)}`}>{readiness}</div>
-        <p className="mt-0.5 max-w-44 text-ui-xs text-muted-foreground">
-          {unsupportedProvider
-            ? "切换到 Codex / Pi 或选择通用"
-            : `首次发送固定此版本 · 按 ${PROVIDER_DISPLAY_NAMES[provider]} 预检`}
-        </p>
-      </div>
+      <span className="max-w-40 shrink-0 truncate text-ui-sm font-medium" title={name}>
+        {name}
+      </span>
+      {description ? (
+        <span
+          className="min-w-0 flex-1 truncate text-ui-xs text-muted-foreground"
+          title={description}
+        >
+          {description}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -154,7 +118,6 @@ interface ExpertComposerPickerProps {
 
 export function ExpertComposerPicker({
   expertId,
-  provider,
   preview,
   previewFetching,
   previewError,
@@ -171,7 +134,6 @@ export function ExpertComposerPicker({
       ? "incompatible"
       : preview?.status
     : undefined;
-  const providerName = PROVIDER_DISPLAY_NAMES[provider];
   const triggerLabel = selectedExpert?.name ?? (expertId ? "已选专家" : "通用");
   const previewSummary = selectedStatus
     ? statusLabel(selectedStatus)
@@ -214,7 +176,7 @@ export function ExpertComposerPicker({
       </MenuTrigger>
       <ComposerPickerMenuPopup align="start" side="top" sideOffset={6} className="w-72">
         <MenuGroup>
-          <MenuGroupLabel>新任务专家</MenuGroupLabel>
+          <MenuGroupLabel>任务专家</MenuGroupLabel>
           <MenuItem onClick={() => commitSelection(undefined)}>
             <span className="min-w-0 flex-1">通用</span>
             {!expertId ? (
@@ -247,11 +209,6 @@ export function ExpertComposerPicker({
                 ? "当前 Provider 不支持专家"
                 : (previewSummary ?? "等待预览结果")}
             </div>
-            <p className="text-ui-xs text-muted-foreground">
-              {unsupportedProvider
-                ? "请切换到 Codex 或 Pi，或选择“通用”后发送。"
-                : `按 ${providerName} 检查；预览不代表运行时已加载。`}
-            </p>
             {preview?.issues.length ? (
               <ul className="list-disc space-y-1 pl-4 text-ui-xs text-muted-foreground">
                 {preview.issues.slice(0, 4).map((issue, index) => (

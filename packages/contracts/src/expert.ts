@@ -1,21 +1,35 @@
 import { Schema } from "effect";
 
 import { IsoDateTime, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
+import { ExpertMcpBindingSchema, McpConfigSourceReferenceSchema, McpConnectionId } from "./mcp";
 import { ProviderSkillReference } from "./providerDiscovery";
 
 const ExpertConnection = Schema.Struct({
   id: TrimmedNonEmptyString,
   required: Schema.Boolean,
   tools: Schema.Array(TrimmedNonEmptyString),
+  enabled: Schema.optional(Schema.Boolean),
 });
 export type ExpertConnection = typeof ExpertConnection.Type;
 
 const EnvironmentVariableName = Schema.String.check(
   Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/u),
 ).check(Schema.isMaxLength(128));
-const ExpertConnectionId = TrimmedNonEmptyString.check(
-  Schema.isPattern(/^[a-z0-9][a-z0-9_-]{0,63}$/u),
+const ExpertMcpCredentialId = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u),
 );
+const EnvironmentSecretReference = Schema.Struct({
+  credentialId: ExpertMcpCredentialId,
+  names: Schema.Array(EnvironmentVariableName).check(Schema.isMaxLength(128)),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+const HttpHeaderName = Schema.String.check(
+  Schema.isPattern(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u),
+).check(Schema.isMaxLength(256));
+const HeaderSecretReference = Schema.Struct({
+  credentialId: ExpertMcpCredentialId,
+  names: Schema.Array(HttpHeaderName).check(Schema.isMaxLength(128)),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+const ExpertConnectionId = McpConnectionId;
 const ExpertConnectionStdioTransport = Schema.Struct({
   type: Schema.Literal("stdio"),
   command: TrimmedNonEmptyString.check(Schema.isMaxLength(4_096)).check(
@@ -30,15 +44,25 @@ const ExpertConnectionStdioTransport = Schema.Struct({
       envVar: EnvironmentVariableName,
     }).annotate({ parseOptions: { onExcessProperty: "error" } }),
   ).check(Schema.isMaxLength(128)),
+  cwd: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(4_096)).check(Schema.isPattern(/^[^\0]+$/u)),
+  ),
+  startupTimeoutMs: Schema.optional(PositiveInt.check(Schema.isLessThanOrEqualTo(300_000))),
+  toolTimeoutMs: Schema.optional(PositiveInt.check(Schema.isLessThanOrEqualTo(300_000))),
+  envFromSource: Schema.optional(
+    Schema.Struct({
+      source: McpConfigSourceReferenceSchema,
+      names: Schema.Array(EnvironmentVariableName).check(Schema.isMaxLength(128)),
+    }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+  ),
+  envFromSecret: Schema.optional(EnvironmentSecretReference),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 const ExpertConnectionHttpTransport = Schema.Struct({
   type: Schema.Literal("http"),
   url: TrimmedNonEmptyString.check(Schema.isMaxLength(4_096)),
   headersFromHost: Schema.Array(
     Schema.Struct({
-      name: Schema.String.check(Schema.isPattern(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u)).check(
-        Schema.isMaxLength(256),
-      ),
+      name: HttpHeaderName,
       envVar: EnvironmentVariableName,
       prefix: Schema.optional(
         Schema.String.check(Schema.isPattern(/^[A-Za-z][A-Za-z0-9._~-]* ?$/u)).check(
@@ -47,6 +71,13 @@ const ExpertConnectionHttpTransport = Schema.Struct({
       ),
     }).annotate({ parseOptions: { onExcessProperty: "error" } }),
   ).check(Schema.isMaxLength(128)),
+  headersFromSource: Schema.optional(
+    Schema.Struct({
+      source: McpConfigSourceReferenceSchema,
+      names: Schema.Array(HttpHeaderName).check(Schema.isMaxLength(128)),
+    }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+  ),
+  headersFromSecret: Schema.optional(HeaderSecretReference),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 
 export const ExpertConnectionTransport = Schema.Union([
@@ -59,6 +90,9 @@ export const ExpertConnectionConfig = Schema.Struct({
   id: ExpertConnectionId,
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   transport: ExpertConnectionTransport,
+  importedFrom: Schema.optional(
+    Schema.Array(McpConfigSourceReferenceSchema).check(Schema.isMaxLength(1_000)),
+  ),
   revision: PositiveInt,
   updatedAt: IsoDateTime,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
@@ -68,6 +102,9 @@ export const ExpertConnectionSaveInput = Schema.Struct({
   id: ExpertConnectionId,
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   transport: ExpertConnectionTransport,
+  importedFrom: Schema.optional(
+    Schema.Array(McpConfigSourceReferenceSchema).check(Schema.isMaxLength(1_000)),
+  ),
   expectedRevision: Schema.optional(PositiveInt),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type ExpertConnectionSaveInput = typeof ExpertConnectionSaveInput.Type;
@@ -77,6 +114,18 @@ export const ExpertConnectionRemoveInput = Schema.Struct({
   expectedRevision: PositiveInt,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type ExpertConnectionRemoveInput = typeof ExpertConnectionRemoveInput.Type;
+
+export const ExpertConnectionTestInput = Schema.Struct({
+  id: ExpertConnectionId,
+  expectedRevision: Schema.optional(PositiveInt),
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type ExpertConnectionTestInput = typeof ExpertConnectionTestInput.Type;
+
+export const ExpertConnectionTestResult = Schema.Struct({
+  tools: Schema.Array(Schema.String),
+  revision: PositiveInt,
+});
+export type ExpertConnectionTestResult = typeof ExpertConnectionTestResult.Type;
 
 export const ExpertDefinition = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -119,6 +168,18 @@ export const ExpertArchiveInput = Schema.Struct({
 });
 export type ExpertArchiveInput = typeof ExpertArchiveInput.Type;
 
+export const ExpertRestoreInput = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  expectedRevision: PositiveInt,
+});
+export type ExpertRestoreInput = typeof ExpertRestoreInput.Type;
+
+export const ExpertDeleteInput = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  expectedRevision: PositiveInt,
+});
+export type ExpertDeleteInput = typeof ExpertDeleteInput.Type;
+
 export const ExpertPreviewInput = Schema.Struct({
   expertId: TrimmedNonEmptyString,
   provider: Schema.Literals(["codex", "pi"]),
@@ -146,6 +207,7 @@ export const ExpertSnapshot = Schema.Struct({
   skillsRoot: TrimmedNonEmptyString,
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
+  mcpBinding: Schema.optional(ExpertMcpBindingSchema),
   preferredProvider: Schema.optional(Schema.Literals(["codex", "pi"])),
   createdAt: IsoDateTime,
 });

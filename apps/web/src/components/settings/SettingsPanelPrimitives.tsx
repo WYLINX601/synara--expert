@@ -61,22 +61,51 @@ export function SettingsSectionShell({
   title,
   action,
   id,
+  count,
+  layout = "default",
   children,
 }: {
   title: string;
   action?: ReactNode;
   id?: string;
+  count?: number;
+  layout?: "default" | "compact";
   children: ReactNode;
 }) {
+  const heading = (
+    <h2
+      className={
+        layout === "compact"
+          ? "flex min-w-0 items-center gap-2 text-ui font-medium text-foreground"
+          : SETTINGS_SECTION_LABEL_CLASS_NAME
+      }
+    >
+      {title}
+      {count !== undefined ? (
+        <span className="rounded-md bg-foreground/5 px-1.5 py-0.5 text-ui-xs tabular-nums text-muted-foreground">
+          {count}
+        </span>
+      ) : null}
+    </h2>
+  );
   return (
-    <section id={id} className={cn(SETTINGS_PANEL_SECTION_CLASS_NAME, id && "scroll-mt-24")}>
-      {action != null ? (
-        <div className="flex items-center justify-between gap-2">
-          <h2 className={SETTINGS_SECTION_LABEL_CLASS_NAME}>{title}</h2>
+    <section
+      id={id}
+      aria-label={layout === "compact" ? title : undefined}
+      className={cn(
+        layout === "compact" ? "flex flex-col" : SETTINGS_PANEL_SECTION_CLASS_NAME,
+        id && "scroll-mt-24",
+      )}
+    >
+      {action != null || layout === "compact" ? (
+        <div
+          className={cn("flex items-center justify-between gap-2", layout === "compact" && "py-2")}
+        >
+          {heading}
           {action}
         </div>
       ) : (
-        <h2 className={SETTINGS_SECTION_LABEL_CLASS_NAME}>{title}</h2>
+        heading
       )}
       {children}
     </section>
@@ -163,24 +192,30 @@ export function SettingsListRow({
   actions,
   align: alignProp,
   onContextMenu,
+  className,
+  layout = "default",
 }: {
   title: ReactNode;
   description?: ReactNode;
   actions?: ReactNode;
   align?: "center" | "start";
   onContextMenu?: ComponentProps<"div">["onContextMenu"];
+  className?: string;
+  layout?: "default" | "compact";
 }) {
   const align = alignProp ?? "center";
   return (
     <div
-      className={SETTINGS_CARD_ROW_CLASS_NAME}
+      className={cn(SETTINGS_CARD_ROW_CLASS_NAME, className)}
       data-slot="settings-row"
       onContextMenu={onContextMenu}
     >
       <div
         className={cn(
-          "flex flex-col gap-2.5 sm:flex-row sm:justify-between",
-          align === "start" ? "sm:items-start" : "sm:items-center",
+          layout === "compact"
+            ? "flex items-center justify-between gap-2"
+            : "flex flex-col gap-2.5 sm:flex-row sm:justify-between",
+          layout !== "compact" && (align === "start" ? "sm:items-start" : "sm:items-center"),
         )}
       >
         <div className="min-w-0 flex-1 space-y-0.5">
@@ -190,7 +225,12 @@ export function SettingsListRow({
           ) : null}
         </div>
         {actions != null ? (
-          <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+          <div
+            className={cn(
+              "flex shrink-0 items-center gap-2",
+              layout !== "compact" && "w-full sm:w-auto sm:justify-end",
+            )}
+          >
             {actions}
           </div>
         ) : null}

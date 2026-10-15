@@ -152,6 +152,109 @@ afterEach(() => {
 });
 
 describe("wsNativeApi", () => {
+  it("forwards revision-guarded expert restore through its server RPC", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock.mockResolvedValue({ id: "expert-1", archived: false, revision: 8 });
+
+    await expect(
+      api.server.restoreExpert({ id: "expert-1", expectedRevision: 7 }),
+    ).resolves.toEqual({ id: "expert-1", archived: false, revision: 8 });
+    expect(requestMock).toHaveBeenCalledExactlyOnceWith(WS_METHODS.serverRestoreExpert, {
+      id: "expert-1",
+      expectedRevision: 7,
+    });
+  });
+
+  it("forwards revision-guarded expert deletion through its server RPC", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock.mockResolvedValue(undefined);
+
+    await expect(
+      api.server.deleteExpert({ id: "expert-1", expectedRevision: 7 }),
+    ).resolves.toBeUndefined();
+    expect(requestMock).toHaveBeenCalledExactlyOnceWith(WS_METHODS.serverDeleteExpert, {
+      id: "expert-1",
+      expectedRevision: 7,
+    });
+  });
+
+  it("forwards revision-guarded Expert connection tests and their result revision", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock.mockResolvedValue({ tools: ["search", "read"], revision: 12 });
+
+    await expect(
+      api.server.testExpertConnection({ id: "research", expectedRevision: 11 }),
+    ).resolves.toEqual({ tools: ["search", "read"], revision: 12 });
+    expect(requestMock).toHaveBeenCalledExactlyOnceWith(WS_METHODS.serverTestExpertConnection, {
+      id: "research",
+      expectedRevision: 11,
+    });
+  });
+
+  it("forwards connection state and reference requests through their fixed RPCs", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock
+      .mockResolvedValueOnce({
+        id: "research",
+        status: "active",
+        revision: 2,
+        updatedAt: "2026-10-04T00:00:00.000Z",
+      })
+      .mockResolvedValueOnce({
+        id: "research",
+        status: "disabled",
+        revision: 3,
+        updatedAt: "2026-10-04T00:00:01.000Z",
+      })
+      .mockResolvedValueOnce({ experts: [], snapshots: [], tasks: [], activeSessionCount: 0 });
+
+    await api.server.getExpertConnectionState({ id: "research" });
+    await api.server.setExpertConnectionState({
+      id: "research",
+      status: "disabled",
+      expectedRevision: 2,
+    });
+    await api.server.readExpertConnectionReferences({ id: "research" });
+
+    expect(requestMock).toHaveBeenNthCalledWith(1, WS_METHODS.serverGetExpertConnectionState, {
+      id: "research",
+    });
+    expect(requestMock).toHaveBeenNthCalledWith(2, WS_METHODS.serverSetExpertConnectionState, {
+      id: "research",
+      status: "disabled",
+      expectedRevision: 2,
+    });
+    expect(requestMock).toHaveBeenNthCalledWith(
+      3,
+      WS_METHODS.serverReadExpertConnectionReferences,
+      { id: "research" },
+    );
+  });
+
+  it("forwards MCP discovery and selected imports through their fixed RPCs", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    const discovery = { sources: [{ kind: "json" as const, path: "/tmp/mcp.json" }] };
+    const imported = {
+      scanId: "scan-1",
+      items: [{ candidateId: "candidate-1", targetId: "local-tools", mode: "create" as const }],
+    };
+
+    await api.server.discoverMcpConnections(discovery);
+    await api.server.importMcpConnections(imported);
+
+    expect(requestMock).toHaveBeenNthCalledWith(
+      1,
+      WS_METHODS.serverDiscoverMcpConnections,
+      discovery,
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(2, WS_METHODS.serverImportMcpConnections, imported);
+  });
+
   it("forwards bounded Computer history and owner diagnostic requests through their RPCs", async () => {
     const { createWsNativeApi } = await import("./wsNativeApi");
     const api = createWsNativeApi();

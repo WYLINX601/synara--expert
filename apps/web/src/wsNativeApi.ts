@@ -666,6 +666,8 @@ export function createWsNativeApi(): NativeApi {
       readExpert: (input) => transport.request(WS_METHODS.serverReadExpert, input),
       saveExpert: (input) => transport.request(WS_METHODS.serverSaveExpert, input),
       archiveExpert: (input) => transport.request(WS_METHODS.serverArchiveExpert, input),
+      restoreExpert: (input) => transport.request(WS_METHODS.serverRestoreExpert, input),
+      deleteExpert: (input) => transport.request(WS_METHODS.serverDeleteExpert, input),
       previewExpert: (input) => transport.request(WS_METHODS.serverPreviewExpert, input),
       readExpertSnapshot: (input) => transport.request(WS_METHODS.serverReadExpertSnapshot, input),
       readExpertAppliedRuntime: (input) =>
@@ -677,6 +679,16 @@ export function createWsNativeApi(): NativeApi {
         transport.request(WS_METHODS.serverRemoveExpertConnection, input),
       testExpertConnection: (input) =>
         transport.request(WS_METHODS.serverTestExpertConnection, input),
+      getExpertConnectionState: (input) =>
+        transport.request(WS_METHODS.serverGetExpertConnectionState, input),
+      setExpertConnectionState: (input) =>
+        transport.request(WS_METHODS.serverSetExpertConnectionState, input),
+      readExpertConnectionReferences: (input) =>
+        transport.request(WS_METHODS.serverReadExpertConnectionReferences, input),
+      discoverMcpConnections: (input) =>
+        transport.request(WS_METHODS.serverDiscoverMcpConnections, input),
+      importMcpConnections: (input) =>
+        transport.request(WS_METHODS.serverImportMcpConnections, input),
       getAuthSession: () => requestAuthJson<AuthSessionState>("/api/auth/session"),
       bootstrapAuth: (input: AuthBootstrapInput) =>
         requestAuthJson<AuthBootstrapResult>("/api/auth/bootstrap", {

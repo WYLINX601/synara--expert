@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   collectWorkbenchFeatureSources,
+  WORKBENCH_RETAINED_IMPORTS,
   findWorkbenchFeatureBoundaryViolations,
 } from "./check-workbench-boundary";
 
@@ -99,6 +100,99 @@ describe("Workbench feature import boundary", () => {
       ).toHaveLength(1);
     } finally {
       rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+  it("rejects full clients, stores and routes on migrated Expert surfaces", () => {
+    expect(
+      findWorkbenchFeatureBoundaryViolations(
+        "apps/web/src/components/settings/ExpertsSettingsPanel.tsx",
+        `import { ensureNativeApi } from "~/nativeApi";
+       import { socket } from "~/wsNativeApi.ts";
+       import { store } from "~/store";
+       import { Route } from "../../routes/_chat.settings";
+       import { useNavigate } from "@tanstack/react-router";`,
+      ).map(({ boundary }) => boundary),
+    ).toEqual([
+      "full native client",
+      "native transport",
+      "native task store",
+      "native routes",
+      "native router",
+    ]);
+  });
+
+  it("allows each exact retained seam but rejects the same coupling in a new module", () => {
+    for (const seam of WORKBENCH_RETAINED_IMPORTS) {
+      const source = `import { capability } from "${seam.specifier}";`;
+      expect(findWorkbenchFeatureBoundaryViolations(seam.file, source)).toEqual([]);
+      const sibling = seam.file.replace(/[^/]+$/, "NewExpertModule.ts");
+      expect(findWorkbenchFeatureBoundaryViolations(sibling, source)).toHaveLength(1);
+    }
+  });
+
+  it("scans existing experts and future Expert/MCP UI without scanning native panels or fixtures", () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "synara-workbench-legacy-"));
+    const files = [
+      "apps/server/src/experts/FutureExpert.ts",
+      "apps/server/src/experts/FutureExpert.test.ts",
+      "apps/web/src/components/settings/ExpertNewPanel.tsx",
+      "apps/web/src/components/settings/GlobalMcpNewPanel.tsx",
+      "apps/web/src/components/settings/LocalMcpNewPanel.tsx",
+      "apps/web/src/components/settings/ExpertNewPanel.browser.tsx",
+      "apps/web/src/components/settings/ProvidersSettingsPanel.tsx",
+      "apps/web/src/components/chat/ExpertNewControl.tsx",
+      "apps/web/src/components/chat/ChatView.tsx",
+    ];
+    try {
+      for (const file of files) {
+        mkdirSync(path.dirname(path.join(tempRoot, file)), { recursive: true });
+        writeFileSync(path.join(tempRoot, file), "export {};");
+      }
+      expect(collectWorkbenchFeatureSources(tempRoot).map(({ path: file }) => file)).toEqual(
+        files
+          .filter(
+            (file) =>
+              !/\.(?:test|browser)\./.test(file) &&
+              !/(?:ProvidersSettingsPanel|ChatView)/.test(file),
+          )
+          .toSorted(),
+      );
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+  it("keeps every retained import documented with an owner and regression path", () => {
+    const manifest = JSON.parse(
+      readFileSync(
+        path.resolve(import.meta.dirname, "../workbench/integration-points.json"),
+        "utf8",
+      ),
+    ) as {
+      integrationPoints: Array<{
+        id: string;
+        retainedImports?: Array<{
+          file: string;
+          specifiers: string[];
+          owner: string;
+          reason: string;
+          tests: string[];
+        }>;
+      }>;
+    };
+    const seams = manifest.integrationPoints.find(
+      (point) => point.id === "workbench.feature-import-boundary",
+    )!.retainedImports!;
+    expect(
+      seams
+        .flatMap((seam) => seam.specifiers.map((specifier) => `${seam.file}:${specifier}`))
+        .toSorted(),
+    ).toEqual(
+      WORKBENCH_RETAINED_IMPORTS.map((seam) => `${seam.file}:${seam.specifier}`).toSorted(),
+    );
+    for (const seam of seams) {
+      expect(seam.owner.length).toBeGreaterThan(0);
+      expect(seam.reason.length).toBeGreaterThan(0);
+      expect(seam.tests.length).toBeGreaterThan(0);
     }
   });
 });

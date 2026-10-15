@@ -1,5 +1,9 @@
 # 基于 Synara 的个人工作台架构
 
+产品方向更新（2026-10-10）：当前 Linx 产品组织、Hermes 常驻职责与 MVP 规划见 [Linx V2.0 原文](./linx-product-design-v2.md)，方案与实施状态路由见[项目上下文](../context/PROJECT_CONTEXT.md)。本文继续保留既有 Workbench 技术设计与历史证据，不作为新增 Space、Hermes 或 Skill Evolution 的实现证明。
+
+2026-10-08 增量方案：[轻量适配层与 UI 模块化](./workbench-adaptation-plan.md)，实施状态见[验收记录](./workbench-adaptation-acceptance.md)。本轮收拢既有接入，不改变历史验收与上游发布门禁。
+
 状态：架构基线与分阶段实施记录。当前范围为 WB-00 至 WB-05；WB-06 按用户决定延期。状态核实日期：2026-10-02。本次文档更新在独立文档分支准备；源候选以 checkout HEAD 与生成 state 的一致绑定为准。验收时须同时核对候选 checkout 的实际 HEAD、`workbench:sync` 状态中的 `candidateSha` 和匹配的 evidence binding；单独读取状态或分支名不足以证明它们一致。历史运行结果只适用于其报告中的源码 SHA，不自动继承给后续代码。
 
 基线关系见 [WB-00 记录](../workbench/WB-00-baseline.md) 与 [上游历史补充](../workbench/WB-00-upstream-evidence.md)：2026-09-29 原工作区基线为 `eaa61eded31b6755d4f30ba8eabc5d905cf817cb`，官方 `upstream/main` 与 `v0.9.2` 的共同基点为 `a33435c18474eb7816582004e45f87382965ac8d`。WB-04 在隔离候选分支从 `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 固定的 `v0.9.2`，merge 提交为 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`。fee08 acceptance attempt 有两项固定门禁失败，首次 Codex 普通首轮请求因模型不支持返回 HTTP 400；9591 六项固定门禁通过，但其独立本地 weekly fixture 失败且没有 Provider 请求。858 修正该 synthetic fixture；各源码结果分别保留为历史。较后的 f248 运行通过六项固定门禁、诊断包、原生身份检查和合成迁移/restore，但 live cancellation 失败、recovery 未运行；详情见 [WB-04 runtime preflight](../workbench/WB-04-runtime-preflight.md)。`upstream.lock` 的 `integratedBase` 仍是 `v0.9.1`，候选尚未提升为已验证集成基线。

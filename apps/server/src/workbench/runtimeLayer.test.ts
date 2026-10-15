@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
@@ -24,7 +24,7 @@ afterEach(async () => {
 });
 
 describe("createWorkbenchExpertRuntime", () => {
-  it("exposes the configured Expert connection's tool names and closes its client", async () => {
+  it("tests a configured Expert connection with optional revision guarding", async () => {
     const stateDir = await makeTempStateDir();
     const client = {
       tools: [{ name: "search" }, { name: "read" }],
@@ -39,17 +39,27 @@ describe("createWorkbenchExpertRuntime", () => {
       connect,
     });
 
-    await runtime.connections.save({
+    const savedConnection = await runtime.connections.save({
       id: "research",
       name: "Research connection",
       transport: { type: "stdio", command: "fixture-mcp", args: [], envFromHost: [] },
     });
 
-    await expect(runtime.testConnection("research")).resolves.toEqual({
+    await expect(runtime.testConnection({ id: "research" })).resolves.toEqual({
       tools: ["search", "read"],
+      revision: savedConnection.revision,
     });
+    await expect(
+      runtime.testConnection({ id: "research", expectedRevision: savedConnection.revision + 1 }),
+    ).rejects.toMatchObject({ code: "revision_conflict" });
     expect(connect).toHaveBeenCalledTimes(1);
-    expect(client.close).toHaveBeenCalledTimes(1);
+
+    await expect(
+      runtime.testConnection({ id: "research", expectedRevision: savedConnection.revision }),
+    ).resolves.toEqual({ tools: ["search", "read"], revision: savedConnection.revision });
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(connect).toHaveBeenNthCalledWith(2, savedConnection);
+    expect(client.close).toHaveBeenCalledTimes(2);
   });
 
   it("delegates applied-runtime reads to the existing repository unchanged", async () => {
@@ -63,5 +73,32 @@ describe("createWorkbenchExpertRuntime", () => {
 
     expect(Effect.runSync(runtime.readAppliedRuntime(request))).toEqual(Option.none());
     expect(getByThreadId).toHaveBeenCalledExactlyOnceWith(request);
+  });
+
+  it("wires local MCP discovery and import through the Workbench runtime", async () => {
+    const stateDir = await makeTempStateDir();
+    const sourcePath = path.join(path.dirname(stateDir), "mcp.json");
+    await writeFile(sourcePath, JSON.stringify({ mcpServers: {} }), "utf8");
+    const runtime = createWorkbenchExpertRuntime({
+      stateDir,
+      expertAppliedRuntimeRepository: {
+        getByThreadId: () => Effect.succeed(Option.none<ExpertAppliedRuntimeRecord>()),
+      },
+    });
+
+    const scan = await runtime.discoverMcpConnections({
+      sources: [{ kind: "json", path: sourcePath }],
+    });
+    expect(scan).toMatchObject({
+      scanId: expect.any(String),
+      sources: [{ kind: "json", path: sourcePath, status: "ready" }],
+      candidates: [],
+    });
+    await expect(runtime.importMcpConnections({ scanId: scan.scanId, items: [] })).resolves.toEqual(
+      {
+        scanId: scan.scanId,
+        items: [],
+      },
+    );
   });
 });

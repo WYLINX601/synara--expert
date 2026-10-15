@@ -6072,6 +6072,7 @@ export default function Sidebar() {
                   to: "/settings",
                   search: (previous) => ({
                     ...previous,
+                    ...options?.query,
                     section: section === "general" ? undefined : section,
                     target: options?.target,
                   }),

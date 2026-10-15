@@ -53,6 +53,8 @@ export interface ExpertStore {
   read(id: string): Promise<ExpertDefinition | null>;
   save(input: typeof ExpertSaveInput.Type): Promise<ExpertDefinition>;
   archive(id: string, expectedRevision?: number): Promise<ExpertDefinition>;
+  restore(id: string, expectedRevision: number): Promise<ExpertDefinition>;
+  remove(id: string, expectedRevision: number): Promise<void>;
   preview(input: typeof ExpertPreviewInput.Type): Promise<ExpertPreview>;
   prepareSnapshot(id: string): Promise<typeof ExpertBinding.Type>;
   readSnapshot(snapshotId: string): Promise<ExpertSnapshot>;
@@ -411,7 +413,7 @@ async function validateResourceTree(
 }
 
 function hashSnapshot(snapshot: ExpertSnapshot, resources: ReadonlyArray<ResourceEntry>): string {
-  const payload = {
+  const payload: Record<string, unknown> = {
     expertId: snapshot.expertId,
     displayName: snapshot.displayName,
     revision: snapshot.revision,
@@ -426,6 +428,12 @@ function hashSnapshot(snapshot: ExpertSnapshot, resources: ReadonlyArray<Resourc
     preferredProvider: snapshot.preferredProvider ?? null,
     resources: [...resources].sort((left, right) => left.path.localeCompare(right.path)),
   };
+  // Older manifests had no MCP binding. Omitting the key entirely preserves
+  // their content hash while making each new snapshot pin its connection revs.
+  if (snapshot.mcpBinding) {
+    const { createdAt: _createdAt, ...binding } = snapshot.mcpBinding;
+    payload.mcpBinding = binding;
+  }
   return `exp_${hashJson(payload)}`;
 }
 
@@ -560,6 +568,72 @@ function hydrateSnapshot(snapshot: ExpertSnapshot, snapshotRoot: string): Expert
   };
 }
 
+/**
+ * Read and validate an immutable snapshot manifest without initializing or
+ * mutating the Expert store. Reference scanners use this single verifier so
+ * snapshot hashes, schemas, and resource integrity have one implementation.
+ */
+export async function readVerifiedStoredExpertSnapshot(
+  snapshotRoot: string,
+  snapshotId: string,
+): Promise<ExpertSnapshot> {
+  if (!SNAPSHOT_ID_PATTERN.test(snapshotId)) {
+    throw new ExpertStoreError("Snapshot ID is invalid.", "invalid_input");
+  }
+  if (!path.isAbsolute(snapshotRoot) || path.basename(snapshotRoot) !== snapshotId) {
+    throw new ExpertStoreError("Snapshot directory is invalid.", "snapshot_corrupt");
+  }
+  const rootStat = await fs.lstat(snapshotRoot).catch((cause: unknown) => {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new ExpertStoreError(`Snapshot not found: ${snapshotId}`, "not_found", { cause });
+    }
+    throw cause;
+  });
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new ExpertStoreError("Snapshot directory is invalid.", "snapshot_corrupt");
+  }
+  const manifestPath = path.join(snapshotRoot, "snapshot.json");
+  const manifestBytes = await safeReadFile(manifestPath, await fs.realpath(snapshotRoot));
+  let stored: StoredSnapshot;
+  try {
+    stored = Schema.decodeUnknownSync(StoredSnapshot)(
+      JSON.parse(manifestBytes.toString("utf8")) as unknown,
+    );
+  } catch (cause) {
+    throw new ExpertStoreError("Snapshot manifest is invalid.", "snapshot_corrupt", { cause });
+  }
+  const snapshot = stored.snapshot;
+  if (
+    snapshot.snapshotId !== snapshotId ||
+    !EXPERT_ID_PATTERN.test(snapshot.expertId) ||
+    snapshot.skillsRoot !== "skills" ||
+    stored.resources.length > MAX_SNAPSHOT_ENTRIES ||
+    stored.resources.some(
+      (entry) =>
+        !["skills", "references"].some((rootName) => isSafeRelativePath(entry.path, rootName)),
+    )
+  ) {
+    throw new ExpertStoreError("Snapshot manifest paths are invalid.", "snapshot_corrupt");
+  }
+  if (
+    snapshot.skills.some((skill) => !isSafeRelativePath(skill.path, "skills")) ||
+    snapshot.references.some((reference) => !isSafeRelativePath(reference, "references"))
+  ) {
+    throw new ExpertStoreError("Snapshot resource references are invalid.", "snapshot_corrupt");
+  }
+  const actualResources = await collectSnapshotResources(snapshotRoot);
+  if (stableJson(actualResources) !== stableJson(stored.resources)) {
+    throw new ExpertStoreError(
+      "Snapshot resources failed integrity validation.",
+      "snapshot_corrupt",
+    );
+  }
+  if (hashSnapshot(snapshot, actualResources) !== snapshotId) {
+    throw new ExpertStoreError("Snapshot content hash does not match its ID.", "snapshot_corrupt");
+  }
+  return snapshot;
+}
+
 export function createExpertStore(stateDir: string): ExpertStore {
   if (!path.isAbsolute(stateDir) || stateDir.includes("\0")) {
     throw new ExpertStoreError("State directory must be an absolute local path.", "invalid_input");
@@ -567,6 +641,8 @@ export function createExpertStore(stateDir: string): ExpertStore {
   const root = path.join(path.resolve(stateDir), "experts");
   const definitionsDir = path.join(root, "definitions");
   const snapshotsDir = path.join(root, "snapshots");
+  const initializationPath = path.join(root, "initialized.json");
+  const initializationMarker = '{"version":1}\n';
   const connectionStore = createExpertConnectionStore(stateDir);
   ensurePrivateDirectorySync(root);
   ensurePrivateDirectorySync(definitionsDir);
@@ -630,24 +706,25 @@ export function createExpertStore(stateDir: string): ExpertStore {
     }
   };
 
-  const list = async (): Promise<ExpertDefinition[]> => {
-    await ensureInitialized();
-    const names = (await fs.readdir(definitionsDir)).filter((name) => name.endsWith(".json"));
-    const definitions = await Promise.all(
-      names.map(async (name) => {
-        const id = name.slice(0, -".json".length);
-        const definition = await readDefinitionFile(id);
-        if (!definition)
-          throw new ExpertStoreError(`Expert manifest disappeared: ${name}`, "snapshot_corrupt");
-        return definition;
-      }),
-    );
-    return definitions.sort(
-      (left, right) =>
-        right.updatedAt.localeCompare(left.updatedAt) ||
-        left.name.localeCompare(right.name, "zh-Hans"),
-    );
-  };
+  const list = (): Promise<ExpertDefinition[]> =>
+    withWriteLock(async () => {
+      await ensureInitialized();
+      const names = (await fs.readdir(definitionsDir)).filter((name) => name.endsWith(".json"));
+      const definitions = await Promise.all(
+        names.map(async (name) => {
+          const id = name.slice(0, -".json".length);
+          const definition = await readDefinitionFile(id);
+          if (!definition)
+            throw new ExpertStoreError(`Expert manifest disappeared: ${name}`, "snapshot_corrupt");
+          return definition;
+        }),
+      );
+      return definitions.sort(
+        (left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt) ||
+          left.name.localeCompare(right.name, "zh-Hans"),
+      );
+    });
 
   const save = (rawInput: typeof ExpertSaveInput.Type): Promise<ExpertDefinition> =>
     withWriteLock(async () => {
@@ -721,63 +798,51 @@ export function createExpertStore(stateDir: string): ExpertStore {
       return archived;
     });
 
+  const restore = (id: string, expectedRevision: number): Promise<ExpertDefinition> =>
+    withWriteLock(async () => {
+      await ensureInitialized();
+      const definition = await readDefinitionFile(id);
+      if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
+      if (definition.revision !== expectedRevision) {
+        throw new ExpertStoreError(
+          "Expert revision changed; reload before restoring.",
+          "revision_conflict",
+        );
+      }
+      if (!definition.archived) return definition;
+      const restored = {
+        ...definition,
+        archived: false,
+        revision: definition.revision + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      await writeAtomically(
+        definitionPath(definitionsDir, id),
+        `${JSON.stringify(restored, null, 2)}\n`,
+      );
+      return restored;
+    });
+
+  const remove = (id: string, expectedRevision: number): Promise<void> =>
+    withWriteLock(async () => {
+      await ensureInitialized();
+      const definition = await readDefinitionFile(id);
+      if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
+      if (definition.revision !== expectedRevision) {
+        throw new ExpertStoreError(
+          "Expert revision changed; reload before deleting.",
+          "revision_conflict",
+        );
+      }
+      // Existing tasks own immutable snapshots independently of the definition.
+      await fs.unlink(definitionPath(definitionsDir, id));
+      await syncDirectoryEntry(definitionsDir);
+    });
+
   const readSnapshot = async (snapshotId: string): Promise<ExpertSnapshot> => {
     await ensureInitialized();
-    if (!SNAPSHOT_ID_PATTERN.test(snapshotId)) {
-      throw new ExpertStoreError("Snapshot ID is invalid.", "invalid_input");
-    }
     const snapshotRoot = path.join(snapshotsDir, snapshotId);
-    const rootStat = await fs.lstat(snapshotRoot).catch((cause: unknown) => {
-      if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
-        throw new ExpertStoreError(`Snapshot not found: ${snapshotId}`, "not_found", { cause });
-      }
-      throw cause;
-    });
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-      throw new ExpertStoreError("Snapshot directory is invalid.", "snapshot_corrupt");
-    }
-    const manifestPath = path.join(snapshotRoot, "snapshot.json");
-    const manifestBytes = await safeReadFile(manifestPath, await fs.realpath(snapshotRoot));
-    let stored: StoredSnapshot;
-    try {
-      stored = Schema.decodeUnknownSync(StoredSnapshot)(
-        JSON.parse(manifestBytes.toString("utf8")) as unknown,
-      );
-    } catch (cause) {
-      throw new ExpertStoreError("Snapshot manifest is invalid.", "snapshot_corrupt", { cause });
-    }
-    const snapshot = stored.snapshot;
-    if (
-      snapshot.snapshotId !== snapshotId ||
-      !EXPERT_ID_PATTERN.test(snapshot.expertId) ||
-      snapshot.skillsRoot !== "skills" ||
-      stored.resources.length > MAX_SNAPSHOT_ENTRIES ||
-      stored.resources.some(
-        (entry) =>
-          !["skills", "references"].some((rootName) => isSafeRelativePath(entry.path, rootName)),
-      )
-    ) {
-      throw new ExpertStoreError("Snapshot manifest paths are invalid.", "snapshot_corrupt");
-    }
-    if (
-      snapshot.skills.some((skill) => !isSafeRelativePath(skill.path, "skills")) ||
-      snapshot.references.some((reference) => !isSafeRelativePath(reference, "references"))
-    ) {
-      throw new ExpertStoreError("Snapshot resource references are invalid.", "snapshot_corrupt");
-    }
-    const actualResources = await collectSnapshotResources(snapshotRoot);
-    if (stableJson(actualResources) !== stableJson(stored.resources)) {
-      throw new ExpertStoreError(
-        "Snapshot resources failed integrity validation.",
-        "snapshot_corrupt",
-      );
-    }
-    if (hashSnapshot(snapshot, actualResources) !== snapshotId) {
-      throw new ExpertStoreError(
-        "Snapshot content hash does not match its ID.",
-        "snapshot_corrupt",
-      );
-    }
+    const snapshot = await readVerifiedStoredExpertSnapshot(snapshotRoot, snapshotId);
     return hydrateSnapshot(snapshot, snapshotRoot);
   };
 
@@ -832,6 +897,24 @@ export function createExpertStore(stateDir: string): ExpertStore {
       collected.push(...entries);
       totalBytes += entries.reduce((total, entry) => total + entry.size, 0);
     }
+    const connectionStore = createExpertConnectionStore(stateDir);
+    const mcpBindingServers = [];
+    for (const connection of definition.connections) {
+      if (connection.enabled === false || connection.tools.length === 0) continue;
+      const config = await connectionStore.pinRevision(connection.id);
+      if (!config && connection.required) {
+        throw new ExpertStoreError(
+          `Required expert connection is not configured: ${connection.id}`,
+          "invalid_resource",
+        );
+      }
+      mcpBindingServers.push({
+        id: connection.id,
+        ...(config ? { configRevision: config.revision } : {}),
+        required: connection.required,
+        tools: connection.tools,
+      });
+    }
     const resources = collected
       .map(({ path: resourcePath, kind, size, sha256 }) => ({
         path: resourcePath,
@@ -853,6 +936,12 @@ export function createExpertStore(stateDir: string): ExpertStore {
       skillsRoot: "skills",
       references: referenceTargets,
       connections: definition.connections,
+      mcpBinding: {
+        schemaVersion: 1,
+        source: "snapshot",
+        createdAt: new Date().toISOString(),
+        servers: mcpBindingServers,
+      },
       preferredProvider: definition.preferredProvider,
       createdAt: "1970-01-01T00:00:00.000Z",
     };
@@ -964,20 +1053,35 @@ export function createExpertStore(stateDir: string): ExpertStore {
     let connectionBlocked = false;
     let connectionPartial = false;
     for (const connection of definition.connections) {
-      if (connection.tools.length === 0) continue;
+      if (connection.enabled === false || connection.tools.length === 0) continue;
+      const markUnavailable = (message: string) => {
+        issues.push(message);
+        if (connection.required) connectionBlocked = true;
+        else connectionPartial = true;
+      };
       let config;
       try {
         config = await connectionStore.read(connection.id);
       } catch {
         config = null;
       }
-      const markUnavailable = (message: string) => {
-        issues.push(message);
-        if (connection.required) connectionBlocked = true;
-        else connectionPartial = true;
-      };
       if (!config) {
         markUnavailable(`${connection.required ? "必需" : "可选"}连接“${connection.id}”尚未配置。`);
+        continue;
+      }
+      let connectionState;
+      try {
+        connectionState = await connectionStore.readState(connection.id);
+      } catch {
+        markUnavailable(
+          `${connection.required ? "必需" : "可选"}连接“${connection.id}”状态不可用。`,
+        );
+        continue;
+      }
+      if (connectionState.status !== "active") {
+        markUnavailable(
+          `${connection.required ? "必需" : "可选"}连接“${connection.id}”已${connectionState.status === "retired" ? "退役" : "停用"}。`,
+        );
         continue;
       }
       const envVars =
@@ -1007,8 +1111,23 @@ export function createExpertStore(stateDir: string): ExpertStore {
     const pending = pendingInitializations.get(root);
     if (pending) return (initialization = pending);
     const created = (async () => {
+      try {
+        const marker = await safeReadFile(initializationPath);
+        if (marker.toString("utf8") !== initializationMarker) {
+          throw new ExpertStoreError(
+            "Expert initialization marker is invalid.",
+            "snapshot_corrupt",
+          );
+        }
+        return;
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+      }
       const existing = await fs.readdir(definitionsDir);
-      if (existing.some((name) => name.endsWith(".json"))) return;
+      if (existing.some((name) => name.endsWith(".json"))) {
+        await writeAtomically(initializationPath, initializationMarker);
+        return;
+      }
       const now = new Date().toISOString();
       const examples: Omit<ExpertDefinition, "updatedAt">[] = [
         {
@@ -1060,6 +1179,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
           `${JSON.stringify({ ...example, updatedAt: now }, null, 2)}\n`,
         );
       }
+      await writeAtomically(initializationPath, initializationMarker);
     })();
     pendingInitializations.set(root, created);
     void created
@@ -1078,6 +1198,8 @@ export function createExpertStore(stateDir: string): ExpertStore {
     },
     save,
     archive,
+    restore,
+    remove,
     preview,
     prepareSnapshot,
     readSnapshot,

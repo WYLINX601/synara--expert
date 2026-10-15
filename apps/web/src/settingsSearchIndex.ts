@@ -6,10 +6,12 @@
 
 import { rankProviderDiscoveryItems } from "~/lib/providerDiscovery";
 import {
+  normalizeSettingsSection,
   settingRowAnchorId,
   SETTINGS_NAV_ITEMS,
   type SettingsSectionId,
 } from "./settingsNavigation";
+import { WORKBENCH_MODULES } from "./workbench/registry";
 
 /**
  * One searchable settings result. `title` usually matches a string SettingsRow heading so
@@ -21,6 +23,7 @@ export interface SettingsSearchEntry {
   title: string;
   keywords: string;
   target?: string | null;
+  query?: Readonly<Record<string, string>>;
   /**
    * Whether this row exists on the machine the user is actually looking at.
    * Omitted means "always". A search result for a row the panel does not render
@@ -52,6 +55,23 @@ const DEFAULT_SETTINGS_SEARCH_CONTEXT: SettingsSearchContext = {
 export function settingsSearchEntryTarget(entry: SettingsSearchEntry): string | null {
   return entry.target === undefined ? settingRowAnchorId(entry.title) : entry.target;
 }
+
+const WORKBENCH_SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = WORKBENCH_MODULES.flatMap(
+  (module) => [
+    {
+      id: `${module.id}:page`,
+      section: module.id,
+      title: module.settings.navigation.label,
+      keywords: `${module.settings.navigation.description} ${module.settings.search.keywords}`,
+      target: null,
+    },
+    ...(module.settings.search.entries ?? []).map((entry) => ({
+      ...entry,
+      section: module.id,
+      target: entry.target ?? null,
+    })),
+  ],
+);
 
 // Mirrors row titles/descriptions rendered in settings panels. Panels stay mounted but render
 // null while inactive, so the sidebar cannot read every row at runtime; keep this list in sync
@@ -505,13 +525,7 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     keywords:
       "Rebuild local project indexes without clearing existing chats when the local state gets out of sync.",
   },
-  {
-    id: "integrations:external-mcp",
-    section: "integrations",
-    title: "External MCP integrations",
-    keywords:
-      "Pair Codex Claude and other local MCP clients with scoped project access. revoke credential task create wait read worktree approval",
-  },
+  ...WORKBENCH_SETTINGS_SEARCH_ENTRIES,
   {
     id: "advanced:version",
     section: "advanced",
@@ -532,7 +546,8 @@ const SETTINGS_SECTION_LABEL_BY_ID = new Map<SettingsSectionId, string>(
 );
 
 export function settingsSectionLabel(section: SettingsSectionId): string {
-  return SETTINGS_SECTION_LABEL_BY_ID.get(section) ?? section;
+  const normalized = normalizeSettingsSection(section);
+  return SETTINGS_SECTION_LABEL_BY_ID.get(normalized) ?? section;
 }
 
 /**

@@ -22,13 +22,18 @@ const projectionThreadsColumnNames = (sql: SqlClient.SqlClient) =>
     SELECT name FROM pragma_table_info('projection_threads')
   `.pipe(Effect.map((rows) => rows.map((row) => row.name)));
 
+const contextDeliveryColumnNames = (sql: SqlClient.SqlClient) =>
+  sql<{ readonly name: string }>`
+    SELECT name FROM pragma_table_info('orchestration_event_deliveries')
+  `.pipe(Effect.map((rows) => rows.map((row) => row.name)));
+
 const expertAppliedRuntimeColumnInfo = (sql: SqlClient.SqlClient) =>
   sql<{ readonly name: string; readonly pk: number }>`
     SELECT name, pk FROM pragma_table_info('expert_applied_runtime_records') ORDER BY cid ASC
   `;
 
 layer("official migration catalog", (it) => {
-  it.effect("keeps former expert migrations out of the official tracker", () =>
+  it.effect("registers Context V1 and leaves reserved expert migration slots unclaimed", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const executed = yield* runMigrations();
@@ -36,7 +41,11 @@ layer("official migration catalog", (it) => {
         executed.map(([id]) => id),
         migrationEntries.map(([id]) => id),
       );
-      assert.equal(Math.max(...migrationEntries.map(([id]) => id)), 108);
+      assert.equal(Math.max(...migrationEntries.map(([id]) => id)), 111);
+      assert.include(
+        executed.map(([, name]) => name),
+        "ContextV1",
+      );
       assert.notInclude(
         executed.map(([, name]) => name),
         "ProjectionThreadsExpertBinding",
@@ -47,6 +56,23 @@ layer("official migration catalog", (it) => {
       );
       assert.deepStrictEqual(yield* expertAppliedRuntimeColumnInfo(sql), []);
       assert.notInclude(yield* projectionThreadsColumnNames(sql), "expert_binding_json");
+      const contextColumns = yield* contextDeliveryColumnNames(sql);
+      assert.include(contextColumns, "context_snapshot_id");
+      assert.include(contextColumns, "context_input_digest");
+      assert.include(contextColumns, "context_message_id");
+      assert.include(contextColumns, "context_phase");
+      const instanceRows = yield* sql<{ readonly id: string }>`
+        SELECT data_instance_id AS id FROM context_meta WHERE singleton = 1
+      `;
+      assert.match(
+        instanceRows[0]?.id ?? "",
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/u,
+      );
+      yield* runMigrations();
+      const stableRows = yield* sql<{ readonly id: string }>`
+        SELECT data_instance_id AS id FROM context_meta WHERE singleton = 1
+      `;
+      assert.strictEqual(stableRows[0]?.id, instanceRows[0]?.id);
     }),
   );
 });
@@ -295,6 +321,7 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
         [106, "ProjectImportOrigins"],
         [107, "ProjectionThreadsHumanMessage"],
         [108, "GatewayCompletions"],
+        [111, "ContextV1"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -355,6 +382,7 @@ managedAttachmentsLegacyLayer("managed attachment migration after private migrat
           { migration_id: 106, name: "ProjectImportOrigins" },
           { migration_id: 107, name: "ProjectionThreadsHumanMessage" },
           { migration_id: 108, name: "GatewayCompletions" },
+          { migration_id: 111, name: "ContextV1" },
         ],
       );
       const preserved = yield* sql<{ readonly count: number }>`
@@ -456,6 +484,7 @@ agentGatewayRetentionLegacyLayer(
           [106, "ProjectImportOrigins"],
           [107, "ProjectionThreadsHumanMessage"],
           [108, "GatewayCompletions"],
+          [111, "ContextV1"],
         ]);
 
         const columns = yield* sql<{ readonly name: string }>`
@@ -559,6 +588,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [106, "ProjectImportOrigins"],
         [107, "ProjectionThreadsHumanMessage"],
         [108, "GatewayCompletions"],
+        [111, "ContextV1"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -603,6 +633,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [106, "ProjectImportOrigins"],
           [107, "ProjectionThreadsHumanMessage"],
           [108, "GatewayCompletions"],
+          [111, "ContextV1"],
         ],
       );
 
@@ -701,6 +732,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
         [106, "ProjectImportOrigins"],
         [107, "ProjectionThreadsHumanMessage"],
         [108, "GatewayCompletions"],
+        [111, "ContextV1"],
       ]);
 
       const tracker = yield* trackerRows(sql);
@@ -741,6 +773,7 @@ spacesMigrationCollisionLayer("Spaces migration after the private migration 70 c
           [106, "ProjectImportOrigins"],
           [107, "ProjectionThreadsHumanMessage"],
           [108, "GatewayCompletions"],
+          [111, "ContextV1"],
         ],
       );
       const preservedSpaces = yield* sql<{ readonly spaceId: string }>`

@@ -66,6 +66,7 @@ import {
 } from "../../computer/Services/ComputerService.ts";
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
+import { ContextRepository } from "../../context/ContextRepository.ts";
 import { TextGenerationError } from "../../git/Errors.ts";
 import {
   ProviderAdapterProcessError,
@@ -744,6 +745,7 @@ describe("ProviderCommandReactor", () => {
         interceptor(command) ?? passthroughDispatch(command, context);
     };
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
+    const contextRepository = await runtime.runPromise(Effect.service(ContextRepository));
     const serverSettings = await runtime.runPromise(Effect.service(ServerSettingsService));
     const deliveryRepository = await runtime.runPromise(
       Effect.service(OrchestrationEventDeliveryRepository),
@@ -812,6 +814,7 @@ describe("ProviderCommandReactor", () => {
 
     return {
       engine,
+      contextRepository,
       seedCompletion: () =>
         runtime!.runPromise(sql`
         INSERT INTO agent_gateway_completions
@@ -1134,6 +1137,120 @@ describe("ProviderCommandReactor", () => {
       context_event_sequence: null,
     });
   });
+
+  it.each([false, true])(
+    "Context load failure retries the original frozen event only with unchanged workspace (changed=%s)",
+    async (workspaceChanged) => {
+      const harness = await createHarness();
+      const config = await Effect.runPromise(
+        harness.contextRepository.getProject(asProjectId("project-1")),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "context.project.save",
+          commandId: CommandId.makeUnsafe("context-config"),
+          projectId: config.projectId,
+          dataInstanceId: config.dataInstanceId,
+          expectedRevision: config.revision,
+          projectGoal: "Original frozen goal",
+          projectInstructions: "Original instructions",
+        }),
+      );
+      harness.startSession.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderValidationError({
+            operation: "startSession",
+            issue: "Context initialization failed before dispatch",
+          }),
+        ),
+      );
+      harness.sendTurn.mockImplementation((input, options) =>
+        (options?.beforeDispatch ?? Effect.void).pipe(
+          Effect.as({ threadId: input.threadId, turnId: asTurnId("context-retried-turn") }),
+        ),
+      );
+      await dispatchHarnessUserTurn(harness, {
+        messageId: "context-original-message",
+        text: "Execute once",
+        createdAt: new Date().toISOString(),
+      });
+      let failedSequence = 0;
+      await waitFor(async () => {
+        const blocker = await Effect.runPromise(
+          harness.deliveryRepository.firstBlockingDeliveryForThread({
+            consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+            threadId: "thread-1",
+          }),
+        );
+        if (Option.isNone(blocker)) return false;
+        failedSequence = blocker.value.eventSequence;
+        expect(blocker.value.contextPhase).toBe("before_dispatch");
+        return true;
+      });
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const original = await Effect.runPromise(
+        harness.contextRepository.getThreadBinding(ThreadId.makeUnsafe("thread-1")),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "context.project.save",
+          commandId: CommandId.makeUnsafe("context-new-config"),
+          projectId: config.projectId,
+          dataInstanceId: config.dataInstanceId,
+          expectedRevision: config.revision + 1,
+          projectGoal: "Updated for future conversations",
+          projectInstructions: "New instructions",
+        }),
+      );
+      if (workspaceChanged) {
+        await Effect.runPromise(
+          harness.engine.dispatch({
+            type: "project.meta.update",
+            commandId: CommandId.makeUnsafe("context-workspace-change"),
+            projectId: config.projectId,
+            workspaceRoot: "/tmp/reassigned-context-project",
+          }),
+        );
+      }
+      const request = {
+        commandId: CommandId.makeUnsafe("context-original-retry"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        eventSequence: failedSequence,
+      };
+      const result = await Effect.runPromise(harness.reactor.retryContextLoad(request));
+      expect(result.status).toBe(workspaceChanged ? "rejected" : "saved");
+      if (!workspaceChanged) {
+        await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+        expect(await Effect.runPromise(harness.reactor.retryContextLoad(request))).toMatchObject({
+          status: "saved",
+        });
+        await harness.drain();
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+        expect(harness.startSession.mock.calls.at(-1)?.[1].contextSession?.snapshotId).toBe(
+          original?.snapshot?.snapshotId,
+        );
+        const delivery = Option.getOrThrow(
+          await Effect.runPromise(
+            harness.deliveryRepository.getDelivery({
+              consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+              eventSequence: failedSequence,
+            }),
+          ),
+        );
+        expect(delivery.contextPhase).toBe("acknowledged");
+      } else expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(
+        (await readHarnessThread(harness))?.messages.filter(
+          (message) => message.id === "context-original-message",
+        ),
+      ).toHaveLength(1);
+      expect(
+        await Effect.runPromise(
+          harness.contextRepository.getThreadBinding(ThreadId.makeUnsafe("thread-1")),
+        ),
+      ).toEqual(original);
+    },
+  );
 
   async function seedRollbackTarget(
     harness: Awaited<ReturnType<typeof createHarness>>,

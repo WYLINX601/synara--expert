@@ -41,6 +41,7 @@ import {
   type RuntimeSpawnOptions,
 } from "@synara/shared/processRuntime";
 import { stripTerminalControlSequences } from "@synara/shared/text";
+import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { Effect, FileSystem, Layer, Option, Queue, Stream } from "effect";
 
 import {
@@ -2689,6 +2690,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       processSupervisor: PiBashProcessSupervisor;
       gatewayTools?: ReadonlyArray<ToolDefinition>;
       expertSession?: Parameters<PiAdapterShape["startSession"]>[0]["expertSession"];
+      contextSession?: Parameters<PiAdapterShape["startSession"]>[0]["contextSession"];
       signal?: AbortSignal;
     }) => {
       const modelRuntime = await createPiModelRuntime(input.agentDir, input.sdk, input.signal);
@@ -2703,11 +2705,18 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           cwd,
           agentDir,
           modelRuntime,
-          ...(input.expertSession
+          ...(input.expertSession || input.contextSession?.hasContent
             ? {
                 resourceLoaderOptions: {
-                  appendSystemPrompt: [input.expertSession.persona],
-                  ...(input.expertSession.skillsRoot
+                  appendSystemPrompt: [
+                    composeProviderBaseInstructions({
+                      expertPersona: input.expertSession?.persona,
+                      contextInstructions: input.contextSession?.hasContent
+                        ? input.contextSession.text
+                        : undefined,
+                    }) ?? "",
+                  ].filter(Boolean),
+                  ...(input.expertSession?.skillsRoot
                     ? { additionalSkillPaths: [input.expertSession.skillsRoot] }
                     : {}),
                 },
@@ -2913,6 +2922,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
                 processSupervisor,
                 ...(gatewayControlAvailable ? { gatewayTools } : {}),
                 ...(input.expertSession ? { expertSession: input.expertSession } : {}),
+                ...(input.contextSession ? { contextSession: input.contextSession } : {}),
               }),
             catch: (cause) =>
               new ProviderAdapterRequestError({

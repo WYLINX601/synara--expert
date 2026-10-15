@@ -50,6 +50,7 @@ import {
 } from "@synara/shared/jsonrpc-stdio";
 import { decodeSubagentReceiverThreadIds } from "@synara/shared/subagents";
 import { spawnProcess } from "@synara/shared/processRuntime";
+import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { Effect, ServiceMap } from "effect";
 
 import {
@@ -187,7 +188,7 @@ type CodexSessionApprovalOverride = {
 
 interface CodexSessionContext {
   readonly enableComputerControl?: boolean;
-  readonly expertDeveloperInstructions?: string;
+  readonly baseDeveloperInstructions?: string;
   readonly gatewaySessionLease?: AgentGatewaySessionLease;
   /** Set once this runtime's bearer is permanently fenced to a terminal turn. */
   gatewayCredentialRetired?: boolean;
@@ -324,6 +325,7 @@ export interface CodexAppServerStartSessionInput {
   readonly forkSourceResumeCursor?: unknown;
   readonly providerOptions?: ProviderSessionStartInput["providerOptions"];
   readonly expertSession?: ProviderExpertSession;
+  readonly contextSession?: ProviderSessionStartInput["contextSession"];
   /**
    * Session-start facts the gateway lease derives its capabilities from.
    * Required on purpose: a lease that forgets it fails silently (the
@@ -1300,6 +1302,12 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         threadId,
         input.agentGatewayCapabilityInput,
       );
+      const baseDeveloperInstructions = composeProviderBaseInstructions({
+        expertPersona: input.expertSession?.persona,
+        contextInstructions: input.contextSession?.hasContent
+          ? input.contextSession.text
+          : undefined,
+      });
       const child = this.spawnAppServer({
         binaryPath: codexBinaryPath,
         cwd: resolvedCwd,
@@ -1313,9 +1321,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         enableComputerControl:
           gatewaySessionLease !== undefined &&
           input.agentGatewayCapabilityInput.enableComputerControl === true,
-        ...(input.expertSession
-          ? { expertDeveloperInstructions: input.expertSession.persona }
-          : {}),
+        ...(baseDeveloperInstructions !== undefined ? { baseDeveloperInstructions } : {}),
         ...(gatewaySessionLease ? { gatewaySessionLease } : {}),
         session,
         ...(input.lifecycleGeneration !== undefined
@@ -1381,7 +1387,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ...(forkSourceThreadId ? { forkSourceThreadId } : {}),
         ...(resumeThreadId ? { resumeThreadId } : {}),
         sessionOverrides,
-        ...(input.expertSession ? { developerInstructions: input.expertSession.persona } : {}),
+        ...(baseDeveloperInstructions !== undefined
+          ? { developerInstructions: baseDeveloperInstructions }
+          : {}),
       });
       const previouslyBound =
         this.previouslyBoundThreadIds.has(threadId) || input.resumeCursor !== undefined;
@@ -1480,7 +1488,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         }).pipe(this.runPromise);
         const fallbackRequest = buildCodexThreadOpenRequest({
           sessionOverrides,
-          ...(input.expertSession ? { developerInstructions: input.expertSession.persona } : {}),
+          ...(baseDeveloperInstructions !== undefined
+            ? { developerInstructions: baseDeveloperInstructions }
+            : {}),
         });
         threadOpenResponse = await this.sendRequest(
           context,
@@ -1625,8 +1635,8 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
       ...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
       ...(input.effort !== undefined ? { effort: input.effort } : {}),
-      ...(context.expertDeveloperInstructions !== undefined
-        ? { expertInstructions: context.expertDeveloperInstructions }
+      ...(context.baseDeveloperInstructions !== undefined
+        ? { expertInstructions: context.baseDeveloperInstructions }
         : {}),
     });
     if (collaborationMode) {
@@ -2164,6 +2174,12 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       }
 
       const resolvedCwd = input.cwd ?? ensureIsolatedScratchWorkspace(threadId);
+      const baseDeveloperInstructions = composeProviderBaseInstructions({
+        expertPersona: input.expertSession?.persona,
+        contextInstructions: input.contextSession?.hasContent
+          ? input.contextSession.text
+          : undefined,
+      });
       let session: ProviderSession = {
         provider: "codex",
         status: "connecting",
@@ -2225,6 +2241,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
       context = {
         ...(gatewaySessionLease ? { gatewaySessionLease } : {}),
+        ...(baseDeveloperInstructions !== undefined ? { baseDeveloperInstructions } : {}),
         ...(input.lifecycleGeneration !== undefined
           ? { lifecycleGeneration: input.lifecycleGeneration }
           : {}),
@@ -2254,7 +2271,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
       await this.sendRequest(context, "initialize", buildCodexInitializeParams());
       await this.writeMessage(context, { method: "initialized" });
-      await this.registerSessionSkillRoots(context);
+      await this.registerSessionSkillRoots(context, input.expertSession);
       try {
         const accountReadResponse = await this.sendRequest(context, "account/read", {});
         context.account = readCodexAccountSnapshot(accountReadResponse);
@@ -2302,6 +2319,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ...(serviceTier !== undefined ? { serviceTier } : {}),
         cwd: resolvedCwd,
         ...mapCodexRuntimeMode(input.runtimeMode),
+        ...(baseDeveloperInstructions !== undefined
+          ? { developerInstructions: baseDeveloperInstructions }
+          : {}),
       };
 
       this.emitLifecycleEvent(

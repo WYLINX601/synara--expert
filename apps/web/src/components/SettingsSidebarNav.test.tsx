@@ -28,6 +28,18 @@ describe("rankSettingsSearchEntries", () => {
     expect(results.some((entry) => entry.id === "behavior:diff-line-wrapping")).toBe(true);
   });
 
+  it("keeps the MCP application access search result on the apps tab", () => {
+    const result = rankSettingsSearchEntries("External MCP integrations", 12).find(
+      (entry) => entry.id === "mcp:apps",
+    );
+
+    expect(result).toMatchObject({
+      section: "mcp",
+      target: null,
+      query: { tab: "apps" },
+    });
+  });
+
   it("surfaces every row in a section when searching the section label", () => {
     const results = rankSettingsSearchEntries("appearance", SETTINGS_SEARCH_ENTRIES.length);
     expect(results.some((entry) => entry.section === "appearance")).toBe(true);

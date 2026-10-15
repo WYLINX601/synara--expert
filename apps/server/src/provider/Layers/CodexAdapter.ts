@@ -2121,6 +2121,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
           : {}),
         ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {}),
         ...(input.expertSession !== undefined ? { expertSession: input.expertSession } : {}),
+        ...(input.contextSession !== undefined ? { contextSession: input.contextSession } : {}),
         agentGatewayCapabilityInput: captureAgentGatewayCapabilityInput(input),
         runtimeMode: input.runtimeMode,
         ...codexModelSelectionOverrides(input.modelSelection),

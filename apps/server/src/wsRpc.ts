@@ -36,14 +36,6 @@ import {
   type ServerConfigStreamEvent,
   type ServerDiagnosticsResult,
   type ServerLifecycleStreamEvent,
-  type ExpertReadInput,
-  type ExpertSaveInput,
-  type ExpertArchiveInput,
-  type ExpertConnectionRemoveInput,
-  type ExpertConnectionSaveInput,
-  type ExpertPreviewInput,
-  type ExpertSnapshotReadInput,
-  type ExpertAppliedRuntimeReadInput,
 } from "@synara/contracts";
 import { clamp } from "effect/Number";
 import { Effect, FileSystem, Layer, Option, Path, Queue, Schema, Scope, Stream } from "effect";
@@ -143,6 +135,11 @@ import { redactSensitiveProcessArgs } from "./processArgumentRedaction";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment";
 import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
 import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
+import { makeWorkbenchExpertRpcHandlers } from "./workbench/host/expertRpc.ts";
+import { makeWorkbenchContextRpcHandlers } from "./workbench/host/contextRpc.ts";
+import { readThreadContextDetails } from "./workbench/host/contextThreadDetails.ts";
+import { ContextRepository, ContextRepositoryLive } from "./context/ContextRepository.ts";
+import { OrchestrationEventDeliveryRepository } from "./persistence/Services/OrchestrationEventDeliveries.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { ServerSettingsService } from "./serverSettings";
@@ -356,6 +353,26 @@ export function toWsRpcError(cause: unknown, fallbackMessage: string) {
   });
 }
 
+/**
+ * Preserve the original rejection for the workbench Expert RPC boundary before
+ * mapping it into the existing RPC error envelope.
+ */
+export function expertRpcEffect<A, E, R>(
+  authorization: Effect.Effect<void, E, R>,
+  operation: () => Promise<A>,
+  fallbackMessage: string,
+): Effect.Effect<A, WsRpcError, R> {
+  return authorization.pipe(
+    Effect.andThen(
+      Effect.tryPromise({
+        try: operation,
+        catch: (cause) => cause,
+      }),
+    ),
+    Effect.mapError((cause) => toWsRpcError(cause, fallbackMessage)),
+  );
+}
+
 // Process-wide so a subscriber's restart chain survives its own reconnects
 // (the client id is stable across a socket reconnect), but keyed per
 // subscriber inside the tracker — see makeResnapshotEscalationTracker.
@@ -423,6 +440,8 @@ const makeWsRpcHandlersLayer = () =>
       const eventStore = yield* OrchestrationEventStore;
       const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
       const expertAppliedRuntimeRepository = yield* ExpertAppliedRuntimeRepository;
+      const contextRepository = yield* ContextRepository;
+      const contextDeliveries = yield* OrchestrationEventDeliveryRepository;
       const workbenchExpertRuntime = createWorkbenchExpertRuntime({
         stateDir: config.stateDir,
         expertAppliedRuntimeRepository,
@@ -1018,6 +1037,54 @@ const makeWsRpcHandlersLayer = () =>
             }),
           );
         }
+      });
+      const workbenchExpertRpcHandlers = makeWorkbenchExpertRpcHandlers({
+        runtime: workbenchExpertRuntime,
+        requireOwner,
+        rpcEffect,
+        expertRpcEffect,
+        loadProjectionThreads: () =>
+          projectionReadModelQuery.getSnapshot().pipe(Effect.map((snapshot) => snapshot.threads)),
+      });
+      const workbenchContextRpcHandlers = makeWorkbenchContextRpcHandlers({
+        repository: contextRepository,
+        dispatch: dispatchOrchestrationCommand,
+        retryLoad: (request) =>
+          runtimeStartup.enqueueCommand(providerCommandReactor.retryContextLoad(request)),
+        getThreadDetails: (request) =>
+          readThreadContextDetails({
+            threadId: request.threadId,
+            repository: contextRepository,
+            deliveries: contextDeliveries,
+            providers: providerService,
+            readThread: (threadId) =>
+              orchestrationEngine
+                .getReadModel()
+                .pipe(
+                  Effect.map((model) => model.threads.find((thread) => thread.id === threadId)),
+                ),
+            readWorkspace: (thread) =>
+              orchestrationEngine.getReadModel().pipe(
+                Effect.map((model) => {
+                  const project = model.projects.find(
+                    (entry) => entry.id === thread.projectId && entry.deletedAt === null,
+                  );
+                  return project
+                    ? {
+                        projectWorkspaceRoot: project.workspaceRoot,
+                        effectiveCwd:
+                          resolveThreadWorkspaceCwd({ thread, projects: [project] }) ?? null,
+                      }
+                    : undefined;
+                }),
+              ),
+            readEvent: (sequence) =>
+              orchestrationEngine.readEventsThrough(sequence - 1, sequence).pipe(
+                Stream.runCollect,
+                Effect.map((events) => events[0]),
+              ),
+          }),
+        rpcEffect,
       });
 
       return AdmittedWsFeatureRpcGroup.of({
@@ -1884,104 +1951,8 @@ const makeWsRpcHandlersLayer = () =>
           rpcEffect(serverSettings.getSettingsView, "Failed to load server settings"),
         [WS_METHODS.serverUpdateSettings]: (input) =>
           rpcEffect(serverSettings.updateSettingsView(input), "Failed to update server settings"),
-        [WS_METHODS.serverListExperts]: () =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(Effect.tryPromise(() => workbenchExpertRuntime.experts.list())),
-            ),
-            "Failed to list experts",
-          ),
-        [WS_METHODS.serverReadExpert]: (input: ExpertReadInput) =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(
-                Effect.tryPromise(() => workbenchExpertRuntime.experts.read(input.id)),
-              ),
-            ),
-            "Failed to read expert",
-          ),
-        [WS_METHODS.serverSaveExpert]: (input: ExpertSaveInput) =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(Effect.tryPromise(() => workbenchExpertRuntime.experts.save(input))),
-            ),
-            "Failed to save expert",
-          ),
-        [WS_METHODS.serverArchiveExpert]: (input: ExpertArchiveInput) =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(
-                Effect.tryPromise(() =>
-                  workbenchExpertRuntime.experts.archive(input.id, input.expectedRevision),
-                ),
-              ),
-            ),
-            "Failed to archive expert",
-          ),
-        [WS_METHODS.serverPreviewExpert]: (input: ExpertPreviewInput) =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(
-                Effect.tryPromise(() => workbenchExpertRuntime.experts.preview(input)),
-              ),
-            ),
-            "Failed to preview expert",
-          ),
-        [WS_METHODS.serverReadExpertSnapshot]: (input: ExpertSnapshotReadInput) =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(
-                Effect.tryPromise(() =>
-                  workbenchExpertRuntime.experts.readSnapshot(input.snapshotId),
-                ),
-              ),
-            ),
-            "Failed to read expert snapshot",
-          ),
-        [WS_METHODS.serverReadExpertAppliedRuntime]: (input: ExpertAppliedRuntimeReadInput) =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(workbenchExpertRuntime.readAppliedRuntime(input)),
-              Effect.map(Option.getOrNull),
-            ),
-            "Failed to read Expert applied runtime",
-          ),
-        [WS_METHODS.serverListExpertConnections]: () =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(Effect.tryPromise(() => workbenchExpertRuntime.connections.list())),
-            ),
-            "Failed to list expert connections",
-          ),
-        [WS_METHODS.serverSaveExpertConnection]: (input: ExpertConnectionSaveInput) =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(
-                Effect.tryPromise(() => workbenchExpertRuntime.connections.save(input)),
-              ),
-            ),
-            "Failed to save expert connection",
-          ),
-        [WS_METHODS.serverRemoveExpertConnection]: (input: ExpertConnectionRemoveInput) =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(
-                Effect.tryPromise(() =>
-                  workbenchExpertRuntime.connections.remove(input.id, input.expectedRevision),
-                ),
-              ),
-            ),
-            "Failed to remove expert connection",
-          ),
-        [WS_METHODS.serverTestExpertConnection]: (input: ExpertReadInput) =>
-          rpcEffect(
-            requireOwner.pipe(
-              Effect.andThen(
-                Effect.tryPromise(() => workbenchExpertRuntime.testConnection(input.id)),
-              ),
-            ),
-            "Failed to test expert connection",
-          ),
+        ...workbenchExpertRpcHandlers,
+        ...workbenchContextRpcHandlers,
         [WS_METHODS.serverRefreshProviders]: () =>
           rpcEffect(
             providerHealth.refresh.pipe(Effect.map((providers) => ({ providers }))),
@@ -2428,7 +2399,10 @@ const makeWsRpcHandlersLayer = () =>
 
 export const makeWsRpcLayer = () =>
   Layer.merge(
-    makeWsRpcHandlersLayer().pipe(Layer.provideMerge(ExpertAppliedRuntimeRepositoryLive)),
+    makeWsRpcHandlersLayer().pipe(
+      Layer.provideMerge(ExpertAppliedRuntimeRepositoryLive),
+      Layer.provideMerge(ContextRepositoryLive),
+    ),
     wsRequestAdmissionMiddlewareLayer,
   );
 

@@ -5,12 +5,32 @@ import {
   ExpertAppliedRuntimeReadInput,
   ExpertConnectionRemoveInput,
   ExpertConnectionSaveInput,
+  ExpertConnectionTestInput,
+  ExpertDeleteInput,
   ExpertPreviewInput,
   ExpertReadInput,
+  ExpertRestoreInput,
   ExpertSaveInput,
   ExpertSnapshotReadInput,
 } from "./expert";
+import {
+  ExpertConnectionReferencesInputSchema,
+  McpConnectionSetStateInputSchema,
+  McpDiscoveryRequestSchema,
+  McpImportRequestSchema,
+} from "./mcp";
 import { NonNegativeInt, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
+import {
+  ContextCommandReadInput,
+  ContextMigrationClaimInput,
+  ContextMigrationResolveInput,
+  ContextRetryInput,
+  ProjectContextReadInput,
+  ProjectContextSaveInput,
+  SpaceContextReadInput,
+  SpaceContextSaveInput,
+  ThreadContextReadInput,
+} from "./context";
 
 import {
   AutomationCancelRunInput,
@@ -266,6 +286,8 @@ export const WS_METHODS = {
   serverReadExpert: "server.readExpert",
   serverSaveExpert: "server.saveExpert",
   serverArchiveExpert: "server.archiveExpert",
+  serverRestoreExpert: "server.restoreExpert",
+  serverDeleteExpert: "server.deleteExpert",
   serverPreviewExpert: "server.previewExpert",
   serverReadExpertSnapshot: "server.readExpertSnapshot",
   serverReadExpertAppliedRuntime: "server.readExpertAppliedRuntime",
@@ -273,6 +295,11 @@ export const WS_METHODS = {
   serverSaveExpertConnection: "server.saveExpertConnection",
   serverRemoveExpertConnection: "server.removeExpertConnection",
   serverTestExpertConnection: "server.testExpertConnection",
+  serverGetExpertConnectionState: "server.getExpertConnectionState",
+  serverSetExpertConnectionState: "server.setExpertConnectionState",
+  serverReadExpertConnectionReferences: "server.readExpertConnectionReferences",
+  serverDiscoverMcpConnections: "server.discoverMcpConnections",
+  serverImportMcpConnections: "server.importMcpConnections",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   serverListExternalMcpIntegrations: "server.listExternalMcpIntegrations",
@@ -313,6 +340,17 @@ export const WS_METHODS = {
   providerReadPlugin: "provider.readPlugin",
   providerListModels: "provider.listModels",
   providerListAgents: "provider.listAgents",
+
+  // Context methods
+  contextGetSpace: "context.getSpace",
+  contextGetProject: "context.getProject",
+  contextGetThread: "context.getThread",
+  contextSaveSpace: "context.saveSpace",
+  contextSaveProject: "context.saveProject",
+  contextGetCommandResult: "context.getCommandResult",
+  contextClaimMigration: "context.claimMigration",
+  contextResolveMigration: "context.resolveMigration",
+  contextRetryLoad: "context.retryLoad",
 
   // Automation methods
   automationList: "automation.list",
@@ -499,13 +537,23 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverReadExpert, ExpertReadInput),
   tagRequestBody(WS_METHODS.serverSaveExpert, ExpertSaveInput),
   tagRequestBody(WS_METHODS.serverArchiveExpert, ExpertArchiveInput),
+  tagRequestBody(WS_METHODS.serverRestoreExpert, ExpertRestoreInput),
+  tagRequestBody(WS_METHODS.serverDeleteExpert, ExpertDeleteInput),
   tagRequestBody(WS_METHODS.serverPreviewExpert, ExpertPreviewInput),
   tagRequestBody(WS_METHODS.serverReadExpertSnapshot, ExpertSnapshotReadInput),
   tagRequestBody(WS_METHODS.serverReadExpertAppliedRuntime, ExpertAppliedRuntimeReadInput),
   tagRequestBody(WS_METHODS.serverListExpertConnections, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverSaveExpertConnection, ExpertConnectionSaveInput),
   tagRequestBody(WS_METHODS.serverRemoveExpertConnection, ExpertConnectionRemoveInput),
-  tagRequestBody(WS_METHODS.serverTestExpertConnection, ExpertReadInput),
+  tagRequestBody(WS_METHODS.serverTestExpertConnection, ExpertConnectionTestInput),
+  tagRequestBody(WS_METHODS.serverGetExpertConnectionState, ExpertConnectionReferencesInputSchema),
+  tagRequestBody(WS_METHODS.serverSetExpertConnectionState, McpConnectionSetStateInputSchema),
+  tagRequestBody(
+    WS_METHODS.serverReadExpertConnectionReferences,
+    ExpertConnectionReferencesInputSchema,
+  ),
+  tagRequestBody(WS_METHODS.serverDiscoverMcpConnections, McpDiscoveryRequestSchema),
+  tagRequestBody(WS_METHODS.serverImportMcpConnections, McpImportRequestSchema),
   tagRequestBody(WS_METHODS.serverRefreshProviders, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverUpdateProvider, ServerProviderUpdateInput),
   tagRequestBody(WS_METHODS.serverListExternalMcpIntegrations, Schema.Struct({})),
@@ -551,6 +599,15 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.automationArchiveRun, AutomationArchiveRunInput),
   tagRequestBody(WS_METHODS.automationResolveProposal, AutomationResolveProposalInput),
   tagRequestBody(WS_METHODS.subscribeAutomationEvents, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.contextGetSpace, SpaceContextReadInput),
+  tagRequestBody(WS_METHODS.contextGetProject, ProjectContextReadInput),
+  tagRequestBody(WS_METHODS.contextGetThread, ThreadContextReadInput),
+  tagRequestBody(WS_METHODS.contextSaveSpace, SpaceContextSaveInput),
+  tagRequestBody(WS_METHODS.contextSaveProject, ProjectContextSaveInput),
+  tagRequestBody(WS_METHODS.contextGetCommandResult, ContextCommandReadInput),
+  tagRequestBody(WS_METHODS.contextClaimMigration, ContextMigrationClaimInput),
+  tagRequestBody(WS_METHODS.contextResolveMigration, ContextMigrationResolveInput),
+  tagRequestBody(WS_METHODS.contextRetryLoad, ContextRetryInput),
 ]);
 
 export const WebSocketRequest = Schema.Struct({

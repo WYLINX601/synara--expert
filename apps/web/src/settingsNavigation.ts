@@ -21,11 +21,14 @@ export const SETTINGS_SECTION_IDS = [
   "skills",
   ...WORKBENCH_SETTINGS_SECTION_IDS,
   "usage",
+  // Legacy deep links remain accepted and normalize to the unified MCP page.
+  "expert-connections",
   "integrations",
   "advanced",
 ] as const;
 
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number];
+export type McpSettingsTab = "tools" | "apps";
 export type SettingsNavGroupId = "personal" | "integrations" | "coding" | "system" | "archived";
 
 /**
@@ -140,14 +143,6 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     badge: "Beta",
   },
   {
-    id: "integrations",
-    group: "integrations",
-    label: "MCP connections",
-    description: "Give Codex, Claude, and other local agents scoped access to Synara tasks.",
-    icon: "plugin-1",
-    eyebrow: "External agents",
-  },
-  {
     id: "providers",
     group: "coding",
     label: "Agent providers",
@@ -216,5 +211,25 @@ export function normalizeSettingsSection(value: unknown): SettingsSectionId {
   if (typeof value !== "string") {
     return "general";
   }
+  if (value === "expert-connections" || value === "integrations") {
+    return "mcp";
+  }
   return SETTINGS_SECTION_IDS.find((candidate) => candidate === value) ?? "general";
+}
+
+export function mcpSettingsTabForRoute(section: unknown, tab: unknown): McpSettingsTab {
+  if (tab === "tools" || tab === "apps") return tab;
+  return section === "integrations" ? "apps" : "tools";
+}
+
+export function validateSettingsRouteSearch(
+  search: Record<string, unknown>,
+): Record<string, unknown> {
+  const originalSection = search.section;
+  const section = normalizeSettingsSection(originalSection);
+  return {
+    ...search,
+    section,
+    ...(section === "mcp" ? { tab: mcpSettingsTabForRoute(originalSection, search.tab) } : {}),
+  };
 }

@@ -1,0 +1,33 @@
+{
+  "reviewDate": "2026-10-13 Asia/Shanghai",
+  "sourceRoot": "/Users/wangyuelin/.codex/worktrees/expert-frontend-redesign/synara-expert",
+  "sourceHead": "61df29b094d3e5f2877f7787613655220a4f72a2",
+  "sourceHasUncommittedChanges": true,
+  "toolchain": {
+    "node": "24.13.1",
+    "bun": "1.4.2",
+    "vite": "8.1.5",
+    "vitest": "4.1.10"
+  },
+  "sha256": {
+    "bun.lock": "7748108544df86324b9dbecbb98639e20cb086e553509e8247c719bcb8145833",
+    "apps/web/package.json": "6a8ec98e16dfe4ffd30c82594591251965087a199caca6d678cc234960d68727",
+    "apps/web/src/index.css": "2b0cf8ad452732a763d9a13019ac7120f02d55e4fc2f974c90d31c68ba477b26",
+    "apps/web/src/components/SpaceSwitcher.tsx": "74948fe5cb5fca3ec493c3181ee88e3d1d6360d33200e29ca859bfc15a3b0c99",
+    "apps/web/src/components/SpaceEditorDialog.tsx": "3980c95ae86c6ddc86056b4508b2c097c7828b5525a0fba2a6c5c5bbf4466c6f",
+    "apps/web/src/components/SpaceIcon.tsx": "d0e7bc85911e06777fe653c2b16f6dade61a973068dc3ddd86d7cf85eaf1747f",
+    "apps/web/src/components/chat/ChatComposerFooter.tsx": "6fbc24826bea08a77a0d64637398efd498757689e103ef5dfcd8173400d4dd60",
+    "apps/web/src/components/settings/SettingsPanelPrimitives.tsx": "d12d356953e1134a83ea1b2ff444c080f8d044bec6e7c86816dd4cae5d07b70a",
+    "apps/web/src/components/settings/useExpertDraftGuard.tsx": "54d204bdd68c65ef72e39354233ab0aaf4604f8d271063abc8aa1aa7cd0fa47d",
+    "apps/web/src/components/ui/button.tsx": "9cb1b0f190dd45e5e8dd92deadf954007f91fa9c2a1c4aacfd57ac61058c992a",
+    "apps/web/src/components/ui/textarea.tsx": "9c5f30110b27691adaf43b8a706491daa392ef2689e2dd1108a59d51c3976b14",
+    "apps/web/src/components/ui/dialog.tsx": "b604d034e81e82a1b33c23abab8abc862e1c8e70eef3e0dc6d9f30b5efeb43a3",
+    "apps/web/src/components/ui/sheet.tsx": "ac5e621ce69ba1ac48aa2d7f6f930fe1bff2c091a286f215aff1da65f2794bba",
+    "apps/web/src/components/ui/popover.tsx": "73706066b769bb7ce744d7ac4661f5d5dd12bdb1317d4f41cf8693690f954e23",
+    "apps/web/src/components/ui/tooltip.tsx": "c3c70150388a34aa4a2f60558cdf94f9f4035e7eac04a9095a6428fc9f33a342",
+    "apps/web/src/components/ui/collapsible.tsx": "544cf88eacac172b77cca3c2aaf764e08b089d195d7610518ad3ab0b7f2c7c97",
+    "apps/web/src/lib/appTypography.ts": "74d2a71be46158e1298070765e6561568800e59fbbdbda284d5149b3cb71933f",
+    "apps/web/src/lib/disclosureMotion.ts": "16c46d94f60b27e1313cd4f34b5b705b6730f0455227bbeb7d9cb23ac08e1508",
+    "apps/web/src/theme/theme.logic.ts": "bc13ac96a8145c64eb9920073183653dfd33f0bd3a8d1d089047d2a766262adf"
+  }
+}

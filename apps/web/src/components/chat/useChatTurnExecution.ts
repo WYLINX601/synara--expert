@@ -5,6 +5,7 @@ import type {
   ProviderSkillReference,
 } from "@synara/contracts";
 import {
+  WS_CONTEXT_V1_CAPABILITY,
   DEFAULT_MODEL_BY_PROVIDER,
   MessageId,
   ProviderInteractionMode,
@@ -20,6 +21,7 @@ import { useCallback } from "react";
 import { promoteThreadCreate } from "~/lib/threadCreatePromotion";
 import { newCommandId, randomUUID } from "~/lib/utils";
 import { readNativeApi } from "~/nativeApi";
+import { readNativeApiServerCapability } from "~/nativeApi";
 import { dispatchThreadNotes } from "~/pinnedMessages";
 import {
   mergeProjectInstructionsIntoThreadNotes,
@@ -424,10 +426,13 @@ export function useChatTurnExecution({
         );
 
         if (isLocalDraftThread) {
-          const inheritedProjectInstructions =
-            useProjectInstructionsStore.getState().instructionsByProjectId[
-              targetProjectIdForSend
-            ] ?? "";
+          const inheritedProjectInstructions = readNativeApiServerCapability(
+            WS_CONTEXT_V1_CAPABILITY,
+          )
+            ? ""
+            : (useProjectInstructionsStore.getState().instructionsByProjectId[
+                targetProjectIdForSend
+              ] ?? "");
           const inheritedThreadNotes = mergeProjectInstructionsIntoThreadNotes({
             threadNotes,
             projectInstructions: inheritedProjectInstructions,

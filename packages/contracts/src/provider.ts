@@ -25,6 +25,7 @@ import {
   RuntimeMode,
 } from "./orchestration";
 import { ProviderMentionReference, ProviderSkillReference } from "./providerDiscovery";
+import { ContextSession } from "./context";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -76,6 +77,8 @@ export const ProviderSessionStartInput = Schema.Struct({
   enableComputerControl: Schema.optional(Schema.Boolean),
   /** Immutable Expert snapshot resolved server-side from the thread binding. */
   expertSession: Schema.optional(ProviderExpertSession),
+  /** Frozen Space + Project Context resolved for this thread, independent of Expert. */
+  contextSession: Schema.optional(ContextSession),
   runtimeMode: RuntimeMode,
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
@@ -114,6 +117,10 @@ export const ProviderForkThreadInput = Schema.Struct({
    * `computer:control` at the fork boundary.
    */
   enableComputerControl: Schema.optional(Schema.Boolean),
+  /** Immutable Expert snapshot inherited by a native provider fork when present. */
+  expertSession: Schema.optional(ProviderExpertSession),
+  /** Frozen Space + Project Context carried independently into a native fork. */
+  contextSession: Schema.optional(ContextSession),
   runtimeMode: RuntimeMode,
 });
 export type ProviderForkThreadInput = typeof ProviderForkThreadInput.Type;

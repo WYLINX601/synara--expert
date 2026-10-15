@@ -15,6 +15,7 @@ import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationRe
 import { StudioOutputReactorLive } from "./orchestration/Layers/StudioOutputReactor";
 import { ThreadGitMetadataReactorLive } from "./orchestration/Layers/ThreadGitMetadataReactor";
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor";
+import { ContextRepositoryLive } from "./context/ContextRepository.ts";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus";
 import { SidechatExpiryReactorLive } from "./orchestration/Layers/SidechatExpiryReactor";
@@ -110,6 +111,7 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(GitLayerLive),
   );
   const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
+    Layer.provideMerge(ContextRepositoryLive),
     Layer.provideMerge(runtimeServicesLayer),
     Layer.provideMerge(providerHealthLayer),
     Layer.provideMerge(OrchestrationEventDeliveryRepositoryLive),

@@ -24,6 +24,7 @@ import {
 } from "effect";
 
 import { CheckpointStoreLive } from "../src/checkpointing/Layers/CheckpointStore.ts";
+import { ContextRepositoryLive } from "../src/context/ContextRepository.ts";
 import { CheckpointStore } from "../src/checkpointing/Services/CheckpointStore.ts";
 import { GitCoreLive } from "../src/git/Layers/GitCore.ts";
 import { GitCore, type GitCoreShape } from "../src/git/Services/GitCore.ts";
@@ -355,6 +356,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(sidechatExpiryReactorLayer),
     );
     const layer = orchestrationReactorLayer.pipe(
+      Layer.provideMerge(ContextRepositoryLive),
       Layer.provide(persistenceLayer),
       Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir)),
       Layer.provideMerge(NodeServices.layer),

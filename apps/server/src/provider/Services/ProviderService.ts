@@ -39,7 +39,7 @@ import type {
 import { ServiceMap } from "effect";
 import type { Effect, Stream } from "effect";
 
-import type { ProviderServiceError } from "../Errors.ts";
+import type { ProviderServiceError, ProviderValidationError } from "../Errors.ts";
 import type { PersistedProviderRuntimeEvent } from "../../persistence/Services/ProviderRuntimeEvents.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
 
@@ -112,6 +112,7 @@ export interface ProviderServiceShape {
    */
   readonly sendTurn: (
     input: ProviderSendTurnInput,
+    options?: { readonly beforeDispatch?: Effect.Effect<void, ProviderValidationError> },
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
 
   /**
@@ -119,6 +120,7 @@ export interface ProviderServiceShape {
    */
   readonly steerTurn: (
     input: ProviderSteerTurnInput,
+    options?: { readonly beforeDispatch?: Effect.Effect<void, ProviderValidationError> },
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
 
   /**
@@ -126,6 +128,7 @@ export interface ProviderServiceShape {
    */
   readonly startReview: (
     input: ProviderStartReviewInput,
+    options?: { readonly beforeDispatch?: Effect.Effect<void, ProviderValidationError> },
   ) => Effect.Effect<ProviderTurnStartResult, ProviderServiceError>;
 
   /**

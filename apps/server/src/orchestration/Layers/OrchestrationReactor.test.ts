@@ -64,6 +64,8 @@ describe("OrchestrationReactor", () => {
             drain: Effect.void,
             listBlockingDeliveries: () => Effect.succeed([]),
             reconcileDelivery: () => Effect.succeed(null),
+            retryContextLoad: (request) =>
+              Effect.succeed({ commandId: request.commandId, status: "rejected" as const }),
             regenerateThreadTitle: () => Effect.succeed({ status: "no-context", title: null }),
           }),
         ),

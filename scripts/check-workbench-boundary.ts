@@ -7,6 +7,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 const featureRoots = [
   "apps/server/src/workbench/features",
   "apps/web/src/workbench/features",
+  "apps/server/src/experts",
 ] as const;
 const extensions = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs"]);
 const restrictedRoots = [
@@ -14,6 +15,12 @@ const restrictedRoots = [
   ["apps/server/src/provider", "Provider runtime control"],
   ["apps/server/src/orchestration", "task internals"],
   ["apps/server/src/agentGateway", "Agent Gateway runtime control"],
+  ["apps/server/src/auth", "native credentials and authorization"],
+  ["apps/server/src/providerUsage", "native provider usage storage"],
+  ["apps/web/src/nativeApi", "full native client"],
+  ["apps/web/src/wsNativeApi", "native transport"],
+  ["apps/web/src/store", "native task store"],
+  ["apps/web/src/routes", "native routes"],
 ] as const;
 const databasePackages = [
   "@effect/sql",
@@ -24,6 +31,37 @@ const databasePackages = [
   "node:sqlite",
   "sqlite3",
 ] as const;
+
+// Exact retained seams: do not exempt an entire legacy directory. Their owners and
+// regression paths are recorded in workbench/integration-points.json.
+export const WORKBENCH_RETAINED_IMPORTS = [
+  {
+    file: "apps/server/src/experts/ExpertGatewayTools.ts",
+    specifier: "../agentGateway/protocol.ts",
+  },
+  {
+    file: "apps/server/src/experts/ExpertGatewayTools.ts",
+    specifier: "../agentGateway/toolRuntime.ts",
+  },
+  {
+    file: "apps/server/src/experts/ExpertMcpCredentials.ts",
+    specifier: "../auth/Layers/ServerSecretStore.ts",
+  },
+  {
+    file: "apps/server/src/experts/ExpertMcpCredentials.ts",
+    specifier: "../auth/Services/ServerSecretStore.ts",
+  },
+  { file: "apps/server/src/experts/McpConfigSource.ts", specifier: "../providerUsage/sqlite.ts" },
+  {
+    file: "apps/web/src/components/settings/useExpertDraftGuard.tsx",
+    specifier: "@tanstack/react-router",
+  },
+] as const;
+
+const isExpertSurface = (file: string) =>
+  /^apps\/web\/src\/components\/settings\/(?:Expert|expert|GlobalMcp|globalMcp|LocalMcp|useExpertDraftGuard|SkillPicker)[^/]*\.[jt]sx?$/.test(
+    file,
+  ) || /^apps\/web\/src\/components\/chat\/Expert[^/]*\.[jt]sx?$/.test(file);
 
 export interface WorkbenchFeatureSource {
   readonly path: string;
@@ -48,7 +86,7 @@ function walk(root: string, directory: string): string[] {
     if (!entry.isFile() || !extensions.has(path.posix.extname(file))) return [];
     if (
       /(?:^|\/)(?:__tests__|fixtures|testing)(?:\/|$)/.test(file) ||
-      /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file)
+      /\.(?:test|spec|browser)\.[cm]?[jt]sx?$/.test(file)
     ) {
       return [];
     }
@@ -58,8 +96,10 @@ function walk(root: string, directory: string): string[] {
 
 /** Missing roots are valid until a feature is added; later files are scanned automatically. */
 export function collectWorkbenchFeatureSources(root: string): WorkbenchFeatureSource[] {
-  return featureRoots
+  const legacyWebSources = ["apps/web/src/components/settings", "apps/web/src/components/chat"]
     .flatMap((directory) => walk(root, directory))
+    .filter(isExpertSurface);
+  return [...featureRoots.flatMap((directory) => walk(root, directory)), ...legacyWebSources]
     .toSorted()
     .map((file) => ({ path: file, source: fs.readFileSync(path.join(root, file), "utf8") }));
 }
@@ -86,6 +126,14 @@ function localTarget(file: string, specifier: string): string | undefined {
 }
 
 function boundaryFor(file: string, specifier: string): string | undefined {
+  if (
+    WORKBENCH_RETAINED_IMPORTS.some((seam) => seam.file === file && seam.specifier === specifier)
+  ) {
+    return undefined;
+  }
+  if (specifier === "@tanstack/react-router" || specifier.startsWith("@tanstack/react-router/")) {
+    return "native router";
+  }
   if (databasePackages.some((name) => specifier === name || specifier.startsWith(`${name}/`))) {
     return "native database access";
   }
@@ -99,7 +147,9 @@ function boundaryFor(file: string, specifier: string): string | undefined {
   }
   return target === undefined
     ? undefined
-    : restrictedRoots.find(([root]) => isWithin(target, root))?.[1];
+    : restrictedRoots.find(
+        ([root]) => isWithin(target, root) || target.replace(/\.[cm]?[jt]sx?$/, "") === root,
+      )?.[1];
 }
 
 export function findWorkbenchFeatureBoundaryViolations(

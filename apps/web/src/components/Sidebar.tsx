@@ -428,6 +428,7 @@ import {
   type CreateProjectSubmitValue,
 } from "./CreateProjectDialog";
 import { SpaceEditorDialog } from "./SpaceEditorDialog";
+import { SpaceContextFieldsEditor } from "./SpaceContextFieldsEditor";
 import { useSpacesController } from "./useSpacesController";
 import { SpaceEmptyState } from "./SpaceEmptyState";
 import { SpaceIcon } from "./SpaceIcon";
@@ -3432,6 +3433,7 @@ export default function Sidebar() {
     spaceEditorOpen,
     spaceEditorMode,
     spaceEditorInitialValue,
+    spaceContextEditor,
     spaceEditorExistingNames,
     spaceProjectPickerTarget,
     openSpaceCreator,
@@ -6072,6 +6074,7 @@ export default function Sidebar() {
                   to: "/settings",
                   search: (previous) => ({
                     ...previous,
+                    ...options?.query,
                     section: section === "general" ? undefined : section,
                     target: options?.target,
                   }),
@@ -6616,6 +6619,35 @@ export default function Sidebar() {
         mode={spaceEditorMode}
         {...(spaceEditorInitialValue ? { initialValue: spaceEditorInitialValue } : {})}
         existingNames={spaceEditorExistingNames}
+        {...(spaceContextEditor
+          ? {
+              bodyContent: (
+                <SpaceContextFieldsEditor
+                  draft={spaceContextEditor.draft}
+                  metadataDraft={spaceContextEditor.metadataDraft}
+                  disabled={spaceContextEditor.disabled}
+                  loading={spaceContextEditor.loading}
+                  ready={spaceContextEditor.ready}
+                  error={spaceContextEditor.error}
+                  conflict={spaceContextEditor.conflict}
+                  onChange={spaceContextEditor.onChange}
+                  onUseSaved={spaceContextEditor.onUseSaved}
+                  onKeepDraft={spaceContextEditor.onKeepDraft}
+                  onRetry={spaceContextEditor.onRetry}
+                />
+              ),
+              onValueChange: spaceContextEditor.onValueChange,
+              submitDisabled: spaceContextEditor.submitDisabled,
+              closeDisabled: spaceContextEditor.closeDisabled,
+              lockWhileSubmitting: true,
+              ...(spaceContextEditor.resetValue
+                ? {
+                    resetValue: spaceContextEditor.resetValue,
+                    resetVersion: spaceContextEditor.resetVersion,
+                  }
+                : {}),
+            }
+          : {})}
         onOpenChange={(open) => {
           if (!open) closeSpaceEditor();
         }}

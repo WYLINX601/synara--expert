@@ -1753,6 +1753,13 @@ describe("startSession", () => {
     mkdirSync(path.dirname(skillPath), { recursive: true });
     writeFileSync(skillPath, "---\nname: reviewer\ndescription: review\n---\nReview.\n");
     const persona = "Use the reviewer persona.";
+    const contextSession = {
+      snapshotId: "context-codex",
+      snapshotHash: "context-hash-codex",
+      text: "## Project Context\nKeep the source evidence boundary.",
+      hasContent: true,
+    };
+    const baseInstructions = `${persona}\n\n${contextSession.text}`;
     const expertSession = {
       snapshotId: "snapshot-codex",
       persona,
@@ -1772,6 +1779,7 @@ describe("startSession", () => {
         runtimeMode: "full-access",
         cwd,
         expertSession,
+        contextSession,
         agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
       });
       expect(
@@ -1779,18 +1787,20 @@ describe("startSession", () => {
       ).toEqual({ extraRoots: [skillRoot] });
       expect(
         fake.requests.find((request) => request.method === "thread/start")?.params,
-      ).toMatchObject({ developerInstructions: persona });
+      ).toMatchObject({ developerInstructions: baseInstructions });
 
       await manager.sendTurn({
         threadId: first.threadId,
-        input: "Continue with the Expert.",
-        interactionMode: "default",
+        input: "Continue with the Expert and Context.",
+        interactionMode: "plan",
       });
       const turnInstructions = fake.requests.find((request) => request.method === "turn/start")
         ?.params?.collaborationMode as
         | { settings?: { developer_instructions?: string } }
         | undefined;
-      expect(turnInstructions?.settings?.developer_instructions).toContain(persona);
+      expect(turnInstructions?.settings?.developer_instructions).toBe(
+        `${CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS}\n\n${baseInstructions}`,
+      );
       await manager.stopSession(first.threadId);
 
       await manager.startSession({
@@ -1800,16 +1810,109 @@ describe("startSession", () => {
         cwd,
         resumeCursor: first.resumeCursor,
         expertSession,
+        contextSession,
         agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
       });
       const resumed = fake.requests.find((request) => request.method === "thread/resume");
       expect(resumed?.params).toMatchObject({
-        developerInstructions: persona,
+        developerInstructions: baseInstructions,
         threadId: "fresh-provider-thread",
       });
       expect(
         fake.requests.filter((request) => request.method === "skills/extraRoots/set"),
       ).toHaveLength(2);
+    } finally {
+      await manager.stopAll();
+      rmSync(skillRoot, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("submits the frozen Expert and Context bundle with a native fork", async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "synara-codex-context-fork-"));
+    const skillRoot = mkdtempSync(path.join(os.tmpdir(), "synara-codex-context-fork-skills-"));
+    const skillPath = path.join(skillRoot, "reviewer", "SKILL.md");
+    mkdirSync(path.dirname(skillPath), { recursive: true });
+    writeFileSync(skillPath, "---\nname: reviewer\ndescription: review\n---\nReview.\n");
+    const fake = createSyntheticCodexAppServer({
+      expertSkills: [{ name: "reviewer", path: skillPath }],
+    });
+    const { manager } = createSyntheticCodexManager(fake);
+    const persona = "Use the forked Expert persona.";
+    const contextText = "## Project Context\nPreserve the original project boundary.";
+
+    try {
+      await manager.forkThread({
+        sourceThreadId: asThreadId("thread-context-fork-source"),
+        sourceResumeCursor: { threadId: "provider-source-thread" },
+        threadId: asThreadId("thread-context-fork-target"),
+        cwd,
+        runtimeMode: "full-access",
+        expertSession: {
+          snapshotId: "expert-context-fork",
+          persona,
+          skillsRoot: skillRoot,
+          skills: [{ name: "reviewer", path: skillPath }],
+          references: [],
+        },
+        contextSession: {
+          snapshotId: "context-fork",
+          snapshotHash: "context-fork-hash",
+          text: contextText,
+          hasContent: true,
+        },
+      });
+
+      expect(
+        fake.requests.find((request) => request.method === "thread/fork")?.params,
+      ).toMatchObject({
+        threadId: "provider-source-thread",
+        developerInstructions: `${persona}\n\n${contextText}`,
+      });
+      expect(
+        fake.requests.find((request) => request.method === "skills/extraRoots/set")?.params,
+      ).toEqual({ extraRoots: [skillRoot] });
+      expect(fake.requests.some((request) => request.method === "skills/list")).toBe(true);
+    } finally {
+      await manager.stopAll();
+      rmSync(skillRoot, { recursive: true, force: true });
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a native fork when Codex did not load a required frozen Expert skill", async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "synara-codex-missing-fork-skill-cwd-"));
+    const skillRoot = mkdtempSync(path.join(os.tmpdir(), "synara-codex-missing-fork-skill-"));
+    const skillPath = path.join(skillRoot, "reviewer", "SKILL.md");
+    const fake = createSyntheticCodexAppServer();
+    const { manager } = createSyntheticCodexManager(fake);
+
+    try {
+      const targetThreadId = asThreadId("thread-missing-fork-skill-target");
+      await expect(
+        manager.forkThread({
+          sourceThreadId: asThreadId("thread-missing-fork-skill-source"),
+          sourceResumeCursor: { threadId: "provider-source-thread" },
+          threadId: targetThreadId,
+          cwd,
+          runtimeMode: "full-access",
+          expertSession: {
+            snapshotId: "expert-context-fork-missing",
+            persona: "Use the forked Expert persona.",
+            skillsRoot: skillRoot,
+            skills: [{ name: "reviewer", path: skillPath }],
+            references: [],
+          },
+          contextSession: {
+            snapshotId: "context-fork-missing-skill",
+            snapshotHash: "context-fork-missing-skill-hash",
+            text: "Context remains separate from Expert skills.",
+            hasContent: true,
+          },
+        }),
+      ).rejects.toThrow("Codex did not load required Expert skill 'reviewer'.");
+      expect(fake.requests.some((request) => request.method === "thread/fork")).toBe(false);
+      expect(manager.hasSession(targetThreadId)).toBe(false);
     } finally {
       await manager.stopAll();
       rmSync(skillRoot, { recursive: true, force: true });

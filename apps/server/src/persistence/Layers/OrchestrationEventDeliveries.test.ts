@@ -16,6 +16,100 @@ const layer = it.layer(
 );
 
 layer("OrchestrationEventDeliveryRepository", (it) => {
+  it.effect(
+    "keeps Context phase evidence monotonic and admits one reconciled original-event retry",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* OrchestrationEventDeliveryRepository;
+        const sql = yield* SqlClient.SqlClient;
+        const now = new Date().toISOString();
+        const later = new Date(Date.now() + 1000).toISOString();
+        const rows = yield* sql<{ readonly sequence: number }>`INSERT INTO orchestration_events (
+        event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at, command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+      ) VALUES ('context-evidence', 'thread', 'context-thread', 0, 'thread.turn-start-requested', ${now}, 'context-command', NULL, NULL, 'user', '{}', '{}') RETURNING sequence`;
+        const eventSequence = rows[0]!.sequence;
+        yield* repository.claim({
+          consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+          eventSequence,
+          threadId: "context-thread",
+          claimOwner: "owner",
+          claimedAt: now,
+          claimExpiresAt: later,
+        });
+        const evidence = {
+          consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+          eventSequence,
+          expectedClaimOwner: "owner",
+          snapshotId: "snapshot",
+          inputDigest: "original",
+          messageId: "message",
+          updatedAt: now,
+        };
+        assert.isFalse(
+          yield* repository.recordContextPhase({ ...evidence, phase: "acknowledged" }),
+        );
+        assert.isFalse(
+          yield* repository.recordContextPhase({
+            ...evidence,
+            expectedClaimOwner: "other",
+            phase: "before_dispatch",
+          }),
+        );
+        assert.isTrue(
+          yield* repository.recordContextPhase({ ...evidence, phase: "before_dispatch" }),
+        );
+        assert.isFalse(
+          yield* repository.recordContextPhase({
+            ...evidence,
+            inputDigest: "changed",
+            phase: "dispatch_started",
+          }),
+        );
+        assert.isTrue(
+          yield* repository.recordContextPhase({ ...evidence, phase: "dispatch_started" }),
+        );
+        assert.isFalse(
+          yield* repository.recordContextPhase({ ...evidence, phase: "before_dispatch" }),
+        );
+        assert.isTrue(yield* repository.recordContextPhase({ ...evidence, phase: "acknowledged" }));
+        yield* repository.markTerminalFailure({
+          consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+          eventSequence,
+          expectedClaimOwner: "owner",
+          state: "uncertain",
+          error: "Review required",
+          updatedAt: later,
+        });
+        const retry = {
+          reconciliationId: "context-retry:verified",
+          consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+          eventSequence,
+          threadId: "context-thread",
+          expectedState: "uncertain" as const,
+          expectedUpdatedAt: later,
+          outcome: "safe_retry" as const,
+          reconciledBy: "operator",
+          reconciledAt: later,
+        };
+        assert.isTrue(
+          Option.isNone(yield* repository.reconcile({ ...retry, expectedUpdatedAt: now })),
+        );
+        assert.isTrue(Option.isNone(yield* repository.getReconciliation(retry.reconciliationId)));
+        const reconciled = yield* repository.reconcile(retry);
+        assert.isTrue(Option.isSome(reconciled));
+        assert.strictEqual(Option.getOrThrow(reconciled).contextPhase, "before_dispatch");
+        assert.isTrue(
+          Option.isNone(
+            yield* repository.reconcile({ ...retry, reconciliationId: "second-retry" }),
+          ),
+        );
+        assert.isTrue(Option.isSome(yield* repository.getReconciliation(retry.reconciliationId)));
+        yield* sql`DELETE FROM provider_delivery_reconciliations WHERE event_sequence = ${eventSequence}`;
+        yield* sql`DELETE FROM orchestration_event_deliveries WHERE event_sequence = ${eventSequence}`;
+        yield* sql`DELETE FROM orchestration_events WHERE sequence = ${eventSequence}`;
+      }),
+  );
+
   it.effect("claims by reference without copying event payload and completes with its owner", () =>
     Effect.gen(function* () {
       const repository = yield* OrchestrationEventDeliveryRepository;

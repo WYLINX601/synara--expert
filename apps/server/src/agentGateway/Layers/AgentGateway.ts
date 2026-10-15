@@ -150,6 +150,7 @@ export const makeAgentGateway = Effect.gen(function* () {
   const diagnostics = yield* ThreadDiagnosticsQuery;
   const serverConfig = yield* ServerConfig;
   const expertTools = makeExpertGatewayToolResolver({ stateDir: serverConfig.stateDir });
+  yield* Effect.addFinalizer(() => Effect.promise(() => expertTools.closeAll()));
   credentials.onSessionRevoked?.((sessionKey) => expertTools.closeSession(sessionKey));
   const browserAutomationHost = Option.getOrElse(
     yield* Effect.serviceOption(BrowserAutomationHost),

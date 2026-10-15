@@ -55,4 +55,55 @@ describe("EnvironmentProjectInstructionsSection", () => {
       "Saved instructions for B",
     );
   });
+
+  it("keeps controlled Context raw, shows its limit, and disables copying a draft", async () => {
+    const onGoalChange = vi.fn();
+    const onInstructionsChange = vi.fn();
+    const onCopy = vi.fn();
+    function ControlledHarness() {
+      const [goal, setGoal] = useState("");
+      const [instructions, setInstructions] = useState("");
+      return (
+        <EnvironmentProjectInstructionsSection
+          projectId={PROJECT_A}
+          instructions=""
+          threadNotes=""
+          canCopyToThreadNotes
+          onInstructionsChange={vi.fn()}
+          onCopyToThreadNotes={onCopy}
+          controlledContext={{
+            goal,
+            onGoalChange: (value) => {
+              onGoalChange(value);
+              setGoal(value);
+            },
+            instructions,
+            onInstructionsChange: (value) => {
+              onInstructionsChange(value);
+              setInstructions(value);
+            },
+            copyDisabled: true,
+          }}
+        />
+      );
+    }
+    await render(<ControlledHarness />);
+
+    await page.getByRole("button", { name: "Project goal" }).click();
+    expect(document.body.textContent).not.toContain("0 / 4096");
+    const goal = "g".repeat(4_097);
+    await page.getByLabelText("Project goal").fill(goal);
+    expect(onGoalChange).toHaveBeenLastCalledWith(goal);
+    const goalTextarea = Array.from(document.querySelectorAll("textarea")).find(
+      (textarea) => textarea.placeholder === "Describe the project goal",
+    );
+    expect(goalTextarea?.value).toBe(goal);
+    await expect.element(page.getByText("4097 / 4096")).toBeVisible();
+    await expect.element(page.getByText("Limit exceeded", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "Project instructions" }).click();
+    await page.getByLabelText("Project instructions").fill("committed context draft");
+    await expect.element(page.getByRole("button", { name: "Copy to notepad" })).toBeDisabled();
+    expect(onCopy).not.toHaveBeenCalled();
+  });
 });

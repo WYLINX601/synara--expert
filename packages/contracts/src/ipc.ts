@@ -12,14 +12,29 @@ import type {
   ExpertConnectionConfig,
   ExpertConnectionRemoveInput,
   ExpertConnectionSaveInput,
+  ExpertConnectionTestInput,
+  ExpertConnectionTestResult,
+  ExpertDeleteInput,
   ExpertDefinition,
   ExpertPreview,
   ExpertPreviewInput,
   ExpertReadInput,
+  ExpertRestoreInput,
   ExpertSaveInput,
   ExpertSnapshot,
   ExpertSnapshotReadInput,
 } from "./expert";
+import type {
+  ExpertConnectionReferencesInput,
+  ExpertConnectionReferencesResult,
+  McpConnectionSetStateInput,
+  McpConnectionState,
+  McpDiscoveryRequest,
+  McpDiscoveryResult,
+  McpImportRequest,
+  McpImportResult,
+} from "./mcp";
+import type { ContextApi } from "./context";
 
 import type {
   AuthBearerBootstrapResult,
@@ -898,6 +913,8 @@ export interface DesktopBridge {
 }
 
 export interface NativeApi {
+  /** Optional while older and isolated test clients are upgraded. */
+  context?: ContextApi;
   dialogs: {
     pickFolder: () => Promise<string | null>;
     saveFile?: (input: {
@@ -1042,6 +1059,8 @@ export interface NativeApi {
     readExpert: (input: ExpertReadInput) => Promise<ExpertDefinition | null>;
     saveExpert: (input: ExpertSaveInput) => Promise<ExpertDefinition>;
     archiveExpert: (input: ExpertArchiveInput) => Promise<ExpertDefinition>;
+    restoreExpert: (input: ExpertRestoreInput) => Promise<ExpertDefinition>;
+    deleteExpert: (input: ExpertDeleteInput) => Promise<void>;
     previewExpert: (input: ExpertPreviewInput) => Promise<ExpertPreview>;
     readExpertSnapshot: (input: ExpertSnapshotReadInput) => Promise<ExpertSnapshot>;
     readExpertAppliedRuntime: (
@@ -1050,7 +1069,16 @@ export interface NativeApi {
     listExpertConnections: () => Promise<ReadonlyArray<ExpertConnectionConfig>>;
     saveExpertConnection: (input: ExpertConnectionSaveInput) => Promise<ExpertConnectionConfig>;
     removeExpertConnection: (input: ExpertConnectionRemoveInput) => Promise<void>;
-    testExpertConnection: (input: ExpertReadInput) => Promise<{ tools: ReadonlyArray<string> }>;
+    testExpertConnection: (input: ExpertConnectionTestInput) => Promise<ExpertConnectionTestResult>;
+    getExpertConnectionState: (
+      input: ExpertConnectionReferencesInput,
+    ) => Promise<McpConnectionState>;
+    setExpertConnectionState: (input: McpConnectionSetStateInput) => Promise<McpConnectionState>;
+    readExpertConnectionReferences: (
+      input: ExpertConnectionReferencesInput,
+    ) => Promise<ExpertConnectionReferencesResult>;
+    discoverMcpConnections: (input: McpDiscoveryRequest) => Promise<McpDiscoveryResult>;
+    importMcpConnections: (input: McpImportRequest) => Promise<McpImportResult>;
     getAuthSession: () => Promise<AuthSessionState>;
     bootstrapAuth: (input: AuthBootstrapInput) => Promise<AuthBootstrapResult>;
     bootstrapBearerAuth: (input: AuthBootstrapInput) => Promise<AuthBearerBootstrapResult>;

@@ -2016,34 +2016,37 @@ const make = Effect.gen(function* () {
               });
               return undefined;
             }
-            yield* orchestrationEngine.dispatch({
-              type: "thread.create",
-              commandId: providerCommandId(event, "subagent-thread-create", childThreadId),
-              threadId: childThreadId,
-              projectId: parentThread.projectId,
-              title: subagentThreadTitle({
-                nickname: identity?.nickname,
-                role: identity?.role,
-                providerThreadId,
-              }),
-              modelSelection: resolvedModelSelection ?? parentThread.modelSelection,
-              runtimeMode: parentThread.runtimeMode,
-              interactionMode: parentThread.interactionMode,
-              envMode: parentThread.envMode,
-              branch: parentThread.branch,
-              worktreePath: parentThread.worktreePath,
-              associatedWorktreePath: parentThread.associatedWorktreePath,
-              associatedWorktreeBranch: parentThread.associatedWorktreeBranch,
-              associatedWorktreeRef: parentThread.associatedWorktreeRef,
-              parentThreadId: parentThread.id,
-              creationSource: "provider_native",
-              sourceThreadId: parentThread.id,
-              ...(sourceTurnId !== null ? { sourceTurnId } : {}),
-              subagentAgentId: identity?.agentId ?? null,
-              subagentNickname: identity?.nickname ?? null,
-              subagentRole: identity?.role ?? null,
-              createdAt: now,
-            });
+            yield* orchestrationEngine.dispatch(
+              {
+                type: "thread.create",
+                commandId: providerCommandId(event, "subagent-thread-create", childThreadId),
+                threadId: childThreadId,
+                projectId: parentThread.projectId,
+                title: subagentThreadTitle({
+                  nickname: identity?.nickname,
+                  role: identity?.role,
+                  providerThreadId,
+                }),
+                modelSelection: resolvedModelSelection ?? parentThread.modelSelection,
+                runtimeMode: parentThread.runtimeMode,
+                interactionMode: parentThread.interactionMode,
+                envMode: parentThread.envMode,
+                branch: parentThread.branch,
+                worktreePath: parentThread.worktreePath,
+                associatedWorktreePath: parentThread.associatedWorktreePath,
+                associatedWorktreeBranch: parentThread.associatedWorktreeBranch,
+                associatedWorktreeRef: parentThread.associatedWorktreeRef,
+                parentThreadId: parentThread.id,
+                creationSource: "provider_native",
+                sourceThreadId: parentThread.id,
+                ...(sourceTurnId !== null ? { sourceTurnId } : {}),
+                subagentAgentId: identity?.agentId ?? null,
+                subagentNickname: identity?.nickname ?? null,
+                subagentRole: identity?.role ?? null,
+                createdAt: now,
+              },
+              { contextOrigin: "provider_native" },
+            );
           } else {
             const existingThreadShell = existingThread.value;
             if (

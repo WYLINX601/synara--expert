@@ -8,7 +8,7 @@ import type {
 } from "@synara/contracts";
 import { useEffect, useRef, useState } from "react";
 
-import { ensureNativeApi } from "~/nativeApi";
+import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -40,29 +40,29 @@ export function ExpertTaskControl(props: {
   const snapshot = useQuery({
     queryKey: ["server", "expertSnapshot", props.binding.snapshotId],
     queryFn: () =>
-      ensureNativeApi().server.readExpertSnapshot({ snapshotId: props.binding.snapshotId }),
+      ensureExpertClient().readExpertSnapshot({ snapshotId: props.binding.snapshotId }),
     enabled: open,
   });
   const appliedRuntime = useQuery({
     queryKey: ["server", "expertAppliedRuntime", props.threadId],
-    queryFn: () => ensureNativeApi().server.readExpertAppliedRuntime({ threadId: props.threadId }),
+    queryFn: () => ensureExpertClient().readExpertAppliedRuntime({ threadId: props.threadId }),
     enabled: open,
   });
   const experts = useQuery({
     queryKey: ["server", "experts"],
-    queryFn: () => ensureNativeApi().server.listExperts(),
+    queryFn: () => ensureExpertClient().listExperts(),
     enabled: open,
   });
   const connections = useQuery({
     queryKey: ["server", "expertConnections"],
-    queryFn: () => ensureNativeApi().server.listExpertConnections(),
+    queryFn: () => ensureExpertClient().listExpertConnections(),
     enabled: open,
   });
   const selected = experts.data?.find((expert) => expert.id === selectedId);
   const preview = useQuery({
     queryKey: ["server", "expertPreview", selectedId, selected?.revision, props.provider],
     queryFn: () =>
-      ensureNativeApi().server.previewExpert({
+      ensureExpertClient().previewExpert({
         expertId: selectedId!,
         provider: props.provider as "codex" | "pi",
       }),
@@ -112,7 +112,7 @@ export function ExpertTaskControl(props: {
       return next;
     });
     try {
-      const result = await ensureNativeApi().server.testExpertConnection({ id: connection.id });
+      const result = await ensureExpertClient().testExpertConnection({ id: connection.id });
       if (generation !== connectionTestGeneration.current) return;
       setConnectionTestResults((current) => ({
         ...current,
@@ -146,7 +146,7 @@ export function ExpertTaskControl(props: {
   return (
     <>
       <Button variant="outline" size="xs" onClick={openDialog}>
-        专家：{props.binding.displayName} · v{props.binding.revision}
+        {props.binding.displayName}
       </Button>
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogPopup className="max-w-xl">
@@ -202,6 +202,7 @@ export function ExpertTaskControl(props: {
                     <ul className="space-y-2">
                       {snapshot.data.connections.map((connection) => {
                         const config = connections.data?.find((item) => item.id === connection.id);
+                        const snapshotDisabled = connection.enabled === false;
                         const connectionName = config?.name ?? connection.id;
                         const result = connectionTestResults[connection.id];
                         const detectedAllowedTools = result?.tools.filter((tool) =>
@@ -220,7 +221,11 @@ export function ExpertTaskControl(props: {
                               <p className="font-medium">
                                 {connectionName} · {connection.required ? "必需" : "可选"}
                               </p>
-                              {config ? (
+                              {snapshotDisabled ? (
+                                <span role="status" className="text-ui-sm text-muted-foreground">
+                                  已停用
+                                </span>
+                              ) : config ? (
                                 <span className="text-ui-sm text-muted-foreground">已配置</span>
                               ) : connections.isLoading ? (
                                 <span className="text-ui-sm text-muted-foreground">
@@ -238,7 +243,7 @@ export function ExpertTaskControl(props: {
                               允许的工具：
                               {connection.tools.length ? connection.tools.join("、") : "无"}
                             </p>
-                            {config ? (
+                            {config && !snapshotDisabled ? (
                               <Button
                                 type="button"
                                 size="xs"

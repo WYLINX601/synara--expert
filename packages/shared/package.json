@@ -32,6 +32,10 @@
       "types": "./src/runtimeMode.ts",
       "import": "./src/runtimeMode.ts"
     },
+    "./contextInstructions": {
+      "types": "./src/contextInstructions.ts",
+      "import": "./src/contextInstructions.ts"
+    },
     "./approvalSessionGrant": {
       "types": "./src/approvalSessionGrant.ts",
       "import": "./src/approvalSessionGrant.ts"

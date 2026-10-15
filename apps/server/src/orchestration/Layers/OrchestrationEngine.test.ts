@@ -12,7 +12,9 @@ import {
 } from "@synara/contracts";
 import { Effect, Layer, ManagedRuntime, Option, Stream } from "effect";
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 
+import { ContextRepository } from "../../context/ContextRepository.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
@@ -22,7 +24,7 @@ import {
   type OrchestrationEventStoreShape,
 } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ManagedAttachmentRepository } from "../../persistence/Services/ManagedAttachments.ts";
-import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
+import { contextBindingSourceThreadId, OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -129,9 +131,11 @@ async function createOrchestrationSystem() {
   const managedAttachmentRepository = await runtime.runPromise(
     Effect.service(ManagedAttachmentRepository),
   );
+  const contextRepository = await runtime.runPromise(Effect.service(ContextRepository));
   return {
     engine,
     managedAttachmentRepository,
+    contextRepository,
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
     dispose: () => runtime.dispose(),
   };
@@ -142,6 +146,24 @@ function now() {
 }
 
 describe("OrchestrationEngine", () => {
+  it("inherits Context from a sidechat root when a created event has no fork or handoff source", () => {
+    const sidechatSourceThreadId = ThreadId.makeUnsafe("context-sidechat-root");
+    expect(
+      contextBindingSourceThreadId({
+        handoff: null,
+        forkSourceThreadId: null,
+        sidechatSourceThreadId,
+      }),
+    ).toBe(sidechatSourceThreadId);
+    expect(
+      contextBindingSourceThreadId({
+        handoff: null,
+        forkSourceThreadId: ThreadId.makeUnsafe("context-direct-fork-source"),
+        sidechatSourceThreadId,
+      }),
+    ).toBe(ThreadId.makeUnsafe("context-direct-fork-source"));
+  });
+
   it.each([false, true])(
     "persists async questions and admits one concurrent answer (running=%s)",
     async (running) => {
@@ -995,8 +1017,8 @@ describe("OrchestrationEngine", () => {
       }),
     );
 
-    expect(result.sequence).toBe(2);
-    expect((await runtime.runPromise(engine.getReadModel())).snapshotSequence).toBe(2);
+    expect(result.sequence).toBe(3);
+    expect((await runtime.runPromise(engine.getReadModel())).snapshotSequence).toBe(3);
     await runtime.dispose();
   });
 
@@ -1099,11 +1121,12 @@ describe("OrchestrationEngine", () => {
     expect(eventsAfterFailure.map((event) => event.type)).toEqual([
       "project.created",
       "thread.created",
+      "context.thread.binding-set",
     ]);
-    expect((await runtime.runPromise(engine.getReadModel())).snapshotSequence).toBe(2);
+    expect((await runtime.runPromise(engine.getReadModel())).snapshotSequence).toBe(3);
 
     const retryResult = await runtime.runPromise(engine.dispatch(turnStartCommand));
-    expect(retryResult.sequence).toBe(4);
+    expect(retryResult.sequence).toBe(5);
 
     const eventsAfterRetry = await runtime.runPromise(
       Stream.runCollect(engine.readEvents(0)).pipe(
@@ -1113,6 +1136,7 @@ describe("OrchestrationEngine", () => {
     expect(eventsAfterRetry.map((event) => event.type)).toEqual([
       "project.created",
       "thread.created",
+      "context.thread.binding-set",
       "thread.message-sent",
       "thread.turn-start-requested",
     ]);
@@ -1352,7 +1376,7 @@ describe("OrchestrationEngine", () => {
     const updatedThread = readModelAfterFailure.threads.find(
       (thread) => thread.id === "thread-sync",
     );
-    expect(readModelAfterFailure.snapshotSequence).toBe(3);
+    expect(readModelAfterFailure.snapshotSequence).toBe(4);
     expect(updatedThread?.title).toBe("sync-after-failed-projection");
 
     await runtime.dispose();
@@ -1577,7 +1601,7 @@ describe("OrchestrationEngine", () => {
 
     await recoveryBootstrap;
 
-    expect(result.sequence).toBe(4);
+    expect(result.sequence).toBe(5);
     expect(deferredCalls).toBeGreaterThanOrEqual(1);
     expect(bootstrapCalls).toBe(4);
     await vi.waitFor(async () => {
@@ -2029,6 +2053,254 @@ describe("OrchestrationEngine", () => {
     ).rejects.toThrow("already exists");
 
     await system.dispose();
+  });
+
+  it("journals a frozen snapshot for an internal bind and keeps it on repeated admission", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine, contextRepository: context } = system;
+    const createdAt = now();
+    const projectId = asProjectId("internal-bind-project");
+    const threadId = ThreadId.makeUnsafe("internal-bind-thread");
+    try {
+      await system.run(
+        engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.makeUnsafe("internal-project"),
+          projectId,
+          title: "Internal",
+          workspaceRoot: "/tmp/internal-bind",
+          createdAt,
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.makeUnsafe("internal-thread"),
+          threadId,
+          projectId,
+          title: "Internal",
+          modelSelection: { provider: "codex", model: "gpt-5-codex" },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      const config = await system.run(context.getProject(projectId));
+      await system.run(
+        engine.dispatch({
+          type: "context.project.save",
+          commandId: CommandId.makeUnsafe("internal-save"),
+          projectId,
+          dataInstanceId: config.dataInstanceId,
+          expectedRevision: config.revision,
+          projectGoal: "Frozen goal",
+          projectInstructions: "",
+        }),
+      );
+      await system.run(
+        engine.dispatch({
+          type: "context.bind",
+          commandId: CommandId.makeUnsafe("internal-bind"),
+          threadId,
+          createdAt,
+        }),
+      );
+      const binding = await system.run(context.getThreadBinding(threadId));
+      expect(binding?.snapshot?.project.projectGoal).toBe("Frozen goal");
+      const events = Array.from(
+        await system.run(
+          Stream.runCollect(engine.readThreadEventsThrough(threadId, 0, Number.MAX_SAFE_INTEGER)),
+        ),
+      );
+      const event = events.find((entry) => entry.type === "context.thread.bind-requested");
+      expect(event?.type === "context.thread.bind-requested" && event.payload.snapshot).toEqual(
+        binding?.snapshot,
+      );
+      await system.run(
+        engine.dispatch({
+          type: "context.bind",
+          commandId: CommandId.makeUnsafe("internal-bind-again"),
+          threadId,
+          createdAt,
+        }),
+      );
+      expect(await system.run(context.getThreadBinding(threadId))).toEqual(binding);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("binds first execution only after migration and provider admission, using committed Context atomically", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine, contextRepository: context } = system;
+    const createdAt = now();
+    const projectId = asProjectId("context-first-bind-project");
+    const threadId = ThreadId.makeUnsafe("context-first-bind-thread");
+    const historicalThreadId = ThreadId.makeUnsafe("context-historical-thread");
+    const turnCommandId = CommandId.makeUnsafe("context-first-bind-turn-accepted");
+
+    try {
+      await system.run(
+        engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.makeUnsafe("context-first-bind-project-create"),
+          projectId,
+          title: "Context admission",
+          workspaceRoot: "/tmp/context-first-bind",
+          defaultModelSelection: { provider: "codex", model: "gpt-5-codex" },
+          createdAt,
+        }),
+      );
+
+      await system.run(
+        engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.makeUnsafe("context-first-bind-thread-create"),
+          threadId,
+          projectId,
+          title: "New Synara thread",
+          modelSelection: { provider: "codex", model: "gpt-5-codex" },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          // This untrusted provenance field must not turn an ordinary creation into legacy mode.
+          creationSource: "provider_native",
+          createdAt,
+        }),
+      );
+      expect(await system.run(system.contextRepository.getThreadBinding(threadId))).toEqual({
+        mode: "unbound",
+      });
+
+      await system.run(
+        engine.dispatch(
+          {
+            type: "thread.create",
+            commandId: CommandId.makeUnsafe("context-historical-thread-create"),
+            threadId: historicalThreadId,
+            projectId,
+            title: "Imported thread",
+            modelSelection: { provider: "codex", model: "gpt-5-codex" },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+          },
+          { contextOrigin: "historical" },
+        ),
+      );
+      expect(await system.run(context.getThreadBinding(historicalThreadId))).toEqual({
+        mode: "legacy",
+      });
+
+      const project = await system.run(context.getProject(projectId));
+      await system.run(
+        engine.dispatch({
+          type: "context.project.save",
+          commandId: CommandId.makeUnsafe("context-first-bind-project-save"),
+          dataInstanceId: project.dataInstanceId,
+          projectId,
+          expectedRevision: project.revision,
+          projectGoal: "Preserve the user's committed raw goal.",
+          projectInstructions: "Apply these exact project instructions.",
+        }),
+      );
+
+      const legacyInstructions = "old provider-native instructions";
+      await system.run(
+        engine.dispatch({
+          type: "context.migration.claim",
+          commandId: CommandId.makeUnsafe("context-first-bind-migration-claim"),
+          dataInstanceId: project.dataInstanceId,
+          projectId,
+          expectedWorkspaceRoot: project.workspaceRoot,
+          sourceDigest: createHash("sha256").update(legacyInstructions, "utf8").digest("hex"),
+          legacyInstructions,
+        }),
+      );
+
+      const startTurn = (suffix: string, modelProvider?: "codex" | "claudeAgent") =>
+        engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe(`context-first-bind-turn-${suffix}`),
+          threadId,
+          message: {
+            messageId: asMessageId(`context-first-bind-message-${suffix}`),
+            role: "user",
+            text: "Start with the committed context.",
+            attachments: [],
+          },
+          ...(modelProvider === undefined
+            ? {}
+            : {
+                modelSelection:
+                  modelProvider === "codex"
+                    ? { provider: "codex" as const, model: "gpt-5-codex" }
+                    : { provider: "claudeAgent" as const, model: "claude-test" },
+              }),
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt,
+        });
+
+      await expect(system.run(startTurn("migration-pending"))).rejects.toThrow(
+        "Resolve the claimed legacy Project instructions",
+      );
+      expect(await system.run(context.getThreadBinding(threadId))).toEqual({ mode: "unbound" });
+
+      await system.run(
+        engine.dispatch({
+          type: "context.migration.resolve",
+          commandId: CommandId.makeUnsafe("context-first-bind-migration-resolve"),
+          dataInstanceId: project.dataInstanceId,
+          projectId,
+          sourceDigest: createHash("sha256").update(legacyInstructions, "utf8").digest("hex"),
+          expectedRevision: 1,
+          choice: "keep_saved",
+        }),
+      );
+
+      await expect(system.run(startTurn("unsupported-provider", "claudeAgent"))).rejects.toThrow(
+        "currently supported only for Codex and Pi",
+      );
+      expect(await system.run(context.getThreadBinding(threadId))).toEqual({ mode: "unbound" });
+
+      await system.run(startTurn("accepted"));
+      const binding = await system.run(context.getThreadBinding(threadId));
+      expect(binding?.mode).toBe("bound");
+      expect(binding?.snapshot?.project.projectGoal).toBe(
+        "Preserve the user's committed raw goal.",
+      );
+      expect(binding?.snapshot?.project.projectInstructions).toBe(
+        "Apply these exact project instructions.",
+      );
+      expect((await system.run(context.getContextSession(threadId)))?.hasContent).toBe(true);
+
+      const eventRows = Array.from(
+        await system.run(
+          Stream.runCollect(engine.readThreadEventsThrough(threadId, 0, Number.MAX_SAFE_INTEGER)),
+        ),
+      );
+      const bindRow = eventRows.find((row) => row.type === "context.thread.bind-requested");
+      const turnRow = eventRows.find(
+        (row) => row.type === "thread.turn-start-requested" && row.commandId === turnCommandId,
+      );
+      expect(bindRow).toBeDefined();
+      expect(turnRow).toBeDefined();
+      expect(bindRow?.type).toBe("context.thread.bind-requested");
+      if (bindRow?.type === "context.thread.bind-requested") {
+        expect(bindRow.payload.snapshot).toEqual(binding?.snapshot);
+        expect(bindRow.payload.snapshot?.snapshotHash).toMatch(/^[0-9a-f]{64}$/u);
+      }
+      expect(bindRow!.sequence).toBeLessThan(turnRow!.sequence);
+      expect(bindRow!.commandId).toBe(turnRow!.commandId);
+    } finally {
+      await system.dispose();
+    }
   });
 
   it("keeps the worker alive when a command throws while its pipeline is built", async () => {

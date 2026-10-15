@@ -152,6 +152,139 @@ afterEach(() => {
 });
 
 describe("wsNativeApi", () => {
+  it("routes Context API calls through their registered RPC methods", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    const context = api.context;
+    if (!context) throw new Error("WebSocket NativeApi must expose Context methods");
+    requestMock.mockResolvedValue(null);
+
+    await context.getSpace({} as never);
+    await context.getProject({} as never);
+    await context.getThread({} as never);
+    await context.saveSpace({} as never);
+    await context.saveProject({} as never);
+    await context.getCommandResult({} as never);
+    await context.claimMigration({} as never);
+    await context.resolveMigration({} as never);
+    await context.retryLoad({} as never);
+
+    expect(requestMock.mock.calls.map(([method]) => method)).toEqual([
+      WS_METHODS.contextGetSpace,
+      WS_METHODS.contextGetProject,
+      WS_METHODS.contextGetThread,
+      WS_METHODS.contextSaveSpace,
+      WS_METHODS.contextSaveProject,
+      WS_METHODS.contextGetCommandResult,
+      WS_METHODS.contextClaimMigration,
+      WS_METHODS.contextResolveMigration,
+      WS_METHODS.contextRetryLoad,
+    ]);
+  });
+
+  it("forwards revision-guarded expert restore through its server RPC", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock.mockResolvedValue({ id: "expert-1", archived: false, revision: 8 });
+
+    await expect(
+      api.server.restoreExpert({ id: "expert-1", expectedRevision: 7 }),
+    ).resolves.toEqual({ id: "expert-1", archived: false, revision: 8 });
+    expect(requestMock).toHaveBeenCalledExactlyOnceWith(WS_METHODS.serverRestoreExpert, {
+      id: "expert-1",
+      expectedRevision: 7,
+    });
+  });
+
+  it("forwards revision-guarded expert deletion through its server RPC", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock.mockResolvedValue(undefined);
+
+    await expect(
+      api.server.deleteExpert({ id: "expert-1", expectedRevision: 7 }),
+    ).resolves.toBeUndefined();
+    expect(requestMock).toHaveBeenCalledExactlyOnceWith(WS_METHODS.serverDeleteExpert, {
+      id: "expert-1",
+      expectedRevision: 7,
+    });
+  });
+
+  it("forwards revision-guarded Expert connection tests and their result revision", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock.mockResolvedValue({ tools: ["search", "read"], revision: 12 });
+
+    await expect(
+      api.server.testExpertConnection({ id: "research", expectedRevision: 11 }),
+    ).resolves.toEqual({ tools: ["search", "read"], revision: 12 });
+    expect(requestMock).toHaveBeenCalledExactlyOnceWith(WS_METHODS.serverTestExpertConnection, {
+      id: "research",
+      expectedRevision: 11,
+    });
+  });
+
+  it("forwards connection state and reference requests through their fixed RPCs", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock
+      .mockResolvedValueOnce({
+        id: "research",
+        status: "active",
+        revision: 2,
+        updatedAt: "2026-10-04T00:00:00.000Z",
+      })
+      .mockResolvedValueOnce({
+        id: "research",
+        status: "disabled",
+        revision: 3,
+        updatedAt: "2026-10-04T00:00:01.000Z",
+      })
+      .mockResolvedValueOnce({ experts: [], snapshots: [], tasks: [], activeSessionCount: 0 });
+
+    await api.server.getExpertConnectionState({ id: "research" });
+    await api.server.setExpertConnectionState({
+      id: "research",
+      status: "disabled",
+      expectedRevision: 2,
+    });
+    await api.server.readExpertConnectionReferences({ id: "research" });
+
+    expect(requestMock).toHaveBeenNthCalledWith(1, WS_METHODS.serverGetExpertConnectionState, {
+      id: "research",
+    });
+    expect(requestMock).toHaveBeenNthCalledWith(2, WS_METHODS.serverSetExpertConnectionState, {
+      id: "research",
+      status: "disabled",
+      expectedRevision: 2,
+    });
+    expect(requestMock).toHaveBeenNthCalledWith(
+      3,
+      WS_METHODS.serverReadExpertConnectionReferences,
+      { id: "research" },
+    );
+  });
+
+  it("forwards MCP discovery and selected imports through their fixed RPCs", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    const discovery = { sources: [{ kind: "json" as const, path: "/tmp/mcp.json" }] };
+    const imported = {
+      scanId: "scan-1",
+      items: [{ candidateId: "candidate-1", targetId: "local-tools", mode: "create" as const }],
+    };
+
+    await api.server.discoverMcpConnections(discovery);
+    await api.server.importMcpConnections(imported);
+
+    expect(requestMock).toHaveBeenNthCalledWith(
+      1,
+      WS_METHODS.serverDiscoverMcpConnections,
+      discovery,
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(2, WS_METHODS.serverImportMcpConnections, imported);
+  });
+
   it("forwards bounded Computer history and owner diagnostic requests through their RPCs", async () => {
     const { createWsNativeApi } = await import("./wsNativeApi");
     const api = createWsNativeApi();

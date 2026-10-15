@@ -36,6 +36,9 @@ import {
   type ProviderRuntimeEvent,
   type ProviderKind,
   type ProviderSession,
+  ContextSession,
+  type ContextSession as ContextSessionType,
+  type ContextAppliedRuntimeRecord,
 } from "@synara/contracts";
 import {
   providerSupportsAutoRuntimeMode,
@@ -57,7 +60,9 @@ import {
   Stream,
 } from "effect";
 import { nonEmptyTrimmed } from "@synara/shared/text";
+import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { computerApprovalGate } from "../../computer/ComputerApprovalGate.ts";
+import { ContextRepository, type ContextRepositoryError } from "../../context/ContextRepository.ts";
 
 import {
   type ProviderAdapterError,
@@ -328,6 +333,46 @@ function readPersistedExpertSession(
   return Schema.is(ProviderExpertSession)(payload.expertSession) ? payload.expertSession : null;
 }
 
+function readPersistedContextSession(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+): ContextSessionType | null | undefined {
+  const payload = runtimePayloadRecord(runtimePayload);
+  if (!Object.hasOwn(payload, "contextSession") || payload.contextSession === null)
+    return undefined;
+  return Schema.is(ContextSession)(payload.contextSession) ? payload.contextSession : null;
+}
+
+function composeRuntimeBaseInstructions(
+  expertSession: ProviderExpertSession | undefined,
+  contextSession: ContextSessionType | undefined,
+): string {
+  return (
+    composeProviderBaseInstructions({
+      expertPersona: expertSession?.persona,
+      contextInstructions: contextSession?.hasContent ? contextSession.text : undefined,
+    }) ?? ""
+  );
+}
+
+function sameContextSession(
+  left: ContextSessionType | undefined,
+  right: ContextSessionType | undefined,
+): boolean {
+  return (
+    left === right ||
+    (left !== undefined &&
+      right !== undefined &&
+      left.snapshotId === right.snapshotId &&
+      left.snapshotHash === right.snapshotHash &&
+      left.text === right.text &&
+      left.hasContent === right.hasContent)
+  );
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 function readPersistedComputerControl(
   runtimePayload: ProviderRuntimeBinding["runtimePayload"],
 ): boolean {
@@ -494,6 +539,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
 
     const registry = yield* ProviderAdapterRegistry;
     const directory = yield* ProviderSessionDirectory;
+    const contextRepository = yield* ContextRepository;
     const recordAppliedExpertRuntime = (
       expertSession: ProviderExpertSession | undefined,
       session: ProviderSession,
@@ -599,6 +645,115 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           ),
         ),
       );
+
+    const persistAppliedContextRuntime = (input: {
+      readonly contextSession: ContextSessionType | undefined;
+      readonly expertSession: ProviderExpertSession | undefined;
+      readonly session: ProviderSession;
+      readonly lifecycleGeneration: string;
+    }): Effect.Effect<void, ContextRepositoryError | ProviderValidationError> => {
+      if (!input.contextSession) return Effect.void;
+      if (
+        input.contextSession.hasContent &&
+        input.session.provider !== "codex" &&
+        input.session.provider !== "pi"
+      ) {
+        return Effect.fail(
+          toValidationError(
+            "ProviderService.startSession",
+            `Non-empty Context is not supported by provider '${input.session.provider}'.`,
+          ),
+        );
+      }
+      const submittedInstructions = composeRuntimeBaseInstructions(
+        input.expertSession,
+        input.contextSession,
+      );
+      const record: ContextAppliedRuntimeRecord = {
+        threadId: input.session.threadId,
+        snapshotId: input.contextSession.snapshotId,
+        snapshotHash: input.contextSession.snapshotHash,
+        provider: input.session.provider,
+        lifecycleGeneration: input.lifecycleGeneration,
+        baseInstructionsHash: sha256(submittedInstructions),
+        submittedInstructions,
+        appliedAt: new Date().toISOString(),
+      };
+      return contextRepository.upsertApplied(record);
+    };
+
+    const persistAppliedContextRuntimeOrRetire = (input: {
+      readonly operation: string;
+      readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+      readonly contextSession: ContextSessionType | undefined;
+      readonly expertSession: ProviderExpertSession | undefined;
+      readonly session: ProviderSession;
+      readonly lifecycleGeneration: string;
+    }) =>
+      Effect.matchCauseEffect(persistAppliedContextRuntime(input), {
+        onSuccess: () => Effect.void,
+        onFailure: (cause) =>
+          input.adapter.stopSession(input.session.threadId).pipe(
+            Effect.timeoutOption(PROVIDER_STOP_SESSION_TIMEOUT),
+            Effect.flatMap((stopped) =>
+              Option.match(stopped, {
+                onNone: () =>
+                  Effect.logError("provider.context.applied_runtime_cleanup_timed_out", {
+                    threadId: input.session.threadId,
+                    provider: input.session.provider,
+                    lifecycleGeneration: input.lifecycleGeneration,
+                    timeoutMs: Duration.toMillis(PROVIDER_STOP_SESSION_TIMEOUT),
+                  }),
+                onSome: () =>
+                  withBindingWriteLock(
+                    input.session.threadId,
+                    Effect.gen(function* () {
+                      const binding = Option.getOrUndefined(
+                        yield* directory.getBinding(input.session.threadId),
+                      );
+                      if (binding?.lifecycleGeneration !== input.lifecycleGeneration) return;
+                      yield* directory.upsert({
+                        threadId: binding.threadId,
+                        provider: binding.provider,
+                        ...(binding.adapterKey !== undefined
+                          ? { adapterKey: binding.adapterKey }
+                          : {}),
+                        ...(binding.runtimeMode !== undefined
+                          ? { runtimeMode: binding.runtimeMode }
+                          : {}),
+                        status: "stopped",
+                        lifecycleGeneration: input.lifecycleGeneration,
+                        ...(binding.resumeCursor !== undefined
+                          ? { resumeCursor: binding.resumeCursor }
+                          : {}),
+                        runtimePayload: {
+                          ...runtimePayloadRecord(binding.runtimePayload),
+                          activeTurnId: null,
+                        },
+                      });
+                    }),
+                  ),
+              }),
+            ),
+            Effect.catchCause((stopCause) =>
+              Effect.logError("provider.context.applied_runtime_cleanup_failed", {
+                threadId: input.session.threadId,
+                provider: input.session.provider,
+                lifecycleGeneration: input.lifecycleGeneration,
+                cause: Cause.pretty(stopCause),
+              }),
+            ),
+            Effect.andThen(
+              Effect.fail(
+                toValidationError(
+                  input.operation,
+                  `Failed to persist the applied Context runtime record for thread '${input.session.threadId}'.`,
+                  String(cause),
+                ),
+              ),
+            ),
+          ),
+      });
     type ResolvedProviderSessionStartInput = ProviderSessionStartInput & {
       readonly provider: ProviderKind;
     };
@@ -642,6 +797,30 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             ),
           )
         : Effect.void;
+    const validateContextSessionStart = (
+      threadId: ThreadId,
+      contextSession: ContextSessionType | undefined,
+      operation: string,
+    ) =>
+      contextRepository.getContextSession(threadId).pipe(
+        Effect.mapError((cause) =>
+          toValidationError(
+            operation,
+            `Cannot verify the frozen Context for thread '${threadId}'.`,
+            String(cause),
+          ),
+        ),
+        Effect.flatMap((currentContextSession) =>
+          sameContextSession(currentContextSession, contextSession)
+            ? Effect.void
+            : Effect.fail(
+                toValidationError(
+                  operation,
+                  `The requested Context snapshot for thread '${threadId}' is missing or out of date.`,
+                ),
+              ),
+        ),
+      );
     const lifecycle = makeProviderLifecycleCoordinator();
     for (const binding of yield* directory.listBindings()) {
       if (binding.lifecycleGeneration !== undefined) {
@@ -1797,10 +1976,27 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             const persistedProviderOptions = readPersistedProviderOptions(binding.runtimePayload);
             const persistedComputerControl = readPersistedComputerControl(binding.runtimePayload);
             const persistedExpertSession = readPersistedExpertSession(binding.runtimePayload);
+            const persistedContextSession = readPersistedContextSession(binding.runtimePayload);
             if (persistedExpertSession === null) {
               return yield* toValidationError(
                 input.operation,
                 `Cannot recover thread '${threadId}' because its persisted Expert snapshot configuration is invalid.`,
+              );
+            }
+            if (persistedContextSession === null) {
+              return yield* toValidationError(
+                input.operation,
+                `Cannot recover thread '${threadId}' because its persisted Context snapshot is invalid.`,
+              );
+            }
+            if (
+              persistedContextSession?.hasContent === true &&
+              binding.provider !== "codex" &&
+              binding.provider !== "pi"
+            ) {
+              return yield* toValidationError(
+                input.operation,
+                `Cannot recover non-empty Context for unsupported provider '${binding.provider}'.`,
               );
             }
             yield* validateAutoRuntimeMode(
@@ -1819,6 +2015,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               ...(persistedProviderOptions ? { providerOptions: persistedProviderOptions } : {}),
               ...(persistedComputerControl ? { enableComputerControl: true } : {}),
               ...(persistedExpertSession ? { expertSession: persistedExpertSession } : {}),
+              ...(persistedContextSession ? { contextSession: persistedContextSession } : {}),
               ...(hasPersistedResumeCursor ? { resumeCursor: binding.resumeCursor } : {}),
               runtimeMode: binding.runtimeMode ?? "full-access",
             };
@@ -1841,7 +2038,10 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               upsertSessionBinding(resumed, threadId, {
                 lifecycleGeneration: lease.generation,
                 ...(persistedComputerControl ? { enableComputerControl: true } : {}),
-                runtimePayload: { expertSession: persistedExpertSession ?? null },
+                runtimePayload: {
+                  expertSession: persistedExpertSession ?? null,
+                  contextSession: persistedContextSession ?? null,
+                },
               }).pipe(
                 Effect.andThen(
                   requiresCredentialRotation
@@ -1852,6 +2052,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                           [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: false,
                           ...(persistedComputerControl ? { enableComputerControl: true } : {}),
                           expertSession: persistedExpertSession ?? null,
+                          contextSession: persistedContextSession ?? null,
                         },
                       })
                     : Effect.void,
@@ -1862,6 +2063,14 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               operation: input.operation,
               adapter,
               expertSession: persistedExpertSession,
+              session: resumed,
+              lifecycleGeneration: lease.generation,
+            });
+            yield* persistAppliedContextRuntimeOrRetire({
+              operation: input.operation,
+              adapter,
+              contextSession: persistedContextSession,
+              expertSession: persistedExpertSession ?? undefined,
               session: resumed,
               lifecycleGeneration: lease.generation,
             });
@@ -1973,10 +2182,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             if (input.allowRecovery) {
               yield* ensureProviderEnabled(liveAdapter.provider, input.operation);
             }
+            const currentGeneration = lifecycle.currentGeneration(input.threadId);
             return {
               adapter: liveAdapter,
               isActive: true,
-              lifecycleGeneration: lifecycle.currentGeneration(input.threadId),
+              ...(currentGeneration !== undefined
+                ? { lifecycleGeneration: currentGeneration }
+                : {}),
             } as const;
           }
           return yield* new ProviderValidationError({
@@ -2013,7 +2225,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           return {
             adapter,
             isActive: true,
-            lifecycleGeneration: binding.lifecycleGeneration,
+            ...(binding.lifecycleGeneration !== undefined
+              ? { lifecycleGeneration: binding.lifecycleGeneration }
+              : {}),
           } as const;
         }
 
@@ -2021,15 +2235,128 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           return {
             adapter,
             isActive: false,
-            lifecycleGeneration: binding.lifecycleGeneration,
+            ...(binding.lifecycleGeneration !== undefined
+              ? { lifecycleGeneration: binding.lifecycleGeneration }
+              : {}),
           } as const;
         }
 
+        const recoveredAdapter = yield* recoverSessionForThread({
+          binding,
+          operation: input.operation,
+        });
+        const recoveredGeneration = lifecycle.currentGeneration(input.threadId);
         return {
-          adapter: yield* recoverSessionForThread({ binding, operation: input.operation }),
+          adapter: recoveredAdapter,
           isActive: true,
-          lifecycleGeneration: lifecycle.currentGeneration(input.threadId),
+          ...(recoveredGeneration !== undefined
+            ? { lifecycleGeneration: recoveredGeneration }
+            : {}),
         } as const;
+      });
+
+    const validateContextDispatch = (input: {
+      readonly threadId: ThreadId;
+      readonly operation: string;
+      readonly routed: {
+        readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+        readonly lifecycleGeneration?: string;
+      };
+    }) =>
+      Effect.gen(function* () {
+        const providerBinding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+        const persistedContextSession = readPersistedContextSession(
+          providerBinding?.runtimePayload,
+        );
+        if (persistedContextSession === null) {
+          return yield* toValidationError(
+            input.operation,
+            `Cannot dispatch a turn for thread '${input.threadId}' because its persisted Context snapshot is invalid.`,
+          );
+        }
+        const liveContext = yield* contextRepository
+          .getThreadBinding(input.threadId)
+          .pipe(
+            Effect.mapError((cause) =>
+              toValidationError(
+                input.operation,
+                `Cannot verify the current Context binding for thread '${input.threadId}'.`,
+                String(cause),
+              ),
+            ),
+          );
+        const liveSnapshot = liveContext?.mode === "bound" ? liveContext.snapshot : undefined;
+        const liveNonEmpty = liveSnapshot?.hasContent === true;
+        const runtimeNonEmpty = persistedContextSession?.hasContent === true;
+        if (!liveNonEmpty && !runtimeNonEmpty) return;
+        if (!liveNonEmpty || !runtimeNonEmpty || !liveSnapshot || !providerBinding) {
+          return yield* toValidationError(
+            input.operation,
+            `Cannot dispatch a turn for thread '${input.threadId}' because the live Context binding does not match its provider session.`,
+          );
+        }
+        if (
+          liveSnapshot.snapshotId !== persistedContextSession.snapshotId ||
+          liveSnapshot.snapshotHash !== persistedContextSession.snapshotHash
+        ) {
+          return yield* toValidationError(
+            input.operation,
+            `Cannot dispatch a turn for thread '${input.threadId}' because its frozen Context differs from the current binding.`,
+          );
+        }
+        if (providerBinding.provider !== "codex" && providerBinding.provider !== "pi") {
+          return yield* toValidationError(
+            input.operation,
+            `Cannot dispatch non-empty Context through unsupported provider '${providerBinding.provider}'.`,
+          );
+        }
+
+        const persistedExpertSession = readPersistedExpertSession(providerBinding.runtimePayload);
+        if (persistedExpertSession === null) {
+          return yield* toValidationError(
+            input.operation,
+            `Cannot dispatch a turn for thread '${input.threadId}' because its persisted Expert snapshot configuration is invalid.`,
+          );
+        }
+        const applied = yield* contextRepository
+          .getApplied(input.threadId)
+          .pipe(
+            Effect.mapError((cause) =>
+              toValidationError(
+                input.operation,
+                `Cannot read the applied Context record for thread '${input.threadId}'.`,
+                String(cause),
+              ),
+            ),
+          );
+        const currentGeneration = lifecycle.currentGeneration(input.threadId);
+        const runtimePayloadGeneration = runtimePayloadString(
+          providerBinding.runtimePayload,
+          "lifecycleGeneration",
+        );
+        const submittedInstructions = composeRuntimeBaseInstructions(
+          persistedExpertSession ?? undefined,
+          persistedContextSession,
+        );
+        if (
+          !applied ||
+          !currentGeneration ||
+          providerBinding.lifecycleGeneration !== currentGeneration ||
+          runtimePayloadGeneration !== currentGeneration ||
+          input.routed.lifecycleGeneration !== currentGeneration ||
+          applied.threadId !== input.threadId ||
+          applied.provider !== providerBinding.provider ||
+          applied.snapshotId !== persistedContextSession.snapshotId ||
+          applied.snapshotHash !== persistedContextSession.snapshotHash ||
+          applied.lifecycleGeneration !== currentGeneration ||
+          applied.submittedInstructions !== submittedInstructions ||
+          applied.baseInstructionsHash !== sha256(submittedInstructions)
+        ) {
+          return yield* toValidationError(
+            input.operation,
+            `Cannot dispatch a turn for thread '${input.threadId}' because its Context was not applied to the current provider generation.`,
+          );
+        }
       });
 
     const startSessionWithOutcome: NonNullable<ProviderServiceShape["startSessionWithOutcome"]> = (
@@ -2061,6 +2388,21 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           "ProviderService.startSession",
           input.provider,
           input.runtimeMode,
+        );
+        if (
+          input.contextSession?.hasContent === true &&
+          input.provider !== "codex" &&
+          input.provider !== "pi"
+        ) {
+          return yield* toValidationError(
+            "ProviderService.startSession",
+            `Non-empty Context is not supported by provider '${input.provider}'.`,
+          );
+        }
+        yield* validateContextSessionStart(
+          threadId,
+          input.contextSession,
+          "ProviderService.startSession",
         );
         // An explicit start is the recovery authority for a failed retirement,
         // but it must never interleave with one still in progress. Capture the
@@ -2224,6 +2566,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                       [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: false,
                       ...(effectiveComputerControl ? { enableComputerControl: true } : {}),
                       expertSession: input.expertSession ?? null,
+                      contextSession: input.contextSession ?? null,
                       [PRIOR_TRANSCRIPT_BOOTSTRAP_PENDING]: priorTranscriptBootstrapPending,
                     },
                   }),
@@ -2231,6 +2574,14 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 yield* persistAppliedExpertRuntimeOrRetire({
                   operation: "ProviderService.startSession",
                   adapter,
+                  expertSession: input.expertSession,
+                  session,
+                  lifecycleGeneration: lease.generation,
+                });
+                yield* persistAppliedContextRuntimeOrRetire({
+                  operation: "ProviderService.startSession",
+                  adapter,
+                  contextSession: input.contextSession,
                   expertSession: input.expertSession,
                   session,
                   lifecycleGeneration: lease.generation,
@@ -2433,44 +2784,91 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           return null;
         }
 
-        const forked = yield* adapter
-          .forkThread({
-            ...input,
-            threadId: input.threadId,
-            sourceThreadId: input.sourceThreadId,
-            ...(effectiveProviderOptions !== undefined
-              ? { providerOptions: effectiveProviderOptions }
-              : {}),
-            ...(sourceBinding.resumeCursor !== null && sourceBinding.resumeCursor !== undefined
-              ? { sourceResumeCursor: sourceBinding.resumeCursor }
-              : {}),
-            ...(sourceCwd ? { sourceCwd } : {}),
-            runtimeMode: input.runtimeMode,
-          })
-          .pipe(
-            Effect.catch((error) =>
-              Effect.logWarning("provider native fork failed; falling back", {
-                sourceThreadId: input.sourceThreadId,
-                targetThreadId: input.threadId,
-                cause: error instanceof Error ? error.message : String(error),
-              }).pipe(Effect.as(null)),
-            ),
+        const effectiveExpertSession =
+          input.expertSession ?? readPersistedExpertSession(sourceBinding.runtimePayload);
+        const sourceContextSession = readPersistedContextSession(sourceBinding.runtimePayload);
+        if (effectiveExpertSession === null || sourceContextSession === null) {
+          return yield* toValidationError(
+            "ProviderService.forkThread",
+            `Cannot fork thread '${input.sourceThreadId}' because its persisted instruction snapshot is invalid.`,
           );
-        if (!forked) {
-          return null;
+        }
+        const targetContextSession =
+          input.contextSession ??
+          (yield* contextRepository
+            .getContextSession(input.threadId)
+            .pipe(
+              Effect.mapError((cause) =>
+                toValidationError(
+                  "ProviderService.forkThread",
+                  `Cannot verify the target Context snapshot for thread '${input.threadId}'.`,
+                  String(cause),
+                ),
+              ),
+            ));
+        if (sourceContextSession?.hasContent === true && targetContextSession === undefined) {
+          return yield* toValidationError(
+            "ProviderService.forkThread",
+            `Cannot fork thread '${input.sourceThreadId}' because target thread '${input.threadId}' has no bound Context snapshot.`,
+          );
+        }
+        const effectiveContextSession = targetContextSession;
+        yield* validateContextSessionStart(
+          input.threadId,
+          effectiveContextSession,
+          "ProviderService.forkThread",
+        );
+        if (
+          effectiveContextSession?.hasContent === true &&
+          adapter.provider !== "codex" &&
+          adapter.provider !== "pi"
+        ) {
+          return yield* toValidationError(
+            "ProviderService.forkThread",
+            `Non-empty Context is not supported by provider '${adapter.provider}'.`,
+          );
         }
 
-        const forkedSession = (yield* adapter.listSessions()).find(
-          (session) => session.threadId === input.threadId,
-        );
-        // Register the fork under a committed lifecycle generation. Writing the
-        // binding outside the coordinator lands it on the directory's "legacy"
-        // default while the coordinator has no entry for the thread at all, and
-        // any later generation adoption from that row (session recovery, the
-        // startup broadcast) diverges from what the live runtime stamps —
-        // silently discarding the thread's runtime events.
-        yield* lifecycle.run(input.threadId, (lease) =>
+        // Reserve the target generation before native init/fork so the provider
+        // receives the generation that will own its ACK, events, binding, and
+        // applied Context record.
+        return yield* lifecycle.run(input.threadId, (lease) =>
           Effect.gen(function* () {
+            const forked = yield* adapter.forkThread!({
+              ...input,
+              threadId: input.threadId,
+              sourceThreadId: input.sourceThreadId,
+              ...(effectiveProviderOptions !== undefined
+                ? { providerOptions: effectiveProviderOptions }
+                : {}),
+              ...(sourceBinding.resumeCursor !== null && sourceBinding.resumeCursor !== undefined
+                ? { sourceResumeCursor: sourceBinding.resumeCursor }
+                : {}),
+              ...(sourceCwd ? { sourceCwd } : {}),
+              ...(effectiveExpertSession ? { expertSession: effectiveExpertSession } : {}),
+              ...(effectiveContextSession ? { contextSession: effectiveContextSession } : {}),
+              lifecycleGeneration: lease.generation,
+              runtimeMode: input.runtimeMode,
+            }).pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("provider native fork failed; falling back", {
+                  sourceThreadId: input.sourceThreadId,
+                  targetThreadId: input.threadId,
+                  cause: error instanceof Error ? error.message : String(error),
+                }).pipe(Effect.as(null)),
+              ),
+            );
+            if (!forked) return null;
+
+            const forkedSession = (yield* adapter.listSessions()).find(
+              (session) => session.threadId === input.threadId,
+            );
+            if (effectiveContextSession?.hasContent && !forkedSession) {
+              return yield* toValidationError(
+                "ProviderService.forkThread",
+                `Provider '${adapter.provider}' acknowledged the fork without an active session to apply Context.`,
+              );
+            }
             if (forkedSession) {
               const session: ProviderSession = {
                 ...forkedSession,
@@ -2484,11 +2882,28 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 ...(effectiveProviderOptions !== undefined
                   ? { providerOptions: effectiveProviderOptions }
                   : {}),
-                // The fork writes the thread's first binding row, so the flag
-                // must land here or resumeSession re-leases without it.
                 ...(input.enableComputerControl ? { enableComputerControl: true } : {}),
                 lastRuntimeEvent: "provider.thread.forked",
                 lastRuntimeEventAt: new Date().toISOString(),
+                runtimePayload: {
+                  expertSession: effectiveExpertSession ?? null,
+                  contextSession: effectiveContextSession ?? null,
+                },
+              });
+              yield* persistAppliedExpertRuntimeOrRetire({
+                operation: "ProviderService.forkThread",
+                adapter,
+                expertSession: effectiveExpertSession ?? undefined,
+                session,
+                lifecycleGeneration: lease.generation,
+              });
+              yield* persistAppliedContextRuntimeOrRetire({
+                operation: "ProviderService.forkThread",
+                adapter,
+                contextSession: effectiveContextSession ?? undefined,
+                expertSession: effectiveExpertSession ?? undefined,
+                session,
+                lifecycleGeneration: lease.generation,
               });
             } else {
               yield* directory.upsert({
@@ -2510,15 +2925,33 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     ? { providerOptions: effectiveProviderOptions }
                     : {}),
                   ...(input.enableComputerControl ? { enableComputerControl: true } : {}),
+                  expertSession: effectiveExpertSession ?? null,
+                  contextSession: effectiveContextSession ?? null,
                   lastRuntimeEvent: "provider.thread.forked",
                   lastRuntimeEventAt: new Date().toISOString(),
                 },
               });
             }
             lease.commit();
-          }),
+            return forked;
+          }).pipe(
+            Effect.onExit((exit) =>
+              Exit.isSuccess(exit)
+                ? Effect.void
+                : adapter.stopSession(input.threadId).pipe(
+                    Effect.timeoutOption(PROVIDER_STOP_SESSION_TIMEOUT),
+                    Effect.catchCause((cause) =>
+                      Effect.logError("provider.context.fork_cleanup_failed", {
+                        sourceThreadId: input.sourceThreadId,
+                        targetThreadId: input.threadId,
+                        cause: Cause.pretty(cause),
+                      }),
+                    ),
+                    Effect.asVoid,
+                  ),
+            ),
+          ),
         );
-        return forked;
       });
 
     const importExternalThread: NonNullable<ProviderServiceShape["importExternalThread"]> = (
@@ -2673,7 +3106,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         );
       });
 
-    const sendTurn: ProviderServiceShape["sendTurn"] = (rawInput) =>
+    const sendTurn: ProviderServiceShape["sendTurn"] = (rawInput, dispatchOptions) =>
       Effect.gen(function* () {
         const parsed = yield* decodeInputOrValidationError({
           operation: "ProviderService.sendTurn",
@@ -2698,6 +3131,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               operation: "ProviderService.sendTurn",
               allowRecovery: true,
             });
+            yield* validateContextDispatch({
+              threadId: input.threadId,
+              operation: "ProviderService.sendTurn",
+              routed,
+            });
+            if (dispatchOptions?.beforeDispatch) yield* dispatchOptions.beforeDispatch;
             const turn = yield* routed.adapter.sendTurn(input);
             const persistenceInput: StartedTurnPersistenceInput = {
               threadId: input.threadId,
@@ -2729,7 +3168,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         );
       });
 
-    const steerTurn: ProviderServiceShape["steerTurn"] = (rawInput) =>
+    const steerTurn: ProviderServiceShape["steerTurn"] = (rawInput, dispatchOptions) =>
       Effect.gen(function* () {
         const parsed = yield* decodeInputOrValidationError({
           operation: "ProviderService.steerTurn",
@@ -2763,6 +3202,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 `Provider '${routed.adapter.provider}' does not support steering an active turn.`,
               );
             }
+            yield* validateContextDispatch({
+              threadId: input.threadId,
+              operation: "ProviderService.steerTurn",
+              routed,
+            });
+            if (dispatchOptions?.beforeDispatch) yield* dispatchOptions.beforeDispatch;
             const turn = yield* routed.adapter.steerTurn(input);
             const persistenceInput: StartedTurnPersistenceInput = {
               threadId: input.threadId,
@@ -2785,7 +3230,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         );
       });
 
-    const startReview: ProviderServiceShape["startReview"] = (rawInput) =>
+    const startReview: ProviderServiceShape["startReview"] = (rawInput, dispatchOptions) =>
       Effect.gen(function* () {
         const input = yield* decodeInputOrValidationError({
           operation: "ProviderService.startReview",
@@ -2807,6 +3252,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               );
             }
 
+            yield* validateContextDispatch({
+              threadId: input.threadId,
+              operation: "ProviderService.startReview",
+              routed,
+            });
+            if (dispatchOptions?.beforeDispatch) yield* dispatchOptions.beforeDispatch;
             const turn = yield* routed.adapter.startReview(input);
             const persistenceInput: StartedTurnPersistenceInput = {
               threadId: input.threadId,
@@ -3594,35 +4045,57 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         yield* runIdleSensitiveProviderWork(
           input.threadId,
           Effect.gen(function* () {
-            const routed = yield* resolveRoutableSession({
+            yield* resolveRoutableSession({
               threadId: input.threadId,
               operation: "ProviderService.compactThread",
               allowRecovery: true,
             });
-            if (!routed.adapter.compactThread) {
-              return yield* toValidationError(
-                "ProviderService.compactThread",
-                `Context compaction is unavailable for provider '${routed.adapter.provider}'.`,
-              );
-            }
-            yield* routed.adapter.compactThread(input.threadId);
-            const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
-            if (binding) {
-              yield* directory.upsert({
-                threadId: input.threadId,
-                provider: binding.provider,
-                ...(binding.adapterKey !== undefined ? { adapterKey: binding.adapterKey } : {}),
-                ...(binding.runtimeMode !== undefined ? { runtimeMode: binding.runtimeMode } : {}),
-                status: "stopped",
-                resumeCursor: binding.resumeCursor,
-                runtimePayload: {
-                  ...runtimePayloadRecord(binding.runtimePayload),
-                  activeTurnId: null,
-                  lastRuntimeEvent: "provider.compactThread",
-                  lastRuntimeEventAt: new Date().toISOString(),
-                },
-              });
-            }
+            yield* lifecycle.runCurrent(input.threadId, () =>
+              Effect.gen(function* () {
+                const routed = yield* resolveRoutableSession({
+                  threadId: input.threadId,
+                  operation: "ProviderService.compactThread",
+                  allowRecovery: false,
+                });
+                if (!routed.isActive) {
+                  return yield* toValidationError(
+                    "ProviderService.compactThread",
+                    `Cannot compact thread '${input.threadId}' because its provider runtime is not active.`,
+                  );
+                }
+                if (!routed.adapter.compactThread) {
+                  return yield* toValidationError(
+                    "ProviderService.compactThread",
+                    `Context compaction is unavailable for provider '${routed.adapter.provider}'.`,
+                  );
+                }
+                yield* validateContextDispatch({
+                  threadId: input.threadId,
+                  operation: "ProviderService.compactThread",
+                  routed,
+                });
+                yield* routed.adapter.compactThread(input.threadId);
+                const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+                if (binding) {
+                  yield* directory.upsert({
+                    threadId: input.threadId,
+                    provider: binding.provider,
+                    ...(binding.adapterKey !== undefined ? { adapterKey: binding.adapterKey } : {}),
+                    ...(binding.runtimeMode !== undefined
+                      ? { runtimeMode: binding.runtimeMode }
+                      : {}),
+                    status: "stopped",
+                    resumeCursor: binding.resumeCursor,
+                    runtimePayload: {
+                      ...runtimePayloadRecord(binding.runtimePayload),
+                      activeTurnId: null,
+                      lastRuntimeEvent: "provider.compactThread",
+                      lastRuntimeEventAt: new Date().toISOString(),
+                    },
+                  });
+                }
+              }),
+            );
           }),
           { scheduleIdleStopOnSuccess: true },
         );

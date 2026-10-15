@@ -1,0 +1,93 @@
+/* Only prototype frame layout; color, type, controls and transitions come from Synara. */
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--background);
+}
+.demo-app {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  height: 100dvh;
+  overflow: hidden;
+}
+.demo-main {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  background: var(--background);
+}
+.demo-header {
+  min-height: 48px;
+  flex-shrink: 0;
+}
+.demo-sidebar {
+  min-height: 0;
+}
+.demo-sidebar-content {
+  background: var(--app-sidebar-surface);
+}
+.demo-empty {
+  min-height: min(55dvh, 480px);
+}
+.demo-chat-layout {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.demo-chat-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+.demo-environment {
+  align-self: flex-start;
+  flex: 0 0 320px;
+  max-height: calc(100% - 24px);
+  margin: 12px 12px 0 0;
+  overflow-y: auto;
+}
+.demo-environment[data-open="false"] {
+  display: none;
+}
+.demo-mobile-nav,
+.demo-mobile-review {
+  display: none;
+}
+@media (max-width: 720px) {
+  .demo-app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .demo-sidebar {
+    display: none;
+  }
+  .demo-mobile-nav {
+    display: inline-flex;
+  }
+  .demo-mobile-review {
+    display: inline-flex;
+  }
+  .demo-environment {
+    position: absolute;
+    right: 12px;
+    left: 12px;
+    z-index: 20;
+    width: auto;
+    max-width: 360px;
+    max-height: calc(100% - 24px);
+    margin: 12px 0 0 auto;
+  }
+  .demo-empty {
+    min-height: 40dvh;
+  }
+}
+@media (max-height: 620px) {
+  .demo-empty {
+    min-height: 28dvh;
+  }
+}

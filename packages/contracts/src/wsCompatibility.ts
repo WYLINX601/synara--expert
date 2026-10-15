@@ -6,8 +6,9 @@ export const WS_PROTOCOL_EPOCH = 1;
 // Revision 2 changes PullRequestCommit.authors to permit name-only authors.
 // Keep revision 1 out of the compatibility range so older clients cannot
 // decode the new nullable login shape and fail while rendering PR details.
-export const WS_PROTOCOL_MIN_REVISION = 2;
-export const WS_PROTOCOL_MAX_REVISION = 2;
+// Revision 3 introduces Context events. Older clients cannot decode that union.
+export const WS_PROTOCOL_MIN_REVISION = 3;
+export const WS_PROTOCOL_MAX_REVISION = 3;
 export const WS_BOOTSTRAP_METHOD = "bootstrap.negotiate";
 export const WS_BOOTSTRAP_PATH = "/ws/bootstrap";
 export const WS_NEGOTIATE_HTTP_PATH = "/ws/negotiate";
@@ -38,6 +39,7 @@ export const WS_NEGOTIATE_QUERY = {
 
 export const WS_GITHUB_PROJECT_PROVISIONING_CAPABILITY = "projects.github-provisioning";
 export const WS_PROJECT_FILE_WATCH_CAPABILITY = "projects.file-watch";
+export const WS_CONTEXT_V1_CAPABILITY = "context.v1";
 
 // Capabilities the current client refuses to run without. Kept separate from
 // the advertised server list so a newer client can still negotiate with an
@@ -59,6 +61,7 @@ export const WS_SERVER_CAPABILITIES = [
   // rest of a newer client unusable during a staggered rollout.
   WS_GITHUB_PROJECT_PROVISIONING_CAPABILITY,
   WS_PROJECT_FILE_WATCH_CAPABILITY,
+  WS_CONTEXT_V1_CAPABILITY,
   // Single-handshake connect: negotiation is available over plain HTTP at
   // WS_NEGOTIATE_HTTP_PATH, so a connect costs exactly one WebSocket upgrade.
   "transport.http-negotiate",

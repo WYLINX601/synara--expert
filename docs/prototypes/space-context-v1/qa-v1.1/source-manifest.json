@@ -1,0 +1,66 @@
+{
+  "version": "Context V1.1",
+  "capturedAt": "2026-10-13T10:22:42.444Z",
+  "sourceRoot": "/Users/wangyuelin/.codex/worktrees/expert-frontend-redesign/synara-expert",
+  "head": "61df29b094d3e5f2877f7787613655220a4f72a2",
+  "branch": "codex/workbench-adaptation",
+  "hasOtherUncommittedChanges": true,
+  "note": "Patch is against captured pre-task UI files, not clean HEAD; preserves candidate worktree edits. New test is represented from /dev/null.",
+  "changedUiFiles": [
+    {
+      "path": "apps/web/src/components/SpaceEditorDialog.tsx",
+      "beforeSha256": "3980c95ae86c6ddc86056b4508b2c097c7828b5525a0fba2a6c5c5bbf4466c6f",
+      "sha256": "faf58716e0670e691ba7f9772fc24325974e663888a3ac8e749140267f508696"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/EnvironmentProjectInstructionsSection.tsx",
+      "beforeSha256": "0235e251480d785b8e02e9fb325167103e72a1b63538ba8f79e0fa5778d64a97",
+      "sha256": "586951c7edd6c095ed3eedb40b6a9539ddbf321e3f860c40dae609d0a715ccd4"
+    },
+    {
+      "path": "apps/web/src/components/chat/ComposerExtrasPanel.tsx",
+      "beforeSha256": "f19329e2344e9609f29f996522b0aff879042d1dcfe1f96365e8da587c27c249",
+      "sha256": "a2d1adb5cf76ca7d6bdb8ccb86142af00081e161c5e7ccc949f3b56b006f7e5b"
+    },
+    {
+      "path": "apps/web/src/components/settings/useExpertDraftGuard.tsx",
+      "beforeSha256": "54d204bdd68c65ef72e39354233ab0aaf4604f8d271063abc8aa1aa7cd0fa47d",
+      "sha256": "fe57be6761af68664736b780837880545ac5ad76359f029a7ccf9c30a7c69335"
+    },
+    {
+      "path": "apps/web/src/components/settings/useExpertDraftGuard.browser.tsx",
+      "beforeSha256": null,
+      "sha256": "b8779a79b3ff7962140c457e1d1dfe57f57b2082439936f99a589047a81694c5"
+    }
+  ],
+  "references": [
+    {
+      "path": "apps/web/src/components/SpaceSwitcher.tsx",
+      "sha256": "74948fe5cb5fca3ec493c3181ee88e3d1d6360d33200e29ca859bfc15a3b0c99"
+    },
+    {
+      "path": "apps/web/src/components/SpaceIcon.tsx",
+      "sha256": "d0e7bc85911e06777fe653c2b16f6dade61a973068dc3ddd86d7cf85eaf1747f"
+    },
+    {
+      "path": "apps/web/src/index.css",
+      "sha256": "2b0cf8ad452732a763d9a13019ac7120f02d55e4fc2f974c90d31c68ba477b26"
+    },
+    {
+      "path": "apps/web/src/hooks/useAppTypography.ts",
+      "sha256": "21ba75c2476cc6373c388816a35f2ed94d939033eb81a7b8d9152eb35192f78b"
+    },
+    {
+      "path": ".mise.toml",
+      "sha256": "a0ed2eb3e3c3704430e76428c341f7f31bb0ef5fbf13d6d28049099a3ad5c898"
+    },
+    {
+      "path": "package.json",
+      "sha256": "1c5e08c1580afbfc489319ad7d673fbe93b8f3a9b82a4a3f96c1d0d30ba77b1c"
+    },
+    {
+      "path": "bun.lock",
+      "sha256": "7748108544df86324b9dbecbb98639e20cb086e553509e8247c719bcb8145833"
+    }
+  ]
+}

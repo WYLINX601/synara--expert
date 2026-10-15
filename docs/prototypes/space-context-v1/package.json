@@ -1,0 +1,12 @@
+{
+  "name": "synara-space-context-prototype",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node run.mjs dev",
+    "build": "node run.mjs build",
+    "preview": "node run.mjs preview",
+    "typecheck": "node run.mjs typecheck",
+    "test": "node run.mjs test"
+  }
+}

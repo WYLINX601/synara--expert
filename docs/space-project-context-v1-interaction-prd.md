@@ -6,7 +6,7 @@
 
 正式接入的代码与验证范围见[实现说明](./space-project-context-v1-implementation.md)和[接入验收](./space-project-context-v1-acceptance.md)。原型截图只作为交互历史参考。
 
-本文取代 [PRD v0.1](./prototypes/space-context-v1/history/prd-v0.1-2026-10-13.md) 作为当前交互基准。目标行为已经批准；[独立 React 原型](./prototypes/space-context-v1/README.md)用于呈现前端交互边界，不代表服务端持久化、Provider 注入或生产链路已经实现。当前验收结果与最新截图分别以[验收记录](./prototypes/space-context-v1/acceptance.md)和[视觉与交互 QA](./prototypes/space-context-v1/design-qa.md)为准；旧版材料与截图只作历史追溯，见[history](./prototypes/space-context-v1/history/README.md)。
+本文取代 [PRD v0.1](./prototypes/space-context-v1/history/prd-v0.1-2026-10-13.md) 作为当前交互基准。正式实现的检查结果与真实页面截图以[接入验收](./space-project-context-v1-acceptance.md)为准。[独立 React 原型](./prototypes/space-context-v1/README.md)、其[验收](./prototypes/space-context-v1/acceptance.md)与[视觉 QA](./prototypes/space-context-v1/design-qa.md)仅保留演示阶段证据；更早版本见[history](./prototypes/space-context-v1/history/README.md)。
 
 ## 1. 产品结构
 
@@ -101,11 +101,11 @@ UI 扩展以可选 props 提供，旧调用默认兼容；没有新增正式 API
 | 历史、派生及归属变化     | 服务端历史标记、来源快照、同项目继承/跨项目限制，删除来源后的快照仍可读                               |
 | 旧指令迁移               | 工作区/Project 归属确认、逐项 CAS、回读核对及持久迁移状态，保留旧数据与 Notes                         |
 
-普通发送不携带前端草稿作为执行上下文。切换工作区或对象后，不复用另一对象的草稿、来源预览或迁移归属。正式持久化、原生 Provider 与 fork/handoff 验收另行进行。
+普通发送不携带前端草稿作为执行上下文。切换工作区或对象后，不复用另一对象的草稿、来源预览或迁移归属。正式持久化、原生 Provider 与 fork/handoff 的实际覆盖范围见[真实接入验收](./space-project-context-v1-acceptance.md)，原型不能作为这些链路的通过证据。
 
 ## 9. 验收场景
 
-当前原型演示与生产接入验收分开记录。下表定义产品场景；只有本轮[验收记录](./prototypes/space-context-v1/acceptance.md)中有证据的项目才可标为通过。
+当前原型演示与生产接入验收分开记录。下表定义产品场景；正式实现只有[真实接入验收](./space-project-context-v1-acceptance.md)中有对应证据的项目才可标为通过；[原型验收](./prototypes/space-context-v1/acceptance.md)仅证明演示交互。
 
 | ID     | 场景                                   | 预期结果                                                                          |
 | ------ | -------------------------------------- | --------------------------------------------------------------------------------- |
@@ -140,8 +140,8 @@ UI 扩展以可选 props 提供，旧调用默认兼容；没有新增正式 API
 - [独立原型 README](./prototypes/space-context-v1/README.md)：预览地址、启动与构建命令、隔离边界。
 - [前后端实现说明](./space-project-context-v1-implementation.md)：数据、协议、页面接入和执行恢复边界。
 - [正式接入验收](./space-project-context-v1-acceptance.md)：当前代码候选的检查与真实运行结果。
-- [当前验收记录](./prototypes/space-context-v1/acceptance.md)：仅记录本轮实际检查结果与未验证范围。
-- [当前视觉与交互 QA](./prototypes/space-context-v1/design-qa.md)：本轮最新截图与视觉依据；本 PRD 不把 v1 历史截图用作当前基准。
+- [历史原型验收](./prototypes/space-context-v1/acceptance.md)：保留独立演示阶段的检查结果与边界。
+- [历史原型视觉与交互 QA](./prototypes/space-context-v1/design-qa.md)：仅供原型阶段追溯；真实页面截图见正式接入验收。
 - [历史材料与旧版截图索引](./prototypes/space-context-v1/history/README.md)。
 - [Linx 产品设计 V2.0](./linx-product-design-v2.md)：上层产品方向；本 PRD 不扩大 Context 的已批准范围。
 - [Expert 产品与技术方案](./expert-product-technical-design.md)：既有 Expert、Provider 与快照约束。

@@ -1,8 +1,8 @@
 # Synara Context V1.1：真实接入验收
 
-日期：2026-10-15。对应[实现说明](./space-project-context-v1-implementation.md)和[交互 PRD](./space-project-context-v1-interaction-prd.md)。
+日期：2026-10-15。第 1–7 节保留初次接入记录，最新本地整合结果见[第 8 节](#8-2026-10-15-浏览器版整合补充)。对应[实现说明](./space-project-context-v1-implementation.md)和[交互 PRD](./space-project-context-v1-interaction-prd.md)。
 
-## 1. 当前结论
+## 1. 初次接入验收结论（整合前记录）
 
 Space / Project 配置、原生页面接入、首次执行快照、Codex / Pi 注入与恢复、旧指令迁移已在独立开发候选中实现。可以审核真实开发版，尚未合并到原工作区或发布安装包。
 
@@ -14,7 +14,7 @@ Context 功能验证通过；仓库完整检查仍有与本功能无关的既有
 - 工作区：`/Users/wangyuelin/synara-expert/.synara/context-v1.1`。先复制原候选的未提交基线，再在该隔离工作区实施；保留原型历史文件。
 - 原候选：`/Users/wangyuelin/.codex/worktrees/expert-frontend-redesign/synara-expert`。本轮没有向其写入代码。
 - 实例：网页 [localhost:5733](http://localhost:5733/)，服务端 17738；home 为 `/private/tmp/synara-context-v1.1-20261015`。测试项目均位于 `/private/tmp`。
-- 实际变更文件及哈希见[源码清单](./assets/context-v1.1/source-manifest.json)。本机原始日志、API 回读与基线摘要保存在 `/Users/wangyuelin/synara-expert/.synara/context-v1.1-evidence/`，不提交含运行数据的完整日志。
+- 初次接入变更文件及哈希见[整合前源码清单](./assets/context-v1.1/source-manifest-before-integration.json)；当前整合源码见[最新清单](./assets/context-v1.1/source-manifest.json)。本机原始日志、API 回读与基线摘要保存在 `/Users/wangyuelin/synara-expert/.synara/context-v1.1-evidence/`，不提交含运行数据的完整日志。
 
 ## 3. 真实页面与 API
 
@@ -97,3 +97,26 @@ Context 功能验证通过；仓库完整检查仍有与本功能无关的既有
 未进行 Windows/Linux 原生运行、签名安装包、生产数据迁移、所有 Provider 的真实故障注入，也未穷举 fork/handoff 的所有原生组合。历史 Notes 保留由迁移写入范围及自动化验证覆盖，本轮没有修改或清理真实用户的旧 Notes。
 
 当前可以审核开发版并继续收敛；合并、正式部署与安装包验收应使用实际候选源码重新确认受影响的门禁。Hermes / Memory / 知识体系仍不在此轮实现内。
+
+## 8. 2026-10-15 浏览器版整合补充
+
+用户确认本轮以浏览器版本验收和本地 Git 合并提交为交付范围。Electron 实机、安装包、签名、安装升级及远端推送均未执行。旧桌面测试的两项失败保留在第 6 节，不作为已修复或已复跑的结果。
+
+整合覆盖 Expert 配置、全局 MCP 与本机发现、Workbench 静态适配层、Space / Project Context，以及原主工作区的产品文档和历史原型。原候选分别保存为 `0f67f540e`、`4b3705f0b`；整合功能提交为 `8b34ef427`、`3a754ee69`。后续文档与 ancestry 合并不改变已测试的产品源码。
+
+提交前的独立审查修复了三处恢复问题：切换 Provider 失败后完整传入原 Expert / Context 并刷新加载证据；Context 在项目 / 对话投影之后重建；迁移认领与选择在入日志前固定回执和结果，重放不再依赖后来的项目目录或配置。MCP 任务详情同时区分固定配置版本和显式检测的当前配置。
+
+检查与边界：
+
+- 全仓格式检查通过；全工作区类型检查 7 个任务通过；lint 0 errors、780 warnings。
+- 9 个浏览器测试文件共 61 项通过，含 Context、Expert / MCP、惰性加载与草稿保护。
+- 迁移 lineage、Windows 静态运行边界和 Workbench 依赖边界检查通过；Web 构建通过。
+- 另外独立复跑的历史 Space Context 原型 4 个测试文件、28 项通过。静态本机 MCP 原型存在示例重复 ID 限制，作为历史材料保留，不接入真实服务。
+- 新独立实例使用 `/private/tmp/synara-browser-integration-20261015`，server 17739 / web 5734；实际打开专家列表和编辑页并显示完成。没有使用日用数据库、更新 Provider 或发起模型任务。该实例只在本机进程运行期间有效。
+- 初次真实 Codex / Pi 证据对应第 2 节的原候选。本轮恢复修正的故障分支由自动化覆盖，未将其称为真实 Provider 故障演练。
+
+旧的未发布 Context 测试 home 中，迁移事件可能尚无固定回执；它们不作为新整合版重建输入。缺失回执时明确拒绝，不使用当前配置猜测原结果。本轮未迁移正式用户数据。
+
+浏览器交付范围的大范围测试命令为 `bun run test --filter='!@synara/desktop' --concurrency=1 --continue`，实际完成 5 个包、12,012 项通过、30 项既有跳过、0 失败：Web 4092、scripts 355、contracts 184、server 6553、shared 828。该结果明确排除桌面包，不能称为完整桌面验收。相较第 6 节初次运行，服务端失败已在最终整合代码上消除。
+
+主工作区及两个有未提交内容的原候选均保存为独立本地提交；重复候选只登记 ancestry，不用旧源码覆盖整合结果。文档整合保留主工作区的 Workbench 历史状态、当前导航和全部原型参考。原始日志仅保留在忽略的本机 evidence 目录，不纳入源码提交。

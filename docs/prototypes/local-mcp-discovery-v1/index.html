@@ -1,0 +1,2820 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Synara · 从本机发现 MCP（交互草稿）</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --font-ui:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", sans-serif;
+        --background: #f5f6f8;
+        --surface: #fff;
+        --surface-soft: #f7f8fa;
+        --surface-hover: #f0f3f6;
+        --foreground: #202329;
+        --muted: #68717d;
+        --subtle: #89919c;
+        --border: #e2e5e9;
+        --border-strong: #cbd1d9;
+        --primary: #339cff;
+        --primary-strong: #1688f0;
+        --primary-soft: #edf6ff;
+        --success: #287a53;
+        --success-soft: #edf8f1;
+        --warning: #93641c;
+        --warning-soft: #fff7e9;
+        --danger: #b64242;
+        --danger-soft: #fff0ef;
+        --shadow: 0 18px 54px rgb(12 20 32 / 20%);
+        --radius: 10px;
+        --ui-scale: 1;
+      }
+      html[data-theme="dark"] {
+        color-scheme: dark;
+        --background: #111315;
+        --surface: #191c20;
+        --surface-soft: #20242a;
+        --surface-hover: #282d34;
+        --foreground: #f1f3f5;
+        --muted: #a7b0bb;
+        --subtle: #78828e;
+        --border: #30363e;
+        --border-strong: #424a55;
+        --primary: #4aa8ff;
+        --primary-strong: #77bdff;
+        --primary-soft: #1c2b3a;
+        --success: #82d2a4;
+        --success-soft: #1b2b22;
+        --warning: #e7bd73;
+        --warning-soft: #302719;
+        --danger: #ff9292;
+        --danger-soft: #321e1e;
+        --shadow: 0 22px 64px rgb(0 0 0 / 55%);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        font-size: calc(100% * var(--ui-scale));
+        scroll-behavior: smooth;
+      }
+      body {
+        min-width: 320px;
+        margin: 0;
+        background: var(--background);
+        color: var(--foreground);
+        font: 400 0.91rem/1.5 var(--font-ui);
+      }
+      button,
+      input,
+      select {
+        color: inherit;
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.48;
+      }
+      :focus-visible {
+        outline: 3px solid color-mix(in srgb, var(--primary) 50%, transparent);
+        outline-offset: 2px;
+      }
+      .app-shell {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: 224px minmax(0, 1fr);
+      }
+      .sidebar {
+        position: sticky;
+        top: 0;
+        height: 100vh;
+        overflow-y: auto;
+        border-right: 1px solid var(--border);
+        background: var(--surface);
+        padding: 18px 12px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 10px 22px;
+        font-size: 1rem;
+        font-weight: 650;
+        letter-spacing: -0.02em;
+      }
+      .brand-mark {
+        width: 23px;
+        height: 23px;
+        display: grid;
+        place-items: center;
+        border-radius: 7px;
+        color: #fff;
+        background: var(--primary);
+        font-size: 0.73rem;
+        font-weight: 700;
+      }
+      .side-caption {
+        padding: 12px 10px 6px;
+        color: var(--subtle);
+        font-size: 0.75rem;
+        letter-spacing: 0.02em;
+      }
+      .side-link {
+        width: 100%;
+        min-height: 37px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        border: 0;
+        border-radius: 7px;
+        padding: 7px 10px;
+        text-align: left;
+        color: var(--muted);
+        background: transparent;
+      }
+      .side-link:hover,
+      .side-link.active {
+        color: var(--foreground);
+        background: var(--surface-soft);
+      }
+      .side-link.active {
+        font-weight: 600;
+      }
+      .side-dot {
+        width: 7px;
+        height: 7px;
+        flex: 0 0 7px;
+        border-radius: 50%;
+        background: currentColor;
+        opacity: 0.5;
+      }
+      .main-shell {
+        min-width: 0;
+      }
+      .topbar {
+        min-height: 56px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 0 28px;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
+      }
+      .breadcrumbs {
+        min-width: 0;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .top-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .top-control {
+        min-height: 34px;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 4px 8px;
+        color: var(--muted);
+        background: var(--surface);
+        font-size: 0.78rem;
+      }
+      .top-control:hover {
+        color: var(--foreground);
+        background: var(--surface-soft);
+      }
+      .scale-value {
+        min-width: 36px;
+        color: var(--foreground);
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+      }
+      .page {
+        width: min(100%, 1150px);
+        margin: 0 auto;
+        padding: 23px 28px 54px;
+      }
+      .prototype-banner {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        margin-bottom: 20px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 9px 12px;
+        color: var(--muted);
+        background: var(--surface);
+        font-size: 0.82rem;
+      }
+      .draft-dot {
+        width: 7px;
+        height: 7px;
+        flex: 0 0 7px;
+        border-radius: 50%;
+        background: var(--warning);
+      }
+      .page-heading {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 19px;
+      }
+      .page-heading h1 {
+        margin: 0 0 4px;
+        font-size: 1.46rem;
+        font-weight: 630;
+        line-height: 1.25;
+        letter-spacing: -0.025em;
+      }
+      .page-heading h2 {
+        margin: 0 0 4px;
+        font-size: 1.13rem;
+        font-weight: 620;
+        letter-spacing: -0.015em;
+      }
+      .eyebrow {
+        margin: 0 0 5px;
+        color: var(--subtle);
+        font-size: 0.77rem;
+      }
+      .subtitle {
+        max-width: 720px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      .button {
+        min-height: 38px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 7px 12px;
+        color: var(--foreground);
+        background: var(--surface);
+        white-space: nowrap;
+        font-size: 0.84rem;
+        font-weight: 550;
+        transition:
+          background-color 120ms ease,
+          border-color 120ms ease;
+      }
+      .button:hover {
+        border-color: var(--border-strong);
+        background: var(--surface-soft);
+      }
+      .button.primary {
+        border-color: var(--primary);
+        color: #fff;
+        background: var(--primary);
+      }
+      .button.primary:hover {
+        border-color: var(--primary-strong);
+        background: var(--primary-strong);
+      }
+      html[data-theme="dark"] .button.primary {
+        color: #101820;
+      }
+      .button.subtle {
+        border-color: transparent;
+        color: var(--muted);
+        background: transparent;
+      }
+      .button.subtle:hover {
+        color: var(--foreground);
+        background: var(--surface-soft);
+      }
+      .button.small {
+        min-height: 31px;
+        padding: 4px 9px;
+        font-size: 0.78rem;
+      }
+      .button.danger-soft {
+        color: var(--danger);
+      }
+      .card {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--surface);
+        overflow: hidden;
+      }
+      .card + .card {
+        margin-top: 15px;
+      }
+      .card-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .card-heading h2,
+      .card-heading h3 {
+        margin: 0;
+        font-size: 0.93rem;
+        font-weight: 600;
+      }
+      .card-heading p {
+        margin: 3px 0 0;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+      .list-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 15px;
+        border-bottom: 1px solid var(--border);
+      }
+      .search-input,
+      .text-input,
+      .select-input {
+        width: 100%;
+        min-height: 38px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 8px 10px;
+        color: var(--foreground);
+        background: var(--surface);
+        font-size: 0.84rem;
+      }
+      .search-input {
+        max-width: 350px;
+      }
+      .search-input::placeholder,
+      .text-input::placeholder {
+        color: var(--subtle);
+      }
+      .list-summary {
+        color: var(--muted);
+        font-size: 0.81rem;
+        white-space: nowrap;
+      }
+      .connection-table,
+      .scan-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+      .connection-table th,
+      .connection-table td,
+      .scan-table th,
+      .scan-table td {
+        border-bottom: 1px solid var(--border);
+        padding: 12px 13px;
+        text-align: left;
+        vertical-align: middle;
+        overflow-wrap: anywhere;
+      }
+      .connection-table th,
+      .scan-table th {
+        color: var(--muted);
+        background: var(--surface-soft);
+        font-size: 0.78rem;
+        font-weight: 560;
+      }
+      .connection-table tbody tr:last-child td,
+      .scan-table tbody tr:last-child td {
+        border-bottom: 0;
+      }
+      .connection-name {
+        display: block;
+        border: 0;
+        padding: 0;
+        color: var(--foreground);
+        background: transparent;
+        text-align: left;
+        font-size: 0.9rem;
+        font-weight: 590;
+      }
+      .connection-name:hover {
+        color: var(--primary);
+      }
+      .meta {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .status {
+        width: fit-content;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border-radius: 99px;
+        padding: 3px 8px;
+        font-size: 0.76rem;
+        line-height: 1.4;
+        white-space: nowrap;
+      }
+      .status::before {
+        width: 6px;
+        height: 6px;
+        flex: 0 0 6px;
+        border-radius: 50%;
+        background: currentColor;
+        content: "";
+      }
+      .status.ready,
+      .status.success {
+        color: var(--success);
+        background: var(--success-soft);
+      }
+      .status.exists,
+      .status.skip,
+      .status.neutral {
+        color: var(--muted);
+        background: var(--surface-soft);
+      }
+      .status.conflict,
+      .status.needs {
+        color: var(--warning);
+        background: var(--warning-soft);
+      }
+      .status.unsupported,
+      .status.failure {
+        color: var(--danger);
+        background: var(--danger-soft);
+      }
+      .source-tag {
+        display: inline-flex;
+        align-items: center;
+        min-height: 23px;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 2px 6px;
+        color: var(--muted);
+        background: var(--surface-soft);
+        font-size: 0.75rem;
+      }
+      .table-empty {
+        padding: 35px 18px;
+        color: var(--muted);
+        text-align: center;
+      }
+      .section-kicker {
+        margin: 0 0 8px;
+        color: var(--subtle);
+        font-size: 0.76rem;
+        font-weight: 590;
+        letter-spacing: 0.02em;
+      }
+      .discover-back {
+        margin: -2px 0 14px;
+      }
+      .stepper {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0;
+        margin: 17px 0 19px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        background: var(--surface);
+        overflow: hidden;
+      }
+      .step {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 10px 13px;
+        color: var(--subtle);
+        font-size: 0.79rem;
+      }
+      .step + .step {
+        border-left: 1px solid var(--border);
+      }
+      .step-number {
+        width: 21px;
+        height: 21px;
+        display: grid;
+        place-items: center;
+        flex: 0 0 21px;
+        border: 1px solid var(--border-strong);
+        border-radius: 50%;
+        font-size: 0.72rem;
+        font-variant-numeric: tabular-nums;
+      }
+      .step.current {
+        color: var(--foreground);
+        background: var(--surface-soft);
+        font-weight: 590;
+      }
+      .step.current .step-number,
+      .step.done .step-number {
+        border-color: var(--primary);
+        color: #fff;
+        background: var(--primary);
+      }
+      html[data-theme="dark"] .step.current .step-number,
+      html[data-theme="dark"] .step.done .step-number {
+        color: #101820;
+      }
+      .source-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .source-option {
+        position: relative;
+        min-height: 62px;
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 11px 12px;
+        background: var(--surface);
+        cursor: pointer;
+      }
+      .source-option:has(input:checked) {
+        border-color: color-mix(in srgb, var(--primary) 64%, var(--border));
+        background: var(--primary-soft);
+      }
+      .source-option input,
+      .field-check input,
+      .choice-row input,
+      .source-filter input {
+        width: 16px;
+        height: 16px;
+        margin: 2px 0 0;
+        accent-color: var(--primary);
+      }
+      .source-option strong {
+        display: block;
+        font-weight: 590;
+      }
+      .source-option small {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 0.77rem;
+      }
+      .field-check {
+        display: inline-flex;
+        align-items: flex-start;
+        gap: 9px;
+        cursor: pointer;
+      }
+      .field-check strong {
+        display: block;
+        font-size: 0.86rem;
+        font-weight: 570;
+      }
+      .field-check small {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .form-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.78fr) minmax(0, 1.5fr);
+        gap: 14px;
+        margin-top: 14px;
+      }
+      .field {
+        min-width: 0;
+      }
+      .field label,
+      .field-label {
+        display: block;
+        margin: 0 0 6px;
+        font-size: 0.82rem;
+        font-weight: 560;
+      }
+      .field-hint,
+      .inline-note {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .source-scope-note {
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+        margin-top: 13px;
+        border-radius: 7px;
+        padding: 9px 11px;
+        color: var(--muted);
+        background: var(--surface-soft);
+        font-size: 0.79rem;
+      }
+      .source-scope-note strong {
+        color: var(--foreground);
+        font-weight: 570;
+      }
+      .card-body {
+        padding: 15px 16px;
+      }
+      .action-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 15px;
+      }
+      .action-row-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .demo-panel {
+        margin-top: 15px;
+        border: 1px dashed var(--border-strong);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+      .demo-panel summary {
+        padding: 9px 12px;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 0.79rem;
+      }
+      .demo-content {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        padding: 0 12px 11px;
+      }
+      .demo-content label {
+        color: var(--muted);
+        font-size: 0.79rem;
+      }
+      .demo-content select {
+        min-height: 32px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 4px 8px;
+        background: var(--surface);
+        font-size: 0.79rem;
+      }
+      .scan-error {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 13px;
+        border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--border));
+        border-radius: 8px;
+        padding: 10px 12px;
+        color: var(--danger);
+        background: var(--danger-soft);
+        font-size: 0.83rem;
+      }
+      .scan-error[hidden] {
+        display: none;
+      }
+      .result-toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+      .source-filters {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+      }
+      .source-filter {
+        min-height: 30px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 4px 7px;
+        color: var(--muted);
+        background: var(--surface);
+        cursor: pointer;
+        font-size: 0.77rem;
+      }
+      .source-filter input {
+        width: 13px;
+        height: 13px;
+        margin: 0;
+      }
+      .selection-bar {
+        position: sticky;
+        bottom: 10px;
+        z-index: 2;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        margin-top: 14px;
+        border: 1px solid var(--border-strong);
+        border-radius: 9px;
+        padding: 10px 12px;
+        background: color-mix(in srgb, var(--surface) 92%, transparent);
+        box-shadow: 0 5px 20px rgb(17 25 38 / 8%);
+        backdrop-filter: blur(12px);
+      }
+      .selection-count {
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+      .selection-count strong {
+        color: var(--foreground);
+        font-variant-numeric: tabular-nums;
+      }
+      .selection-help {
+        display: inline-block;
+        margin-left: 7px;
+        color: var(--subtle);
+        font-size: 0.77rem;
+      }
+      .scan-table th:first-child,
+      .scan-table td:first-child {
+        width: 39px;
+        padding-right: 3px;
+        padding-left: 13px;
+      }
+      .scan-table th:nth-child(2) {
+        width: 27%;
+      }
+      .scan-table th:nth-child(3) {
+        width: 13%;
+      }
+      .scan-table th:nth-child(4) {
+        width: 23%;
+      }
+      .scan-table th:nth-child(5) {
+        width: 25%;
+      }
+      .scan-table td {
+        font-size: 0.82rem;
+      }
+      .scan-table tr:hover td {
+        background: color-mix(in srgb, var(--surface-soft) 48%, var(--surface));
+      }
+      .row-name {
+        display: block;
+        color: var(--foreground);
+        font-weight: 590;
+        overflow-wrap: anywhere;
+      }
+      .row-source {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 0.77rem;
+      }
+      .row-check {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+        accent-color: var(--primary);
+      }
+      .status-cell {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+      }
+      .text-action {
+        border: 0;
+        padding: 2px 0;
+        color: var(--primary);
+        background: transparent;
+        font-size: 0.78rem;
+      }
+      .text-action:hover {
+        text-decoration: underline;
+      }
+      .conflict-detail-cell {
+        padding: 0 !important;
+        background: var(--surface-soft);
+      }
+      .conflict-detail {
+        padding: 13px 15px 15px 53px;
+      }
+      .conflict-detail h3 {
+        margin: 0 0 5px;
+        font-size: 0.87rem;
+        font-weight: 600;
+      }
+      .conflict-detail p {
+        margin: 0 0 10px;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+      .safe-summary {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .safe-summary-card {
+        display: grid;
+        gap: 4px;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 8px 9px;
+        background: var(--surface);
+      }
+      .safe-summary-card span {
+        color: var(--muted);
+        font-size: 0.75rem;
+      }
+      .safe-summary-card strong {
+        font-size: 0.86rem;
+        font-weight: 600;
+      }
+      .safe-summary-note {
+        margin: 0 0 12px !important;
+        color: var(--muted);
+        font-size: 0.77rem;
+      }
+      .choice-list {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 7px;
+      }
+      .choice-row {
+        min-height: 40px;
+        display: flex;
+        align-items: flex-start;
+        gap: 7px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 8px;
+        background: var(--surface);
+        cursor: pointer;
+        font-size: 0.79rem;
+      }
+      .choice-row:has(input:checked) {
+        border-color: color-mix(in srgb, var(--primary) 60%, var(--border));
+        background: var(--primary-soft);
+      }
+      .choice-row small {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 0.74rem;
+      }
+      .new-id-field {
+        max-width: 410px;
+        margin-top: 10px;
+      }
+      .new-id-field[hidden] {
+        display: none;
+      }
+      .field-error {
+        min-height: 1.2em;
+        margin: 4px 0 0;
+        color: var(--danger);
+        font-size: 0.75rem;
+      }
+      .inline-state {
+        margin: 0;
+        border-bottom: 1px solid var(--border);
+        padding: 10px 14px;
+        color: var(--muted);
+        background: var(--surface-soft);
+        font-size: 0.8rem;
+      }
+      .inline-state strong {
+        color: var(--foreground);
+      }
+      .empty-state {
+        padding: 38px 18px;
+        text-align: center;
+      }
+      .empty-state h3 {
+        margin: 0 0 5px;
+        font-size: 0.94rem;
+        font-weight: 600;
+      }
+      .empty-state p {
+        margin: 0 0 14px;
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+      .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 9px;
+      }
+      .summary-stat {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 11px;
+        background: var(--surface);
+      }
+      .summary-stat span {
+        display: block;
+        color: var(--muted);
+        font-size: 0.77rem;
+      }
+      .summary-stat strong {
+        display: block;
+        margin-top: 3px;
+        font-size: 1.12rem;
+        font-weight: 620;
+        font-variant-numeric: tabular-nums;
+      }
+      .summary-stat.new strong {
+        color: var(--success);
+      }
+      .summary-stat.update strong {
+        color: var(--primary);
+      }
+      .summary-stat.blocked strong {
+        color: var(--warning);
+      }
+      .review-list {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .review-list li {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 14px;
+        border-bottom: 1px solid var(--border);
+        padding: 10px 13px;
+      }
+      .review-list li:last-child {
+        border-bottom: 0;
+      }
+      .review-primary {
+        min-width: 0;
+      }
+      .review-primary strong {
+        display: block;
+        font-size: 0.84rem;
+        font-weight: 590;
+        overflow-wrap: anywhere;
+      }
+      .review-primary small {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 0.77rem;
+      }
+      .review-decision {
+        flex: 0 0 auto;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .review-note {
+        margin-top: 13px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 11px 13px;
+        color: var(--muted);
+        background: var(--surface-soft);
+        font-size: 0.8rem;
+      }
+      .review-note strong {
+        color: var(--foreground);
+        font-weight: 580;
+      }
+      .outcome-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 15px;
+      }
+      .outcome-head h2 {
+        margin: 0 0 4px;
+        font-size: 1.05rem;
+        font-weight: 610;
+      }
+      .outcome-head p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+      .outcome-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid var(--border);
+        padding: 12px 14px;
+      }
+      .outcome-row:last-child {
+        border-bottom: 0;
+      }
+      .outcome-info {
+        min-width: 0;
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+      }
+      .outcome-info .status {
+        margin-top: 2px;
+      }
+      .outcome-info strong {
+        display: block;
+        font-size: 0.84rem;
+        font-weight: 590;
+        overflow-wrap: anywhere;
+      }
+      .outcome-info small {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 0.77rem;
+      }
+      .outcome-actions {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .finish-note {
+        margin-top: 13px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+        color: var(--muted);
+        background: var(--surface-soft);
+        font-size: 0.8rem;
+      }
+      dialog {
+        width: min(480px, calc(100vw - 28px));
+        max-height: min(82vh, 680px);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 0;
+        color: var(--foreground);
+        background: var(--surface);
+        box-shadow: var(--shadow);
+      }
+      dialog::backdrop {
+        background: rgb(13 18 24 / 45%);
+        backdrop-filter: blur(2px);
+      }
+      .dialog-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        border-bottom: 1px solid var(--border);
+        padding: 15px 16px 12px;
+      }
+      .dialog-head h2 {
+        margin: 0;
+        font-size: 1rem;
+        font-weight: 610;
+      }
+      .dialog-content {
+        padding: 14px 16px;
+      }
+      .dialog-content p {
+        margin: 0 0 11px;
+        color: var(--muted);
+        font-size: 0.84rem;
+      }
+      .detail-grid {
+        display: grid;
+        grid-template-columns: 125px minmax(0, 1fr);
+        gap: 8px 12px;
+        margin: 0;
+        font-size: 0.81rem;
+      }
+      .detail-grid dt {
+        color: var(--muted);
+      }
+      .detail-grid dd {
+        min-width: 0;
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+      .dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        border-top: 1px solid var(--border);
+        padding: 11px 15px;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        clip-path: inset(50%);
+      }
+      [hidden] {
+        display: none !important;
+      }
+      @media (max-width: 960px) {
+        .app-shell {
+          grid-template-columns: 190px minmax(0, 1fr);
+        }
+        .page {
+          padding-right: 20px;
+          padding-left: 20px;
+        }
+        .scan-table th:nth-child(2) {
+          width: 24%;
+        }
+        .scan-table th:nth-child(3) {
+          width: 12%;
+        }
+        .scan-table th:nth-child(4) {
+          width: 25%;
+        }
+        .scan-table th:nth-child(5) {
+          width: 27%;
+        }
+      }
+      @media (max-width: 720px) {
+        .app-shell {
+          display: block;
+        }
+        .sidebar {
+          display: none;
+        }
+        .topbar {
+          min-height: 52px;
+          padding: 0 14px;
+        }
+        .page {
+          padding: 17px 14px 42px;
+        }
+        .page-heading {
+          flex-wrap: wrap;
+          align-items: center;
+          margin-bottom: 15px;
+        }
+        .page-heading > .button {
+          width: 100%;
+        }
+        .source-grid,
+        .form-grid {
+          grid-template-columns: 1fr;
+        }
+        .stepper {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .step {
+          justify-content: center;
+          gap: 5px;
+          padding: 9px 4px;
+          font-size: 0.7rem;
+        }
+        .step-number {
+          width: 19px;
+          height: 19px;
+          flex-basis: 19px;
+          font-size: 0.68rem;
+        }
+        .summary-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .connection-table th,
+        .connection-table td {
+          padding: 10px 8px;
+        }
+        .connection-table th:nth-child(2),
+        .connection-table td:nth-child(2) {
+          display: none;
+        }
+      }
+      @media (max-width: 540px) {
+        body {
+          font-size: 0.89rem;
+        }
+        .topbar {
+          gap: 7px;
+          padding: 0 10px;
+        }
+        .breadcrumbs {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          font-size: 0.78rem;
+        }
+        .top-actions {
+          gap: 5px;
+        }
+        .top-control {
+          min-height: 32px;
+          gap: 3px;
+          padding: 3px 6px;
+          font-size: 0.73rem;
+        }
+        .type-label {
+          display: none;
+        }
+        .page {
+          padding-right: 10px;
+          padding-left: 10px;
+        }
+        .prototype-banner {
+          align-items: flex-start;
+          margin-bottom: 15px;
+          padding: 8px 9px;
+          font-size: 0.76rem;
+        }
+        .page-heading h1 {
+          font-size: 1.31rem;
+        }
+        .subtitle {
+          font-size: 0.81rem;
+        }
+        .list-toolbar {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+        .search-input {
+          max-width: none;
+        }
+        .step {
+          flex-direction: column;
+          gap: 3px;
+          text-align: center;
+          font-size: 0.67rem;
+        }
+        .card-heading,
+        .card-body {
+          padding-right: 11px;
+          padding-left: 11px;
+        }
+        .action-row {
+          align-items: stretch;
+          flex-direction: column-reverse;
+        }
+        .action-row-right {
+          justify-content: flex-end;
+        }
+        .action-row > .button {
+          width: 100%;
+        }
+        .result-toolbar {
+          align-items: stretch;
+          flex-direction: column;
+          padding: 10px;
+        }
+        .result-toolbar .search-input {
+          max-width: none;
+        }
+        .scan-table thead {
+          display: none;
+        }
+        .scan-table,
+        .scan-table tbody,
+        .scan-table tr {
+          display: block;
+          width: 100%;
+        }
+        .scan-table tbody tr {
+          position: relative;
+          display: grid;
+          grid-template-columns: 28px minmax(0, 1fr);
+          gap: 0 8px;
+          border-bottom: 1px solid var(--border);
+          padding: 10px 9px;
+        }
+        .scan-table tbody tr:last-child {
+          border-bottom: 0;
+        }
+        .scan-table td,
+        .scan-table td:first-child {
+          width: auto;
+          display: flex;
+          align-items: flex-start;
+          min-width: 0;
+          border: 0;
+          padding: 3px 0;
+        }
+        .scan-table td:first-child {
+          grid-column: 1;
+          grid-row: 1 / span 4;
+          justify-content: center;
+          padding-top: 7px;
+        }
+        .scan-table td:first-child::before,
+        .scan-table td.name-cell::before {
+          display: none;
+        }
+        .scan-table td[data-label]::before {
+          width: 79px;
+          flex: 0 0 79px;
+          padding-right: 7px;
+          color: var(--muted);
+          content: attr(data-label);
+          font-size: 0.74rem;
+        }
+        .scan-table td.name-cell {
+          grid-column: 2;
+          display: block;
+          padding: 0 0 5px;
+        }
+        .scan-table td.protocol-cell,
+        .scan-table td.source-cell,
+        .scan-table td.import-cell {
+          grid-column: 2;
+        }
+        .scan-table tr.detail-row {
+          display: block;
+          padding: 0;
+        }
+        .scan-table tr.detail-row td {
+          display: block;
+          padding: 0 !important;
+        }
+        .conflict-detail {
+          padding: 12px 10px;
+        }
+        .safe-summary {
+          grid-template-columns: 1fr;
+        }
+        .choice-list {
+          grid-template-columns: 1fr;
+        }
+        .selection-bar {
+          bottom: 5px;
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 8px;
+          margin-top: 10px;
+          padding: 9px;
+        }
+        .selection-bar .button {
+          width: 100%;
+        }
+        .selection-help {
+          display: block;
+          margin: 3px 0 0;
+        }
+        .review-list li,
+        .outcome-row {
+          align-items: flex-start;
+        }
+        .outcome-row {
+          flex-direction: column;
+        }
+        .outcome-actions {
+          width: 100%;
+          justify-content: flex-end;
+        }
+        .review-decision {
+          max-width: 42%;
+          text-align: right;
+          overflow-wrap: anywhere;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+          animation-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">S</span> Synara</div>
+        <div class="side-caption">Personal</div>
+        <button class="side-link" type="button"><span class="side-dot"></span>常规</button>
+        <button class="side-link" type="button"><span class="side-dot"></span>外观</button>
+        <div class="side-caption">Integrations</div>
+        <button class="side-link active" type="button" aria-current="page">
+          <span class="side-dot"></span>MCP
+        </button>
+        <button class="side-link" type="button"><span class="side-dot"></span>应用</button>
+        <button class="side-link" type="button"><span class="side-dot"></span>Provider</button>
+        <div class="side-caption">Coding</div>
+        <button class="side-link" type="button"><span class="side-dot"></span>Experts</button>
+        <button class="side-link" type="button"><span class="side-dot"></span>Skills</button>
+        <button class="side-link" type="button"><span class="side-dot"></span>工作区</button>
+      </aside>
+
+      <div class="main-shell">
+        <header class="topbar">
+          <div class="breadcrumbs" aria-label="当前位置">
+            设置 <span aria-hidden="true">/</span> Integrations
+            <span aria-hidden="true">/</span> MCP
+          </div>
+          <div class="top-actions" aria-label="外观预览">
+            <button
+              id="theme-toggle"
+              class="top-control"
+              type="button"
+              aria-label="切换到深色主题"
+              aria-pressed="false"
+            >
+              <span aria-hidden="true">◐</span><span class="type-label">浅色</span>
+            </button>
+            <div class="top-control" aria-label="界面字号">
+              <span class="type-label">字号</span>
+              <button
+                id="font-smaller"
+                type="button"
+                aria-label="减小界面字号"
+                style="border: 0; background: transparent; padding: 0 2px"
+              >
+                A−
+              </button>
+              <span id="font-scale-label" class="scale-value">100%</span>
+              <button
+                id="font-larger"
+                type="button"
+                aria-label="增大界面字号"
+                style="border: 0; background: transparent; padding: 0 2px"
+              >
+                A+
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <main class="page">
+          <div class="prototype-banner" role="note">
+            <span class="draft-dot" aria-hidden="true"></span>
+            <span><strong>交互草稿 · 示例数据，未读取或导入真实配置。</strong></span>
+          </div>
+
+          <section id="connections-view" aria-labelledby="connections-title">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">设置 / Integrations</p>
+                <h1 id="connections-title" tabindex="-1">MCP</h1>
+                <p class="subtitle">
+                  管理 Synara 的 MCP 连接配置。连接、应用来源状态与 Expert 授权各自独立。
+                </p>
+              </div>
+              <button id="discover-button" class="button primary" type="button">
+                <span aria-hidden="true">＋</span>从本机发现
+              </button>
+            </div>
+
+            <section class="card" aria-label="Synara MCP 连接列表">
+              <div class="card-heading">
+                <div>
+                  <h2>连接</h2>
+                  <p>新发现的服务只会进入 Synara 连接目录，不会自动连接或授权。</p>
+                </div>
+                <span id="connection-total" class="list-summary">3 个连接</span>
+              </div>
+              <div class="list-toolbar">
+                <input
+                  id="connection-search"
+                  class="search-input"
+                  type="search"
+                  placeholder="搜索连接"
+                  aria-label="搜索连接"
+                />
+                <span class="list-summary">配置与 Expert 授权分别管理</span>
+              </div>
+              <table class="connection-table">
+                <thead>
+                  <tr>
+                    <th style="width: 28%">名称</th>
+                    <th style="width: 15%">协议</th>
+                    <th style="width: 20%">连接状态</th>
+                    <th style="width: 18%">授权 Experts</th>
+                    <th style="width: 19%">配置版本</th>
+                  </tr>
+                </thead>
+                <tbody id="connection-rows"></tbody>
+              </table>
+              <div id="connection-empty" class="table-empty" hidden>没有匹配的连接。</div>
+            </section>
+          </section>
+
+          <section id="discovery-view" hidden aria-labelledby="discovery-title">
+            <button id="back-to-list" class="button subtle discover-back" type="button">
+              ← 返回 MCP 列表
+            </button>
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">MCP / 连接</p>
+                <h1 id="discovery-title" tabindex="-1">从本机发现</h1>
+                <p class="subtitle">
+                  只读扫描 Synara 服务所在电脑上的配置。导入只新增或更新 Synara 连接。
+                </p>
+              </div>
+            </div>
+
+            <div id="stepper" class="stepper" aria-label="发现流程">
+              <div class="step current" data-step="results">
+                <span class="step-number">1</span><span>发现结果</span>
+              </div>
+              <div class="step" data-step="review">
+                <span class="step-number">2</span><span>确认摘要</span>
+              </div>
+              <div class="step" data-step="outcome">
+                <span class="step-number">3</span><span>导入结果</span>
+              </div>
+            </div>
+
+            <section id="source-step" hidden>
+              <div class="card-heading">
+                <div>
+                  <h2>修改来源</h2>
+                  <p>选择本机配置来源或指定文件，然后重新扫描。</p>
+                </div>
+              </div>
+              <section class="card">
+                <div class="card-heading">
+                  <div>
+                    <h2>本机配置来源</h2>
+                    <p>可同时选择多个来源；来源标签只用于标记发现位置。</p>
+                  </div>
+                </div>
+                <div class="card-body">
+                  <div class="source-grid">
+                    <label class="source-option">
+                      <input class="source-choice" type="checkbox" value="Codex" checked />
+                      <span><strong>Codex</strong><small>用户 MCP 配置</small></span>
+                    </label>
+                    <label class="source-option">
+                      <input class="source-choice" type="checkbox" value="CCSwitch" checked />
+                      <span><strong>CCSwitch</strong><small>只读读取数据库条目</small></span>
+                    </label>
+                  </div>
+                  <div class="source-scope-note">
+                    <span aria-hidden="true">ⓘ</span>
+                    <span
+                      ><strong>本机指 Synara 服务所在电脑。</strong
+                      >来源状态只描述来源配置，不会切换任何应用开关，也不会授予 Expert 权限。</span
+                    >
+                  </div>
+                </div>
+              </section>
+
+              <section class="card">
+                <div class="card-heading">
+                  <div>
+                    <h2>
+                      指定文件 <span class="meta" style="display: inline; margin: 0">(可选)</span>
+                    </h2>
+                    <p>手动指定配置格式和服务端绝对路径。</p>
+                  </div>
+                  <label class="field-check">
+                    <span class="sr-only">启用指定文件</span>
+                    <input id="use-file" type="checkbox" />
+                    <span>启用</span>
+                  </label>
+                </div>
+                <div id="file-fields" class="card-body" hidden>
+                  <div class="form-grid">
+                    <div class="field">
+                      <label for="file-format">配置格式</label>
+                      <select id="file-format" class="select-input">
+                        <option value="Codex TOML">Codex TOML</option>
+                        <option value="标准 MCP JSON">标准 MCP JSON</option>
+                        <option value="CCSwitch DB">CCSwitch DB</option>
+                      </select>
+                    </div>
+                    <div class="field">
+                      <label for="file-path">服务端绝对路径</label>
+                      <input
+                        id="file-path"
+                        class="text-input"
+                        type="text"
+                        autocomplete="off"
+                        spellcheck="false"
+                        placeholder="/absolute/path/to/config.toml"
+                      />
+                      <p class="field-hint">
+                        扫描在 Synara 服务所在电脑执行；预览显示 MCP
+                        元数据和安全摘要，不显示密钥值。
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <div class="action-row">
+                <span id="scan-help" class="inline-note"
+                  >重新扫描不会连接服务或修改来源配置；预览不显示密钥值。</span
+                >
+                <button id="scan-button" class="button primary" type="button">重新扫描</button>
+              </div>
+              <details class="demo-panel">
+                <summary>演示状态</summary>
+                <div class="demo-content">
+                  <label for="demo-mode">扫描 / 导入演示</label>
+                  <select id="demo-mode">
+                    <option value="normal">正常扫描</option>
+                    <option value="error">扫描失败</option>
+                    <option value="empty">无发现结果</option>
+                    <option value="changed">确认前来源发生变化</option>
+                  </select>
+                  <span class="inline-note">仅用于浏览交互状态。</span>
+                </div>
+              </details>
+            </section>
+
+            <section id="results-step" data-flow-step="results" hidden>
+              <div id="scan-error" class="scan-error" role="alert" hidden>
+                <span>未能读取所选来源。可以重试，或修改来源。</span>
+                <button id="scan-retry" class="button small" type="button">重试</button>
+              </div>
+              <div id="result-state" class="inline-state" aria-live="polite"></div>
+              <section class="card">
+                <div class="result-toolbar">
+                  <input
+                    id="result-search"
+                    class="search-input"
+                    type="search"
+                    placeholder="搜索名称"
+                    aria-label="搜索发现结果"
+                  />
+                  <div id="source-filters" class="source-filters" aria-label="显示来源"></div>
+                  <button id="change-source" class="button small" type="button">修改来源</button>
+                </div>
+                <table class="scan-table">
+                  <thead>
+                    <tr>
+                      <th aria-label="选择"></th>
+                      <th>名称与来源</th>
+                      <th>协议</th>
+                      <th>来源状态</th>
+                      <th>导入状态</th>
+                    </tr>
+                  </thead>
+                  <tbody id="result-rows"></tbody>
+                </table>
+                <div id="results-empty" class="empty-state" hidden>
+                  <h3 id="empty-title">没有发现 MCP 配置</h3>
+                  <p id="empty-copy">所选来源没有可显示的示例条目。</p>
+                  <button id="empty-back" class="button small" type="button">修改来源</button>
+                </div>
+              </section>
+              <div class="selection-bar">
+                <div id="selection-summary" class="selection-count" aria-live="polite"></div>
+                <button id="continue-review" class="button primary" type="button" disabled>
+                  查看确认摘要
+                </button>
+              </div>
+            </section>
+
+            <section id="review-step" data-flow-step="review" hidden>
+              <div class="page-heading">
+                <div>
+                  <p class="eyebrow">导入前最后核对</p>
+                  <h2>确认导入摘要</h2>
+                  <p class="subtitle">确认后按条目模拟写入 Synara 连接目录。</p>
+                </div>
+              </div>
+              <div id="summary-stats" class="summary-grid" aria-label="导入数量"></div>
+              <section class="card" style="margin-top: 14px">
+                <div class="card-heading">
+                  <div>
+                    <h3>逐项处理</h3>
+                    <p>包含选中条目、跳过决定和当前不可导入项。</p>
+                  </div>
+                </div>
+                <ul id="review-rows" class="review-list"></ul>
+              </section>
+              <div class="review-note">
+                <strong>更新会生成新版本。</strong>已有任务仍使用原绑定版本。导入不会自动连接
+                MCP，也不会授予 Expert 权限。
+              </div>
+              <div class="action-row">
+                <button id="back-to-results" class="button" type="button">返回结果</button>
+                <div class="action-row-right">
+                  <button id="confirm-import" class="button primary" type="button">
+                    确认并模拟导入
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            <section id="outcome-step" data-flow-step="outcome" hidden>
+              <div class="page-heading outcome-head">
+                <div>
+                  <p class="eyebrow">逐项模拟结果</p>
+                  <h2 id="outcome-title">模拟导入完成</h2>
+                  <p id="outcome-subtitle"></p>
+                </div>
+                <button id="finish-to-list" class="button" type="button">返回 MCP 列表</button>
+              </div>
+              <section class="card">
+                <div id="outcome-rows"></div>
+              </section>
+              <div class="finish-note">
+                导入只表示连接配置进入 Synara 目录；连接检查与 Expert
+                授权需另行操作。本草稿不运行检查或授权，也不显示密钥值。
+              </div>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <dialog id="detail-dialog" aria-labelledby="detail-title">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow" id="detail-eyebrow">Synara 连接 · 示例</p>
+          <h2 id="detail-title">连接详情</h2>
+        </div>
+        <button class="button small" type="button" data-close-dialog aria-label="关闭">关闭</button>
+      </div>
+      <div id="detail-content" class="dialog-content"></div>
+      <div class="dialog-actions">
+        <button class="button" type="button" data-close-dialog>完成</button>
+      </div>
+    </dialog>
+
+    <dialog id="retry-dialog" aria-labelledby="retry-title">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">来源已变化</p>
+          <h2 id="retry-title">重新扫描后重试</h2>
+        </div>
+        <button class="button small" type="button" data-close-dialog aria-label="关闭">关闭</button>
+      </div>
+      <div class="dialog-content">
+        <p id="retry-copy">来源配置与扫描时不同。重试会先刷新来源摘要，再模拟写入这一条连接。</p>
+        <p>示例内容不会读取或写入真实配置。</p>
+      </div>
+      <div class="dialog-actions">
+        <button class="button" type="button" data-close-dialog>取消</button>
+        <button id="confirm-retry" class="button primary" type="button">重新扫描并重试</button>
+      </div>
+    </dialog>
+
+    <script>
+      const sampleItems = [
+        {
+          id: "codex-codegraph",
+          name: "codegraph",
+          source: "Codex",
+          protocol: "stdio",
+          sourceStatus: "Codex 中启用",
+          importStatus: "exists",
+          existingRevision: 2,
+        },
+        {
+          id: "codex-computer-use",
+          name: "computer-use",
+          source: "Codex",
+          protocol: "stdio",
+          sourceStatus: "Codex 中未标注",
+          importStatus: "ready",
+          defaultVersion: 1,
+        },
+        {
+          id: "codex-node-repl",
+          name: "node_repl",
+          source: "Codex",
+          protocol: "stdio",
+          sourceStatus: "Codex 中停用",
+          importStatus: "ready",
+          defaultVersion: 1,
+        },
+        {
+          id: "codex-open-design",
+          name: "open-design",
+          source: "Codex",
+          protocol: "stdio",
+          sourceStatus: "Codex 中启用",
+          importStatus: "conflict",
+          existingRevision: 3,
+          currentSafeSummary: "stdio · node",
+          discoveredSafeSummary: "stdio · npx",
+          conflictSummary: "来源入口与 Synara 现有配置不同",
+        },
+        {
+          id: "codex-zotero",
+          name: "zotero",
+          source: "Codex",
+          protocol: "stdio",
+          sourceStatus: "Codex 中未标注",
+          importStatus: "conflict",
+          existingRevision: 1,
+          currentSafeSummary: "stdio · python",
+          discoveredSafeSummary: "stdio · uvx",
+          conflictSummary: "来源配置摘要与 Synara 现有配置不同",
+        },
+        {
+          id: "cc-codegraph",
+          name: "codegraph",
+          source: "CCSwitch",
+          protocol: "stdio",
+          sourceStatus: "Codex 中启用",
+          importStatus: "conflict",
+          existingRevision: 2,
+          currentSafeSummary: "stdio · codegraph",
+          discoveredSafeSummary: "stdio · npx",
+          conflictSummary: "来源入口与 Synara 现有配置不同",
+        },
+        {
+          id: "cc-node-repl",
+          name: "node_repl",
+          source: "CCSwitch",
+          protocol: "stdio",
+          sourceStatus: "Codex 中停用",
+          importStatus: "conflict",
+          existingRevision: 1,
+          currentSafeSummary: "stdio · node",
+          discoveredSafeSummary: "stdio · node",
+          conflictSummary: "启动参数摘要与 Synara 现有配置不同",
+        },
+        {
+          id: "cc-open-design",
+          name: "open-design",
+          source: "CCSwitch",
+          protocol: "stdio",
+          sourceStatus: "Codex 中启用",
+          importStatus: "conflict",
+          existingRevision: 3,
+          currentSafeSummary: "stdio · node",
+          discoveredSafeSummary: "stdio · npx",
+          conflictSummary: "来源入口与 Synara 现有配置不同",
+        },
+        {
+          id: "cc-zotero",
+          name: "zotero",
+          source: "CCSwitch",
+          protocol: "stdio",
+          sourceStatus: "Codex 中未标注",
+          importStatus: "conflict",
+          existingRevision: 1,
+          currentSafeSummary: "stdio · python",
+          discoveredSafeSummary: "stdio · uvx",
+          conflictSummary: "来源配置摘要与 Synara 现有配置不同",
+        },
+        {
+          id: "cc-ekko",
+          name: "ekko",
+          source: "CCSwitch",
+          protocol: "stdio",
+          sourceStatus: "Codex 中启用",
+          importStatus: "ready",
+          defaultVersion: 1,
+        },
+        {
+          id: "cc-ekko-bridge",
+          name: "ekko-bridge",
+          source: "CCSwitch",
+          protocol: "stdio",
+          sourceStatus: "Codex 中停用",
+          importStatus: "ready",
+          defaultVersion: 1,
+        },
+        {
+          id: "cc-ekko-notes",
+          name: "ekko-notes",
+          source: "CCSwitch",
+          protocol: "stdio",
+          sourceStatus: "Codex 中启用",
+          importStatus: "ready",
+          defaultVersion: 1,
+        },
+        {
+          id: "cc-ekko-search",
+          name: "ekko-search",
+          source: "CCSwitch",
+          protocol: "stdio",
+          sourceStatus: "Codex 中未标注",
+          importStatus: "ready",
+          defaultVersion: 1,
+        },
+        {
+          id: "cc-ekko-files",
+          name: "ekko-files",
+          source: "CCSwitch",
+          protocol: "stdio",
+          sourceStatus: "Codex 中启用",
+          importStatus: "ready",
+          defaultVersion: 1,
+        },
+      ];
+      const jsonDemoItems = [
+        {
+          id: "json-legacy-sse",
+          name: "legacy-sse",
+          source: "指定文件 · 标准 MCP JSON",
+          protocol: "SSE",
+          sourceStatus: "源配置状态",
+          importStatus: "unsupported",
+          demoReason: "演示：不支持的传输方式",
+        },
+        {
+          id: "json-input-reference",
+          name: "input-reference",
+          source: "指定文件 · 标准 MCP JSON",
+          protocol: "stdio",
+          sourceStatus: "源配置状态",
+          importStatus: "needs",
+          demoReason: "演示：缺少必需配置引用",
+        },
+      ];
+      const initialConnections = [
+        { id: "codegraph", protocol: "stdio", revision: 2, state: "未检查" },
+        { id: "open-design", protocol: "stdio", revision: 3, state: "未检查" },
+        { id: "node_repl", protocol: "stdio", revision: 1, state: "未检查" },
+        { id: "zotero", protocol: "stdio", revision: 1, state: "未检查" },
+      ];
+      const existingIds = new Set(["codegraph", "open-design", "node_repl", "zotero"]);
+      const stateById = new Map(
+        [...sampleItems, ...jsonDemoItems].map((item) => [
+          item.id,
+          {
+            selected: false,
+            choice: item.importStatus === "conflict" ? "skip" : null,
+            newId: "",
+            importResult: null,
+          },
+        ]),
+      );
+      let connections = [...initialConnections];
+      let scannedItems = [];
+      let scanMode = "normal";
+      let resultSources = new Set();
+      let expandedConflict = null;
+      let retryingItemId = null;
+      let currentFlowStep = "results";
+      let flowCompleted = false;
+      const connectionRows = document.getElementById("connection-rows");
+      const connectionEmpty = document.getElementById("connection-empty");
+      const resultsRows = document.getElementById("result-rows");
+      const resultState = document.getElementById("result-state");
+      const resultSearch = document.getElementById("result-search");
+      const resultEmpty = document.getElementById("results-empty");
+      const continueButton = document.getElementById("continue-review");
+      const scanError = document.getElementById("scan-error");
+      const scanButton = document.getElementById("scan-button");
+      const sourceStep = document.getElementById("source-step");
+      const resultsStep = document.getElementById("results-step");
+      const reviewStep = document.getElementById("review-step");
+      const outcomeStep = document.getElementById("outcome-step");
+      const detailDialog = document.getElementById("detail-dialog");
+      const retryDialog = document.getElementById("retry-dialog");
+
+      function escapeHtml(value) {
+        return String(value).replace(
+          /[&<>"']/g,
+          (character) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            })[character],
+        );
+      }
+
+      function statusLabel(status) {
+        return (
+          {
+            ready: "可导入",
+            exists: "已存在",
+            conflict: "配置冲突",
+            needs: "需要补充配置",
+            unsupported: "不支持",
+          }[status] || status
+        );
+      }
+
+      function sourceStateFor(item) {
+        const jsonFile =
+          document.getElementById("use-file").checked &&
+          document.getElementById("file-format").value === "标准 MCP JSON";
+        if (jsonFile) {
+          return { label: "源配置状态" };
+        }
+        return { label: item.sourceStatus };
+      }
+
+      function importReason(item) {
+        if (item.demoReason) return item.demoReason;
+        if (item.importStatus === "conflict") return item.conflictSummary;
+        return "";
+      }
+
+      function sourceChoices() {
+        return [...document.querySelectorAll(".source-choice:checked")].map((input) => input.value);
+      }
+
+      function isAbsolutePath(value) {
+        return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value);
+      }
+
+      function updateScanButton() {
+        const useFile = document.getElementById("use-file").checked;
+        const sourcesReady = sourceChoices().length > 0 || useFile;
+        const path = document.getElementById("file-path").value.trim();
+        const fileReady = !useFile || (path.length > 0 && isAbsolutePath(path));
+        scanButton.disabled = !sourcesReady || !fileReady;
+        document.getElementById("scan-help").textContent = !sourcesReady
+          ? "至少选择一个来源。"
+          : useFile && !fileReady
+            ? "请输入服务端绝对路径后再扫描。"
+            : "扫描为只读；不会连接服务或修改来源配置，预览不显示密钥值。";
+      }
+
+      function setFlowStep(step) {
+        currentFlowStep = step;
+        sourceStep.hidden = true;
+        resultsStep.hidden = step !== "results";
+        reviewStep.hidden = step !== "review";
+        outcomeStep.hidden = step !== "outcome";
+        const order = ["results", "review", "outcome"];
+        document.querySelectorAll(".step").forEach((node) => {
+          const index = order.indexOf(node.dataset.step);
+          const activeIndex = order.indexOf(step);
+          node.classList.toggle("current", node.dataset.step === step);
+          node.classList.toggle("done", index < activeIndex);
+        });
+        const heading = document.getElementById("discovery-title");
+        if (!document.getElementById("discovery-view").hidden) {
+          requestAnimationFrame(() => heading.focus({ preventScroll: true }));
+        }
+      }
+
+      function showConnections() {
+        document.getElementById("connections-view").hidden = false;
+        document.getElementById("discovery-view").hidden = true;
+        document.getElementById("connections-title").focus({ preventScroll: true });
+      }
+
+      function showDiscovery() {
+        if (flowCompleted) {
+          scannedItems = [];
+          expandedConflict = null;
+          for (const item of [...sampleItems, ...jsonDemoItems]) {
+            const rowState = stateById.get(item.id);
+            rowState.selected = false;
+            rowState.choice = item.importStatus === "conflict" ? "skip" : null;
+            rowState.newId = "";
+            rowState.importResult = null;
+          }
+          flowCompleted = false;
+        }
+        document.getElementById("connections-view").hidden = true;
+        document.getElementById("discovery-view").hidden = false;
+        setFlowStep("results");
+        scan();
+      }
+
+      function renderConnections(queryValue) {
+        const query = (queryValue || "").trim().toLowerCase();
+        const filtered = connections.filter((item) => item.id.toLowerCase().includes(query));
+        connectionRows.innerHTML = filtered
+          .map(
+            (item) =>
+              "<tr>" +
+              '<td><button class="connection-name" type="button" data-open-connection="' +
+              escapeHtml(item.id) +
+              '">' +
+              escapeHtml(item.id) +
+              '</button><span class="meta">Synara 连接</span></td>' +
+              '<td><span class="source-tag">' +
+              escapeHtml(item.protocol) +
+              "</span></td>" +
+              '<td><span class="status neutral">' +
+              escapeHtml(item.state) +
+              "</span></td>" +
+              "<td>—</td>" +
+              "<td>v" +
+              item.revision +
+              "</td>" +
+              "</tr>",
+          )
+          .join("");
+        connectionEmpty.hidden = filtered.length > 0;
+        document.getElementById("connection-total").textContent = connections.length + " 个连接";
+      }
+
+      function currentPlans() {
+        const plans = [];
+        let unavailable = 0;
+        for (const item of scannedItems) {
+          const rowState = stateById.get(item.id);
+          if (item.importStatus === "needs" || item.importStatus === "unsupported") {
+            unavailable += 1;
+            continue;
+          }
+          if (item.importStatus === "ready" && rowState.selected) {
+            plans.push({ item, action: "new", finalId: item.name });
+          } else if (
+            item.importStatus === "conflict" &&
+            rowState.selected &&
+            rowState.choice === "update"
+          ) {
+            plans.push({ item, action: "update", finalId: item.name });
+          } else if (
+            item.importStatus === "conflict" &&
+            rowState.selected &&
+            rowState.choice === "create"
+          ) {
+            plans.push({ item, action: "new", finalId: rowState.newId.trim() });
+          }
+        }
+        return { plans, unavailable };
+      }
+
+      function normalizedCandidateId(value) {
+        return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(value);
+      }
+
+      function uniqueNewId(itemId, value) {
+        const candidate = value.trim();
+        if (!normalizedCandidateId(candidate)) return false;
+        if (existingIds.has(candidate)) return false;
+        const { plans } = currentPlans();
+        for (const plan of plans) {
+          if (
+            plan.item.id !== itemId &&
+            plan.action === "new" &&
+            plan.finalId.toLowerCase() === candidate.toLowerCase()
+          ) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      function hasInvalidCreateChoice() {
+        return scannedItems.some((item) => {
+          const rowState = stateById.get(item.id);
+          return (
+            item.importStatus === "conflict" &&
+            rowState.choice === "create" &&
+            !uniqueNewId(item.id, rowState.newId)
+          );
+        });
+      }
+
+      function updateSelectionSummary() {
+        const { plans, unavailable } = currentPlans();
+        const newCount = plans.filter((plan) => plan.action === "new").length;
+        const updateCount = plans.filter((plan) => plan.action === "update").length;
+        const selectedCount = newCount + updateCount;
+        const skipCount = Math.max(0, scannedItems.length - unavailable - selectedCount);
+        document.getElementById("selection-summary").innerHTML =
+          "<strong>" +
+          selectedCount +
+          "</strong> 项待处理" +
+          '<span class="selection-help">新增 ' +
+          newCount +
+          " · 更新 " +
+          updateCount +
+          " · 跳过 " +
+          skipCount +
+          " · 不可导入 " +
+          unavailable +
+          "</span>";
+        continueButton.disabled = selectedCount === 0 || hasInvalidCreateChoice();
+        if (hasInvalidCreateChoice()) {
+          document.getElementById("selection-summary").innerHTML +=
+            '<span class="selection-help" style="color:var(--danger)">请完成冲突 ID</span>';
+        }
+      }
+
+      function filteredResults() {
+        const query = resultSearch.value.trim().toLowerCase();
+        return scannedItems.filter(
+          (item) =>
+            resultSources.has(item.source) &&
+            (!query ||
+              item.name.toLowerCase().includes(query) ||
+              item.source.toLowerCase().includes(query)),
+        );
+      }
+
+      function renderSourceFilters() {
+        const available = [...new Set(scannedItems.map((item) => item.source))];
+        const host = document.getElementById("source-filters");
+        host.innerHTML = available
+          .map(
+            (source) =>
+              '<label class="source-filter"><input type="checkbox" data-source-filter="' +
+              escapeHtml(source) +
+              '" ' +
+              (resultSources.has(source) ? "checked" : "") +
+              "><span>" +
+              escapeHtml(source) +
+              "</span></label>",
+          )
+          .join("");
+      }
+
+      function renderConflictDetail(item) {
+        const rowState = stateById.get(item.id);
+        const createChoice = rowState.choice === "create";
+        const updateChoice = rowState.choice === "update";
+        const skipChoice = rowState.choice === "skip";
+        const idError =
+          createChoice && rowState.newId
+            ? uniqueNewId(item.id, rowState.newId)
+              ? ""
+              : "ID 格式无效或与已有连接重复。"
+            : createChoice
+              ? "请输入唯一 ID。"
+              : "";
+        return (
+          '<tr class="detail-row"><td class="conflict-detail-cell" colspan="5"><div class="conflict-detail">' +
+          "<h3>核对配置冲突</h3>" +
+          "<p>" +
+          escapeHtml(item.conflictSummary) +
+          "。不会自动合并同名来源。</p>" +
+          '<div class="safe-summary" aria-label="安全配置摘要对比">' +
+          '<div class="safe-summary-card"><span>Synara 当前 · v' +
+          item.existingRevision +
+          "</span><strong>" +
+          escapeHtml(item.currentSafeSummary) +
+          "</strong></div>" +
+          '<div class="safe-summary-card"><span>发现配置 · ' +
+          escapeHtml(item.source) +
+          "</span><strong>" +
+          escapeHtml(item.discoveredSafeSummary) +
+          "</strong></div>" +
+          '</div><p class="safe-summary-note">启动参数或环境来源等其他配置不同，值不在预览中显示。</p>' +
+          '<div class="choice-list" role="radiogroup" aria-label="' +
+          escapeHtml(item.name) +
+          ' 的冲突处理方式">' +
+          '<label class="choice-row"><input type="radio" name="choice-' +
+          escapeHtml(item.id) +
+          '" value="skip" data-choice="' +
+          escapeHtml(item.id) +
+          '" ' +
+          (skipChoice ? "checked" : "") +
+          "><span>跳过<small>默认处理</small></span></label>" +
+          '<label class="choice-row"><input type="radio" name="choice-' +
+          escapeHtml(item.id) +
+          '" value="create" data-choice="' +
+          escapeHtml(item.id) +
+          '" ' +
+          (createChoice ? "checked" : "") +
+          "><span>另建 ID<small>保留两份配置</small></span></label>" +
+          '<label class="choice-row"><input type="radio" name="choice-' +
+          escapeHtml(item.id) +
+          '" value="update" data-choice="' +
+          escapeHtml(item.id) +
+          '" ' +
+          (updateChoice ? "checked" : "") +
+          "><span>更新现有<small>生成下一版本</small></span></label>" +
+          "</div>" +
+          '<div class="new-id-field" ' +
+          (createChoice ? "" : "hidden") +
+          ">" +
+          '<label class="field-label" for="new-id-' +
+          escapeHtml(item.id) +
+          '">新连接 ID</label>' +
+          '<input id="new-id-' +
+          escapeHtml(item.id) +
+          '" class="text-input" type="text" inputmode="latin" autocomplete="off" spellcheck="false" data-new-id="' +
+          escapeHtml(item.id) +
+          '" value="' +
+          escapeHtml(rowState.newId) +
+          '" placeholder="例如 codegraph-ccswitch">' +
+          '<p class="field-error" data-id-error="' +
+          escapeHtml(item.id) +
+          '" aria-live="polite">' +
+          escapeHtml(idError) +
+          "</p>" +
+          "</div>" +
+          (updateChoice
+            ? '<p class="inline-note">确认后保存为 v' +
+              (item.existingRevision + 1) +
+              "；已有任务继续使用原绑定版本。</p>"
+            : "") +
+          "</div></td></tr>"
+        );
+      }
+
+      function renderResults() {
+        renderSourceFilters();
+        const visible = filteredResults();
+        const { plans, unavailable } = currentPlans();
+        if (scannedItems.length === 0) {
+          resultEmpty.hidden = false;
+          document.getElementById("empty-title").textContent =
+            scanMode === "empty"
+              ? "没有发现 MCP 配置"
+              : scanMode === "error"
+                ? "来源未能读取"
+                : "没有可显示的结果";
+          document.getElementById("empty-copy").textContent =
+            scanMode === "empty"
+              ? "可以修改来源后重新扫描。"
+              : scanMode === "error"
+                ? "修改来源或重试扫描。"
+                : "当前来源筛选没有匹配条目。";
+          resultsRows.innerHTML = "";
+        } else if (visible.length === 0) {
+          resultEmpty.hidden = false;
+          document.getElementById("empty-title").textContent = "没有匹配的结果";
+          document.getElementById("empty-copy").textContent = "更改搜索词或显示来源即可继续核对。";
+          resultsRows.innerHTML = "";
+        } else {
+          resultEmpty.hidden = true;
+          resultsRows.innerHTML = visible
+            .map((item) => {
+              const rowState = stateById.get(item.id);
+              const sourceState = sourceStateFor(item);
+              const selectable = item.importStatus === "ready" || item.importStatus === "conflict";
+              const conflictReady =
+                item.importStatus === "conflict" &&
+                (rowState.choice === "update" ||
+                  (rowState.choice === "create" && uniqueNewId(item.id, rowState.newId)));
+              const checked =
+                item.importStatus === "ready"
+                  ? rowState.selected
+                  : conflictReady && rowState.selected;
+              const disabled = !selectable || (item.importStatus === "conflict" && !conflictReady);
+              const action =
+                item.importStatus === "conflict"
+                  ? '<button class="text-action" type="button" data-expand-conflict="' +
+                    escapeHtml(item.id) +
+                    '">' +
+                    (expandedConflict === item.id ? "收起" : "处理") +
+                    "</button>"
+                  : "";
+              const reason = importReason(item);
+              const row =
+                '<tr data-result-id="' +
+                escapeHtml(item.id) +
+                '">' +
+                '<td data-label="选择"><input class="row-check" type="checkbox" data-select="' +
+                escapeHtml(item.id) +
+                '" aria-label="选择 ' +
+                escapeHtml(item.name) +
+                "，来源 " +
+                escapeHtml(item.source) +
+                '" ' +
+                (checked ? "checked" : "") +
+                (disabled ? " disabled" : "") +
+                "></td>" +
+                '<td class="name-cell" data-label="名称与来源"><span class="row-name">' +
+                escapeHtml(item.name) +
+                '</span><span class="row-source">' +
+                escapeHtml(item.source) +
+                "</span></td>" +
+                '<td class="protocol-cell" data-label="协议">' +
+                escapeHtml(item.protocol) +
+                "</td>" +
+                '<td class="source-cell" data-label="来源状态"><span class="source-tag">' +
+                escapeHtml(sourceState.label) +
+                "</span></td>" +
+                '<td class="import-cell" data-label="导入状态"><div class="status-cell"><span class="status ' +
+                escapeHtml(item.importStatus) +
+                '">' +
+                statusLabel(item.importStatus) +
+                "</span>" +
+                action +
+                (reason && item.importStatus !== "conflict"
+                  ? '<span class="meta" style="margin:0">' + escapeHtml(reason) + "</span>"
+                  : "") +
+                "</div></td>" +
+                "</tr>";
+              return row + (expandedConflict === item.id ? renderConflictDetail(item) : "");
+            })
+            .join("");
+        }
+        const selectedCount = plans.length;
+        resultState.innerHTML = scannedItems.length
+          ? "<strong>发现 " +
+            scannedItems.length +
+            " 项。</strong>来源状态只说明来源配置；不可导入项不会进入确认列表。"
+          : scanMode === "error"
+            ? "<strong>来源未能读取。</strong>修改来源或重试。"
+            : "<strong>扫描完成。</strong>没有发现可显示的配置。";
+        updateSelectionSummary();
+      }
+
+      function statusForPlan(plan) {
+        if (plan.action === "update")
+          return (
+            "更新现有 v" + plan.item.existingRevision + " → v" + (plan.item.existingRevision + 1)
+          );
+        return "新增连接 " + plan.finalId;
+      }
+
+      function renderReview() {
+        const { plans, unavailable } = currentPlans();
+        const planIds = new Set(plans.map((plan) => plan.item.id));
+        const newCount = plans.filter((plan) => plan.action === "new").length;
+        const updateCount = plans.filter((plan) => plan.action === "update").length;
+        const skipCount = Math.max(0, scannedItems.length - unavailable - plans.length);
+        document.getElementById("summary-stats").innerHTML =
+          '<div class="summary-stat new"><span>新增</span><strong>' +
+          newCount +
+          "</strong></div>" +
+          '<div class="summary-stat update"><span>更新</span><strong>' +
+          updateCount +
+          "</strong></div>" +
+          '<div class="summary-stat"><span>跳过</span><strong>' +
+          skipCount +
+          "</strong></div>" +
+          '<div class="summary-stat blocked"><span>不可导入</span><strong>' +
+          unavailable +
+          "</strong></div>";
+        document.getElementById("review-rows").innerHTML = scannedItems
+          .map((item) => {
+            const rowState = stateById.get(item.id);
+            let decision = "";
+            if (planIds.has(item.id)) {
+              decision = statusForPlan(plans.find((plan) => plan.item.id === item.id));
+            } else if (item.importStatus === "needs") {
+              decision = "需要补充配置";
+            } else if (item.importStatus === "unsupported") {
+              decision = "不支持";
+            } else if (item.importStatus === "exists") {
+              decision = "已存在 · 跳过";
+            } else if (item.importStatus === "conflict" && rowState.choice === "update") {
+              decision = "未选中 · 保留更新决定";
+            } else if (item.importStatus === "conflict" && rowState.choice === "create") {
+              decision = "未选中 · 保留新 ID 决定";
+            } else if (item.importStatus === "conflict") {
+              decision = "配置冲突 · 跳过";
+            } else {
+              decision = "未选择 · 跳过";
+            }
+            return (
+              '<li><div class="review-primary"><strong>' +
+              escapeHtml(item.name) +
+              ' <span class="meta" style="display:inline">· ' +
+              escapeHtml(item.source) +
+              '</span></strong></div><span class="review-decision">' +
+              escapeHtml(decision) +
+              "</span></li>"
+            );
+          })
+          .join("");
+      }
+
+      function addOrUpdateConnection(plan) {
+        const existing = connections.find((connection) => connection.id === plan.finalId);
+        if (plan.action === "update" && existing) {
+          existing.revision += 1;
+        } else {
+          connections.push({
+            id: plan.finalId,
+            protocol: plan.item.protocol,
+            revision: 1,
+            state: "未检查",
+          });
+        }
+      }
+
+      function renderOutcomes() {
+        const results = scannedItems
+          .map((item) => ({ item, state: stateById.get(item.id) }))
+          .filter((entry) => entry.state.importResult);
+        const successes = results.filter(
+          (entry) => entry.state.importResult.status === "success",
+        ).length;
+        const failures = results.filter(
+          (entry) => entry.state.importResult.status === "failure",
+        ).length;
+        document.getElementById("outcome-title").textContent = failures
+          ? successes
+            ? "导入部分完成"
+            : "导入未完成"
+          : "模拟导入完成";
+        document.getElementById("outcome-subtitle").textContent =
+          "成功 " + successes + " 项 · 失败 " + failures + " 项。结果按条目显示。";
+        document.getElementById("outcome-rows").innerHTML = results
+          .map((entry) => {
+            const result = entry.state.importResult;
+            const finalId = result.finalId || entry.item.name;
+            const description =
+              result.status === "success"
+                ? result.retryNote
+                  ? "重新扫描并重试成功；当前未连接。"
+                  : result.action === "update"
+                    ? "已生成新版本；任务原绑定保持。"
+                    : "已加入 Synara 连接目录；当前未连接。"
+                : "来源配置与扫描摘要不同，未写入。请重新扫描后重试。";
+            const actions =
+              result.status === "success"
+                ? '<div class="outcome-actions"><button class="button small" type="button" data-view-result="' +
+                  escapeHtml(entry.item.id) +
+                  '">查看连接</button><button class="button small" type="button" data-check-result="' +
+                  escapeHtml(entry.item.id) +
+                  '">检查连接与配置授权</button></div>'
+                : '<div class="outcome-actions"><button class="button small" type="button" data-retry-result="' +
+                  escapeHtml(entry.item.id) +
+                  '">重新扫描并重试</button></div>';
+            return (
+              '<div class="outcome-row"><div class="outcome-info"><span class="status ' +
+              (result.status === "success" ? "success" : "failure") +
+              '">' +
+              (result.status === "success" ? "成功" : "失败") +
+              "</span><div><strong>" +
+              escapeHtml(finalId) +
+              "</strong><small>" +
+              escapeHtml(description) +
+              "</small></div></div>" +
+              actions +
+              "</div>"
+            );
+          })
+          .join("");
+      }
+
+      function startImport() {
+        const { plans } = currentPlans();
+        const changeOne = document.getElementById("demo-mode").value === "changed";
+        let changedUsed = false;
+        for (const plan of plans) {
+          const shouldFail = changeOne && !changedUsed;
+          if (shouldFail) changedUsed = true;
+          const rowState = stateById.get(plan.item.id);
+          rowState.importResult = shouldFail
+            ? {
+                status: "failure",
+                finalId: plan.finalId,
+                action: plan.action,
+                error: "source-changed",
+              }
+            : { status: "success", finalId: plan.finalId, action: plan.action };
+          if (!shouldFail) addOrUpdateConnection(plan);
+        }
+        renderConnections(document.getElementById("connection-search").value);
+        renderOutcomes();
+        flowCompleted = true;
+        setFlowStep("outcome");
+      }
+
+      function openDetail(connectionId, sourceItem, mode) {
+        const connection = connections.find((item) => item.id === connectionId);
+        const title = mode === "check" ? "连接与配置授权" : "连接详情";
+        document.getElementById("detail-title").textContent = connectionId;
+        document.getElementById("detail-eyebrow").textContent =
+          mode === "check" ? "检查流程 · 演示" : "Synara 连接 · 示例";
+        if (mode === "check") {
+          document.getElementById("detail-content").innerHTML =
+            '<p><strong style="color:var(--foreground)">' +
+            title +
+            "。</strong>这是后续操作说明；本草稿不运行连接检查、不读取工具，也不生成健康或授权结果。</p>" +
+            "<p>正式流程将在真实连接配置后提供检查入口。检查完成后，由你单独选择工具并保存 Expert 授权。</p>";
+        } else {
+          document.getElementById("detail-content").innerHTML =
+            '<p><strong style="color:var(--foreground)">' +
+            title +
+            "。</strong>这里显示连接配置摘要，不执行连接检查或读取工具。</p>" +
+            '<dl class="detail-grid">' +
+            "<dt>协议</dt><dd>" +
+            escapeHtml(
+              connection ? connection.protocol : sourceItem ? sourceItem.protocol : "stdio",
+            ) +
+            "</dd>" +
+            "<dt>配置版本</dt><dd>v" +
+            (connection ? connection.revision : "1") +
+            "</dd>" +
+            "<dt>连接检查</dt><dd>本草稿未执行</dd>" +
+            "<dt>密钥与 header</dt><dd>保留来源引用；此页面不显示值</dd>" +
+            "</dl>";
+        }
+        detailDialog.showModal();
+      }
+
+      function scan() {
+        scanError.hidden = true;
+        scanMode = document.getElementById("demo-mode").value;
+        const sources = sourceChoices();
+        const useFile = document.getElementById("use-file").checked;
+        const format = document.getElementById("file-format").value;
+        if (scanMode === "error") {
+          scannedItems = [];
+          resultSources = new Set();
+          scanError.hidden = false;
+          resultSearch.value = "";
+          renderResults();
+          setFlowStep("results");
+          return;
+        }
+        if (scanMode === "empty") {
+          scannedItems = [];
+        } else if (useFile && format === "标准 MCP JSON") {
+          scannedItems = [...jsonDemoItems];
+        } else if (useFile && format === "Codex TOML") {
+          scannedItems = sampleItems.filter((item) => item.source === "Codex");
+        } else if (useFile && format === "CCSwitch DB") {
+          scannedItems = sampleItems.filter((item) => item.source === "CCSwitch");
+        } else {
+          scannedItems = sampleItems.filter((item) => sources.includes(item.source));
+        }
+        resultSources = new Set([...sources, ...scannedItems.map((item) => item.source)]);
+        expandedConflict = null;
+        resultSearch.value = "";
+        renderResults();
+        setFlowStep("results");
+      }
+
+      document.getElementById("discover-button").addEventListener("click", showDiscovery);
+      document.getElementById("back-to-list").addEventListener("click", showConnections);
+      document.getElementById("finish-to-list").addEventListener("click", showConnections);
+      document.getElementById("change-source").addEventListener("click", () => {
+        sourceStep.hidden = !sourceStep.hidden;
+        document.getElementById("change-source").textContent = sourceStep.hidden
+          ? "修改来源"
+          : "收起来源设置";
+        if (!sourceStep.hidden) {
+          document.querySelector(".source-choice")?.focus();
+        }
+      });
+      document.getElementById("empty-back").addEventListener("click", () => {
+        sourceStep.hidden = false;
+        document.getElementById("change-source").textContent = "收起来源设置";
+        document.querySelector(".source-choice")?.focus();
+      });
+      document.getElementById("scan-button").addEventListener("click", scan);
+      document.getElementById("scan-retry").addEventListener("click", () => {
+        document.getElementById("demo-mode").value = "normal";
+        scan();
+      });
+      document.getElementById("use-file").addEventListener("change", (event) => {
+        document.getElementById("file-fields").hidden = !event.target.checked;
+        updateScanButton();
+      });
+      document.getElementById("file-path").addEventListener("input", updateScanButton);
+      document
+        .querySelectorAll(".source-choice")
+        .forEach((input) => input.addEventListener("change", updateScanButton));
+      document.getElementById("result-search").addEventListener("input", renderResults);
+      document.getElementById("source-filters").addEventListener("change", (event) => {
+        const source = event.target.dataset.sourceFilter;
+        if (!source) return;
+        if (event.target.checked) resultSources.add(source);
+        else resultSources.delete(source);
+        renderResults();
+      });
+      document.getElementById("result-rows").addEventListener("click", (event) => {
+        const expand = event.target.closest("[data-expand-conflict]");
+        if (!expand) return;
+        expandedConflict =
+          expandedConflict === expand.dataset.expandConflict ? null : expand.dataset.expandConflict;
+        renderResults();
+        if (expandedConflict) {
+          document
+            .querySelector('[data-choice="' + CSS.escape(expandedConflict) + '"]')
+            ?.focus({ preventScroll: true });
+        }
+      });
+      document.getElementById("result-rows").addEventListener("change", (event) => {
+        const selection = event.target.closest("[data-select]");
+        if (selection) {
+          stateById.get(selection.dataset.select).selected = selection.checked;
+          updateSelectionSummary();
+          return;
+        }
+        const choice = event.target.closest("[data-choice]");
+        if (choice) {
+          const state = stateById.get(choice.dataset.choice);
+          state.choice = choice.value;
+          state.selected = choice.value === "update";
+          if (
+            choice.value === "create" &&
+            state.newId &&
+            uniqueNewId(choice.dataset.choice, state.newId)
+          ) {
+            state.selected = true;
+          }
+          renderResults();
+          const next =
+            choice.value === "create"
+              ? document.querySelector('[data-new-id="' + CSS.escape(choice.dataset.choice) + '"]')
+              : document.querySelector(
+                  '[data-choice="' +
+                    CSS.escape(choice.dataset.choice) +
+                    '"][value="' +
+                    choice.value +
+                    '"]',
+                );
+          next?.focus({ preventScroll: true });
+        }
+      });
+      document.getElementById("result-rows").addEventListener("input", (event) => {
+        const field = event.target.closest("[data-new-id]");
+        if (!field) return;
+        const id = field.dataset.newId;
+        const state = stateById.get(id);
+        state.newId = field.value;
+        const valid = uniqueNewId(id, state.newId);
+        state.selected = valid;
+        const error = document.querySelector('[data-id-error="' + CSS.escape(id) + '"]');
+        if (error)
+          error.textContent = valid
+            ? ""
+            : state.newId
+              ? "ID 格式无效或与已有连接重复。"
+              : "请输入唯一 ID。";
+        const checkbox = document.querySelector('[data-select="' + CSS.escape(id) + '"]');
+        if (checkbox) {
+          checkbox.disabled = !valid;
+          checkbox.checked = valid;
+        }
+        updateSelectionSummary();
+      });
+      continueButton.addEventListener("click", () => {
+        renderReview();
+        setFlowStep("review");
+      });
+      document
+        .getElementById("back-to-results")
+        .addEventListener("click", () => setFlowStep("results"));
+      document.getElementById("confirm-import").addEventListener("click", startImport);
+      document.getElementById("outcome-rows").addEventListener("click", (event) => {
+        const view = event.target.closest("[data-view-result]");
+        const check = event.target.closest("[data-check-result]");
+        const retry = event.target.closest("[data-retry-result]");
+        if (view || check) {
+          const itemId = (view || check).dataset.viewResult || (view || check).dataset.checkResult;
+          const item = sampleItems.find((entry) => entry.id === itemId);
+          const result = stateById.get(itemId).importResult;
+          openDetail(result.finalId, item, Boolean(check) ? "check" : "view");
+        } else if (retry) {
+          retryingItemId = retry.dataset.retryResult;
+          retryDialog.showModal();
+        }
+      });
+      document.getElementById("confirm-retry").addEventListener("click", () => {
+        const item = sampleItems.find((entry) => entry.id === retryingItemId);
+        const rowState = stateById.get(retryingItemId);
+        const result = rowState.importResult;
+        result.status = "success";
+        result.error = null;
+        result.retryNote = "重新扫描并重试成功";
+        addOrUpdateConnection({ item, action: result.action, finalId: result.finalId });
+        retryDialog.close();
+        retryingItemId = null;
+        renderConnections(document.getElementById("connection-search").value);
+        renderOutcomes();
+      });
+      document.getElementById("connection-rows").addEventListener("click", (event) => {
+        const open = event.target.closest("[data-open-connection]");
+        if (open) openDetail(open.dataset.openConnection, null, "view");
+      });
+      document
+        .getElementById("connection-search")
+        .addEventListener("input", (event) => renderConnections(event.target.value));
+      document
+        .querySelectorAll("[data-close-dialog]")
+        .forEach((button) =>
+          button.addEventListener("click", () => button.closest("dialog").close()),
+        );
+      document.querySelectorAll("dialog").forEach((dialog) => {
+        dialog.addEventListener("click", (event) => {
+          if (event.target === dialog) dialog.close();
+        });
+      });
+
+      document.getElementById("theme-toggle").addEventListener("click", (event) => {
+        const dark = document.documentElement.dataset.theme !== "dark";
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+        event.currentTarget.setAttribute("aria-pressed", String(dark));
+        event.currentTarget.setAttribute("aria-label", dark ? "切换到浅色主题" : "切换到深色主题");
+        event.currentTarget.querySelector(".type-label").textContent = dark ? "深色" : "浅色";
+      });
+      let fontScale = 1;
+      function setFontScale(next) {
+        fontScale = Math.max(0.9, Math.min(1.2, Math.round(next * 100) / 100));
+        document.documentElement.style.setProperty("--ui-scale", String(fontScale));
+        document.getElementById("font-scale-label").textContent = Math.round(fontScale * 100) + "%";
+      }
+      document
+        .getElementById("font-smaller")
+        .addEventListener("click", () => setFontScale(fontScale - 0.05));
+      document
+        .getElementById("font-larger")
+        .addEventListener("click", () => setFontScale(fontScale + 0.05));
+      document.addEventListener("keydown", (event) => {
+        if (
+          event.key === "Escape" &&
+          !detailDialog.open &&
+          !retryDialog.open &&
+          currentFlowStep !== "results"
+        ) {
+          setFlowStep("results");
+          document.getElementById("discovery-title").focus();
+        }
+      });
+
+      renderConnections("");
+      updateScanButton();
+    </script>
+  </body>
+</html>

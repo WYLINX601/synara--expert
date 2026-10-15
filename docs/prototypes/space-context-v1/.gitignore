@@ -1,0 +1,6 @@
+dist/
+.vite/
+ui-source.local.json
+tsconfig.resolved.json
+src/synara.generated.css
+qa/*.log

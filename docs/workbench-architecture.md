@@ -2,17 +2,16 @@
 
 产品方向更新（2026-10-10）：当前 Linx 产品组织、Hermes 常驻职责与 MVP 规划见 [Linx V2.0 原文](./linx-product-design-v2.md)，方案与实施状态路由见[项目上下文](../context/PROJECT_CONTEXT.md)。本文继续保留既有 Workbench 技术设计与历史证据，不作为新增 Space、Hermes 或 Skill Evolution 的实现证明。
 
-2026-10-08 增量方案：[轻量适配层与 UI 模块化](./workbench-adaptation-plan.md)，实施状态见[验收记录](./workbench-adaptation-acceptance.md)。本轮收拢既有接入，不改变历史验收与上游发布门禁。
+状态：本文保留 2026-09-29 的架构设计与实施起点快照，不描述当前实施状态；当前进度与验收见[工作台验收记录](./workbench-acceptance-2026-10-02.md)。
 
-状态：架构基线与分阶段实施记录。当前范围为 WB-00 至 WB-05；WB-06 按用户决定延期。状态核实日期：2026-10-02。本次文档更新在独立文档分支准备；源候选以 checkout HEAD 与生成 state 的一致绑定为准。验收时须同时核对候选 checkout 的实际 HEAD、`workbench:sync` 状态中的 `candidateSha` 和匹配的 evidence binding；单独读取状态或分支名不足以证明它们一致。历史运行结果只适用于其报告中的源码 SHA，不自动继承给后续代码。
+当前实施快照（2026-10-03）：source ae 的双 flavor 构建、payload、应用隔离、合成恢复、8 项真实 runtime、10 项绑定与正式六项门禁均已通过；WB-00 至 WB-04 的 macOS arm64 本机隔离范围为 READY/M1/M2 通过。M3 远端手动与定时流程仍待执行，WB-06 延期；详见[验收记录](./workbench-acceptance-2026-10-02.md)。
 
-基线关系见 [WB-00 记录](../workbench/WB-00-baseline.md) 与 [上游历史补充](../workbench/WB-00-upstream-evidence.md)：2026-09-29 原工作区基线为 `eaa61eded31b6755d4f30ba8eabc5d905cf817cb`，官方 `upstream/main` 与 `v0.9.2` 的共同基点为 `a33435c18474eb7816582004e45f87382965ac8d`。WB-04 在隔离候选分支从 `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 固定的 `v0.9.2`，merge 提交为 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`。fee08 acceptance attempt 有两项固定门禁失败，首次 Codex 普通首轮请求因模型不支持返回 HTTP 400；9591 六项固定门禁通过，但其独立本地 weekly fixture 失败且没有 Provider 请求。858 修正该 synthetic fixture；各源码结果分别保留为历史。较后的 f248 运行通过六项固定门禁、诊断包、原生身份检查和合成迁移/restore，但 live cancellation 失败、recovery 未运行；详情见 [WB-04 runtime preflight](../workbench/WB-04-runtime-preflight.md)。`upstream.lock` 的 `integratedBase` 仍是 `v0.9.1`，候选尚未提升为已验证集成基线。
-
-当前状态按证据来源区分：WB-00 已完成。WB-01/02 在源码 858 上的两种 macOS arm64 诊断包、payload/身份、三应用并存、两款工作台 updater-policy 检查及三项合成迁移/restore 场景通过；其中 restore CLI 在打包 Electron 43.4.1 的 Node mode 执行，未访问用户数据库，也没有证明普通 Electron 启动迁移。f248 的后续独立包与合成 restore 证据也通过，但不改变 858 的来源标记。包有 ad-hoc 本机签名，没有 Developer ID 发布签名；原版 updater 未读取。WB-03 的接入代码和聚焦检查已集成；fee08 的 Codex 普通首轮因模型不受支持返回 HTTP 400。后续 858 live attempt 中 Codex 普通首轮通过，但专家首轮在 provider approval 未完成时超时，其余请求未运行。f248 的运行明确选择 Codex `gpt-6-luna/high` 与 Pi `openai-codex/gpt-5.6-sol/medium`；四种普通/专家首轮、MCP 与产品 session/persona isolation 通过，cancellation 失败、recovery 未运行。Node 24.13.1 与 MCP SDK 1.29 的 immediate-close 复现显示关闭时下游 abort 可能尚未送达；Expert MCP 客户端的有界取消通知 drain 修复已过 review，三个服务端文件的 25 个测试与 scripts fixture 的 3 个测试通过。该修复提交尚未完成六项正式门禁、新构建或 live 重验，不能据此声称 live cancellation 已修复或已通过。WB-04 的 f248 六项固定门禁、诊断包、原生身份检查及合成迁移/restore 均通过限定范围，但十项 runtime evidence 未全部通过并绑定；该轮状态为 `awaiting-runtime`。截至本文记录时，候选分支 HEAD 为 de287，而生成状态仍绑定 f248；它们不匹配，不能将 f248 状态或证据算作 de287 验收。WB-05 的 9591 本地 Git fixture 失败；858 修正合成 fixture 后本地通过，生产 bind/CAS guard 未削弱，GitHub 手动与定时 workflow 仍未实际运行。WB-06 按用户决定延期。M1/M2/M3 均未完成，`integratedBase` 仍为 `v0.9.1`，`main` 仍为 `8e5c12b963e3dd143837aa751e1749b5b55f5d73`。详见 [WB-01 证据](../workbench/WB-01-evidence.md)、[WB-04 858 证据](../workbench/WB-04-858-evidence.md)、[WB-04 runtime preflight](../workbench/WB-04-runtime-preflight.md)、[WB-05 自动化记录](../workbench/WB-05-automation.md) 与[实施计划](./workbench-implementation-plan.md)；[WB-04 9591 证据](../workbench/WB-04-9591-evidence.md) 保持其历史原文。
-
-隔离检查设计为核对互异的产品 `session.threadId`、准确专家绑定和 persona 不串线；当前产品 RPC 不暴露 Provider 原生 `providerSessionId`，因此不能据此声称原生 Provider session ID 隔离已证明。f248 上产品 session/persona isolation 已通过，但 native Provider session ID 隔离仍未由此接口证明。后续候选需要按自身 SHA 重新绑定证据。
+历史核实日期：2026-09-29。历史本地代码基线：`eaa61eded31b6755d4f30ba8eabc5d905cf817cb`，当时另有未提交的专家系统改动。
+目标：保留 Synara 的日常能力，持续增加专家、业务看板等个人能力，每周检查并集成一次官方更新。
 
 后续实施见 [落地技术方案与计划](./workbench-implementation-plan.md)，其中已细化文件位置、迁移接管、验收与每周同步任务。
+
+2026-10-08 的后续接入设计见[轻量适配层与 UI 模块化方案](./workbench-adaptation-plan.md)：在已有 Workbench 注册、装配和迁移边界上增量收拢专家与 MCP 接入。首期代码已完成，实际检查与遗留见[验收记录](./workbench-adaptation-acceptance.md)；保留任务生命周期与数据结构，不改变本文历史验收范围。
 
 ## 快速导航
 
@@ -207,6 +206,8 @@ contracts 仅承载跨进程结构；运行逻辑放 server/web，公共运行�
 
 实施后跟踪每次同步的冲突文件、实际适配位置、验证耗时和阻塞原因。两到三次同步后，再用真实记录判断是否需要抽出更多接口；现在不承诺固定分钟数或零维护成本。
 
-## 初始设计验证范围（历史快照）
+## 2026-09-29 设计验证范围（历史快照）
+
+以下记录方案形成时的设计核查，不表示当前实现、合并或验收状态；当前状态以[工作台验收记录](./workbench-acceptance-2026-10-02.md)为准。
 
 方案形成初期已检查源码中的任务所有权、看板、插件页面、专家接入、迁移历史、应用身份和更新机制，并在线核实官方稳定/预发布信息；当时尚未计算完整的本地与官方差异或执行 merge/真实升级。该初始设计快照中的“未执行 merge”“仅配置 origin”“Git 仍是浅克隆”及 GitHub 代理连接失败是当时记录的历史状态；尤其浅克隆与远端配置的观察反映 WB-00 补齐历史之前的起点，已被后续工作取代，不表示当前状态。候选验收须核对实际 checkout HEAD、generated sync state `candidateSha` 与 runtime-evidence binding 一致；状态及运行证据按各自源码 SHA 记录，9591 和 fee08 的历史结果不转移给后续代码。

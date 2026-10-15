@@ -1,9 +1,14 @@
 # 个人工作台落地技术方案与实施计划
 
-2026-10-08 增量方案：[轻量适配层与 UI 模块化](./workbench-adaptation-plan.md)，实施状态见[验收记录](./workbench-adaptation-acceptance.md)。本轮收拢既有接入，不改变历史验收与上游发布门禁。
+状态：本文件保留 2026-09-29 制定的计划与实施起点快照；当前进度与验收见[工作台验收记录](./workbench-acceptance-2026-10-02.md)。本轮工作涉及 WB-00 至 WB-05，WB-06 按用户决定延期；各项完成状态以验收记录为准。
 
-状态（2026-10-02；按来源记录证据，不将历史 SHA 写成当前绑定）：本轮范围为 WB-00 至 WB-05；WB-06 按用户决定延期。WB-00 完成。WB-01/02 在源码 858 上的两种 macOS arm64 诊断包、bundle/plist、payload、三应用共存、隔离目录、updater-policy 与三项合成 file-backed SQLite 演练通过；较后的 f248 也有独立包/身份与三项合成 restore 通过记录。所有包均为诊断包，ad-hoc 本机签名不等于 Developer ID 发布签名。WB-03 代码与聚焦检查已集成；fee08 的 Codex 普通首轮因不支持模型返回 HTTP 400。858 后续 live attempt 通过 Codex 普通首轮，但专家首轮在 provider approval 未完成时超时，其余请求未运行。f248 显式使用 Codex `gpt-6-luna/high`、Pi `openai-codex/gpt-5.6-sol/medium`，四种普通/专家首轮、MCP 与产品 session/persona isolation 通过，cancellation 失败、recovery 未运行。后续提交 `de287dc487b2ae09e1053c823ac4f317be7a19aa` 加入经 review 的有界 HTTP 取消通知 drain，三个服务端文件的 25 项目标测试和 scripts fixture 的 3 项测试通过；该提交尚无六项正式门禁、新构建或 live 重验。WB-04 的 f248 六项固定门禁及包、身份和合成迁移证据按范围通过，但完整十项 runtime evidence 未通过并绑定，f248 状态为 `awaiting-runtime`。当前候选必须同时核对候选 checkout HEAD、生成状态中的 `candidateSha` 和对应 evidence binding；截至本文记录时，branch HEAD 为 de287、state 仍绑定 f248，二者不一致。WB-05 的 9591 本地 Git fixture 失败；858 修正合成 fixture 后本地通过且 production bind/CAS guard 未削弱；GitHub 手动与定时运行均未执行。`upstream.lock` 的 `integratedBase` 仍为 `v0.9.1`，`main` 仍为 `8e5c12b963e3dd143837aa751e1749b5b55f5d73`，M1、M2、M3 均未完成。详见 [WB-04 runtime preflight](../workbench/WB-04-runtime-preflight.md)、[WB-04 858 证据](../workbench/WB-04-858-evidence.md) 与 [WB-05 自动化记录](../workbench/WB-05-automation.md)；9591 原页保留其历史结果。
-日期：2026-10-02。适用仓库：当前 Synara Expert fork。隔离候选从 `b608f0c17fcbc69ee7735cb6bd3d82d9e4d6801b` merge 固定官方 `v0.9.2`（`a33435c18474eb7816582004e45f87382965ac8d`），merge 提交为 `1309416dc3aefdc62e6edec1b2a4ed6d46f4e89c`。858 是 9591 的直接子提交，只修复 `.github/scripts/workbench-weekly.test.mjs` 的本地 lineage fixture，不改生产 bind/CAS 逻辑。历史结果按源码区分：fee08 两项固定门禁失败且首次 Codex 普通首轮返回 HTTP 400；9591 六项固定门禁通过，但独立本地 weekly fixture 失败且没有 Provider 请求；858 首次门禁因 umask `077` 下四个文件权限断言失败，随后在 umask `022` 下六项全通过；f248 六项固定门禁全通过但取消失败、恢复未运行。后续文档修改位于从 858 建立的文档分支，不改变被测源码，也不自动继承运行证据。当前候选尚未被文档页宣称为已接受基线，`integratedBase` 未推进。
+后续日常开发遵循[工作台开发流程](./workbench-development-workflow.md)：按改动影响选择检查，在集成和交付阶段集中验收。本计划的首次升级矩阵及既有验收记录继续适用于其声明范围，不作为每次界面修改的固定步骤。
+
+后续 WB-03 接入边界的增量设计见[轻量适配层与 UI 模块化方案](./workbench-adaptation-plan.md)（2026-10-08，首期已完成，见[验收记录](./workbench-adaptation-acceptance.md)）。阶段 A0—A4 以现有专家 / 全局 MCP 候选稳定为前提，首期收拢 UI 入口、业务请求与依赖检查；不推进本计划已延期的 WB-06，也不更改官方同步门禁。
+
+当前实施快照（2026-10-03）：source ae 的双 flavor payload、隔离、恢复、8 项真实 runtime、10 项绑定和正式六项门禁均已通过，六个 workspace 测试合计 13,189 passed、36 个既有 skip；WB-00 至 WB-04 在 macOS arm64 本机隔离范围为 READY/M1/M2 通过。PR #1 已合入 GitHub `main`（merge `61df29b`），候选 exact-head CI 24/24 通过，合并后 `main` 的五个 push workflow 均成功。按用户最新决定，本轮不手动同步官方当前稳定版、不更新上游基线，也不手动触发 workflow。M3 的真实 manual CAS publish 与独立 scheduled run 尚未验收。周同步 workflow 保持启用并按周运行；当前锁文件仍把 v0.9.2 记为未集成，下一次计划运行是 2026-10-10 10:30（Asia/Shanghai）。WB-06 延期。详细边界见[工作台验收记录](./workbench-acceptance-2026-10-02.md)。
+
+日期：2026-09-29。适用仓库：当前 Synara Expert fork。
 上位设计：[工作台架构](./workbench-architecture.md)。既有能力：[专家方案](./expert-product-technical-design.md)。
 
 ## 快速导航
@@ -22,9 +27,9 @@
 
 第一轮交付是一个可持续升级的个人工作台底座：当前专家能力继续可用，原生能力有回归验证，自定义应用与原版隔离，完成一次真实的官方版本集成，并建立每周候选更新流程。看板等新产品功能在此基础上继续增加。
 
-下表记录 2026-09-29 制定方案时的历史起点，不代表当前状态。之后已形成提交、补齐上游历史和发布标签；远端仍未推送或启用 workflow，也没有迁移活动用户数据或安装候选应用。本次 WB-02 实现与测试不访问活动数据库、不运行生产迁移，也不代表已完成 WB-04 的真实升级验收。
+计划制定时尚未执行提交、配置远端、迁移数据、安装新应用、推送或启用定时任务。以上为 2026-09-29 的历史记录，不代表当前进度；当前验收状态见[工作台验收记录](./workbench-acceptance-2026-10-02.md)。
 
-历史实施起点（2026-09-29）：
+截至 2026-09-29 核实的初始实施起点（历史快照）：
 
 | 项目       | 状态                                                                            | 实施影响                                                         |
 | ---------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------- |

@@ -1,9 +1,8 @@
 {
-  "baseHead": "61df29b094d3e5f2877f7787613655220a4f72a2",
-  "branch": "codex/context-v1.1",
-  "uncommitted": true,
-  "scope": "Context changes relative to the copied development candidate; historical prototype files unchanged",
-  "contentHash": "1ac1f794fc2215348cf4bf9bfa414bf13271968a42b1d419957d623e9ea21a77",
+  "codeCommit": "3a754ee699b3ea81eb41428910ced9e95dbdbf4c",
+  "branch": "main",
+  "scope": "Context V1.1 with integration recovery fixes and MCP diagnostic clarification; historical prototype code excluded",
+  "historicalManifest": "source-manifest-before-integration.json",
   "files": [
     {
       "path": "apps/server/integration/OrchestrationEngineHarness.integration.ts",
@@ -23,11 +22,11 @@
     },
     {
       "path": "apps/server/src/context/ContextRepository.test.ts",
-      "sha256": "19990d18c7bd3da3a668f6f7526ea4843fe0dd8a0f3de88ed5c923ea7f525a1d"
+      "sha256": "eb2ba9af29799bb060afa1261d4f429af0dc83ee1bac54526be0ce93a57a2c2f"
     },
     {
       "path": "apps/server/src/context/ContextRepository.ts",
-      "sha256": "842e834655ac6e1576644cb9c35fe801bb9c43be8a8992f7138d32c221a837c3"
+      "sha256": "4447f1cf784be5199a5d7fbebd2088e51a8a3b9d2a9129265836f8ce663ef1d4"
     },
     {
       "path": "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts",
@@ -35,15 +34,19 @@
     },
     {
       "path": "apps/server/src/orchestration/Layers/OrchestrationEngine.ts",
-      "sha256": "c8dd1460dd0419eccd6a41b779902d6cb2cf8711ed0e3edf19b256eab5b3ed28"
+      "sha256": "6be4eec6f937336f3bb78627793cb3d574a271f4386d2cdee63a91c49ddf67ea"
     },
     {
       "path": "apps/server/src/orchestration/Layers/OrchestrationReactor.test.ts",
       "sha256": "b39692f211a045d871537923bf57c83d72ebea0282e21f872a00c9b0305e3034"
     },
     {
+      "path": "apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts",
+      "sha256": "1346f133762d2b537cb051e58eb84017038a5013c5959f2c451064526ccb0039"
+    },
+    {
       "path": "apps/server/src/orchestration/Layers/ProjectionPipeline.ts",
-      "sha256": "d1fad17a68ae3b9a4395049c35d0f48dab98572397a94e595d03efb4b206a9ea"
+      "sha256": "a564d8fcb27f66c6cc39b7154230f09b22fd2aff852a0f79c50d89930ccc992f"
     },
     {
       "path": "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
@@ -119,7 +122,7 @@
     },
     {
       "path": "apps/server/src/provider/ContextRepositoryTestLayer.ts",
-      "sha256": "a0aa753fd9d45733a35c2b7bc2f940a1b3f2dfba4452fc7dd9a7296fef719c75"
+      "sha256": "8743e9dad388fe47e8505d6617031965c20b9da0b4dd4cde3ad53da09bc591f1"
     },
     {
       "path": "apps/server/src/provider/Layers/CodexAdapter.ts",
@@ -135,11 +138,11 @@
     },
     {
       "path": "apps/server/src/provider/Layers/ProviderService.test.ts",
-      "sha256": "e0b53356a46a76183eb8dd1a1189a870683a7c221c04e923e4d4242f00839793"
+      "sha256": "9770324cce224b902301ed965dfbb76cd7e6b9d91947232e811e653244f6b0cf"
     },
     {
       "path": "apps/server/src/provider/Layers/ProviderService.ts",
-      "sha256": "f8e9e8a9a175f1b63cf0afd06eeb2e9fb3eb25588dbce5eda39080508e47b08b"
+      "sha256": "218a21246564f25ca4801a51997a930bb4c00bee309178701d1c7f8bf64441b2"
     },
     {
       "path": "apps/server/src/provider/Layers/ProviderSessionReaper.test.ts",
@@ -214,6 +217,10 @@
       "sha256": "11a7544d937f91f306222b84c3ee4fbffb1f2827f6b5b8bb62e035482025ed18"
     },
     {
+      "path": "apps/web/src/components/chat/ExpertTaskControl.tsx",
+      "sha256": "672e8c00496404f6f3652510669b4928733fbb933af0e8c988cc2a9c63335aa9"
+    },
+    {
       "path": "apps/web/src/components/chat/environment/EnvironmentPanel.tsx",
       "sha256": "a1a2eb7869c99667f3b9fd445e2f784c8e134b911e9473b94182e1b49d329c18"
     },
@@ -266,6 +273,10 @@
       "sha256": "7b46017d5171be3ad2cdde78a695b1cbcce96fafa06725a6a3314c05ce5902e9"
     },
     {
+      "path": "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
+      "sha256": "7b276fadcf46605300fce3df180ad3d7e08e97d349895fbdb40fd3c389768abb"
+    },
+    {
       "path": "apps/web/src/components/settings/useExpertDraftGuard.browser.tsx",
       "sha256": "3b14b65a337b4ff5ba6b1eeaabc66c1bf2426cd09562ad49fba0f348c5b2a007"
     },
@@ -298,8 +309,12 @@
       "sha256": "12da278046816682423ddff4f52f6b8927647bf4410837f09d43248e7c18fe68"
     },
     {
+      "path": "context/PROJECT_CONTEXT.md",
+      "sha256": "3f4e41d8f959e42a27798266d658814617ea5b3c229d70742c5804d65f28dedc"
+    },
+    {
       "path": "docs/README.md",
-      "sha256": "634000e27586d53f545e587973c3f6e269890391e2a2b4130ac1437fa1383130"
+      "sha256": "8d084ad9a3ccc59623268c954784f8786c3ba38703b75a81c06095467f89cc31"
     },
     {
       "path": "docs/assets/context-v1.1/pi-expert-context-light.jpg",
@@ -308,6 +323,10 @@
     {
       "path": "docs/assets/context-v1.1/project-context-light.jpg",
       "sha256": "ef04a270238ba2d73b0b3474b17acf4ad929e85f47b8fec3c6ef0afc97f8ecab"
+    },
+    {
+      "path": "docs/assets/context-v1.1/source-manifest-before-integration.json",
+      "sha256": "a84d5c9b18a4cc74cdd622d0650e26f312e916170b345fb1ba4e0da26cc7a9b8"
     },
     {
       "path": "docs/assets/context-v1.1/space-settings-light.jpg",
@@ -331,15 +350,15 @@
     },
     {
       "path": "docs/space-project-context-v1-acceptance.md",
-      "sha256": "3569d8de8c6554186b91618995c785e151533545398ef66f1b0733388effb0c4"
+      "sha256": "be078361d57c13371bd60ac1de819c1482b14dda70ba60486cb86d651a60e970"
     },
     {
       "path": "docs/space-project-context-v1-implementation.md",
-      "sha256": "7d9e28f23801bd0337961e3a9affd1bf92bf45bc05d00b010a41761f5fd850d5"
+      "sha256": "082132f2ddd83c2004d2c2fb83e1d0dcf378ea4082c75b2e95192d2dc1977258"
     },
     {
       "path": "docs/space-project-context-v1-interaction-prd.md",
-      "sha256": "eb212423df87e86619a7e9ae80dc6748d39faf4bf5e37df8502222bedc32abd8"
+      "sha256": "b0d5296c499beec1cfafc5f6916d097e04c0903affc8d697ced8322e398a7782"
     },
     {
       "path": "packages/contracts/src/context.ts",
@@ -355,7 +374,7 @@
     },
     {
       "path": "packages/contracts/src/orchestration.ts",
-      "sha256": "4ebd8ee1629662d9431d6dc96b954b2a9c7930414ed6bca278d3b8bdcd5cbb20"
+      "sha256": "97242738f8e62f116611b1cb50f48ce3270b7f191611865332f62618a803da63"
     },
     {
       "path": "packages/contracts/src/provider.ts",
@@ -385,5 +404,7 @@
       "path": "scripts/workbench-build.test.ts",
       "sha256": "7d0973bc7336cc583c72c73f725ed6d1197d0446a0f3be4f3e14c818a7cb46b7"
     }
-  ]
+  ],
+  "contentHash": "0f5d5d06c02b02e1d814dacab52427647fa5894b0ef334f1e35913e0b403939d",
+  "contentHashFormat": "SHA-256 of compact UTF-8 files JSON"
 }

@@ -6,7 +6,7 @@
 
 本轮在原有 Sidebar、Space 编辑弹窗、Environment 与 Chat 中接入真实配置和执行链路。配置统一由服务端存储，浏览器只持有草稿。Hermes、Memory、知识库和安装包发布不在本轮范围内。
 
-代码在隔离工作区的 `codex/context-v1.1` 分支，基于 `61df29b094d3e5f2877f7787613655220a4f72a2` 加原开发候选的未提交基线。当前包含未提交变更，不能用该 HEAD 代表完整交付源码；验收记录另列实际文件清单和内容摘要。原开发候选与正式数据库保持独立。
+当前产品源码已固定为本地功能提交 `3a754ee69`，后续开发以主目录的本地 `main` 为入口。最初的隔离 Context 候选保存为 `4b3705f0b`，保留作历史证据；最终整合清单与检查范围见[接入验收第 8 节](./space-project-context-v1-acceptance.md#8-2026-10-15-浏览器版整合补充)。原测试实例与正式数据库保持独立。
 
 ## 2. 数据与所有权
 
@@ -73,18 +73,18 @@ WebSocket 协议最低版本提高到 revision 3，并发布 `context.v1` capabi
 
 无冲突和冲突路径均保留旧浏览器数据；失败、未知结果或冲突不能标为完成。只限制存在待处理迁移的相关项目的新对话首次执行，不影响已有快照、其他项目或无旧数据的用户。迁移不清理历史 Notes。
 
-未发布开发基线中曾存在未冻结回执的迁移事件。它们只来自旧的隔离测试实例；这类事件缺少可信结果时重建会明确失败，不使用当前配置猜测。旧测试 home 与对应源码保留作历史证据，不作为生产迁移或新整合版恢复输入。正式用户数据没有经过该开发版本迁移。
+未发布开发基线中曾存在未冻结回执的迁移事件。它们只来自旧的隔离测试实例；这类事件缺少可信结果时重建会明确失败，不使用当前配置猜测。旧测试 home 与对应源码保留作历史证据，不作为生产迁移或新整合版恢复输入。本轮未迁移正式用户数据。
 
 ## 8. 本地预览
 
-在 Context 开发工作区使用仓库锁定的 Node / Bun 版本运行：
+在整合预览工作区 `.synara/browser-integration` 使用仓库锁定的 Node / Bun 版本运行：
 
 ```sh
 env -u SYNARA_AUTH_TOKEN mise exec -- bun run dev --dry-run \
-  --home-dir /private/tmp/synara-context-v1.1-20261015 \
-  --host 127.0.0.1 --port 17738 --no-browser --no-auto-bootstrap-project-from-cwd
+  --home-dir /private/tmp/synara-browser-integration-20261015 \
+  --host 127.0.0.1 --port 17739 --no-browser --no-auto-bootstrap-project-from-cwd
 ```
 
-确认输出的 server/web 端口和独立目录后，去掉 `--dry-run` 启动。此实例网页为 [localhost:5733](http://localhost:5733/)，服务端为 17738。已有实例运行时重新检查 IPv4/IPv6 端口，勿复用正式 home 或数据库。上面的环境变量清理仅作用于隔离测试进程。
+确认输出的 server/web 端口和独立目录后，去掉 `--dry-run` 启动。此实例网页为 [localhost:5734](http://localhost:5734/)，服务端为 17739。已有实例运行时重新检查 IPv4/IPv6 端口，勿复用正式 home 或数据库。上面的环境变量清理仅作用于隔离测试进程。
 
 正式部署、数据迁移与安装包验收需要另外执行，不能把本地原生 Provider 验收当作已发布结果。

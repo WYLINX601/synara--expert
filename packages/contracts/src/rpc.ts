@@ -53,6 +53,21 @@ import {
   McpConnectionStateSchema,
 } from "./mcp";
 import {
+  ContextCommandReadInput,
+  ContextCommandResult,
+  ContextMigrationClaimInput,
+  ContextMigrationResolveInput,
+  ContextRetryInput,
+  ProjectContextReadInput,
+  ProjectContextSaveInput,
+  ProjectContextSettings,
+  SpaceContextReadInput,
+  SpaceContextSaveInput,
+  SpaceContextSettings,
+  ThreadContextDetails,
+  ThreadContextReadInput,
+} from "./context";
+import {
   ExternalMcpCreateIntegrationInput,
   ExternalMcpCreateIntegrationResult,
   ExternalMcpIntegration,
@@ -1667,6 +1682,60 @@ export const WsSubscribeAutomationEventsRpc = Rpc.make(WS_METHODS.subscribeAutom
   stream: true,
 });
 
+export const WsContextGetSpaceRpc = Rpc.make(WS_METHODS.contextGetSpace, {
+  payload: SpaceContextReadInput,
+  success: SpaceContextSettings,
+  error: WsRpcError,
+});
+
+export const WsContextGetProjectRpc = Rpc.make(WS_METHODS.contextGetProject, {
+  payload: ProjectContextReadInput,
+  success: ProjectContextSettings,
+  error: WsRpcError,
+});
+
+export const WsContextGetThreadRpc = Rpc.make(WS_METHODS.contextGetThread, {
+  payload: ThreadContextReadInput,
+  success: ThreadContextDetails,
+  error: WsRpcError,
+});
+
+export const WsContextSaveSpaceRpc = Rpc.make(WS_METHODS.contextSaveSpace, {
+  payload: SpaceContextSaveInput,
+  success: ContextCommandResult,
+  error: WsRpcError,
+});
+
+export const WsContextSaveProjectRpc = Rpc.make(WS_METHODS.contextSaveProject, {
+  payload: ProjectContextSaveInput,
+  success: ContextCommandResult,
+  error: WsRpcError,
+});
+
+export const WsContextGetCommandResultRpc = Rpc.make(WS_METHODS.contextGetCommandResult, {
+  payload: ContextCommandReadInput,
+  success: ContextCommandResult,
+  error: WsRpcError,
+});
+
+export const WsContextClaimMigrationRpc = Rpc.make(WS_METHODS.contextClaimMigration, {
+  payload: ContextMigrationClaimInput,
+  success: ContextCommandResult,
+  error: WsRpcError,
+});
+
+export const WsContextResolveMigrationRpc = Rpc.make(WS_METHODS.contextResolveMigration, {
+  payload: ContextMigrationResolveInput,
+  success: ContextCommandResult,
+  error: WsRpcError,
+});
+
+export const WsContextRetryLoadRpc = Rpc.make(WS_METHODS.contextRetryLoad, {
+  payload: ContextRetryInput,
+  success: ContextCommandResult,
+  error: WsRpcError,
+});
+
 export const WsBootstrapRpcGroup = RpcGroup.make(WsBootstrapNegotiateRpc);
 
 export const WsFeatureRpcGroup = RpcGroup.make(
@@ -1819,4 +1888,13 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsAutomationArchiveRunRpc,
   WsAutomationResolveProposalRpc,
   WsSubscribeAutomationEventsRpc,
+  WsContextGetSpaceRpc,
+  WsContextGetProjectRpc,
+  WsContextGetThreadRpc,
+  WsContextSaveSpaceRpc,
+  WsContextSaveProjectRpc,
+  WsContextGetCommandResultRpc,
+  WsContextClaimMigrationRpc,
+  WsContextResolveMigrationRpc,
+  WsContextRetryLoadRpc,
 );

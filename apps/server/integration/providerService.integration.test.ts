@@ -7,6 +7,7 @@ import { ProviderUnsupportedError } from "../src/provider/Errors.ts";
 import { ProviderAdapterRegistry } from "../src/provider/Services/ProviderAdapterRegistry.ts";
 import { ProviderSessionDirectoryLive } from "../src/provider/Layers/ProviderSessionDirectory.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
+import { makeContextRepositoryTestLayer } from "../src/provider/ContextRepositoryTestLayer.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -60,7 +61,10 @@ const makeIntegrationFixture = Effect.gen(function* () {
     Layer.succeed(ProviderAdapterRegistry, registry),
   ).pipe(Layer.provide(SqlitePersistenceMemory));
 
-  const layer = makeProviderServiceLive().pipe(Layer.provide(shared));
+  const layer = makeProviderServiceLive().pipe(
+    Layer.provide(shared),
+    Layer.provide(makeContextRepositoryTestLayer()),
+  );
 
   return {
     cwd,

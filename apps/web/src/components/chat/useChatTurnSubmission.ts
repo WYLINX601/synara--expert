@@ -44,6 +44,7 @@ import {
 } from "../ChatView.logic";
 import { toastManager } from "../ui/toast";
 import type { ChatTurnSubmissionInput } from "./chatSendTypes";
+import { useProjectContextMigration } from "./environment/useProjectContextMigration";
 import { handleChatAutomationSend } from "./handleChatAutomationSend";
 import { prepareChatSendWorkspace } from "./prepareChatSendWorkspace";
 import {
@@ -203,6 +204,14 @@ export function useChatTurnSubmission({
   runProjectScript,
   persistThreadSettingsForNextTurn,
 }: ChatTurnSubmissionInput) {
+  const projectContextMigration = useProjectContextMigration({
+    projectId: activeProject?.id ?? null,
+    threadId,
+    localProjectName: activeProject?.name ?? "",
+    localWorkspaceRoot: activeProject?.cwd ?? "",
+    isLocalDraft: isLocalDraftThread,
+  });
+  const beforeFirstSend = projectContextMigration.beforeFirstSend;
   const executePreparedTurn = useChatTurnExecution({
     isServerThread,
     setStoreThreadWorkspace,
@@ -282,6 +291,13 @@ export function useChatTurnSubmission({
         sendInFlightRef.current
       ) {
         return false;
+      }
+      if (isLocalDraftThread) {
+        sendPreflightInFlightRef.current = true;
+        const migrationResolved = await beforeFirstSend().finally(() => {
+          sendPreflightInFlightRef.current = false;
+        });
+        if (!migrationResolved) return false;
       }
       const hasPendingCacheReview = () =>
         getThreadFromState(useStore.getState(), activeThread.id)?.claudeCacheReview != null;
@@ -1073,7 +1089,8 @@ export function useChatTurnSubmission({
       providerStatuses,
       setOptimisticUserMessages,
       executePreparedTurn,
+      beforeFirstSend,
     ],
   );
-  return { onSend };
+  return { onSend, migrationDialog: projectContextMigration.dialog };
 }

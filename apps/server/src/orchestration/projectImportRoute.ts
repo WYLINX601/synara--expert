@@ -394,21 +394,24 @@ export function makeProjectImportHandlers(options: ProjectImportRouteOptions) {
             ? sourceWorkingDirectory
             : null;
         if (!existingThread) {
-          yield* options.orchestrationEngine.dispatch({
-            type: "thread.create",
-            commandId: CommandId.makeUnsafe(`project-import:${threadId}:create`),
-            threadId,
-            projectId: project.id,
-            title: source.title,
-            modelSelection,
-            runtimeMode: "approval-required",
-            interactionMode: "default",
-            envMode: worktreePath ? "worktree" : "local",
-            branch: null,
-            worktreePath,
-            ...(workingDirectory ? { workingDirectory } : {}),
-            createdAt: source.createdAt,
-          });
+          yield* options.orchestrationEngine.dispatch(
+            {
+              type: "thread.create",
+              commandId: CommandId.makeUnsafe(`project-import:${threadId}:create`),
+              threadId,
+              projectId: project.id,
+              title: source.title,
+              modelSelection,
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              envMode: worktreePath ? "worktree" : "local",
+              branch: null,
+              worktreePath,
+              ...(workingDirectory ? { workingDirectory } : {}),
+              createdAt: source.createdAt,
+            },
+            { contextOrigin: "historical" },
+          );
         }
         const settings = yield* options.serverSettings.getSettings;
         const configuredOptions = providerStartOptionsFromServerSettings(settings);

@@ -13,6 +13,11 @@ import {
 
 export interface UseExpertDraftGuardOptions {
   isDirty: boolean;
+  /** Returns false for in-scope route changes that should keep the draft mounted. */
+  shouldGuardNavigation?: (input: {
+    readonly currentPathname: string;
+    readonly nextPathname: string;
+  }) => boolean;
   canSave?: boolean;
   saveDisabledReason?: string;
   onSave: () => Promise<boolean>;
@@ -28,6 +33,7 @@ export function useExpertDraftGuard({
   isDirty,
   canSave = true,
   saveDisabledReason,
+  shouldGuardNavigation,
   onSave,
   onDiscard,
 }: UseExpertDraftGuardOptions): {
@@ -86,7 +92,13 @@ export function useExpertDraftGuard({
   }, []);
 
   useBlocker({
-    shouldBlockFn: async () => {
+    shouldBlockFn: async ({ current, next }) => {
+      if (
+        shouldGuardNavigation &&
+        !shouldGuardNavigation({ currentPathname: current.pathname, nextPathname: next.pathname })
+      ) {
+        return false;
+      }
       if (approvedNavigationRef.current) {
         approvedNavigationRef.current = false;
         if (approvedNavigationTimerRef.current !== null) {

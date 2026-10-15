@@ -350,7 +350,7 @@ describe("completed migration backup recovery", () => {
     });
 
     await expect(Effect.runPromise(restoreMarkedMigrationBackup(databasePath))).rejects.toThrow(
-      "Migration backup provenance does not describe the current database",
+      "Invalid migration backup provenance version identity",
     );
     const liveDatabase = new DatabaseSync(databasePath, { readOnly: true });
     try {
@@ -366,7 +366,9 @@ describe("completed migration backup recovery", () => {
 
   it("restores the explicitly selected completed backup instead of a leftover active marker", async () => {
     const databasePath = await makeDatabasePath();
-    const latestMigrationId = Math.max(...migrationEntries.map(([migrationId]) => migrationId));
+    // V1 provenance is a frozen legacy format. Current (Context-era) upgrades
+    // write V2 records, covered by MigrationBackup.test.ts.
+    const latestMigrationId = 108;
     const databaseMigrationId = latestMigrationId;
     const selectedBackupMigrationId = Math.max(latestMigrationId - 5, 0);
     writeTrackedDatabase(databasePath, databaseMigrationId);
@@ -458,8 +460,8 @@ describe("completed migration backup recovery", () => {
 
   it("recovers an exact restore after a crash strands the live database mid-swap", async () => {
     const databasePath = await makeDatabasePath();
-    const latestMigrationId = Math.max(...migrationEntries.map(([migrationId]) => migrationId));
-    const databaseMigrationId = latestMigrationId + 1;
+    const latestMigrationId = 108;
+    const databaseMigrationId = latestMigrationId;
     const backupMigrationId = Math.max(latestMigrationId - 5, 0);
     writeTrackedDatabase(databasePath, databaseMigrationId);
     await fs.mkdir(migrationBackupDirectory(databasePath));

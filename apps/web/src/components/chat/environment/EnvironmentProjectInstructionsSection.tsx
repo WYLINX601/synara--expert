@@ -4,7 +4,12 @@
 // Exports: EnvironmentProjectInstructionsSection
 
 import { useEffect, useId, useRef, useState, type ChangeEventHandler, type ReactNode } from "react";
-import { THREAD_NOTES_MAX_CHARS, type ProjectId } from "@synara/contracts";
+import {
+  CONTEXT_GOAL_MAX_LENGTH,
+  CONTEXT_INSTRUCTIONS_MAX_LENGTH,
+  THREAD_NOTES_MAX_CHARS,
+  type ProjectId,
+} from "@synara/contracts";
 
 import { Textarea } from "~/components/ui/textarea";
 import { Button } from "~/components/ui/button";
@@ -263,6 +268,7 @@ function ControlledProjectContextSection({
             placeholder="Describe the project goal"
             disabled={Boolean(context.disabled)}
           />
+          <ContextCharacterCount value={context.goal} limit={CONTEXT_GOAL_MAX_LENGTH} />
         </div>
       </EnvironmentCollapsibleSection>
       <EnvironmentCollapsibleSection label="Project instructions" defaultOpen={hasInstructions}>
@@ -276,6 +282,10 @@ function ControlledProjectContextSection({
             onChange={(event) => context.onInstructionsChange(event.target.value)}
             placeholder="Architecture notes, conventions, repo links"
             disabled={Boolean(context.disabled)}
+          />
+          <ContextCharacterCount
+            value={context.instructions}
+            limit={CONTEXT_INSTRUCTIONS_MAX_LENGTH}
           />
           {hasInstructions && canCopyToThreadNotes ? (
             <Button
@@ -299,6 +309,23 @@ function ControlledProjectContextSection({
       ) : null}
       {context.actions != null ? (
         <div className="flex flex-wrap items-center gap-2 px-2 pb-1">{context.actions}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function ContextCharacterCount({ value, limit }: { value: string; limit: number }) {
+  const overLimit = value.length > limit;
+  if (!overLimit) return null;
+  return (
+    <div className="flex justify-end text-ui-xs text-muted-foreground">
+      <span aria-live="polite">
+        {value.length} / {limit}
+      </span>
+      {overLimit ? (
+        <span role="alert" className="ml-2 text-destructive">
+          Limit exceeded
+        </span>
       ) : null}
     </div>
   );

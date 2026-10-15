@@ -23,6 +23,15 @@ import { AsyncUserInput, AsyncUserInputQuestions, AsyncUserInputResponse } from 
 import { ProjectKind } from "./project";
 import { ClaudeCacheObservation } from "./claudeCache";
 import {
+  ContextMode,
+  ContextSnapshot,
+  ContextCommandResult,
+  ProjectContextSaveInput,
+  SpaceContextSaveInput,
+  ContextMigrationClaimInput,
+  ContextMigrationResolveInput,
+} from "./context";
+import {
   ApprovalRequestId,
   CheckpointRef,
   CommandId,
@@ -1577,6 +1586,33 @@ const ThreadSessionStopCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ContextSpaceSaveCommand = Schema.Struct({
+  type: Schema.Literal("context.space.save"),
+  ...SpaceContextSaveInput.fields,
+});
+
+const ContextProjectSaveCommand = Schema.Struct({
+  type: Schema.Literal("context.project.save"),
+  ...ProjectContextSaveInput.fields,
+});
+
+const ContextMigrationClaimCommand = Schema.Struct({
+  type: Schema.Literal("context.migration.claim"),
+  ...ContextMigrationClaimInput.fields,
+});
+
+const ContextMigrationResolveCommand = Schema.Struct({
+  type: Schema.Literal("context.migration.resolve"),
+  ...ContextMigrationResolveInput.fields,
+});
+
+const ContextBindCommand = Schema.Struct({
+  type: Schema.Literal("context.bind"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadActivityAppendCommand = Schema.Struct({
   requireUnarchived: Schema.optional(Schema.Boolean),
   type: Schema.Literal("thread.activity.append"),
@@ -1619,6 +1655,10 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadMessageEditAndResendCommand,
   ThreadActivityAppendCommand,
   ThreadSessionStopCommand,
+  ContextSpaceSaveCommand,
+  ContextProjectSaveCommand,
+  ContextMigrationClaimCommand,
+  ContextMigrationResolveCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -1656,6 +1696,10 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadMessageEditAndResendCommand,
   ThreadActivityAppendCommand,
   ThreadSessionStopCommand,
+  ContextSpaceSaveCommand,
+  ContextProjectSaveCommand,
+  ContextMigrationClaimCommand,
+  ContextMigrationResolveCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -1807,6 +1851,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadDispatchQueuedTurnCommand,
   ThreadSidechatActivityRecordCommand,
   ThreadSidechatExpireCommand,
+  ContextBindCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1860,6 +1905,12 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.activity-appended",
   "thread.sidechat-activity-recorded",
   "thread.sidechat-expired",
+  "context.space.save-requested",
+  "context.project.save-requested",
+  "context.migration.claim-requested",
+  "context.migration.resolve-requested",
+  "context.thread.binding-set",
+  "context.thread.bind-requested",
 ]);
 export type OrchestrationEventType = typeof OrchestrationEventType.Type;
 
@@ -1984,6 +2035,42 @@ export const ThreadCreatedPayload = Schema.Struct({
   handoff: Schema.NullOr(ThreadHandoff).pipe(Schema.withDecodingDefault(() => null)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
+});
+
+export const ContextThreadBindingSetPayload = Schema.Struct({
+  threadId: ThreadId,
+  mode: ContextMode,
+  snapshot: Schema.optional(ContextSnapshot),
+});
+
+export const ContextThreadBindRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+  snapshot: Schema.optional(ContextSnapshot),
+});
+
+export const SpaceContextSaveRequestedPayload = Schema.Struct({
+  ...SpaceContextSaveInput.fields,
+  /** Frozen admission outcome; projections must never rerun this command's CAS. */
+  result: Schema.optional(ContextCommandResult),
+});
+
+export const ProjectContextSaveRequestedPayload = Schema.Struct({
+  ...ProjectContextSaveInput.fields,
+  /** Frozen admission outcome; projections must never rerun this command's CAS. */
+  result: Schema.optional(ContextCommandResult),
+});
+
+export const ContextMigrationClaimRequestedPayload = Schema.Struct({
+  ...ContextMigrationClaimInput.fields,
+  /** Frozen admission outcome; projections must never reevaluate the live Project metadata. */
+  result: Schema.optional(ContextCommandResult),
+});
+
+export const ContextMigrationResolveRequestedPayload = Schema.Struct({
+  ...ContextMigrationResolveInput.fields,
+  /** Frozen admission outcome; projections must never reevaluate the live Project context. */
+  result: Schema.optional(ContextCommandResult),
 });
 
 export const ThreadDeletedPayload = Schema.Struct({
@@ -2503,6 +2590,36 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.sidechat-expired"),
     payload: ThreadSidechatExpiredPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("context.space.save-requested"),
+    payload: SpaceContextSaveRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("context.project.save-requested"),
+    payload: ProjectContextSaveRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("context.migration.claim-requested"),
+    payload: ContextMigrationClaimRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("context.migration.resolve-requested"),
+    payload: ContextMigrationResolveRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("context.thread.binding-set"),
+    payload: ContextThreadBindingSetPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("context.thread.bind-requested"),
+    payload: ContextThreadBindRequestedPayload,
   }),
 ]);
 export type OrchestrationEvent = typeof OrchestrationEvent.Type;

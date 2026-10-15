@@ -28,11 +28,18 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function GuardLayout({ onDiscard }: { onDiscard: UseExpertDraftGuardOptions["onDiscard"] }) {
+function GuardLayout({
+  onDiscard,
+  shouldGuardNavigation,
+}: {
+  onDiscard: UseExpertDraftGuardOptions["onDiscard"];
+  shouldGuardNavigation?: UseExpertDraftGuardOptions["shouldGuardNavigation"];
+}) {
   const { dialog } = useExpertDraftGuard({
     isDirty: true,
     onSave: async () => true,
     onDiscard,
+    ...(shouldGuardNavigation ? { shouldGuardNavigation } : {}),
   });
   return (
     <>
@@ -42,9 +49,17 @@ function GuardLayout({ onDiscard }: { onDiscard: UseExpertDraftGuardOptions["onD
   );
 }
 
-async function mount(onDiscard: UseExpertDraftGuardOptions["onDiscard"]) {
+async function mount(
+  onDiscard: UseExpertDraftGuardOptions["onDiscard"],
+  shouldGuardNavigation?: UseExpertDraftGuardOptions["shouldGuardNavigation"],
+) {
   const root = createRootRoute({
-    component: () => <GuardLayout onDiscard={onDiscard} />,
+    component: () => (
+      <GuardLayout
+        onDiscard={onDiscard}
+        {...(shouldGuardNavigation ? { shouldGuardNavigation } : {})}
+      />
+    ),
   });
   const edit = createRoute({
     getParentRoute: () => root,
@@ -117,6 +132,21 @@ it("allows navigation when async discard resolves void", async () => {
   pending.resolve(undefined);
 
   await expect.poll(() => mounted.router.state.location.pathname).toBe("/settings");
+  await mounted.close();
+});
+
+it("skips the dirty guard for route changes accepted by an optional scope predicate", async () => {
+  const shouldGuardNavigation = vi.fn(() => false);
+  const mounted = await mount(() => undefined, shouldGuardNavigation);
+
+  await page.getByRole("button", { name: "Attempt leave" }).click();
+
+  await expect.poll(() => mounted.router.state.location.pathname).toBe("/settings");
+  expect(shouldGuardNavigation).toHaveBeenCalledWith({
+    currentPathname: "/edit",
+    nextPathname: "/settings",
+  });
+  expect(document.body.textContent).not.toContain("未保存的更改");
   await mounted.close();
 });
 

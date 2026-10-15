@@ -7,7 +7,12 @@ import type {
   SpaceId,
   ThreadId,
 } from "@synara/contracts";
-import { OrchestrationCommand, ORCHESTRATION_WS_METHODS } from "@synara/contracts";
+import {
+  OrchestrationCommand,
+  ORCHESTRATION_WS_METHODS,
+  SpaceIconName,
+  SpaceName,
+} from "@synara/contracts";
 import {
   Cause,
   Deferred,
@@ -78,6 +83,7 @@ import {
 } from "../Services/ProjectionPipeline.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import { ContextRepository, ContextRepositoryLive } from "../../context/ContextRepository.ts";
 import { REQUIRED_SNAPSHOT_PROJECTORS } from "./ProjectionSnapshotQuery.ts";
 import {
   OrchestrationEngineService,
@@ -97,6 +103,7 @@ type OrchestrationEnginePhase = "running" | "quiescing" | "draining" | "stopped"
 interface CommandEnvelope {
   command: OrchestrationCommand;
   attachmentPrincipal: ManagedAttachmentPrincipal;
+  contextOrigin?: "historical" | "provider_native";
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
   executionState: Ref.Ref<CommandExecutionState>;
   deadlineAtMs: number;
@@ -116,11 +123,27 @@ type CommittedCommandResult = {
   readonly nextCommandReadModel: OrchestrationReadModel;
 };
 
+export const contextBindingSourceThreadId = (created: {
+  readonly handoff?: { readonly sourceThreadId: ThreadId } | null | undefined;
+  readonly forkSourceThreadId?: ThreadId | null | undefined;
+  readonly sidechatSourceThreadId?: ThreadId | null | undefined;
+}): ThreadId | null =>
+  created.handoff?.sourceThreadId ??
+  created.forkSourceThreadId ??
+  created.sidechatSourceThreadId ??
+  null;
+
 function commandToAggregateRef(command: OrchestrationCommand): {
   readonly aggregateKind: "space" | "project" | "thread";
   readonly aggregateId: SpaceId | ProjectId | ThreadId;
 } {
   switch (command.type) {
+    case "context.space.save":
+      return { aggregateKind: "space", aggregateId: command.spaceId };
+    case "context.project.save":
+    case "context.migration.claim":
+    case "context.migration.resolve":
+      return { aggregateKind: "project", aggregateId: command.projectId };
     case "space.create":
     case "space.meta.update":
     case "space.reorder":
@@ -167,6 +190,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const messageRepository = yield* ProjectionThreadMessageRepository;
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const contextRepository = yield* ContextRepository;
   const serverConfig = yield* ServerConfig;
   const expertStore = createExpertStore(serverConfig.stateDir);
   const deciderWorkspacePaths = {
@@ -240,6 +264,141 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       commandId: command.commandId,
       commandType: command.type,
       detail,
+    });
+
+  const contextEventBase = (input: {
+    readonly commandId: OrchestrationCommand["commandId"];
+    readonly aggregateKind: OrchestrationEvent["aggregateKind"];
+    readonly aggregateId: OrchestrationEvent["aggregateId"];
+    readonly occurredAt: string;
+  }) => ({
+    eventId: crypto.randomUUID() as OrchestrationEvent["eventId"],
+    aggregateKind: input.aggregateKind,
+    aggregateId: input.aggregateId,
+    occurredAt: input.occurredAt,
+    commandId: input.commandId,
+    causationEventId: null,
+    correlationId: input.commandId,
+    metadata: {},
+  });
+
+  const makeThreadCreationContextEvent = (
+    events: ReadonlyArray<Omit<OrchestrationEvent, "sequence">>,
+    command: OrchestrationCommand,
+    contextOrigin: CommandEnvelope["contextOrigin"],
+  ): Effect.Effect<Omit<OrchestrationEvent, "sequence"> | undefined, OrchestrationDispatchError> =>
+    Effect.gen(function* () {
+      const created = events.find(
+        (event): event is Extract<OrchestrationEvent, { type: "thread.created" }> =>
+          event.type === "thread.created",
+      );
+      if (!created) return undefined;
+
+      let binding: {
+        readonly mode: "legacy" | "unbound" | "bound";
+        readonly snapshot?: import("@synara/contracts").ContextSnapshot;
+      } = {
+        mode: "unbound",
+      };
+      if (contextOrigin !== undefined) {
+        binding = { mode: "legacy" };
+      } else {
+        const sourceThreadId = contextBindingSourceThreadId(created.payload);
+        if (sourceThreadId !== null) {
+          const sourceThread = commandReadModel.threads.find(
+            (thread) => thread.id === sourceThreadId,
+          );
+          if (sourceThread?.projectId === created.payload.projectId) {
+            const sourceBinding = yield* contextRepository.getThreadBinding(sourceThreadId);
+            if (sourceBinding !== undefined) binding = sourceBinding;
+          }
+        }
+      }
+
+      if (binding.mode === "bound" && binding.snapshot === undefined) {
+        return yield* makeCommandInternalError(
+          command,
+          "A source thread has a bound Context mode without its immutable snapshot.",
+        );
+      }
+      return {
+        ...contextEventBase({
+          commandId: command.commandId,
+          aggregateKind: "thread",
+          aggregateId: created.payload.threadId,
+          occurredAt: created.payload.createdAt,
+        }),
+        type: "context.thread.binding-set" as const,
+        payload: {
+          threadId: created.payload.threadId,
+          mode: binding.mode,
+          ...(binding.snapshot !== undefined ? { snapshot: binding.snapshot } : {}),
+        },
+      };
+    });
+
+  const validateAndMakeExecutionBindEvent = (
+    command: OrchestrationCommand,
+    events: ReadonlyArray<Omit<OrchestrationEvent, "sequence">>,
+  ): Effect.Effect<Omit<OrchestrationEvent, "sequence"> | undefined, OrchestrationDispatchError> =>
+    Effect.gen(function* () {
+      if (
+        command.type !== "thread.turn.start" &&
+        command.type !== "thread.goal.continue" &&
+        command.type !== "context.bind"
+      ) {
+        return undefined;
+      }
+      const binding = yield* contextRepository.getThreadBinding(command.threadId);
+      if (binding?.mode !== "unbound") {
+        return command.type === "context.bind"
+          ? events.find((event) => event.type === "context.thread.bind-requested")
+          : undefined;
+      }
+      const thread = commandReadModel.threads.find((entry) => entry.id === command.threadId);
+      if (!thread) {
+        return yield* makeCommandInternalError(
+          command,
+          "The thread disappeared during Context admission.",
+        );
+      }
+      const project = yield* contextRepository.getProject(thread.projectId);
+      if (project.migration?.status === "pending" || project.migration?.status === "conflict") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Resolve the claimed legacy Project instructions before starting a new execution.",
+        });
+      }
+      const preview = yield* contextRepository.getPreview(thread.projectId);
+      const provider =
+        command.type === "thread.turn.start"
+          ? (command.modelSelection?.provider ?? thread.modelSelection.provider)
+          : thread.modelSelection.provider;
+      if (preview.hasContent && provider !== "codex" && provider !== "pi") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Project Context with content is currently supported only for Codex and Pi.",
+        });
+      }
+      const existingRequest = events.find(
+        (event): event is Extract<OrchestrationEvent, { type: "context.thread.bind-requested" }> =>
+          event.type === "context.thread.bind-requested",
+      );
+      if (existingRequest) {
+        return yield* contextRepository.prepareBinding(existingRequest);
+      }
+      const occurredAt = command.createdAt;
+      return yield* contextRepository.prepareBinding({
+        ...contextEventBase({
+          commandId: command.commandId,
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+        }),
+        type: "context.thread.bind-requested" as const,
+        payload: { threadId: command.threadId, createdAt: occurredAt },
+      });
     });
 
   const validateCommandReceiptIdentity = (
@@ -954,6 +1113,25 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         const deferredSettledSequences = new Set<number>();
         let nextCommandReadModel = commandReadModel;
 
+        const eventsToCommit = [...eventBases];
+        const creationContextEvent = yield* makeThreadCreationContextEvent(
+          eventBases,
+          command,
+          envelope.contextOrigin,
+        );
+        if (creationContextEvent !== undefined) {
+          const createdIndex = eventsToCommit.findIndex((event) => event.type === "thread.created");
+          eventsToCommit.splice(createdIndex + 1, 0, creationContextEvent);
+        }
+        const executionBindEvent = yield* validateAndMakeExecutionBindEvent(command, eventBases);
+        if (executionBindEvent !== undefined) {
+          const existingBindIndex = eventsToCommit.findIndex(
+            (event) => event.eventId === executionBindEvent.eventId,
+          );
+          if (existingBindIndex >= 0) eventsToCommit[existingBindIndex] = executionBindEvent;
+          else eventsToCommit.unshift(executionBindEvent);
+        }
+
         if (command.type === "thread.turn.start") {
           const attachmentIds = command.message.attachments
             .filter((attachment) => attachment.type === "image" || attachment.type === "file")
@@ -975,8 +1153,28 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           }
         }
 
-        for (const nextEvent of eventBases) {
-          const savedEvent = yield* eventStore.append(nextEvent);
+        for (const nextEvent of eventsToCommit) {
+          let preparedEvent = nextEvent;
+          switch (nextEvent.type) {
+            case "context.space.save-requested":
+              preparedEvent = yield* contextRepository.prepareSpaceSave(nextEvent);
+              break;
+            case "context.project.save-requested":
+              preparedEvent = yield* contextRepository.prepareProjectSave(nextEvent);
+              break;
+            case "context.migration.claim-requested":
+              preparedEvent = yield* contextRepository.prepareMigrationClaim(nextEvent);
+              break;
+            case "context.migration.resolve-requested":
+              preparedEvent = yield* contextRepository.prepareMigrationResolve(nextEvent);
+              break;
+            case "context.thread.bind-requested":
+              preparedEvent = yield* contextRepository.prepareBinding(nextEvent);
+              break;
+            default:
+              break;
+          }
+          const savedEvent = yield* eventStore.append(preparedEvent);
           nextCommandReadModel = yield* projectEvent(nextCommandReadModel, savedEvent);
           if (isShellMetadataEvent(savedEvent)) {
             yield* projectionPipeline.projectMetadataEvent(savedEvent);
@@ -986,6 +1184,33 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             if (deferredPhaseSettled) deferredSettledSequences.add(savedEvent.sequence);
           }
           committedEvents.push(savedEvent);
+
+          if (savedEvent.type === "context.space.save-requested") {
+            const result = yield* contextRepository.getCommandResult(savedEvent.payload.commandId);
+            if (result.status === "saved" && result.space !== undefined) {
+              const metadataEventBase = contextEventBase({
+                commandId: savedEvent.payload.commandId,
+                aggregateKind: "space",
+                aggregateId: savedEvent.payload.spaceId,
+                occurredAt: savedEvent.occurredAt,
+              });
+              const metadataEvent = yield* eventStore.append({
+                ...metadataEventBase,
+                type: "space.meta-updated",
+                payload: {
+                  spaceId: result.space.spaceId,
+                  name: Schema.decodeUnknownSync(SpaceName)(result.space.name),
+                  icon: Schema.decodeUnknownSync(SpaceIconName)(result.space.icon),
+                  updatedAt: savedEvent.occurredAt,
+                },
+              });
+              nextCommandReadModel = yield* projectEvent(nextCommandReadModel, metadataEvent);
+              if (isShellMetadataEvent(metadataEvent)) {
+                yield* projectionPipeline.projectMetadataEvent(metadataEvent);
+              }
+              committedEvents.push(metadataEvent);
+            }
+          }
         }
 
         const lastSavedEvent = committedEvents.at(-1) ?? null;
@@ -1435,6 +1660,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       const envelope: CommandEnvelope = {
         command,
         attachmentPrincipal: context?.attachmentPrincipal ?? LOCAL_LOOPBACK_ATTACHMENT_PRINCIPAL,
+        ...(context?.contextOrigin !== undefined ? { contextOrigin: context.contextOrigin } : {}),
         result,
         executionState,
         deadlineAtMs: Date.now() + ORCHESTRATION_DISPATCH_TIMEOUT_MS,
@@ -1732,4 +1958,5 @@ export const OrchestrationEngineLive = Layer.effect(
 ).pipe(
   Layer.provide(ProjectionThreadMessageRepositoryLive),
   Layer.provideMerge(ManagedAttachmentRepositoryLive),
+  Layer.provideMerge(ContextRepositoryLive),
 );

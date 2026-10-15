@@ -41,6 +41,7 @@ import {
   type OrchestrationProjectionPipelineShape,
 } from "../Services/ProjectionPipeline.ts";
 import { ServerConfig } from "../../config.ts";
+import { ContextRepository } from "../../context/ContextRepository.ts";
 import { runManagedAttachmentCleanupBatch } from "../../managedAttachmentCleanup.ts";
 
 const readProjectedMessage = (threadId: ThreadId, messageId: MessageId) =>
@@ -5538,6 +5539,100 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("synara-human-recen
           yield* sql`DELETE FROM projection_state`;
           yield* pipeline.bootstrap;
           yield* readSummary;
+        }),
+    );
+  },
+);
+
+it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("synara-context-rebuild-")))(
+  "Context projection rebuild",
+  (it) => {
+    it.effect(
+      "restores the original complete snapshot after project and thread projections are cleared",
+      () =>
+        Effect.gen(function* () {
+          const eventStore = yield* OrchestrationEventStore;
+          const pipeline = yield* OrchestrationProjectionPipeline;
+          const context = yield* ContextRepository;
+          const sql = yield* SqlClient.SqlClient;
+          const now = "2026-10-15T10:00:00.000Z";
+          const projectId = ProjectId.makeUnsafe("context-rebuild-project");
+          const threadId = ThreadId.makeUnsafe("context-rebuild-thread");
+          const append = makeScenarioAppender(
+            makeAppendAndProject(eventStore, pipeline),
+            "context-rebuild",
+          );
+          yield* append({
+            type: "project.created",
+            aggregateKind: "project",
+            aggregateId: projectId,
+            occurredAt: now,
+            payload: {
+              projectId,
+              title: "Research",
+              workspaceRoot: "/tmp/context-original",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+          yield* append({
+            type: "thread.created",
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: now,
+            payload: {
+              threadId,
+              projectId,
+              title: "Original thread",
+              modelSelection: { provider: "codex", model: "test-model" },
+              runtimeMode: "full-access",
+              branch: null,
+              worktreePath: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+          yield* sql`INSERT INTO context_projects (project_id, project_goal, project_instructions, revision, updated_at)
+          VALUES (${projectId}, 'Original goal', 'Keep the original instructions.\n', 1, ${now})`;
+          yield* append({
+            type: "context.thread.binding-set",
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: now,
+            payload: { threadId, mode: "unbound" },
+          });
+          const snapshot = yield* context.buildBindingSnapshot(
+            threadId,
+            "evt-context-rebuild-4",
+            now,
+          );
+          yield* append({
+            type: "context.thread.bind-requested",
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: now,
+            payload: { threadId, createdAt: now, snapshot },
+          });
+          const original = (yield* sql<{ readonly json: string }>`
+          SELECT snapshot_json AS json FROM context_thread_bindings WHERE thread_id = ${threadId}
+        `)[0]!.json;
+          yield* sql`DELETE FROM context_thread_bindings`;
+          yield* sql`DELETE FROM context_projects`;
+          yield* sql`DELETE FROM projection_threads`;
+          yield* sql`DELETE FROM projection_projects`;
+          yield* sql`DELETE FROM projection_state`;
+          yield* pipeline.bootstrap;
+          const restored = yield* context.getThreadBinding(threadId);
+          assert.equal(restored?.mode, "bound");
+          assert.deepEqual(restored?.snapshot, snapshot);
+          assert.equal(
+            (yield* sql<{ readonly json: string }>`
+          SELECT snapshot_json AS json FROM context_thread_bindings WHERE thread_id = ${threadId}
+        `)[0]!.json,
+            original,
+          );
         }),
     );
   },

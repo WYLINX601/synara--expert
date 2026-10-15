@@ -22,11 +22,59 @@ const deliveryColumns = (sql: SqlClient.SqlClient) => sql`
   attempt_count AS "attemptCount",
   last_error AS "lastError",
   completed_at AS "completedAt",
-  updated_at AS "updatedAt"
+  updated_at AS "updatedAt",
+  context_snapshot_id AS "contextSnapshotId",
+  context_input_digest AS "contextInputDigest",
+  context_message_id AS "contextMessageId",
+  context_phase AS "contextPhase"
 `;
 
 const makeRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+
+  const getReconciliation: OrchestrationEventDeliveryRepositoryShape["getReconciliation"] = (
+    reconciliationId,
+  ) =>
+    sql<{
+      readonly eventSequence: number;
+      readonly threadId: string;
+      readonly outcome: "accepted" | "safe_retry" | "abandon";
+    }>`
+      SELECT event_sequence AS "eventSequence", thread_id AS "threadId", outcome
+      FROM provider_delivery_reconciliations
+      WHERE reconciliation_id = ${reconciliationId}
+    `.pipe(
+      Effect.map((rows) => Option.fromNullishOr(rows[0])),
+      Effect.mapError(toPersistenceSqlError("OrchestrationEventDelivery.getReconciliation")),
+    );
+
+  const recordContextPhase: OrchestrationEventDeliveryRepositoryShape["recordContextPhase"] = (
+    input,
+  ) =>
+    sql<{ readonly eventSequence: number }>`
+      UPDATE orchestration_event_deliveries
+      SET context_snapshot_id = ${input.snapshotId},
+          context_input_digest = ${input.inputDigest},
+          context_message_id = ${input.messageId},
+          context_phase = ${input.phase},
+          updated_at = ${input.updatedAt}
+      WHERE consumer_name = ${input.consumerName}
+        AND event_sequence = ${input.eventSequence}
+        AND state = 'inflight'
+        AND claim_owner = ${input.expectedClaimOwner}
+        AND (context_snapshot_id IS NULL OR context_snapshot_id = ${input.snapshotId})
+        AND (context_input_digest IS NULL OR context_input_digest = ${input.inputDigest})
+        AND (context_message_id IS NULL OR context_message_id = ${input.messageId})
+        AND (
+          (${input.phase} = 'before_dispatch' AND (context_phase IS NULL OR context_phase = 'before_dispatch'))
+          OR (${input.phase} = 'dispatch_started' AND context_phase IN ('before_dispatch', 'dispatch_started'))
+          OR (${input.phase} = 'acknowledged' AND context_phase = 'dispatch_started')
+        )
+      RETURNING event_sequence AS "eventSequence"
+    `.pipe(
+      Effect.map((rows) => rows.length === 1),
+      Effect.mapError(toPersistenceSqlError("OrchestrationEventDelivery.recordContextPhase")),
+    );
 
   const getConsumerStateRow = SqlSchema.findOneOption({
     Request: Schema.String,
@@ -343,6 +391,7 @@ const makeRepository = Effect.gen(function* () {
             AND event_sequence = ${input.eventSequence}
             AND thread_id = ${input.threadId}
             AND state = ${input.expectedState}
+            AND (${input.expectedUpdatedAt ?? null} IS NULL OR updated_at = ${input.expectedUpdatedAt ?? null})
         `;
           if (candidates.length !== 1) return Option.none<OrchestrationEventDelivery>();
 
@@ -364,6 +413,10 @@ const makeRepository = Effect.gen(function* () {
               claimed_at = NULL,
               claim_expires_at = NULL,
               completed_at = ${input.outcome === "safe_retry" ? null : input.reconciledAt},
+              context_phase = CASE
+                WHEN ${input.outcome} = 'safe_retry' AND context_snapshot_id IS NOT NULL THEN 'before_dispatch'
+                ELSE context_phase
+              END,
               updated_at = ${input.reconciledAt}
           WHERE consumer_name = ${input.consumerName}
             AND event_sequence = ${input.eventSequence}
@@ -377,6 +430,8 @@ const makeRepository = Effect.gen(function* () {
       .pipe(Effect.mapError(toPersistenceSqlError("OrchestrationEventDelivery.reconcile")));
 
   return {
+    getReconciliation,
+    recordContextPhase,
     getConsumerState,
     getDelivery,
     claim,

@@ -123,6 +123,7 @@ async function mountMenu(props?: {
   interactionMode?: ProviderInteractionMode;
   supportsFastMode?: boolean;
   threadId?: ThreadId;
+  onViewContext?: () => void;
 }) {
   const onAddAttachments = vi.fn();
   const onToggleFastMode = vi.fn();
@@ -142,6 +143,7 @@ async function mountMenu(props?: {
       onToggleFastMode={onToggleFastMode}
       onInteractionModeChange={onInteractionModeChange}
       onInsertGoal={onInsertGoal}
+      {...(props?.onViewContext ? { onViewContext: props.onViewContext } : {})}
       onClose={onClose}
     />,
     { container: host },
@@ -159,6 +161,7 @@ async function mountMenu(props?: {
     onToggleFastMode,
     onInteractionModeChange,
     onInsertGoal,
+    onViewContext: props?.onViewContext,
     onClose,
   };
 }
@@ -216,6 +219,16 @@ describe("ComposerExtrasPanel", () => {
     await page.getByText("Fast mode", { exact: true }).click();
 
     expect(menu.onToggleFastMode).toHaveBeenCalledTimes(1);
+    expect(menu.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens Context details from the existing plus menu row", async () => {
+    const onViewContext = vi.fn();
+    await using menu = await mountMenu({ onViewContext });
+
+    await page.getByText("查看上下文", { exact: true }).click();
+
+    expect(onViewContext).toHaveBeenCalledTimes(1);
     expect(menu.onClose).toHaveBeenCalledTimes(1);
   });
 

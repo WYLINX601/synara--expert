@@ -52,17 +52,17 @@
 
 ## 当前权威材料
 
-| 材料                                                         | 角色               | 当前用途                                                         |
-| ------------------------------------------------------------ | ------------------ | ---------------------------------------------------------------- |
-| [Linx V2.0 原文](../docs/linx-product-design-v2.md) | 当前 Linx 产品设计来源 | 长期工作方向、Hermes / Expert 分工、Context、进化、UI 与 MVP；未实现内容保留设计状态 |
-| [Expert 产品与技术方案](../docs/expert-product-technical-design.md) | 既有 Expert 子系统基线 | Expert 对象、交互、数据模型、Provider 适配和阶段范围 |
-| [P0 技术验证记录](../docs/expert-p0/README.md)               | 当前验证结论入口   | Codex / Pi、恢复、取消、Gateway 与真实模型证据                   |
-| [发布故障矩阵](../docs/expert-p0/release-fault-matrix.md)    | 当前验收与缺口清单 | 区分自动化、本机实测和待平台实测                                 |
-| [交互线框](../docs/expert-interaction-wireframe.html)        | 已确认的交互参考   | 新任务选专家、专家管理和任务详情的首版流程                       |
-| [架构图](../docs/expert-architecture.drawio)                 | 可编辑架构参考     | Expert、Task、Provider、Gateway 和连接的关系                     |
-| [轻量适配层方案](../docs/workbench-adaptation-plan.md)       | 已确认的首期设计   | A0–A4 范围、UI / 服务端适配与保留的深层接入                      |
-| [适配层实施验收](../docs/workbench-adaptation-acceptance.md) | 当前进度与验证入口 | 候选源码、实际检查、遗留失败与受控演练；完整日志不复制到 context |
-| [工作台开发流程](../docs/workbench-development-workflow.md)  | 开发与验证约定     | 按影响选择检查、证据有效性和完成报告                             |
+| 材料                                                                | 角色                   | 当前用途                                                                             |
+| ------------------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------ |
+| [Linx V2.0 原文](../docs/linx-product-design-v2.md)                 | 当前 Linx 产品设计来源 | 长期工作方向、Hermes / Expert 分工、Context、进化、UI 与 MVP；未实现内容保留设计状态 |
+| [Expert 产品与技术方案](../docs/expert-product-technical-design.md) | 既有 Expert 子系统基线 | Expert 对象、交互、数据模型、Provider 适配和阶段范围                                 |
+| [P0 技术验证记录](../docs/expert-p0/README.md)                      | 当前验证结论入口       | Codex / Pi、恢复、取消、Gateway 与真实模型证据                                       |
+| [发布故障矩阵](../docs/expert-p0/release-fault-matrix.md)           | 当前验收与缺口清单     | 区分自动化、本机实测和待平台实测                                                     |
+| [交互线框](../docs/expert-interaction-wireframe.html)               | 已确认的交互参考       | 新任务选专家、专家管理和任务详情的首版流程                                           |
+| [架构图](../docs/expert-architecture.drawio)                        | 可编辑架构参考         | Expert、Task、Provider、Gateway 和连接的关系                                         |
+| [轻量适配层方案](../docs/workbench-adaptation-plan.md)              | 已确认的首期设计       | A0–A4 范围、UI / 服务端适配与保留的深层接入                                          |
+| [适配层实施验收](../docs/workbench-adaptation-acceptance.md)        | 当前进度与验证入口     | 候选源码、实际检查、遗留失败与受控演练；完整日志不复制到 context                     |
+| [工作台开发流程](../docs/workbench-development-workflow.md)         | 开发与验证约定         | 按影响选择检查、证据有效性和完成报告                                                 |
 
 ## 既有 Expert 子系统已确认决定
 

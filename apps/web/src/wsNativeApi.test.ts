@@ -152,6 +152,36 @@ afterEach(() => {
 });
 
 describe("wsNativeApi", () => {
+  it("routes Context API calls through their registered RPC methods", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    const context = api.context;
+    if (!context) throw new Error("WebSocket NativeApi must expose Context methods");
+    requestMock.mockResolvedValue(null);
+
+    await context.getSpace({} as never);
+    await context.getProject({} as never);
+    await context.getThread({} as never);
+    await context.saveSpace({} as never);
+    await context.saveProject({} as never);
+    await context.getCommandResult({} as never);
+    await context.claimMigration({} as never);
+    await context.resolveMigration({} as never);
+    await context.retryLoad({} as never);
+
+    expect(requestMock.mock.calls.map(([method]) => method)).toEqual([
+      WS_METHODS.contextGetSpace,
+      WS_METHODS.contextGetProject,
+      WS_METHODS.contextGetThread,
+      WS_METHODS.contextSaveSpace,
+      WS_METHODS.contextSaveProject,
+      WS_METHODS.contextGetCommandResult,
+      WS_METHODS.contextClaimMigration,
+      WS_METHODS.contextResolveMigration,
+      WS_METHODS.contextRetryLoad,
+    ]);
+  });
+
   it("forwards revision-guarded expert restore through its server RPC", async () => {
     const { createWsNativeApi } = await import("./wsNativeApi");
     const api = createWsNativeApi();

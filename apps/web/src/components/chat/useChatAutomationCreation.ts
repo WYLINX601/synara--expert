@@ -1,4 +1,5 @@
 import {
+  WS_CONTEXT_V1_CAPABILITY,
   EventId,
   ProviderInteractionMode,
   RuntimeMode,
@@ -18,6 +19,7 @@ import { useCallback } from "react";
 import { promoteThreadCreate } from "~/lib/threadCreatePromotion";
 import { newCommandId, randomUUID } from "~/lib/utils";
 import { readNativeApi } from "~/nativeApi";
+import { readNativeApiServerCapability } from "~/nativeApi";
 import { dispatchThreadNotes } from "~/pinnedMessages";
 import {
   mergeProjectInstructionsIntoThreadNotes,
@@ -291,8 +293,10 @@ export function useChatAutomationCreation({
           return null;
         }
 
-        const inheritedProjectInstructions =
-          useProjectInstructionsStore.getState().instructionsByProjectId[activeProject.id] ?? "";
+        const inheritedProjectInstructions = readNativeApiServerCapability(WS_CONTEXT_V1_CAPABILITY)
+          ? ""
+          : (useProjectInstructionsStore.getState().instructionsByProjectId[activeProject.id] ??
+            "");
         const inheritedThreadNotes = mergeProjectInstructionsIntoThreadNotes({
           threadNotes,
           projectInstructions: inheritedProjectInstructions,

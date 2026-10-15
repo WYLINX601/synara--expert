@@ -70,6 +70,11 @@ import { findProviderStatus } from "~/lib/providerAvailability";
 import { serverSettingsQueryOptions } from "~/lib/serverReactQuery";
 import { cn, isMacNavigatorPlatform, newCommandId, newThreadId, randomUUID } from "~/lib/utils";
 import { readNativeApi } from "~/nativeApi";
+import { useProjectContextAutosave } from "./chat/environment/useProjectContextAutosave";
+import { useSpacesUiStore } from "../spacesUiStore";
+import { shouldGuardProjectContextNavigation } from "./chat/environment/projectContextNavigationGuard";
+import { ContextDetailsDialog } from "./chat/ContextDetailsDialog";
+import { useExpertDraftGuard } from "./settings/useExpertDraftGuard";
 import {
   mergeProjectInstructionsIntoThreadNotes,
   useProjectInstructionsStore,
@@ -768,6 +773,7 @@ export default function ChatView({
   // The composer `+` panel shares the floating slot above the editor with the
   // slash/mention command menu, so only one of the two is ever open.
   const [isComposerExtrasPanelOpen, setIsComposerExtrasPanelOpen] = useState(false);
+  const [isContextDetailsOpen, setIsContextDetailsOpen] = useState(false);
   const [secondaryChromePlaceholderHeight, setSecondaryChromePlaceholderHeight] = useState(88);
   // Tracks whether the user explicitly dismissed the sidebar for the active turn.
   const planSidebarDismissedForTurnRef = useRef<string | null>(null);
@@ -980,6 +986,36 @@ export default function ChatView({
   const activeProject = useStore(
     useMemo(() => createProjectSelector(activeProjectId), [activeProjectId]),
   );
+  const projectContext = useProjectContextAutosave(activeProjectId, true);
+  const projectContextState = projectContext.state;
+  const contextGuardShouldBlockNavigation = useCallback(
+    ({ currentPathname, nextPathname }: { currentPathname: string; nextPathname: string }) => {
+      return shouldGuardProjectContextNavigation({
+        activeProjectId,
+        currentPathname,
+        nextPathname,
+        projectIdForThread: (targetThreadId) =>
+          getThreadFromState(useStore.getState(), targetThreadId)?.projectId ??
+          useComposerDraftStore.getState().draftThreadsByThreadId[targetThreadId]?.projectId ??
+          null,
+      });
+    },
+    [activeProjectId],
+  );
+  const projectContextGuard = useExpertDraftGuard({
+    isDirty: projectContextState?.dirty ?? false,
+    canSave: Boolean(
+      projectContext.controller &&
+      !projectContextState?.error &&
+      projectContextState?.status !== "conflict",
+    ),
+    ...(projectContextState?.error
+      ? { saveDisabledReason: projectContextState.error.message }
+      : {}),
+    shouldGuardNavigation: contextGuardShouldBlockNavigation,
+    onSave: () => projectContext.controller?.flush() ?? Promise.resolve(false),
+    onDiscard: () => projectContext.controller?.discard() ?? Promise.resolve(true),
+  });
   const deletePlaceholderTerminalThread = useCallback(
     async (terminalThreadId: ThreadId) => {
       const api = readNativeApi();
@@ -1078,6 +1114,11 @@ export default function ChatView({
     activeProjectId ? (state.instructionsByProjectId[activeProjectId] ?? "") : "",
   );
   const setProjectInstructions = useProjectInstructionsStore((state) => state.setInstructions);
+  const projectInstructionsForCopy = projectContext.available
+    ? (projectContextState?.base.projectInstructions ??
+      projectContext.settings?.projectInstructions ??
+      "")
+    : projectInstructions;
   const homeDir = useWorkspacePathsStore((state) => state.homeDir);
   const chatWorkspaceRoot = useWorkspacePathsStore((state) => state.chatWorkspaceRoot);
   const studioWorkspaceRoot = useWorkspacePathsStore((state) => state.studioWorkspaceRoot);
@@ -1752,7 +1793,7 @@ export default function ChatView({
     }
     const nextNotes = mergeProjectInstructionsIntoThreadNotes({
       threadNotes,
-      projectInstructions,
+      projectInstructions: projectInstructionsForCopy,
     });
     if (nextNotes === threadNotes) {
       return;
@@ -1767,7 +1808,12 @@ export default function ChatView({
       .catch(() => {
         // `handleNotesChange` already surfaces the save failure through the shared notes toast.
       });
-  }, [activeThreadId, handleNotesChange, projectInstructions, threadNotes]);
+  }, [activeThreadId, handleNotesChange, projectInstructionsForCopy, threadNotes]);
+  const handleNewThreadWithLatestContext = useCallback(() => {
+    if (!activeProjectId) return;
+    setIsContextDetailsOpen(false);
+    void handleNewThread(activeProjectId, { entryPoint: "chat" });
+  }, [activeProjectId, handleNewThread]);
   const handleJumpToPinnedMessage = useCallback(
     (messageId: MessageId) => {
       timelineControllerRef.current?.scrollToMessage(messageId);
@@ -2749,14 +2795,36 @@ export default function ChatView({
     // hand-written array omits it.
     [setEnvironmentPanelPreferenceOpen, updateSettings],
   );
+  const flushProjectContextBeforeEnvironmentClose = useCallback(async () => {
+    if (!projectContextState?.dirty) return true;
+    const saved = await projectContext.controller?.flush();
+    if (!saved) {
+      toastManager.add({
+        type: "error",
+        title: "Project context is not saved",
+        description: "Resolve the save issue before closing Environment.",
+      });
+      return false;
+    }
+    return true;
+  }, [projectContext.controller, projectContextState?.dirty]);
   const setEnvironmentPanelOpenPreference = useCallback(
-    (open: boolean) => updateEnvironmentPanelPreference(open, true),
-    [updateEnvironmentPanelPreference],
+    (open: boolean) => {
+      if (open) {
+        updateEnvironmentPanelPreference(true, true);
+        return;
+      }
+      void flushProjectContextBeforeEnvironmentClose().then((saved) => {
+        if (saved) updateEnvironmentPanelPreference(false, true);
+      });
+    },
+    [flushProjectContextBeforeEnvironmentClose, updateEnvironmentPanelPreference],
   );
-  const closeEnvironmentPanelAfterAction = useCallback(
-    () => updateEnvironmentPanelPreference(false, false),
-    [updateEnvironmentPanelPreference],
-  );
+  const closeEnvironmentPanelAfterAction = useCallback(() => {
+    void flushProjectContextBeforeEnvironmentClose().then((saved) => {
+      if (saved) updateEnvironmentPanelPreference(false, false);
+    });
+  }, [flushProjectContextBeforeEnvironmentClose, updateEnvironmentPanelPreference]);
   const environmentPanelOpen = resolveEnvironmentPanelOpen({
     defaultOpen: environmentDefaultOpen,
     userPreferenceOpen: environmentPanelPreferenceOpen,
@@ -3972,7 +4040,7 @@ export default function ChatView({
     sendPreflightInFlightRef,
   });
 
-  const { onSend } = useChatTurnSubmission({
+  const { onSend, migrationDialog } = useChatTurnSubmission({
     threadId,
     hasLiveTurn,
     lateComposerSendHandlersRef,
@@ -5071,6 +5139,142 @@ export default function ChatView({
     activeThread.id,
   ).map((definition) => ({ definition }));
 
+  const inheritedProjectContext = projectContext.settings?.inherited ?? null;
+  const contextStatus = !projectContext.controller ? (
+    projectContext.loading ? (
+      <span>Loading project context…</span>
+    ) : projectContext.error instanceof Error ? (
+      <span role="alert" className="text-destructive">
+        {projectContext.error.message}
+      </span>
+    ) : projectContext.error ? (
+      <span role="alert" className="text-destructive">
+        Unable to load project context.
+      </span>
+    ) : null
+  ) : projectContextState?.error ? (
+    <span role="alert" className="text-destructive">
+      {projectContextState.error.message}
+    </span>
+  ) : projectContextState?.saving ? (
+    <span>Saving project context…</span>
+  ) : null;
+  const contextActions = projectContext.controller ? (
+    projectContextState?.error?.code === "conflict" ? (
+      <div className="w-full space-y-2 rounded-lg border border-[color:var(--color-border-light)] p-2">
+        <p className="text-ui-sm font-medium">Compare saved values and your draft</p>
+        <p className="text-ui-xs text-muted-foreground">Saved project goal</p>
+        <p className="whitespace-pre-wrap break-words text-ui-xs">
+          {projectContextState.base.projectGoal || "Empty"}
+        </p>
+        <p className="text-ui-xs text-muted-foreground">Your project goal</p>
+        <p className="whitespace-pre-wrap break-words text-ui-xs">
+          {projectContextState.draft.projectGoal || "Empty"}
+        </p>
+        <p className="text-ui-xs text-muted-foreground">Saved project instructions</p>
+        <p className="whitespace-pre-wrap break-words text-ui-xs">
+          {projectContextState.base.projectInstructions || "Empty"}
+        </p>
+        <p className="text-ui-xs text-muted-foreground">Your project instructions</p>
+        <p className="whitespace-pre-wrap break-words text-ui-xs">
+          {projectContextState.draft.projectInstructions || "Empty"}
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={() => void projectContext.controller?.acceptSaved()}
+          >
+            Use saved values
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            onClick={() => void projectContext.controller?.keepDraft()}
+          >
+            Keep my draft
+          </Button>
+        </div>
+      </div>
+    ) : projectContextState?.error ? (
+      <Button
+        type="button"
+        size="xs"
+        variant="outline"
+        onClick={() => void projectContext.controller?.retry()}
+        disabled={projectContextState.saving}
+      >
+        Retry save
+      </Button>
+    ) : null
+  ) : projectContext.error ? (
+    <Button type="button" size="xs" variant="outline" onClick={() => void projectContext.reload()}>
+      Retry context load
+    </Button>
+  ) : null;
+  const controlledProjectContext = projectContext.available
+    ? {
+        goal: projectContextState?.draft.projectGoal ?? projectContext.settings?.projectGoal ?? "",
+        onGoalChange: (value: string) => {
+          if (projectContextState) {
+            projectContext.controller?.setDraft({
+              ...projectContextState.draft,
+              projectGoal: value,
+            });
+          }
+        },
+        instructions:
+          projectContextState?.draft.projectInstructions ??
+          projectContext.settings?.projectInstructions ??
+          "",
+        onInstructionsChange: (value: string) => {
+          if (projectContextState) {
+            projectContext.controller?.setDraft({
+              ...projectContextState.draft,
+              projectInstructions: value,
+            });
+          }
+        },
+        ...(inheritedProjectContext
+          ? {
+              inheritedLabel: `Inherited from ${inheritedProjectContext.name}`,
+              inheritedContent: (
+                <div className="space-y-2 px-2 pb-1 text-ui-sm">
+                  <p className="whitespace-pre-wrap break-words">
+                    {inheritedProjectContext.directionGoal || "No Space direction goal"}
+                  </p>
+                  <p className="whitespace-pre-wrap break-words">
+                    {inheritedProjectContext.sharedInstructions || "No shared instructions"}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="xs"
+                    onClick={() =>
+                      useSpacesUiStore
+                        .getState()
+                        .requestSpaceEditor(inheritedProjectContext.spaceId)
+                    }
+                  >
+                    Edit Space context
+                  </Button>
+                </div>
+              ),
+            }
+          : {}),
+        status: contextStatus,
+        actions: contextActions,
+        disabled: !projectContextState,
+        copyDisabled:
+          !projectContextState ||
+          !projectContext.settings ||
+          projectContextState.dirty ||
+          projectContextState.saving ||
+          projectContextState.error !== null,
+      }
+    : undefined;
+
   // Shared inputs for both Environment panel surfaces (the header Popover when the dock is
   // open, and the docked right column when it is closed) so the two never drift.
   const environmentPanelProps: Omit<EnvironmentPanelProps, "open" | "variant"> = {
@@ -5103,9 +5307,10 @@ export default function ChatView({
     pinnedMessageTextById,
     notes: threadNotes,
     activeProjectId,
-    projectInstructions,
-    canCopyProjectInstructionsToNotes: !isLocalDraftThread,
+    projectInstructions: projectInstructionsForCopy,
+    canCopyProjectInstructionsToNotes: !isLocalDraftThread && Boolean(projectInstructionsForCopy),
     onProjectInstructionsChange: setProjectInstructions,
+    ...(controlledProjectContext ? { controlledProjectContext } : {}),
     onCopyProjectInstructionsToNotes: handleCopyProjectInstructionsToNotes,
     onToggleDiff,
     onOpenAutomation: (definition: AutomationDefinition) => onOpenAutomation(definition.id),
@@ -5464,6 +5669,9 @@ export default function ChatView({
                           onToggleFastMode={toggleFastMode}
                           onInteractionModeChange={handleInteractionModeChange}
                           onInsertGoal={insertGoalSlashCommandInComposer}
+                          {...(projectContext.available
+                            ? { onViewContext: () => setIsContextDetailsOpen(true) }
+                            : {})}
                           onClose={() => {
                             setIsComposerExtrasPanelOpen(false);
                             scheduleComposerFocus();
@@ -6183,6 +6391,18 @@ export default function ChatView({
                   </AmbientRailSlot>
                 ) : undefined
               }
+            />
+          ) : null}
+          {projectContextGuard.dialog}
+          {migrationDialog}
+          {projectContext.available ? (
+            <ContextDetailsDialog
+              open={isContextDetailsOpen}
+              onOpenChange={setIsContextDetailsOpen}
+              threadId={activeThread.id}
+              projectId={activeProjectId}
+              isLocalDraft={isLocalDraftThread}
+              onNewThread={handleNewThreadWithLatestContext}
             />
           ) : null}
         </div>

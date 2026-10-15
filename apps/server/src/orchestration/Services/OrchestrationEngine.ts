@@ -27,6 +27,8 @@ import type { ManagedAttachmentPrincipal } from "../../managedAttachmentPrincipa
 
 export interface OrchestrationDispatchContext {
   readonly attachmentPrincipal?: ManagedAttachmentPrincipal;
+  /** Trusted origin supplied by server-owned history/native-provider import paths only. */
+  readonly contextOrigin?: "historical" | "provider_native";
 }
 
 export interface OrchestrationProjectionCatchUpStatus {

@@ -24,6 +24,7 @@ import {
 import { ProviderSessionReaper } from "../Services/ProviderSessionReaper";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService";
 import { makeProviderServiceLive } from "./ProviderService.ts";
+import { makeContextRepositoryTestLayer } from "../ContextRepositoryTestLayer.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import { makeProviderSessionReaperLive } from "./ProviderSessionReaper";
 
@@ -276,6 +277,7 @@ async function assertIdleReaperPreservesResumeCursor(
   const providerLayer = makeProviderServiceLive({ runtimeIdleStopMs: 0 }).pipe(
     Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
     Layer.provide(directoryLayer),
+    Layer.provide(makeContextRepositoryTestLayer()),
   );
   const sharedLayer = Layer.mergeAll(providerLayer, directoryLayer, NodeServices.layer);
   const reaperLayer = makeProviderSessionReaperLive({

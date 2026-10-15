@@ -35,6 +35,12 @@ export const OrchestrationEventDelivery = Schema.Struct({
   lastError: Schema.NullOr(Schema.String),
   completedAt: Schema.NullOr(IsoDateTime),
   updatedAt: IsoDateTime,
+  contextSnapshotId: Schema.optional(Schema.NullOr(Schema.String)),
+  contextInputDigest: Schema.optional(Schema.NullOr(Schema.String)),
+  contextMessageId: Schema.optional(Schema.NullOr(Schema.String)),
+  contextPhase: Schema.optional(
+    Schema.NullOr(Schema.Literals(["before_dispatch", "dispatch_started", "acknowledged"])),
+  ),
 });
 export type OrchestrationEventDelivery = typeof OrchestrationEventDelivery.Type;
 
@@ -65,6 +71,24 @@ export const ProviderBlockingDeliveryEvidence = Schema.Struct({
 export type ProviderBlockingDeliveryEvidence = typeof ProviderBlockingDeliveryEvidence.Type;
 
 export interface OrchestrationEventDeliveryRepositoryShape {
+  readonly getReconciliation: (reconciliationId: string) => Effect.Effect<
+    Option.Option<{
+      readonly eventSequence: number;
+      readonly threadId: string;
+      readonly outcome: ProviderDeliveryReconciliationOutcome;
+    }>,
+    PersistenceSqlError
+  >;
+  readonly recordContextPhase: (input: {
+    readonly consumerName: string;
+    readonly eventSequence: number;
+    readonly expectedClaimOwner: string;
+    readonly snapshotId: string;
+    readonly inputDigest: string;
+    readonly messageId: string;
+    readonly phase: "before_dispatch" | "dispatch_started" | "acknowledged";
+    readonly updatedAt: string;
+  }) => Effect.Effect<boolean, PersistenceSqlError>;
   readonly getConsumerState: (
     consumerName: string,
   ) => Effect.Effect<Option.Option<OrchestrationConsumerState>, PersistenceSqlError>;
@@ -135,6 +159,7 @@ export interface OrchestrationEventDeliveryRepositoryShape {
     readonly eventSequence: number;
     readonly threadId: string;
     readonly expectedState: "dead" | "uncertain";
+    readonly expectedUpdatedAt?: string;
     readonly outcome: ProviderDeliveryReconciliationOutcome;
     readonly reconciledBy: string;
     readonly note?: string | undefined;

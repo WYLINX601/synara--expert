@@ -167,6 +167,7 @@ async function withAdapter(
   startSessionOverrides?: {
     readonly enableComputerControl?: boolean;
     readonly expertSession?: ProviderSessionStartInput["expertSession"];
+    readonly contextSession?: ProviderSessionStartInput["contextSession"];
     readonly lifecycleGeneration?: string;
   },
   gatewayFetchOverride?: AgentGatewayMcpFetch,
@@ -238,6 +239,9 @@ async function withAdapter(
         ...(startSessionOverrides?.expertSession
           ? { expertSession: startSessionOverrides.expertSession }
           : {}),
+        ...(startSessionOverrides?.contextSession
+          ? { contextSession: startSessionOverrides.contextSession }
+          : {}),
         ...(startSessionOverrides?.lifecycleGeneration !== undefined
           ? { lifecycleGeneration: startSessionOverrides.lifecycleGeneration }
           : {}),
@@ -282,18 +286,29 @@ it("injects the Expert persona and snapshot skills through Pi's session Resource
     skills: [{ name: "reviewer", path: skillPath }],
     references: ["handbook"],
   } satisfies NonNullable<ProviderSessionStartInput["expertSession"]>;
+  const contextSession = {
+    snapshotId: "context-pi",
+    snapshotHash: "context-hash-pi",
+    text: "## 项目指令\n保留建筑证据边界。",
+    hasContent: true,
+  } satisfies NonNullable<ProviderSessionStartInput["contextSession"]>;
 
   await withAdapter(
     async () => {
       const session = captured.sessions[0]!;
-      expect(session.resourceLoader.getAppendSystemPrompt()).toContain(expertSession.persona);
+      const systemPrompt = session.resourceLoader.getAppendSystemPrompt().join("\n\n");
+      expect(systemPrompt).toContain(expertSession.persona);
+      expect(systemPrompt).toContain(contextSession.text);
+      expect(systemPrompt.indexOf(expertSession.persona)).toBeLessThan(
+        systemPrompt.indexOf(contextSession.text),
+      );
       expect(session.resourceLoader.getSkills().skills).toContainEqual(
         expect.objectContaining({ name: "reviewer", filePath: skillPath }),
       );
     },
     100,
     undefined,
-    { expertSession },
+    { expertSession, contextSession },
   );
 });
 

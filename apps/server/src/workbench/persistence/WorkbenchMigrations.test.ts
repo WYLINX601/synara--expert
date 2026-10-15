@@ -268,19 +268,22 @@ it.effect("allows an empty database to pass pre-migration history recognition", 
 
 it.effect("uses official migration IDs as versions even when the catalog reserves a gap", () =>
   Effect.sync(() => {
-    const catalog = [
-      ...migrationEntries.filter(([id]) => id <= 108),
-      [112, "OfficialChangeAfterSplit", Effect.void] as const,
-    ];
+    const currentEntries = migrationEntries;
+    const currentRows: OfficialMigrationRecord[] = currentEntries.map(([migration_id, name]) => ({
+      migration_id,
+      name,
+    }));
+    const catalog = [...currentEntries, [112, "OfficialChangeAfterSplit", Effect.void] as const];
     const rows: OfficialMigrationRecord[] = [
-      ...frozenOfficialPrefix,
+      ...currentRows,
       { migration_id: 112, name: "OfficialChangeAfterSplit" },
     ];
     assert.isNull(validateOfficialMigrationPrefixAgainstCatalog(rows, catalog));
     assert.isNull(validateCurrentOfficialMigrationPrefix(frozenOfficialPrefix));
-    assert.strictEqual(currentOfficialMigrationCount(), 108);
-    assert.strictEqual(currentOfficialMigrationEntryCount(), 108);
-    assert.strictEqual(catalog.length, 109);
+    assert.isNull(validateCurrentOfficialMigrationPrefix(currentRows));
+    assert.strictEqual(currentOfficialMigrationCount(), 111);
+    assert.strictEqual(currentOfficialMigrationEntryCount(), 109);
+    assert.strictEqual(catalog.length, 110);
     assert.strictEqual(officialMigrationCatalogHighWaterMark(catalog), 112);
   }),
 );
@@ -330,12 +333,14 @@ fullAdoptionLayer("legacy expert migration handoff", (test) => {
 
       const adopted = yield* adoptLegacyExpertMigrations();
       assert.deepStrictEqual(adopted.adoptedMigrationIds, [1, 2]);
+      yield* runMigrations();
 
       const officialRows = yield* sql<{ readonly migration_id: number; readonly name: string }>`
         SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id
       `;
-      assert.strictEqual(officialRows.length, 108);
+      assert.strictEqual(officialRows.length, currentOfficialMigrationEntryCount());
       assert.strictEqual(officialRows[107]?.name, "GatewayCompletions");
+      assert.deepStrictEqual(officialRows.at(-1), { migration_id: 111, name: "ContextV1" });
 
       const binding = yield* sql<{ readonly expert_binding_json: string }>`
         SELECT expert_binding_json FROM projection_threads WHERE thread_id = 'legacy-thread'
@@ -382,6 +387,7 @@ partialAdoptionLayer("legacy 109 intermediate handoff", (test) => {
       yield* seedLegacyExpertHistory(109);
       const adopted = yield* adoptLegacyExpertMigrations();
       assert.deepStrictEqual(adopted.adoptedMigrationIds, [1]);
+      yield* runMigrations();
 
       const result = yield* runWorkbenchMigrations();
       assert.deepStrictEqual(
@@ -401,7 +407,7 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
   test.effect("runs static expert migrations once after the official baseline", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 108 });
+      yield* runMigrations();
       const first = yield* runWorkbenchMigrations();
       const second = yield* runWorkbenchMigrations();
       assert.deepStrictEqual(

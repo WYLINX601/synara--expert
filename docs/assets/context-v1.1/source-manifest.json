@@ -1,0 +1,389 @@
+{
+  "baseHead": "61df29b094d3e5f2877f7787613655220a4f72a2",
+  "branch": "codex/context-v1.1",
+  "uncommitted": true,
+  "scope": "Context changes relative to the copied development candidate; historical prototype files unchanged",
+  "contentHash": "1ac1f794fc2215348cf4bf9bfa414bf13271968a42b1d419957d623e9ea21a77",
+  "files": [
+    {
+      "path": "apps/server/integration/OrchestrationEngineHarness.integration.ts",
+      "sha256": "3df775c80be63b52d140544b8c8a77607bb70f5187363eceb1ca33a2a8068895"
+    },
+    {
+      "path": "apps/server/integration/providerService.integration.test.ts",
+      "sha256": "fcd6c49fedcd581c6272fc61f65aed4e6b5fccbb92f44df32bca2c81999b189a"
+    },
+    {
+      "path": "apps/server/src/codexAppServerManager.test.ts",
+      "sha256": "a425c355261737cbfcedf3bbdc0718bcf85fb035499dd351111dbe5d22686baf"
+    },
+    {
+      "path": "apps/server/src/codexAppServerManager.ts",
+      "sha256": "f69b148782587de2e1dcc18127b6f62a7534f184395dfa228e43b2ba07528a83"
+    },
+    {
+      "path": "apps/server/src/context/ContextRepository.test.ts",
+      "sha256": "19990d18c7bd3da3a668f6f7526ea4843fe0dd8a0f3de88ed5c923ea7f525a1d"
+    },
+    {
+      "path": "apps/server/src/context/ContextRepository.ts",
+      "sha256": "842e834655ac6e1576644cb9c35fe801bb9c43be8a8992f7138d32c221a837c3"
+    },
+    {
+      "path": "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts",
+      "sha256": "58ef703209625cdbda62a68e7444cda7eb5bc94f024cc55944dd26d179632a14"
+    },
+    {
+      "path": "apps/server/src/orchestration/Layers/OrchestrationEngine.ts",
+      "sha256": "c8dd1460dd0419eccd6a41b779902d6cb2cf8711ed0e3edf19b256eab5b3ed28"
+    },
+    {
+      "path": "apps/server/src/orchestration/Layers/OrchestrationReactor.test.ts",
+      "sha256": "b39692f211a045d871537923bf57c83d72ebea0282e21f872a00c9b0305e3034"
+    },
+    {
+      "path": "apps/server/src/orchestration/Layers/ProjectionPipeline.ts",
+      "sha256": "d1fad17a68ae3b9a4395049c35d0f48dab98572397a94e595d03efb4b206a9ea"
+    },
+    {
+      "path": "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
+      "sha256": "6474fa29711daed4e8b135aa370ae6acbade7ff1f2c5a28387574eaebe35208c"
+    },
+    {
+      "path": "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts",
+      "sha256": "16c9d40259c24eee67b77f4e409f811b8d428b2f0b3159a53f83f1877ac4dee8"
+    },
+    {
+      "path": "apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts",
+      "sha256": "1564333e355bbaca72eaf29fa8a376f966daf733b5ff6cf6337acb891c448f2a"
+    },
+    {
+      "path": "apps/server/src/orchestration/Services/OrchestrationEngine.ts",
+      "sha256": "9cafbeb9ecfef8bc14ae03921d5146c4af3beb5a2cb846b892830f627246c0ed"
+    },
+    {
+      "path": "apps/server/src/orchestration/Services/ProviderCommandReactor.ts",
+      "sha256": "a803674c9e403fe0b29b02e47e2ad09df25dc4a18efcb8cfa13f68fbb7e435d7"
+    },
+    {
+      "path": "apps/server/src/orchestration/contextDispatchEvidence.test.ts",
+      "sha256": "615bd1789e3aec0bcc8913d16098deef8792ce4f2d1070e9f151991d4948ce25"
+    },
+    {
+      "path": "apps/server/src/orchestration/contextDispatchEvidence.ts",
+      "sha256": "0d9c58535f1a5af148fb4ed3a7264ed1ac1302c4df6d4ecf7bbce5892efe5596"
+    },
+    {
+      "path": "apps/server/src/orchestration/decider.ts",
+      "sha256": "bddd2b2dd98a5dd2c5b3cfa71bb53074cca251be80dc0f9fffdfc0a0c3245958"
+    },
+    {
+      "path": "apps/server/src/orchestration/projectImportRoute.ts",
+      "sha256": "3d7b263947ef57b737888bc3c4c47cb382d5dd5569cb1b8fcde9c0cc721369e1"
+    },
+    {
+      "path": "apps/server/src/orchestration/runtimeLayer.ts",
+      "sha256": "0271dda8e1b4d3f3cbc10b5e541692df14ec510ee8b08766cee93e117bc7de39"
+    },
+    {
+      "path": "apps/server/src/persistence/Layers/OrchestrationEventDeliveries.test.ts",
+      "sha256": "e495fe9a6714f81431f2eeaa860c5755e424d0ae05a9812f65d147801098b2c7"
+    },
+    {
+      "path": "apps/server/src/persistence/Layers/OrchestrationEventDeliveries.ts",
+      "sha256": "22ac4e4bbf317fe1dc6a786193af4ad5ca90049c25cef802289aa005a38618a5"
+    },
+    {
+      "path": "apps/server/src/persistence/MigrationBackup.test.ts",
+      "sha256": "1459e13f3ce9ea5b2925f68d377246014578f702f118d213c8535607cf887537"
+    },
+    {
+      "path": "apps/server/src/persistence/MigrationSchemaTooNewRecovery.test.ts",
+      "sha256": "03ef8a5c6600ad0abc543d37c590561a64adbe46565b8b016808554fc502da34"
+    },
+    {
+      "path": "apps/server/src/persistence/Migrations.test.ts",
+      "sha256": "eb6b0c42e757a0cb67c7a5df2b37a1f8d045695076f50a3f75da4cd16e5e0c63"
+    },
+    {
+      "path": "apps/server/src/persistence/Migrations.ts",
+      "sha256": "afa89c677bdb9c1972cebb34a55930848b8ffaed1671e41b90c20c163ae0008b"
+    },
+    {
+      "path": "apps/server/src/persistence/Migrations/111_ContextV1.ts",
+      "sha256": "b7dbd84911484156f3f38093973338ca005dce9e8ba4b38b8972d9dfe79a4911"
+    },
+    {
+      "path": "apps/server/src/persistence/Services/OrchestrationEventDeliveries.ts",
+      "sha256": "f25440f07f6984ea62003a5c0b921b0d830b0cd67f8262d1e2dc0281632337f6"
+    },
+    {
+      "path": "apps/server/src/provider/ContextRepositoryTestLayer.ts",
+      "sha256": "a0aa753fd9d45733a35c2b7bc2f940a1b3f2dfba4452fc7dd9a7296fef719c75"
+    },
+    {
+      "path": "apps/server/src/provider/Layers/CodexAdapter.ts",
+      "sha256": "f4813049b1ee10dd8f7d3392ac313bafebd9842841c519ab434a46fba999052f"
+    },
+    {
+      "path": "apps/server/src/provider/Layers/PiAdapter.lifecycle.test.ts",
+      "sha256": "41b5c6320cee1723855f013ff2ab5817f1ce9f38b6536ab87de61006893d25d6"
+    },
+    {
+      "path": "apps/server/src/provider/Layers/PiAdapter.ts",
+      "sha256": "60b75ccd52c1db1557515727769e16f6aa7e58c05976dee31412db46c6855263"
+    },
+    {
+      "path": "apps/server/src/provider/Layers/ProviderService.test.ts",
+      "sha256": "e0b53356a46a76183eb8dd1a1189a870683a7c221c04e923e4d4242f00839793"
+    },
+    {
+      "path": "apps/server/src/provider/Layers/ProviderService.ts",
+      "sha256": "f8e9e8a9a175f1b63cf0afd06eeb2e9fb3eb25588dbce5eda39080508e47b08b"
+    },
+    {
+      "path": "apps/server/src/provider/Layers/ProviderSessionReaper.test.ts",
+      "sha256": "27e4f4f804bb8d78403bce976a6062946d3b19777eb029a205da203cd1e029fa"
+    },
+    {
+      "path": "apps/server/src/provider/Services/ProviderService.ts",
+      "sha256": "5c2510ce008d79dceefc305457e370cf95661d2809da97cf27d186fbd4edd38a"
+    },
+    {
+      "path": "apps/server/src/provider/runtimeLayer.ts",
+      "sha256": "73588170e51d7660a8fb8597e336dbf9764dff980933815c6285a009eeba33dc"
+    },
+    {
+      "path": "apps/server/src/serverLayers.ts",
+      "sha256": "a3a49ae4b0404b915b522348aea8d36c16e14be92af4986d08006a8f53e48972"
+    },
+    {
+      "path": "apps/server/src/workbench/host/contextRpc.test.ts",
+      "sha256": "5992f3db8d27388f10405289329a6172c0168280b77b51f782080ff912566264"
+    },
+    {
+      "path": "apps/server/src/workbench/host/contextRpc.ts",
+      "sha256": "a167c6fe85f838094965de8127326a257f6533aec528e449bc8a28366bb5b827"
+    },
+    {
+      "path": "apps/server/src/workbench/host/contextThreadDetails.ts",
+      "sha256": "bcb13030e1abae19e459ca2bc20878808373a19a412b88027126d87ef26e26f5"
+    },
+    {
+      "path": "apps/server/src/workbench/persistence/WorkbenchMigrations.test.ts",
+      "sha256": "47d593d30d3f049e535485869f86e5f29ec66218b1809cbda5ce1387f4bfe840"
+    },
+    {
+      "path": "apps/server/src/workbench/persistence/WorkbenchUpgradePlan.test.ts",
+      "sha256": "7212d28f14106345b0ee60887b242a45b49fc3dacc323d5eba4e5133f9411edd"
+    },
+    {
+      "path": "apps/server/src/wsCompatibility.test.ts",
+      "sha256": "e8026aaa55d388e61e87fb82ba86bfe9df713ace128f559f89aa26a518ada4e3"
+    },
+    {
+      "path": "apps/server/src/wsRpc.ts",
+      "sha256": "ead0e4da8f7d24a317968d1ad0609a5ba9680ba4563e213452d20374cde93c12"
+    },
+    {
+      "path": "apps/web/src/components/ChatView.tsx",
+      "sha256": "5bd7d4a0644ad360bd0828702ee73e4bd1dfb20e643e5f85ce6910f90c57ac75"
+    },
+    {
+      "path": "apps/web/src/components/Sidebar.tsx",
+      "sha256": "8f5997957e5b08a5c8b5947bcd1565cf61299920be30999009c1125dd2cd1f46"
+    },
+    {
+      "path": "apps/web/src/components/SpaceContextFieldsEditor.tsx",
+      "sha256": "5a47eacbcb0a2e49c31ec977cfa871cd4b887ac8061f4c3362864a187c6da4c3"
+    },
+    {
+      "path": "apps/web/src/components/SpaceEditorDialog.tsx",
+      "sha256": "2ab60d24a4cb965fbf20b54447b1f9ababc5e4ae4fea5747a047427a08509e49"
+    },
+    {
+      "path": "apps/web/src/components/chat/ComposerExtrasPanel.browser.tsx",
+      "sha256": "32a7b06334fb9c9f71bcbe0a229daf7e873299eacb353c8283be293186e89e47"
+    },
+    {
+      "path": "apps/web/src/components/chat/ContextDetailsDialog.browser.tsx",
+      "sha256": "d34638cbbb1844faa4e8a4429420af9064fadb00e4efa951d7f56ccf957e6308"
+    },
+    {
+      "path": "apps/web/src/components/chat/ContextDetailsDialog.tsx",
+      "sha256": "11a7544d937f91f306222b84c3ee4fbffb1f2827f6b5b8bb62e035482025ed18"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/EnvironmentPanel.tsx",
+      "sha256": "a1a2eb7869c99667f3b9fd445e2f784c8e134b911e9473b94182e1b49d329c18"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/EnvironmentProjectInstructionsSection.browser.tsx",
+      "sha256": "c109fd8ba86367771969f048cfb3b79cb22208dfed9f9d3e840dca690e63ac48"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/EnvironmentProjectInstructionsSection.tsx",
+      "sha256": "c6e71df0808a6e6ebec84ff9b43e6682eafd29c80f03aff9e89a9809f9b15944"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/projectContextAutosave.test.ts",
+      "sha256": "9bea535cd402027cd599f59aaba337d042ae51f465e4aba222394bd30cbb0f89"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/projectContextAutosave.ts",
+      "sha256": "9c3b27446d4b051a51413d51db34e5c6f3bad52751f6271798268e2e0dc8207a"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/projectContextNavigationGuard.test.ts",
+      "sha256": "534c1d1aa6b9806e91921c1206a1edb704e141c16a5226c8cfa71520300896b0"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/projectContextNavigationGuard.ts",
+      "sha256": "2856905cad97c225b243747234a7052ce112bde308e0c8bf8285fc52597e3d59"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/useProjectContextAutosave.ts",
+      "sha256": "f66fa7fb21bf2d62b1bbe3371405e03e0a6520763bad56bef98b9936278cd9a8"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/useProjectContextMigration.browser.tsx",
+      "sha256": "eba2f1ff9c62e71df016b9827e74c0edb3b6740ae925b213af64337d09887cb9"
+    },
+    {
+      "path": "apps/web/src/components/chat/environment/useProjectContextMigration.tsx",
+      "sha256": "c8db3c4e7065dbdef0d624e6d295f14aa8cb7ab8e062f5905a5cda2eb1f52ea2"
+    },
+    {
+      "path": "apps/web/src/components/chat/useChatAutomationCreation.ts",
+      "sha256": "8781caa754f978f300e87b94a6b6e0085a1174fdc4fecdde29a84dee00cab04d"
+    },
+    {
+      "path": "apps/web/src/components/chat/useChatTurnExecution.ts",
+      "sha256": "7fad9cbb554ee98d79c603ef9693b324743c9153985255c3d811b07a8b665576"
+    },
+    {
+      "path": "apps/web/src/components/chat/useChatTurnSubmission.ts",
+      "sha256": "7b46017d5171be3ad2cdde78a695b1cbcce96fafa06725a6a3314c05ce5902e9"
+    },
+    {
+      "path": "apps/web/src/components/settings/useExpertDraftGuard.browser.tsx",
+      "sha256": "3b14b65a337b4ff5ba6b1eeaabc66c1bf2426cd09562ad49fba0f348c5b2a007"
+    },
+    {
+      "path": "apps/web/src/components/settings/useExpertDraftGuard.tsx",
+      "sha256": "54dc61e435bc34f24d173ad74154de34753d2d588f616243250c7dc05c5b8d2e"
+    },
+    {
+      "path": "apps/web/src/components/useSpacesController.ts",
+      "sha256": "b8d9e45bd9f4d3554cae7f151086940cab11085c78822234c027802a73f8b8f0"
+    },
+    {
+      "path": "apps/web/src/hooks/useNativeApiServerCapability.ts",
+      "sha256": "cb29bc01b501836d4dd41a6d7ea266e0c598c6745e175e560e6c8b46ae2b4da8"
+    },
+    {
+      "path": "apps/web/src/nativeApi.ts",
+      "sha256": "451805d0af0abfcc404f9c731bb9e73ae1eea061a92453a11d32679f27e85262"
+    },
+    {
+      "path": "apps/web/src/spacesUiStore.ts",
+      "sha256": "7ddfa001fa3ce67df6eca4cab6232bd8805df9e411d0f6a367c9e61429e46ebf"
+    },
+    {
+      "path": "apps/web/src/wsNativeApi.test.ts",
+      "sha256": "ddb47619cb107259df35cd08788b74662b39898c35bbbfc6e111cfa74c6bd270"
+    },
+    {
+      "path": "apps/web/src/wsNativeApi.ts",
+      "sha256": "12da278046816682423ddff4f52f6b8927647bf4410837f09d43248e7c18fe68"
+    },
+    {
+      "path": "docs/README.md",
+      "sha256": "634000e27586d53f545e587973c3f6e269890391e2a2b4130ac1437fa1383130"
+    },
+    {
+      "path": "docs/assets/context-v1.1/pi-expert-context-light.jpg",
+      "sha256": "5230fd5f936d0087dffecb5f203c79504619ea4445ce6d95c3a07f4460c8d668"
+    },
+    {
+      "path": "docs/assets/context-v1.1/project-context-light.jpg",
+      "sha256": "ef04a270238ba2d73b0b3474b17acf4ad929e85f47b8fec3c6ef0afc97f8ecab"
+    },
+    {
+      "path": "docs/assets/context-v1.1/space-settings-light.jpg",
+      "sha256": "ac5f9000d105d4d474abfa18b3e91c0f4d45c0b7c41818e69bc99f1fa82bfa6f"
+    },
+    {
+      "path": "docs/assets/context-v1.1/thread-context-dark-16px.jpg",
+      "sha256": "f989e6fc1fa44ce22ac7e06bb976e84f796fa69f6097f2fd0a8726371d261854"
+    },
+    {
+      "path": "docs/assets/context-v1.1/thread-context-loaded-light.jpg",
+      "sha256": "1f808096b4b8dbd1a44dcf9312ad9b6a1a8b4b47e6cac25056e58f6dee5b26cc"
+    },
+    {
+      "path": "docs/assets/context-v1.1/thread-context-narrow-16px.jpg",
+      "sha256": "eaa454df6f5aa1131fb0cba14ba05ad2b648dbcada0782c4c64be23ebafdcd1f"
+    },
+    {
+      "path": "docs/assets/context-v1.1/thread-context-pi-light.jpg",
+      "sha256": "0c4a193bf0864a942945cf33c3ef72b9b6d7fdd65f30ddb9bd8f0400270a1bcd"
+    },
+    {
+      "path": "docs/space-project-context-v1-acceptance.md",
+      "sha256": "3569d8de8c6554186b91618995c785e151533545398ef66f1b0733388effb0c4"
+    },
+    {
+      "path": "docs/space-project-context-v1-implementation.md",
+      "sha256": "7d9e28f23801bd0337961e3a9affd1bf92bf45bc05d00b010a41761f5fd850d5"
+    },
+    {
+      "path": "docs/space-project-context-v1-interaction-prd.md",
+      "sha256": "eb212423df87e86619a7e9ae80dc6748d39faf4bf5e37df8502222bedc32abd8"
+    },
+    {
+      "path": "packages/contracts/src/context.ts",
+      "sha256": "88a24661551308247f982f5b3f076ce17eed103d70113cca3fc6a6b1058c863e"
+    },
+    {
+      "path": "packages/contracts/src/index.ts",
+      "sha256": "152d1f11d01f43465ade7694f56585a092cf415e475287fa1f36eb7558885211"
+    },
+    {
+      "path": "packages/contracts/src/ipc.ts",
+      "sha256": "41707a3df62c11dc1d29067acc947801ab50a7e4fdce92ef362b8b89fa33a805"
+    },
+    {
+      "path": "packages/contracts/src/orchestration.ts",
+      "sha256": "4ebd8ee1629662d9431d6dc96b954b2a9c7930414ed6bca278d3b8bdcd5cbb20"
+    },
+    {
+      "path": "packages/contracts/src/provider.ts",
+      "sha256": "25b96572a535d9d6cfc00a171fc668b0f1fe66f977571f466d839328790deef7"
+    },
+    {
+      "path": "packages/contracts/src/rpc.ts",
+      "sha256": "494c7543190dcdddf77904935806d7abf9555633c039763db64765f752aa78ab"
+    },
+    {
+      "path": "packages/contracts/src/ws.ts",
+      "sha256": "8d9fe9b99d8f06123bc0eba94ff87939725f0243b2bf1f63d0e723b5a86dad51"
+    },
+    {
+      "path": "packages/contracts/src/wsCompatibility.ts",
+      "sha256": "cf9bce210e865aedbda45f41a9bc8de2d5561cf38b52abc85e9d84eb61df5bbf"
+    },
+    {
+      "path": "packages/shared/package.json",
+      "sha256": "e959e0a5e43c99076b75da840fb51848dcc536958d90ed96d3f79a4151675c75"
+    },
+    {
+      "path": "packages/shared/src/contextInstructions.ts",
+      "sha256": "5d7ffcb4219d1ce7617abdc8f536c31e8f0a76ec13a46f1d1fbee8ab0f6e4444"
+    },
+    {
+      "path": "scripts/workbench-build.test.ts",
+      "sha256": "7d0973bc7336cc583c72c73f725ed6d1197d0446a0f3be4f3e14c818a7cb46b7"
+    }
+  ]
+}

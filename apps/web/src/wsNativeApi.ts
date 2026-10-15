@@ -17,8 +17,6 @@ import {
   type AuthSessionState,
   type AuthWebSocketTokenResult,
   type ExternalMcpCreateIntegrationInput,
-  type ExternalMcpCreateIntegrationResult,
-  type ExternalMcpIntegration,
   type ExternalMcpRefreshPairingInput,
   type ExternalMcpRevokeIntegrationInput,
   type ThreadId,
@@ -493,6 +491,17 @@ export function createWsNativeApi(): NativeApi {
     threadStreamFailureListeners.emit(failure);
   });
   const api: NativeApi = {
+    context: {
+      getSpace: (input) => transport.request(WS_METHODS.contextGetSpace, input),
+      getProject: (input) => transport.request(WS_METHODS.contextGetProject, input),
+      getThread: (input) => transport.request(WS_METHODS.contextGetThread, input),
+      saveSpace: (input) => transport.request(WS_METHODS.contextSaveSpace, input),
+      saveProject: (input) => transport.request(WS_METHODS.contextSaveProject, input),
+      getCommandResult: (input) => transport.request(WS_METHODS.contextGetCommandResult, input),
+      claimMigration: (input) => transport.request(WS_METHODS.contextClaimMigration, input),
+      resolveMigration: (input) => transport.request(WS_METHODS.contextResolveMigration, input),
+      retryLoad: (input) => transport.request(WS_METHODS.contextRetryLoad, input),
+    },
     dialogs: {
       pickFolder: async () => {
         if (!window.desktopBridge) return null;

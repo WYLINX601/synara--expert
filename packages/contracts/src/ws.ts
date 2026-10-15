@@ -20,6 +20,17 @@ import {
   McpImportRequestSchema,
 } from "./mcp";
 import { NonNegativeInt, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
+import {
+  ContextCommandReadInput,
+  ContextMigrationClaimInput,
+  ContextMigrationResolveInput,
+  ContextRetryInput,
+  ProjectContextReadInput,
+  ProjectContextSaveInput,
+  SpaceContextReadInput,
+  SpaceContextSaveInput,
+  ThreadContextReadInput,
+} from "./context";
 
 import {
   AutomationCancelRunInput,
@@ -330,6 +341,17 @@ export const WS_METHODS = {
   providerListModels: "provider.listModels",
   providerListAgents: "provider.listAgents",
 
+  // Context methods
+  contextGetSpace: "context.getSpace",
+  contextGetProject: "context.getProject",
+  contextGetThread: "context.getThread",
+  contextSaveSpace: "context.saveSpace",
+  contextSaveProject: "context.saveProject",
+  contextGetCommandResult: "context.getCommandResult",
+  contextClaimMigration: "context.claimMigration",
+  contextResolveMigration: "context.resolveMigration",
+  contextRetryLoad: "context.retryLoad",
+
   // Automation methods
   automationList: "automation.list",
   automationGetMemory: "automation.getMemory",
@@ -577,6 +599,15 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.automationArchiveRun, AutomationArchiveRunInput),
   tagRequestBody(WS_METHODS.automationResolveProposal, AutomationResolveProposalInput),
   tagRequestBody(WS_METHODS.subscribeAutomationEvents, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.contextGetSpace, SpaceContextReadInput),
+  tagRequestBody(WS_METHODS.contextGetProject, ProjectContextReadInput),
+  tagRequestBody(WS_METHODS.contextGetThread, ThreadContextReadInput),
+  tagRequestBody(WS_METHODS.contextSaveSpace, SpaceContextSaveInput),
+  tagRequestBody(WS_METHODS.contextSaveProject, ProjectContextSaveInput),
+  tagRequestBody(WS_METHODS.contextGetCommandResult, ContextCommandReadInput),
+  tagRequestBody(WS_METHODS.contextClaimMigration, ContextMigrationClaimInput),
+  tagRequestBody(WS_METHODS.contextResolveMigration, ContextMigrationResolveInput),
+  tagRequestBody(WS_METHODS.contextRetryLoad, ContextRetryInput),
 ]);
 
 export const WebSocketRequest = Schema.Struct({

@@ -110,7 +110,7 @@ const harness = vi.hoisted(() => {
     }),
     readExpertSnapshot: vi.fn(async () => null),
     readExpertAppliedRuntime: vi.fn(async () => null),
-    testExpertConnection: vi.fn(async () => ({ tools: [] })),
+    testExpertConnection: vi.fn(async () => ({ tools: [] as string[] })),
   };
   return { data, makeExpert, server };
 });

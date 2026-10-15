@@ -562,6 +562,101 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   OrchestrationCommandInvariantError
 > {
   switch (command.type) {
+    case "context.space.save":
+      return {
+        ...withEventBase({
+          aggregateKind: "space",
+          aggregateId: command.spaceId,
+          occurredAt: nowIso(),
+          commandId: command.commandId,
+        }),
+        type: "context.space.save-requested",
+        payload: {
+          commandId: command.commandId,
+          dataInstanceId: command.dataInstanceId,
+          spaceId: command.spaceId,
+          expectedRevision: command.expectedRevision,
+          expectedName: command.expectedName,
+          expectedIcon: command.expectedIcon,
+          name: command.name,
+          icon: command.icon,
+          directionGoal: command.directionGoal,
+          sharedInstructions: command.sharedInstructions,
+        },
+      };
+
+    case "context.project.save":
+      return {
+        ...withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: nowIso(),
+          commandId: command.commandId,
+        }),
+        type: "context.project.save-requested",
+        payload: {
+          commandId: command.commandId,
+          dataInstanceId: command.dataInstanceId,
+          projectId: command.projectId,
+          expectedRevision: command.expectedRevision,
+          projectGoal: command.projectGoal,
+          projectInstructions: command.projectInstructions,
+        },
+      };
+
+    case "context.migration.claim":
+      return {
+        ...withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: nowIso(),
+          commandId: command.commandId,
+        }),
+        type: "context.migration.claim-requested",
+        payload: {
+          commandId: command.commandId,
+          dataInstanceId: command.dataInstanceId,
+          projectId: command.projectId,
+          expectedWorkspaceRoot: command.expectedWorkspaceRoot,
+          sourceDigest: command.sourceDigest,
+          legacyInstructions: command.legacyInstructions,
+        },
+      };
+
+    case "context.migration.resolve":
+      return {
+        ...withEventBase({
+          aggregateKind: "project",
+          aggregateId: command.projectId,
+          occurredAt: nowIso(),
+          commandId: command.commandId,
+        }),
+        type: "context.migration.resolve-requested",
+        payload: {
+          commandId: command.commandId,
+          dataInstanceId: command.dataInstanceId,
+          projectId: command.projectId,
+          sourceDigest: command.sourceDigest,
+          expectedRevision: command.expectedRevision,
+          choice: command.choice,
+          ...(command.instructions !== undefined ? { instructions: command.instructions } : {}),
+        },
+      };
+
+    case "context.bind": {
+      yield* requireThread({ readModel, command, threadId: command.threadId });
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "context.thread.bind-requested",
+        payload: { threadId: command.threadId, createdAt: command.createdAt },
+      };
+    }
+
     case "space.create": {
       yield* requireSpaceAbsent({ readModel, command, spaceId: command.spaceId });
       if (command.spaceId === RESERVED_VOID_SPACE_ID) {

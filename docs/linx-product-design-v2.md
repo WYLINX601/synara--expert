@@ -81,16 +81,16 @@ Linx
 
 ### 2.2 核心对象
 
-| 对象 | 产品定义 | 生命周期 |
-|---|---|---|
-| Space | 长期工作方向与责任边界 | 长期 |
-| Project | 围绕明确目标开展的具体工作 | 阶段性 |
-| Task | 可执行、可跟踪的工作事项 | 短期 |
-| Run | 一次 Agent 执行过程 | 单次 |
-| Artifact | 可持续修改和复用的工作成果 | 长期保留 |
-| Persistent Agent | 拥有持续身份与职责的 AI | 长期 |
-| Expert | 可配置、可复用的专业能力角色 | 长期 |
-| Skill | 可复用的专业工作方法 | 持续迭代 |
+| 对象             | 产品定义                     | 生命周期 |
+| ---------------- | ---------------------------- | -------- |
+| Space            | 长期工作方向与责任边界       | 长期     |
+| Project          | 围绕明确目标开展的具体工作   | 阶段性   |
+| Task             | 可执行、可跟踪的工作事项     | 短期     |
+| Run              | 一次 Agent 执行过程          | 单次     |
+| Artifact         | 可持续修改和复用的工作成果   | 长期保留 |
+| Persistent Agent | 拥有持续身份与职责的 AI      | 长期     |
+| Expert           | 可配置、可复用的专业能力角色 | 长期     |
+| Skill            | 可复用的专业工作方法         | 持续迭代 |
 
 ---
 
@@ -110,15 +110,15 @@ Space 是 Linx 的核心长期组织单元。
 
 ### 3.2 Space 的必要信息
 
-| 字段 | 说明 |
-|---|---|
-| Name | Space 名称 |
-| Goal | 长期目标与当前重点 |
-| Owner | 唯一主要负责人 |
-| Projects | 关联的 Project |
+| 字段            | 说明                           |
+| --------------- | ------------------------------ |
+| Name            | Space 名称                     |
+| Goal            | 长期目标与当前重点             |
+| Owner           | 唯一主要负责人                 |
+| Projects        | 关联的 Project                 |
 | Context Sources | Obsidian、文件夹及其他资料引用 |
-| Reporting | 负责人汇报规则 |
-| Permissions | 负责人允许读取和执行的操作 |
+| Reporting       | 负责人汇报规则                 |
+| Permissions     | 负责人允许读取和执行的操作     |
 
 Space 不需要独立复制全部 Project 文件。其 Context 以目标、索引、跨项目状态和长期决策为主。
 
@@ -136,6 +136,7 @@ Space 首页聚焦四个问题：
 **顶部：** Space 名称、当前目标、负责人、联系负责人入口。
 
 **主体：**
+
 - Current Focus：当前最重要的 1–3 个事项。
 - Projects：项目列表，显示进展和关键状态。
 - Updates：最新进展、风险与待确认事项。
@@ -291,12 +292,12 @@ Expert 是 Provider 无关的专业角色配置，而非一个必须长期在线
 
 它主要由以下能力构成：
 
-| 模块 | 作用 |
-|---|---|
-| Persona | 专业身份、职责和工作原则 |
-| Skills | 专业方法与操作流程 |
-| References | 可引用的资料和知识源 |
-| Connections | 工具与外部系统 |
+| 模块                | 作用                     |
+| ------------------- | ------------------------ |
+| Persona             | 专业身份、职责和工作原则 |
+| Skills              | 专业方法与操作流程       |
+| References          | 可引用的资料和知识源     |
+| Connections         | 工具与外部系统           |
 | Runtime Preferences | 执行偏好及 Provider 配置 |
 
 继续保留现有 Expert 配置体系，尤其不需要重做 Skills 配置界面。
@@ -322,12 +323,12 @@ Expert 默认加载：
 
 ### 7.1 四类 Context
 
-| 类型 | 主要来源 | 核心用途 |
-|---|---|---|
-| Personal Context | Hermes Memory | 了解用户、偏好和长期目标 |
-| Space Context | Space + Owner | 了解方向、跨项目关系及长期决策 |
-| Project Context | Synara Project | 理解具体工作与已有成果 |
-| Expert Context | Persona + Skills | 提供专业方法和执行约束 |
+| 类型             | 主要来源         | 核心用途                       |
+| ---------------- | ---------------- | ------------------------------ |
+| Personal Context | Hermes Memory    | 了解用户、偏好和长期目标       |
+| Space Context    | Space + Owner    | 了解方向、跨项目关系及长期决策 |
+| Project Context  | Synara Project   | 理解具体工作与已有成果         |
+| Expert Context   | Persona + Skills | 提供专业方法和执行约束         |
 
 Obsidian 作为长期知识底座，为 Space、Project 和 Expert 提供按需检索的知识来源。
 
@@ -485,13 +486,13 @@ Agent Team 是复杂任务的可选执行模式。
 
 ### 一级导航
 
-| 入口 | 功能 |
-|---|---|
-| Home | 今日重点、全局助理、跨方向信息汇总 |
-| Spaces | 长期方向、负责人、Project 导航 |
-| Tasks | 统一任务与 Inbox |
-| Experts | 专业角色和 Skills |
-| Settings | 连接器、Agent 运行配置、权限 |
+| 入口     | 功能                               |
+| -------- | ---------------------------------- |
+| Home     | 今日重点、全局助理、跨方向信息汇总 |
+| Spaces   | 长期方向、负责人、Project 导航     |
+| Tasks    | 统一任务与 Inbox                   |
+| Experts  | 专业角色和 Skills                  |
+| Settings | 连接器、Agent 运行配置、权限       |
 
 Project 主要从所属 Space 进入，同时保留最近访问和全局搜索快捷入口。
 

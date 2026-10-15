@@ -33,24 +33,28 @@ describe("WebSocket compatibility bootstrap", () => {
     expect(result.capabilities).toContain("orchestration.thread-detail-snapshot");
     expect(result.capabilities).toContain("projects.github-provisioning");
     expect(result.capabilities).toContain(WS_PROJECT_FILE_WATCH_CAPABILITY);
+    expect(result.capabilities).toContain("context.v1");
     expect(WS_CLIENT_REQUIRED_CAPABILITIES).not.toContain("projects.github-provisioning");
     expect(WS_CLIENT_REQUIRED_CAPABILITIES).not.toContain(WS_PROJECT_FILE_WATCH_CAPABILITY);
   });
 
-  it("rejects revision-one clients after the commit-author wire shape change", async () => {
-    const error = await Effect.runPromise(
-      negotiateWsCompatibility({
-        protocolEpoch: WS_PROTOCOL_EPOCH,
-        minRevision: 1,
-        maxRevision: 1,
-        clientBuild: "stale-client",
-        requiredCapabilities: [],
-      }).pipe(Effect.flip),
-    );
+  it.each([1, 2])(
+    "rejects revision-%s clients that cannot decode current event shapes",
+    async (revision) => {
+      const error = await Effect.runPromise(
+        negotiateWsCompatibility({
+          protocolEpoch: WS_PROTOCOL_EPOCH,
+          minRevision: revision,
+          maxRevision: revision,
+          clientBuild: "stale-client",
+          requiredCapabilities: [],
+        }).pipe(Effect.flip),
+      );
 
-    expect(error).toMatchObject({
-      code: "WS_PROTOCOL_INCOMPATIBLE",
-      action: "update-client",
-    });
-  });
+      expect(error).toMatchObject({
+        code: "WS_PROTOCOL_INCOMPATIBLE",
+        action: "update-client",
+      });
+    },
+  );
 });

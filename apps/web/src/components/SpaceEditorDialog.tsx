@@ -69,6 +69,9 @@ export function SpaceEditorDialog(props: {
   finalFocus?: ComponentProps<typeof DialogPopup>["finalFocus"];
   /** Parent-owned validation or persistence can keep Save unavailable. */
   submitDisabled?: boolean;
+  /** Explicitly re-seeds the metadata fields after a server conflict comparison. */
+  resetValue?: SpaceEditorValue;
+  resetVersion?: number;
   /** Preserve the legacy submitting behavior unless a parent opts into field/close locking. */
   lockWhileSubmitting?: boolean;
   /** Prevents Escape, outside press, and the close affordance from dismissing the dialog. */
@@ -90,6 +93,7 @@ export function SpaceEditorDialog(props: {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
   const openedRef = useRef(false);
+  const resetVersionRef = useRef(props.resetVersion);
   const fieldId = useId();
   const nameInputId = `${fieldId}-name`;
   const nameErrorId = `${fieldId}-name-error`;
@@ -121,6 +125,25 @@ export function SpaceEditorDialog(props: {
     props.mode,
     onValueChange,
     props.open,
+  ]);
+
+  useEffect(() => {
+    if (!props.open || resetVersionRef.current === props.resetVersion) return;
+    resetVersionRef.current = props.resetVersion;
+    const value = props.resetValue ?? props.initialValue ?? { name: "", icon: defaultIcon };
+    setName(value.name);
+    setIcon(value.icon);
+    setIconPinned(props.mode !== "create");
+    setSubmitError(null);
+    onValueChange?.(value);
+  }, [
+    defaultIcon,
+    onValueChange,
+    props.initialValue,
+    props.mode,
+    props.open,
+    props.resetValue,
+    props.resetVersion,
   ]);
 
   const trimmedName = name.trim();

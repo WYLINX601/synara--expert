@@ -69,6 +69,8 @@ function recordsEqual<T extends string>(
 }
 
 interface SpacesUiState extends PersistedSpacesUiState {
+  requestedEditorSpaceId: SpaceId | null;
+  requestSpaceEditor: (spaceId: SpaceId | null) => void;
   pendingActiveSpace: { spaceId: SpaceId; minSequence: number } | null;
   setActiveSpaceId: (spaceId: SpaceId | null) => void;
   setOptimisticActiveSpaceId: (spaceId: SpaceId, minSequence: number) => void;
@@ -88,6 +90,8 @@ const persisted = readPersisted();
 
 export const useSpacesUiStore = create<SpacesUiState>((set, get) => ({
   ...persisted,
+  requestedEditorSpaceId: null,
+  requestSpaceEditor: (requestedEditorSpaceId) => set({ requestedEditorSpaceId }),
   pendingActiveSpace: null,
   setActiveSpaceId: (activeSpaceId) => {
     set({ activeSpaceId, pendingActiveSpace: null });

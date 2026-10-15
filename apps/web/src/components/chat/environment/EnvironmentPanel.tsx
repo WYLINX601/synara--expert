@@ -67,7 +67,10 @@ import {
 } from "./EnvironmentSidechatsSection";
 import { EnvironmentNotesSection } from "./EnvironmentNotesSection";
 import { EnvironmentPinnedSection } from "./EnvironmentPinnedSection";
-import { EnvironmentProjectInstructionsSection } from "./EnvironmentProjectInstructionsSection";
+import {
+  EnvironmentProjectInstructionsSection,
+  type ControlledProjectContextProps,
+} from "./EnvironmentProjectInstructionsSection";
 import { ENVIRONMENT_PANEL_RECAP_MARKDOWN_CLASS_NAME } from "./environmentPanelStyles";
 import { shouldShowStudioFolderRow } from "./EnvironmentPanel.logic";
 import {
@@ -158,6 +161,8 @@ export interface EnvironmentPanelProps {
   canCopyProjectInstructionsToNotes: boolean;
   /** Persist local project instruction edits. */
   onProjectInstructionsChange: (projectId: ProjectId, instructions: string) => void;
+  /** Server-owned Context editor, present only when the connected server advertises V1. */
+  controlledProjectContext?: ControlledProjectContextProps;
   /** Copy/append current project instructions into the active thread's notepad. */
   onCopyProjectInstructionsToNotes: () => void;
   /** Toggle the Diff panel/route (same handler the header diff toggle used). */
@@ -243,6 +248,7 @@ export function EnvironmentPanel({
   projectInstructions,
   canCopyProjectInstructionsToNotes,
   onProjectInstructionsChange,
+  controlledProjectContext,
   onCopyProjectInstructionsToNotes,
   onToggleDiff,
   onOpenAutomation,
@@ -542,6 +548,7 @@ export function EnvironmentPanel({
             canCopyToThreadNotes={canCopyProjectInstructionsToNotes}
             onInstructionsChange={onProjectInstructionsChange}
             onCopyToThreadNotes={onCopyProjectInstructionsToNotes}
+            {...(controlledProjectContext ? { controlledContext: controlledProjectContext } : {})}
           />
         </>
       ) : null}

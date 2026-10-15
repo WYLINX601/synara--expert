@@ -56,6 +56,7 @@ import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProjectionThreadRepositoryLive } from "../../persistence/Layers/ProjectionThreads.ts";
 import { ManagedAttachmentRepositoryLive } from "../../persistence/Layers/ManagedAttachments.ts";
+import { ContextRepository, ContextRepositoryLive } from "../../context/ContextRepository.ts";
 import { ServerConfig } from "../../config.ts";
 import {
   OrchestrationProjectionPipeline,
@@ -102,6 +103,7 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   // Preserve the established cursor identity. Migration 062 resets it so the
   // widened projector replays approval and user-input history exactly once.
   pendingInteractions: "projection.pending-approvals",
+  context: "projection.context",
 } as const;
 
 type ProjectorName =
@@ -157,6 +159,15 @@ const PROJECT_EVENT_TYPES = new Set<OrchestrationEvent["type"]>([
   "project.created",
   "project.meta-updated",
   "project.deleted",
+]);
+
+const CONTEXT_PROJECTION_EVENT_TYPES = new Set<OrchestrationEvent["type"]>([
+  "context.space.save-requested",
+  "context.project.save-requested",
+  "context.migration.claim-requested",
+  "context.migration.resolve-requested",
+  "context.thread.binding-set",
+  "context.thread.bind-requested",
 ]);
 
 const THREAD_MESSAGE_PROJECTION_EVENT_TYPES = new Set<OrchestrationEvent["type"]>([
@@ -501,6 +512,7 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
   const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const projectionPendingInteractionRepository = yield* ProjectionPendingInteractionRepository;
+  const contextRepository = yield* ContextRepository;
 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -1937,6 +1949,14 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
       replayFilter: { eventTypes: [...THREAD_PROJECTION_EVENT_TYPES] },
       apply: applyThreadsProjection,
     },
+    // Context replay follows the project and thread projections it reads.
+    {
+      name: ORCHESTRATION_PROJECTOR_NAMES.context,
+      phase: "hot",
+      shouldApply: (event) => CONTEXT_PROJECTION_EVENT_TYPES.has(event.type),
+      replayFilter: { eventTypes: [...CONTEXT_PROJECTION_EVENT_TYPES] },
+      apply: (event) => contextRepository.applyEvent(event),
+    },
     {
       name: ORCHESTRATION_PROJECTOR_NAMES.threadSessions,
       phase: "hot",
@@ -2519,4 +2539,5 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   Layer.provideMerge(ProjectionPendingInteractionRepositoryLive),
   Layer.provideMerge(ProjectionStateRepositoryLive),
   Layer.provideMerge(ManagedAttachmentRepositoryLive),
+  Layer.provideMerge(ContextRepositoryLive),
 );

@@ -21,6 +21,7 @@ folder keeps a small set of focused guides that stay in sync with the repository
 
 - [Linx 个人 AI 工作台｜产品设计方案 V2.0](./linx-product-design-v2.md) — 用户于 2026-10-10 提供的完整原文；当前产品方向与 MVP 规划，不代表实现或验收完成。
 - [Linx / Synara Expert 项目上下文](../context/PROJECT_CONTEXT.md) — 当前方案、既有开发候选、权限与版本边界、后续任务路由。
+- [Space / Project Context V1.1 实现](./space-project-context-v1-implementation.md) — 真实前后端接入、快照和 Provider 恢复；[交互 PRD](./space-project-context-v1-interaction-prd.md)与[接入验收](./space-project-context-v1-acceptance.md)。
 - [Expert 产品与技术方案](./expert-product-technical-design.md) — 既有 Expert 子系统设计与实现约束，结合 V2.0 的上层产品范围阅读。
 
 Other material lives in [docs/archive](./archive/) for historical reference.

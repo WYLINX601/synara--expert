@@ -26,6 +26,9 @@ const officialPrefix = (through: number): readonly OfficialMigrationRecord[] =>
     .filter(([id]) => id <= through && id <= 108)
     .map(([migration_id, name]) => ({ migration_id, name }));
 
+const currentOfficialRows = (): readonly OfficialMigrationRecord[] =>
+  migrationEntries.map(([migration_id, name]) => ({ migration_id, name }));
+
 const legacyRows = (through: 109 | 110): readonly OfficialMigrationRecord[] => [
   ...officialPrefix(108),
   ...LEGACY_EXPERT_OFFICIAL_MIGRATIONS.filter(({ officialId }) => officialId <= through).map(
@@ -102,7 +105,7 @@ const observe = (
   hasApplicationTables: true,
   officialTrackerExists: true,
   officialTrackerValid: true,
-  officialRows: officialPrefix(108),
+  officialRows: currentOfficialRows(),
   workbenchTrackerExists: false,
   workbenchTrackerValid: true,
   workbenchRows: [],
@@ -173,7 +176,7 @@ it.effect("backs up extension-only and official-only non-empty upgrades", () =>
   }),
 );
 
-it.effect("plans exact legacy adoption as a backup-required extension-only change", () =>
+it.effect("plans legacy adoption with the pending Context migration", () =>
   Effect.sync(() => {
     const plan = planWorkbenchUpgrade(
       observe({ officialRows: legacyRows(110), schemaState: legacy110Schema }),
@@ -181,7 +184,8 @@ it.effect("plans exact legacy adoption as a backup-required extension-only chang
     assert.strictEqual(plan.kind, "ready");
     if (plan.kind !== "ready") return;
     assert.strictEqual(plan.official.sourceVersion, 108);
-    assert.strictEqual(plan.official.hasPendingMigrations, false);
+    assert.strictEqual(plan.official.hasPendingMigrations, true);
+    assert.strictEqual(plan.official.targetVersion, currentOfficialMigrationCount());
     assert.deepStrictEqual(plan.workbench.adoptedMigrationIds, [1, 2]);
     assert.strictEqual(plan.workbench.hasPendingMigrations, false);
     assert.deepStrictEqual(
@@ -197,7 +201,7 @@ it.effect("plans exact legacy adoption as a backup-required extension-only chang
 
 it.effect("recognizes frozen legacy rows before checking the post-split official catalog", () =>
   Effect.sync(() => {
-    const postSplitCatalog = migrationEntries.filter(([id]) => id <= 108);
+    const postSplitCatalog = migrationEntries;
     for (const through of [109, 110] as const) {
       const legacy = planWorkbenchUpgrade(
         observe({
@@ -213,17 +217,18 @@ it.effect("recognizes frozen legacy rows before checking the post-split official
           through === 109 ? [1] : [1, 2],
         );
         assert.strictEqual(legacy.official.sourceVersion, 108);
-        assert.strictEqual(legacy.official.targetVersion, 108);
+        assert.strictEqual(legacy.official.targetVersion, currentOfficialMigrationCount());
+        assert.strictEqual(legacy.official.hasPendingMigrations, true);
       }
     }
 
     const futureCatalog = [
       ...postSplitCatalog,
-      [112, "OfficialMigrationAfterReservedSlots", Effect.void] as const,
+      [112, "OfficialMigrationAfterContextV1", Effect.void] as const,
     ];
     const futureRows = [
-      ...officialPrefix(108),
-      { migration_id: 112, name: "OfficialMigrationAfterReservedSlots" },
+      ...currentOfficialRows(),
+      { migration_id: 112, name: "OfficialMigrationAfterContextV1" },
     ];
     const sparseOfficial = planWorkbenchUpgrade(
       observe({ officialRows: futureRows, schemaState: baselineSchema }),
@@ -235,40 +240,41 @@ it.effect("recognizes frozen legacy rows before checking the post-split official
       assert.strictEqual(sparseOfficial.official.targetVersion, 112);
     }
 
-    const known109Catalog = [
+    const known112Catalog = [
       ...postSplitCatalog,
-      [109, "CurrentOfficialMigration109", Effect.void] as const,
+      [112, "CurrentOfficialMigration112", Effect.void] as const,
     ];
-    const known109 = planWorkbenchUpgrade(
+    const known112 = planWorkbenchUpgrade(
       observe({
         officialRows: [
-          ...officialPrefix(108),
-          { migration_id: 109, name: "CurrentOfficialMigration109" },
+          ...currentOfficialRows(),
+          { migration_id: 112, name: "CurrentOfficialMigration112" },
         ],
         schemaState: baselineSchema,
       }),
-      known109Catalog,
+      known112Catalog,
     );
-    assert.strictEqual(known109.kind, "ready");
-    if (known109.kind === "ready") {
-      assert.strictEqual(known109.official.sourceVersion, 109);
-      assert.strictEqual(known109.official.targetVersion, 109);
-      assert.deepStrictEqual(known109.legacyOfficialMigrations, []);
+    assert.strictEqual(known112.kind, "ready");
+    if (known112.kind === "ready") {
+      assert.strictEqual(known112.official.sourceVersion, 112);
+      assert.strictEqual(known112.official.targetVersion, 112);
+      assert.deepStrictEqual(known112.legacyOfficialMigrations, []);
     }
 
-    const unknownKnown109 = planWorkbenchUpgrade(
+    const unknownKnown112 = planWorkbenchUpgrade(
       observe({
         officialRows: [
-          ...officialPrefix(108),
-          { migration_id: 109, name: "UnrecognizedMigration109" },
+          ...currentOfficialRows(),
+          { migration_id: 112, name: "UnrecognizedMigration112" },
         ],
         schemaState: baselineSchema,
       }),
-      known109Catalog,
+      known112Catalog,
     );
-    assert.strictEqual(unknownKnown109.kind, "rejected");
-    if (unknownKnown109.kind === "rejected") {
-      assert.match(unknownKnown109.reason, /reserved legacy expert slot/u);
+    assert.strictEqual(unknownKnown112.kind, "ready");
+    if (unknownKnown112.kind === "ready") {
+      assert.isFalse(unknownKnown112.official.hasLineageRepair);
+      assert.isTrue(unknownKnown112.requiresBackup);
     }
   }),
 );
@@ -278,16 +284,16 @@ it.effect("rejects unknown, too-new, and structurally inconsistent histories", (
     const tooNewOfficial = planWorkbenchUpgrade(
       observe({
         officialRows: [
-          ...legacyRows(110),
-          { migration_id: 111, name: "UnrecognizedFutureOfficialMigration" },
+          ...currentOfficialRows(),
+          { migration_id: 112, name: "UnrecognizedFutureOfficialMigration" },
         ],
-        schemaState: legacy110Schema,
+        schemaState: baselineSchema,
       }),
     );
     assert.strictEqual(tooNewOfficial.kind, "rejected");
     if (tooNewOfficial.kind === "rejected") {
       assert.strictEqual(tooNewOfficial.rejectionKind, "official-too-new");
-      assert.strictEqual(tooNewOfficial.databaseVersion, 111);
+      assert.strictEqual(tooNewOfficial.databaseVersion, 112);
     }
 
     const tooNewWorkbench = planWorkbenchUpgrade(
@@ -362,7 +368,7 @@ it.effect("reads the empty database as an initialization plan", () =>
 
 it.effect("reads an extension-only pending migration without confusing official versions", () =>
   Effect.gen(function* () {
-    yield* runMigrations({ toMigrationInclusive: 108 });
+    yield* runMigrations();
     const plan = yield* inspectWorkbenchUpgradePlan;
     assert.strictEqual(plan.kind, "ready");
     if (plan.kind === "ready") {
@@ -398,7 +404,8 @@ it.effect("reads old 109/110 as an adoption-only upgrade with a required backup"
     assert.strictEqual(plan.kind, "ready");
     if (plan.kind === "ready") {
       assert.strictEqual(plan.official.sourceVersion, 108);
-      assert.strictEqual(plan.official.hasPendingMigrations, false);
+      assert.strictEqual(plan.official.targetVersion, currentOfficialMigrationCount());
+      assert.strictEqual(plan.official.hasPendingMigrations, true);
       assert.strictEqual(plan.workbench.sourceVersion, 0);
       assert.deepStrictEqual(plan.workbench.adoptedMigrationIds, [1, 2]);
       assert.strictEqual(plan.workbench.hasPendingMigrations, false);

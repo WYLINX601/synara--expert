@@ -4,11 +4,13 @@
 // Depends on: ProviderServiceLive with in-memory adapter and SQLite fakes.
 
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
 import type {
   ExpertAppliedRuntimeRecord,
+  ContextAppliedRuntimeRecord,
   ProviderApprovalDecision,
   ProviderForkThreadInput,
   ProviderForkThreadResult,
@@ -65,11 +67,12 @@ import {
   type ProviderSessionDirectoryShape,
 } from "../Services/ProviderSessionDirectory.ts";
 import {
-  makeProviderServiceLive,
+  makeProviderServiceLive as makeProviderServiceLiveRaw,
   PROVIDER_RUNTIME_QUARANTINE_CAUSE_MAX_BYTES,
   summarizeProviderRuntimeQuarantineCause,
 } from "./ProviderService.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
+import { makeContextRepositoryTestLayer } from "../ContextRepositoryTestLayer.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ProviderSessionRuntimeRepositoryLive } from "../../persistence/Layers/ProviderSessionRuntime.ts";
 import { ProviderSessionRuntimeRepository } from "../../persistence/Services/ProviderSessionRuntime.ts";
@@ -77,12 +80,24 @@ import {
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
 } from "../../persistence/Layers/Sqlite.ts";
-import { AGENT_GATEWAY_TURN_AUTHORITY_RETIRED } from "../../agentGateway/sessionLease.ts";
+import {
+  AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED,
+  AGENT_GATEWAY_TURN_AUTHORITY_RETIRED,
+} from "../../agentGateway/sessionLease.ts";
+import {
+  ContextRepository,
+  type ThreadContextBinding,
+  type ContextRepositoryShape,
+} from "../../context/ContextRepository.ts";
+import { PersistenceDecodeError } from "../../persistence/Errors.ts";
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.makeUnsafe(value);
 const asEventId = (value: string): EventId => EventId.makeUnsafe(value);
 const asThreadId = (value: string): ThreadId => ThreadId.makeUnsafe(value);
 const asTurnId = (value: string): TurnId => TurnId.makeUnsafe(value);
+
+const makeProviderServiceLive = (options?: Parameters<typeof makeProviderServiceLiveRaw>[0]) =>
+  makeProviderServiceLiveRaw(options).pipe(Layer.provide(makeContextRepositoryTestLayer()));
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
@@ -428,6 +443,7 @@ function makeProviderServiceLayer(
   providers?: {
     readonly includeRestartRollbackDroid?: boolean;
     readonly includePi?: boolean;
+    readonly contextRepository?: ContextRepositoryShape;
     readonly codexDidResumeSession?: NonNullable<
       ProviderAdapterShape<ProviderAdapterError>["didResumeSession"]
     >;
@@ -466,15 +482,37 @@ function makeProviderServiceLayer(
   };
 
   const providerAdapterLayer = Layer.succeed(ProviderAdapterRegistry, registry);
+  const contextRepository: ContextRepositoryShape = providers?.contextRepository ?? {
+    getSpace: () => Effect.die(new Error("Unused ContextRepository.getSpace in provider tests.")),
+    getProject: () =>
+      Effect.die(new Error("Unused ContextRepository.getProject in provider tests.")),
+    getThreadBinding: () => Effect.succeed(undefined),
+    getContextSession: () => Effect.succeed(undefined),
+    getApplied: () => Effect.succeed(undefined),
+    upsertApplied: () => Effect.void,
+    getThreadDetails: () => Effect.die(new Error("Unused ContextRepository.getThreadDetails.")),
+    getCommandResult: () => Effect.die(new Error("Unused ContextRepository.getCommandResult.")),
+    getPreview: () => Effect.die(new Error("Unused ContextRepository.getPreview.")),
+    buildBindingSnapshot: () =>
+      Effect.die(new Error("Unused ContextRepository.buildBindingSnapshot.")),
+    prepareSpaceSave: (event) => Effect.succeed(event),
+    prepareProjectSave: (event) => Effect.succeed(event),
+    prepareMigrationClaim: (event) => Effect.succeed(event),
+    prepareMigrationResolve: (event) => Effect.succeed(event),
+    prepareBinding: (event) => Effect.succeed(event),
+    applyEvent: () => Effect.void,
+  };
+  const contextRepositoryLayer = Layer.succeed(ContextRepository, contextRepository);
   const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
     Layer.provide(SqlitePersistenceMemory),
   );
   const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
 
   const rawLayer = Layer.mergeAll(
-    makeProviderServiceLive(options).pipe(
+    makeProviderServiceLiveRaw(options).pipe(
       Layer.provide(providerAdapterLayer),
       Layer.provide(directoryLayer),
+      Layer.provide(contextRepositoryLayer),
     ),
     directoryLayer,
     runtimeRepositoryLayer,
@@ -493,6 +531,502 @@ function makeProviderServiceLayer(
   };
 }
 
+type TestContextSession = NonNullable<ProviderSessionStartInput["contextSession"]>;
+
+function makeMutableContextRepository() {
+  const sessions = new Map<ThreadId, TestContextSession>();
+  const bindings = new Map<ThreadId, ThreadContextBinding>();
+  const applied = new Map<ThreadId, ContextAppliedRuntimeRecord>();
+  let appliedWriteFailure = false;
+  let appliedReadFailure = false;
+  let bindingReadFailure = false;
+
+  const repository: ContextRepositoryShape = {
+    getSpace: () => Effect.die(new Error("Unused ContextRepository.getSpace in provider tests.")),
+    getProject: () =>
+      Effect.die(new Error("Unused ContextRepository.getProject in provider tests.")),
+    getThreadBinding: (threadId) =>
+      bindingReadFailure
+        ? Effect.fail(
+            new PersistenceDecodeError({
+              operation: "test.getThreadBinding",
+              issue: "injected binding read failure",
+            }),
+          )
+        : Effect.succeed(bindings.get(threadId)),
+    getContextSession: (threadId) => Effect.succeed(sessions.get(threadId)),
+    getApplied: (threadId) =>
+      appliedReadFailure
+        ? Effect.fail(
+            new PersistenceDecodeError({
+              operation: "test.getApplied",
+              issue: "injected applied record read failure",
+            }),
+          )
+        : Effect.succeed(applied.get(threadId)),
+    upsertApplied: (record) =>
+      appliedWriteFailure
+        ? Effect.fail(
+            new PersistenceDecodeError({
+              operation: "test.upsertApplied",
+              issue: "injected applied record failure",
+            }),
+          )
+        : Effect.sync(() => {
+            applied.set(record.threadId, record);
+          }),
+    getThreadDetails: () => Effect.die(new Error("Unused ContextRepository.getThreadDetails.")),
+    getCommandResult: () => Effect.die(new Error("Unused ContextRepository.getCommandResult.")),
+    getPreview: () => Effect.die(new Error("Unused ContextRepository.getPreview.")),
+    buildBindingSnapshot: () =>
+      Effect.die(new Error("Unused ContextRepository.buildBindingSnapshot.")),
+    prepareSpaceSave: (event) => Effect.succeed(event),
+    prepareProjectSave: (event) => Effect.succeed(event),
+    prepareMigrationClaim: (event) => Effect.succeed(event),
+    prepareMigrationResolve: (event) => Effect.succeed(event),
+    prepareBinding: (event) => Effect.succeed(event),
+    applyEvent: () => Effect.void,
+  };
+
+  const setContext = (
+    threadId: ThreadId,
+    session: TestContextSession | undefined,
+    mode: ThreadContextBinding["mode"] = session ? "bound" : "unbound",
+  ) => {
+    if (session) {
+      sessions.set(threadId, session);
+      bindings.set(threadId, {
+        mode,
+        snapshot: {
+          snapshotId: session.snapshotId,
+          snapshotHash: session.snapshotHash,
+          text: session.text,
+          hasContent: session.hasContent,
+        } as NonNullable<ThreadContextBinding["snapshot"]>,
+      });
+    } else {
+      sessions.delete(threadId);
+      bindings.set(threadId, { mode });
+    }
+  };
+
+  return {
+    repository,
+    applied,
+    setContext,
+    setAppliedWriteFailure: (value: boolean) => {
+      appliedWriteFailure = value;
+    },
+    setAppliedReadFailure: (value: boolean) => {
+      appliedReadFailure = value;
+    },
+    setBindingReadFailure: (value: boolean) => {
+      bindingReadFailure = value;
+    },
+  };
+}
+
+const makeTestContextSession = (snapshotId: string, text: string): TestContextSession => ({
+  snapshotId,
+  snapshotHash: `${snapshotId}-hash`,
+  text,
+  hasContent: true,
+});
+
+const contextDispatchRepository = makeMutableContextRepository();
+const contextDispatchRouting = makeProviderServiceLayer(undefined, {
+  contextRepository: contextDispatchRepository.repository,
+});
+const contextDispatchThreadId = asThreadId("thread-context-dispatch-witness");
+const contextDispatchSession = makeTestContextSession(
+  "context-dispatch",
+  "## Project instructions\nPreserve source evidence boundaries.",
+);
+const contextDispatchExpert = {
+  snapshotId: "expert-dispatch",
+  persona: "Use the frozen review persona.",
+  skills: [],
+  references: [],
+} satisfies NonNullable<ProviderSessionStartInput["expertSession"]>;
+const contextDispatchBase = `${contextDispatchExpert.persona}\n\n${contextDispatchSession.text}`;
+const contextDispatchOrder: string[] = [];
+contextDispatchRepository.setContext(contextDispatchThreadId, contextDispatchSession);
+contextDispatchRouting.layer("ProviderService Context V1.1", (it) => {
+  it.effect(
+    "persists the applied Expert+Context bundle and witnesses send, steer, and review",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        yield* provider.startSession(contextDispatchThreadId, {
+          provider: "codex",
+          threadId: contextDispatchThreadId,
+          runtimeMode: "full-access",
+          expertSession: contextDispatchExpert,
+          contextSession: contextDispatchSession,
+        });
+
+        const adapterInput = contextDispatchRouting.codex.startSession.mock.calls.at(-1)?.[0];
+        assert.deepEqual(adapterInput?.expertSession, contextDispatchExpert);
+        assert.deepEqual(adapterInput?.contextSession, contextDispatchSession);
+        const applied = contextDispatchRepository.applied.get(contextDispatchThreadId);
+        assert.equal(applied?.snapshotId, contextDispatchSession.snapshotId);
+        assert.equal(applied?.snapshotHash, contextDispatchSession.snapshotHash);
+        assert.equal(applied?.provider, "codex");
+        assert.equal(applied?.submittedInstructions, contextDispatchBase);
+        assert.equal(
+          applied?.baseInstructionsHash,
+          createHash("sha256").update(contextDispatchBase).digest("hex"),
+        );
+
+        contextDispatchRouting.codex.sendTurn.mockImplementationOnce((input) =>
+          Effect.sync(() => {
+            contextDispatchOrder.push("adapter.sendTurn");
+            return { threadId: input.threadId, turnId: asTurnId("turn-context-send") };
+          }),
+        );
+        contextDispatchRouting.codex.steerTurn.mockImplementationOnce((input) =>
+          Effect.sync(() => {
+            contextDispatchOrder.push("adapter.steerTurn");
+            return { threadId: input.threadId, turnId: asTurnId("turn-context-steer") };
+          }),
+        );
+        contextDispatchRouting.codex.startReview.mockImplementationOnce((input) =>
+          Effect.sync(() => {
+            contextDispatchOrder.push("adapter.startReview");
+            return { threadId: input.threadId, turnId: asTurnId("turn-context-review") };
+          }),
+        );
+        yield* provider.sendTurn(
+          { threadId: contextDispatchThreadId, input: "send", attachments: [] },
+          {
+            beforeDispatch: Effect.sync(() => contextDispatchOrder.push("witness.sendTurn")).pipe(
+              Effect.asVoid,
+            ),
+          },
+        );
+        yield* provider.steerTurn(
+          { threadId: contextDispatchThreadId, input: "steer", attachments: [] },
+          {
+            beforeDispatch: Effect.sync(() => contextDispatchOrder.push("witness.steerTurn")).pipe(
+              Effect.asVoid,
+            ),
+          },
+        );
+        yield* provider.startReview(
+          { threadId: contextDispatchThreadId, target: { type: "uncommittedChanges" } },
+          {
+            beforeDispatch: Effect.sync(() =>
+              contextDispatchOrder.push("witness.startReview"),
+            ).pipe(Effect.asVoid),
+          },
+        );
+        assert.deepEqual(contextDispatchOrder, [
+          "witness.sendTurn",
+          "adapter.sendTurn",
+          "witness.steerTurn",
+          "adapter.steerTurn",
+          "witness.startReview",
+          "adapter.startReview",
+        ]);
+        yield* provider.stopSession({ threadId: contextDispatchThreadId });
+      }),
+  );
+});
+
+const contextGateRepository = makeMutableContextRepository();
+const contextGateRouting = makeProviderServiceLayer(undefined, {
+  contextRepository: contextGateRepository.repository,
+});
+const contextGateThreadId = asThreadId("thread-context-dispatch-gate");
+const contextGateSession = makeTestContextSession("context-gate", "Frozen instructions.");
+contextGateRepository.setContext(contextGateThreadId, contextGateSession);
+contextGateRouting.layer("ProviderService Context V1.1 gate", (it) => {
+  it.effect("refuses dispatch for changed, stale, or unreadable Context state", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      yield* provider.startSession(contextGateThreadId, {
+        provider: "codex",
+        threadId: contextGateThreadId,
+        runtimeMode: "full-access",
+        contextSession: contextGateSession,
+      });
+      contextGateRouting.codex.sendTurn.mockClear();
+
+      let witnessCalls = 0;
+      const options = {
+        beforeDispatch: Effect.sync(() => {
+          witnessCalls += 1;
+        }).pipe(Effect.asVoid),
+      };
+      contextGateRepository.setContext(contextGateThreadId, {
+        ...contextGateSession,
+        snapshotHash: "different-current-hash",
+      });
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(
+            provider.sendTurn(
+              { threadId: contextGateThreadId, input: "must not send", attachments: [] },
+              options,
+            ),
+          ),
+        ),
+      );
+      assert.equal(witnessCalls, 0);
+      assert.equal(contextGateRouting.codex.sendTurn.mock.calls.length, 0);
+
+      contextGateRepository.setContext(contextGateThreadId, contextGateSession);
+      const currentRecord = contextGateRepository.applied.get(contextGateThreadId);
+      if (!currentRecord) assert.fail("Expected a current applied Context record");
+      contextGateRepository.applied.set(contextGateThreadId, {
+        ...currentRecord,
+        lifecycleGeneration: "retired-generation",
+      });
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(
+            provider.sendTurn({
+              threadId: contextGateThreadId,
+              input: "stale applied record",
+              attachments: [],
+            }),
+          ),
+        ),
+      );
+      assert.equal(contextGateRouting.codex.sendTurn.mock.calls.length, 0);
+
+      contextGateRepository.applied.set(contextGateThreadId, currentRecord);
+      contextGateRepository.setBindingReadFailure(true);
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(
+            provider.sendTurn({
+              threadId: contextGateThreadId,
+              input: "unreadable binding",
+              attachments: [],
+            }),
+          ),
+        ),
+      );
+      assert.equal(contextGateRouting.codex.sendTurn.mock.calls.length, 0);
+      contextGateRepository.setBindingReadFailure(false);
+
+      const compactThread = contextGateRouting.codex.compactThread;
+      compactThread.mockClear();
+      contextGateRepository.applied.delete(contextGateThreadId);
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(provider.compactThread({ threadId: contextGateThreadId })),
+        ),
+      );
+      assert.equal(compactThread.mock.calls.length, 0);
+
+      contextGateRepository.applied.set(contextGateThreadId, {
+        ...currentRecord,
+        lifecycleGeneration: "retired-compaction-generation",
+      });
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(provider.compactThread({ threadId: contextGateThreadId })),
+        ),
+      );
+      assert.equal(compactThread.mock.calls.length, 0);
+
+      contextGateRepository.applied.set(contextGateThreadId, currentRecord);
+      contextGateRepository.setAppliedReadFailure(true);
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(provider.compactThread({ threadId: contextGateThreadId })),
+        ),
+      );
+      assert.equal(compactThread.mock.calls.length, 0);
+      contextGateRepository.setAppliedReadFailure(false);
+      yield* provider.stopSession({ threadId: contextGateThreadId });
+    }),
+  );
+});
+
+const contextFailureRepository = makeMutableContextRepository();
+const contextFailureRouting = makeProviderServiceLayer(undefined, {
+  contextRepository: contextFailureRepository.repository,
+});
+const contextFailureThreadId = asThreadId("thread-context-record-failure");
+const contextFailureSession = makeTestContextSession("context-record-failure", "Persist this.");
+contextFailureRepository.setContext(contextFailureThreadId, contextFailureSession);
+contextFailureRepository.setAppliedWriteFailure(true);
+contextFailureRouting.layer("ProviderService Context V1.1 persistence failure", (it) => {
+  it.effect("stops a just-started generation when applied-record persistence fails", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const result = yield* Effect.exit(
+        provider.startSession(contextFailureThreadId, {
+          provider: "codex",
+          threadId: contextFailureThreadId,
+          runtimeMode: "full-access",
+          contextSession: contextFailureSession,
+        }),
+      );
+      assert.isTrue(Exit.isFailure(result));
+      assert.isFalse(yield* contextFailureRouting.codex.hasSession(contextFailureThreadId));
+      assert.equal(contextFailureRouting.codex.stopSession.mock.calls.length, 1);
+      assert.equal(contextFailureRepository.applied.has(contextFailureThreadId), false);
+      assert.equal(
+        Option.getOrUndefined(yield* directory.getBinding(contextFailureThreadId))?.status,
+        "stopped",
+      );
+    }),
+  );
+});
+
+const contextRestoreRepository = makeMutableContextRepository();
+const contextRestoreRouting = makeProviderServiceLayer(undefined, {
+  contextRepository: contextRestoreRepository.repository,
+});
+const contextRestoreThreadId = asThreadId("thread-context-frozen-recovery");
+const contextRestoreOriginal = makeTestContextSession("context-original", "Original frozen text.");
+const contextRestoreNewer = makeTestContextSession("context-newer", "Newer settings text.");
+contextRestoreRepository.setContext(contextRestoreThreadId, contextRestoreOriginal);
+contextRestoreRouting.layer("ProviderService Context V1.1 restoration", (it) => {
+  it.effect("recovers the same frozen Context and dispatches once in the new generation", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      yield* provider.startSession(contextRestoreThreadId, {
+        provider: "codex",
+        threadId: contextRestoreThreadId,
+        runtimeMode: "full-access",
+        contextSession: contextRestoreOriginal,
+      });
+      const firstBinding = Option.getOrUndefined(
+        yield* directory.getBinding(contextRestoreThreadId),
+      );
+      if (!firstBinding?.lifecycleGeneration) assert.fail("Expected the initial generation");
+
+      yield* provider.stopRuntimeSession!({ threadId: contextRestoreThreadId });
+      const stoppedBinding = Option.getOrUndefined(
+        yield* directory.getBinding(contextRestoreThreadId),
+      );
+      if (!stoppedBinding?.lifecycleGeneration) assert.fail("Expected the stopped generation");
+      contextRestoreRouting.codex.startSession.mockClear();
+      contextRestoreRouting.codex.sendTurn.mockClear();
+
+      const turn = yield* provider.sendTurn({
+        threadId: contextRestoreThreadId,
+        input: "restore and dispatch once",
+        attachments: [],
+      });
+      const restoredStart = contextRestoreRouting.codex.startSession.mock.calls.at(-1)?.[0];
+      const currentBinding = Option.getOrUndefined(
+        yield* directory.getBinding(contextRestoreThreadId),
+      );
+      const applied = contextRestoreRepository.applied.get(contextRestoreThreadId);
+
+      assert.deepEqual(restoredStart?.contextSession, contextRestoreOriginal);
+      assert.equal(restoredStart?.lifecycleGeneration, currentBinding?.lifecycleGeneration);
+      assert.notEqual(currentBinding?.lifecycleGeneration, firstBinding.lifecycleGeneration);
+      assert.notEqual(currentBinding?.lifecycleGeneration, stoppedBinding.lifecycleGeneration);
+      assert.equal(applied?.lifecycleGeneration, currentBinding?.lifecycleGeneration);
+      assert.equal(contextRestoreRouting.codex.sendTurn.mock.calls.length, 1);
+      assert.equal(turn.threadId, contextRestoreThreadId);
+      yield* provider.stopSession({ threadId: contextRestoreThreadId });
+    }),
+  );
+
+  it.effect("restores the persisted Context snapshot without substituting newer settings", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      yield* provider.startSession(contextRestoreThreadId, {
+        provider: "codex",
+        threadId: contextRestoreThreadId,
+        runtimeMode: "full-access",
+        contextSession: contextRestoreOriginal,
+      });
+      yield* provider.stopRuntimeSession!({ threadId: contextRestoreThreadId });
+      contextRestoreRepository.setContext(contextRestoreThreadId, contextRestoreNewer);
+      contextRestoreRouting.codex.startSession.mockClear();
+      contextRestoreRouting.codex.sendTurn.mockClear();
+
+      const result = yield* Effect.exit(
+        provider.sendTurn({
+          threadId: contextRestoreThreadId,
+          input: "restore only",
+          attachments: [],
+        }),
+      );
+      assert.isTrue(Exit.isFailure(result));
+      assert.deepEqual(
+        contextRestoreRouting.codex.startSession.mock.calls.at(-1)?.[0]?.contextSession,
+        contextRestoreOriginal,
+      );
+      assert.equal(contextRestoreRouting.codex.sendTurn.mock.calls.length, 0);
+      yield* provider.stopSession({ threadId: contextRestoreThreadId });
+    }),
+  );
+});
+
+const contextForkRepository = makeMutableContextRepository();
+const contextForkRouting = makeProviderServiceLayer(undefined, {
+  contextRepository: contextForkRepository.repository,
+});
+const contextForkSourceThreadId = asThreadId("thread-context-fork-source");
+const contextForkTargetThreadId = asThreadId("thread-context-fork-target");
+const contextForkSession = makeTestContextSession("context-fork-target", "Target instructions.");
+contextForkRepository.setContext(contextForkSourceThreadId, contextForkSession);
+contextForkRouting.layer("ProviderService Context V1.1 native fork", (it) => {
+  it.effect("uses the target snapshot for native forks and rejects an unbound target", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      yield* provider.startSession(contextForkSourceThreadId, {
+        provider: "codex",
+        threadId: contextForkSourceThreadId,
+        runtimeMode: "full-access",
+        contextSession: contextForkSession,
+      });
+
+      const forkInput = {
+        sourceThreadId: contextForkSourceThreadId,
+        threadId: contextForkTargetThreadId,
+        runtimeMode: "full-access" as const,
+      };
+      const missingTarget = yield* Effect.exit(provider.forkThread!(forkInput));
+      assert.isTrue(Exit.isFailure(missingTarget));
+      assert.equal(contextForkRouting.codex.forkThread.mock.calls.length, 0);
+
+      contextForkRepository.setContext(contextForkTargetThreadId, contextForkSession);
+      contextForkRouting.codex.forkThread.mockImplementationOnce((input) =>
+        Effect.gen(function* () {
+          const forkedSession = yield* contextForkRouting.codex.startSession({
+            provider: "codex",
+            threadId: input.threadId,
+            runtimeMode: input.runtimeMode,
+            ...(input.lifecycleGeneration !== undefined
+              ? { lifecycleGeneration: input.lifecycleGeneration }
+              : {}),
+            ...(input.contextSession !== undefined ? { contextSession: input.contextSession } : {}),
+          });
+          return { threadId: input.threadId, resumeCursor: forkedSession.resumeCursor };
+        }),
+      );
+      const fork = yield* provider.forkThread!(forkInput);
+      assert.equal(fork?.threadId, contextForkTargetThreadId);
+      assert.deepEqual(
+        contextForkRouting.codex.forkThread.mock.calls.at(-1)?.[0]?.contextSession,
+        contextForkSession,
+      );
+      const applied = contextForkRepository.applied.get(contextForkTargetThreadId);
+      const targetBinding = Option.getOrUndefined(
+        yield* directory.getBinding(contextForkTargetThreadId),
+      );
+      assert.equal(applied?.snapshotId, contextForkSession.snapshotId);
+      assert.equal(applied?.lifecycleGeneration, targetBinding?.lifecycleGeneration);
+      yield* provider.stopSession({ threadId: contextForkSourceThreadId });
+      yield* provider.stopSession({ threadId: contextForkTargetThreadId });
+    }),
+  );
+});
+
 const routing = makeProviderServiceLayer();
 const expertAppliedRuntimeWrites: ExpertAppliedRuntimeRecord[] = [];
 const expertAppliedRuntimeRouting = makeProviderServiceLayer({
@@ -501,6 +1035,23 @@ const expertAppliedRuntimeRouting = makeProviderServiceLayer({
       expertAppliedRuntimeWrites.push(record);
     }),
 });
+const replacementRollbackContextRepository = makeMutableContextRepository();
+const replacementRollbackExpertWrites: ExpertAppliedRuntimeRecord[] = [];
+let failReplacementRollbackExpertWrite = false;
+const replacementRollbackRouting = makeProviderServiceLayer(
+  {
+    persistExpertAppliedRuntime: (record) =>
+      failReplacementRollbackExpertWrite
+        ? Effect.fail(new Error("injected rollback Expert applied runtime write failure"))
+        : Effect.sync(() => {
+            replacementRollbackExpertWrites.push(record);
+          }),
+  },
+  {
+    includePi: true,
+    contextRepository: replacementRollbackContextRepository.repository,
+  },
+);
 const expertAppliedRuntimeFailureRouting = makeProviderServiceLayer({
   persistExpertAppliedRuntime: () =>
     Effect.fail(new Error("injected applied runtime write failure")),
@@ -2161,6 +2712,232 @@ routing.layer("ProviderServiceLive routing", (it) => {
 
       yield* provider.stopSession({ threadId });
     }),
+  );
+
+  it.effect(
+    "restores persisted Expert and Context snapshots after a failed provider replacement",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId("thread-failed-codex-pi-replacement-snapshots");
+        const originalExpert = {
+          snapshotId: "snapshot-rollback-original",
+          persona: "Use the original reviewer persona.",
+          skills: [],
+          references: [],
+        };
+        const replacementExpert = {
+          snapshotId: "snapshot-rollback-replacement",
+          persona: "Use the replacement planner persona.",
+          skills: [],
+          references: [],
+        };
+        const originalContext = makeTestContextSession(
+          "context-rollback-original",
+          "Original frozen Context instructions.",
+        );
+        const replacementContext = makeTestContextSession(
+          "context-rollback-replacement",
+          "Replacement Context instructions.",
+        );
+        replacementRollbackExpertWrites.length = 0;
+        failReplacementRollbackExpertWrite = false;
+        replacementRollbackContextRepository.setContext(threadId, originalContext);
+
+        const initial = yield* provider.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          cwd: "/tmp/failed-codex-pi-replacement-snapshots",
+          expertSession: originalExpert,
+          contextSession: originalContext,
+          runtimeMode: "full-access",
+        });
+        const originalBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        yield* directory.upsert({
+          threadId,
+          provider: "codex",
+          runtimePayload: {
+            priorTranscriptBootstrapPending: true,
+            [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: true,
+          },
+        });
+
+        replacementRollbackContextRepository.setContext(threadId, replacementContext);
+        const replacementFailure = new ProviderAdapterSessionNotFoundError({
+          provider: "pi",
+          threadId,
+        });
+        replacementRollbackRouting.pi.startSession.mockImplementationOnce(() =>
+          Effect.fail(replacementFailure),
+        );
+        const replacement = yield* Effect.result(
+          provider.startSession(threadId, {
+            provider: "pi",
+            threadId,
+            cwd: "/tmp/failed-codex-pi-replacement-snapshots",
+            expertSession: replacementExpert,
+            contextSession: replacementContext,
+            runtimeMode: "full-access",
+          }),
+        );
+        assertFailure(replacement, replacementFailure);
+
+        const restoredBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        const restoreCall = replacementRollbackRouting.codex.startSession.mock.calls.findLast(
+          ([input]) => input.threadId === threadId,
+        )?.[0];
+        const appliedContext = replacementRollbackContextRepository.applied.get(threadId);
+        const restoredRuntimePayload = asRuntimePayloadRecord(restoredBinding.runtimePayload);
+        assert.equal(restoredBinding.provider, "codex");
+        assert.equal(restoredBinding.status, "running");
+        assert.equal(restoredBinding.lifecycleGeneration, originalBinding.lifecycleGeneration);
+        assert.isTrue(yield* replacementRollbackRouting.codex.hasSession(threadId));
+        assert.isFalse(yield* replacementRollbackRouting.pi.hasSession(threadId));
+        assert.deepEqual(restoreCall?.resumeCursor, initial.resumeCursor);
+        assert.deepEqual(restoreCall?.expertSession, originalExpert);
+        assert.deepEqual(restoreCall?.contextSession, originalContext);
+        assert.deepEqual(restoredRuntimePayload.expertSession, originalExpert);
+        assert.deepEqual(restoredRuntimePayload.contextSession, originalContext);
+        assert.equal(restoredRuntimePayload.priorTranscriptBootstrapPending, true);
+        assert.equal(restoredRuntimePayload[AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED], false);
+        assert.lengthOf(replacementRollbackExpertWrites, 2);
+        assert.equal(replacementRollbackExpertWrites[1]?.snapshotId, originalExpert.snapshotId);
+        assert.equal(replacementRollbackExpertWrites[1]?.provider, "codex");
+        assert.equal(
+          replacementRollbackExpertWrites[1]?.lifecycleGeneration,
+          originalBinding.lifecycleGeneration,
+        );
+        assert.equal(appliedContext?.snapshotId, originalContext.snapshotId);
+        assert.equal(appliedContext?.snapshotHash, originalContext.snapshotHash);
+        assert.equal(appliedContext?.provider, "codex");
+        assert.equal(appliedContext?.lifecycleGeneration, restoredBinding.lifecycleGeneration);
+        const originalInstructions = `${originalExpert.persona}\n\n${originalContext.text}`;
+        assert.equal(appliedContext?.submittedInstructions, originalInstructions);
+        assert.equal(
+          appliedContext?.baseInstructionsHash,
+          createHash("sha256").update(originalInstructions).digest("hex"),
+        );
+
+        replacementRollbackContextRepository.setContext(threadId, originalContext);
+        yield* provider.sendTurn({
+          threadId,
+          input: "Continue with the restored snapshots.",
+          attachments: [],
+        });
+        assert.equal(replacementRollbackRouting.codex.sendTurn.mock.calls.length, 1);
+        assert.equal(replacementRollbackRouting.pi.sendTurn.mock.calls.length, 0);
+        yield* provider.stopSession({ threadId });
+      }).pipe(Effect.provide(replacementRollbackRouting.rawLayer)),
+  );
+
+  it.effect("retires a restored runtime when rollback applied evidence cannot persist", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-failed-codex-pi-rollback-evidence");
+      const expertSession = {
+        snapshotId: "snapshot-rollback-evidence-failure",
+        persona: "Use the reviewer persona.",
+        skills: [],
+        references: [],
+      };
+      const contextSession = makeTestContextSession(
+        "context-rollback-evidence-failure",
+        "Context for rollback evidence failure.",
+      );
+      replacementRollbackContextRepository.setContext(threadId, contextSession);
+      failReplacementRollbackExpertWrite = false;
+      yield* provider.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        expertSession,
+        contextSession,
+        runtimeMode: "full-access",
+      });
+
+      failReplacementRollbackExpertWrite = true;
+      replacementRollbackRouting.pi.startSession.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterSessionNotFoundError({
+            provider: "pi",
+            threadId,
+          }),
+        ),
+      );
+      const replacement = yield* Effect.exit(
+        provider.startSession(threadId, {
+          provider: "pi",
+          threadId,
+          expertSession,
+          contextSession,
+          runtimeMode: "full-access",
+        }),
+      );
+      failReplacementRollbackExpertWrite = false;
+
+      assert.isTrue(Exit.isFailure(replacement));
+      assert.isFalse(yield* replacementRollbackRouting.codex.hasSession(threadId));
+      assert.isFalse(yield* replacementRollbackRouting.pi.hasSession(threadId));
+      const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(binding.provider, "codex");
+      assert.equal(binding.status, "stopped");
+      assert.deepEqual(asRuntimePayloadRecord(binding.runtimePayload).expertSession, expertSession);
+      yield* provider.stopSession({ threadId });
+    }).pipe(Effect.provide(replacementRollbackRouting.rawLayer)),
+  );
+
+  it.effect("rejects malformed persisted rollback snapshots before stopping the old runtime", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      failReplacementRollbackExpertWrite = false;
+      for (const field of ["expertSession", "contextSession"] as const) {
+        const threadId = asThreadId(`thread-malformed-rollback-${field}`);
+        const expertSession = {
+          snapshotId: `snapshot-malformed-rollback-${field}`,
+          persona: "Use the reviewer persona.",
+          skills: [],
+          references: [],
+        };
+        const contextSession = makeTestContextSession(
+          `context-malformed-rollback-${field}`,
+          "Context for malformed rollback snapshot.",
+        );
+        replacementRollbackContextRepository.setContext(threadId, contextSession);
+        yield* provider.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          expertSession,
+          contextSession,
+          runtimeMode: "full-access",
+        });
+        yield* directory.upsert({
+          threadId,
+          provider: "codex",
+          runtimePayload:
+            field === "expertSession"
+              ? { expertSession: { snapshotId: "malformed" } }
+              : { contextSession: { snapshotId: "malformed" } },
+        });
+        const piStarts = replacementRollbackRouting.pi.startSession.mock.calls.length;
+        const result = yield* Effect.exit(
+          provider.startSession(threadId, {
+            provider: "pi",
+            threadId,
+            expertSession,
+            contextSession,
+            runtimeMode: "full-access",
+          }),
+        );
+
+        assert.isTrue(Exit.isFailure(result));
+        assert.isTrue(yield* replacementRollbackRouting.codex.hasSession(threadId));
+        assert.isFalse(yield* replacementRollbackRouting.pi.hasSession(threadId));
+        assert.equal(replacementRollbackRouting.pi.startSession.mock.calls.length, piStarts);
+        yield* provider.stopSession({ threadId });
+      }
+    }).pipe(Effect.provide(replacementRollbackRouting.rawLayer)),
   );
 
   it.effect("serializes recovery before a competing provider start", () =>

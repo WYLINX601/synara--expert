@@ -5,6 +5,8 @@ import { parseComputerInvocation } from "@synara/shared/computerInvocation";
 import { AgentGatewaySessionRegistry } from "../../agentGateway/Services/AgentGatewaySessionRegistry";
 import { preflightExpertConnections } from "../../experts/ExpertGatewayTools.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
+import { ContextRepository } from "../../context/ContextRepository.ts";
+import { contextExecutionInputDigest } from "../contextDispatchEvidence.ts";
 import { ComputerService } from "../../computer/Services/ComputerService";
 import { providerWorkspaceChanged } from "../projectRelocationPaths.ts";
 // FILE: ProviderCommandReactor.ts
@@ -91,6 +93,7 @@ import {
   ProviderAdapterRequestError,
   ProviderAdapterValidationError,
   ProviderServiceError,
+  ProviderValidationError,
 } from "../../provider/Errors.ts";
 import { buildInlineSkillInstructions } from "../../provider/skillPromptInjection.ts";
 import {
@@ -743,6 +746,7 @@ class ProviderCommandReactorConfig extends ServiceMap.Service<
 const make = Effect.gen(function* () {
   const { commandEventTimeout } = yield* ProviderCommandReactorConfig;
   const orchestrationEngine = yield* OrchestrationEngineService;
+  const contextRepository = yield* ContextRepository;
   const deliveryRepository = yield* OrchestrationEventDeliveryRepository;
   const turnCheckpointCoordinator = yield* TurnCheckpointCoordinator;
   const queuedTurnPromotions = yield* QueuedTurnPromotionRepository;
@@ -1668,6 +1672,38 @@ const make = Effect.gen(function* () {
     clearWorkspaceIndexCache(plan.cwd);
   });
 
+  const admitContextForExecution = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    createdAt: string,
+  ) {
+    const binding = yield* contextRepository.getThreadBinding(threadId);
+    if (binding?.mode === "unbound") {
+      yield* orchestrationEngine.dispatch({
+        type: "context.bind",
+        commandId: serverCommandId("context-bind"),
+        threadId,
+        createdAt,
+      });
+    }
+    return yield* contextRepository.getContextSession(threadId);
+  });
+
+  const readContextExecutionWorkspace = Effect.fnUntraced(function* (thread: OrchestrationThread) {
+    const model = yield* orchestrationEngine.getReadModel();
+    const project = model.projects.find((entry) => entry.id === thread.projectId);
+    if (project === undefined || project.deletedAt !== null) {
+      return yield* new ProviderValidationError({
+        operation: "context.dispatch",
+        issue:
+          "The execution project is unavailable; original workspace identity cannot be confirmed.",
+      });
+    }
+    return {
+      projectWorkspaceRoot: project.workspaceRoot,
+      effectiveCwd: resolveThreadWorkspaceCwd({ thread, projects: [project] }) ?? null,
+    };
+  });
+
   const ensureSessionForThread = Effect.fnUntraced(function* (
     threadId: ThreadId,
     createdAt: string,
@@ -1685,6 +1721,7 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${threadId}' was not found in projection state.`),
       );
     }
+    const contextSession = yield* admitContextForExecution(threadId, createdAt);
     const shouldRegisterContextBootstrap =
       !suppressContextBootstrapOnNextStartThreadIds.has(threadId);
 
@@ -1813,6 +1850,7 @@ const make = Effect.gen(function* () {
       modelSelection: desiredModelSelection,
       providerOptions: resolvedProviderOptions,
       ...(expertSession ? { expertSession } : {}),
+      ...(contextSession ? { contextSession } : {}),
       ...(options?.enableComputerControl !== undefined
         ? { enableComputerControl: options.enableComputerControl }
         : {}),
@@ -2282,6 +2320,105 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
+    const contextSession = yield* admitContextForExecution(input.threadId, input.createdAt);
+    const contextDeliverySequence = input.completionEventSequence ?? input.sourceEventSequence;
+    const contextDelivery = contextSession?.hasContent
+      ? yield* deliveryRepository.getDelivery({
+          consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+          eventSequence: contextDeliverySequence,
+        })
+      : Option.none();
+    const contextEvent =
+      Option.isSome(contextDelivery) && contextDelivery.value.state === "inflight"
+        ? yield* readOrchestrationEventAtSequence(contextDeliverySequence)
+        : undefined;
+    const contextWorkspace = contextSession?.hasContent
+      ? yield* readContextExecutionWorkspace(thread)
+      : undefined;
+    const contextWitness =
+      contextSession?.hasContent &&
+      Option.isSome(contextDelivery) &&
+      contextDelivery.value.claimOwner !== null &&
+      contextEvent !== undefined &&
+      (contextEvent.type === "thread.turn-start-requested" ||
+        contextEvent.type === "thread.goal-continuation-requested")
+        ? {
+            consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+            eventSequence: contextDeliverySequence,
+            expectedClaimOwner: contextDelivery.value.claimOwner,
+            snapshotId: contextSession.snapshotId,
+            inputDigest: contextExecutionInputDigest(contextEvent, thread, contextWorkspace!),
+            messageId: input.messageId,
+          }
+        : undefined;
+    const recordContextPhase = (phase: "before_dispatch" | "dispatch_started" | "acknowledged") =>
+      contextWitness === undefined
+        ? Effect.void
+        : deliveryRepository
+            .recordContextPhase({ ...contextWitness, phase, updatedAt: new Date().toISOString() })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderValidationError({
+                    operation: "context.dispatch",
+                    issue: "Could not persist Context execution evidence.",
+                    cause,
+                  }),
+              ),
+              Effect.flatMap((recorded) =>
+                recorded
+                  ? Effect.void
+                  : Effect.fail(
+                      new ProviderValidationError({
+                        operation: "context.dispatch",
+                        issue:
+                          "Context execution inputs or delivery ownership changed; dispatch refused.",
+                      }),
+                    ),
+              ),
+            );
+    yield* recordContextPhase("before_dispatch");
+    const contextDispatchOptions =
+      contextWitness === undefined
+        ? undefined
+        : {
+            beforeDispatch: Effect.gen(function* () {
+              const currentThread = yield* resolveThread(input.threadId);
+              if (
+                !currentThread ||
+                !contextEvent ||
+                (contextEvent.type !== "thread.turn-start-requested" &&
+                  contextEvent.type !== "thread.goal-continuation-requested")
+              ) {
+                return yield* new ProviderValidationError({
+                  operation: "context.dispatch",
+                  issue: "Original execution inputs disappeared before dispatch.",
+                });
+              }
+              const workspace = yield* readContextExecutionWorkspace(currentThread);
+              if (
+                contextExecutionInputDigest(contextEvent, currentThread, workspace) !==
+                contextWitness.inputDigest
+              ) {
+                return yield* new ProviderValidationError({
+                  operation: "context.dispatch",
+                  issue: "Execution inputs or workspace changed before dispatch.",
+                });
+              }
+              yield* recordContextPhase("dispatch_started");
+            }).pipe(
+              Effect.asVoid,
+              Effect.mapError((cause) =>
+                cause instanceof ProviderValidationError
+                  ? cause
+                  : new ProviderValidationError({
+                      operation: "context.dispatch",
+                      issue: "Could not confirm original inputs before dispatch.",
+                      cause,
+                    }),
+              ),
+            ),
+          };
     const debugPromptOverheadChars = debugModePromptOverheadChars(input.interactionMode);
     const goalPromptOverheadChars = providerGoalPromptOverheadChars(activeThreadGoal(thread));
     const providerPromptOverheadChars = debugPromptOverheadChars + goalPromptOverheadChars;
@@ -2849,10 +2986,13 @@ const make = Effect.gen(function* () {
             issue: "The saved send was cancelled before delivery.",
           });
         }
-        return yield* providerService.sendTurn({
-          ...providerTurnInput,
-          ...(messageText ? { input: messageText } : {}),
-        });
+        return yield* providerService.sendTurn(
+          {
+            ...providerTurnInput,
+            ...(messageText ? { input: messageText } : {}),
+          },
+          contextDispatchOptions,
+        );
       });
 
     const captureMessageStartCheckpoint = Effect.gen(function* () {
@@ -2915,16 +3055,22 @@ const make = Effect.gen(function* () {
     if (input.reviewTarget !== undefined) {
       yield* capturePreTurnBaselines;
       startedTurn = yield* providerService
-        .startReview({
-          threadId: input.threadId,
-          target: input.reviewTarget,
-        })
+        .startReview(
+          {
+            threadId: input.threadId,
+            target: input.reviewTarget,
+          },
+          contextDispatchOptions,
+        )
         .pipe(Effect.onError(() => cancelPendingStudioBaseline));
     } else if (input.dispatchMode === "steer") {
-      startedTurn = yield* providerService.steerTurn({
-        ...providerTurnInput,
-        ...(normalizedInput ? { input: normalizedInput } : {}),
-      });
+      startedTurn = yield* providerService.steerTurn(
+        {
+          ...providerTurnInput,
+          ...(normalizedInput ? { input: normalizedInput } : {}),
+        },
+        contextDispatchOptions,
+      );
     } else {
       yield* capturePreTurnBaselines;
       const tracksDroidContextAcceptance =
@@ -3126,6 +3272,7 @@ const make = Effect.gen(function* () {
         );
       }
     }
+    if (startedTurn !== undefined) yield* recordContextPhase("acknowledged");
     // A native steer belongs to the still-pending recovery turn; its terminal
     // event, not the steering acknowledgement, retires escalation evidence.
     if (input.reviewTarget !== undefined) {
@@ -6298,6 +6445,29 @@ const make = Effect.gen(function* () {
         const outcome: ProviderAttemptOutcome =
           workerResult._tag === "ok" ? { _tag: "accepted" } : workerResult.outcome;
 
+        // The accepted user message and snapshot already exist. A Context load
+        // rejection before dispatch must remain recoverable by its original
+        // event, rather than being completed as an ordinary rejected send.
+        if (outcome._tag === "rejected" && event.type === "thread.turn-start-requested") {
+          const evidence = yield* deliveryRepository.getDelivery({
+            consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+            eventSequence: event.sequence,
+          });
+          if (
+            Option.isSome(evidence) &&
+            evidence.value.contextSnapshotId &&
+            evidence.value.contextPhase === "before_dispatch"
+          ) {
+            yield* settleTerminalFailure({
+              event,
+              claimOwner,
+              state: "dead",
+              detail: outcome.detail,
+            });
+            return;
+          }
+        }
+
         switch (outcome._tag) {
           case "accepted":
           case "rejected": {
@@ -6480,6 +6650,20 @@ const make = Effect.gen(function* () {
           ),
         );
       }
+      const retryEvidence = yield* deliveryRepository.getDelivery({
+        consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+        eventSequence: input.eventSequence,
+      });
+      if (
+        event.type === "thread.turn-start-requested" &&
+        Option.isSome(retryEvidence) &&
+        retryEvidence.value.contextSnapshotId &&
+        retryEvidence.value.contextPhase === "before_dispatch"
+      ) {
+        // Admission verified that this original event never reached dispatch.
+        // Remove only its failed-attempt cache entry so the explicit retry can run.
+        yield* Cache.invalidate(handledTurnStartKeys, turnStartKeyForEvent(event));
+      }
       yield* processClaimedProviderIntentWithRecovery(event);
       const delivery = yield* deliveryRepository.getDelivery({
         consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
@@ -6506,7 +6690,9 @@ const make = Effect.gen(function* () {
             if (
               Option.isNone(delivery) ||
               delivery.value.threadId !== input.threadId ||
-              delivery.value.state !== input.expectedState
+              delivery.value.state !== input.expectedState ||
+              (input.expectedUpdatedAt !== undefined &&
+                delivery.value.updatedAt !== input.expectedUpdatedAt)
             )
               return null;
             const reconciledEvent = yield* readProviderIntentEvent(input.eventSequence);
@@ -6531,11 +6717,14 @@ const make = Effect.gen(function* () {
               );
             }
             const reconciled = yield* deliveryRepository.reconcile({
-              reconciliationId: crypto.randomUUID(),
+              reconciliationId: input.reconciliationId ?? crypto.randomUUID(),
               consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
               eventSequence: input.eventSequence,
               threadId: input.threadId,
               expectedState: input.expectedState,
+              ...(input.expectedUpdatedAt !== undefined
+                ? { expectedUpdatedAt: input.expectedUpdatedAt }
+                : {}),
               outcome: input.outcome,
               reconciledBy: input.reconciledBy,
               ...(input.note === undefined ? {} : { note: input.note }),
@@ -6963,6 +7152,76 @@ const make = Effect.gen(function* () {
         : reconcileDeliveryRuntime(input),
     );
 
+  const retryContextLoad: ProviderCommandReactorShape["retryContextLoad"] = (input) =>
+    Effect.gen(function* () {
+      const reject = (message: string) => ({
+        commandId: input.commandId,
+        status: "rejected" as const,
+        message,
+      });
+      const reconciliationId = `context-retry:${input.commandId}`;
+      const prior = yield* deliveryRepository.getReconciliation(reconciliationId);
+      if (Option.isSome(prior)) {
+        return prior.value.threadId === input.threadId &&
+          prior.value.eventSequence === input.eventSequence &&
+          prior.value.outcome === "safe_retry"
+          ? { commandId: input.commandId, status: "saved" as const }
+          : reject("Retry command identity is already used by a different operation.");
+      }
+      const binding = yield* contextRepository.getThreadBinding(input.threadId);
+      const delivery = yield* deliveryRepository.getDelivery({
+        consumerName: PROVIDER_COMMAND_REACTOR_CONSUMER,
+        eventSequence: input.eventSequence,
+      });
+      const event = yield* readOrchestrationEventAtSequence(input.eventSequence);
+      const thread = yield* resolveThread(input.threadId);
+      const retryWorkspace = thread ? yield* readContextExecutionWorkspace(thread) : undefined;
+      if (
+        !thread ||
+        binding?.mode !== "bound" ||
+        !binding.snapshot?.hasContent ||
+        Option.isNone(delivery) ||
+        event?.type !== "thread.turn-start-requested" ||
+        event.payload.threadId !== input.threadId ||
+        delivery.value.threadId !== input.threadId ||
+        (delivery.value.state !== "dead" && delivery.value.state !== "uncertain") ||
+        delivery.value.contextPhase !== "before_dispatch" ||
+        delivery.value.contextSnapshotId !== binding.snapshot.snapshotId ||
+        delivery.value.contextMessageId !== event.payload.messageId ||
+        !thread.messages.some((message) => message.id === event.payload.messageId) ||
+        retryWorkspace === undefined ||
+        delivery.value.contextInputDigest !==
+          contextExecutionInputDigest(event, thread, retryWorkspace)
+      ) {
+        return reject(
+          "The original input or execution outcome cannot be confirmed. It was not replayed.",
+        );
+      }
+      const sessions = yield* providerService.listSessions();
+      if (
+        sessions.some(
+          (session) => session.threadId === input.threadId && session.status !== "closed",
+        ) ||
+        !providerService.hasLiveRuntimeTasks ||
+        (yield* providerService.hasLiveRuntimeTasks({ threadId: input.threadId }))
+      ) {
+        return reject("Stop the existing runtime before retrying the original message.");
+      }
+      const result = yield* reconcileDelivery({
+        threadId: input.threadId,
+        eventSequence: input.eventSequence,
+        expectedState: delivery.value.state,
+        expectedUpdatedAt: delivery.value.updatedAt,
+        outcome: "safe_retry",
+        reconciledBy: "context-loading-retry",
+        reconciliationId,
+        note: "Original event and inputs verified unchanged; durable phase proves no turn dispatch; runtime absence confirmed.",
+      });
+      return result === null
+        ? reject("The execution state changed before retry admission.")
+        : { commandId: input.commandId, status: "saved" as const };
+    });
+
   const generateConversationTitle: ProviderCommandReactorShape["regenerateThreadTitle"] = (input) =>
     Effect.gen(function* () {
       const expectedTitleSequence = yield* orchestrationEngine.getThreadTitleHighWaterSequence(
@@ -7070,6 +7329,7 @@ const make = Effect.gen(function* () {
     drain,
     listBlockingDeliveries,
     reconcileDelivery,
+    retryContextLoad,
     regenerateThreadTitle,
   } satisfies ProviderCommandReactorShape;
 });

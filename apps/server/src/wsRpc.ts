@@ -136,6 +136,10 @@ import { ServerEnvironment } from "./environment/Services/ServerEnvironment";
 import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
 import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
 import { makeWorkbenchExpertRpcHandlers } from "./workbench/host/expertRpc.ts";
+import { makeWorkbenchContextRpcHandlers } from "./workbench/host/contextRpc.ts";
+import { readThreadContextDetails } from "./workbench/host/contextThreadDetails.ts";
+import { ContextRepository, ContextRepositoryLive } from "./context/ContextRepository.ts";
+import { OrchestrationEventDeliveryRepository } from "./persistence/Services/OrchestrationEventDeliveries.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { ServerSettingsService } from "./serverSettings";
@@ -436,6 +440,8 @@ const makeWsRpcHandlersLayer = () =>
       const eventStore = yield* OrchestrationEventStore;
       const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
       const expertAppliedRuntimeRepository = yield* ExpertAppliedRuntimeRepository;
+      const contextRepository = yield* ContextRepository;
+      const contextDeliveries = yield* OrchestrationEventDeliveryRepository;
       const workbenchExpertRuntime = createWorkbenchExpertRuntime({
         stateDir: config.stateDir,
         expertAppliedRuntimeRepository,
@@ -1039,6 +1045,46 @@ const makeWsRpcHandlersLayer = () =>
         expertRpcEffect,
         loadProjectionThreads: () =>
           projectionReadModelQuery.getSnapshot().pipe(Effect.map((snapshot) => snapshot.threads)),
+      });
+      const workbenchContextRpcHandlers = makeWorkbenchContextRpcHandlers({
+        repository: contextRepository,
+        dispatch: dispatchOrchestrationCommand,
+        retryLoad: (request) =>
+          runtimeStartup.enqueueCommand(providerCommandReactor.retryContextLoad(request)),
+        getThreadDetails: (request) =>
+          readThreadContextDetails({
+            threadId: request.threadId,
+            repository: contextRepository,
+            deliveries: contextDeliveries,
+            providers: providerService,
+            readThread: (threadId) =>
+              orchestrationEngine
+                .getReadModel()
+                .pipe(
+                  Effect.map((model) => model.threads.find((thread) => thread.id === threadId)),
+                ),
+            readWorkspace: (thread) =>
+              orchestrationEngine.getReadModel().pipe(
+                Effect.map((model) => {
+                  const project = model.projects.find(
+                    (entry) => entry.id === thread.projectId && entry.deletedAt === null,
+                  );
+                  return project
+                    ? {
+                        projectWorkspaceRoot: project.workspaceRoot,
+                        effectiveCwd:
+                          resolveThreadWorkspaceCwd({ thread, projects: [project] }) ?? null,
+                      }
+                    : undefined;
+                }),
+              ),
+            readEvent: (sequence) =>
+              orchestrationEngine.readEventsThrough(sequence - 1, sequence).pipe(
+                Stream.runCollect,
+                Effect.map((events) => events[0]),
+              ),
+          }),
+        rpcEffect,
       });
 
       return AdmittedWsFeatureRpcGroup.of({
@@ -1906,6 +1952,7 @@ const makeWsRpcHandlersLayer = () =>
         [WS_METHODS.serverUpdateSettings]: (input) =>
           rpcEffect(serverSettings.updateSettingsView(input), "Failed to update server settings"),
         ...workbenchExpertRpcHandlers,
+        ...workbenchContextRpcHandlers,
         [WS_METHODS.serverRefreshProviders]: () =>
           rpcEffect(
             providerHealth.refresh.pipe(Effect.map((providers) => ({ providers }))),
@@ -2352,7 +2399,10 @@ const makeWsRpcHandlersLayer = () =>
 
 export const makeWsRpcLayer = () =>
   Layer.merge(
-    makeWsRpcHandlersLayer().pipe(Layer.provideMerge(ExpertAppliedRuntimeRepositoryLive)),
+    makeWsRpcHandlersLayer().pipe(
+      Layer.provideMerge(ExpertAppliedRuntimeRepositoryLive),
+      Layer.provideMerge(ContextRepositoryLive),
+    ),
     wsRequestAdmissionMiddlewareLayer,
   );
 

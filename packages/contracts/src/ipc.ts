@@ -34,6 +34,7 @@ import type {
   McpImportRequest,
   McpImportResult,
 } from "./mcp";
+import type { ContextApi } from "./context";
 
 import type {
   AuthBearerBootstrapResult,
@@ -912,6 +913,8 @@ export interface DesktopBridge {
 }
 
 export interface NativeApi {
+  /** Optional while older and isolated test clients are upgraded. */
+  context?: ContextApi;
   dialogs: {
     pickFolder: () => Promise<string | null>;
     saveFile?: (input: {

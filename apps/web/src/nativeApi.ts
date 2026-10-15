@@ -1,4 +1,5 @@
 import {
+  WS_CONTEXT_V1_CAPABILITY,
   WS_GITHUB_PROJECT_PROVISIONING_CAPABILITY,
   WS_PROJECT_FILE_WATCH_CAPABILITY,
   type NativeApi,
@@ -11,6 +12,7 @@ import {
 } from "./wsNativeApi";
 
 let cachedDesktopApi: NativeApi | undefined;
+let cachedWsApi: NativeApi | undefined;
 
 export function readNativeApi(): NativeApi | undefined {
   if (typeof window === "undefined") return undefined;
@@ -21,7 +23,8 @@ export function readNativeApi(): NativeApi | undefined {
     return cachedDesktopApi;
   }
 
-  return createWsNativeApi();
+  cachedWsApi ??= createWsNativeApi();
+  return cachedWsApi;
 }
 
 export function ensureNativeApi(): NativeApi {
@@ -40,6 +43,20 @@ export function readNativeApiServerCapability(capability: string): boolean {
     }
     if (capability === WS_PROJECT_FILE_WATCH_CAPABILITY) {
       return typeof window.nativeApi.projects?.onFileChange === "function";
+    }
+    if (capability === WS_CONTEXT_V1_CAPABILITY) {
+      const context = window.nativeApi.context;
+      return (
+        typeof context?.getSpace === "function" &&
+        typeof context.getProject === "function" &&
+        typeof context.getThread === "function" &&
+        typeof context.saveSpace === "function" &&
+        typeof context.saveProject === "function" &&
+        typeof context.getCommandResult === "function" &&
+        typeof context.claimMigration === "function" &&
+        typeof context.resolveMigration === "function" &&
+        typeof context.retryLoad === "function"
+      );
     }
     return false;
   }

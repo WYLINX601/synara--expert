@@ -1,5 +1,7 @@
 # Synara Expert 产品与技术方案
 
+上层产品方向（2026-10-10）：见 [Linx V2.0 原文](./linx-product-design-v2.md)与[项目上下文](../context/PROJECT_CONTEXT.md)。本文继续维护既有 Expert 子系统设计与实现约束；Space、Hermes 常驻服务、Skill Evolution 和 Agent Team 的新增规划见 V2.0，不由本文的既有实施状态推导为已完成。
+
 状态：首版产品链路已经实施：专家编辑、预检、任务快照绑定、Codex / Pi 加载、恢复、接续任务，以及本机第三方 MCP 连接管理和按专家工具允许列表路由均已接入。必需连接会在新会话启动前实测并阻止失败启动；可选连接失败时降级并写入专家上下文。连接按 Provider session 隔离，并在 Gateway 凭据撤销且在途请求排空后关闭。Codex、Pi SDK 与 MCP 的 P0 验证结果见 [技术验证记录](./expert-p0/README.md)。  
 调研日期：2026-09-24。代码基线：`eaa61eded31b6755d4f30ba8eabc5d905cf817cb`。  
 范围：在现有 Synara 内增加跨 Codex / Pi 的专家能力。暂按个人使用优先、以后可分享专家包设计；团队权限和公开市场不作为首版前提。

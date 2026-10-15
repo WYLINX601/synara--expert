@@ -14,8 +14,11 @@ Synara is a multi-provider coding-agent workspace with web, server, CLI, and des
 
 Read only what the task needs:
 
+- Linx product planning and current work routing: [project context](context/PROJECT_CONTEXT.md) and [Linx product design V2.0](docs/linx-product-design-v2.md). V2.0 is the user-provided product design; proposals and unimplemented capabilities are not runtime or acceptance facts.
+
 - Product and ownership semantics: [core concepts](docs/core-concepts.md) and [providers](docs/providers.md).
 - Contribution and verification conventions: [CONTRIBUTING.md](CONTRIBUTING.md) and the affected package's scripts.
+- Personal Workbench development stages, check selection, and concise acceptance reports: [development workflow](docs/workbench-development-workflow.md). Apply it alongside the verification requirements below.
 - Release/signing work: [release guide](docs/release.md). Local Canary operations: [Canary guide](docs/canary.md).
 - Current commands, toolchain requirements, and patched dependencies: [package.json](package.json), `bun.lock`, and `.mise.toml`. Resolve current paths from the checkout rather than relying on an old repository map.
 

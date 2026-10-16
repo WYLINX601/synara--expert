@@ -8,6 +8,8 @@ const ExpertConnection = Schema.Struct({
   id: TrimmedNonEmptyString,
   required: Schema.Boolean,
   tools: Schema.Array(TrimmedNonEmptyString),
+  /** Missing means the legacy explicit whitelist in `tools`. */
+  toolMode: Schema.optional(Schema.Literals(["all", "selected"])),
   enabled: Schema.optional(Schema.Boolean),
 });
 export type ExpertConnection = typeof ExpertConnection.Type;

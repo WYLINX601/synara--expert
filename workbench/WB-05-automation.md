@@ -1,5 +1,7 @@
 # WB-05 weekly upstream sync automation
 
+The contract and source-bound fixtures below retain their original historical scope. For the latest observed remote state, see the [2026-10-16 read-only audit](#2026-10-16-remote-read-only-audit); a historical statement that no schedule fired is not the current remote status.
+
 ## Workflow contract
 
 - `.github/workflows/workbench-weekly-sync.yml` runs Saturday at 02:30 UTC (10:30 Shanghai time) and supports `workflow_dispatch`. A fixed concurrency group prevents overlapping sync runs without cancelling the active run.
@@ -32,3 +34,36 @@ One additional local fixture run was executed against clean source SHA `9591dcda
 The fixture correction is committed in source SHA `8584249e19313471fe4e22f7ae7eca277f5ccf14`, directly after 9591. That commit changes only `.github/scripts/workbench-weekly.test.mjs`: it gives the synthetic repository a valid integrated-base lineage so the real `workbench:sync bind` API can accept the fixture candidate. The production bind and compare-and-swap guards were not weakened. A single local fixture run on 858 passed with Bun `1.4.2`; stdout SHA-256 `57596ebbc0d283ae3915f4dbf4f626afb2c206f0edb351048c8fc3fb0e395905`, empty stderr SHA-256 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. The structured weekly archive index is `8584249e1931-20261001/weekly/index.json`, SHA-256 `86bb64121732d691fbe778693fb550bde696b5eedc1a295b3c8eba1b2b8f8012`. It records a local synthetic-Git fixture pass, not a GitHub or remote workflow success, and does not establish fixture behavior for a later source SHA.
 
 WB-05 still requires a real manual `workflow_dispatch` run and a separate real scheduled run after the workflow is enabled and the publisher's required write permission is available. The manual run must demonstrate the trusted-main publisher's compare-and-swap write and resulting report; the scheduled run must show the configured schedule actually triggered and produced the expected candidate/report behavior. Until those are observed, remote branch-write permission, artifact retention, and scheduled operation remain unverified. No token or repository setting was changed for the local checks.
+
+<a id="2026-10-16-remote-read-only-audit"></a>
+
+## 2026-10-16 remote read-only audit
+
+Scope: read-only GitHub API requests for the v1.1 standards rollout; no workflow dispatch, repository-setting update, branch push, PR creation, or release. These are observations on 2026-10-16 (Asia/Shanghai), not guarantees of future state.
+
+| GET request                                                                                  | Observed result                                                                                                             |
+| -------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `repos/WYLINX601/synara--expert/branches/main`                                               | `protected: false`                                                                                                          |
+| `repos/WYLINX601/synara--expert/rulesets`                                                    | Empty array; no rulesets returned                                                                                           |
+| `repos/WYLINX601/synara--expert/actions/workflows/workbench-weekly-sync.yml/runs?per_page=5` | `total_count: 1`; one completed `schedule` run, conclusion `failure`, source SHA `61df29b094d3e5f2877f7787613655220a4f72a2` |
+| `repos/WYLINX601/synara--expert/actions/runs/38039223510/jobs`                               | `prepare` failed at `Select and prepare one fixed candidate`; `verify` and `publish` skipped                                |
+
+Run: [38039223510](https://github.com/WYLINX601/synara--expert/actions/runs/38039223510).
+
+The schedule has therefore triggered at least once, superseding the earlier no-trigger observation. This failed run does not establish end-to-end sync success, exact-SHA verification, candidate publishing, artifact recovery, or a successful manual dispatch. Job metadata identifies the failing stage only; this audit did not inspect detailed logs/artifacts or determine root cause.
+
+Execution: until remote protection is configured in a separately authorized repository operation, enforce the [same main gates manually](../docs/workbench-development-workflow.md#main-合入条件与保护) and label them as manual checks. Next automation maintenance should investigate the recorded prepare failure, first reconcile the [local baseline/state differences](./WB-00-upstream-evidence.md#2026-10-16-baseline-audit), then validate manual and scheduled paths under the [sync SOP](../docs/workbench-implementation-plan.md#sync-sop). Do not retry a mutating workflow merely to refresh a status or claim this documentation update enabled protection.
+
+The later 2026-10-16 architecture alignment adds the seventh formal boundary gate and baseline scope/refusal checks. Its synthetic WB-05 fixture passed again (including cross-job bundle import, real bind and CAS/race cases); this is still local Git-fixture evidence, not a remote manual/scheduled workflow rerun. See [alignment acceptance](../docs/workbench-adaptation-acceptance.md#alignment-implementation-20261016).
+
+<a id="maintenance-root-cause-20261016"></a>
+
+## 2026-10-16 prepare failure root cause
+
+The maintenance read the actual prepare job `114175960942` and downloaded its existing candidate artifact from [run 38039223510](https://github.com/WYLINX601/synara--expert/actions/runs/38039223510). The artifact report SHA-256 is `8a3b31d9948f073bee87498364e4e2e4ea7de354e888812841c673311cd9dabf`. Its result is `candidate-conflict`, stage `git-merge`, against base `61df29b094d3e5f2877f7787613655220a4f72a2` and fixed official target `v1.0.1` / `f44ce959bdeedf5e2dfe117d362ef4e08386b3c3`, with 30 conflict files. The official-selection check succeeded; verify and publish were correctly skipped. This is an unresolved upstream merge, not evidence of a scheduler, token or publishing defect. No workflow/settings changes or remote rerun were performed.
+
+Conflicts cover native orchestration/Provider loading, RPC/contracts, migrations, Chat/settings and CI. A retry alone cannot resolve them; repair must preserve the fixed target, review the semantic merge and verify the final candidate. Do not use ours/theirs wholesale or mark this run successful.
+
+A local isolated preparation includes current main plus all existing uncommitted source (including the Beta test fix), frozen as `ce593e8846e60f6dfaace8f6f97c59cb4a140689`. Merging the same official target reports 46 conflict files. It is an unaccepted source snapshot with an unresolved merge, at `/private/tmp/linx-maintenance-lb7ugot1/upgrade-v1.0.1`; main has not moved and no candidate was pushed. The original report/bundle and current preparation JSON are preserved under `/private/tmp/linx-maintenance-lb7ugot1/`. These temporary paths are recovery material for this maintenance, not durable production entry points. The user subsequently approved source-baseline calibration and the precise old-111 compatibility proposal, while asking for an explanation of what the scheduled merge does. Source calibration is now applied locally; implementation of compatibility and completion of the unresolved v1.0.1 merge remain separate steps.
+
+The fixed upstream catalog also owns `111 / GroupLibraryHosting`, while the local frozen history owns `111 / ContextV1`. This is a semantic tracker collision, not a conflict to resolve by retaining one side's text. The current no-adoption rule cannot support both identities in the native tracker. A [specific compatibility proposal](../docs/workbench-implementation-plan.md#v101-compatibility-proposal) describes exact recognition, independent Context ledger, shared backup/transaction/recovery and synthetic failure tests. The user explicitly approved this direction for implementation and isolated tests. No migration implementation, tracker or user database has yet changed; the original frozen script is preserved.

@@ -265,6 +265,48 @@ describe("ExpertStore", () => {
     });
   });
 
+  it("pins empty all-mode connections and gives each prepared task its own authorization ID", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const store = createExpertStore(stateDir);
+    const connections = createExpertConnectionStore(stateDir);
+    const config = await connections.save({
+      id: "all-tools",
+      name: "All tools MCP",
+      transport: { type: "stdio", command: "fixture-mcp", args: [], envFromHost: [] },
+    });
+    const expert = await store.save(
+      definitionInput("All tools", {
+        connections: [{ id: "all-tools", required: true, tools: [], toolMode: "all" }],
+      }),
+    );
+    await expect(store.preview({ expertId: expert.id, provider: "codex" })).resolves.toMatchObject({
+      status: "available",
+      issues: [],
+    });
+
+    const first = await store.prepareSnapshot(expert.id);
+    const firstSnapshot = await store.readSnapshot(first.snapshotId);
+    expect(firstSnapshot.mcpBinding).toMatchObject({
+      authorizationId: expect.any(String),
+      servers: [
+        {
+          id: "all-tools",
+          configRevision: config.revision,
+          required: true,
+          toolMode: "all",
+          tools: [],
+        },
+      ],
+    });
+
+    const second = await store.prepareSnapshot(expert.id);
+    expect(second.snapshotId).not.toBe(first.snapshotId);
+    expect((await store.readSnapshot(second.snapshotId)).mcpBinding?.authorizationId).not.toBe(
+      firstSnapshot.mcpBinding?.authorizationId,
+    );
+  });
+
   it("continues to verify a pre-MCP snapshot with its original content hash", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");

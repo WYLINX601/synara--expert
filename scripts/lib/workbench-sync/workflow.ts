@@ -48,6 +48,7 @@ export const AUTOMATIC_CHECKS = [
   { id: "tests", script: "test" },
   { id: "migrations", script: "migrations:check" },
   { id: "windows-runtime", script: "windows-runtime:check" },
+  { id: "workbench-boundaries", script: "workbench:check-boundaries" },
 ] as const;
 
 export const REQUIRED_RUNTIME_CHECKS = [
@@ -83,6 +84,7 @@ type WorkflowDependencies = {
 };
 
 export type CheckWorkflowReport = Omit<CheckReport, "stage" | "exitCode"> & {
+  readonly baseline?: BaselineInspection;
   readonly mainRef: string;
   readonly mainSha?: string;
   readonly stage: string;
@@ -95,12 +97,14 @@ export type CheckWorkflowReport = Omit<CheckReport, "stage" | "exitCode"> & {
 };
 
 export type PrepareWorkflowReport = PrepareReport & {
+  readonly baseline?: BaselineInspection;
   readonly mainRef: string;
   readonly mainSha: string;
   readonly candidateSha?: string;
 };
 
 export type BindWorkflowReport = {
+  readonly baseline?: BaselineInspection;
   readonly command: "bind";
   readonly status: "candidate-bound" | "bind-rejected" | "candidate-busy";
   readonly stage: string;
@@ -282,6 +286,108 @@ function getCheckoutIdentity(checkout: string): {
   return { head, branch, status, mergeHead };
 }
 
+export interface BaselineInspection {
+  readonly requestedMainRef: string;
+  readonly mainSha: string | null;
+  readonly callerCheckout: {
+    readonly head: string | null;
+    readonly branch: string | null;
+    readonly dirty: boolean | null;
+  };
+  readonly integratedBase?: WorkbenchSyncLock["integratedBase"] & {
+    readonly includedInMain: boolean | null;
+  };
+  readonly lockedCandidate?: WorkbenchSyncLock["candidate"] & {
+    readonly includedInMain: boolean | null;
+  };
+  readonly candidateBinding?: {
+    readonly mainRef: string;
+    readonly baseSha: string;
+    readonly candidateSha?: string;
+    readonly includedInMain: boolean | null;
+    readonly targetIncludedInMain: boolean | null;
+  };
+  readonly reasons: readonly string[];
+}
+
+/** Read-only scope/provenance inspection; inclusion never implies acceptance. */
+async function inspectWorkbenchBaseline(input: {
+  readonly repoRoot: string;
+  readonly mainRef: string;
+  readonly lockPath?: string;
+  readonly candidate?: ActiveCandidate | undefined;
+}): Promise<BaselineInspection> {
+  const { repoRoot, mainRef, candidate } = input;
+  const identity = getCheckoutIdentity(repoRoot);
+  const mainSha = resolveRefSha(repoRoot, mainRef);
+  const reasons: string[] = [];
+  const result = {
+    requestedMainRef: mainRef,
+    mainSha,
+    callerCheckout: {
+      head: identity.head,
+      branch: identity.branch,
+      dirty: identity.status === null ? null : identity.status !== "",
+    },
+  };
+  if (!mainSha) reasons.push("requested-main-ref-unavailable");
+  if (candidate && candidate.mainRef !== mainRef) reasons.push("candidate-main-ref-mismatch");
+  const candidateBinding = candidate
+    ? {
+        mainRef: candidate.mainRef,
+        baseSha: candidate.baseSha,
+        ...(candidate.candidateSha ? { candidateSha: candidate.candidateSha } : {}),
+        includedInMain:
+          mainSha && candidate.candidateSha
+            ? isAncestor(repoRoot, candidate.candidateSha, mainSha)
+            : null,
+        targetIncludedInMain: mainSha
+          ? isAncestor(repoRoot, candidate.target.commit, mainSha)
+          : null,
+      }
+    : undefined;
+  try {
+    const lock = await readCurrentLock(input.lockPath ?? (await repositoryLockFile(repoRoot)));
+    const integratedBase = {
+      ...lock.integratedBase,
+      includedInMain: mainSha ? isAncestor(repoRoot, lock.integratedBase.commit, mainSha) : null,
+    };
+    const lockedCandidate = {
+      ...lock.candidate,
+      includedInMain: mainSha ? isAncestor(repoRoot, lock.candidate.commit, mainSha) : null,
+    };
+    if (mainSha && integratedBase.includedInMain !== true)
+      reasons.push(
+        integratedBase.includedInMain === null
+          ? "integrated-base-history-unavailable"
+          : "integrated-base-not-in-requested-main",
+      );
+    if (
+      lockedCandidate.includedInMain === true &&
+      lock.integratedBase.commit.toLowerCase() !== lock.candidate.commit.toLowerCase() &&
+      isAncestor(repoRoot, lock.integratedBase.commit, lock.candidate.commit) === true
+    ) {
+      reasons.push("locked-target-in-main-without-baseline-calibration");
+    }
+    return {
+      ...result,
+      integratedBase,
+      lockedCandidate,
+      ...(candidateBinding ? { candidateBinding } : {}),
+      reasons,
+    };
+  } catch {
+    return {
+      ...result,
+      ...(candidateBinding ? { candidateBinding } : {}),
+      reasons: [...reasons, "upstream-lock-unavailable-or-invalid"],
+    };
+  }
+}
+
+const BASELINE_RETRY_ACTION =
+  "reconcile-git-lock-and-source-bound-acceptance-for-the-requested-main-before-advancing";
+
 function checkExitCode(status: CheckReport["status"]): number {
   return status === "network-failure" ? 1 : status === "selection-blocked" ? 2 : 0;
 }
@@ -308,6 +414,27 @@ export async function checkWorkbenchSyncWorkflow(input: {
         exitCode: null,
         retryAction: "select-an-existing-commit-ref-with-main-ref",
         mainRef,
+      };
+    }
+
+    const baseline = await inspectWorkbenchBaseline({
+      repoRoot,
+      mainRef,
+      lockPath,
+      candidate: (await readWorkbenchSyncState(paths.stateFile)).activeCandidate,
+    });
+    if (baseline.reasons.length > 0) {
+      return {
+        command: "check",
+        status: "selection-blocked",
+        reason: "baseline-review-required",
+        integratedBase: lock.integratedBase,
+        stage: "baseline-review-required",
+        exitCode: null,
+        retryAction: BASELINE_RETRY_ACTION,
+        mainRef,
+        mainSha,
+        baseline,
       };
     }
 
@@ -527,6 +654,28 @@ export async function prepareWorkbenchCandidate(input: {
     const lockfileHash = await hashLockfile(lockPath);
     const lock = await readCurrentLock(lockPath);
     const check = state.lastCheck;
+    const baseline = await inspectWorkbenchBaseline({
+      repoRoot,
+      mainRef,
+      lockPath,
+      candidate: state.activeCandidate,
+    });
+    if (baseline.reasons.length > 0) {
+      return {
+        ...prepareRejected(
+          "candidate-base-mismatch",
+          "baseline-review-required",
+          baseSha,
+          input.targetTag,
+          targetSha,
+          mainRef,
+          mainSha,
+          undefined,
+          BASELINE_RETRY_ACTION,
+        ),
+        baseline,
+      };
+    }
     if (
       !check ||
       check.status !== "update-available" ||
@@ -810,6 +959,17 @@ export async function bindWorkbenchCandidate(input: {
           "fetch-enough-history-to-prove-target-descends-from-integrated-base",
         );
       }
+    }
+    const baseline = await inspectWorkbenchBaseline({
+      repoRoot,
+      mainRef,
+      candidate: (await readWorkbenchSyncState(paths.stateFile)).activeCandidate,
+    });
+    if (baseline.reasons.length > 0) {
+      return {
+        ...reject("baseline-review-required", BASELINE_RETRY_ACTION),
+        baseline,
+      };
     }
     const officialTag = validateFixedOfficialTag(
       repoRoot,
@@ -1451,6 +1611,7 @@ export async function verifyWorkbenchCandidate(input: {
 
 export async function statusWorkbenchSync(input: {
   readonly repoRoot: string;
+  readonly mainRef?: string;
   readonly dependencies?: Pick<WorkflowDependencies, "readToolchain">;
 }): Promise<Record<string, unknown>> {
   const repoRoot = await realpath(input.repoRoot);
@@ -1460,16 +1621,26 @@ export async function statusWorkbenchSync(input: {
   const state = await readWorkbenchSyncState(paths.stateFile);
   const lock = await readRepositoryLockStatus(paths.lockDirectory);
   const candidate = state.activeCandidate;
+  const baseline = await inspectWorkbenchBaseline({
+    repoRoot,
+    mainRef: input.mainRef ?? DEFAULT_MAIN_REF,
+    candidate,
+  });
+  const baselineNeedsReview = baseline.reasons.length > 0;
   if (!candidate) {
     return {
       command: "status",
-      status: state.lastCheck?.status ?? "no-candidate",
-      stage: "persisted-state-inspected",
+      status: baselineNeedsReview
+        ? "baseline-review-required"
+        : (state.lastCheck?.status ?? "no-candidate"),
+      stage: baselineNeedsReview ? "baseline-review-required" : "persisted-state-inspected",
       exitCode: null,
+      baseline,
       lastCheck: state.lastCheck,
       operationLock: lock,
-      retryAction:
-        state.lastCheck?.status === "update-available"
+      retryAction: baselineNeedsReview
+        ? BASELINE_RETRY_ACTION
+        : state.lastCheck?.status === "update-available"
           ? "prepare-the-exact-target-from-the-last-check"
           : "run-check-to-refresh-official-release-status",
     };
@@ -1479,9 +1650,10 @@ export async function statusWorkbenchSync(input: {
   if (candidate.status === "conflict" && checkoutIdentity.mergeHead !== null) {
     return {
       command: "status",
-      status: "conflict",
-      stage: "merge-conflict-unresolved",
+      status: baselineNeedsReview ? "baseline-review-required" : "conflict",
+      stage: baselineNeedsReview ? "baseline-review-required" : "merge-conflict-unresolved",
       exitCode: null,
+      baseline,
       candidate: {
         status: candidate.status,
         branch: candidate.branch,
@@ -1493,7 +1665,9 @@ export async function statusWorkbenchSync(input: {
       invalidations: ["merge-conflict-unresolved"],
       lastCheck: state.lastCheck,
       operationLock: lock,
-      retryAction: "resolve-the-merge-manually-without-resetting-or-aborting-the-candidate",
+      retryAction: baselineNeedsReview
+        ? BASELINE_RETRY_ACTION
+        : "resolve-the-merge-manually-without-resetting-or-aborting-the-candidate",
     };
   }
   const invalidations: string[] = [];
@@ -1566,13 +1740,21 @@ export async function statusWorkbenchSync(input: {
     }
   }
   const stateStatus = candidate.status;
-  const status = invalidations.length > 0 ? "rebind-required" : stateStatus;
+  const status = baselineNeedsReview
+    ? "baseline-review-required"
+    : invalidations.length > 0
+      ? "rebind-required"
+      : stateStatus;
   return {
     command: "status",
     status,
-    stage:
-      invalidations.length > 0 ? "evidence-invalidation-detected" : "persisted-state-inspected",
+    stage: baselineNeedsReview
+      ? "baseline-review-required"
+      : invalidations.length > 0
+        ? "evidence-invalidation-detected"
+        : "persisted-state-inspected",
     exitCode: null,
+    baseline,
     candidate: {
       status: stateStatus,
       branch: candidate.branch,
@@ -1592,8 +1774,9 @@ export async function statusWorkbenchSync(input: {
     invalidations,
     lastCheck: state.lastCheck,
     operationLock: lock,
-    retryAction:
-      invalidations.length > 0
+    retryAction: baselineNeedsReview
+      ? BASELINE_RETRY_ACTION
+      : invalidations.length > 0
         ? "review-the-candidate-and-bind-its-exact-clean-sha-again"
         : stateStatus === "awaiting-runtime"
           ? "provide-runtime-evidence-bound-to-this-exact-sha"

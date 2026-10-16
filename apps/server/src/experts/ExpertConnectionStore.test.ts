@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
-import type { ExpertConnectionSaveInput } from "@synara/contracts";
+import type { ExpertConnectionSaveInput, ExpertMcpBinding } from "@synara/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createExpertStore } from "./ExpertStore.ts";
@@ -57,6 +57,28 @@ function stdioInput(
     transport: { type: "stdio", command: "node", args: [], envFromHost: [] },
     ...extra,
   };
+}
+
+async function makeAllModeSnapshot() {
+  const stateDir = path.join(await makeTempRoot(), "state");
+  const connections = createExpertConnectionStore(stateDir);
+  await connections.save(stdioInput("all-mcp"));
+  const experts = createExpertStore(stateDir);
+  const expert = await experts.save({
+    id: "all-mode-reference-test",
+    name: "All-mode reference test",
+    description: "",
+    useCases: "",
+    persona: "",
+    outputRequirements: "",
+    skills: [],
+    references: [],
+    connections: [{ id: "all-mcp", required: false, tools: [], toolMode: "all" }],
+  });
+  const taskBinding = await experts.prepareSnapshot(expert.id);
+  const snapshot = await experts.readSnapshot(taskBinding.snapshotId);
+  if (!snapshot.mcpBinding) throw new Error("Expected a pinned MCP binding.");
+  return { stateDir, snapshot, binding: snapshot.mcpBinding };
 }
 
 describe("ExpertConnectionStore", () => {
@@ -263,6 +285,64 @@ describe("ExpertConnectionStore", () => {
     );
     await expect(connections.remove("mcp-one", 1)).rejects.toMatchObject({
       code: "in_use",
+    });
+  });
+
+  it.each([
+    ["resolved tools", { status: "resolved" as const, tools: ["read", "write"] }],
+    ["unavailable tools", { status: "unavailable" as const, tools: [] }],
+  ])("scans references when an all-mode sidecar has %s", async (_label, resolution) => {
+    const { stateDir, snapshot, binding } = await makeAllModeSnapshot();
+    const bindings = createExpertMcpBindingStore(stateDir);
+    await bindings.get(snapshot.snapshotId, () => binding);
+    await bindings.resolveToolsOnce(snapshot.snapshotId, "all-mcp", resolution);
+
+    await expect(scanExpertConnectionReferences(stateDir, "all-mcp")).resolves.toMatchObject({
+      experts: [{ id: "all-mode-reference-test", toolMode: "all", tools: [] }],
+      snapshots: [
+        {
+          snapshotId: snapshot.snapshotId,
+          expertId: snapshot.expertId,
+          configRevision: 1,
+          required: false,
+          toolMode: "all",
+          legacy: false,
+        },
+      ],
+    });
+  });
+
+  it.each([
+    [
+      "config revision",
+      (binding: ExpertMcpBinding): ExpertMcpBinding => ({
+        ...binding,
+        servers: binding.servers.map((server) => ({
+          ...server,
+          configRevision: (server.configRevision ?? 0) + 1,
+        })),
+      }),
+    ],
+    [
+      "tool mode",
+      (binding: ExpertMcpBinding): ExpertMcpBinding => ({
+        ...binding,
+        servers: binding.servers.map((server) => ({ ...server, toolMode: "selected" })),
+      }),
+    ],
+    [
+      "authorization ID",
+      (binding: ExpertMcpBinding): ExpertMcpBinding => ({
+        ...binding,
+        authorizationId: "different-task-authorization",
+      }),
+    ],
+  ])("rejects a sidecar with a mismatched pinned %s", async (_field, mutate) => {
+    const { stateDir, snapshot, binding } = await makeAllModeSnapshot();
+    await createExpertMcpBindingStore(stateDir).createOnce(snapshot.snapshotId, mutate(binding));
+
+    await expect(scanExpertConnectionReferences(stateDir, "all-mcp")).rejects.toMatchObject({
+      code: "corrupt",
     });
   });
 

@@ -207,6 +207,148 @@ async function runtimeEvidenceFor(
 }
 
 describe("workbench sync persisted workflow", () => {
+  it("reports an old ready candidate in its requested scope without writing state", async () => {
+    const fixture = await makeFixture();
+    const { baseSha, prepare } = await checkedAndPrepared(fixture);
+    const candidateSha = prepare.candidateSha!;
+    const evidence = await runtimeEvidenceFor(fixture, candidateSha, baseSha);
+    const evidencePath = join(fixture.directory, "runtime-evidence.json");
+    await writeFile(evidencePath, `${JSON.stringify(evidence)}\n`);
+    await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha,
+      runtimeEvidencePath: evidencePath,
+      dependencies: { readToolchain: () => toolchain, commandRunner: allPassing },
+    });
+    const paths = await resolveRepositoryStatePaths(fixture.repo);
+    const state = JSON.parse(await readFile(paths.stateFile, "utf8"));
+    const historicalRef = "refs/heads/workbench-foundation";
+    git(fixture.repo, "branch", "workbench-foundation", baseSha);
+    state.activeCandidate.mainRef = historicalRef;
+    state.activeCandidate.runtimeEvidence.mainRef = historicalRef;
+    state.activeCandidate.runtimeEvidenceHash = createHash("sha256")
+      .update(JSON.stringify(state.activeCandidate.runtimeEvidence))
+      .digest("hex");
+    await writeFile(paths.stateFile, `${JSON.stringify(state)}\n`);
+    await writeFile(join(fixture.repo, "local-draft.txt"), "uncommitted operator work\n");
+    const beforeState = await readFile(paths.stateFile, "utf8");
+    const beforeLock = await readFile(join(fixture.repo, "workbench/upstream.lock.json"), "utf8");
+    const report = await statusWorkbenchSync({
+      repoRoot: fixture.repo,
+      dependencies: { readToolchain: () => toolchain },
+    });
+    expect(report.status).toBe("baseline-review-required");
+    expect(report.candidate).toMatchObject({ status: "ready", mainRef: historicalRef });
+    expect(report.baseline).toMatchObject({
+      requestedMainRef: "refs/heads/main",
+      mainSha: baseSha,
+      callerCheckout: { dirty: true },
+      reasons: ["candidate-main-ref-mismatch"],
+    });
+    const scoped = await statusWorkbenchSync({
+      repoRoot: fixture.repo,
+      mainRef: historicalRef,
+      dependencies: { readToolchain: () => toolchain },
+    });
+    expect(scoped.status).toBe("ready");
+    expect(scoped.baseline).toMatchObject({ requestedMainRef: historicalRef, reasons: [] });
+    expect(await readFile(paths.stateFile, "utf8")).toBe(beforeState);
+    expect(await readFile(join(fixture.repo, "workbench/upstream.lock.json"), "utf8")).toBe(
+      beforeLock,
+    );
+    let fetches = 0;
+    const check = await checkWorkbenchSyncWorkflow({
+      repoRoot: fixture.repo,
+      dependencies: {
+        repository: fixture.remote,
+        fetcher: async () => {
+          fetches += 1;
+          throw new Error("must not fetch before baseline review");
+        },
+      },
+    });
+    expect(check.status).toBe("selection-blocked");
+    expect(check.stage).toBe("baseline-review-required");
+    expect(fetches).toBe(0);
+    expect(await readFile(paths.stateFile, "utf8")).toBe(beforeState);
+  }, 30_000);
+
+  it("blocks check, prepare and bind when the locked target is already in uncalibrated main", async () => {
+    const fixture = await makeFixture();
+    const { prepare } = await checkedAndPrepared(fixture);
+    git(fixture.repo, "merge", "--no-ff", prepare.branch, "-m", "include candidate source");
+    const currentMain = git(fixture.repo, "rev-parse", "HEAD");
+    const paths = await resolveRepositoryStatePaths(fixture.repo);
+    const beforeState = await readFile(paths.stateFile, "utf8");
+    const beforeLock = await readFile(join(fixture.repo, "workbench/upstream.lock.json"), "utf8");
+    const status = await statusWorkbenchSync({
+      repoRoot: fixture.repo,
+      dependencies: { readToolchain: () => toolchain },
+    });
+    expect(status.status).toBe("baseline-review-required");
+    expect(status.baseline).toMatchObject({
+      mainSha: currentMain,
+      lockedCandidate: { includedInMain: true },
+      candidateBinding: { includedInMain: true },
+      reasons: ["locked-target-in-main-without-baseline-calibration"],
+    });
+    const check = await checkWorkbenchSyncWorkflow({
+      repoRoot: fixture.repo,
+      dependencies: { repository: fixture.remote, fetcher: fakeFetcher() },
+    });
+    expect(check.stage).toBe("baseline-review-required");
+    const preparation = await prepareWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: currentMain,
+      targetTag: "v0.9.2",
+      targetSha: fixture.targetSha,
+      dependencies: { repository: fixture.remote },
+    });
+    expect(preparation.stage).toBe("baseline-review-required");
+    const binding = await bindWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: currentMain,
+      targetTag: "v0.9.2",
+      targetSha: fixture.targetSha,
+      candidateSha: prepare.candidateSha!,
+      dependencies: { repository: fixture.remote },
+    });
+    expect(binding.stage).toBe("baseline-review-required");
+    expect(await readFile(paths.stateFile, "utf8")).toBe(beforeState);
+    expect(await readFile(join(fixture.repo, "workbench/upstream.lock.json"), "utf8")).toBe(
+      beforeLock,
+    );
+  }, 30_000);
+
+  it("requires the seventh architecture gate even when all historical six gates passed", async () => {
+    const fixture = await makeFixture();
+    const { prepare } = await checkedAndPrepared(fixture);
+    await verifyWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      candidateSha: prepare.candidateSha!,
+      dependencies: { readToolchain: () => toolchain, commandRunner: allPassing },
+    });
+    const paths = await resolveRepositoryStatePaths(fixture.repo);
+    const state = JSON.parse(await readFile(paths.stateFile, "utf8"));
+    state.activeCandidate.status = "ready";
+    state.activeCandidate.automaticChecks = state.activeCandidate.automaticChecks.filter(
+      (check: { id: string }) => check.id !== "workbench-boundaries",
+    );
+    await writeFile(paths.stateFile, `${JSON.stringify(state)}\n`);
+    const report = await statusWorkbenchSync({
+      repoRoot: fixture.repo,
+      dependencies: { readToolchain: () => toolchain },
+    });
+    expect(report.status).toBe("rebind-required");
+    expect(report.invalidations).toContain("automatic-checks-incomplete-or-invalid");
+    expect(AUTOMATIC_CHECKS).toContainEqual({
+      id: "workbench-boundaries",
+      script: "workbench:check-boundaries",
+    });
+  }, 30_000);
+
   // The composed Git fixture needs a 30s test budget matching its per-command Git timeout.
   it("binds a newly checked official release when the versioned candidate lock is stale", async () => {
     const fixture = await makeFixture();
@@ -442,6 +584,7 @@ describe("workbench sync persisted workflow", () => {
       "failed",
       "failed",
       "passed",
+      "passed",
     ]);
     expect(verified.checks[1]?.reason).toBe("bun-run-lint-failed");
     expect(verified.checks[2]?.reason).toBe("gate-runner-threw");
@@ -663,6 +806,7 @@ describe("workbench sync persisted workflow", () => {
     expect(verified.checks.map((check) => check.status)).toEqual([
       "passed",
       "failed",
+      "passed",
       "passed",
       "passed",
       "passed",

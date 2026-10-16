@@ -85,6 +85,9 @@ describe("Workbench feature import boundary", () => {
     const tempRoot = mkdtempSync(path.join(os.tmpdir(), "synara-workbench-boundary-"));
     try {
       expect(collectWorkbenchFeatureSources(tempRoot)).toEqual([]);
+      expect(() => collectWorkbenchFeatureSources(tempRoot, { requireManifest: true })).toThrow(
+        /Required Workbench manifest is missing/,
+      );
 
       const featureDirectory = path.join(tempRoot, "apps/server/src/workbench/features/boards");
       mkdirSync(featureDirectory, { recursive: true });
@@ -102,6 +105,31 @@ describe("Workbench feature import boundary", () => {
       rmSync(tempRoot, { recursive: true, force: true });
     }
   });
+
+  it("fails with the declared path when a manifest feature file is missing", () => {
+    const tempRoot = mkdtempSync(path.join(os.tmpdir(), "synara-workbench-manifest-"));
+    try {
+      mkdirSync(path.join(tempRoot, "workbench"), { recursive: true });
+      writeFileSync(
+        path.join(tempRoot, "workbench/integration-points.json"),
+        JSON.stringify({
+          integrationPoints: [
+            {
+              id: "workbench.feature-import-boundary",
+              featureFiles: ["apps/web/src/missingFeature.ts"],
+            },
+          ],
+        }),
+      );
+
+      expect(() => collectWorkbenchFeatureSources(tempRoot)).toThrow(
+        /feature file does not exist: apps\/web\/src\/missingFeature\.ts/,
+      );
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it("rejects full clients, stores and routes on migrated Expert surfaces", () => {
     expect(
       findWorkbenchFeatureBoundaryViolations(
@@ -119,6 +147,41 @@ describe("Workbench feature import boundary", () => {
       "native routes",
       "native router",
     ]);
+  });
+
+  it("rejects native client, task store, routes, persistence and legacy context cache from Context and Space features", () => {
+    const file = "apps/web/src/components/chat/environment/useProjectContextAutosave.ts";
+    const violations = findWorkbenchFeatureBoundaryViolations(
+      file,
+      `import { api } from "~/nativeApi";
+       import { store } from "~/store";
+       import { Route } from "~/routes/_chat";
+       import { useNavigate } from "@tanstack/react-router";
+       import * as Sql from "@effect/sql";
+       import { ContextRepository } from "../../../../../server/src/context/ContextRepository";
+       import { useProjectInstructionsStore } from "~/projectInstructionsStore";`,
+    );
+
+    expect(violations.map(({ boundary }) => boundary)).toEqual([
+      "full native client",
+      "native task store",
+      "native routes",
+      "native router",
+      "native database access",
+      "native persistence",
+      "legacy project context cache",
+    ]);
+  });
+
+  it("allows UI, contracts and the explicit Context host client for migrated consumers", () => {
+    expect(
+      findWorkbenchFeatureBoundaryViolations(
+        "apps/web/src/components/chat/ContextDetailsDialog.tsx",
+        `import type { ContextApi } from "@synara/contracts";
+         import { SpaceIcon } from "~/components/SpaceIcon";
+         import { useContextClient } from "~/workbench/host/contextClient";`,
+      ),
+    ).toEqual([]);
   });
 
   it("allows each exact retained seam but rejects the same coupling in a new module", () => {
@@ -142,6 +205,16 @@ describe("Workbench feature import boundary", () => {
       "apps/web/src/components/settings/ProvidersSettingsPanel.tsx",
       "apps/web/src/components/chat/ExpertNewControl.tsx",
       "apps/web/src/components/chat/ChatView.tsx",
+      "apps/web/src/components/SpaceSwitcher.tsx",
+      "apps/web/src/components/SpaceSwitcher.browser.tsx",
+      "apps/web/src/components/useSpacesController.ts",
+      "apps/web/src/components/chat/ContextDetailsDialog.tsx",
+      "apps/web/src/components/chat/ContextDetailsDialog.browser.tsx",
+      "apps/web/src/components/chat/environment/projectContextAutosave.ts",
+      "apps/web/src/components/chat/environment/projectContextAutosave.test.ts",
+      "apps/web/src/components/chat/environment/projectContextNavigationGuard.ts",
+      "apps/web/src/components/chat/environment/useProjectContextMigration.tsx",
+      "apps/web/src/components/chat/environment/useProjectContextMigration.browser.tsx",
     ];
     try {
       for (const file of files) {
@@ -153,7 +226,7 @@ describe("Workbench feature import boundary", () => {
           .filter(
             (file) =>
               !/\.(?:test|browser)\./.test(file) &&
-              !/(?:ProvidersSettingsPanel|ChatView)/.test(file),
+              !/(?:ProvidersSettingsPanel|ChatView|useSpacesController)/.test(file),
           )
           .toSorted(),
       );
@@ -162,11 +235,12 @@ describe("Workbench feature import boundary", () => {
     }
   });
   it("keeps every retained import documented with an owner and regression path", () => {
+    const root = path.resolve(import.meta.dirname, "..");
+    const scannedFiles = new Set(
+      collectWorkbenchFeatureSources(root, { requireManifest: true }).map(({ path: file }) => file),
+    );
     const manifest = JSON.parse(
-      readFileSync(
-        path.resolve(import.meta.dirname, "../workbench/integration-points.json"),
-        "utf8",
-      ),
+      readFileSync(path.join(root, "workbench/integration-points.json"), "utf8"),
     ) as {
       integrationPoints: Array<{
         id: string;
@@ -177,6 +251,8 @@ describe("Workbench feature import boundary", () => {
           reason: string;
           tests: string[];
         }>;
+        featureFiles?: string[];
+        featureRoots?: string[];
       }>;
     };
     const seams = manifest.integrationPoints.find(
@@ -193,6 +269,11 @@ describe("Workbench feature import boundary", () => {
       expect(seam.owner.length).toBeGreaterThan(0);
       expect(seam.reason.length).toBeGreaterThan(0);
       expect(seam.tests.length).toBeGreaterThan(0);
+      expect(scannedFiles.has(seam.file)).toBe(true);
     }
+
+    const featureFiles = manifest.integrationPoints.flatMap((point) => point.featureFiles ?? []);
+    expect(featureFiles.length).toBeGreaterThan(0);
+    for (const featureFile of featureFiles) expect(scannedFiles.has(featureFile)).toBe(true);
   });
 });

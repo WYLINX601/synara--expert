@@ -129,12 +129,20 @@ const ExpertMcpBindingServerSchema = Schema.Struct({
   id: McpConnectionId,
   configRevision: Schema.optional(PositiveInt),
   required: Schema.Boolean,
+  /** Missing is a legacy selected-tool whitelist. */
+  toolMode: Schema.optional(Schema.Literals(["all", "selected"])),
   tools: Schema.Array(TrimmedNonEmptyString),
+  /** Written once when an `all` connection is first safely enumerated. */
+  effectiveTools: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  /** An unavailable all-mode server is frozen with an empty effectiveTools list. */
+  resolutionStatus: Schema.optional(Schema.Literals(["resolved", "unavailable"])),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 
 export const ExpertMcpBindingSchema = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   source: Schema.Literals(["snapshot", "legacy-current"]),
+  /** Unique per prepared all-mode task snapshot; old snapshots omit it. */
+  authorizationId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
   createdAt: IsoDateTime,
   servers: Schema.Array(ExpertMcpBindingServerSchema),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
@@ -151,6 +159,7 @@ const ExpertConnectionReferenceSchema = Schema.Struct({
   revision: PositiveInt,
   enabled: Schema.Boolean,
   required: Schema.Boolean,
+  toolMode: Schema.optional(Schema.Literals(["all", "selected"])),
   tools: Schema.Array(TrimmedNonEmptyString),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 
@@ -160,6 +169,7 @@ const ExpertSnapshotConnectionReferenceSchema = Schema.Struct({
   displayName: TrimmedNonEmptyString,
   configRevision: Schema.optional(PositiveInt),
   required: Schema.Boolean,
+  toolMode: Schema.optional(Schema.Literals(["all", "selected"])),
   legacy: Schema.Boolean,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 

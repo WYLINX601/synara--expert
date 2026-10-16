@@ -20,7 +20,7 @@
 
 四字段可为空，服务端与前端按 JavaScript UTF-16 字符串长度校验：目标 4096，指令 16384。不截断输入，不改写已保存原文。来源删除或归属变化不能删除历史快照。
 
-契约在 `packages/contracts/src/context.ts`；持久化在 `apps/server/src/context/ContextRepository.ts`。官方迁移使用 `111_ContextV1`，不重新占用保留的 109/110，也不把 Workbench Expert 的独立迁移重新注册为官方迁移。旧备份识别与恢复保护继续保留。
+契约在 `packages/contracts/src/context.ts`；持久化在 `apps/server/src/context/ContextRepository.ts`。本地原生 tracker 曾加入 `111_ContextV1`，它不是已证明来自官方上游的迁移。2026-10-16 按用户确认将其保留为冻结的历史兼容例外：不改号、不改脚本或搬表，后续 Linx 扩展使用独立 ledger，归属由[迁移检查](../scripts/check-migration-lineage.ts)验证。不重新占用保留的 109/110，也不把 Workbench Expert 的独立迁移重新注册为官方迁移。旧备份识别与恢复保护继续保留。
 
 ## 3. 读写与协议
 
@@ -44,10 +44,13 @@ WebSocket 协议最低版本提高到 revision 3，并发布 `context.v1` capabi
 - Space：复用 `SpaceEditorDialog` 与 `useSpacesController`。新建仍只填写名称、图标；编辑已有 Space 时增加两字段。一次提交，成功关闭，失败或冲突保留全部草稿。
 - Project：复用 `EnvironmentProjectInstructionsSection`。只读继承默认折叠；“Edit Space context”打开原弹窗，不切路由或丢弃项目草稿。没有 Space 时省略继承。
 - 自动保存：`projectContextAutosave.ts` 持有每个连接、数据实例和项目的独立队列。500ms 防抖、串行提交、最新草稿排队；在途保存期间仍能继续编辑。只在确认后推进基线。未知结果查询原回执，冲突暂停队列并比较原文。
+
 - 离开保护：离开项目或关闭编辑区先提交并等待；无法确认时保留草稿。放弃仅取消未提交内容。普通发送和同项目切换对话不触发配置保存弹窗。
 - 配置刷新：活动页面每 5 秒回读已提交配置，后台停止轮询；Space 保存后主动刷新项目来源。控制器保护在途与未保存草稿，远端结果不能覆盖本地新输入。
 - Chat：仅从现有“＋”菜单按需打开 `ContextDetailsDialog`。正常界面不常驻显示 Context 状态、更新横幅或迁移导航。详情每 2 秒刷新当前加载状态，技术编号和版本默认折叠。普通字段不显示常驻字符计数，超限才报错。
 - 旧项目指令：Context capability 存在时停止自动复制到 Thread Notes；手动复制已提交指令仍可用。既有 Notes 不自动清理。
+
+2026-10-16 架构对齐：Context 详情、自动保存和旧指令迁移通过 `workbench/host/contextClient` 读取原生 `ContextApi` 和 capability，保留原对象身份及已有队列；旧指令读取也集中到只读宿主入口。Space 业务辅助函数只接收实际所需的 orchestration 方法，批量移动保留传输结果不确定时的 shell 回读。接入归属与功能扫描统一登记在[接入清单](../workbench/integration-points.json)，源码范围与检查见[架构对齐验收](./workbench-adaptation-acceptance.md#alignment-implementation-20261016)。
 
 ## 5. 首次执行、Provider 与恢复
 

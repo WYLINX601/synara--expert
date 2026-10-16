@@ -17,6 +17,12 @@ import { isStudioContainerProject } from "~/lib/studioProjects";
 import type { ServerWorkspacePaths } from "~/lib/serverWorkspacePaths";
 import { newCommandId, newSpaceId } from "~/lib/utils";
 
+type SpaceCommandApi = Pick<NativeApi["orchestration"], "dispatchCommand">;
+type SpaceCommandRecoveryApi = Pick<
+  NativeApi["orchestration"],
+  "dispatchCommand" | "getShellSnapshot"
+>;
+
 /**
  * Spaces organize ordinary projects only: the Chats and Studio containers are reachable
  * from every Space and so belong to none. This is the membership rule the whole feature
@@ -36,12 +42,12 @@ export function isOrdinarySpaceProject(
 }
 
 export async function createSpace(input: {
-  api: NativeApi;
+  api: SpaceCommandApi;
   name: string;
   icon: SpaceIconName;
 }): Promise<{ spaceId: SpaceId; sequence: number }> {
   const spaceId = newSpaceId();
-  const receipt = await input.api.orchestration.dispatchCommand({
+  const receipt = await input.api.dispatchCommand({
     type: "space.create",
     commandId: newCommandId(),
     spaceId,
@@ -57,12 +63,12 @@ export async function createSpace(input: {
  * concurrent rename from another window (and vice versa).
  */
 export async function updateSpace(input: {
-  api: NativeApi;
+  api: SpaceCommandApi;
   spaceId: SpaceId;
   name?: string | undefined;
   icon?: SpaceIconName | undefined;
 }): Promise<void> {
-  await input.api.orchestration.dispatchCommand({
+  await input.api.dispatchCommand({
     type: "space.meta.update",
     commandId: newCommandId(),
     spaceId: input.spaceId,
@@ -71,8 +77,11 @@ export async function updateSpace(input: {
   });
 }
 
-export async function deleteSpace(input: { api: NativeApi; spaceId: SpaceId }): Promise<void> {
-  await input.api.orchestration.dispatchCommand({
+export async function deleteSpace(input: {
+  api: SpaceCommandApi;
+  spaceId: SpaceId;
+}): Promise<void> {
+  await input.api.dispatchCommand({
     type: "space.delete",
     commandId: newCommandId(),
     spaceId: input.spaceId,
@@ -80,11 +89,11 @@ export async function deleteSpace(input: { api: NativeApi; spaceId: SpaceId }): 
 }
 
 export async function reorderSpaces(input: {
-  api: NativeApi;
+  api: SpaceCommandApi;
   movedSpaceId: SpaceId;
   orderedSpaceIds: ReadonlyArray<SpaceId>;
 }): Promise<void> {
-  await input.api.orchestration.dispatchCommand({
+  await input.api.dispatchCommand({
     type: "space.reorder",
     commandId: newCommandId(),
     spaceId: input.movedSpaceId,
@@ -93,11 +102,11 @@ export async function reorderSpaces(input: {
 }
 
 export async function moveProjectToSpace(input: {
-  api: NativeApi;
+  api: SpaceCommandApi;
   projectId: ProjectId;
   spaceId: SpaceId | null;
 }): Promise<void> {
-  await input.api.orchestration.dispatchCommand({
+  await input.api.dispatchCommand({
     type: "project.meta.update",
     commandId: newCommandId(),
     projectId: input.projectId,
@@ -114,7 +123,7 @@ export async function moveProjectToSpace(input: {
  * to infer an exact count of projects whose assignment changed.
  */
 export async function moveProjectsToSpace(input: {
-  api: NativeApi;
+  api: SpaceCommandRecoveryApi;
   projectIds: ReadonlyArray<ProjectId>;
   spaceId: SpaceId;
 }): Promise<{ failedProjectIds: ProjectId[] }> {
@@ -125,7 +134,7 @@ export async function moveProjectsToSpace(input: {
   ) {
     const chunk = input.projectIds.slice(offset, offset + SPACE_PROJECTS_ASSIGN_MAX_COUNT);
     try {
-      await input.api.orchestration.dispatchCommand({
+      await input.api.dispatchCommand({
         type: "space.projects.assign",
         commandId: newCommandId(),
         spaceId: input.spaceId,
@@ -136,7 +145,7 @@ export async function moveProjectsToSpace(input: {
       // A transport error can race a committed command. Re-read the authoritative shell
       // before offering a retry so we do not report projects that already reached the target.
       try {
-        const snapshot = await input.api.orchestration.getShellSnapshot();
+        const snapshot = await input.api.getShellSnapshot();
         const projectById = new Map(snapshot.projects.map((project) => [project.id, project]));
         return {
           failedProjectIds: remainingProjectIds.filter((projectId) => {

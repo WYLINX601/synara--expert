@@ -13,8 +13,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
 import { createExpertMcpCredentialStore } from "./ExpertMcpCredentials.ts";
-import { connectExpertMcp } from "./ExpertMcpClient.ts";
+import { collectExpertMcpTools, connectExpertMcp } from "./ExpertMcpClient.ts";
 import { createLocalMcpDiscovery } from "./LocalMcpDiscovery.ts";
+import { startWorkbenchRuntimeMcpFixture } from "../../../../scripts/lib/workbench-runtime-mcp-fixture.ts";
 
 const originalToken = process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
 
@@ -191,6 +192,76 @@ async function makeHttpFixture(options: { hangCancellationNotificationResponse?:
 }
 
 describe("connectExpertMcp", () => {
+  it("uses one startup timeout budget across tools/list pages", async () => {
+    let now = 1_000;
+    const timeouts: number[] = [];
+    const requestPage = async (cursor: string | undefined, timeoutMs: number) => {
+      timeouts.push(timeoutMs);
+      if (cursor === undefined) {
+        now += 40;
+        return { tools: [], nextCursor: "page-two" };
+      }
+      return { tools: [] };
+    };
+
+    await expect(collectExpertMcpTools(requestPage, 100, () => now)).resolves.toEqual([]);
+    expect(timeouts).toEqual([100, 60]);
+  });
+
+  it("does not request another tools/list page after the startup budget expires", async () => {
+    let now = 1_000;
+    let requestCount = 0;
+    const requestPage = async () => {
+      requestCount += 1;
+      now += 100;
+      return { tools: [], nextCursor: "page-two" };
+    };
+
+    await expect(collectExpertMcpTools(requestPage, 100, () => now)).rejects.toThrow(
+      "startup timeout",
+    );
+    expect(requestCount).toBe(1);
+  });
+
+  it("rejects repeated tools/list cursors instead of looping indefinitely", async () => {
+    const fixture = await startWorkbenchRuntimeMcpFixture({ pagination: "repeated-cursor" });
+
+    try {
+      await expect(
+        connectExpertMcp(connectionConfig({ type: "http", url: fixture.url, headersFromHost: [] })),
+      ).rejects.toThrow("repeated pagination cursor");
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  it("restores output validation and task guards across tools/list pages", async () => {
+    const fixture = await startWorkbenchRuntimeMcpFixture({
+      pagination: "two-pages",
+      invalidFirstPageOutput: true,
+      firstPageTaskSupport: "required",
+    });
+    let client: Awaited<ReturnType<typeof connectExpertMcp>> | undefined;
+
+    try {
+      client = await connectExpertMcp(
+        connectionConfig({ type: "http", url: fixture.url, headersFromHost: [] }),
+      );
+      await expect(client.callTool("workbench_probe_echo", { value: "invalid" })).rejects.toThrow(
+        "output schema",
+      );
+      await expect(client.callTool("workbench_probe_required", {})).rejects.toThrow(
+        "requires task-based execution",
+      );
+      expect(fixture.stats().echoCalls).toBe(1);
+      expect(fixture.stats().paginatedToolCalls).toBe(0);
+      expect(fixture.stats().requiredTaskToolCalls).toBe(0);
+    } finally {
+      await client?.close().catch(() => undefined);
+      await fixture.close();
+    }
+  });
+
   it("uses Synara-owned credentials for HTTP headers", async () => {
     const root = await mkdtemp(join(tmpdir(), "synara-mcp-http-secret-"));
     const credentials = createExpertMcpCredentialStore(join(root, "state"));

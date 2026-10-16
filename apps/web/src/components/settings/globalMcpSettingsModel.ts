@@ -357,7 +357,7 @@ export function authorizedExpertCount(
         (item) =>
           item.id === connectionId &&
           item.enabled !== false &&
-          item.tools.some((tool) => tool.trim()),
+          (item.toolMode === "all" || item.tools.some((tool) => tool.trim())),
       ),
   ).length;
 }

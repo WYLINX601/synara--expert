@@ -134,8 +134,12 @@ async function main(): Promise<number> {
   }
 
   if (command === "status") {
-    if (args.length !== 0) return usageError("status", "use-status-without-options");
-    const report = await statusWorkbenchSync({ repoRoot: repositoryRoot });
+    const options = parseOptions(args, ["--main-ref"], []);
+    if (!options) return usageError("status", "use-status-with-an-optional-main-ref");
+    const report = await statusWorkbenchSync({
+      repoRoot: repositoryRoot,
+      mainRef: parseMainRef(options),
+    });
     printReport(report);
     return 0;
   }

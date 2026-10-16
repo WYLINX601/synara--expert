@@ -5,14 +5,15 @@
   "updateChannel": "latest-stable-release",
   "integrationStrategy": "merge",
   "integratedBase": {
-    "tag": "v0.9.1",
-    "commit": "eaa61eded31b6755d4f30ba8eabc5d905cf817cb"
+    "tag": "v0.9.2",
+    "commit": "a33435c18474eb7816582004e45f87382965ac8d"
   },
   "candidate": {
     "tag": "v0.9.2",
     "commit": "a33435c18474eb7816582004e45f87382965ac8d",
-    "status": "not-yet-integrated"
+    "status": "integrated"
   },
   "observedUpstreamMain": "ec3b1f6ef9c2f656f26dd9711339fe1265d8cb5c",
-  "verifiedAt": "2026-09-29"
+  "verifiedAt": "2026-09-29",
+  "integrationEvidence": "workbench/baseline-reconciliation.json"
 }

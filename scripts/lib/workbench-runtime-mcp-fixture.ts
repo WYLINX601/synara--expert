@@ -16,6 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import * as z from "zod/v4";
 
 const FIXTURE_HOST = "127.0.0.1";
@@ -31,6 +32,8 @@ export type WorkbenchRuntimeMcpFixture = {
   /** echoCalls is lifetime-cumulative; wait counters are since the last resetWait call. */
   stats(): {
     readonly echoCalls: number;
+    readonly paginatedToolCalls: number;
+    readonly requiredTaskToolCalls: number;
     readonly waitCalls: number;
     readonly activeWaits: number;
     readonly cancelledWaits: number;
@@ -40,6 +43,12 @@ export type WorkbenchRuntimeMcpFixture = {
   /** Rotate wait event gates and clear wait counters; active wait requests must be zero. */
   resetWait(): void;
   close(): Promise<void>;
+};
+
+export type WorkbenchRuntimeMcpFixtureOptions = {
+  readonly pagination?: "two-pages" | "repeated-cursor";
+  readonly invalidFirstPageOutput?: boolean;
+  readonly firstPageTaskSupport?: "required";
 };
 
 type SignalGate = {
@@ -206,9 +215,13 @@ async function reserveLoopbackPair(handleRequest: FixtureRequestHandler): Promis
   throw new Error("could-not-reserve-dual-loopback-fixture-port", { cause: lastBindError });
 }
 
-export async function startWorkbenchRuntimeMcpFixture(): Promise<WorkbenchRuntimeMcpFixture> {
+export async function startWorkbenchRuntimeMcpFixture(
+  options: WorkbenchRuntimeMcpFixtureOptions = {},
+): Promise<WorkbenchRuntimeMcpFixture> {
   const echoMarker = `wb-mcp-${randomBytes(24).toString("hex")}`;
   let echoCalls = 0;
+  let paginatedToolCalls = 0;
+  let requiredTaskToolCalls = 0;
   let waitCalls = 0;
   let activeWaits = 0;
   let cancelledWaits = 0;
@@ -276,6 +289,36 @@ export async function startWorkbenchRuntimeMcpFixture(): Promise<WorkbenchRuntim
         });
       },
     );
+    if (options.pagination === "two-pages") {
+      mcpServer.registerTool(
+        "workbench_probe_page_two",
+        {
+          description: "A tool available only on the second tools/list page.",
+          inputSchema: { value: stringSchema },
+          outputSchema: { value: stringSchema },
+        },
+        ({ value }: { value: string }) => {
+          paginatedToolCalls += 1;
+          return {
+            content: [{ type: "text", text: `page-two:${value}` }],
+            structuredContent: { value },
+          };
+        },
+      );
+    }
+    if (options.firstPageTaskSupport === "required") {
+      mcpServer.registerTool(
+        "workbench_probe_required",
+        {
+          description: "A required task-based tool used to verify metadata guards.",
+          inputSchema: {},
+        },
+        () => {
+          requiredTaskToolCalls += 1;
+          return { content: [{ type: "text", text: "unexpected-call" }] };
+        },
+      );
+    }
   };
 
   const createSession = async (): Promise<FixtureSession> => {
@@ -294,6 +337,63 @@ export async function startWorkbenchRuntimeMcpFixture(): Promise<WorkbenchRuntim
       },
     });
     registerTools(mcpServer);
+    if (options.pagination) {
+      const echoTool = {
+        name: "workbench_probe_echo",
+        description: "Return a fixture-generated marker with the submitted value.",
+        inputSchema: {
+          type: "object",
+          properties: { value: { type: "string" } },
+          required: ["value"],
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            echoMarker: { type: options.invalidFirstPageOutput ? "number" : "string" },
+            value: { type: "string" },
+          },
+          required: ["echoMarker", "value"],
+        },
+      };
+      const waitTool = {
+        name: "workbench_probe_wait",
+        description: "Remain pending until the MCP client cancels this tool request.",
+        inputSchema: { type: "object", properties: {} },
+      };
+      const pageTwoTool = {
+        name: "workbench_probe_page_two",
+        description: "A tool available only on the second tools/list page.",
+        inputSchema: {
+          type: "object",
+          properties: { value: { type: "string" } },
+          required: ["value"],
+        },
+      };
+      const requiredTaskTool = {
+        name: "workbench_probe_required",
+        description: "A required task-based tool used to verify metadata guards.",
+        inputSchema: { type: "object", properties: {} },
+        execution: { taskSupport: "required" },
+      };
+      mcpServer.server.setRequestHandler(ListToolsRequestSchema, (request) => {
+        if (options.pagination === "repeated-cursor") {
+          return { tools: [echoTool], nextCursor: "repeated" };
+        }
+        if (request.params?.cursor === undefined) {
+          return {
+            tools: [
+              echoTool,
+              ...(options.firstPageTaskSupport === "required" ? [requiredTaskTool] : []),
+            ],
+            nextCursor: "page-two",
+          };
+        }
+        if (request.params.cursor === "page-two") {
+          return { tools: [waitTool, pageTwoTool] };
+        }
+        throw new Error("fixture received an unknown tools/list cursor");
+      });
+    }
     session = {
       server: mcpServer,
       transport,
@@ -358,7 +458,14 @@ export async function startWorkbenchRuntimeMcpFixture(): Promise<WorkbenchRuntim
   return {
     url: `http://${FIXTURE_HOST}:${listeners.port}${FIXTURE_PATH}`,
     echoMarker,
-    stats: () => ({ echoCalls, waitCalls, activeWaits, cancelledWaits }),
+    stats: () => ({
+      echoCalls,
+      paginatedToolCalls,
+      requiredTaskToolCalls,
+      waitCalls,
+      activeWaits,
+      cancelledWaits,
+    }),
     waitForWaitStart: (timeoutMs) =>
       withTimeout(waitStartGate.promise, timeoutMs, "mcp-wait-start"),
     waitForWaitAbort: (timeoutMs) =>

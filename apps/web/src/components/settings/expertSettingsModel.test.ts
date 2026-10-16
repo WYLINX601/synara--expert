@@ -93,4 +93,38 @@ describe("expertSettingsModel", () => {
       }).filter((issue) => issue.field === "connections"),
     ).toEqual([]);
   });
+
+  it("allows all-tool authorizations without a saved tool whitelist", () => {
+    const draft = expertDraftFromDefinition(definition);
+
+    expect(
+      validateExpertDraft({
+        ...draft,
+        connections: [{ id: "docs", required: false, enabled: true, toolMode: "all", tools: [] }],
+      }).filter((issue) => issue.field === "connections"),
+    ).toEqual([]);
+  });
+
+  it("preserves explicit authorization mode while saving a draft", () => {
+    const draft = {
+      ...expertDraftFromDefinition(definition),
+      connections: [
+        { id: "all-tools", required: false, enabled: true, toolMode: "all" as const, tools: [] },
+        { id: "selected-tools", required: false, toolMode: "selected" as const, tools: ["search"] },
+        { id: "legacy", required: false, tools: ["read"] },
+      ],
+    };
+
+    expect(expertSaveInputForDraft(draft).connections).toEqual(draft.connections);
+    expect(
+      expertDraftsEqual(draft, {
+        ...draft,
+        connections: draft.connections.map((connection) =>
+          connection.id === "legacy"
+            ? { ...connection, toolMode: "all" as const, tools: [] }
+            : connection,
+        ),
+      }),
+    ).toBe(false);
+  });
 });

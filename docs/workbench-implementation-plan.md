@@ -173,6 +173,22 @@ v2 恢复记录记录官方、工作台和格式的源/目标版本、旧历史�
 
 真实数据库只在明确的维护窗口生成一致性副本，用副本验收；本轮计划没有访问或停止当前日用数据库。
 
+<a id="v101-compatibility-proposal"></a>
+
+### 4.5 v1.0.1 升级前置兼容方案（已确认，待实施）
+
+2026-10-16 的隔离核对确认，固定上游 `v1.0.1` / `f44ce959bdeedf5e2dfe117d362ef4e08386b3c3` 使用 `111_GroupLibraryHosting`；当前 Linx 使用冻结的 `111_ContextV1`。二者不能占用同一原生 tracker 的同一 ID。用户随后明确允许推进精确兼容方案与隔离测试，批准在升级候选中调整“111 保留原生 tracker、不接管”的策略。本节是已确认的实施方向，尚无对应实现或迁移验收；当前 main 的迁移代码未变，也不授权生产迁移。
+
+拟调整为：保留旧 `111_ContextV1` 的身份、路径、原始脚本摘要和来源证据；在未来升级版本中，把它从活动的原生 catalog 中退出，Context 通过既有 `workbench_sql_migrations` 的独立 `(module_id: context, migration_id: 1)` 登记。上游原生 109/110/111 及之后的名字、编号和脚本按固定上游保留；不改号，也不把上游迁移作为 Linx 扩展执行。现有 Expert ledger 记录不重写。
+
+1. **只读识别先于写入**：只承认精确的旧 `111 / ContextV1`、可核验的官方前缀、现有 Expert 历史，以及七张 Context 表与四个投递账本列的预期 schema。保留 `data_instance_id`、配置 revision、快照、运行记录和命令回执。未知身份、结构不符、双重登记或部分接管状态明确拒绝，不按 ID 单独白名单放行。
+2. **备份后原子接管**：沿用宿主连接、统一升级计划和恢复点；备份成功后，事务内登记 Context ledger、保留旧记录的审计来源并移除精确旧 tracker 项，再执行官方迁移和扩展迁移。正常重启与失败重试不能重复执行或丢弃原恢复点。
+3. **新库和已升级库分开验证**：新库执行上游原生 catalog，并通过 Context 独立 ledger 建立同一 schema；已有正确 Context ledger 的库只验证，不重复初始化。复用冻结脚本时登记具体的宿主持久化接入，不为目录豁免；不得复制后悄悄改变历史脚本。
+4. **检查规则随已确认策略调整**：实施时把强制“当前 catalog 必含旧 111”的检查改为“冻结历史文件与精确旧身份 + 官方 catalog 来源 + Context ledger 归属”，保留未知迁移、脚本编辑和缺少来源的拒绝。已有 109/110 精确兼容逻辑也须在官方已复用这些槽位的 catalog 下复验。
+5. **验收覆盖恢复边界**：使用合成旧库验证合法旧 111、未知同号身份、缺表/列、冲突记录、新库、重复启动，以及接管前后、官方迁移和扩展迁移中断；证明数据库、相关状态与应用版本可配套恢复。升级后不保证旧应用可直接打开新库，回退使用已验证的完整恢复点。
+
+实施先在隔离升级候选中进行，不能只删除当前 main 的冻结检查以消掉迁移冲突；用户数据库、日用应用和远端发布仍不在自动执行范围。实际恢复现场与上游冲突见 [WB-05](../workbench/WB-05-automation.md#maintenance-root-cause-20261016)。
+
 ## 5. 模块接入方案
 
 ### 5.1 第一轮收拢范围
@@ -199,18 +215,52 @@ v2 恢复记录记录官方、工作台和格式的源/目标版本、旧历史�
 
 ## 6. 每周同步工具与调度
 
+<a id="sync-sop"></a>
+
+### 6.0 当前升级执行 SOP（v1.1，2026-10-16）
+
+来源与状态：用户确认执行二开 v1.1。本节是后续升级的操作入口；第 6.1 节保留实际命令与状态语义，第 7.2 节维护应用/数据恢复。历史候选和历史通过结果不自动晋级为当前 main 的验收。日常开发按[开发 SOP](./workbench-development-workflow.md#execution-sop)，架构按[二开标准](./workbench-adaptation-plan.md#current-standard-v11)。
+
+| 步骤          | 操作与产出                                                                                                                                                    | 停止或继续条件                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| 0. 校准基线   | 核对分支/HEAD/dirty diff、官方 tag 到 SHA 的映射、Git 祖先关系、upstream lock、候选 metadata、`workbench:sync status` 的 mainRef/base/candidateSha 和验收来源 | 记录不一致先解释；不能单凭历史 ready 或一个字段准备下一候选         |
+| 1. 固定目标   | 按最新稳定发布渠道执行第 6.1 节 `check`，记录固定 base/tag/完整 SHA、锁文件 hash 与工具链                                                                     | `check` 会持久化检查快照，不是只读 status；不替换不同目标的活动候选 |
+| 2. 准备/续跑  | 在干净隔离 checkout/worktree 按 `prepare` 执行 merge，或按现有候选恢复规则续跑                                                                                | 保持单一活动候选；冲突保留现场，人工审查并提交修复                  |
+| 3. 审查适配   | 结合接入清单检查布局/导航、协议、Provider、生命周期、迁移及依赖补丁                                                                                           | 无文本冲突也执行适用回归；新增宿主依赖执行边界检查                  |
+| 4. 绑定与验证 | 按当前 main ref、真实 merge 历史和最终候选 HEAD 执行 `bind`、`verify`                                                                                         | 完整固定门禁失败继续修复；自动检查通过仅是 awaiting-runtime         |
+| 5. 冻结并实测 | 对同一候选补齐正式要求的原生/专家真实运行、取消恢复、MCP、身份、迁移与产物证据                                                                                | 输入变化按既有绑定规则重新验证，不搬用另一 SHA 的证据               |
+| 6. 审核与交付 | 满足既有 ready/审核条件后按[main 合入要求](./workbench-development-workflow.md#main-合入条件与保护)操作；安装/发布另按对应授权                                | 分别记录候选保存、自动检查、runtime、合入、安装和发布状态           |
+
+基线校准至少可以先只读运行以下命令，再对照对应文件和验收记录；命令成功退出不等于当前源码通过：
+
+```bash
+git status --short
+git rev-parse HEAD
+mise exec -- bun run workbench:sync status
+```
+
+`status` 支持 `--main-ref REF`，默认 `refs/heads/main`。输出 `baseline` 明确请求 ref/SHA、调用工作区的 HEAD/分支/dirty 状态、锁定版本的包含关系与候选绑定。请求范围不同、锁定目标已进入 main 但基线记录未校准等情况，顶层为 `baseline-review-required`；`candidate.status` 保留历史值。查询不修改状态、锁文件或退休候选，退出码 0 只表示读取成功，不能作为合入门禁。`check` / `prepare` / `bind` 复用核对，存在待校准差异时停止推进并返回处理指引。
+
+对锁文件中的完整官方 SHA 使用 `git merge-base --is-ancestor <official-sha> HEAD` 核对历史。标签/远端需要刷新时按本次维护授权执行，缓存 ref 的观察日期必须注明。涉及实际安装/迁移时另核对运行应用版本、数据目录、官方/扩展 schema 与文件格式。
+
+不一致的处理顺序：保留历史记录 → 明确哪个对象/源码已验证 → 找到合入与验收依据 → 按现有状态语义制定锁文件/候选记录的校准变更 → 重新绑定并验证。证据不足时将该升级标为待校准，只暂停候选生成/晋级；不阻塞独立日常开发，不直接将锁文件改成“已集成”。[2026-10-16 核对](../workbench/WB-00-upstream-evidence.md#2026-10-16-baseline-audit)记录了当前需处理的历史状态差异。
+
+每周检查一次，不要求每周合并或发布。失败时保留上一可用版本并继续同一候选。远端自动化分别验收手动触发、实际定时触发、候选保存与报告；一次 schedule 触发或候选分支写入不是整条链路成功，最新观察见 [WB-05](../workbench/WB-05-automation.md#2026-10-16-remote-read-only-audit)。
+
+每次真实升级在该次验收摘要中记录固定目标/候选 SHA、冲突文件、实际语义适配位置、模块业务改动、修复与验证耗时及阻塞原因；测试/文档改动单列。两至三次相似升级后评估是否增加接口，不预设零冲突、工期或节省比例。
+
 ### 6.1 脚本接口
 
 接口状态：WB-04 的 `check`/`prepare`/`bind`/`verify`/`status`、集成候选退休、build manifest 与候选 runtime probe 已集成。fee08 的两项固定门禁失败、9591 的六项固定门禁通过及 weekly fixture 失败、858 在 umask `077` 下的首次 test 权限失败和 `022` 下六门禁通过，均按各自来源保留；f248 的六项固定门禁也通过。f248 上两 flavor 诊断构建、身份和合成迁移/restore 按范围通过，但 live cancellation 失败、recovery 未运行，故该轮为 `awaiting-runtime`。de287 的 HTTP cancel-drain 修复在三个服务端文件通过 25 个目标测试、scripts fixture 通过 3 个目标测试；这些检查在 pinned Node `24.13.1`/Bun `1.4.2` 工具链下运行。该提交尚未通过六项正式门禁、重新构建或 live 重验。十项 required runtime evidence 没有全部通过并绑定；858 后续 attempt、f248 结果和取消诊断见 [WB-04 runtime preflight](../workbench/WB-04-runtime-preflight.md)。未来候选须核对 checkout HEAD、生成状态中的 `candidateSha` 与 evidence binding 一致；不继承 f248 或 de287 的验收结论。
 
-| 命令                                                                                                                                                    | 行为与输出                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workbench:sync check [--main-ref REF]`                                                                                                                 | 读取当前 main ref SHA，检查官方稳定发布并持久化固定 tag/SHA 快照；不替换活动候选。默认 `refs/heads/main`。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `workbench:sync prepare --checkout PATH --base SHA --target-tag TAG --target-sha SHA [--main-ref REF]`                                                  | 要求上一条成功检查的 tag、SHA、main SHA 与锁文件 hash 全部相符；在指定 clean 候选 checkout 中对固定 target 做真实 `--no-ff` merge。冲突保留现场。只把同步状态写入 git common dir，不在候选工作树写额外文件。                                                                                                                                                                                                                                                                                                                                                                                              |
-| `workbench:sync bind --checkout PATH --base SHA --target-tag TAG --target-sha SHA --candidate-sha SHA [--main-ref REF]`                                 | 在新 runner 或人工修复后重建本地状态。核对 branch、clean HEAD、准确 SHA、当前 main ref、候选 metadata 和真实 target merge 历史；不依赖临时 runner 的成功状态。                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `workbench:sync verify --candidate-sha SHA [--runtime-evidence PATH]`                                                                                   | 只对绑定的准确 HEAD 串行运行六项固定门禁，逐项记录通过/失败/未运行。stdout、stderr 和 runner 异常写入 Git common-dir 下按候选 SHA 与 run ID 隔离的私有日志目录；报告只返回日志相对引用、SHA-256 与状态，不包含日志正文。写日志失败不得进入 ready。workflow artifact 仅保留脱敏摘要和退出标识，临时 runner 的详细日志不会上传。自动门禁全部通过后进入 `awaiting-runtime`；仅接受绑定相同候选、base、target、锁文件 hash 和 Node/Bun 版本的完整运行证据后进入 `ready`。运行证据须覆盖 Codex/Pi 普通与专家首轮、恢复、取消、MCP、session 隔离、打包身份和迁移恢复；每项均须 `passed` 并带 evidence SHA-256。 |
-| `workbench:sync status`                                                                                                                                 | 对照实际 Git、当前 main ref、锁文件和工具链展示候选及证据状态；不展示本机绝对 checkout 路径。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `scripts/workbench-build.ts --flavor FLAVOR --source-sha SHA --platform PLATFORM --arch ARCH --output-dir PATH [--upstream-tag TAG --upstream-sha SHA]` | 只对准确、干净的 HEAD 使用 mise 锁定的 Node/Bun 和现有桌面构建器；官方来源必须匹配锁文件并能由 Git 证明已集成。产物与 provenance/build manifest 写到源码树外的新目录。manifest 标记 `diagnostic-build-only`，自动门禁和运行证据明确为 `not-run`。候选分支可省略 upstream 参数，由已提交的候选 metadata 固定目标。                                                                                                                                                                                                                                                                                         |
+| 命令                                                                                                                                                    | 行为与输出                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `workbench:sync check [--main-ref REF]`                                                                                                                 | 读取当前 main ref SHA，检查官方稳定发布并持久化固定 tag/SHA 快照；不替换活动候选。默认 `refs/heads/main`。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `workbench:sync prepare --checkout PATH --base SHA --target-tag TAG --target-sha SHA [--main-ref REF]`                                                  | 要求上一条成功检查的 tag、SHA、main SHA 与锁文件 hash 全部相符；在指定 clean 候选 checkout 中对固定 target 做真实 `--no-ff` merge。冲突保留现场。只把同步状态写入 git common dir，不在候选工作树写额外文件。                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `workbench:sync bind --checkout PATH --base SHA --target-tag TAG --target-sha SHA --candidate-sha SHA [--main-ref REF]`                                 | 在新 runner 或人工修复后重建本地状态。核对 branch、clean HEAD、准确 SHA、当前 main ref、候选 metadata 和真实 target merge 历史；不依赖临时 runner 的成功状态。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `workbench:sync verify --candidate-sha SHA [--runtime-evidence PATH]`                                                                                   | 只对绑定的准确 HEAD 串行运行七项固定门禁（原六项加 workbench:check-boundaries），逐项记录通过/失败/未运行。stdout、stderr 和 runner 异常写入 Git common-dir 下按候选 SHA 与 run ID 隔离的私有日志目录；报告只返回日志相对引用、SHA-256 与状态，不包含日志正文。写日志失败不得进入 ready。workflow artifact 仅保留脱敏摘要和退出标识，临时 runner 的详细日志不会上传。自动门禁全部通过后进入 `awaiting-runtime`；仅接受绑定相同候选、base、target、锁文件 hash 和 Node/Bun 版本的完整运行证据后进入 `ready`。运行证据须覆盖 Codex/Pi 普通与专家首轮、恢复、取消、MCP、session 隔离、打包身份和迁移恢复；每项均须 `passed` 并带 evidence SHA-256。 |
+| `workbench:sync status [--main-ref REF]`                                                                                                                | 只读检查请求的 main ref（默认 refs/heads/main）与候选绑定、锁文件、工作区和工具链；差异报告 baseline-review-required，历史 candidate.status 保留，退出 0 不代表验收；不展示本机绝对 checkout 路径。                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `scripts/workbench-build.ts --flavor FLAVOR --source-sha SHA --platform PLATFORM --arch ARCH --output-dir PATH [--upstream-tag TAG --upstream-sha SHA]` | 只对准确、干净的 HEAD 使用 mise 锁定的 Node/Bun 和现有桌面构建器；官方来源必须匹配锁文件并能由 Git 证明已集成。产物与 provenance/build manifest 写到源码树外的新目录。manifest 标记 `diagnostic-build-only`，自动门禁和运行证据明确为 `not-run`。候选分支可省略 upstream 参数，由已提交的候选 metadata 固定目标。                                                                                                                                                                                                                                                                                                                                |
 
 常用命令需在仓库锁定工具链下运行，例如：
 
@@ -318,11 +368,19 @@ bun run windows-runtime:check
 
 ### 7.2 安装与恢复流程
 
+当前恢复标准（2026-10-16 v1.1）：应用回退和数据恢复分别制定方案。即使数据库结构未变，也要核对配置及其他持久化格式兼容性；未经验证，旧应用不得直接写入新版本数据。恢复不能跨 Stable/Beta/Workbench 的数据身份。
+
 1. 候选通过自动检查和本机真实运行验证，核对最终源码 SHA 与构建清单。
 2. 在日用实例无活跃任务时进入维护窗口，停止拥有该数据目录的进程，取得生命周期锁；不能每周定时强制终止工作。
 3. 保存一致性数据库备份及专家快照、必要配置文件，校验对应关系和可恢复性。已核实专家数据位于解析后的 `stateDir/experts/definitions`、`stateDir/experts/snapshots` 和 `stateDir/expert-connections`；备份清单覆盖这些内容及需要的文件引用，不导出环境变量中的明文凭据。备份包留在本机，不进入仓库/CI artifact。
 4. 安装并启动自己的已验证构建，迁移成功后检查已有任务、专家、工具和个人数据。
 5. 失败时先保留故障后数据，按兼容性选择程序回退或程序+数据配套恢复。升级后新增的数据不会自动回填进旧备份。
+
+涉及数据格式变化的交付，在该次验收中明确以下恢复输入：匹配应用版本、官方/扩展 schema 与状态文件格式、一致性恢复点、需要配套恢复的文件/引用、失败重试步骤、校验断言，以及恢复点后新增数据的保留办法与可能损失范围。SQLite 备份不自动覆盖数据库外的状态文件；不得把活动数据库主文件的普通复制视为完整一致性备份。
+
+恢复演练先在隔离副本执行。实际恢复前停止所有访问目标 home/数据目录的应用和服务，按现有生命周期锁、provenance 和恢复标记校验；保留故障后副本，再恢复数据库和必要关联状态，使用匹配应用启动并核对原生任务、专家绑定、配置与数据。当前 `restoreMarkedMigrationBackup` 是数据库恢复入口，其通过不证明关联文件已备份或已恢复，须单独核对清单。不能用 Git 回退或重新安装代替这些步骤。
+
+上述规则定义后续恢复要求，不表示本次已迁移用户库、演练当前源码或安装应用；实际结果仍进入对应源码的验收记录。
 
 第一版以本机脚本更新为主，关闭工作台对官方二进制渠道的自动更新。后续需要安装包分发时，单独接入自己的签名与发布渠道。已有 Canary 的程序回退只提供复用基础，完整数据恢复仍需 WB-02/WB-04 的验证。
 
@@ -348,4 +406,4 @@ WB-06 只预留最小业务模型和接入方式，具体业务列、字段、�
 - [ ] WB-05：每周任务手动/定时实测通过，冲突与重复运行处理可靠。
 - [ ] WB-06：明确看板需求后实施，并纳入周更新验收。
 
-各工作包的勾选只代表该行列出的证据达到范围；诊断构建、合成 SQLite、Provider 部分结果和历史失败的候选门禁分别注明，不推导为 M1/M2/M3 完成。f248 的固定门禁和部分本地验收通过，但其 cancellation 失败、recovery 未运行；十项 runtime evidence 尚无完整通过绑定，因此 WB-04 与 M2 未完成。其后的 de287 定向测试不能代替新源码的六项门禁、构建和 live revalidation。WB-05 的本地 fixture 通过记录限于 858，远端 manual 与 scheduled 运行仍无证据；WB-06 按用户决定延期。每阶段记录代码版本、完成项、未完成项和下一阶段依赖，保留可追溯证据即可，无需另建一套项目管理系统。
+各工作包的勾选只代表该行列出的证据达到范围；诊断构建、合成 SQLite、Provider 部分结果和历史失败的候选门禁分别注明，不推导为 M1/M2/M3 完成。f248 的固定门禁和部分本地验收通过，但其 cancellation 失败、recovery 未运行；十项 runtime evidence 尚无完整通过绑定，因此 WB-04 与 M2 未完成。其后的 de287 定向测试不能代替新源码的正式门禁、构建和 live revalidation；2026-10-16 起正式验证为七项门禁，历史六项不自动晋级。WB-05 的本地 fixture 通过记录限于 858，远端 manual 与 scheduled 运行仍无证据；WB-06 按用户决定延期。每阶段记录代码版本、完成项、未完成项和下一阶段依赖，保留可追溯证据即可，无需另建一套项目管理系统。

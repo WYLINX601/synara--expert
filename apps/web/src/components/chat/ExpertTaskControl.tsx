@@ -208,12 +208,13 @@ export function ExpertTaskControl(props: {
                         const snapshotDisabled = connection.enabled === false;
                         const connectionName = config?.name ?? connection.id;
                         const result = connectionTestResults[connection.id];
-                        const detectedAllowedTools = result?.tools.filter((tool) =>
-                          connection.tools.includes(tool),
+                        const allToolsAuthorized = connection.toolMode === "all";
+                        const detectedAllowedTools = result?.tools.filter(
+                          (tool) => allToolsAuthorized || connection.tools.includes(tool),
                         );
-                        const missingTools = connection.tools.filter(
-                          (tool) => !result?.tools.includes(tool),
-                        );
+                        const missingTools = allToolsAuthorized
+                          ? []
+                          : connection.tools.filter((tool) => !result?.tools.includes(tool));
 
                         return (
                           <li
@@ -249,7 +250,11 @@ export function ExpertTaskControl(props: {
                             ) : null}
                             <p className="text-ui-sm text-muted-foreground">
                               允许的工具：
-                              {connection.tools.length ? connection.tools.join("、") : "无"}
+                              {allToolsAuthorized
+                                ? "全部工具（本任务首次启动时自动读取并固定）"
+                                : connection.tools.length
+                                  ? connection.tools.join("、")
+                                  : "无"}
                             </p>
                             {config && !snapshotDisabled ? (
                               <Button
@@ -270,12 +275,14 @@ export function ExpertTaskControl(props: {
                             ) : result ? (
                               <div role="status" className="space-y-1 text-ui-sm">
                                 <p>
-                                  当前配置检测完成 · 已发现且获准：
+                                  {allToolsAuthorized
+                                    ? "当前配置检测完成 · 当前提供："
+                                    : "当前配置检测完成 · 已发现且获准："}
                                   {detectedAllowedTools?.length
                                     ? detectedAllowedTools.join("、")
                                     : "无"}
                                 </p>
-                                {connection.tools.length ? (
+                                {!allToolsAuthorized && connection.tools.length ? (
                                   <p className="text-muted-foreground">
                                     允许但未发现：
                                     {missingTools.length ? missingTools.join("、") : "无"}

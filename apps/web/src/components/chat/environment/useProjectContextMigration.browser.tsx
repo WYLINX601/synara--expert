@@ -6,12 +6,24 @@ import {
   type ContextApi,
   type ContextCommandResult,
   type ContextMigrationRecord,
+  type NativeApi,
   type ProjectContextSettings,
 } from "@synara/contracts";
 import { useState } from "react";
 import { page } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+
+const contextClientMocks = vi.hoisted(() => ({
+  readContextClient: null as null | (() => { supported: boolean; api: null }),
+}));
+vi.mock("~/workbench/host/contextClient", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/workbench/host/contextClient")>();
+  return {
+    ...actual,
+    readContextClient: () => contextClientMocks.readContextClient?.() ?? actual.readContextClient(),
+  };
+});
 
 import { useProjectInstructionsStore } from "~/projectInstructionsStore";
 import { useProjectContextMigration } from "./useProjectContextMigration";
@@ -50,11 +62,11 @@ function projectSettings(overrides: Partial<ProjectContextSettings> = {}): Proje
   };
 }
 
-function setNativeApi(context: ContextApi): () => void {
+function setNativeApi(api: Partial<NativeApi>): () => void {
   const previous = Object.getOwnPropertyDescriptor(window, "nativeApi");
   Object.defineProperty(window, "nativeApi", {
     configurable: true,
-    value: { context },
+    value: api,
   });
   return () => {
     if (previous) Object.defineProperty(window, "nativeApi", previous);
@@ -145,10 +157,14 @@ function digest(value: string): Promise<string> {
 
 describe("legacy Project Instructions migration gate", () => {
   let restoreNativeApi: (() => void) | null = null;
+  let restoreContextClient: (() => void) | null = null;
 
   afterEach(() => {
     restoreNativeApi?.();
     restoreNativeApi = null;
+    restoreContextClient?.();
+    restoreContextClient = null;
+    contextClientMocks.readContextClient = null;
     useProjectInstructionsStore.getState().clearInstructions(projectId);
     document.body.innerHTML = "";
   });
@@ -185,7 +201,7 @@ describe("legacy Project Instructions migration gate", () => {
         migration: completedRecord,
       })),
     });
-    restoreNativeApi = setNativeApi(api);
+    restoreNativeApi = setNativeApi({ context: api });
     useProjectInstructionsStore.getState().setInstructions(projectId, legacyInstructions);
     await render(<MigrationHarness />);
 
@@ -227,7 +243,7 @@ describe("legacy Project Instructions migration gate", () => {
 
   it("cancels the first send without claiming or changing legacy storage", async () => {
     const api = makeApi();
-    restoreNativeApi = setNativeApi(api);
+    restoreNativeApi = setNativeApi({ context: api });
     useProjectInstructionsStore.getState().setInstructions(projectId, legacyInstructions);
     await render(<MigrationHarness />);
 
@@ -242,13 +258,55 @@ describe("legacy Project Instructions migration gate", () => {
     );
   });
 
+  it("continues the first send when the server does not support Context v1", async () => {
+    restoreNativeApi = setNativeApi({});
+    useProjectInstructionsStore.getState().setInstructions(projectId, legacyInstructions);
+    await render(<MigrationHarness />);
+
+    await page.getByRole("button", { name: "Send" }).click();
+
+    await expect.element(page.getByText("sent", { exact: true })).toBeVisible();
+    expect(useProjectInstructionsStore.getState().instructionsByProjectId[projectId]).toBe(
+      legacyInstructions,
+    );
+  });
+
+  it("blocks the first send when Context is supported but its API is unavailable", async () => {
+    restoreNativeApi = setNativeApi({});
+    useProjectInstructionsStore.getState().setInstructions(projectId, legacyInstructions);
+    contextClientMocks.readContextClient = () => ({ supported: true, api: null });
+    restoreContextClient = () => {
+      contextClientMocks.readContextClient = null;
+    };
+    await render(<MigrationHarness />);
+
+    await page.getByRole("button", { name: "Send" }).click();
+
+    await expect.element(page.getByText("cancelled", { exact: true })).toBeVisible();
+    expect(document.body.textContent).not.toContain("Confirm legacy instructions ownership");
+    expect(useProjectInstructionsStore.getState().instructionsByProjectId[projectId]).toBe(
+      legacyInstructions,
+    );
+  });
+
+  it("blocks the first send when a supported Context connection is temporarily offline", async () => {
+    const api = makeApi({ getProject: vi.fn().mockRejectedValue(new Error("connection closed")) });
+    restoreNativeApi = setNativeApi({ context: api });
+    await render(<MigrationHarness />);
+
+    await page.getByRole("button", { name: "Send" }).click();
+
+    await expect.element(page.getByText("cancelled", { exact: true })).toBeVisible();
+    expect(api.getProject).toHaveBeenCalledOnce();
+  });
+
   it("cancels a first-send migration read when the active project and thread change", async () => {
     let resolveRead!: (value: ProjectContextSettings) => void;
     const delayedRead = new Promise<ProjectContextSettings>((resolve) => {
       resolveRead = resolve;
     });
     const api = makeApi({ getProject: vi.fn(() => delayedRead) });
-    restoreNativeApi = setNativeApi(api);
+    restoreNativeApi = setNativeApi({ context: api });
     useProjectInstructionsStore.getState().setInstructions(projectId, legacyInstructions);
     await render(<PendingReadMigrationHarness />);
 

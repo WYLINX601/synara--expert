@@ -1,5 +1,4 @@
 import {
-  WS_CONTEXT_V1_CAPABILITY,
   type ProjectId,
   type ThreadContextDetails as ThreadContextDetailsDto,
   type ThreadId,
@@ -7,8 +6,7 @@ import {
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { newCommandId } from "~/lib/utils";
-import { readNativeApi } from "~/nativeApi";
-import { useNativeApiServerCapability } from "~/hooks/useNativeApiServerCapability";
+import { useContextClient } from "~/workbench/host/contextClient";
 import { Button } from "~/components/ui/button";
 import { EnvironmentCollapsibleSection } from "./environment/EnvironmentRow";
 import {
@@ -29,8 +27,8 @@ export function ContextDetailsDialog(props: {
   readonly isLocalDraft: boolean;
   readonly onNewThread: () => void;
 }) {
-  const available = useNativeApiServerCapability(WS_CONTEXT_V1_CAPABILITY);
-  const contextApi = available ? (readNativeApi()?.context ?? null) : null;
+  const contextClient = useContextClient();
+  const contextApi = contextClient.supported ? contextClient.api : null;
   const detailsQuery = useQuery({
     queryKey: ["context", "thread", props.threadId],
     enabled: Boolean(props.open && !props.isLocalDraft && props.threadId && contextApi),
@@ -74,9 +72,13 @@ export function ContextDetailsDialog(props: {
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="max-h-[65vh] space-y-4 overflow-y-auto text-ui">
-          {!available ? (
+          {!contextClient.supported ? (
             <p className="text-ui-sm text-muted-foreground">
               Context is unavailable on this server.
+            </p>
+          ) : !contextApi ? (
+            <p className="text-ui-sm text-muted-foreground">
+              Context is temporarily unavailable. Reconnect and try again.
             </p>
           ) : props.isLocalDraft ? (
             <p className="text-ui-sm text-muted-foreground">
@@ -120,7 +122,7 @@ export function ContextDetailsDialog(props: {
               type="button"
               variant="outline"
               onClick={props.onNewThread}
-              disabled={!available}
+              disabled={!contextClient.supported || !contextApi}
             >
               Start a new chat with current Context
             </Button>

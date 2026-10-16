@@ -255,13 +255,13 @@ export function ExpertsSettingsPanel(props: {
     setView("list");
   };
 
-  const openConnectionManager = async (connectionId?: string) => {
+  const openConnectionManager = async () => {
     if (!props.onOpenConnections) return;
     if (!(await confirmLeave())) return;
     let current = baselineRef.current;
     if (!current) current = (await saveDraft()) ?? null;
     if (!current || current.archived) return;
-    props.onOpenConnections(current.id, connectionId);
+    props.onOpenConnections(current.id);
   };
 
   const requestExpertAction = async (type: ExpertActionType, source: ExpertDefinition) => {
@@ -501,7 +501,7 @@ export function ExpertsSettingsPanel(props: {
             catalogError={skillsQuery.isError ? errorText(skillsQuery.error) : null}
             onTabChange={setTab}
             onChange={updateDraft}
-            onOpenConnections={(connectionId) => void openConnectionManager(connectionId)}
+            onOpenConnections={() => void openConnectionManager()}
           />
 
           {isDirty && !readonly ? (

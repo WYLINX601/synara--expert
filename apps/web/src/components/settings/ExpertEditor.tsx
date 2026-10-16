@@ -42,7 +42,7 @@ export function ExpertEditor({
   catalogError: string | null;
   onTabChange: (tab: ExpertEditorTab) => void;
   onChange: (patch: Partial<ExpertSaveInput>) => void;
-  onOpenConnections: (connectionId?: string) => void;
+  onOpenConnections: () => void;
 }) {
   const fieldIssue = (field: ExpertDraftField) =>
     issues.find((issue) => issue.field === field && issue.index === undefined);

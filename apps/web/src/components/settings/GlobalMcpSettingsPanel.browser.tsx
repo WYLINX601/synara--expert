@@ -43,7 +43,13 @@ const harness = vi.hoisted(() => {
     updatedAt: "2026-10-03T00:00:00.000Z",
   });
   const makeExpert = (
-    connections: Array<{ id: string; enabled?: boolean; required: boolean; tools: string[] }> = [],
+    connections: Array<{
+      id: string;
+      enabled?: boolean;
+      required: boolean;
+      toolMode?: "all" | "selected";
+      tools: string[];
+    }> = [],
   ) => ({
     id: "planner",
     name: "规划专家",
@@ -184,6 +190,7 @@ vi.mock("~/components/ui/toast", () => ({ toastManager: { add: vi.fn() } }));
 vi.mock("./ExternalMcpSettingsPanel", () => ({ ExternalMcpSettingsPanel: () => null }));
 
 import { GlobalMcpSettingsPanel } from "./GlobalMcpSettingsPanel";
+import { toastManager } from "~/components/ui/toast";
 
 let cleanupMountedPanel: (() => Promise<void>) | null = null;
 
@@ -448,6 +455,31 @@ describe("GlobalMcpSettingsPanel wrapper", () => {
     expect(harness.server.removeExpertConnection).not.toHaveBeenCalled();
   });
 
+  it("describes an all-tools expert reference without reporting an empty tool list", async () => {
+    harness.references = {
+      experts: [
+        {
+          id: "planner",
+          name: "规划专家",
+          revision: 7,
+          enabled: true,
+          required: false,
+          toolMode: "all",
+          tools: [],
+        },
+      ],
+      snapshots: [],
+      tasks: [],
+      activeSessionCount: 0,
+    };
+    await renderPanel({ initialConnectionId: "linear" });
+
+    await page.getByRole("tab", { name: "使用情况", exact: true }).click();
+    await expect
+      .element(page.getByText("规划专家 · v7 · 已启用 · 全部工具", { exact: true }))
+      .toBeVisible();
+  });
+
   it("imports one merged local MCP candidate directly and locks the selection while importing", async () => {
     let resolveImport!: (result: McpImportResult) => void;
     harness.server.importMcpConnections.mockImplementation(
@@ -506,8 +538,14 @@ describe("GlobalMcpSettingsPanel wrapper", () => {
         },
       ],
     });
-    await expect.element(page.getByText("导入结果", { exact: true })).toBeVisible();
-    await expect.element(page.getByText("已导入", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByRole("textbox", { name: "搜索 MCP 连接", exact: true }))
+      .toBeVisible();
+    expect(page.getByText("导入结果", { exact: true }).length).toBe(0);
+    expect(toastManager.add).toHaveBeenCalledWith({
+      type: "success",
+      title: "已导入 1 个 MCP 连接",
+    });
   });
 
   it("keeps the selected conflict policy and expected revision in a direct import", async () => {
@@ -554,7 +592,18 @@ describe("GlobalMcpSettingsPanel wrapper", () => {
       ],
     });
     await expect
-      .element(page.getByText("Connection changed after discovery.", { exact: true }))
+      .poll(() =>
+        vi
+          .mocked(toastManager.add)
+          .mock.calls.some(
+            ([toast]) =>
+              toast.type === "error" &&
+              String(toast.description).includes("Connection changed after discovery."),
+          ),
+      )
+      .toBe(true);
+    await expect
+      .element(page.getByRole("textbox", { name: "搜索发现结果", exact: true }))
       .toBeVisible();
   });
 
@@ -617,5 +666,37 @@ describe("GlobalMcpSettingsPanel wrapper", () => {
       .element(page.getByText("已保存请求头：Authorization、X-Workspace", { exact: true }))
       .toBeVisible();
     expect(page.getByText(credentialId, { exact: true }).length).toBe(0);
+  });
+
+  it("manages an all-tools grant without a tool check and preserves its mode", async () => {
+    harness.expert = {
+      ...harness.expert,
+      connections: [{ id: "linear", enabled: true, required: false, toolMode: "all", tools: [] }],
+    };
+    const onReturnToExpert = vi.fn();
+    await renderPanel({
+      initialConnectionId: "linear",
+      initialExpertId: "planner",
+      returnExpertId: "planner",
+      onReturnToExpert,
+    });
+
+    await expect.element(page.getByText("允许使用此连接的全部工具", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText(/新任务首次启动时会自动读取此 MCP 提供的工具/u))
+      .toBeVisible();
+    expect(page.getByRole("checkbox").length).toBe(0);
+    expect(page.getByText(/已选 0 \/ 0/u).length).toBe(0);
+
+    await page.getByRole("radio", { name: "阻止启动", exact: true }).click();
+    const save = page.getByRole("button", { name: "保存此专家授权", exact: true });
+    await expect.element(save).toBeEnabled();
+    await save.click();
+    await expect.poll(() => harness.server.saveExpert.mock.calls.length).toBe(1);
+    expect(harness.server.saveExpert.mock.calls[0]?.[0]).toMatchObject({
+      connections: [{ id: "linear", enabled: true, required: true, toolMode: "all", tools: [] }],
+    });
+    expect(harness.server.testExpertConnection).not.toHaveBeenCalled();
+    expect(onReturnToExpert).not.toHaveBeenCalled();
   });
 });

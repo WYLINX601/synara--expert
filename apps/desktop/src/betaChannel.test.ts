@@ -68,6 +68,18 @@ function makeRoot(): string {
   return root;
 }
 
+function probeMacInstall(appPath: string): () => ReturnType<typeof detectBetaInstall> {
+  return () => {
+    const installed = existsSync(appPath);
+    return {
+      installed,
+      installPath: installed ? appPath : null,
+      executablePath: installed ? appPath : null,
+      version: null,
+    };
+  };
+}
+
 afterEach(() => {
   while (roots.length > 0) {
     rmSync(roots.pop()!, { recursive: true, force: true });
@@ -190,6 +202,7 @@ describe("DesktopBetaChannel", () => {
       betaHomeDir: betaHome,
       flavor: "production",
       installDirOverride: installDir,
+      probeBetaInstall: probeMacInstall(join(installDir, "Synara Beta.app")),
       betaUserDataDir: join(root, "beta-userdata"),
       install: async (onProgress) => {
         onProgress({ phase: "downloading", percent: 42 });
@@ -222,6 +235,7 @@ describe("DesktopBetaChannel", () => {
       betaHomeDir: join(root, ".synara-beta"),
       flavor: "production",
       installDirOverride: join(root, "Applications"),
+      probeBetaInstall: probeMacInstall(join(root, "Applications", "Synara Beta.app")),
       install: async () => {
         throw new Error("checksum mismatch");
       },

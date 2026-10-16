@@ -2,8 +2,20 @@ import "../../index.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ProjectId, ThreadId, type ContextApi, type ThreadContextDetails } from "@synara/contracts";
+import { page } from "vitest/browser";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+
+const contextClientHarness = vi.hoisted(() => ({
+  value: null as null | { supported: boolean; api: null },
+}));
+vi.mock("~/workbench/host/contextClient", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/workbench/host/contextClient")>();
+  return {
+    ...actual,
+    useContextClient: () => contextClientHarness.value ?? actual.useContextClient(),
+  };
+});
 
 import { ContextDetailsDialog } from "./ContextDetailsDialog";
 
@@ -44,6 +56,7 @@ describe("ContextDetailsDialog", () => {
   afterEach(() => {
     restoreNativeApi?.();
     restoreNativeApi = null;
+    contextClientHarness.value = null;
     document.body.innerHTML = "";
   });
 
@@ -86,6 +99,41 @@ describe("ContextDetailsDialog", () => {
       latest = details({ loadStatus: "stopped" });
       await expect.poll(() => document.body.textContent, { timeout: 5_000 }).toContain("stopped");
       expect(getThread.mock.calls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      await screen.unmount();
+      queryClient.clear();
+      host.remove();
+    }
+  });
+
+  it("shows a reconnect message and disables new chat when the supported API is unavailable", async () => {
+    contextClientHarness.value = { supported: true, api: null };
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const screen = await render(
+      <QueryClientProvider client={queryClient}>
+        <ContextDetailsDialog
+          open
+          onOpenChange={() => undefined}
+          threadId={threadId}
+          projectId={projectId}
+          isLocalDraft={false}
+          onNewThread={() => undefined}
+        />
+      </QueryClientProvider>,
+      { container: host },
+    );
+
+    try {
+      await expect
+        .element(page.getByText("Context is temporarily unavailable. Reconnect and try again."))
+        .toBeVisible();
+      await expect
+        .element(page.getByRole("button", { name: "Start a new chat with current Context" }))
+        .toBeDisabled();
     } finally {
       await screen.unmount();
       queryClient.clear();

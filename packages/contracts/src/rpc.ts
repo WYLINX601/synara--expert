@@ -1738,7 +1738,7 @@ export const WsContextRetryLoadRpc = Rpc.make(WS_METHODS.contextRetryLoad, {
 
 export const WsBootstrapRpcGroup = RpcGroup.make(WsBootstrapNegotiateRpc);
 
-export const WsFeatureRpcGroup = RpcGroup.make(
+const WS_FEATURE_RPC_GROUP_1 = RpcGroup.make(
   WsOrchestrationDispatchCommandRpc,
   WsOrchestrationImportThreadRpc,
   WsListProjectImportsRpc,
@@ -1779,6 +1779,9 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsStudioListThreadOutputsRpc,
   WsFilesystemBrowseRpc,
   WsShellOpenInEditorRpc,
+);
+
+const WS_FEATURE_RPC_GROUP_2 = RpcGroup.make(
   WsGitGithubRepositoryRpc,
   WsGitStatusRpc,
   WsGitReadWorkingTreeDiffRpc,
@@ -1819,6 +1822,9 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsTerminalResizeRpc,
   WsTerminalClearRpc,
   WsTerminalRestartRpc,
+);
+
+const WS_FEATURE_RPC_GROUP_3 = RpcGroup.make(
   WsTerminalCloseRpc,
   WsSubscribeTerminalEventsRpc,
   WsServerGetConfigRpc,
@@ -1859,6 +1865,9 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsStatsGetProfileTokenStatsRpc,
   WsServerGetDiagnosticsRpc,
   WsServerReadThreadDiagnosticsRpc,
+);
+
+const WS_FEATURE_RPC_GROUP_4 = RpcGroup.make(
   WsServerPrewarmVoiceRpc,
   WsServerTranscribeVoiceRpc,
   WsServerGenerateThreadRecapRpc,
@@ -1897,4 +1906,16 @@ export const WsFeatureRpcGroup = RpcGroup.make(
   WsContextClaimMigrationRpc,
   WsContextResolveMigrationRpc,
   WsContextRetryLoadRpc,
+);
+
+type WsFeatureRpc =
+  | RpcGroup.Rpcs<typeof WS_FEATURE_RPC_GROUP_1>
+  | RpcGroup.Rpcs<typeof WS_FEATURE_RPC_GROUP_2>
+  | RpcGroup.Rpcs<typeof WS_FEATURE_RPC_GROUP_3>
+  | RpcGroup.Rpcs<typeof WS_FEATURE_RPC_GROUP_4>;
+
+export const WsFeatureRpcGroup: RpcGroup.RpcGroup<WsFeatureRpc> = WS_FEATURE_RPC_GROUP_1.merge(
+  WS_FEATURE_RPC_GROUP_2,
+  WS_FEATURE_RPC_GROUP_3,
+  WS_FEATURE_RPC_GROUP_4,
 );

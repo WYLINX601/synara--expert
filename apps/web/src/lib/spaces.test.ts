@@ -14,13 +14,11 @@ import { moveProjectsToSpace } from "./spaces";
 function makeApi(
   dispatchCommand: ReturnType<typeof vi.fn>,
   getShellSnapshot: ReturnType<typeof vi.fn> = vi.fn().mockRejectedValue(new Error("offline")),
-): NativeApi {
-  return {
-    orchestration: {
-      dispatchCommand,
-      getShellSnapshot,
-    },
-  } as unknown as NativeApi;
+): Pick<NativeApi["orchestration"], "dispatchCommand" | "getShellSnapshot"> {
+  return { dispatchCommand, getShellSnapshot } as unknown as Pick<
+    NativeApi["orchestration"],
+    "dispatchCommand" | "getShellSnapshot"
+  >;
 }
 
 describe("moveProjectsToSpace", () => {

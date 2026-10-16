@@ -2,9 +2,7 @@ import type { ContextApi, ProjectId, ProjectContextSettings } from "@synara/cont
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 
-import { WS_CONTEXT_V1_CAPABILITY } from "@synara/contracts";
-import { readNativeApi } from "~/nativeApi";
-import { useNativeApiServerCapability } from "~/hooks/useNativeApiServerCapability";
+import { useContextClient } from "~/workbench/host/contextClient";
 
 import {
   getProjectContextAutosave,
@@ -35,9 +33,8 @@ export function useProjectContextAutosave(
   projectId: ProjectId | null,
   enabled: boolean,
 ): ProjectContextController {
-  const capabilityAvailable = useNativeApiServerCapability(WS_CONTEXT_V1_CAPABILITY);
-  const nativeApi = readNativeApi();
-  const contextApi = capabilityAvailable ? (nativeApi?.context ?? null) : null;
+  const contextClient = useContextClient();
+  const contextApi = contextClient.supported ? contextClient.api : null;
   const query = useQuery({
     queryKey: ["context", "project", projectId],
     enabled: Boolean(enabled && projectId && contextApi),
@@ -75,7 +72,7 @@ export function useProjectContextAutosave(
     controller,
     state,
     settings: query.data,
-    available: Boolean(capabilityAvailable && contextApi),
+    available: Boolean(contextClient.supported && contextApi),
     loading: Boolean(enabled && projectId && contextApi && query.isPending),
     error: query.error,
     reload: async () => {

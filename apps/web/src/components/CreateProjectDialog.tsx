@@ -318,7 +318,7 @@ export function CreateProjectDialog(props: {
     const api = readNativeApi();
     if (!api) throw new Error("The app server is unavailable.");
     const icon = toSpaceIconName(value.icon);
-    const { spaceId } = await createSpace({ api, name: value.name, icon });
+    const { spaceId } = await createSpace({ api: api.orchestration, name: value.name, icon });
     const createdAt = new Date().toISOString();
     setCreatedSpace({
       id: spaceId,

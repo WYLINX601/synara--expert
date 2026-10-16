@@ -76,15 +76,20 @@ async function resolveSnapshotMcpBinding(
   stateDir: string,
   connectionStore: ReturnType<typeof createExpertConnectionStore>,
 ) {
-  if (snapshot.mcpBinding) return snapshot.mcpBinding;
-
-  // Pre-MCP-1 snapshots are never edited. The first safe connection boundary
-  // captures their then-current revisions once in the sidecar store.
   const bindingStore = createExpertMcpBindingStore(stateDir);
-  return bindingStore.get(snapshot.snapshotId, async () => {
+  const binding = await bindingStore.get(snapshot.snapshotId, async () => {
+    if (snapshot.mcpBinding) return snapshot.mcpBinding;
+
+    // Pre-MCP-1 snapshots are never edited. The first safe connection boundary
+    // captures their then-current revisions once in the sidecar store.
     const servers = [];
     for (const connection of snapshot.connections) {
-      if (connection.enabled === false || connection.tools.length === 0) continue;
+      if (
+        connection.enabled === false ||
+        (connection.toolMode !== "all" && connection.tools.length === 0)
+      ) {
+        continue;
+      }
       const config = await connectionStore.pinRevision(connection.id);
       if (!config && connection.required) {
         throw new Error(`Required expert connection is not configured: ${connection.id}`);
@@ -93,6 +98,7 @@ async function resolveSnapshotMcpBinding(
         id: connection.id,
         ...(config ? { configRevision: config.revision } : {}),
         required: connection.required,
+        ...(connection.toolMode ? { toolMode: connection.toolMode } : {}),
         tools: connection.tools,
       });
     }
@@ -103,12 +109,38 @@ async function resolveSnapshotMcpBinding(
       servers,
     };
   });
+  if (snapshot.mcpBinding) {
+    const snapshotShape = (value: typeof snapshot.mcpBinding) =>
+      JSON.stringify({
+        schemaVersion: value!.schemaVersion,
+        source: value!.source,
+        ...(value!.authorizationId ? { authorizationId: value!.authorizationId } : {}),
+        servers: value!.servers.map((server) => ({
+          id: server.id,
+          ...(server.configRevision !== undefined ? { configRevision: server.configRevision } : {}),
+          required: server.required,
+          ...(server.toolMode ? { toolMode: server.toolMode } : {}),
+          tools: server.tools,
+        })),
+      });
+    if (snapshotShape(binding) !== snapshotShape(snapshot.mcpBinding)) {
+      throw new Error("Persisted expert MCP binding does not match its immutable snapshot.");
+    }
+  }
+  return binding;
 }
 
 function bindingUnavailableMessage(id: string, status?: string): string {
   if (status === "retired") return `Expert connection has been retired: ${id}`;
   if (status === "disabled") return `Expert connection is disabled: ${id}`;
   return `Expert connection is unavailable: ${id}`;
+}
+
+class ExpertToolAuthorizationPersistenceError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ExpertToolAuthorizationPersistenceError";
+  }
 }
 
 function closeRuntimeConnection(
@@ -217,44 +249,67 @@ async function inspectSnapshotConnections(
   connect: typeof connectExpertMcp,
 ): Promise<{ readonly optionalIssues: string[] }> {
   const connectionStore = createExpertConnectionStore(stateDir);
+  const bindingStore = createExpertMcpBindingStore(stateDir);
   const optionalIssues: string[] = [];
   const binding = await resolveSnapshotMcpBinding(snapshot, stateDir, connectionStore);
   for (const server of binding.servers) {
-    if (server.tools.length === 0) continue;
-    const unavailable = (message: string) => {
+    const allMode = server.toolMode === "all";
+    const hasFrozenTools = allMode && server.effectiveTools !== undefined;
+    const frozenTools = hasFrozenTools ? server.effectiveTools! : undefined;
+    if (!allMode && server.tools.length === 0) continue;
+    if (allMode && server.resolutionStatus === "unavailable") {
+      const message = `可选连接“${server.id}”在本任务首次读取时不可用，未授权工具。`;
+      if (server.required) throw new Error(`必需连接“${server.id}”此前无法读取。`);
+      optionalIssues.push(message);
+      continue;
+    }
+    if (allMode && server.resolutionStatus === "resolved" && frozenTools?.length === 0) continue;
+    const unavailable = async (message: string) => {
+      if (allMode && !hasFrozenTools && !server.required) {
+        try {
+          await bindingStore.resolveToolsOnce(snapshot.snapshotId, server.id, {
+            status: "unavailable",
+            tools: [],
+          });
+        } catch (cause) {
+          throw new ExpertToolAuthorizationPersistenceError(
+            `Could not persist the unavailable state for optional connection ${server.id}.`,
+            { cause },
+          );
+        }
+      }
       if (server.required) throw new Error(message);
       optionalIssues.push(message);
     };
     if (server.configRevision === undefined) {
-      unavailable(`连接“${server.id}”尚未配置。`);
+      await unavailable(`连接“${server.id}”尚未配置。`);
       continue;
     }
     let state;
     try {
       state = await connectionStore.readState(server.id);
     } catch (cause) {
-      unavailable(`连接“${server.id}”状态不可用。`);
+      await unavailable(`必需连接“${server.id}”状态不可用。`);
       if (server.required) throw new Error(`必需连接“${server.id}”状态不可用。`, { cause });
       continue;
     }
     if (state.status !== "active") {
-      unavailable(bindingUnavailableMessage(server.id, state.status));
+      await unavailable(bindingUnavailableMessage(server.id, state.status));
       continue;
     }
     let config;
     try {
       config = await connectionStore.readRevision(server.id, server.configRevision);
     } catch (cause) {
-      unavailable(`连接“${server.id}”版本 ${server.configRevision} 不可用。`);
-      if (server.required) {
+      await unavailable(`必需连接“${server.id}”版本 ${server.configRevision} 不可用。`);
+      if (server.required)
         throw new Error(`必需连接“${server.id}”版本 ${server.configRevision} 不可用。`, {
           cause,
         });
-      }
       continue;
     }
     if (!config) {
-      unavailable(`连接“${server.id}”版本 ${server.configRevision} 不可用。`);
+      await unavailable(`连接“${server.id}”版本 ${server.configRevision} 不可用。`);
       continue;
     }
     let client: ConnectedExpertMcp | undefined;
@@ -262,19 +317,42 @@ async function inspectSnapshotConnections(
       client = await connect(config);
       state = await connectionStore.readState(server.id);
       if (state.status !== "active") {
-        unavailable(bindingUnavailableMessage(server.id, state.status));
+        await unavailable(bindingUnavailableMessage(server.id, state.status));
         continue;
       }
       const names = new Set(client.tools.map((tool) => tool.name));
-      const missing = server.tools.filter((name) => !names.has(name));
+      let authorizedTools = server.tools;
+      if (allMode) {
+        if (frozenTools !== undefined) {
+          authorizedTools = frozenTools;
+        } else {
+          let updated;
+          try {
+            updated = await bindingStore.resolveToolsOnce(snapshot.snapshotId, server.id, {
+              status: "resolved",
+              tools: client.tools.map((tool) => tool.name),
+            });
+          } catch (cause) {
+            throw new ExpertToolAuthorizationPersistenceError(
+              `Could not persist effective tools for connection ${server.id}.`,
+              { cause },
+            );
+          }
+          authorizedTools =
+            updated.servers.find((entry) => entry.id === server.id)?.effectiveTools ?? [];
+        }
+      }
+      const missing = authorizedTools.filter((name) => !names.has(name));
       if (missing.length > 0) {
-        unavailable(`连接“${server.id}”不可用，缺少工具：${missing.join("、")}。`);
+        await unavailable(`连接“${server.id}”不可用，缺少工具：${missing.join("、")}。`);
       }
     } catch (cause) {
+      if (cause instanceof ExpertToolAuthorizationPersistenceError) throw cause;
       if (server.required) {
         throw new Error(`必需连接“${server.id}”不可用。`, { cause });
       }
-      optionalIssues.push(`可选连接“${server.id}”当前不可用。`);
+      if (allMode && !hasFrozenTools) await unavailable(`可选连接“${server.id}”当前不可用。`);
+      else optionalIssues.push(`可选连接“${server.id}”当前不可用。`);
     } finally {
       if (client) await client.close().catch(() => undefined);
     }
@@ -300,6 +378,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
 } {
   const expertStore = createExpertStore(options.stateDir);
   const connectionStore = createExpertConnectionStore(options.stateDir);
+  const bindingStore = createExpertMcpBindingStore(options.stateDir);
   const connect = options.connect ?? createDefaultExpertMcpConnector(options.stateDir);
   const normalizedStateDir = path.resolve(options.stateDir);
   const sessions = new Map<string, Map<string, SessionCatalog>>();
@@ -359,6 +438,20 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
     if (record.closed) return;
     const exposedNames = new Set<string>();
     const seenConnectionIds = new Set<string>();
+    const freezeOptionalUnavailable = async (server: (typeof binding.servers)[number]) => {
+      if (server.toolMode !== "all" || server.effectiveTools !== undefined) return;
+      try {
+        await bindingStore.resolveToolsOnce(snapshot.snapshotId, server.id, {
+          status: "unavailable",
+          tools: [],
+        });
+      } catch (cause) {
+        throw new ExpertToolAuthorizationPersistenceError(
+          `Could not persist the unavailable state for optional connection ${server.id}.`,
+          { cause },
+        );
+      }
+    };
     try {
       for (const server of binding.servers) {
         if (record.closed) return;
@@ -366,15 +459,31 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
           throw new Error(`Expert snapshot contains duplicate connection IDs: ${server.id}`);
         }
         seenConnectionIds.add(server.id);
-        if (server.tools.length === 0) continue;
+        const allMode = server.toolMode === "all";
+        if (allMode && server.resolutionStatus === "unavailable") {
+          if (server.required) {
+            throw new Error(
+              `Required expert connection was unavailable during first enumeration: ${server.id}`,
+            );
+          }
+          continue;
+        }
+        if (
+          (!allMode && server.tools.length === 0) ||
+          (allMode && server.effectiveTools !== undefined && server.effectiveTools.length === 0)
+        ) {
+          continue;
+        }
         if (record.revokedConnectionIds.has(server.id)) {
           if (server.required) throw new Error(bindingUnavailableMessage(server.id, "disabled"));
+          await freezeOptionalUnavailable(server);
           continue;
         }
         if (server.configRevision === undefined) {
           if (server.required) {
             throw new Error(`Required expert connection is not configured: ${server.id}`);
           }
+          await freezeOptionalUnavailable(server);
           continue;
         }
         let stateAtStart;
@@ -386,12 +495,14 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
               cause,
             });
           }
+          await freezeOptionalUnavailable(server);
           continue;
         }
         if (stateAtStart.status !== "active") {
           if (server.required) {
             throw new Error(bindingUnavailableMessage(server.id, stateAtStart.status));
           }
+          await freezeOptionalUnavailable(server);
           continue;
         }
         let config;
@@ -404,6 +515,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
               { cause },
             );
           }
+          await freezeOptionalUnavailable(server);
           continue;
         }
         if (!config) {
@@ -412,6 +524,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
               `Required expert connection revision is unavailable: ${server.id}@${server.configRevision}`,
             );
           }
+          await freezeOptionalUnavailable(server);
           continue;
         }
         let client: ConnectedExpertMcp;
@@ -421,6 +534,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
           if (server.required) {
             throw new Error(bindingUnavailableMessage(server.id), { cause });
           }
+          await freezeOptionalUnavailable(server);
           continue;
         }
         const stateAfterConnect = await connectionStore.readState(server.id).catch(() => null);
@@ -434,6 +548,51 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
           if (server.required) {
             throw new Error(bindingUnavailableMessage(server.id, stateAfterConnect?.status));
           }
+          await freezeOptionalUnavailable(server);
+          continue;
+        }
+
+        let authorizedTools = server.tools;
+        if (allMode) {
+          if (server.effectiveTools !== undefined) {
+            authorizedTools = server.effectiveTools;
+          } else {
+            let resolvedBinding;
+            try {
+              resolvedBinding = await bindingStore.resolveToolsOnce(
+                snapshot.snapshotId,
+                server.id,
+                {
+                  status: "resolved",
+                  tools: client.tools.map((tool) => tool.name),
+                },
+              );
+            } catch (cause) {
+              await client.close().catch(() => undefined);
+              throw new ExpertToolAuthorizationPersistenceError(
+                `Could not persist effective tools for connection ${server.id}.`,
+                { cause },
+              );
+            }
+            const resolvedServer = resolvedBinding.servers.find((entry) => entry.id === server.id);
+            if (!resolvedServer || resolvedServer.effectiveTools === undefined) {
+              await client.close().catch(() => undefined);
+              throw new Error(`Effective tools were not persisted for connection ${server.id}.`);
+            }
+            if (resolvedServer.resolutionStatus === "unavailable") {
+              await client.close().catch(() => undefined);
+              if (server.required) {
+                throw new Error(
+                  `Required expert connection was unavailable during first enumeration: ${server.id}`,
+                );
+              }
+              continue;
+            }
+            authorizedTools = resolvedServer.effectiveTools;
+          }
+        }
+        if (authorizedTools.length === 0) {
+          await client.close().catch(() => undefined);
           continue;
         }
 
@@ -446,9 +605,17 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
         };
         record.connections.set(server.id, runtimeConnection);
         indexConnection(record.stateDir, record.sessionKey, runtimeConnection);
+        const stateAfterIndex = await connectionStore.readState(server.id).catch(() => null);
+        if (stateAfterIndex?.status !== "active") {
+          revokeConnection(record, server.id, stateAfterIndex?.status ?? "disabled");
+          if (server.required) {
+            throw new Error(bindingUnavailableMessage(server.id, stateAfterIndex?.status));
+          }
+          continue;
+        }
 
         const downstreamByName = new Map(client.tools.map((tool) => [tool.name, tool]));
-        for (const downstreamName of server.tools) {
+        for (const downstreamName of authorizedTools) {
           const downstream = downstreamByName.get(downstreamName);
           if (!downstream) {
             if (server.required) {

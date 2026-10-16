@@ -183,7 +183,11 @@ export function validateExpertDraft(draft: ExpertSaveInput): ExpertDraftIssue[] 
       });
     }
     const selectedTools = connection.tools.filter((tool) => tool.trim().length > 0);
-    if (connection.enabled !== false && selectedTools.length === 0) {
+    if (
+      connection.toolMode !== "all" &&
+      connection.enabled !== false &&
+      selectedTools.length === 0
+    ) {
       issues.push({
         field: "connections",
         code: "invalid",

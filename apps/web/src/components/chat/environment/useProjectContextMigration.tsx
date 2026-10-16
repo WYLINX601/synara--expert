@@ -1,5 +1,4 @@
 import {
-  WS_CONTEXT_V1_CAPABILITY,
   type ContextApi,
   type ContextCommandResult,
   type ContextMigrationRecord,
@@ -10,8 +9,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { newCommandId } from "~/lib/utils";
-import { readNativeApi, readNativeApiServerCapability } from "~/nativeApi";
-import { useProjectInstructionsStore } from "~/projectInstructionsStore";
+import { readContextClient, readLegacyProjectInstructions } from "~/workbench/host/contextClient";
 import { toastManager } from "~/components/ui/toast";
 import { Button } from "~/components/ui/button";
 import {
@@ -159,10 +157,11 @@ export function useProjectContextMigration(input: {
 
   const beforeFirstSend = useCallback(async (): Promise<boolean> => {
     if (!input.isLocalDraft || !input.projectId) return true;
-    if (!readNativeApiServerCapability(WS_CONTEXT_V1_CAPABILITY)) return true;
+    const contextClient = readContextClient();
+    if (!contextClient.supported) return true;
     const generation = generationRef.current;
     if (pendingSendRef.current) return pendingSendRef.current.promise;
-    const api = readNativeApi()?.context;
+    const api = contextClient.api;
     if (!api) {
       toastManager.add({
         type: "error",
@@ -172,8 +171,7 @@ export function useProjectContextMigration(input: {
       return false;
     }
 
-    const legacyInstructions =
-      useProjectInstructionsStore.getState().instructionsByProjectId[input.projectId] ?? "";
+    const legacyInstructions = readLegacyProjectInstructions(input.projectId);
 
     let settings: ProjectContextSettings;
     try {
@@ -235,7 +233,7 @@ export function useProjectContextMigration(input: {
     )
       return;
     const generation = request.generation;
-    const api = readNativeApi()?.context;
+    const api = readContextClient().api;
     if (!api) {
       setRequest({ ...request, error: "Context is unavailable on this connection." });
       return;
@@ -328,7 +326,7 @@ export function useProjectContextMigration(input: {
       )
         return;
       const generation = request.generation;
-      const api = readNativeApi()?.context;
+      const api = readContextClient().api;
       if (!api) {
         setRequest({ ...request, error: "Context is unavailable on this connection." });
         return;

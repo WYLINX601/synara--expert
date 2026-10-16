@@ -618,7 +618,10 @@ export function GlobalMcpSettingsPanel({
             <LocalMcpDiscoveryPanel
               onBack={() => setShowLocalDiscovery(false)}
               onImported={async () => {
-                await queryClient.invalidateQueries({ queryKey: EXPERT_CONNECTIONS_QUERY_KEY });
+                await queryClient.invalidateQueries(
+                  { queryKey: EXPERT_CONNECTIONS_QUERY_KEY },
+                  { throwOnError: true },
+                );
               }}
             />
           ) : (
@@ -1106,7 +1109,7 @@ export function GlobalMcpSettingsPanel({
                           <div>
                             <h3 className="text-ui-lg font-medium">{selectedExpert?.name}</h3>
                             <p className="text-ui-sm text-muted-foreground">
-                              专家授权单独保存；关闭后白名单仍保留。
+                              专家授权单独保存；关闭后当前授权仍保留。
                             </p>
                           </div>
                           {binding ? (
@@ -1177,108 +1180,120 @@ export function GlobalMcpSettingsPanel({
                           </div>
                         </div>
                         <div className="space-y-2">
-                          <p className="text-ui-sm font-medium">
-                            允许使用的工具 · 已选 {binding?.tools.length ?? 0} /{" "}
-                            {authorizationTools.length}
-                          </p>
-                          {binding?.enabled !== false && binding?.tools.length === 0 ? (
-                            <p className="rounded-md border border-dashed p-3 text-ui-sm text-amber-700 dark:text-amber-300">
-                              此连接尚未授权工具。选择至少一项后才能保存。
-                            </p>
-                          ) : null}
-                          {binding?.enabled === false ? (
-                            <p className="text-ui-sm text-muted-foreground">
-                              已关闭，保存和重新启用时保留当前白名单。
-                            </p>
-                          ) : null}
-                          {currentTestTools.length ? (
-                            <div className="grid gap-2 sm:grid-cols-2">
-                              {authorizationTools.map((tool) => (
-                                <label
-                                  key={tool}
-                                  className="flex items-start gap-2 rounded-md border border-border p-3 text-ui-sm"
-                                >
-                                  <Checkbox
-                                    aria-labelledby={`${toolLabelId}-${encodeURIComponent(tool)}`}
-                                    checked={binding?.tools.includes(tool) ?? false}
-                                    disabled={pending || retired || binding?.enabled === false}
-                                    onCheckedChange={(checked) =>
-                                      setAuthDraft((d) =>
-                                        d
-                                          ? {
-                                              ...d,
-                                              connections: d.connections.map((x) =>
-                                                x.id === connectionId
-                                                  ? {
-                                                      ...x,
-                                                      tools:
-                                                        checked === true
-                                                          ? [...new Set([...x.tools, tool])]
-                                                          : x.tools.filter((v) => v !== tool),
-                                                    }
-                                                  : x,
-                                              ),
-                                            }
-                                          : d,
-                                      )
-                                    }
-                                  />
-                                  <code
-                                    id={`${toolLabelId}-${encodeURIComponent(tool)}`}
-                                    className="break-all"
-                                  >
-                                    {tool}
-                                  </code>
-                                </label>
-                              ))}
-                            </div>
-                          ) : binding?.tools.length ? (
-                            <div className="space-y-2">
-                              {binding.tools.map((tool) => (
-                                <label
-                                  key={tool}
-                                  className="flex items-center gap-2 rounded-md border border-border p-3 text-ui-sm"
-                                >
-                                  <Checkbox
-                                    aria-labelledby={`${toolLabelId}-${encodeURIComponent(tool)}`}
-                                    checked
-                                    disabled={pending || retired || binding.enabled === false}
-                                    onCheckedChange={(checked) =>
-                                      setAuthDraft((d) =>
-                                        d
-                                          ? {
-                                              ...d,
-                                              connections: d.connections.map((x) =>
-                                                x.id === connectionId
-                                                  ? {
-                                                      ...x,
-                                                      tools: checked
-                                                        ? [...new Set([...x.tools, tool])]
-                                                        : x.tools.filter((v) => v !== tool),
-                                                    }
-                                                  : x,
-                                              ),
-                                            }
-                                          : d,
-                                      )
-                                    }
-                                  />
-                                  <code
-                                    id={`${toolLabelId}-${encodeURIComponent(tool)}`}
-                                    className="break-all"
-                                  >
-                                    {tool}
-                                  </code>
-                                  <span className="text-ui-xs text-muted-foreground">
-                                    检查后可添加新工具
-                                  </span>
-                                </label>
-                              ))}
+                          {binding?.toolMode === "all" ? (
+                            <div className="space-y-1">
+                              <p className="text-ui-sm font-medium">允许使用此连接的全部工具</p>
+                              <p className="text-ui-sm text-muted-foreground">
+                                新任务首次启动时会自动读取此 MCP
+                                提供的工具；已启动任务继续使用原工具范围。
+                              </p>
                             </div>
                           ) : (
-                            <SettingsEmptyState layout="status">
-                              保存连接后，可检查连接并读取工具；系统不会自动检查。
-                            </SettingsEmptyState>
+                            <>
+                              <p className="text-ui-sm font-medium">
+                                允许使用的工具 · 已选 {binding?.tools.length ?? 0} /{" "}
+                                {authorizationTools.length}
+                              </p>
+                              {binding?.enabled !== false && binding?.tools.length === 0 ? (
+                                <p className="rounded-md border border-dashed p-3 text-ui-sm text-amber-700 dark:text-amber-300">
+                                  此连接尚未授权工具。选择至少一项后才能保存。
+                                </p>
+                              ) : null}
+                              {binding?.enabled === false ? (
+                                <p className="text-ui-sm text-muted-foreground">
+                                  已关闭，保存和重新启用时保留当前白名单。
+                                </p>
+                              ) : null}
+                              {currentTestTools.length ? (
+                                <div className="grid gap-2 sm:grid-cols-2">
+                                  {authorizationTools.map((tool) => (
+                                    <label
+                                      key={tool}
+                                      className="flex items-start gap-2 rounded-md border border-border p-3 text-ui-sm"
+                                    >
+                                      <Checkbox
+                                        aria-labelledby={`${toolLabelId}-${encodeURIComponent(tool)}`}
+                                        checked={binding?.tools.includes(tool) ?? false}
+                                        disabled={pending || retired || binding?.enabled === false}
+                                        onCheckedChange={(checked) =>
+                                          setAuthDraft((d) =>
+                                            d
+                                              ? {
+                                                  ...d,
+                                                  connections: d.connections.map((x) =>
+                                                    x.id === connectionId
+                                                      ? {
+                                                          ...x,
+                                                          tools:
+                                                            checked === true
+                                                              ? [...new Set([...x.tools, tool])]
+                                                              : x.tools.filter((v) => v !== tool),
+                                                        }
+                                                      : x,
+                                                  ),
+                                                }
+                                              : d,
+                                          )
+                                        }
+                                      />
+                                      <code
+                                        id={`${toolLabelId}-${encodeURIComponent(tool)}`}
+                                        className="break-all"
+                                      >
+                                        {tool}
+                                      </code>
+                                    </label>
+                                  ))}
+                                </div>
+                              ) : binding?.tools.length ? (
+                                <div className="space-y-2">
+                                  {binding.tools.map((tool) => (
+                                    <label
+                                      key={tool}
+                                      className="flex items-center gap-2 rounded-md border border-border p-3 text-ui-sm"
+                                    >
+                                      <Checkbox
+                                        aria-labelledby={`${toolLabelId}-${encodeURIComponent(tool)}`}
+                                        checked
+                                        disabled={pending || retired || binding.enabled === false}
+                                        onCheckedChange={(checked) =>
+                                          setAuthDraft((d) =>
+                                            d
+                                              ? {
+                                                  ...d,
+                                                  connections: d.connections.map((x) =>
+                                                    x.id === connectionId
+                                                      ? {
+                                                          ...x,
+                                                          tools: checked
+                                                            ? [...new Set([...x.tools, tool])]
+                                                            : x.tools.filter((v) => v !== tool),
+                                                        }
+                                                      : x,
+                                                  ),
+                                                }
+                                              : d,
+                                          )
+                                        }
+                                      />
+                                      <code
+                                        id={`${toolLabelId}-${encodeURIComponent(tool)}`}
+                                        className="break-all"
+                                      >
+                                        {tool}
+                                      </code>
+                                      <span className="text-ui-xs text-muted-foreground">
+                                        检查后可添加新工具
+                                      </span>
+                                    </label>
+                                  ))}
+                                </div>
+                              ) : (
+                                <SettingsEmptyState layout="status">
+                                  保存连接后，可检查连接并读取工具；系统不会自动检查。
+                                </SettingsEmptyState>
+                              )}
+                            </>
                           )}
                         </div>
                         {authIssues.length ? (
@@ -1333,7 +1348,7 @@ export function GlobalMcpSettingsPanel({
                       {refsQuery.data.experts.map((x) => (
                         <p key={`${x.id}-${x.revision}`} className="text-ui-sm">
                           {x.name} · v{x.revision} · {x.enabled ? "已启用" : "已关闭"} ·{" "}
-                          {x.tools.length} 项工具
+                          {x.toolMode === "all" ? "全部工具" : `${x.tools.length} 项工具`}
                         </p>
                       ))}
                       {refsQuery.data.snapshots.map((x) => (

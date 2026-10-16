@@ -1,8 +1,38 @@
 # Linx / Synara Expert 项目上下文
 
-更新日期：2026-10-15
+更新日期：2026-10-16
 
 范围：以 Linx V2.0 组织长期方向管理、专业任务执行与能力进化，并在现有 Synara Expert / MCP / 工作台适配层上增量推进。本文只负责项目路由、设计边界与当前状态；产品、技术和验收细节以链接的权威文档为准。
+
+<a id="execution-entry"></a>
+
+## 执行入口：先选任务，再读对应规范
+
+2026-10-16，用户在审核修订后明确要求执行《Linx 二次开发流程与工程标准 v1.1》并落地仓库规范与 SOP。规范已分别纳入下列现有文件；本页只维护路由和状态，不再复制完整架构、步骤或检查矩阵。该决定建立工程标准，不代表新的产品功能、上游升级或发布已完成。
+
+| 本次任务                              | 先读的权威材料                                                                                                                                                                                                               | 使用边界                                                                                  |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 普通开发、修复、UI 或文档调整         | [执行 SOP 与检查矩阵](../docs/workbench-development-workflow.md#execution-sop)                                                                                                                                               | 按影响选择检查；核心流程/信息架构/重要视觉先确认，小修可实现后预览                        |
+| 新模块、新页面、宿主接口或依赖        | [v1.1 架构标准](../docs/workbench-adaptation-plan.md#current-standard-v11)、[接入点清单](../workbench/integration-points.json)                                                                                               | 明确数据所有权、真实父布局、窄能力与扫描覆盖；不按目录名声称隔离                          |
+| 官方更新、候选续跑或基线校准          | [升级 SOP](../docs/workbench-implementation-plan.md#sync-sop)、[基线核对](../workbench/WB-00-upstream-evidence.md#2026-10-16-baseline-audit)、[远端状态](../workbench/WB-05-automation.md#2026-10-16-remote-read-only-audit) | 先核对 Git/锁文件/候选/ref/验收，历史 ready 不代表当前 main                               |
+| 数据兼容、恢复或安装                  | [恢复 SOP](../docs/workbench-implementation-plan.md#72-安装与恢复流程)、[发布指南](../docs/release.md)、[Canary](../docs/canary.md)                                                                                          | 应用与数据恢复分开；实际安装/生产操作按对应授权                                           |
+| 产品范围与优先级                      | [Linx V2.0 原文](../docs/linx-product-design-v2.md)                                                                                                                                                                          | 用户产品设计来源，未实现内容保留规划状态                                                  |
+| Space / Project Context               | [Context V1.1 实现](../docs/space-project-context-v1-implementation.md)、[浏览器整合验收](../docs/space-project-context-v1-acceptance.md#8-2026-10-15-浏览器版整合补充)                                                      | 实现、运行证据与未发布边界分别核对                                                        |
+| Expert / MCP                          | [产品与技术方案](../docs/expert-product-technical-design.md)、[MCP 调整验收](../docs/mcp-connection-selection-acceptance.md)                                                                                                 | 最新未提交增量与历史实现分开；交互参考见[线框](../docs/expert-interaction-wireframe.html) |
+| Provider / Gateway 真实运行与发布缺口 | [P0 证据](../docs/expert-p0/README.md)、[故障矩阵](../docs/expert-p0/release-fault-matrix.md)                                                                                                                                | 查对应源码、Provider、平台和场景，不搬用旧结果                                            |
+| 既有适配实现与历史设计                | [适配层验收](../docs/workbench-adaptation-acceptance.md)、[工作台历史架构](../docs/workbench-architecture.md)、[Expert 架构图](../docs/expert-architecture.drawio)                                                           | 历史路径、tree 和演练保留原范围，不是当前源码入口                                         |
+
+每项任务先完成 SOP 的范围/基线核对，实施中按需读取表中材料，结束时把结果写入对应验收，只有跨任务目标、入口、决定或状态变化才回写本页。主会话保留需求和架构决策；明确边界后才委派执行。不为小改强制新增需求目录或管理记录。
+
+### 规范落地状态与维护入口
+
+- **规范已落地，代码已对齐**：规范来源与早期文档检查见[规范落地验收](../docs/workbench-adaptation-acceptance.md#standards-rollout-20261016)；后续代码收口与实际检查见[架构对齐验收](../docs/workbench-adaptation-acceptance.md#alignment-implementation-20261016)。Context 窄客户端、Space 命令能力、清单覆盖/依赖检查、迁移归属检查及升级状态范围已实现；正式候选增加第七项边界门禁。
+- **来源基线已校准，当前验收独立**：用户明确确认后，按已核验的历史验收与真实合入记录登记 v0.9.2 来源，完整归档旧 ref 的候选状态，不转移历史 ready。实际 `status` 为 no-candidate、baseline reasons 为空；当前 main 及隔离 v1.0.1 候选均未获新的正式验收。详见[校准结果与回执](../workbench/WB-00-upstream-evidence.md#baseline-reconciled-20261016)。
+- **已登记的兼容例外**：Context 原生 tracker 中的 `111_ContextV1` 保留不迁移；身份、路径及脚本内容被冻结，后续新增原生迁移必须能证明来自固定上游，Linx 扩展使用独立 ledger。共享数据库与 Context 运行时未改；不要把此例外理解为继续追加本地原生迁移编号。
+- **本轮检查结果**：格式、lint、类型、边界、迁移及受影响 browser 通过；完整六包测试 13,364 通过、2 失败、36 跳过，失败仍为既有桌面 Beta 两项。本轮规则实现不等于正式候选 ready，具体范围与未运行项见[架构对齐验收](../docs/workbench-adaptation-acceptance.md#alignment-implementation-20261016)。
+- **维护续办**：Beta 两项失败已修复为隔离安装探测，聚焦 32 项通过，完整六包已为 13,366 通过、0 失败、36 既有跳过；工作区检查与正式候选验收分开，详见[维护验收](../docs/workbench-adaptation-acceptance.md#maintenance-followup-20261016)。远端 prepare 已确认是固定 v1.0.1 的 30 项合并冲突，当前源码隔离快照有 46 项；上游 `111_GroupLibraryHosting` 与冻结的 `111_ContextV1` 冲突，用户已明确确认推进[精确兼容方案](../docs/workbench-implementation-plan.md#v101-compatibility-proposal)与隔离测试，当前 main 的迁移实现仍保持原样，升级候选尚未完成。
+- **远端自动保护未启用**：2026-10-16 只读 API 返回 main 未保护、rulesets 为空；按开发 SOP 人工执行相同门禁，不宣称已有强制保护。
+- **定时链路已触发但未成功验收**：查询返回 1 次 schedule，prepare 失败，verify/publish 跳过；下一维护任务先查该失败，再验收手动与定时路径。运行链接和范围仅维护在[远端核对](../workbench/WB-05-automation.md#2026-10-16-remote-read-only-audit)。本轮未改变仓库设置、触发 workflow、推送或发布。
 
 ## 当前目标
 
@@ -50,21 +80,6 @@ Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的�
 - 实机首次打开专家页时发现持续显示 Loading，已把两页 lazy 组件身份移至 Suspense 边界之外；候选新增正常并发根下的首加载回归。首页、专家列表及产品经理编辑页已实际显示；没有发起模型任务、安装应用或升级官方源码。
 - 修复检查与限制记录在[适配层实施验收的 10 月 9 日补充](../docs/workbench-adaptation-acceptance.md#2026-10-09-开发预览与首加载修复)。10 月 8 日归档和完整门禁结果保留原样，不作为修复后候选的完整验收。
 
-## 当前权威材料
-
-| 材料                                                                          | 角色                   | 当前用途                                                                             |
-| ----------------------------------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------ |
-| [Context V1.1 实现与验收](../docs/space-project-context-v1-implementation.md) | 当前增量实现入口       | Space / Project、快照、Provider 恢复；验收与发布边界见链接                           |
-| [Linx V2.0 原文](../docs/linx-product-design-v2.md)                           | 当前 Linx 产品设计来源 | 长期工作方向、Hermes / Expert 分工、Context、进化、UI 与 MVP；未实现内容保留设计状态 |
-| [Expert 产品与技术方案](../docs/expert-product-technical-design.md)           | 既有 Expert 子系统基线 | Expert 对象、交互、数据模型、Provider 适配和阶段范围                                 |
-| [P0 技术验证记录](../docs/expert-p0/README.md)                                | 当前验证结论入口       | Codex / Pi、恢复、取消、Gateway 与真实模型证据                                       |
-| [发布故障矩阵](../docs/expert-p0/release-fault-matrix.md)                     | 当前验收与缺口清单     | 区分自动化、本机实测和待平台实测                                                     |
-| [交互线框](../docs/expert-interaction-wireframe.html)                         | 已确认的交互参考       | 新任务选专家、专家管理和任务详情的首版流程                                           |
-| [架构图](../docs/expert-architecture.drawio)                                  | 可编辑架构参考         | Expert、Task、Provider、Gateway 和连接的关系                                         |
-| [轻量适配层方案](../docs/workbench-adaptation-plan.md)                        | 已确认的首期设计       | A0–A4 范围、UI / 服务端适配与保留的深层接入                                          |
-| [适配层实施验收](../docs/workbench-adaptation-acceptance.md)                  | 当前进度与验证入口     | 候选源码、实际检查、遗留失败与受控演练；完整日志不复制到 context                     |
-| [工作台开发流程](../docs/workbench-development-workflow.md)                   | 开发与验证约定         | 按影响选择检查、证据有效性和完成报告                                                 |
-
 ## 既有 Expert 子系统已确认决定
 
 以下为既有 Expert 范围内的决定，不代替上面的 Linx V2.0 产品规划。权威说明均在[产品与技术方案](../docs/expert-product-technical-design.md)：
@@ -108,7 +123,8 @@ Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的�
 
 ## 当前工作状态与边界
 
-- 主目录 `/Users/wangyuelin/synara-expert` 的本地 `main` 是后续开发入口。当前源码以实际 Git HEAD 与工作区状态为准；本轮产品源码固定在 `3a754ee69`，其后文档及候选历史整合不改变受检产品源码。
+- 2026-10-15 至 10-16 MCP 交互与授权调整：本机导入取消结果页、改用 toast；专家按连接添加，全部工具由首次任务启动自动读取并固定，后续新任务可读取新增工具。旧配置缺少 `toolMode` 时维持显式允许列表，旧任务不扩权。该增量为本地未提交改动，检查与实测边界统一见 [MCP 调整验收](../docs/mcp-connection-selection-acceptance.md)。
+- 主目录的本地 `main` 是后续开发入口，当前源码以实际 Git HEAD 与工作区状态为准。2026-10-15 浏览器整合验收对应产品源码 `3a754ee69`；后续文档/历史整合及未提交 Expert/MCP 增量不自动继承该验收。v1.1 规范核对的 HEAD 与历史状态差异见上方基线入口。
 - 整合预览位于 `.synara/browser-integration`（`codex/browser-integration`），使用独立测试 home；不是正式用户数据库。预览与完整检查见[最新接入验收](../docs/space-project-context-v1-acceptance.md#8-2026-10-15-浏览器版整合补充)。
 - 原 Expert 候选与 Context 候选分别保存为 `0f67f540e`、`4b3705f0b`，仅作历史追溯；不再要求后续工作只在旧候选目录实施。原主目录的文档与原型已保存为 `20d370eb7`。
 - 2026-10-08 历史实施前 tree 为 `560487726a8dffb4432f3d46b8262b3bbe7332f5`、当时交付 tree 为 `490e1320a7a193fb486479e254e24304ce2f8c61`；历史归档位于 `/Users/wangyuelin/.codex/task-artifacts/workbench-adaptation-2026-10-08/`。这些 tree 不作为 10 月 15 日整合源码的验收结果。
@@ -126,7 +142,8 @@ Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的�
 
 ### 后续验证与交付
 
-1. 准备桌面交付时复核并处理两项既有 Beta 测试失败，形成相应的桌面检查与完整门禁结论；保留首次全量失败和复跑证据，不降低断言或用 skip 隐藏问题。
+0. 来源基线校准已完成；按用户已确认的旧 111 精确兼容方案，在隔离候选中实现并测试，再处理 v1.0.1 的其余语义冲突。用户最新要求先解释定时合并机制；当前尚未完成或发布该升级。prepare 根因已确认，重跑本身不能修复冲突。
+1. Beta 两项既有测试失败已修复，保留此前失败及本次复跑证据；准备桌面交付时仍需准确源码的产物/身份与适用运行验收，测试通过不代表安装或发布。
 2. 本地已保存并整合专家 UI / 全局 MCP / 本机导入、适配层与 Context；远端推送、构建、安装与发布分别记录实际状态，不能互相替代。
 3. 按实际交付目标补齐当前源码的真实 Provider、取消/恢复、MCP、跨平台安装包和迁移验证；保留 Linux、Windows 与远端 HTTP MCP 的历史缺口，不搬用旧 SHA 的成功结论。
 4. 后续两到三次真实官方升级记录改动类型、需语义适配的宿主/模块文件、修复与验证时间，评估本层维护成本。没有本轮官方升级或长期收益的完成结论。

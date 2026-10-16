@@ -3,12 +3,27 @@
 // Layer: CI preflight
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const migrationsFile = "apps/server/src/persistence/Migrations.ts";
+const upstreamLockFile = "workbench/upstream.lock.json";
+
+/**
+ * Migration 111 was added to the official tracker during the fork's history.
+ * Its SQL and tracker identity are now a frozen compatibility exception: old
+ * databases may already have applied it, so neither its bytes nor its name
+ * can be changed or moved into another ledger.
+ */
+export const FROZEN_NATIVE_COMPATIBILITY_MIGRATION = {
+  id: 111,
+  name: "ContextV1",
+  migrationFile: "apps/server/src/persistence/Migrations/111_ContextV1.ts",
+  sha256: "b7dbd84911484156f3f38093973338ca005dce9e8ba4b38b8972d9dfe79a4911",
+} as const;
 
 /**
  * Every shipped Synara database records its applied migrations as (id, name)
@@ -29,6 +44,350 @@ const migrationsFile = "apps/server/src/persistence/Migrations.ts";
 export interface MigrationLineageEntry {
   readonly id: number;
   readonly name: string;
+}
+
+export interface MigrationCatalogEntry extends MigrationLineageEntry {
+  readonly migrationFile: string;
+  readonly sha256?: string | undefined;
+}
+
+export interface PinnedUpstreamRevision {
+  readonly tag: string;
+  readonly commit: string;
+}
+
+export interface PinnedUpstreamProvenance {
+  readonly integratedBase: PinnedUpstreamRevision;
+  readonly candidate: PinnedUpstreamRevision;
+}
+
+const migrationImportsPattern =
+  /^\s*import\s+([\w$]+)\s+from\s+["']\.\/Migrations\/([^"']+\.ts)["'];?\s*$/gmu;
+const staticCatalogEntryPattern = /\[\s*(\d+)\s*,\s*"([^"]+)"\s*,\s*([\w$]+)\s*\]/uy;
+
+function stripCatalogComments(source: string): string {
+  let output = "";
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (let index = 0; index < source.length; ) {
+    const current = source[index]!;
+    const next = source[index + 1];
+    if (quote !== null) {
+      output += current;
+      if (escaped) escaped = false;
+      else if (current === "\\") escaped = true;
+      else if (current === quote) quote = null;
+      index += 1;
+      continue;
+    }
+    if (current === '"' || current === "'") {
+      quote = current;
+      output += current;
+      index += 1;
+      continue;
+    }
+    if (current === "/" && next === "/") {
+      while (index < source.length && source[index] !== "\n" && source[index] !== "\r") {
+        output += " ";
+        index += 1;
+      }
+      continue;
+    }
+    if (current === "/" && next === "*") {
+      output += "  ";
+      index += 2;
+      let closed = false;
+      while (index < source.length) {
+        if (source[index] === "*" && source[index + 1] === "/") {
+          output += "  ";
+          index += 2;
+          closed = true;
+          break;
+        }
+        const commentCharacter = source[index]!;
+        output += commentCharacter === "\n" || commentCharacter === "\r" ? commentCharacter : " ";
+        index += 1;
+      }
+      if (!closed) throw new Error("Unterminated comment in migrationEntries array.");
+      continue;
+    }
+    output += current;
+    index += 1;
+  }
+  return output;
+}
+
+function parseStaticCatalogEntries(block: string): Array<{
+  readonly id: number;
+  readonly name: string;
+  readonly migrationImport: string;
+}> {
+  const entries: Array<{ id: number; name: string; migrationImport: string }> = [];
+  let cursor = 0;
+  while (cursor < block.length) {
+    while (/\s/u.test(block[cursor] ?? "")) cursor += 1;
+    if (cursor >= block.length) break;
+
+    staticCatalogEntryPattern.lastIndex = cursor;
+    const match = staticCatalogEntryPattern.exec(block);
+    if (match === null) {
+      const excerpt = block
+        .slice(cursor, cursor + 40)
+        .trim()
+        .replace(/\s+/gu, " ");
+      throw new Error(
+        `Unsupported or dynamic migrationEntries syntax near "${excerpt}"; every entry must be a static imported migration tuple.`,
+      );
+    }
+
+    const id = match[1];
+    const name = match[2];
+    const migrationImport = match[3];
+    if (id === undefined || name === undefined || migrationImport === undefined) {
+      throw new Error("A migrationEntries tuple is incomplete.");
+    }
+    entries.push({ id: Number(id), name, migrationImport });
+    cursor = staticCatalogEntryPattern.lastIndex;
+    while (/\s/u.test(block[cursor] ?? "")) cursor += 1;
+    if (cursor < block.length) {
+      if (block[cursor] !== ",") {
+        const excerpt = block
+          .slice(cursor, cursor + 40)
+          .trim()
+          .replace(/\s+/gu, " ");
+        throw new Error(`Expected a comma between migrationEntries tuples near "${excerpt}".`);
+      }
+      cursor += 1;
+    }
+  }
+  return entries;
+}
+
+/**
+ * Parse the native catalog together with the source file each entry executes.
+ * Reading imports from the official source handles historical filename/name
+ * differences such as migration 54 without guessing a path from its label.
+ */
+export function parseMigrationCatalog(source: string): MigrationCatalogEntry[] {
+  const block = entriesBlockPattern.exec(source);
+  if (block === null || block[1] === undefined) {
+    throw new Error(`Could not locate the migrationEntries array in ${migrationsFile}.`);
+  }
+
+  const imports = new Map<string, string[]>();
+  for (const match of source.matchAll(migrationImportsPattern)) {
+    const alias = match[1];
+    const importedFile = match[2];
+    if (alias === undefined || importedFile === undefined || importedFile.includes("..")) {
+      throw new Error(`Could not safely resolve a migration import in ${migrationsFile}.`);
+    }
+    const files = imports.get(alias) ?? [];
+    files.push(importedFile);
+    imports.set(alias, files);
+  }
+
+  const uncommentedBody = stripCatalogComments(block[1]);
+  const entries: MigrationCatalogEntry[] = [];
+  for (const parsed of parseStaticCatalogEntries(uncommentedBody)) {
+    const importedFiles = imports.get(parsed.migrationImport) ?? [];
+    if (importedFiles.length !== 1) {
+      throw new Error(
+        `Migration ${parsed.id} ("${parsed.name}") must resolve exactly once to an imported SQL script.`,
+      );
+    }
+    entries.push({
+      id: parsed.id,
+      name: parsed.name,
+      migrationFile: `apps/server/src/persistence/Migrations/${importedFiles[0]!}`,
+    });
+  }
+  if (entries.length === 0) {
+    throw new Error(`Parsed zero migrations from ${migrationsFile}; the guard cannot verify it.`);
+  }
+
+  const uncommentedBlock = block[0].replace(block[1], uncommentedBody);
+  const uncommentedSource =
+    source.slice(0, block.index) + uncommentedBlock + source.slice(block.index + block[0].length);
+  const lineageEntries = parseMigrationLineage(uncommentedSource);
+  for (let index = 0; index < lineageEntries.length; index += 1) {
+    const expected = lineageEntries[index]!;
+    const entry = entries[index];
+    if (entry === undefined || entry.id !== expected.id || entry.name !== expected.name) {
+      throw new Error(
+        `Migration ${expected.id} ("${expected.name}") does not resolve exactly once to a supported imported SQL script.`,
+      );
+    }
+  }
+  if (entries.length !== lineageEntries.length) {
+    throw new Error(
+      `Migration catalog resolved ${entries.length} of ${lineageEntries.length} lineage entries from ${migrationsFile}.`,
+    );
+  }
+  return entries;
+}
+
+const validCommit = (value: unknown): value is string =>
+  typeof value === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(value);
+const validTag = (value: unknown): value is string =>
+  typeof value === "string" && /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(value);
+
+/**
+ * Validate that the lock names two full, locally available official tag
+ * commits. An ownership audit must fail closed when this evidence is absent.
+ */
+export function validatePinnedUpstreamProvenance(
+  source: string,
+  resolveTagCommit: (tag: string) => string | null,
+): { readonly provenance: PinnedUpstreamProvenance | null; readonly problems: string[] } {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(source);
+  } catch {
+    return { provenance: null, problems: [`${upstreamLockFile} is not valid JSON.`] };
+  }
+  if (typeof decoded !== "object" || decoded === null) {
+    return { provenance: null, problems: [`${upstreamLockFile} must contain an object.`] };
+  }
+
+  const lock = decoded as {
+    readonly formatVersion?: unknown;
+    readonly integratedBase?: { readonly tag?: unknown; readonly commit?: unknown };
+    readonly candidate?: { readonly tag?: unknown; readonly commit?: unknown };
+  };
+  const problems: string[] = [];
+  if (lock.formatVersion !== 1) {
+    problems.push(`${upstreamLockFile} has an unsupported formatVersion.`);
+  }
+
+  const revisions: Array<{ name: "integratedBase" | "candidate"; value: unknown }> = [
+    { name: "integratedBase", value: lock.integratedBase },
+    { name: "candidate", value: lock.candidate },
+  ];
+  const validRevisions = new Map<string, PinnedUpstreamRevision>();
+  for (const { name, value } of revisions) {
+    if (typeof value !== "object" || value === null) {
+      problems.push(`${upstreamLockFile} is missing ${name} provenance.`);
+      continue;
+    }
+    const revision = value as { readonly tag?: unknown; readonly commit?: unknown };
+    if (!validTag(revision.tag) || !validCommit(revision.commit)) {
+      problems.push(`${upstreamLockFile} ${name} must name a release tag and full commit SHA.`);
+      continue;
+    }
+    const resolvedCommit = resolveTagCommit(revision.tag);
+    if (resolvedCommit === null) {
+      problems.push(`Pinned upstream tag ${revision.tag} cannot be resolved from local Git.`);
+      continue;
+    }
+    if (resolvedCommit.toLowerCase() !== revision.commit.toLowerCase()) {
+      problems.push(
+        `Pinned upstream tag ${revision.tag} resolves to ${resolvedCommit}, not ${revision.commit}.`,
+      );
+      continue;
+    }
+    validRevisions.set(name, { tag: revision.tag, commit: revision.commit.toLowerCase() });
+  }
+
+  const integratedBase = validRevisions.get("integratedBase");
+  const candidate = validRevisions.get("candidate");
+  if (problems.length > 0 || integratedBase === undefined || candidate === undefined) {
+    return { provenance: null, problems };
+  }
+  return { provenance: { integratedBase, candidate }, problems };
+}
+
+const migrationIdentity = ({ id, name }: MigrationLineageEntry) => `${id}:${name}`;
+
+/**
+ * Enforce ownership of the current native catalog against the two locked
+ * upstream snapshots. Existing upstream files may have fork-local edits, so
+ * their bytes are not blanket-compared. The upstream snapshots themselves
+ * must preserve their shared migration bytes, while entries first introduced
+ * by the candidate must match the approved upstream script exactly.
+ */
+export function findMigrationOwnershipViolations(
+  current: readonly MigrationCatalogEntry[],
+  integratedBase: readonly MigrationCatalogEntry[],
+  candidate: readonly MigrationCatalogEntry[],
+): string[] {
+  const problems: string[] = [];
+  const currentById = new Map(current.map((entry) => [entry.id, entry]));
+  const currentIdentities = new Set(current.map(migrationIdentity));
+  const integratedById = new Map(integratedBase.map((entry) => [entry.id, entry]));
+  const candidateById = new Map(candidate.map((entry) => [entry.id, entry]));
+  const candidateIdentities = new Set(candidate.map(migrationIdentity));
+
+  for (const entry of integratedBase) {
+    const next = candidateById.get(entry.id);
+    if (next === undefined || next.name !== entry.name) {
+      problems.push(
+        `Pinned upstream candidate changes integrated migration ${entry.id} ("${entry.name}").`,
+      );
+      continue;
+    }
+    if (entry.sha256 === undefined || next.sha256 === undefined) {
+      problems.push(`Cannot verify pinned upstream script bytes for migration ${entry.id}.`);
+    } else if (entry.sha256 !== next.sha256) {
+      problems.push(
+        `Pinned upstream candidate changes the script bytes for existing migration ${entry.id} ("${entry.name}").`,
+      );
+    }
+  }
+
+  for (const entry of candidate) {
+    if (!currentIdentities.has(migrationIdentity(entry))) {
+      const localAtId = currentById.get(entry.id);
+      problems.push(
+        localAtId === undefined
+          ? `Current native catalog is missing pinned upstream migration ${entry.id} ("${entry.name}").`
+          : `Current native migration ${entry.id} is "${localAtId.name}"; pinned upstream owns "${entry.name}".`,
+      );
+      continue;
+    }
+
+    if (integratedById.has(entry.id)) continue;
+    const local = currentById.get(entry.id);
+    if (local?.sha256 === undefined || entry.sha256 === undefined) {
+      problems.push(
+        `Cannot verify local script bytes for newly approved upstream migration ${entry.id} ("${entry.name}").`,
+      );
+    } else if (local.sha256 !== entry.sha256) {
+      problems.push(
+        `Newly approved upstream migration ${entry.id} ("${entry.name}") does not match its pinned upstream script bytes.`,
+      );
+    }
+  }
+
+  const frozen = FROZEN_NATIVE_COMPATIBILITY_MIGRATION;
+  const frozenEntry = currentById.get(frozen.id);
+  if (frozenEntry === undefined || frozenEntry.name !== frozen.name) {
+    problems.push(
+      `Frozen native migration ${frozen.id}_${frozen.name} was removed, renamed, or moved to another ID.`,
+    );
+  } else {
+    if (frozenEntry.migrationFile !== frozen.migrationFile) {
+      problems.push(
+        `Frozen native migration ${frozen.id}_${frozen.name} must remain in ${frozen.migrationFile}.`,
+      );
+    }
+    if (frozenEntry.sha256 === undefined) {
+      problems.push(
+        `Cannot verify frozen native migration ${frozen.id}_${frozen.name} script bytes.`,
+      );
+    } else if (frozenEntry.sha256 !== frozen.sha256) {
+      problems.push(`Frozen native migration ${frozen.id}_${frozen.name} script bytes changed.`);
+    }
+  }
+
+  for (const entry of current) {
+    if (candidateIdentities.has(migrationIdentity(entry))) continue;
+    if (entry.id === frozen.id && entry.name === frozen.name) continue;
+    problems.push(
+      `Native migration ${entry.id} ("${entry.name}") is not owned by the pinned upstream catalog. ` +
+        "Linx extensions belong in the independent workbench_sql_migrations ledger.",
+    );
+  }
+  return problems;
 }
 
 export interface MigrationLineageViolation {
@@ -161,6 +520,123 @@ function git(args: readonly string[]): { readonly status: number; readonly stdou
   return { status: result.status ?? 1, stdout: result.stdout ?? "" };
 }
 
+function gitFile(commit: string, path: string): Buffer | null {
+  const result = spawnSync("git", ["show", `${commit}:${path}`], {
+    cwd: repoRoot,
+    encoding: null,
+  });
+  return result.status === 0 && Buffer.isBuffer(result.stdout) ? result.stdout : null;
+}
+
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+
+function hashCurrentCatalog(entries: readonly MigrationCatalogEntry[]): {
+  readonly entries: MigrationCatalogEntry[];
+  readonly problems: string[];
+} {
+  const problems: string[] = [];
+  const hashed: MigrationCatalogEntry[] = [];
+  for (const entry of entries) {
+    try {
+      hashed.push({
+        ...entry,
+        sha256: sha256(readFileSync(resolve(repoRoot, entry.migrationFile))),
+      });
+    } catch {
+      problems.push(`Current migration script is unreadable: ${entry.migrationFile}.`);
+    }
+  }
+  return { entries: hashed, problems };
+}
+
+function readPinnedCatalog(
+  commit: string,
+  label: string,
+): {
+  readonly entries: MigrationCatalogEntry[] | null;
+  readonly problems: string[];
+} {
+  const sourceBytes = gitFile(commit, migrationsFile);
+  if (sourceBytes === null) {
+    return {
+      entries: null,
+      problems: [`Pinned upstream ${label} source ${commit}:${migrationsFile} is unreadable.`],
+    };
+  }
+
+  let parsed: MigrationCatalogEntry[];
+  try {
+    parsed = parseMigrationCatalog(sourceBytes.toString("utf8"));
+  } catch (error) {
+    return {
+      entries: null,
+      problems: [
+        `Pinned upstream ${label} migration catalog is unreadable: ${error instanceof Error ? error.message : String(error)}`,
+      ],
+    };
+  }
+
+  const entries: MigrationCatalogEntry[] = [];
+  const problems: string[] = [];
+  for (const entry of parsed) {
+    const scriptBytes = gitFile(commit, entry.migrationFile);
+    if (scriptBytes === null) {
+      problems.push(
+        `Pinned upstream ${label} migration ${entry.id} ("${entry.name}") script is unreadable at ${entry.migrationFile}.`,
+      );
+      continue;
+    }
+    entries.push({ ...entry, sha256: sha256(scriptBytes) });
+  }
+  return { entries: problems.length === 0 ? entries : null, problems };
+}
+
+function auditCurrentMigrationOwnership(currentSource: string): string[] {
+  let lockSource: string;
+  try {
+    lockSource = readFileSync(resolve(repoRoot, upstreamLockFile), "utf8");
+  } catch {
+    return [`Pinned upstream provenance is missing: ${upstreamLockFile} is unreadable.`];
+  }
+
+  const provenance = validatePinnedUpstreamProvenance(lockSource, (tag) => {
+    const resolved = git(["rev-parse", "--verify", `refs/tags/${tag}^{commit}`]);
+    return resolved.status === 0 ? resolved.stdout.trim() : null;
+  });
+  if (provenance.problems.length > 0 || provenance.provenance === null) {
+    return [
+      "Migration ownership audit cannot verify its pinned upstream source:",
+      ...provenance.problems,
+    ];
+  }
+
+  const { integratedBase, candidate } = provenance.provenance;
+  const ancestry = git(["merge-base", "--is-ancestor", integratedBase.commit, candidate.commit]);
+  if (ancestry.status !== 0) {
+    return [
+      `Pinned upstream candidate ${candidate.tag} is not a verified descendant of integrated base ${integratedBase.tag}.`,
+    ];
+  }
+
+  let currentParsed: MigrationCatalogEntry[];
+  try {
+    currentParsed = parseMigrationCatalog(currentSource);
+  } catch (error) {
+    return [
+      `Current native migration catalog cannot be audited: ${error instanceof Error ? error.message : String(error)}`,
+    ];
+  }
+  const currentHashed = hashCurrentCatalog(currentParsed);
+  const base = readPinnedCatalog(integratedBase.commit, `integrated base ${integratedBase.tag}`);
+  const next = readPinnedCatalog(candidate.commit, `candidate ${candidate.tag}`);
+  const problems = [...currentHashed.problems, ...base.problems, ...next.problems];
+  if (problems.length > 0 || base.entries === null || next.entries === null) {
+    return ["Migration ownership audit cannot verify pinned migration source files:", ...problems];
+  }
+
+  return findMigrationOwnershipViolations(currentHashed.entries, base.entries, next.entries);
+}
+
 const defaultListTags = (pattern: string): readonly string[] => {
   const result = git(["tag", "--list", pattern, "--sort=-v:refname"]);
   return result.status === 0
@@ -226,6 +702,17 @@ function main(): void {
     for (const problem of structureProblems) console.error(`- ${problem}`);
     process.exitCode = 1;
     return;
+  }
+
+  const ownershipProblems = auditCurrentMigrationOwnership(currentSource);
+  if (ownershipProblems.length > 0) {
+    console.error("Migration ownership audit failed:");
+    for (const problem of ownershipProblems) console.error(`- ${problem}`);
+    process.exitCode = 1;
+  } else {
+    console.log(
+      "Migration ownership audit passed: pinned upstream catalog and frozen migration 111 are valid.",
+    );
   }
 
   const tags = resolveReleaseTags();

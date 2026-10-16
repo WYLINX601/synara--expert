@@ -32,6 +32,14 @@ export interface ExpertMcpBindingStore {
     snapshotId: string,
     capture: () => ExpertMcpBinding | Promise<ExpertMcpBinding>,
   ): Promise<ExpertMcpBinding>;
+  resolveToolsOnce(
+    snapshotId: string,
+    connectionId: string,
+    resolution: {
+      readonly status: "resolved" | "unavailable";
+      readonly tools: ReadonlyArray<string>;
+    },
+  ): Promise<ExpertMcpBinding>;
 }
 
 function withWriteLock<T>(key: string, action: () => Promise<T>): Promise<T> {
@@ -72,7 +80,17 @@ function validateSnapshotId(snapshotId: string): void {
 
 function decodeBinding(value: unknown, code: "invalid_input" | "corrupt"): ExpertMcpBinding {
   try {
-    return Schema.decodeUnknownSync(ExpertMcpBindingSchema)(value);
+    const binding = Schema.decodeUnknownSync(ExpertMcpBindingSchema)(value);
+    for (const server of binding.servers) {
+      if (
+        (server.effectiveTools === undefined) !== (server.resolutionStatus === undefined) ||
+        (server.toolMode !== "all" && server.effectiveTools !== undefined) ||
+        (server.resolutionStatus === "unavailable" && server.effectiveTools?.length !== 0)
+      ) {
+        throw new Error("Expert MCP tool resolution state is inconsistent.");
+      }
+    }
+    return binding;
   } catch (cause) {
     throw new ExpertMcpBindingStoreError("Expert MCP binding is invalid.", code, { cause });
   }
@@ -167,5 +185,67 @@ export function createExpertMcpBindingStore(stateDir: string): ExpertMcpBindingS
       return writeUnlocked(snapshotId, binding);
     });
 
-  return { read, createOnce, get };
+  const resolveToolsOnce: ExpertMcpBindingStore["resolveToolsOnce"] = (
+    snapshotId,
+    connectionId,
+    resolution,
+  ) =>
+    withWriteLock(directory, async () => {
+      validateSnapshotId(snapshotId);
+      const current = await readUnlocked(snapshotId);
+      if (!current) {
+        throw new ExpertMcpBindingStoreError(
+          "Expert MCP binding must exist before tool authorization is resolved.",
+          "not_found",
+        );
+      }
+      const index = current.servers.findIndex((server) => server.id === connectionId);
+      if (index < 0) {
+        throw new ExpertMcpBindingStoreError(
+          "Expert MCP binding does not contain the connection being resolved.",
+          "not_found",
+        );
+      }
+      const server = current.servers[index]!;
+      if (server.toolMode !== "all") {
+        throw new ExpertMcpBindingStoreError(
+          "Only all-mode Expert MCP bindings can resolve effective tools.",
+          "invalid_input",
+        );
+      }
+      if (server.effectiveTools !== undefined || server.resolutionStatus !== undefined) {
+        if (server.effectiveTools === undefined || server.resolutionStatus === undefined) {
+          throw new ExpertMcpBindingStoreError(
+            "Expert MCP tool resolution state is corrupt.",
+            "corrupt",
+          );
+        }
+        return current;
+      }
+      if (resolution.status === "unavailable" && resolution.tools.length !== 0) {
+        throw new ExpertMcpBindingStoreError(
+          "Unavailable Expert MCP connections cannot authorize tools.",
+          "invalid_input",
+        );
+      }
+      const servers = current.servers.map((entry, entryIndex) =>
+        entryIndex === index
+          ? {
+              ...entry,
+              effectiveTools: [...resolution.tools],
+              resolutionStatus: resolution.status,
+            }
+          : entry,
+      );
+      const updated = decodeBinding({ ...current, servers }, "invalid_input");
+      const contents = JSON.stringify(updated, null, 2) + "\n";
+      if (Buffer.byteLength(contents, "utf8") > MAX_BINDING_BYTES) {
+        throw new ExpertMcpBindingStoreError("Expert MCP binding is too large.", "invalid_input");
+      }
+      await assertBindingDirectory(directory);
+      await writePrivateFileAtomically(filePath(snapshotId), contents);
+      return updated;
+    });
+
+  return { read, createOnce, get, resolveToolsOnce };
 }

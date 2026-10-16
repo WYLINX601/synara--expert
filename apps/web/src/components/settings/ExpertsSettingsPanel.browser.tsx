@@ -9,7 +9,7 @@ import {
   Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
-import { page, userEvent } from "vitest/browser";
+import { page } from "vitest/browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
@@ -580,6 +580,8 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     harness.server.saveExpert.mockRejectedValueOnce(new Error("revision conflict"));
 
     await page.getByRole("button", { name: "添加专家 MCP 连接" }).click();
+    await page.getByRole("textbox", { name: "搜索 MCP 连接", exact: true }).fill("no match");
+    await page.getByRole("button", { name: "管理 MCP 连接", exact: true }).click();
     await expect.element(page.getByText("离开前要保存还是放弃这些更改？")).toBeVisible();
     await page.getByRole("button", { name: "保存并继续" }).click();
     await expect
@@ -630,6 +632,8 @@ describe("ExpertsSettingsPanel browser interactions", () => {
         }),
     );
     await page.getByRole("button", { name: "添加专家 MCP 连接" }).click();
+    await page.getByRole("textbox", { name: "搜索 MCP 连接", exact: true }).fill("no match");
+    await page.getByRole("button", { name: "管理 MCP 连接", exact: true }).click();
     await page.getByRole("button", { name: "保存并继续" }).click();
     await expect.poll(() => harness.server.saveExpert.mock.calls.length).toBe(1);
     expect(
@@ -665,7 +669,7 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     await close();
   });
 
-  it("shows global disablement without changing a saved expert grant", async () => {
+  it("shows a compact connection row for an existing disabled legacy grant", async () => {
     harness.data.experts = [
       harness.makeExpert({
         connections: [{ id: "linear", enabled: true, required: false, tools: ["legacy_search"] }],
@@ -675,25 +679,126 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     const { close } = await mountPanel("/settings?expertId=planner");
     await page.getByRole("tab", { name: "能力" }).click();
 
-    await expect.element(page.getByRole("status").filter({ hasText: "全局停用" })).toBeVisible();
+    await expect.element(page.getByText("全局停用", { exact: true })).toBeVisible();
     await expect
-      .element(page.getByRole("switch", { name: "允许使用 Linear 工作区" }))
-      .toBeChecked();
-    await expect.element(page.getByText("1 项工具", { exact: true })).toBeVisible();
-    document.querySelector<HTMLButtonElement>('[aria-label="添加专家 MCP 连接"]')?.focus();
-    await userEvent.keyboard("{Tab}");
-    expect(document.activeElement?.textContent).toBe("1 项工具");
+      .element(page.getByRole("region", { name: "MCP 工具", exact: true }))
+      .toHaveTextContent("旧版权限");
     await expect
-      .element(page.getByRole("tooltip"))
-      .toHaveTextContent("此专家已获准使用所选的 1 项工具；连接不可用时可继续启动任务。");
-    expect(document.activeElement?.getAttribute("aria-describedby")).toBe(
-      document.querySelector('[role="tooltip"]')?.id,
-    );
+      .element(page.getByRole("button", { name: "移除专家 MCP 连接 Linear 工作区", exact: true }))
+      .toBeVisible();
+    expect(page.getByRole("button", { name: "管理工具", exact: true }).length).toBe(0);
+    expect(page.getByText("1 项工具", { exact: true }).length).toBe(0);
     expect(harness.server.getExpertConnectionState).toHaveBeenCalledWith({ id: "linear" });
     expect(harness.server.saveExpert).not.toHaveBeenCalled();
     expect(harness.data.experts[0]?.connections).toEqual([
       { id: "linear", enabled: true, required: false, tools: ["legacy_search"] },
     ]);
+    await close();
+  });
+
+  it("searches and applies MCP connections without reading tools, upgrading selected bindings explicitly", async () => {
+    harness.data.connections = [
+      ...harness.data.connections,
+      {
+        id: "github",
+        name: "GitHub 工作区",
+        transport: {
+          type: "stdio" as const,
+          command: "npx",
+          args: ["-y", "github-mcp"],
+          envFromHost: [],
+        },
+        revision: 1,
+        updatedAt: "2026-10-03T00:00:00.000Z",
+      },
+    ];
+    harness.data.experts = [
+      harness.makeExpert({
+        connections: [
+          {
+            id: "linear",
+            enabled: false,
+            required: true,
+            tools: ["issues.search"],
+          },
+        ],
+      }),
+    ];
+    const { close } = await mountPanel("/settings?expertId=planner");
+    await page.getByRole("tab", { name: "能力" }).click();
+
+    const mcpSection = page.getByRole("region", { name: "MCP 工具", exact: true });
+    await expect.element(mcpSection).toHaveTextContent("1");
+    await expect.element(mcpSection).toHaveTextContent("Linear 工作区");
+    await expect.element(mcpSection).toHaveTextContent("已关闭");
+    expect(mcpSection.getByRole("button", { name: "选择工具", exact: true }).length).toBe(0);
+    expect(mcpSection.getByText(/\d+ 项工具/u).length).toBe(0);
+
+    await page.getByRole("button", { name: "添加专家 MCP 连接" }).click();
+    const search = page.getByRole("textbox", { name: "搜索 MCP 连接", exact: true });
+    await expect
+      .element(page.getByText("所选 MCP 将提供全部工具。", { exact: false }))
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("checkbox", { name: "Linear 工作区", exact: true }))
+      .toBeChecked();
+    await search.fill("GitHub");
+    const github = page.getByRole("checkbox", { name: "GitHub 工作区", exact: true });
+    await expect.element(github).toBeVisible();
+    await github.click();
+    await page.getByRole("button", { name: "取消", exact: true }).click();
+    expect(harness.server.saveExpert).not.toHaveBeenCalled();
+    expect(harness.server.testExpertConnection).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "添加专家 MCP 连接" }).click();
+    await page.getByRole("textbox", { name: "搜索 MCP 连接", exact: true }).fill("GitHub");
+    await page.getByRole("checkbox", { name: "GitHub 工作区", exact: true }).click();
+    await page.getByRole("button", { name: "应用选择", exact: true }).click();
+    expect(mcpSection.getByText("旧版权限", { exact: true }).length).toBe(0);
+    await expect.element(page.getByRole("button", { name: "保存更改", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
+    await expect.poll(() => harness.server.saveExpert.mock.calls.length).toBe(1);
+    expect(harness.server.saveExpert.mock.calls[0]?.[0]).toMatchObject({
+      connections: [
+        {
+          id: "linear",
+          enabled: false,
+          required: true,
+          toolMode: "all",
+          tools: [],
+        },
+        {
+          id: "github",
+          enabled: true,
+          required: false,
+          toolMode: "all",
+          tools: [],
+        },
+      ],
+    });
+    expect(harness.server.testExpertConnection).not.toHaveBeenCalled();
+    await close();
+  });
+
+  it("keeps missing MCP bindings visible and lets the expert draft remove them", async () => {
+    harness.data.experts = [
+      harness.makeExpert({
+        connections: [
+          { id: "missing-mcp", enabled: true, required: true, tools: ["legacy.search"] },
+        ],
+      }),
+    ];
+    const { close } = await mountPanel("/settings?expertId=planner");
+    await page.getByRole("tab", { name: "能力" }).click();
+
+    const missing = page.getByRole("region", { name: "MCP 工具", exact: true });
+    await expect.element(missing).toHaveTextContent("missing-mcp");
+    await expect.element(missing).toHaveTextContent("连接缺失");
+    await page.getByRole("button", { name: "移除专家 MCP 连接 missing-mcp", exact: true }).click();
+    await expect.element(missing).not.toHaveTextContent("missing-mcp");
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
+    await expect.poll(() => harness.server.saveExpert.mock.calls.length).toBe(1);
+    expect(harness.server.saveExpert.mock.calls[0]?.[0]).toMatchObject({ connections: [] });
     await close();
   });
 
@@ -795,6 +900,70 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     expect(harness.server.testExpertConnection).toHaveBeenCalledWith({ id: "linear" });
     await expect.element(page.getByText(/当前配置检测完成/)).toBeVisible();
     await expect.element(page.getByText("固定配置 · v1", { exact: true })).toBeVisible();
+    await view.unmount();
+    queryClient.clear();
+  });
+
+  it("shows an all-tools task authorization as automatically captured and fixed", async () => {
+    harness.server.testExpertConnection.mockResolvedValueOnce({
+      tools: ["issues.search", "issues.read"],
+    });
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    harness.server.readExpertSnapshot.mockResolvedValue({
+      snapshotId: "snapshot-planner-v7",
+      expertId: "planner",
+      revision: 7,
+      name: "规划专家",
+      description: "帮助规划任务",
+      useCases: "",
+      persona: "先澄清目标",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [{ id: "linear", enabled: true, required: true, toolMode: "all", tools: [] }],
+      mcpBinding: {
+        schemaVersion: 1,
+        source: "snapshot",
+        createdAt: "2026-10-03T00:00:00.000Z",
+        servers: [{ id: "linear", configRevision: 3, required: true, tools: [] }],
+      },
+      skillsRoot: "/skills",
+    } as never);
+    harness.server.readExpertAppliedRuntime.mockResolvedValue(null);
+    const view = await render(
+      <QueryClientProvider client={queryClient}>
+        <ExpertTaskControl
+          threadId={"thread-1" as never}
+          binding={
+            {
+              snapshotId: "snapshot-planner-v7",
+              expertId: "planner",
+              revision: 7,
+              displayName: "规划专家",
+            } as never
+          }
+          provider={"codex" as never}
+          model="test-model"
+          canContinue={false}
+          onContinue={async () => {}}
+        />
+      </QueryClientProvider>,
+    );
+
+    await page.getByRole("button", { name: "规划专家", exact: true }).click();
+    await expect
+      .element(page.getByText(/全部工具（本任务首次启动时自动读取并固定）/u))
+      .toBeVisible();
+    expect(page.getByText("允许的工具：无", { exact: true }).length).toBe(0);
+    expect(harness.server.testExpertConnection).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "检测当前配置 Linear 工作区", exact: true }).click();
+    await expect
+      .element(page.getByText(/当前配置检测完成 · 当前提供：issues.search、issues.read/u))
+      .toBeVisible();
+    expect(page.getByText(/允许但未发现/u).length).toBe(0);
     await view.unmount();
     queryClient.clear();
   });

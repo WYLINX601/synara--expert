@@ -900,7 +900,12 @@ export function createExpertStore(stateDir: string): ExpertStore {
     const connectionStore = createExpertConnectionStore(stateDir);
     const mcpBindingServers = [];
     for (const connection of definition.connections) {
-      if (connection.enabled === false || connection.tools.length === 0) continue;
+      if (
+        connection.enabled === false ||
+        (connection.toolMode !== "all" && connection.tools.length === 0)
+      ) {
+        continue;
+      }
       const config = await connectionStore.pinRevision(connection.id);
       if (!config && connection.required) {
         throw new ExpertStoreError(
@@ -912,6 +917,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
         id: connection.id,
         ...(config ? { configRevision: config.revision } : {}),
         required: connection.required,
+        ...(connection.toolMode ? { toolMode: connection.toolMode } : {}),
         tools: connection.tools,
       });
     }
@@ -939,6 +945,9 @@ export function createExpertStore(stateDir: string): ExpertStore {
       mcpBinding: {
         schemaVersion: 1,
         source: "snapshot",
+        ...(mcpBindingServers.some((server) => server.toolMode === "all")
+          ? { authorizationId: randomUUID() }
+          : {}),
         createdAt: new Date().toISOString(),
         servers: mcpBindingServers,
       },
@@ -1053,7 +1062,12 @@ export function createExpertStore(stateDir: string): ExpertStore {
     let connectionBlocked = false;
     let connectionPartial = false;
     for (const connection of definition.connections) {
-      if (connection.enabled === false || connection.tools.length === 0) continue;
+      if (
+        connection.enabled === false ||
+        (connection.toolMode !== "all" && connection.tools.length === 0)
+      ) {
+        continue;
+      }
       const markUnavailable = (message: string) => {
         issues.push(message);
         if (connection.required) connectionBlocked = true;

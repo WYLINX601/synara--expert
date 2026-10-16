@@ -84,6 +84,8 @@ interface BetaChannelDeps {
   readonly canTrashOwnBundle?: boolean | undefined;
   /** Environment beta was launched with; read for the stable handoff (tests). */
   readonly env?: NodeJS.ProcessEnv | undefined;
+  /** Read-only install probe override for tests that must not inspect host installs. */
+  readonly probeBetaInstall?: (() => BetaInstallDetection) | undefined;
   /** Injectable installer (tests). Defaults to the real feed install. */
   readonly install?: (
     onProgress: (progress: DesktopBetaInstallProgress) => void,
@@ -429,6 +431,7 @@ export class DesktopBetaChannel {
   }
 
   private detect(): BetaInstallDetection {
+    if (this.deps.probeBetaInstall) return this.deps.probeBetaInstall();
     return detectBetaInstall(this.deps.platform, this.deps.homeDir);
   }
 

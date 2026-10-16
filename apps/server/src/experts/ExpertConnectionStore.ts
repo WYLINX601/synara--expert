@@ -251,7 +251,44 @@ async function readDirectoryEntries(
 }
 
 function validateConnectionReferences(value: unknown, message: string): ExpertMcpBinding {
-  return decode<ExpertMcpBinding>(ExpertMcpBindingSchema, value, message, "corrupt");
+  const binding = decode<ExpertMcpBinding>(ExpertMcpBindingSchema, value, message, "corrupt");
+  for (const server of binding.servers) {
+    if (
+      (server.effectiveTools === undefined) !== (server.resolutionStatus === undefined) ||
+      (server.toolMode !== "all" && server.effectiveTools !== undefined) ||
+      (server.resolutionStatus === "unavailable" && server.effectiveTools?.length !== 0)
+    ) {
+      throw new ExpertConnectionStoreError(message, "corrupt");
+    }
+  }
+  return binding;
+}
+
+function immutableBindingShape(binding: ExpertMcpBinding, isSnapshot: boolean): unknown {
+  return {
+    schemaVersion: binding.schemaVersion,
+    source: binding.source,
+    ...(binding.authorizationId ? { authorizationId: binding.authorizationId } : {}),
+    createdAt: binding.createdAt,
+    servers: binding.servers.map((server) => {
+      if (
+        isSnapshot &&
+        (server.effectiveTools !== undefined || server.resolutionStatus !== undefined)
+      ) {
+        throw new ExpertConnectionStoreError(
+          "Snapshot MCP bindings cannot contain resolved tool state.",
+          "corrupt",
+        );
+      }
+      return {
+        id: server.id,
+        ...(server.configRevision !== undefined ? { configRevision: server.configRevision } : {}),
+        required: server.required,
+        ...(server.toolMode ? { toolMode: server.toolMode } : {}),
+        tools: server.tools,
+      };
+    }),
+  };
 }
 
 /**
@@ -322,6 +359,7 @@ export async function scanExpertConnectionReferences(
         revision: definition.revision,
         enabled: !definition.archived && connection.enabled !== false,
         required: connection.required,
+        ...(connection.toolMode ? { toolMode: connection.toolMode } : {}),
         tools: connection.tools,
       });
     }
@@ -382,7 +420,11 @@ export async function scanExpertConnectionReferences(
       "Expert MCP binding file is invalid.",
     );
     const snapshotBinding = snapshotBindings.get(snapshotId);
-    if (snapshotBinding && stableJson(snapshotBinding) !== stableJson(binding)) {
+    if (
+      snapshotBinding &&
+      stableJson(immutableBindingShape(snapshotBinding, true)) !==
+        stableJson(immutableBindingShape(binding, false))
+    ) {
       throw new ExpertConnectionStoreError(
         "Snapshot and sidecar MCP bindings disagree.",
         "corrupt",
@@ -412,6 +454,9 @@ export async function scanExpertConnectionReferences(
           ? {}
           : { configRevision: boundServer.configRevision }),
         required: boundServer?.required ?? connection?.required ?? false,
+        ...((boundServer?.toolMode ?? connection?.toolMode)
+          ? { toolMode: boundServer?.toolMode ?? connection?.toolMode }
+          : {}),
         legacy: binding === undefined || binding.source === "legacy-current",
       });
     }
@@ -427,6 +472,7 @@ export async function scanExpertConnectionReferences(
         displayName: snapshotId,
         ...(server.configRevision === undefined ? {} : { configRevision: server.configRevision }),
         required: server.required,
+        ...(server.toolMode ? { toolMode: server.toolMode } : {}),
         legacy: binding.source === "legacy-current",
       });
     }

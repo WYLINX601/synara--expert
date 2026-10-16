@@ -1,5 +1,7 @@
 # 基于 Synara 的个人工作台架构
 
+当前二开规范（2026-10-16）：[v1.1 架构与接入标准](./workbench-adaptation-plan.md#current-standard-v11)、[开发 SOP](./workbench-development-workflow.md#execution-sop)、[上游升级 SOP](./workbench-implementation-plan.md#sync-sop)。下文保留设计与验收的历史范围；当前源码、升级基线和待处理差异从[项目入口](../context/PROJECT_CONTEXT.md#execution-entry)及[基线核对](../workbench/WB-00-upstream-evidence.md#2026-10-16-baseline-audit)进入。
+
 产品方向更新（2026-10-10）：当前 Linx 产品组织、Hermes 常驻职责与 MVP 规划见 [Linx V2.0 原文](./linx-product-design-v2.md)，方案与实施状态路由见[项目上下文](../context/PROJECT_CONTEXT.md)。本文继续保留既有 Workbench 技术设计与历史证据，不作为新增 Space、Hermes 或 Skill Evolution 的实现证明。
 
 状态：本文保留 2026-09-29 的架构设计与实施起点快照，不描述当前实施状态；当前进度与验收见[工作台验收记录](./workbench-acceptance-2026-10-02.md)。

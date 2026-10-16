@@ -19,8 +19,18 @@ Read only what the task needs:
 - Product and ownership semantics: [core concepts](docs/core-concepts.md) and [providers](docs/providers.md).
 - Contribution and verification conventions: [CONTRIBUTING.md](CONTRIBUTING.md) and the affected package's scripts.
 - Personal Workbench development stages, check selection, and concise acceptance reports: [development workflow](docs/workbench-development-workflow.md). Apply it alongside the verification requirements below.
+- Linx secondary-development architecture and module/layout contracts: [current architecture standard](docs/workbench-adaptation-plan.md#current-standard-v11). Upstream upgrades: [sync SOP](docs/workbench-implementation-plan.md#sync-sop), [baseline audit](workbench/WB-00-upstream-evidence.md#2026-10-16-baseline-audit), and [remote automation status](workbench/WB-05-automation.md#2026-10-16-remote-read-only-audit).
 - Release/signing work: [release guide](docs/release.md). Beta channel and flavor work: [Beta guide](BETA.md). Local Canary operations: [Canary guide](docs/canary.md).
 - Current commands, toolchain requirements, and patched dependencies: [package.json](package.json), `bun.lock`, and `.mise.toml`. Resolve current paths from the checkout rather than relying on an old repository map.
+
+## Linx execution SOP
+
+- Start Linx work from the task routing in [project context](context/PROJECT_CONTEXT.md#execution-entry); read only the relevant architecture, development, sync, or release sections. Keep architecture decisions in the architecture standard, operational steps/checks in the development or sync SOP, and actual results in acceptance/evidence records.
+- Before implementation, identify the user scenario, acceptance criteria, data owner, required host capabilities, and any native integration points. New pages must identify their actual parent layout and its inherited subscriptions, state, and shortcuts; a thin route alone does not isolate chat behavior.
+- Confirm core user-flow, information-architecture, or substantial visual changes before implementation. Explicit local fixes can proceed to a reviewable preview; honor any stricter design-confirmation request already made by the user.
+- Keep module collaboration behind explicit public capabilities and reuse the native task source. Update the integration-point manifest and run the existing boundary check when changing host seams or feature dependencies; document the check's actual coverage rather than claiming full runtime isolation.
+- Before an upstream candidate, reconcile Git ancestry, tracked locks, candidate state, and source-bound acceptance. A historical `ready` for another candidate/ref is not current-main acceptance. Follow the sync SOP when these records disagree; do not edit a lock merely to make a status look current.
+- Finish the applicable gates before reporting acceptance. Required-check failures block formal integration; remote protection, workflow triggering, installation, and publishing require actual results and the corresponding authorization.
 
 ## Beta and Stable
 

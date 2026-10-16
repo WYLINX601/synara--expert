@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdtemp, readdir, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startWorkbenchRuntimeMcpFixture } from "../../../../scripts/lib/workbench-runtime-mcp-fixture.ts";
 import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
+import { createExpertMcpBindingStore } from "./ExpertMcpBindingStore.ts";
 import { createExpertMcpCredentialStore } from "./ExpertMcpCredentials.ts";
 import { connectExpertMcp } from "./ExpertMcpClient.ts";
 import { createExpertStore } from "./ExpertStore.ts";
@@ -144,6 +145,129 @@ describe("ExpertGatewayTools", () => {
     controller.abort();
     await cancelled;
     await expect(pending).rejects.toThrow();
+    await resolver.closeAll();
+  });
+
+  it("freezes all-mode tools per task snapshot and gives a new task newly added tools", async () => {
+    const { stateDir, snapshotId } = await makeScenario([
+      { id: "all-tools", required: true, tools: [], toolMode: "all" },
+    ]);
+    const experts = createExpertStore(stateDir);
+    const firstClient = fakeClient([fakeTool("search"), fakeTool("publish")]);
+    const firstResolver = makeExpertGatewayToolResolver({
+      stateDir,
+      connect: vi.fn(async () => firstClient) as typeof connectExpertMcp,
+    });
+
+    const firstTools = await firstResolver.resolve("session-all-first", snapshotId);
+    expect(firstTools.map(({ definition }) => definition.name).sort()).toEqual([
+      "expert_all-tools_publish",
+      "expert_all-tools_search",
+    ]);
+    await expect(createExpertMcpBindingStore(stateDir).read(snapshotId)).resolves.toMatchObject({
+      servers: [
+        {
+          id: "all-tools",
+          toolMode: "all",
+          tools: [],
+          effectiveTools: ["search", "publish"],
+          resolutionStatus: "resolved",
+        },
+      ],
+    });
+    await firstResolver.closeAll();
+
+    const resumedClient = fakeClient([
+      fakeTool("search"),
+      fakeTool("publish"),
+      fakeTool("newly_added"),
+    ]);
+    const resumedResolver = makeExpertGatewayToolResolver({
+      stateDir,
+      connect: vi.fn(async () => resumedClient) as typeof connectExpertMcp,
+    });
+    const resumedTools = await resumedResolver.resolve("session-all-resumed", snapshotId);
+    expect(resumedTools.map(({ definition }) => definition.name).sort()).toEqual([
+      "expert_all-tools_publish",
+      "expert_all-tools_search",
+    ]);
+    await resumedResolver.closeAll();
+
+    const nextTask = await experts.prepareSnapshot("gateway-tools-test");
+    expect(nextTask.snapshotId).not.toBe(snapshotId);
+    const nextTaskClient = fakeClient([
+      fakeTool("search"),
+      fakeTool("publish"),
+      fakeTool("newly_added"),
+    ]);
+    const nextTaskResolver = makeExpertGatewayToolResolver({
+      stateDir,
+      connect: vi.fn(async () => nextTaskClient) as typeof connectExpertMcp,
+    });
+    const nextTaskTools = await nextTaskResolver.resolve(
+      "session-all-next-task",
+      nextTask.snapshotId,
+    );
+    expect(nextTaskTools.map(({ definition }) => definition.name).sort()).toEqual([
+      "expert_all-tools_newly_added",
+      "expert_all-tools_publish",
+      "expert_all-tools_search",
+    ]);
+    await nextTaskResolver.closeAll();
+  });
+
+  it("freezes an optional all-mode enumeration failure with no tools for that task", async () => {
+    const { stateDir, snapshotId } = await makeScenario([
+      { id: "optional-all", required: false, tools: [], toolMode: "all" },
+    ]);
+    const snapshot = await createExpertStore(stateDir).readSnapshot(snapshotId);
+    const preflight = await preflightExpertConnections(snapshot, {
+      stateDir,
+      connect: vi.fn(async () => {
+        throw new Error("fixture unavailable");
+      }) as typeof connectExpertMcp,
+    });
+    expect(preflight.optionalIssues).toEqual(["可选连接“optional-all”当前不可用。"]);
+    await expect(createExpertMcpBindingStore(stateDir).read(snapshotId)).resolves.toMatchObject({
+      servers: [
+        {
+          id: "optional-all",
+          effectiveTools: [],
+          resolutionStatus: "unavailable",
+        },
+      ],
+    });
+
+    const laterConnect = vi.fn(async () => fakeClient([fakeTool("newly_available")]));
+    const resolver = makeExpertGatewayToolResolver({
+      stateDir,
+      connect: laterConnect as typeof connectExpertMcp,
+    });
+    await expect(resolver.resolve("session-optional-all", snapshotId)).resolves.toEqual([]);
+    expect(laterConnect).not.toHaveBeenCalled();
+    await resolver.closeAll();
+  });
+
+  it("fails closed and closes the client when effective-tool persistence fails", async () => {
+    const { stateDir, snapshotId } = await makeScenario([
+      { id: "all-tools", required: true, tools: [], toolMode: "all" },
+    ]);
+    const client = fakeClient([fakeTool("search")]);
+    const bindingPath = path.join(stateDir, "expert-mcp-bindings", `${snapshotId}.json`);
+    const connect = vi.fn(async () => {
+      await rename(bindingPath, `${bindingPath}.saved`);
+      await mkdir(bindingPath);
+      return client;
+    });
+    const resolver = makeExpertGatewayToolResolver({
+      stateDir,
+      connect: connect as typeof connectExpertMcp,
+    });
+
+    await expect(resolver.resolve("session-persistence-failure", snapshotId)).rejects.toThrow(
+      /Could not persist effective tools/u,
+    );
+    expect(client.close).toHaveBeenCalledOnce();
     await resolver.closeAll();
   });
 
@@ -354,6 +478,103 @@ describe("ExpertGatewayTools", () => {
     } finally {
       const cleanupResults = await Promise.allSettled([
         ...(resolver ? [resolver.closeAll()] : []),
+        fixture.close(),
+      ]);
+      const cleanupFailure = cleanupResults.find((result) => result.status === "rejected");
+      if (cleanupFailure?.status === "rejected") throw cleanupFailure.reason;
+    }
+  });
+
+  it("lists, calls, and restores all-mode tools through the production HTTP MCP connector", async () => {
+    const root = await makeTempRoot();
+    const fixture = await startWorkbenchRuntimeMcpFixture({ pagination: "two-pages" });
+    const stateDir = path.join(root, "state");
+    const experts = createExpertStore(stateDir);
+    const connections = createExpertConnectionStore(stateDir);
+    let resolver: ReturnType<typeof makeExpertGatewayToolResolver> | undefined;
+    let resumedResolver: ReturnType<typeof makeExpertGatewayToolResolver> | undefined;
+
+    try {
+      await connections.save({
+        id: "live-all",
+        name: "Live all-tools MCP",
+        transport: { type: "http", url: fixture.url, headersFromHost: [] },
+      });
+      const expert = await experts.save({
+        id: "live-all-tools",
+        name: "Live all-tools",
+        description: "Exercise production MCP enumeration and recovery.",
+        useCases: "Verify all-mode tools against a live fixture.",
+        persona: "Use the task-authorized MCP tools.",
+        outputRequirements: "Return the fixture marker.",
+        skills: [],
+        references: [],
+        connections: [{ id: "live-all", required: true, tools: [], toolMode: "all" }],
+      });
+      const binding = await experts.prepareSnapshot(expert.id);
+      resolver = makeExpertGatewayToolResolver({ stateDir, connect: connectExpertMcp });
+
+      const tools = await resolver.resolve("session-live-all", binding.snapshotId);
+      expect(tools.map(({ definition }) => definition.name)).toEqual([
+        "expert_live-all_workbench_probe_echo",
+        "expert_live-all_workbench_probe_wait",
+        "expert_live-all_workbench_probe_page_two",
+      ]);
+      await expect(
+        createExpertMcpBindingStore(stateDir).read(binding.snapshotId),
+      ).resolves.toMatchObject({
+        servers: [
+          {
+            id: "live-all",
+            effectiveTools: [
+              "workbench_probe_echo",
+              "workbench_probe_wait",
+              "workbench_probe_page_two",
+            ],
+            resolutionStatus: "resolved",
+          },
+        ],
+      });
+
+      await expect(
+        Effect.runPromise(tools[0]!.handler({ value: "all-mode-live" }, {} as never)),
+      ).resolves.toMatchObject({
+        content: [{ type: "text", text: fixture.echoMarker }],
+        structuredContent: { echoMarker: fixture.echoMarker, value: "all-mode-live" },
+      });
+      expect(fixture.stats().echoCalls).toBe(1);
+      const pageTwo = tools.find(({ definition }) =>
+        definition.name.endsWith("_workbench_probe_page_two"),
+      );
+      if (!pageTwo) throw new Error("Expected the second-page fixture tool.");
+      await expect(
+        Effect.runPromise(pageTwo.handler({ value: "page-two-call" }, {} as never)),
+      ).resolves.toMatchObject({
+        content: [{ type: "text", text: "page-two:page-two-call" }],
+        structuredContent: { value: "page-two-call" },
+      });
+      expect(fixture.stats().paginatedToolCalls).toBe(1);
+      await resolver.closeAll();
+
+      resumedResolver = makeExpertGatewayToolResolver({ stateDir, connect: connectExpertMcp });
+      const resumedTools = await resumedResolver.resolve(
+        "session-live-all-resumed",
+        binding.snapshotId,
+      );
+      expect(resumedTools.map(({ definition }) => definition.name)).toEqual(
+        tools.map(({ definition }) => definition.name),
+      );
+      await expect(
+        Effect.runPromise(resumedTools[0]!.handler({ value: "all-mode-restored" }, {} as never)),
+      ).resolves.toMatchObject({
+        content: [{ type: "text", text: fixture.echoMarker }],
+        structuredContent: { echoMarker: fixture.echoMarker, value: "all-mode-restored" },
+      });
+      expect(fixture.stats().echoCalls).toBe(2);
+    } finally {
+      const cleanupResults = await Promise.allSettled([
+        ...(resolver ? [resolver.closeAll()] : []),
+        ...(resumedResolver ? [resumedResolver.closeAll()] : []),
         fixture.close(),
       ]);
       const cleanupFailure = cleanupResults.find((result) => result.status === "rejected");

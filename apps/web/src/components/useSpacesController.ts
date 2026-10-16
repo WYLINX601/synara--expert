@@ -503,7 +503,7 @@ export function useSpacesController(input: {
           return;
         }
         await updateSpace({
-          api,
+          api: api.orchestration,
           spaceId: spaceEditorState.spaceId,
           name: nextName,
           icon: nextIcon,
@@ -511,11 +511,15 @@ export function useSpacesController(input: {
         return;
       }
 
-      const { spaceId, sequence } = await createSpace({ api, name: value.name, icon });
+      const { spaceId, sequence } = await createSpace({
+        api: api.orchestration,
+        name: value.name,
+        icon,
+      });
       const projectId = spaceEditorState.projectIdAfterCreate;
       if (projectId) {
         try {
-          await moveProjectToSpace({ api, projectId, spaceId });
+          await moveProjectToSpace({ api: api.orchestration, projectId, spaceId });
         } catch (error) {
           toastManager.add({
             type: "error",
@@ -576,7 +580,7 @@ export function useSpacesController(input: {
         (isOnKanban && routeProjectId ? (projectById.get(routeProjectId) ?? null) : null);
 
       try {
-        await deleteSpace({ api, spaceId });
+        await deleteSpace({ api: api.orchestration, spaceId });
         if (activeSpaceId === spaceId) {
           selectSpaceForNavigation(null);
           if (!isOrdinarySpaceProject(activeContextProject, workspacePaths)) {
@@ -611,7 +615,7 @@ export function useSpacesController(input: {
     const api = readNativeApi();
     if (!api || space.name === name) return;
     try {
-      await updateSpace({ api, spaceId: space.id, name });
+      await updateSpace({ api: api.orchestration, spaceId: space.id, name });
     } catch (error) {
       toastManager.add({
         type: "error",
@@ -633,7 +637,11 @@ export function useSpacesController(input: {
       const api = readNativeApi();
       if (!api) return;
       reorderSpacesLocally(orderedSpaceIds);
-      void reorderSpaces({ api, movedSpaceId, orderedSpaceIds }).catch(async (error) => {
+      void reorderSpaces({
+        api: api.orchestration,
+        movedSpaceId,
+        orderedSpaceIds,
+      }).catch(async (error) => {
         try {
           // A transport error can arrive after the command committed. Re-read the authoritative
           // shell instead of blindly rolling back a reorder the server may already have stored.
@@ -661,7 +669,11 @@ export function useSpacesController(input: {
     async (projectIds: ReadonlyArray<ProjectId>, spaceId: SpaceId) => {
       const api = readNativeApi();
       if (!api) throw new Error("The app server is unavailable.");
-      const result = await moveProjectsToSpace({ api, projectIds, spaceId });
+      const result = await moveProjectsToSpace({
+        api: api.orchestration,
+        projectIds,
+        spaceId,
+      });
       return result.failedProjectIds;
     },
     [],
@@ -678,7 +690,7 @@ export function useSpacesController(input: {
       const movesTheRoutedProject =
         activeRouteProjectId === projectId || (isOnKanban && routeProjectId === projectId);
       try {
-        await moveProjectToSpace({ api, projectId, spaceId });
+        await moveProjectToSpace({ api: api.orchestration, projectId, spaceId });
         if (movesTheRoutedProject) {
           selectSpaceForNavigation(spaceId);
         }

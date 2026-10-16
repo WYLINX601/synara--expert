@@ -1,1 +1,2 @@
 bun.lock text eol=lf
+apps/server/src/persistence/Migrations/*.ts text eol=lf

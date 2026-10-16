@@ -149,10 +149,24 @@
         "package.json",
         ".github/workflows/ci.yml"
       ],
-      "responsibility": "Static direct import check covers server/web workbench/features, existing server experts and named Expert/MCP Web surfaces. New full native client, task store/router, database, Provider, orchestration, Gateway, auth and provider-usage imports are refused. Host files assemble native capabilities. Exact retained imports below preserve established lifecycle and credential ownership. This guard is not runtime isolation or a transitive security check; registry/runtime/host assembly remain outside the feature scan.",
+      "responsibility": "Static direct import check covers server/web workbench/features, existing server experts and named Expert/MCP, Space and Context Web surfaces, plus the exact migrated Space and project-context feature files below. New full native client, task store/router, database, Provider, orchestration, Gateway, auth, legacy project-context cache and Context persistence imports are refused. Host files assemble native capabilities. Exact retained imports below preserve established lifecycle and credential ownership. This guard is not runtime isolation or a transitive security check; registry/runtime/host assembly remain outside the feature scan.",
       "tests": [
         "scripts/check-workbench-boundary.test.ts",
         ".github/scripts/ci-contracts.test.mjs"
+      ],
+      "featureFiles": [
+        "apps/web/src/components/SpaceContextFieldsEditor.tsx",
+        "apps/web/src/components/SpaceEditorDialog.tsx",
+        "apps/web/src/components/SpaceEmptyState.tsx",
+        "apps/web/src/components/SpaceIcon.tsx",
+        "apps/web/src/components/SpaceProjectPickerDialog.tsx",
+        "apps/web/src/components/SpaceSwitcher.tsx",
+        "apps/web/src/components/chat/ContextDetailsDialog.tsx",
+        "apps/web/src/components/chat/environment/projectContextAutosave.ts",
+        "apps/web/src/components/chat/environment/projectContextNavigationGuard.ts",
+        "apps/web/src/components/chat/environment/useProjectContextAutosave.ts",
+        "apps/web/src/components/chat/environment/useProjectContextMigration.tsx",
+        "apps/web/src/lib/spaces.ts"
       ],
       "retainedImports": [
         {
@@ -193,6 +207,68 @@
           ]
         }
       ]
+    },
+    {
+      "id": "workbench.context-and-spaces-host-ownership",
+      "surface": "web-server-host",
+      "entryFiles": [
+        "apps/web/src/components/Sidebar.tsx",
+        "apps/web/src/components/useSpacesController.ts",
+        "apps/web/src/components/useRouteSpaceSync.ts",
+        "apps/web/src/lib/spaces.ts",
+        "apps/web/src/components/ChatView.tsx",
+        "apps/web/src/components/chat/useChatAutomationCreation.ts",
+        "apps/web/src/components/chat/useChatTurnExecution.ts",
+        "apps/web/src/components/chat/useChatTurnSubmission.ts",
+        "apps/web/src/projectInstructionsStore.ts",
+        "apps/web/src/workbench/host/contextClient.ts",
+        "apps/server/src/wsRpc.ts",
+        "apps/server/src/workbench/runtimeLayer.ts",
+        "apps/server/src/workbench/host/contextRpc.ts",
+        "apps/server/src/workbench/host/contextThreadDetails.ts",
+        "apps/server/src/context/ContextRepository.ts",
+        "apps/server/src/orchestration/Layers/OrchestrationEngine.ts",
+        "apps/server/src/orchestration/Layers/ProjectionPipeline.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts",
+        "apps/server/src/provider/Layers/ProviderService.ts",
+        "apps/server/src/persistence/Services/ProjectionSpaces.ts",
+        "apps/server/src/persistence/Migrations/111_ContextV1.ts",
+        "packages/contracts/src/context.ts",
+        "packages/contracts/src/ws.ts",
+        "packages/contracts/src/rpc.ts"
+      ],
+      "responsibility": "The sidebar owns Space controller and route synchronization because those modules use native navigation, the task store and the established Space mutation capability. The Context host client exposes read-only legacy project-instructions cache access to Context feature consumers with shared contracts; ChatView and chat execution/automation modules remain host integrations for their existing context injection and prompt flows. Server wsRpc/runtime assembly owns authenticated Context RPC admission and error mapping, contextThreadDetails combines the repository with live execution evidence, OrchestrationEngine and ProjectionPipeline own replayable Context lifecycle, ProviderCommandReactor loads thread bindings and context sessions for execution, ProviderService applies runtime Context and records execution state, and ContextRepository owns Context SQL persistence. The existing projection service owns Space projection; migration 111 contains the frozen Context schema compatibility exception audited by the repository migration-lineage guard, rather than a newly upstream-owned migration. Contracts keep the shared Context wire schema. This records ownership only; wire behavior, lifecycle and persistence semantics remain in their existing implementations.",
+      "tests": [
+        "apps/web/src/components/useRouteSpaceSync.browser.tsx",
+        "apps/web/src/lib/spaces.test.ts",
+        "apps/web/src/lib/spaceNavigation.test.ts",
+        "apps/web/src/projectInstructionsStore.test.ts",
+        "apps/web/src/components/chat/ContextDetailsDialog.browser.tsx",
+        "apps/web/src/components/chat/environment/projectContextAutosave.test.ts",
+        "apps/web/src/components/chat/environment/projectContextNavigationGuard.test.ts",
+        "apps/web/src/components/chat/environment/useProjectContextMigration.browser.tsx",
+        "apps/web/src/workbench/host/contextClient.test.ts",
+        "apps/server/src/workbench/host/contextRpc.test.ts",
+        "apps/server/src/context/ContextRepository.test.ts",
+        "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts",
+        "apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
+        "apps/server/src/provider/Layers/ProviderService.test.ts",
+        "apps/server/src/persistence/Migrations.test.ts",
+        "apps/server/src/wsRpc.errors.test.ts"
+      ]
+    },
+    {
+      "id": "repository.migration-lineage-ownership",
+      "surface": "repository-migration-audit",
+      "entryFiles": [
+        "scripts/check-migration-lineage.ts",
+        "apps/server/src/persistence/Migrations.ts",
+        "apps/server/src/persistence/Migrations/111_ContextV1.ts",
+        "workbench/upstream.lock.json"
+      ],
+      "responsibility": "check-migration-lineage owns the repository audit for migration identity and upstream provenance. It freezes migration 111 ContextV1's tracker identity and script digest as a historical compatibility exception because shipped databases may already contain it; this does not make 111 a newly upstream-owned migration or authorize further native tracker additions. New Workbench-only migrations remain on the independent Workbench ledger.",
+      "tests": ["scripts/check-migration-lineage.test.ts"]
     },
     {
       "id": "web.expert-chat-slots",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  authorizedExpertCount,
   connectionSaveInput,
   draftFromConnection,
   sameConnectionDraft,
@@ -296,5 +297,24 @@ describe("global MCP connection form mapping", () => {
     });
     legacyOnly.envFromHost = "LEGACY_TOKEN=HOST_TOKEN";
     expect(validateConnectionDraft(legacyOnly)).toBeNull();
+  });
+
+  it("counts all-mode connections as authorized without requiring a saved tool list", () => {
+    const experts = [
+      {
+        archived: false,
+        connections: [
+          { id: "all-tools", enabled: true, required: false, toolMode: "all", tools: [] },
+          { id: "disabled-all", enabled: false, required: false, toolMode: "all", tools: [] },
+          { id: "legacy", enabled: true, required: false, tools: ["search"] },
+          { id: "empty-selected", enabled: true, required: false, toolMode: "selected", tools: [] },
+        ],
+      },
+    ] as never;
+
+    expect(authorizedExpertCount("all-tools", experts)).toBe(1);
+    expect(authorizedExpertCount("disabled-all", experts)).toBe(0);
+    expect(authorizedExpertCount("legacy", experts)).toBe(1);
+    expect(authorizedExpertCount("empty-selected", experts)).toBe(0);
   });
 });

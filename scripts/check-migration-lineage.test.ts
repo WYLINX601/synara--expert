@@ -4,12 +4,17 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  FROZEN_NATIVE_COMPATIBILITY_MIGRATION,
+  findMigrationOwnershipViolations,
   findLineageStructureViolations,
   findReleasedLineageViolations,
   groupViolationsByPair,
+  parseMigrationCatalog,
   parseMigrationLineage,
   parseMigrationLineageAllowances,
   resolveReleaseTags,
+  validatePinnedUpstreamProvenance,
+  type MigrationCatalogEntry,
 } from "./check-migration-lineage";
 
 const migrationsSource = () =>
@@ -23,6 +28,21 @@ const sourceFor = (entries: readonly (readonly [number, string])[]) =>
     .map(([id, name]) => `  [${id}, "${name}", Migration],`)
     .join("\n")}\n] as const;\n`;
 
+const catalogEntry = (
+  id: number,
+  name: string,
+  sha256: string,
+  migrationFile = `apps/server/src/persistence/Migrations/${String(id).padStart(3, "0")}_${name}.ts`,
+): MigrationCatalogEntry => ({ id, name, migrationFile, sha256 });
+
+const frozenCatalogEntry = (sha256: string = FROZEN_NATIVE_COMPATIBILITY_MIGRATION.sha256) =>
+  catalogEntry(
+    FROZEN_NATIVE_COMPATIBILITY_MIGRATION.id,
+    FROZEN_NATIVE_COMPATIBILITY_MIGRATION.name,
+    sha256,
+    FROZEN_NATIVE_COMPATIBILITY_MIGRATION.migrationFile,
+  );
+
 const released = [
   [1, "OrchestrationEvents"],
   [53, "BackfillThreadActivitySequence"],
@@ -30,6 +50,54 @@ const released = [
 ] as const;
 
 describe("migration lineage guard", () => {
+  it("parses native catalog entries with their imported migration file", () => {
+    expect(
+      parseMigrationCatalog(`
+        import CommandDelivery from "./Migrations/054_ReservedDurableProviderCommandDelivery.ts";
+        export const migrationEntries = [
+          /* [112, "CommentOnlyMigration", NotAnImport] is documentation. */
+          [54, "DurableProviderCommandDelivery", CommandDelivery],
+          // A second tuple-shaped comment must not become a catalog entry:
+          // [113, "AlsoCommentOnly", NotAnImport],
+        ] as const;
+      `),
+    ).toEqual([
+      {
+        id: 54,
+        name: "DurableProviderCommandDelivery",
+        migrationFile:
+          "apps/server/src/persistence/Migrations/054_ReservedDurableProviderCommandDelivery.ts",
+      },
+    ]);
+  });
+
+  it("fails closed instead of omitting an unsupported native catalog entry", () => {
+    const source = `
+      import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
+      export const migrationEntries = [
+        [1, "OrchestrationEvents", Migration0001],
+        [112, "LinxNativeExtension", makeMigration()],
+      ] as const;
+    `;
+    expect(() => parseMigrationCatalog(source)).toThrow(
+      /Unsupported or dynamic migrationEntries syntax/u,
+    );
+  });
+
+  it("rejects spread and single-quoted catalog syntax instead of ignoring it", () => {
+    const prefix = `
+      import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
+      export const migrationEntries = [
+        [1, "OrchestrationEvents", Migration0001],
+    `;
+    expect(() => parseMigrationCatalog(`${prefix}...localEntries\n] as const;`)).toThrow(
+      /Unsupported or dynamic migrationEntries syntax/u,
+    );
+    expect(() =>
+      parseMigrationCatalog(`${prefix}[112, 'LinxNativeExtension', Migration0112],\n] as const;`),
+    ).toThrow(/Unsupported or dynamic migrationEntries syntax/u);
+  });
+
   it("parses ids and names, ignoring comments around the entries", () => {
     const source = `
       // [99, "NotAnEntry"] in a comment above the array
@@ -195,5 +263,85 @@ describe("migration lineage guard", () => {
     const entries = parseMigrationLineage(migrationsSource());
     expect(findLineageStructureViolations(entries)).toEqual([]);
     expect(entries.length).toBeGreaterThan(50);
+  });
+
+  it("accepts pinned upstream migrations and verifies bytes for entries added by the candidate", () => {
+    const integrated = [catalogEntry(1, "OrchestrationEvents", "a".repeat(64))];
+    const candidate = [
+      ...integrated,
+      catalogEntry(2, "OrchestrationCommandReceipts", "b".repeat(64)),
+    ];
+    const current = [...candidate, frozenCatalogEntry()];
+    expect(findMigrationOwnershipViolations(current, integrated, candidate)).toEqual([]);
+    expect(
+      findMigrationOwnershipViolations(
+        [
+          integrated[0]!,
+          catalogEntry(2, "OrchestrationCommandReceipts", "c".repeat(64)),
+          frozenCatalogEntry(),
+        ],
+        integrated,
+        candidate,
+      ),
+    ).toContain(
+      'Newly approved upstream migration 2 ("OrchestrationCommandReceipts") does not match its pinned upstream script bytes.',
+    );
+  });
+
+  it("rejects a changed frozen 111 script and a removed or renamed frozen identity", () => {
+    const changed = findMigrationOwnershipViolations([frozenCatalogEntry("c".repeat(64))], [], []);
+    expect(changed).toContain("Frozen native migration 111_ContextV1 script bytes changed.");
+
+    expect(findMigrationOwnershipViolations([], [], [])).toContain(
+      "Frozen native migration 111_ContextV1 was removed, renamed, or moved to another ID.",
+    );
+    expect(
+      findMigrationOwnershipViolations(
+        [catalogEntry(111, "RenamedContextV1", FROZEN_NATIVE_COMPATIBILITY_MIGRATION.sha256)],
+        [],
+        [],
+      ),
+    ).toContain(
+      "Frozen native migration 111_ContextV1 was removed, renamed, or moved to another ID.",
+    );
+  });
+
+  it("rejects an unknown local migration in the native catalog", () => {
+    const problems = findMigrationOwnershipViolations(
+      [frozenCatalogEntry(), catalogEntry(112, "LinxNativeExtension", "d".repeat(64))],
+      [],
+      [],
+    );
+    expect(problems).toContain(
+      'Native migration 112 ("LinxNativeExtension") is not owned by the pinned upstream catalog. ' +
+        "Linx extensions belong in the independent workbench_sql_migrations ledger.",
+    );
+  });
+
+  it("fails closed when pinned upstream provenance is missing or disagrees with local Git", () => {
+    const missing = validatePinnedUpstreamProvenance(
+      JSON.stringify({
+        formatVersion: 1,
+        integratedBase: { tag: "v1.0.0", commit: "a".repeat(40) },
+      }),
+      () => "a".repeat(40),
+    );
+    expect(missing.provenance).toBeNull();
+    expect(missing.problems).toContain(
+      "workbench/upstream.lock.json is missing candidate provenance.",
+    );
+
+    const mismatch = validatePinnedUpstreamProvenance(
+      JSON.stringify({
+        formatVersion: 1,
+        integratedBase: { tag: "v1.0.0", commit: "a".repeat(40) },
+        candidate: { tag: "v1.1.0", commit: "b".repeat(40) },
+      }),
+      (tag) => (tag === "v1.0.0" ? "a".repeat(40) : "c".repeat(40)),
+    );
+    expect(mismatch.provenance).toBeNull();
+    expect(mismatch.problems).toContain(
+      `Pinned upstream tag v1.1.0 resolves to ${"c".repeat(40)}, not ${"b".repeat(40)}.`,
+    );
   });
 });

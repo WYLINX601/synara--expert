@@ -5,6 +5,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { migrationEntries } from "../../persistence/Migrations.ts";
 import LegacyExpertBindingMigration from "../../persistence/Migrations/109_ProjectionThreadsExpertBinding.ts";
 import ExpertAppliedRuntimeRecordsMigration from "../../persistence/Migrations/110_ExpertAppliedRuntimeRecords.ts";
+import ContextV1Migration from "../../persistence/Migrations/111_ContextV1.ts";
 import * as NodeSqliteClient from "../../persistence/NodeSqliteClient.ts";
 import { runMigrations } from "../../persistence/Migrations.ts";
 import {
@@ -20,6 +21,20 @@ import {
   planWorkbenchUpgrade,
   type WorkbenchUpgradeObservation,
 } from "./WorkbenchUpgradePlan.ts";
+
+const absentContextSchema = {
+  contextSchemaObjects: [],
+  contextTableColumns: {
+    context_meta: null,
+    context_spaces: null,
+    context_projects: null,
+    context_migrations: null,
+    context_thread_bindings: null,
+    context_applied_runtime_records: null,
+    context_command_results: null,
+  },
+  contextDeliveryColumns: null,
+} as const;
 
 const officialPrefix = (through: number): readonly OfficialMigrationRecord[] =>
   migrationEntries
@@ -64,16 +79,19 @@ const seedLegacyExpertHistory = (through: 109 | 110 = 110) =>
   });
 
 const emptySchema = {
+  ...absentContextSchema,
   projectionThreadsExists: false,
   bindingColumn: null,
   runtimeRecordColumns: null,
 } as const;
 const baselineSchema = {
+  ...absentContextSchema,
   projectionThreadsExists: true,
   bindingColumn: null,
   runtimeRecordColumns: null,
 } as const;
 const legacy109Schema = {
+  ...absentContextSchema,
   projectionThreadsExists: true,
   bindingColumn: {
     name: "expert_binding_json",
@@ -187,7 +205,7 @@ it.effect("plans legacy adoption with the pending Context migration", () =>
     assert.strictEqual(plan.official.hasPendingMigrations, true);
     assert.strictEqual(plan.official.targetVersion, currentOfficialMigrationCount());
     assert.deepStrictEqual(plan.workbench.adoptedMigrationIds, [1, 2]);
-    assert.strictEqual(plan.workbench.hasPendingMigrations, false);
+    assert.strictEqual(plan.workbench.hasPendingMigrations, true);
     assert.deepStrictEqual(
       plan.legacyOfficialMigrations.map(({ officialId, workbenchId }) => [officialId, workbenchId]),
       [
@@ -224,11 +242,11 @@ it.effect("recognizes frozen legacy rows before checking the post-split official
 
     const futureCatalog = [
       ...postSplitCatalog,
-      [112, "OfficialMigrationAfterContextV1", Effect.void] as const,
+      [137, "OfficialMigrationAfterContextV1", Effect.void] as const,
     ];
     const futureRows = [
       ...currentOfficialRows(),
-      { migration_id: 112, name: "OfficialMigrationAfterContextV1" },
+      { migration_id: 137, name: "OfficialMigrationAfterContextV1" },
     ];
     const sparseOfficial = planWorkbenchUpgrade(
       observe({ officialRows: futureRows, schemaState: baselineSchema }),
@@ -236,45 +254,45 @@ it.effect("recognizes frozen legacy rows before checking the post-split official
     );
     assert.strictEqual(sparseOfficial.kind, "ready");
     if (sparseOfficial.kind === "ready") {
-      assert.strictEqual(sparseOfficial.official.sourceVersion, 112);
-      assert.strictEqual(sparseOfficial.official.targetVersion, 112);
+      assert.strictEqual(sparseOfficial.official.sourceVersion, 137);
+      assert.strictEqual(sparseOfficial.official.targetVersion, 137);
     }
 
-    const known112Catalog = [
+    const known136Catalog = [
       ...postSplitCatalog,
-      [112, "CurrentOfficialMigration112", Effect.void] as const,
+      [136, "CurrentOfficialMigration136", Effect.void] as const,
     ];
-    const known112 = planWorkbenchUpgrade(
+    const known136 = planWorkbenchUpgrade(
       observe({
         officialRows: [
           ...currentOfficialRows(),
-          { migration_id: 112, name: "CurrentOfficialMigration112" },
+          { migration_id: 136, name: "CurrentOfficialMigration136" },
         ],
         schemaState: baselineSchema,
       }),
-      known112Catalog,
+      known136Catalog,
     );
-    assert.strictEqual(known112.kind, "ready");
-    if (known112.kind === "ready") {
-      assert.strictEqual(known112.official.sourceVersion, 112);
-      assert.strictEqual(known112.official.targetVersion, 112);
-      assert.deepStrictEqual(known112.legacyOfficialMigrations, []);
+    assert.strictEqual(known136.kind, "ready");
+    if (known136.kind === "ready") {
+      assert.strictEqual(known136.official.sourceVersion, 136);
+      assert.strictEqual(known136.official.targetVersion, 136);
+      assert.deepStrictEqual(known136.legacyOfficialMigrations, []);
     }
 
-    const unknownKnown112 = planWorkbenchUpgrade(
+    const unknownKnown136 = planWorkbenchUpgrade(
       observe({
         officialRows: [
           ...currentOfficialRows(),
-          { migration_id: 112, name: "UnrecognizedMigration112" },
+          { migration_id: 136, name: "UnrecognizedMigration136" },
         ],
         schemaState: baselineSchema,
       }),
-      known112Catalog,
+      known136Catalog,
     );
-    assert.strictEqual(unknownKnown112.kind, "ready");
-    if (unknownKnown112.kind === "ready") {
-      assert.isFalse(unknownKnown112.official.hasLineageRepair);
-      assert.isTrue(unknownKnown112.requiresBackup);
+    assert.strictEqual(unknownKnown136.kind, "ready");
+    if (unknownKnown136.kind === "ready") {
+      assert.isFalse(unknownKnown136.official.hasLineageRepair);
+      assert.isTrue(unknownKnown136.requiresBackup);
     }
   }),
 );
@@ -285,7 +303,7 @@ it.effect("rejects unknown, too-new, and structurally inconsistent histories", (
       observe({
         officialRows: [
           ...currentOfficialRows(),
-          { migration_id: 112, name: "UnrecognizedFutureOfficialMigration" },
+          { migration_id: 136, name: "UnrecognizedFutureOfficialMigration" },
         ],
         schemaState: baselineSchema,
       }),
@@ -293,7 +311,7 @@ it.effect("rejects unknown, too-new, and structurally inconsistent histories", (
     assert.strictEqual(tooNewOfficial.kind, "rejected");
     if (tooNewOfficial.kind === "rejected") {
       assert.strictEqual(tooNewOfficial.rejectionKind, "official-too-new");
-      assert.strictEqual(tooNewOfficial.databaseVersion, 112);
+      assert.strictEqual(tooNewOfficial.databaseVersion, 136);
     }
 
     const tooNewWorkbench = planWorkbenchUpgrade(
@@ -408,8 +426,109 @@ it.effect("reads old 109/110 as an adoption-only upgrade with a required backup"
       assert.strictEqual(plan.official.hasPendingMigrations, true);
       assert.strictEqual(plan.workbench.sourceVersion, 0);
       assert.deepStrictEqual(plan.workbench.adoptedMigrationIds, [1, 2]);
-      assert.strictEqual(plan.workbench.hasPendingMigrations, false);
+      assert.strictEqual(plan.workbench.hasPendingMigrations, true);
       assert.strictEqual(plan.requiresBackup, true);
     }
   }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+);
+
+it.effect("does not let imported-lineage consent bypass any untracked Context schema", () =>
+  Effect.sync(() => {
+    const importedRows = officialPrefix(108).map((row) =>
+      row.migration_id === 17 ? { migration_id: 17, name: "UnknownImportedName" } : row,
+    );
+    const clean = planWorkbenchUpgrade(observe({ officialRows: importedRows }));
+    assert.strictEqual(clean.kind, "ready");
+    if (clean.kind === "ready") {
+      assert.strictEqual(clean.official.sourceVersion, 16);
+      assert.isTrue(clean.official.hasPendingMigrations);
+      assert.isTrue(clean.requiresBackup);
+    }
+    for (const reservedId of [109, 110, 111]) {
+      const rows = migrationEntries
+        .filter(([id]) => id <= reservedId)
+        .map(([migration_id, name]) => ({
+          migration_id,
+          name:
+            migration_id === 17
+              ? "UnknownImportedName"
+              : migration_id === reservedId
+                ? "UnknownReservedMigration"
+                : name,
+        }));
+      const plan = planWorkbenchUpgrade(observe({ officialRows: rows }));
+      assert.strictEqual(
+        plan.kind,
+        "rejected",
+        `unknown reserved ${reservedId} cannot use imported consent`,
+      );
+    }
+    const column = {
+      name: "partial_column",
+      type: "TEXT",
+      notnull: 0,
+      dflt_value: null,
+      pk: 0,
+    } as const;
+    for (const tableName of Object.keys(absentContextSchema.contextTableColumns)) {
+      const plan = planWorkbenchUpgrade(
+        observe({
+          officialRows: importedRows,
+          schemaState: {
+            ...baselineSchema,
+            contextTableColumns: {
+              ...absentContextSchema.contextTableColumns,
+              [tableName]: [column],
+            },
+          },
+        }),
+      );
+      assert.strictEqual(plan.kind, "rejected", `untracked ${tableName} must be rejected`);
+    }
+    for (const name of [
+      "context_snapshot_id",
+      "context_input_digest",
+      "context_message_id",
+      "context_phase",
+    ]) {
+      const plan = planWorkbenchUpgrade(
+        observe({
+          officialRows: importedRows,
+          schemaState: {
+            ...baselineSchema,
+            contextDeliveryColumns: [{ ...column, name }],
+          },
+        }),
+      );
+      assert.strictEqual(
+        plan.kind,
+        "rejected",
+        `untracked delivery column ${name} must be rejected`,
+      );
+    }
+  }),
+);
+
+it.effect(
+  "rejects foreign imported prefix 17 followed by exact legacy111 and its complete Context schema",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations({ toMigrationInclusive: 108 });
+      yield* ContextV1Migration;
+      yield* sql`INSERT INTO effect_sql_migrations (migration_id, name) VALUES (111, 'ContextV1')`;
+      yield* sql`UPDATE effect_sql_migrations SET name = 'UnknownImportedName' WHERE migration_id = 17`;
+      const before =
+        yield* sql`SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id`;
+      const plan = yield* inspectWorkbenchUpgradePlan;
+      assert.strictEqual(plan.kind, "rejected");
+      assert.deepStrictEqual(
+        yield* sql`SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id`,
+        before,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT name FROM sqlite_master WHERE name IN ('workbench_sql_migrations', 'workbench_legacy_migration_adoptions')`,
+        [],
+      );
+    }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );

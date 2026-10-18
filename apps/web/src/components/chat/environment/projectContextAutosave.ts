@@ -21,6 +21,7 @@ export interface ProjectContextAutosaveState {
   readonly draft: ProjectContextFields;
   readonly status: ProjectContextAutosaveStatus;
   readonly dirty: boolean;
+  readonly pending: boolean;
   readonly saving: boolean;
   readonly queued: boolean;
   readonly error: ProjectContextAutosaveError | null;
@@ -90,6 +91,9 @@ export class ProjectContextAutosave {
   readonly projectId: ProjectContextSettings["projectId"];
 
   private readonly api: ContextApi;
+  private available = true;
+  private detachedDraftDiscarded = false;
+  private readonly availabilityOwners = new Map<object, boolean>();
   private readonly debounceMs: number;
   private readonly listeners = new Set<() => void>();
   private base: ProjectContextSettings;
@@ -125,6 +129,23 @@ export class ProjectContextAutosave {
     return () => this.listeners.delete(listener);
   };
 
+  /** Multiple chat surfaces can share this queue; one unmount must not pause another. */
+  setOwnerAvailable(owner: object, available: boolean | null): void {
+    if (available === null) this.availabilityOwners.delete(owner);
+    else this.availabilityOwners.set(owner, available);
+    this.setAvailable([...this.availabilityOwners.values()].some(Boolean));
+  }
+
+  /** Pause unsent writes while negotiation is unknown without abandoning this queue. */
+  setAvailable(available: boolean): void {
+    if (this.available === available) return;
+    this.available = available;
+    if (!available) {
+      this.clearTimer();
+      this.autoDue = false;
+    } else if (!this.currentError() && this.shouldSaveCurrentDraft()) this.schedule();
+  }
+
   setDraft(fields: ProjectContextFields): void {
     if (this.resolving) return;
     if (typeof fields.projectGoal !== "string" || typeof fields.projectInstructions !== "string") {
@@ -132,6 +153,7 @@ export class ProjectContextAutosave {
     }
     if (sameFields(this.draft, fields)) return;
 
+    this.detachedDraftDiscarded = false;
     this.draft = copyFields(fields);
     this.draftVersion += 1;
     this.validationError = this.validateLength(fields);
@@ -143,9 +165,11 @@ export class ProjectContextAutosave {
 
   /** Cancel the debounce and await every serial write for this project's latest draft. */
   async flush(): Promise<boolean> {
+    if (!this.available) return false;
     this.clearTimer();
     this.autoDue = false;
     for (;;) {
+      if (!this.available) return false;
       if (this.inFlight) {
         await this.inFlight.catch(() => undefined);
         continue;
@@ -162,6 +186,7 @@ export class ProjectContextAutosave {
 
   /** Query the original command before retrying; uncertain writes reuse its command id. */
   async retry(): Promise<boolean> {
+    if (!this.available) return false;
     if (this.resolving) return false;
     if (this.currentError()?.code === "conflict" || this.validationError) return false;
     if (this.inFlight) {
@@ -175,6 +200,7 @@ export class ProjectContextAutosave {
       try {
         const result = await this.api.getCommandResult({ commandId: this.attempt.commandId });
         if (result.status === "unknown") {
+          this.requireAvailable();
           const replayed = await this.api.saveProject(this.toSaveInput(this.attempt));
           const finalResult =
             replayed.status === "unknown"
@@ -206,6 +232,7 @@ export class ProjectContextAutosave {
 
   /** Adopt only a server-confirmed value, including after any already-sent write settles. */
   async acceptSaved(): Promise<boolean> {
+    if (!this.available) return false;
     if (this.resolving) return false;
     this.resolving = true;
     this.clearTimer();
@@ -231,6 +258,7 @@ export class ProjectContextAutosave {
 
   /** Rebase the current draft on the latest server revision, then explicitly save it. */
   async keepDraft(): Promise<boolean> {
+    if (!this.available) return false;
     if (this.resolving) return false;
     this.resolving = true;
     this.clearTimer();
@@ -257,7 +285,25 @@ export class ProjectContextAutosave {
     return valid ? this.flush() : false;
   }
 
+  /** Explicitly discard local edits after ownership changes; never replay or cancel old commands. */
+  discardDetachedDraft(): boolean {
+    if (this.available) return false;
+    this.clearTimer();
+    this.autoDue = false;
+    this.detachedDraftDiscarded = true;
+    this.draft = fieldsFrom(this.base);
+    this.draftVersion += 1;
+    this.validationError = null;
+    this.publish();
+    return true;
+  }
+
   async discard(): Promise<boolean> {
+    if (!this.available && !this.inFlight && !this.attempt) {
+      this.adopt(this.base);
+      this.publish();
+      return true;
+    }
     return this.acceptSaved();
   }
 
@@ -343,6 +389,7 @@ export class ProjectContextAutosave {
       draft: copyFields(this.draft),
       status,
       dirty,
+      pending: !this.detachedDraftDiscarded && (dirty || saving || this.attempt !== null),
       saving,
       queued: Boolean(this.inFlightAttempt && !sameFields(this.draft, this.inFlightAttempt.fields)),
       error,
@@ -350,6 +397,7 @@ export class ProjectContextAutosave {
   }
 
   private publish(): void {
+    if (this.detachedDraftDiscarded) this.draft = fieldsFrom(this.base);
     this.snapshot = this.createState();
     for (const listener of this.listeners) listener();
   }
@@ -380,6 +428,7 @@ export class ProjectContextAutosave {
 
   private schedule(): void {
     this.clearTimer();
+    if (!this.available) return;
     this.timer = setTimeout(() => {
       this.timer = null;
       if (this.currentError()) return;
@@ -399,6 +448,7 @@ export class ProjectContextAutosave {
   }
 
   private async startSave(): Promise<void> {
+    if (!this.available) return;
     if (this.inFlight) return this.inFlight;
     if (this.currentError()) throw new Error(this.currentError()?.message);
     if (!this.isDirty()) return;
@@ -432,9 +482,20 @@ export class ProjectContextAutosave {
     return operation;
   }
 
+  private requireAvailable(): void {
+    if (this.available) return;
+    this.errorValue = makeError(
+      "failure",
+      "Context is disconnected. Reconnect before retrying this save.",
+      true,
+    );
+    throw new Error(this.errorValue.message);
+  }
+
   private async sendAndReconcile(attempt: SaveAttempt): Promise<ContextCommandResult> {
     let initialError: unknown = null;
     try {
+      this.requireAvailable();
       const result = await this.api.saveProject(this.toSaveInput(attempt));
       if (result.status !== "unknown") return result;
     } catch (error) {
@@ -442,6 +503,7 @@ export class ProjectContextAutosave {
     }
 
     try {
+      this.requireAvailable();
       const result = await this.api.getCommandResult({ commandId: attempt.commandId });
       if (result.status !== "unknown") return result;
     } catch (error) {
@@ -450,12 +512,14 @@ export class ProjectContextAutosave {
 
     // The original command is unknown, so replay the exact request with the same idempotency key.
     try {
+      this.requireAvailable();
       const replayed = await this.api.saveProject(this.toSaveInput(attempt));
       if (replayed.status !== "unknown") return replayed;
     } catch (error) {
       initialError = error;
     }
     try {
+      this.requireAvailable();
       const result = await this.api.getCommandResult({ commandId: attempt.commandId });
       if (result.status !== "unknown") return result;
     } catch (error) {
@@ -599,6 +663,7 @@ export class ProjectContextAutosave {
     const attempt = this.attempt;
     if (!attempt) return true;
     try {
+      this.requireAvailable();
       const result = await this.api.getCommandResult({ commandId: attempt.commandId });
       if (result.status === "pending" || result.status === "unknown") {
         this.errorValue = makeError(

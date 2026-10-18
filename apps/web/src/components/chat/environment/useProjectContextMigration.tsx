@@ -9,7 +9,12 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 import { newCommandId } from "~/lib/utils";
-import { readContextClient, readLegacyProjectInstructions } from "~/workbench/host/contextClient";
+import {
+  contextApiQueryIdentity,
+  readContextClient,
+  readLegacyProjectInstructions,
+  useContextClient,
+} from "~/workbench/host/contextClient";
 import { toastManager } from "~/components/ui/toast";
 import { Button } from "~/components/ui/button";
 import {
@@ -23,6 +28,8 @@ import {
 } from "~/components/ui/dialog";
 
 interface MigrationRequest {
+  readonly api: ContextApi;
+  readonly hostGeneration: string | null;
   readonly phase: "ownership" | "resolve";
   readonly settings: ProjectContextSettings;
   readonly migration: ContextMigrationRecord | null;
@@ -57,21 +64,33 @@ async function runIdempotentCommand(
   input: { readonly commandId: CommandAttempt["commandId"] },
   run: () => Promise<ContextCommandResult>,
   retryExisting: boolean,
+  stillCurrent: () => boolean,
 ): Promise<ContextCommandResult> {
+  const requireCurrentApi = () => {
+    const client = readContextClient();
+    if (!client.available || client.api !== api || !stillCurrent())
+      throw new Error("Context is disconnected. Reconnect before retrying.");
+  };
   let result: ContextCommandResult | null = null;
   if (retryExisting) {
     try {
+      requireCurrentApi();
       result = await api.getCommandResult({ commandId: attempt.commandId });
+      requireCurrentApi();
     } catch {
       // The original command may still be queryable after a reconnect; continue below.
     }
   }
   if (!result || result.status === "unknown" || result.status === "pending") {
     try {
+      requireCurrentApi();
       result = await run();
+      requireCurrentApi();
     } catch {
       try {
+        requireCurrentApi();
         result = await api.getCommandResult({ commandId: attempt.commandId });
+        requireCurrentApi();
       } catch {
         result = null;
       }
@@ -79,10 +98,14 @@ async function runIdempotentCommand(
   }
   if (result?.status === "unknown") {
     try {
+      requireCurrentApi();
       result = await run();
+      requireCurrentApi();
     } catch {
       try {
+        requireCurrentApi();
         result = await api.getCommandResult({ commandId: attempt.commandId });
+        requireCurrentApi();
       } catch {
         result = null;
       }
@@ -104,13 +127,39 @@ export function useProjectContextMigration(input: {
   readonly localProjectName: string;
   readonly localWorkspaceRoot: string;
   readonly isLocalDraft: boolean;
+  readonly hasPendingContextDraft?: boolean;
+  readonly hasDetachedContextDraft?: boolean;
+  readonly contextDataInstanceId?: string | null;
 }): { readonly beforeFirstSend: () => Promise<boolean>; readonly dialog: ReactNode } {
+  const contextClient = useContextClient();
+  const latestInput = useRef(input);
+  useLayoutEffect(() => {
+    latestInput.current = input;
+  }, [input]);
+  const isCurrentContext = useCallback(
+    (api: ContextApi, hostGeneration: string | null, dataInstanceId?: string) => {
+      const client = readContextClient();
+      const latest = latestInput.current;
+      return (
+        client.api === api &&
+        client.generation === hostGeneration &&
+        client.available &&
+        !(latest.hasPendingContextDraft && latest.hasDetachedContextDraft) &&
+        (!dataInstanceId ||
+          !latest.contextDataInstanceId ||
+          latest.contextDataInstanceId === dataInstanceId)
+      );
+    },
+    [],
+  );
   const [request, setRequest] = useState<MigrationRequest | null>(null);
   const [busy, setBusy] = useState(false);
   const pendingSendRef = useRef<PendingSend | null>(null);
   const claimAttemptRef = useRef<CommandAttempt | null>(null);
   const resolveAttemptRef = useRef<CommandAttempt | null>(null);
   const identityKey = JSON.stringify([
+    contextApiQueryIdentity(contextClient.api),
+    contextClient.generation,
     input.projectId,
     input.threadId,
     input.isLocalDraft,
@@ -157,12 +206,30 @@ export function useProjectContextMigration(input: {
 
   const beforeFirstSend = useCallback(async (): Promise<boolean> => {
     if (!input.isLocalDraft || !input.projectId) return true;
+    if (input.hasDetachedContextDraft && input.hasPendingContextDraft) {
+      toastManager.add({
+        type: "error",
+        title: "Previous Context draft is not resolved",
+        description: "Discard the preserved draft before starting a chat on this connection.",
+      });
+      return false;
+    }
     const contextClient = readContextClient();
-    if (!contextClient.supported) return true;
+    if (contextClient.capability === "unsupported") {
+      if (!input.hasPendingContextDraft) return true;
+      toastManager.add({
+        type: "error",
+        title: "Project context is not saved",
+        description:
+          "Resolve or discard the Context draft before using this server without Context support.",
+      });
+      return false;
+    }
     const generation = generationRef.current;
+    const hostGeneration = contextClient.generation;
     if (pendingSendRef.current) return pendingSendRef.current.promise;
     const api = contextClient.api;
-    if (!api) {
+    if (!api || !contextClient.available) {
       toastManager.add({
         type: "error",
         title: "Project context is unavailable",
@@ -185,7 +252,11 @@ export function useProjectContextMigration(input: {
       });
       return false;
     }
-    if (generationRef.current !== generation) return false;
+    if (
+      generationRef.current !== generation ||
+      !isCurrentContext(api, hostGeneration, settings.dataInstanceId)
+    )
+      return false;
     if (settings.migration?.status === "completed") return true;
     if (!settings.migration && legacyInstructions.length === 0) return true;
 
@@ -203,8 +274,14 @@ export function useProjectContextMigration(input: {
       });
       return false;
     }
-    if (generationRef.current !== generation) return false;
+    if (
+      generationRef.current !== generation ||
+      !isCurrentContext(api, hostGeneration, settings.dataInstanceId)
+    )
+      return false;
     const nextRequest: MigrationRequest = {
+      api,
+      hostGeneration,
       phase: migration ? "resolve" : "ownership",
       settings,
       migration,
@@ -222,7 +299,16 @@ export function useProjectContextMigration(input: {
     });
     pendingSendRef.current = { generation, promise, resolve: resolvePending };
     return promise;
-  }, [input.isLocalDraft, input.localProjectName, input.localWorkspaceRoot, input.projectId]);
+  }, [
+    input.isLocalDraft,
+    input.localProjectName,
+    input.localWorkspaceRoot,
+    input.projectId,
+    input.hasPendingContextDraft,
+    input.hasDetachedContextDraft,
+    input.contextDataInstanceId,
+    isCurrentContext,
+  ]);
 
   const claim = useCallback(async () => {
     if (
@@ -233,8 +319,13 @@ export function useProjectContextMigration(input: {
     )
       return;
     const generation = request.generation;
-    const api = readContextClient().api;
-    if (!api) {
+    const currentClient = readContextClient();
+    const api = currentClient.api;
+    if (
+      !api ||
+      !isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId) ||
+      api !== request.api
+    ) {
       setRequest({ ...request, error: "Context is unavailable on this connection." });
       return;
     }
@@ -260,11 +351,20 @@ export function useProjectContextMigration(input: {
         commandInput,
         () => api.claimMigration(commandInput),
         retryExisting,
+        () => isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId),
       );
-      if (generationRef.current !== generation) return;
+      if (
+        generationRef.current !== generation ||
+        !isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId)
+      )
+        return;
       if (result.status === "saved") {
         const latest = result.project ?? (await api.getProject({ projectId: input.projectId }));
-        if (generationRef.current !== generation) return;
+        if (
+          generationRef.current !== generation ||
+          !isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId)
+        )
+          return;
         const savedMigration = result.migration ?? latest.migration;
         if (!savedMigration || savedMigration.sourceDigest !== request.sourceDigest) {
           throw new Error("The claimed legacy source could not be confirmed.");
@@ -281,7 +381,11 @@ export function useProjectContextMigration(input: {
       }
       if (result.status === "conflict") {
         const latest = result.project ?? (await api.getProject({ projectId: input.projectId }));
-        if (generationRef.current !== generation) return;
+        if (
+          generationRef.current !== generation ||
+          !isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId)
+        )
+          return;
         const serverMigration = result.migration ?? latest.migration;
         if (serverMigration?.sourceDigest === request.sourceDigest) {
           claimAttemptRef.current = null;
@@ -307,13 +411,17 @@ export function useProjectContextMigration(input: {
           "The claim is still being processed. Retry to confirm the original command.",
       );
     } catch (error) {
-      if (generationRef.current !== generation) return;
+      if (
+        generationRef.current !== generation ||
+        !isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId)
+      )
+        return;
       const message = error instanceof Error ? error.message : "Unable to claim legacy context.";
       setRequest((current) => (current ? { ...current, error: message } : current));
     } finally {
       if (generationRef.current === generation) setBusy(false);
     }
-  }, [input.projectId, request]);
+  }, [input.projectId, request, isCurrentContext]);
 
   const resolve = useCallback(
     async (choice: "keep_saved" | "use_legacy") => {
@@ -326,8 +434,13 @@ export function useProjectContextMigration(input: {
       )
         return;
       const generation = request.generation;
-      const api = readContextClient().api;
-      if (!api) {
+      const currentClient = readContextClient();
+      const api = currentClient.api;
+      if (
+        !api ||
+        !isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId) ||
+        api !== request.api
+      ) {
         setRequest({ ...request, error: "Context is unavailable on this connection." });
         return;
       }
@@ -354,11 +467,20 @@ export function useProjectContextMigration(input: {
           commandInput,
           () => api.resolveMigration(commandInput),
           retryExisting,
+          () => isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId),
         );
-        if (generationRef.current !== generation) return;
+        if (
+          generationRef.current !== generation ||
+          !isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId)
+        )
+          return;
         if (result.status === "saved") {
           const saved = result.project ?? (await api.getProject({ projectId: input.projectId }));
-          if (generationRef.current !== generation) return;
+          if (
+            generationRef.current !== generation ||
+            !isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId)
+          )
+            return;
           const savedMigration = result.migration ?? saved.migration;
           const expectedInstructions =
             choice === "use_legacy"
@@ -374,12 +496,19 @@ export function useProjectContextMigration(input: {
               "Migration completed without matching project values. Read back and retry.",
             );
           }
-          settleSend(true, generation);
+          settleSend(
+            isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId),
+            generation,
+          );
           return;
         }
         if (result.status === "conflict") {
           const latest = result.project ?? (await api.getProject({ projectId: input.projectId }));
-          if (generationRef.current !== generation) return;
+          if (
+            generationRef.current !== generation ||
+            !isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId)
+          )
+            return;
           const savedMigration = result.migration ?? latest.migration ?? request.migration;
           resolveAttemptRef.current = null;
           setRequest({
@@ -401,7 +530,11 @@ export function useProjectContextMigration(input: {
             "The migration is still processing. Retry to confirm the original command.",
         );
       } catch (error) {
-        if (generationRef.current !== generation) return;
+        if (
+          generationRef.current !== generation ||
+          !isCurrentContext(api, request.hostGeneration, request.settings.dataInstanceId)
+        )
+          return;
         const message =
           error instanceof Error ? error.message : "Unable to resolve legacy context.";
         setRequest((current) => (current ? { ...current, error: message } : current));
@@ -409,7 +542,7 @@ export function useProjectContextMigration(input: {
         if (generationRef.current === generation) setBusy(false);
       }
     },
-    [input.projectId, request, settleSend],
+    [input.projectId, request, settleSend, isCurrentContext],
   );
 
   const dialog = request ? (

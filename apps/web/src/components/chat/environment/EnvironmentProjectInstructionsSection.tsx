@@ -3,7 +3,15 @@
 // Layer: Environment panel section
 // Exports: EnvironmentProjectInstructionsSection
 
-import { useEffect, useId, useRef, useState, type ChangeEventHandler, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ChangeEventHandler,
+  type ReactNode,
+} from "react";
 import {
   CONTEXT_GOAL_MAX_LENGTH,
   CONTEXT_INSTRUCTIONS_MAX_LENGTH,
@@ -25,7 +33,7 @@ interface PendingProjectInstructionsSave {
   readonly lastCommitted: string;
 }
 
-function useProjectInstructionsAutosave({
+export function useProjectInstructionsAutosave({
   projectId,
   instructions,
   onChange,
@@ -51,7 +59,9 @@ function useProjectInstructionsAutosave({
     onChangeRef.current = onChange;
   }, [onChange]);
 
-  const flush = () => {
+  // Stable identity: `flush` is an effect dependency below, so a per-render
+  // closure would re-run the effects (and the unmount flush) on every keystroke.
+  const flush = useCallback(() => {
     if (debounceRef.current !== null) {
       window.clearTimeout(debounceRef.current);
       debounceRef.current = null;
@@ -65,7 +75,7 @@ function useProjectInstructionsAutosave({
     if (projectIdRef.current === pendingSave.projectId) {
       lastCommittedRef.current = pendingSave.value;
     }
-  };
+  }, []);
 
   useEffect(() => {
     const projectChanged = projectIdRef.current !== projectId;

@@ -18,6 +18,7 @@ import {
 } from "./release-artifact-provenance.ts";
 import {
   findLineageStructureViolations,
+  FROZEN_NATIVE_COMPATIBILITY_MIGRATION,
   parseMigrationLineage,
 } from "../check-migration-lineage.ts";
 import { runGit } from "./workbench-sync/git.ts";
@@ -318,7 +319,31 @@ export function parseSchemaVersions(
     }
   }
   const legacyFields = exportedObjectArray(declarations, "LEGACY_EXPERT_OFFICIAL_MIGRATIONS");
-  const workbenchFields = exportedObjectArray(declarations, "workbenchMigrationEntries");
+  const expertFields = exportedObjectArray(declarations, "workbenchMigrationEntries");
+  const hasContextCatalog = declarations.has("contextWorkbenchMigrationEntries");
+  const contextFields = hasContextCatalog
+    ? exportedObjectArray(declarations, "contextWorkbenchMigrationEntries")
+    : [];
+  if (hasContextCatalog || declarations.has("allWorkbenchMigrationEntries")) {
+    const aggregate = declarations.get("allWorkbenchMigrationEntries")?.initializer;
+    const entries = aggregate ? unwrapStaticAssertion(aggregate) : undefined;
+    const catalogs = ["workbenchMigrationEntries", "contextWorkbenchMigrationEntries"];
+    if (
+      !hasContextCatalog ||
+      !entries ||
+      !ts.isArrayLiteralExpression(entries) ||
+      entries.elements.length !== catalogs.length ||
+      entries.elements.some(
+        (entry, index) =>
+          !ts.isSpreadElement(entry) ||
+          !ts.isIdentifier(entry.expression) ||
+          entry.expression.text !== catalogs[index],
+      )
+    ) {
+      throw new Error("workbench-schema-catalog-is-invalid");
+    }
+  }
+  const workbenchFields = [...expertFields, ...contextFields];
   const formatVersionInitializer = declarations.get("WORKBENCH_SCHEMA_FORMAT_VERSION")?.initializer;
   const formatVersion = numberLiteral(formatVersionInitializer);
   if (formatVersion === undefined) throw new Error("workbench-schema-catalog-could-not-be-read");
@@ -333,7 +358,14 @@ export function parseSchemaVersions(
     return { id, name };
   });
   const workbenchEntries = workbenchFields.map((fields) => {
-    requireFields(fields, ["moduleId", "migrationId", "name", "checksum", "statement"]);
+    const isContextEffect = contextFields.includes(fields);
+    requireFields(fields, [
+      "moduleId",
+      "migrationId",
+      "name",
+      "checksum",
+      isContextEffect ? "effect" : "statement",
+    ]);
     const moduleExpression = fields.get("moduleId");
     const moduleId =
       stringLiteral(moduleExpression) ??
@@ -351,6 +383,29 @@ export function parseSchemaVersions(
       !/^sha256:[0-9a-f]{64}$/u.test(checksum)
     ) {
       throw new Error("workbench-schema-catalog-is-invalid");
+    }
+    if (isContextEffect) {
+      const effect = fields.get("effect");
+      const frozen = FROZEN_NATIVE_COMPATIBILITY_MIGRATION;
+      const importsFrozenScript =
+        effect &&
+        ts.isIdentifier(effect) &&
+        workbenchSource.statements.some(
+          (statement) =>
+            ts.isImportDeclaration(statement) &&
+            ts.isStringLiteral(statement.moduleSpecifier) &&
+            statement.moduleSpecifier.text === "../../persistence/Migrations/111_ContextV1.ts" &&
+            statement.importClause?.name?.text === effect.text,
+        );
+      if (
+        moduleId !== "context" ||
+        id !== 1 ||
+        name !== frozen.name ||
+        checksum !== `sha256:${frozen.sha256}` ||
+        !importsFrozenScript
+      ) {
+        throw new Error("workbench-schema-catalog-is-invalid");
+      }
     }
     return { moduleId, id };
   });

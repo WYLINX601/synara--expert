@@ -49,8 +49,9 @@ import { makeCodexAdapterLive } from "../src/provider/Layers/CodexAdapter.ts";
 import { CodexAdapter } from "../src/provider/Services/CodexAdapter.ts";
 import { ProviderService } from "../src/provider/Services/ProviderService.ts";
 import { ServerSettingsService } from "../src/serverSettings.ts";
+import { ServerSecretStore } from "../src/auth/Services/ServerSecretStore.ts";
 import { CheckpointReactorLive } from "../src/orchestration/Layers/CheckpointReactor.ts";
-import { StudioOutputReactorLive } from "../src/orchestration/Layers/StudioOutputReactor.ts";
+import { HubOutputReactorLive } from "../src/orchestration/Layers/HubOutputReactor.ts";
 import { SidechatExpiryReactorLive } from "../src/orchestration/Layers/SidechatExpiryReactor.ts";
 import { OrchestrationEngineLive } from "../src/orchestration/Layers/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "../src/orchestration/Layers/ProjectionPipeline.ts";
@@ -265,6 +266,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+      Layer.provide(ServerSettingsService.layerTest()),
     );
     const providerSessionDirectoryLayer = ProviderSessionDirectoryLive.pipe(
       Layer.provide(ProviderSessionRuntimeRepositoryLive),
@@ -291,10 +293,28 @@ export const makeOrchestrationIntegrationHarness = (
       ? makeProviderServiceLive().pipe(
           Layer.provide(providerSessionDirectoryLayer),
           Layer.provide(realCodexRegistry),
+          Layer.provide(ServerSettingsService.layerTest()),
+          Layer.provide(
+            Layer.succeed(ServerSecretStore, {
+              get: () => Effect.succeed(null),
+              set: () => Effect.void,
+              getOrCreateRandom: (_name, bytes) => Effect.succeed(new Uint8Array(bytes)),
+              remove: () => Effect.void,
+            }),
+          ),
         )
       : makeProviderServiceLive().pipe(
           Layer.provide(providerSessionDirectoryLayer),
           Layer.provide(fakeRegistry!),
+          Layer.provide(ServerSettingsService.layerTest()),
+          Layer.provide(
+            Layer.succeed(ServerSecretStore, {
+              get: () => Effect.succeed(null),
+              set: () => Effect.void,
+              getOrCreateRandom: (_name, bytes) => Effect.succeed(new Uint8Array(bytes)),
+              remove: () => Effect.void,
+            }),
+          ),
         );
 
     const checkpointStoreLayer = CheckpointStoreLive.pipe(Layer.provide(GitCoreLive));
@@ -319,7 +339,7 @@ export const makeOrchestrationIntegrationHarness = (
     const textGenerationLayer = Layer.succeed(TextGeneration, {
       generateBranchName: () => Effect.succeed({ branch: null }),
     } as unknown as TextGenerationShape);
-    const studioOutputReactorLayer = StudioOutputReactorLive.pipe(
+    const hubOutputReactorLayer = HubOutputReactorLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
     );
     const providerHealthLayer = Layer.succeed(ProviderHealth, {
@@ -331,7 +351,7 @@ export const makeOrchestrationIntegrationHarness = (
     const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
       Layer.provideMerge(providerHealthLayer),
-      Layer.provideMerge(studioOutputReactorLayer),
+      Layer.provideMerge(hubOutputReactorLayer),
       Layer.provideMerge(gitCoreLayer),
       Layer.provideMerge(textGenerationLayer),
       Layer.provideMerge(ServerSettingsService.layerTest()),
@@ -351,7 +371,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(runtimeIngestionLayer),
       Layer.provideMerge(providerCommandReactorLayer),
       Layer.provideMerge(checkpointReactorLayer),
-      Layer.provideMerge(studioOutputReactorLayer),
+      Layer.provideMerge(hubOutputReactorLayer),
       Layer.provideMerge(threadGitMetadataReactorLayer),
       Layer.provideMerge(sidechatExpiryReactorLayer),
     );
@@ -359,6 +379,7 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(ContextRepositoryLive),
       Layer.provide(persistenceLayer),
       Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir)),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(NodeServices.layer),
     );
 

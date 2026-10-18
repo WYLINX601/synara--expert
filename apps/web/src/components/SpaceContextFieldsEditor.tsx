@@ -25,6 +25,7 @@ export function SpaceContextFieldsEditor(props: {
   readonly onChange: (draft: SpaceContextFieldsDraft) => void;
   readonly onUseSaved: () => void;
   readonly onKeepDraft: () => void;
+  readonly keepDraftDisabled?: boolean;
   readonly onRetry: () => void;
 }) {
   const goalId = useId();
@@ -105,7 +106,12 @@ export function SpaceContextFieldsEditor(props: {
             <Button type="button" size="xs" variant="outline" onClick={props.onUseSaved}>
               Use saved values
             </Button>
-            <Button type="button" size="xs" onClick={props.onKeepDraft}>
+            <Button
+              type="button"
+              size="xs"
+              disabled={props.keepDraftDisabled}
+              onClick={props.onKeepDraft}
+            >
               Keep my edits
             </Button>
           </div>

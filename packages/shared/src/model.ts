@@ -1,4 +1,5 @@
 import {
+  CLAUDE_CODE_EFFORT_OPTIONS,
   DEFAULT_MODEL_BY_PROVIDER,
   MODEL_CAPABILITIES_INDEX,
   MODEL_OPTIONS_BY_PROVIDER,
@@ -46,6 +47,7 @@ export interface SelectableModelOption {
   name: string;
 }
 
+const CLAUDE_CODE_EFFORT_SET: ReadonlySet<string> = new Set(CLAUDE_CODE_EFFORT_OPTIONS);
 const PI_THINKING_LEVEL_SET = new Set<PiThinkingLevel>([
   "off",
   "minimal",
@@ -63,6 +65,11 @@ export const EMPTY_MODEL_CAPABILITIES: ModelCapabilities = {
   promptInjectedEffortLevels: [],
   contextWindowOptions: [],
 };
+
+function isClaudeCodeEffort(value: string): value is ClaudeCodeEffort {
+  return CLAUDE_CODE_EFFORT_SET.has(value);
+}
+
 export function getModelOptions(provider: ProviderKind = "codex") {
   return MODEL_OPTIONS_BY_PROVIDER[provider];
 }
@@ -672,25 +679,31 @@ export function resolveNewestKnownClaudeFamilyModel(
 
 export function resolveGrokEffortFamily(model: string): "build" | "4.5" | "4.6" {
   const slug = model.trim().toLowerCase();
+  const version = /grok-(\d+)\.(\d+)/u.exec(slug);
+  const major = version ? Number(version[1]) : null;
+  const minor = version ? Number(version[2]) : null;
+  // grok-4.7-build-fast is the fast tier of Grok 4.7, not the retired
+  // grok-build product. A Grok 4.5+ id keeps that generation's ladder even
+  // when the slug also contains "build" or "code-fast".
+  const versionedGeneration =
+    major !== null && minor !== null && (major > 4 || (major === 4 && minor >= 5));
   if (
-    slug.includes("build") ||
-    slug.includes("code-fast") ||
-    slug === "grok-4" ||
-    slug === "grok-4.3" ||
-    slug.startsWith("grok-4.3-")
+    !versionedGeneration &&
+    (slug.includes("build") ||
+      slug.includes("code-fast") ||
+      slug === "grok-4" ||
+      slug === "grok-4.3" ||
+      slug.startsWith("grok-4.3-"))
   ) {
     return "build";
   }
 
-  const version = /grok-(\d+)\.(\d+)/u.exec(slug);
-  if (!version) {
+  if (major === null || minor === null) {
     // Preserve the legacy Grok Build ladder for custom or future aliases we
     // cannot classify. Discovery can still opt known versioned models into
     // the newer ladders without silently changing persisted custom models.
     return "build";
   }
-  const major = Number(version[1]);
-  const minor = Number(version[2]);
   if (major < 4 || (major === 4 && minor <= 3)) {
     return "build";
   }
@@ -909,7 +922,10 @@ interface ClaudeSpawnProfile {
 function claudeSpawnProfile(selection: Extract<ModelSelection, { provider: "claudeAgent" }>) {
   const caps = getModelCapabilities("claudeAgent", selection.model);
   const requestedEffort = trimOrNull(selection.options?.effort ?? null);
-  const effort = requestedEffort && hasEffortLevel(caps, requestedEffort) ? requestedEffort : null;
+  const effort =
+    requestedEffort && isClaudeCodeEffort(requestedEffort) && hasEffortLevel(caps, requestedEffort)
+      ? requestedEffort
+      : null;
   return {
     maxEffort: getEffectiveClaudeCodeEffort(effort) === "max",
     autoCompactWindow: normalizeClaudeModelOptions(selection.model, selection.options)

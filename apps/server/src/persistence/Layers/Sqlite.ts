@@ -166,7 +166,7 @@ const makeSetup = ({
       // official migrator. The shared read-only plan is also passed to backup
       // and resume so inspection, recovery, and execution use one decision.
       const fullUpgrade = Effect.gen(function* () {
-        if (upgradePlan.legacyOfficialMigrations.length > 0) {
+        if (upgradePlan.legacyMigrations.length > 0) {
           yield* adoptLegacyExpertMigrations();
         }
         yield* runMigrations();
@@ -180,8 +180,9 @@ const makeSetup = ({
           finalPlan.official.hasPendingMigrations ||
           finalPlan.workbench.hasPendingMigrations ||
           finalPlan.format.hasPendingUpgrade ||
-          finalPlan.legacyOfficialMigrations.length > 0 ||
-          finalPlan.workbench.adoptedMigrationIds.length > 0
+          finalPlan.legacyMigrations.length > 0 ||
+          finalPlan.workbench.adoptedMigrationIds.length > 0 ||
+          finalPlan.workbench.adoptedContextMigrationIds.length > 0
         ) {
           return yield* Effect.fail(
             new WorkbenchMigrationError({

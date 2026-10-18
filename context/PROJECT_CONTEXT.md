@@ -1,6 +1,6 @@
 # Linx / Synara Expert 项目上下文
 
-更新日期：2026-10-16
+更新日期：2026-10-18
 
 范围：以 Linx V2.0 组织长期方向管理、专业任务执行与能力进化，并在现有 Synara Expert / MCP / 工作台适配层上增量推进。本文只负责项目路由、设计边界与当前状态；产品、技术和验收细节以链接的权威文档为准。
 
@@ -27,12 +27,18 @@
 ### 规范落地状态与维护入口
 
 - **规范已落地，代码已对齐**：规范来源与早期文档检查见[规范落地验收](../docs/workbench-adaptation-acceptance.md#standards-rollout-20261016)；后续代码收口与实际检查见[架构对齐验收](../docs/workbench-adaptation-acceptance.md#alignment-implementation-20261016)。Context 窄客户端、Space 命令能力、清单覆盖/依赖检查、迁移归属检查及升级状态范围已实现；正式候选增加第七项边界门禁。
-- **来源基线已校准，当前验收独立**：用户明确确认后，按已核验的历史验收与真实合入记录登记 v0.9.2 来源，完整归档旧 ref 的候选状态，不转移历史 ready。实际 `status` 为 no-candidate、baseline reasons 为空；当前 main 及隔离 v1.0.1 候选均未获新的正式验收。详见[校准结果与回执](../workbench/WB-00-upstream-evidence.md#baseline-reconciled-20261016)。
-- **已登记的兼容例外**：Context 原生 tracker 中的 `111_ContextV1` 保留不迁移；身份、路径及脚本内容被冻结，后续新增原生迁移必须能证明来自固定上游，Linx 扩展使用独立 ledger。共享数据库与 Context 运行时未改；不要把此例外理解为继续追加本地原生迁移编号。
-- **本轮检查结果**：格式、lint、类型、边界、迁移及受影响 browser 通过；完整六包测试 13,364 通过、2 失败、36 跳过，失败仍为既有桌面 Beta 两项。本轮规则实现不等于正式候选 ready，具体范围与未运行项见[架构对齐验收](../docs/workbench-adaptation-acceptance.md#alignment-implementation-20261016)。
-- **维护续办**：Beta 两项失败已修复为隔离安装探测，聚焦 32 项通过，完整六包已为 13,366 通过、0 失败、36 既有跳过；工作区检查与正式候选验收分开，详见[维护验收](../docs/workbench-adaptation-acceptance.md#maintenance-followup-20261016)。远端 prepare 已确认是固定 v1.0.1 的 30 项合并冲突，当前源码隔离快照有 46 项；上游 `111_GroupLibraryHosting` 与冻结的 `111_ContextV1` 冲突，用户已明确确认推进[精确兼容方案](../docs/workbench-implementation-plan.md#v101-compatibility-proposal)与隔离测试，当前 main 的迁移实现仍保持原样，升级候选尚未完成。
+- **来源基线已校准，当前验收独立**：用户明确确认后，按已核验的历史验收与真实合入记录登记 v0.9.2 来源，完整归档旧 ref 的候选状态，不转移历史 ready。冻结 v1.0.5 前 main B 的 `status` 为 no-candidate、baseline reasons 为空；这份快照不代表后续候选或 main 的验收状态。详见[校准结果与回执](../workbench/WB-00-upstream-evidence.md#baseline-reconciled-20261016)，活动升级见下节。
+- **已登记的兼容例外（升级前状态）**：B 的 Context 原生 tracker 中 `111_ContextV1` 保留不迁移；身份、路径及脚本内容被冻结，后续新增原生迁移必须能证明来自固定上游，Linx 扩展使用独立 ledger。本次 v1.0.5 候选按用户授权改为精确识别后转入 context1 ledger，先备份、事务内审计接管；冻结原文件和摘要保持不变。该候选尚未验收，不表示 main 已执行接管。不要追加本地原生迁移编号。
+- **架构对齐历史检查**：格式、lint、类型、边界、迁移及受影响 browser 通过；完整六包首次 13,364 通过、2 失败、36 跳过，Beta 两项随后修复。具体范围见[架构对齐验收](../docs/workbench-adaptation-acceptance.md#alignment-implementation-20261016)。这些数量不适用于 v1.0.5 候选。
+- **维护续办**：Beta 两项已修复为隔离安装探测，聚焦 32 项通过，完整六包随后为 13,366 通过、0 失败、36 既有跳过，详见[维护验收](../docs/workbench-adaptation-acceptance.md#maintenance-followup-20261016)。远端 prepare 的固定 v1.0.1 有 30 项合并冲突、原本地快照有 46 项；该目标已被 v1.0.5 替代。旧 111 精确兼容授权和原由保留在[兼容方案](../docs/workbench-implementation-plan.md#v101-compatibility-proposal)，活动实现及验收见下节。
 - **远端自动保护未启用**：2026-10-16 只读 API 返回 main 未保护、rulesets 为空；按开发 SOP 人工执行相同门禁，不宣称已有强制保护。
 - **定时链路已触发但未成功验收**：查询返回 1 次 schedule，prepare 失败，verify/publish 跳过；下一维护任务先查该失败，再验收手动与定时路径。运行链接和范围仅维护在[远端核对](../workbench/WB-05-automation.md#2026-10-16-remote-read-only-audit)。本轮未改变仓库设置、触发 workflow、推送或发布。
+
+## 当前升级：Synara v1.0.5 源码与验收入口
+
+2026-10-16 用户批准固定合并官方 `v1.0.5` / `1eb2beb6b5019fc311f23a3deb5362f68d07d537`，采用新版原生界面并保留 Linx Expert、MCP、Space / Context。现有 63 文件开发已完整保存为基线 B `21052b8338e4c71514df31fee9a422778ac626c9`；隔离分支为 `codex/sync-v1-0-5-1eb2beb6`，本次原始合并有 57 个冲突文件。v1.0.1 不再是活动目标。2026-10-18 原临时候选目录被清理后，已从保留的 Git 合并状态及逐份核对的会话源码修改恢复至项目内持久目录；失去的旧日志不作验收。候选包含精确旧 111 接管、恢复 v3、Context 连接与草稿保护，以及会话重启必需 MCP 预检；实现、独立复核和冻结前检查统一见升级验收。
+
+只有最终候选 C 通过全部正式要求才快进本地 main；本轮不推送、不安装日用应用、不迁移用户数据库、不发布。固定输入、归档和兼容决定见 [v1.0.5 升级验收](../docs/workbench-v105-upgrade-acceptance.md)。该文是冻结前来源说明；最终 C、同源检查、运行与合入结果读取项目内 `.synara/upgrades/v1.0.5/evidence/` 的交付回执及 Git common-dir 的正式 sync 状态，以实际 HEAD 和记录绑定为准。此前基线或冻结前检查不作为 C 的验收，缺少完整回执时继续保持待验收。
 
 ## 当前目标
 
@@ -40,7 +46,7 @@
 
 把 Expert 作为可复用、可检查、可固定版本的工作能力配置，组合 Persona、Skills 和 MCP 工具；Task 在首次启动时绑定不可变快照，并记录实际生效的 Provider、模型、SDK / CLI 版本和 lifecycle generation。
 
-Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的本地功能提交。本轮按用户确认，以浏览器版验收为准，暂不执行桌面运行、打包、安装、远端推送或发布。整合结果、源码清单及实际检查统一见[Context 接入验收](../docs/space-project-context-v1-acceptance.md#8-2026-10-15-浏览器版整合补充)。原有桌面失败与跨平台发布缺口仍保留，不将旧运行证据改写为最新源码的通过结果。
+Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的本地功能提交。10 月 15 日浏览器整合的范围及检查见[Context 接入验收](../docs/space-project-context-v1-acceptance.md#8-2026-10-15-浏览器版整合补充)；当前 v1.0.5 升级另行授权隔离 Provider、桌面诊断打包及恢复验收，按上节固定目标执行。安装、远端推送与发布仍不在本轮范围。不将旧运行证据改写为最新源码的通过结果。
 
 ## 当前产品方案：Linx V2.0（2026-10-10 归档）
 
@@ -142,7 +148,7 @@ Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的�
 
 ### 后续验证与交付
 
-0. 来源基线校准已完成；按用户已确认的旧 111 精确兼容方案，在隔离候选中实现并测试，再处理 v1.0.1 的其余语义冲突。用户最新要求先解释定时合并机制；当前尚未完成或发布该升级。prepare 根因已确认，重跑本身不能修复冲突。
+0. 活动目标固定为 v1.0.5；完成隔离候选的独立审查并冻结 C，执行同源七项门禁及十项运行/产物要求，全部满足后才快进本地 main。来源校准和旧 111 授权沿用已确认结果；远端旧 prepare 冲突不通过触发重跑解决。
 1. Beta 两项既有测试失败已修复，保留此前失败及本次复跑证据；准备桌面交付时仍需准确源码的产物/身份与适用运行验收，测试通过不代表安装或发布。
 2. 本地已保存并整合专家 UI / 全局 MCP / 本机导入、适配层与 Context；远端推送、构建、安装与发布分别记录实际状态，不能互相替代。
 3. 按实际交付目标补齐当前源码的真实 Provider、取消/恢复、MCP、跨平台安装包和迁移验证；保留 Linux、Windows 与远端 HTTP MCP 的历史缺口，不搬用旧 SHA 的成功结论。

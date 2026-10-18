@@ -8,6 +8,12 @@ import {
   planMigrationLineageAliasRepairs,
 } from "../../persistence/Migrations.ts";
 import { migrationEntries } from "../../persistence/Migrations.ts";
+import ContextV1Migration from "../../persistence/Migrations/111_ContextV1.ts";
+import {
+  CONTEXT_SCHEMA_OBJECTS_QUERY,
+  validateFrozenContextSchema,
+  type SqliteSchemaObject,
+} from "./FrozenContextSchema.ts";
 
 export const WORKBENCH_MIGRATIONS_TABLE = "workbench_sql_migrations";
 export const WORKBENCH_SCHEMA_METADATA_TABLE = "workbench_schema_metadata";
@@ -23,8 +29,18 @@ export const LEGACY_EXPERT_OFFICIAL_MIGRATIONS = [
   { officialId: 109, officialName: "ProjectionThreadsExpertBinding", workbenchId: 1 },
   { officialId: 110, officialName: "ExpertAppliedRuntimeRecords", workbenchId: 2 },
 ] as const;
+export const LEGACY_CONTEXT_OFFICIAL_MIGRATIONS = [
+  { officialId: 111, officialName: "ContextV1", workbenchId: 1 },
+] as const;
+export const LEGACY_OFFICIAL_MIGRATIONS = [
+  ...LEGACY_EXPERT_OFFICIAL_MIGRATIONS,
+  ...LEGACY_CONTEXT_OFFICIAL_MIGRATIONS,
+] as const;
 export const LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK = Math.max(
   ...LEGACY_EXPERT_OFFICIAL_MIGRATIONS.map(({ officialId }) => officialId),
+);
+export const LEGACY_CONTEXT_OFFICIAL_HIGH_WATER_MARK = Math.max(
+  ...LEGACY_CONTEXT_OFFICIAL_MIGRATIONS.map(({ officialId }) => officialId),
 );
 
 const FROZEN_LEGACY_OFFICIAL_PREFIX_LENGTH = 108;
@@ -49,6 +65,54 @@ const EXPERT_RUNTIME_RECORD_COLUMNS = [
   { name: "runtime_version", type: "TEXT", notnull: 0, dflt_value: null, pk: 0 },
   { name: "lifecycle_generation", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
   { name: "applied_at", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+] as const;
+
+export const CONTEXT_TABLE_COLUMNS: Readonly<Record<string, readonly SqliteColumnInfo[]>> = {
+  context_meta: [
+    { name: "singleton", type: "INTEGER", notnull: 0, dflt_value: null, pk: 1 },
+    { name: "data_instance_id", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+  ],
+  context_spaces: [
+    { name: "space_id", type: "TEXT", notnull: 0, dflt_value: null, pk: 1 },
+    { name: "direction_goal", type: "TEXT", notnull: 1, dflt_value: "''", pk: 0 },
+    { name: "shared_instructions", type: "TEXT", notnull: 1, dflt_value: "''", pk: 0 },
+    { name: "revision", type: "INTEGER", notnull: 1, dflt_value: "0", pk: 0 },
+    { name: "updated_at", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+  ],
+  context_projects: [
+    { name: "project_id", type: "TEXT", notnull: 0, dflt_value: null, pk: 1 },
+    { name: "project_goal", type: "TEXT", notnull: 1, dflt_value: "''", pk: 0 },
+    { name: "project_instructions", type: "TEXT", notnull: 1, dflt_value: "''", pk: 0 },
+    { name: "revision", type: "INTEGER", notnull: 1, dflt_value: "0", pk: 0 },
+    { name: "updated_at", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+  ],
+  context_migrations: [
+    { name: "project_id", type: "TEXT", notnull: 0, dflt_value: null, pk: 1 },
+    { name: "source_digest", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+    { name: "legacy_instructions", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+    { name: "status", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+    { name: "choice", type: "TEXT", notnull: 0, dflt_value: null, pk: 0 },
+    { name: "updated_at", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+  ],
+  context_thread_bindings: [
+    { name: "thread_id", type: "TEXT", notnull: 0, dflt_value: null, pk: 1 },
+    { name: "mode", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+    { name: "snapshot_json", type: "TEXT", notnull: 0, dflt_value: null, pk: 0 },
+  ],
+  context_applied_runtime_records: [
+    { name: "thread_id", type: "TEXT", notnull: 0, dflt_value: null, pk: 1 },
+    { name: "record_json", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+  ],
+  context_command_results: [
+    { name: "command_id", type: "TEXT", notnull: 0, dflt_value: null, pk: 1 },
+    { name: "result_json", type: "TEXT", notnull: 1, dflt_value: null, pk: 0 },
+  ],
+};
+export const CONTEXT_DELIVERY_COLUMNS = [
+  { name: "context_snapshot_id", type: "TEXT", notnull: 0, dflt_value: null, pk: 0 },
+  { name: "context_input_digest", type: "TEXT", notnull: 0, dflt_value: null, pk: 0 },
+  { name: "context_message_id", type: "TEXT", notnull: 0, dflt_value: null, pk: 0 },
+  { name: "context_phase", type: "TEXT", notnull: 0, dflt_value: null, pk: 0 },
 ] as const;
 
 const WORKBENCH_MIGRATIONS_DDL = `CREATE TABLE workbench_sql_migrations (
@@ -95,9 +159,12 @@ export interface OfficialMigrationRecord {
 }
 
 export interface WorkbenchSchemaState {
+  readonly contextSchemaObjects: readonly SqliteSchemaObject[];
   readonly projectionThreadsExists: boolean;
   readonly bindingColumn: SqliteColumnInfo | null;
   readonly runtimeRecordColumns: readonly SqliteColumnInfo[] | null;
+  readonly contextTableColumns: Readonly<Record<string, readonly SqliteColumnInfo[] | null>>;
+  readonly contextDeliveryColumns: readonly SqliteColumnInfo[] | null;
 }
 
 export interface WorkbenchSchemaFormatState {
@@ -106,22 +173,15 @@ export interface WorkbenchSchemaFormatState {
 }
 
 export interface WorkbenchMigrationDefinition {
-  readonly moduleId: string;
+  readonly moduleId: "expert" | "context";
   readonly migrationId: number;
   readonly name: string;
   readonly checksum: string;
-  readonly statement: string;
+  readonly statement?: string | undefined;
+  readonly effect?: typeof ContextV1Migration | undefined;
 }
 
-const isLegacyExpertIdentity = (id: number, name: string) =>
-  LEGACY_EXPERT_OFFICIAL_MIGRATIONS.some(
-    (migration) => migration.officialId === id && migration.officialName === name,
-  );
-
-const currentOfficialMigrationEntries = () =>
-  migrationEntries
-    .filter(([id, name]) => !isLegacyExpertIdentity(id, name))
-    .toSorted(([a], [b]) => a - b);
+const currentOfficialMigrationEntries = () => migrationEntries.toSorted(([a], [b]) => a - b);
 
 export type OfficialMigrationCatalog = readonly (readonly [number, string, unknown])[];
 
@@ -184,15 +244,15 @@ export const normalizeRecognizedOfficialMigrationRows = (
   };
 };
 
-/** Validate the frozen official history that existed before expert IDs 109/110 were added. */
+/** Validate the exact old 1..108 prefix followed only by known fork migrations. */
 export const validateFrozenLegacyOfficialPrefix = (
   rows: readonly OfficialMigrationRecord[],
 ): string | null => {
   if (
     rows.length < FROZEN_LEGACY_OFFICIAL_PREFIX_LENGTH + 1 ||
-    rows.length > FROZEN_LEGACY_OFFICIAL_PREFIX_LENGTH + LEGACY_EXPERT_OFFICIAL_MIGRATIONS.length
+    rows.length > FROZEN_LEGACY_OFFICIAL_PREFIX_LENGTH + LEGACY_OFFICIAL_MIGRATIONS.length
   ) {
-    return "The legacy expert migrations do not follow the frozen official prefix.";
+    return "The legacy workbench migrations do not follow the frozen official prefix.";
   }
   const frozenPrefix = rows.slice(0, FROZEN_LEGACY_OFFICIAL_PREFIX_LENGTH);
   if (
@@ -204,16 +264,32 @@ export const validateFrozenLegacyOfficialPrefix = (
     return "The official migration prefix before legacy expert migrations is not recognized.";
   }
   const legacyTail = rows.slice(FROZEN_LEGACY_OFFICIAL_PREFIX_LENGTH);
-  for (let index = 0; index < legacyTail.length; index += 1) {
-    const row = legacyTail[index]!;
-    const expected = LEGACY_EXPERT_OFFICIAL_MIGRATIONS[index];
+  let previousId = FROZEN_LEGACY_OFFICIAL_PREFIX_LENGTH;
+  const found = new Set<string>();
+  for (const row of legacyTail) {
+    const expected = LEGACY_OFFICIAL_MIGRATIONS.find(
+      (migration) => migration.officialId === row.migration_id,
+    );
     if (
       expected === undefined ||
-      row.migration_id !== expected.officialId ||
-      row.name !== expected.officialName
+      row.name !== expected.officialName ||
+      row.migration_id <= previousId
     ) {
       return `Legacy official migration ${row.migration_id} has an unknown name or order.`;
     }
+    found.add(`${expected.workbenchId}:${expected.officialName}`);
+    previousId = row.migration_id;
+  }
+  if (
+    LEGACY_EXPERT_OFFICIAL_MIGRATIONS[1] !== undefined &&
+    found.has(
+      `${LEGACY_EXPERT_OFFICIAL_MIGRATIONS[1].workbenchId}:${LEGACY_EXPERT_OFFICIAL_MIGRATIONS[1].officialName}`,
+    ) &&
+    !found.has(
+      `${LEGACY_EXPERT_OFFICIAL_MIGRATIONS[0]!.workbenchId}:${LEGACY_EXPERT_OFFICIAL_MIGRATIONS[0]!.officialName}`,
+    )
+  ) {
+    return "Legacy expert migration 110 is recorded without migration 109.";
   }
   return null;
 };
@@ -250,9 +326,26 @@ export const workbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] 
   },
 ];
 
+/** The Context migration reuses the exact frozen native script from legacy 111. */
+export const contextWorkbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] = [
+  {
+    moduleId: "context",
+    migrationId: 1,
+    name: "ContextV1",
+    checksum: "sha256:b7dbd84911484156f3f38093973338ca005dce9e8ba4b38b8972d9dfe79a4911",
+    effect: ContextV1Migration,
+  },
+];
+
+export const allWorkbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] = [
+  ...workbenchMigrationEntries,
+  ...contextWorkbenchMigrationEntries,
+];
+
 export interface WorkbenchHistoryPlan {
   readonly ok: true;
   readonly applied: readonly WorkbenchMigrationDefinition[];
+  readonly appliedByModule: Readonly<Record<"expert" | "context", number>>;
 }
 
 export interface InvalidWorkbenchHistoryPlan {
@@ -264,6 +357,12 @@ export const planWorkbenchHistory = (
   rows: readonly WorkbenchMigrationRecord[],
 ): WorkbenchHistoryPlan | InvalidWorkbenchHistoryPlan => {
   for (const migration of workbenchMigrationEntries) {
+    if (migration.statement === undefined) {
+      return {
+        ok: false,
+        reason: `Expert workbench migration ${migration.migrationId} has no canonical SQL statement.`,
+      };
+    }
     const expectedChecksum = `sha256:${createHash("sha256")
       .update(migration.statement)
       .digest("hex")}`;
@@ -279,52 +378,96 @@ export const planWorkbenchHistory = (
     (a, b) => a.module_id.localeCompare(b.module_id) || a.migration_id - b.migration_id,
   );
   const modules = new Set(ordered.map((row) => row.module_id));
-  if ([...modules].some((moduleId) => moduleId !== EXPERT_WORKBENCH_MODULE_ID)) {
+  if ([...modules].some((moduleId) => moduleId !== "expert" && moduleId !== "context")) {
     return { ok: false, reason: "The workbench migration tracker contains an unsupported module." };
   }
 
-  const expertRows = ordered.filter((row) => row.module_id === EXPERT_WORKBENCH_MODULE_ID);
   const applied: WorkbenchMigrationDefinition[] = [];
-  for (let index = 0; index < expertRows.length; index += 1) {
-    const row = expertRows[index]!;
-    const expectedId = index + 1;
-    if (row.migration_id > workbenchMigrationEntries.length) {
-      return {
-        ok: false,
-        reason: `Workbench migration ${row.migration_id} is newer than this build supports.`,
-      };
+  const appliedByModule: Record<"expert" | "context", number> = { expert: 0, context: 0 };
+  for (const moduleId of ["expert", "context"] as const) {
+    const definitions =
+      moduleId === "expert" ? workbenchMigrationEntries : contextWorkbenchMigrationEntries;
+    const moduleRows = ordered.filter((row) => row.module_id === moduleId);
+    for (let index = 0; index < moduleRows.length; index += 1) {
+      const row = moduleRows[index]!;
+      const expectedId = index + 1;
+      const expected = definitions[index];
+      if (row.migration_id > definitions.length) {
+        return {
+          ok: false,
+          reason: `${moduleId} workbench migration ${row.migration_id} is newer than this build supports.`,
+        };
+      }
+      if (row.migration_id !== expectedId) {
+        return {
+          ok: false,
+          reason: `${moduleId} workbench migration history is not a contiguous prefix at ${expectedId}.`,
+        };
+      }
+      if (
+        expected === undefined ||
+        row.name !== expected.name ||
+        row.checksum !== expected.checksum ||
+        row.applied_at.length === 0
+      ) {
+        return {
+          ok: false,
+          reason: `${moduleId} workbench migration ${row.migration_id} has an unknown name, checksum, or timestamp.`,
+        };
+      }
+      applied.push(expected);
     }
-    if (row.migration_id !== expectedId) {
-      return {
-        ok: false,
-        reason: `Expert workbench migration history is not a contiguous prefix at ${expectedId}.`,
-      };
-    }
-    const expected = workbenchMigrationEntries[index];
-    if (
-      expected === undefined ||
-      row.name !== expected.name ||
-      row.checksum !== expected.checksum ||
-      row.applied_at.length === 0
-    ) {
-      return {
-        ok: false,
-        reason: `Expert workbench migration ${row.migration_id} has an unknown name, checksum, or timestamp.`,
-      };
-    }
-    applied.push(expected);
+    appliedByModule[moduleId] = moduleRows.length;
   }
 
-  return { ok: true, applied };
+  return { ok: true, applied, appliedByModule };
 };
 
 export const validateWorkbenchSchemaState = (
-  appliedMigrationCount: number,
+  appliedMigrationCount: number | Readonly<Record<"expert" | "context", number>>,
   state: WorkbenchSchemaState,
 ): string | null => {
+  const appliedByModule =
+    typeof appliedMigrationCount === "number"
+      ? { expert: appliedMigrationCount, context: 0 }
+      : appliedMigrationCount;
+  const contextApplied = appliedByModule.context >= 1;
+  const contextDefinitionIssue = validateFrozenContextSchema(
+    contextApplied,
+    state.contextSchemaObjects,
+  );
+  if (contextDefinitionIssue !== null) return contextDefinitionIssue;
+  const contextTableNames = Object.keys(CONTEXT_TABLE_COLUMNS);
+  if (contextApplied) {
+    for (const tableName of contextTableNames) {
+      const actual = state.contextTableColumns[tableName];
+      const expected = CONTEXT_TABLE_COLUMNS[tableName];
+      if (
+        actual === null ||
+        actual === undefined ||
+        expected === undefined ||
+        !sameColumns(actual, expected)
+      ) {
+        return `Context table ${tableName} does not match the frozen Context V1 schema.`;
+      }
+    }
+    if (
+      state.contextDeliveryColumns === null ||
+      !sameColumns(state.contextDeliveryColumns, CONTEXT_DELIVERY_COLUMNS)
+    ) {
+      return "orchestration_event_deliveries does not match the frozen Context V1 columns.";
+    }
+  } else if (
+    contextTableNames.some((tableName) => state.contextTableColumns[tableName] !== null) ||
+    state.contextDeliveryColumns !== null
+  ) {
+    return "Context V1 schema exists without a matching context workbench migration record.";
+  }
+
   if (!state.projectionThreadsExists) {
     if (
-      appliedMigrationCount === 0 &&
+      appliedByModule.expert === 0 &&
+      !contextApplied &&
       state.bindingColumn === null &&
       state.runtimeRecordColumns === null
     ) {
@@ -333,7 +476,7 @@ export const validateWorkbenchSchemaState = (
     return "The official projection_threads table is missing; run official migrations through 108 first.";
   }
 
-  const bindingApplied = appliedMigrationCount >= 1;
+  const bindingApplied = appliedByModule.expert >= 1;
   if (bindingApplied) {
     if (
       state.bindingColumn === null ||
@@ -345,7 +488,7 @@ export const validateWorkbenchSchemaState = (
     return "projection_threads.expert_binding_json exists without a matching workbench migration record.";
   }
 
-  const runtimeRecordsApplied = appliedMigrationCount >= 2;
+  const runtimeRecordsApplied = appliedByModule.expert >= 2;
   if (runtimeRecordsApplied) {
     if (
       state.runtimeRecordColumns === null ||
@@ -553,7 +696,39 @@ export const readWorkbenchSchemaState = Effect.gen(function* () {
     runtimeTable === null
       ? null
       : yield* inspectTableColumns(sql, "expert_applied_runtime_records");
-  return { projectionThreadsExists, bindingColumn, runtimeRecordColumns };
+
+  const contextTableColumns: Record<string, readonly SqliteColumnInfo[] | null> = {};
+  for (const tableName of Object.keys(CONTEXT_TABLE_COLUMNS)) {
+    const table = yield* inspectSqliteObject(sql, tableName);
+    if (table !== null && table.type !== "table") {
+      return yield* fail(`${tableName} exists but is not a table.`);
+    }
+    contextTableColumns[tableName] =
+      table === null ? null : yield* inspectTableColumns(sql, tableName);
+  }
+  const deliveryTable = yield* inspectSqliteObject(sql, "orchestration_event_deliveries");
+  if (deliveryTable !== null && deliveryTable.type !== "table") {
+    return yield* fail("orchestration_event_deliveries exists but is not a table.");
+  }
+  const deliveryColumns =
+    deliveryTable === null
+      ? null
+      : yield* inspectTableColumns(sql, "orchestration_event_deliveries");
+  const contextDeliveryColumns =
+    deliveryColumns === null
+      ? null
+      : deliveryColumns.filter(({ name }) =>
+          CONTEXT_DELIVERY_COLUMNS.some((expected) => expected.name === name),
+        );
+  const contextSchemaObjects = yield* sql.unsafe<SqliteSchemaObject>(CONTEXT_SCHEMA_OBJECTS_QUERY);
+  return {
+    contextSchemaObjects,
+    projectionThreadsExists,
+    bindingColumn,
+    runtimeRecordColumns,
+    contextTableColumns,
+    contextDeliveryColumns: contextDeliveryColumns?.length === 0 ? null : contextDeliveryColumns,
+  };
 });
 
 export const ensureWorkbenchTracker = Effect.gen(function* () {
@@ -575,7 +750,7 @@ export interface RunWorkbenchMigrationsResult {
 }
 
 /**
- * Runs only the expert-owned extension migrations after the shared SQLite
+ * Runs only the workbench-owned extension migrations after the shared SQLite
  * startup path has planned, backed up, adopted any frozen legacy rows, and run
  * the official migrator.
  */
@@ -595,7 +770,7 @@ export const runWorkbenchMigrations = () =>
     const initialPlan = planWorkbenchHistory(initialTracker.rows);
     if (!initialPlan.ok) return yield* fail(initialPlan.reason);
     const initialSchema = yield* readWorkbenchSchemaState;
-    const schemaIssue = validateWorkbenchSchemaState(initialPlan.applied.length, initialSchema);
+    const schemaIssue = validateWorkbenchSchemaState(initialPlan.appliedByModule, initialSchema);
     if (schemaIssue !== null) return yield* fail(schemaIssue);
     const initialFormat = yield* readWorkbenchSchemaFormat;
     if (initialFormat.version > WORKBENCH_SCHEMA_FORMAT_VERSION) {
@@ -605,22 +780,33 @@ export const runWorkbenchMigrations = () =>
     }
 
     const executed: WorkbenchMigrationDefinition[] = [];
-    for (const migration of workbenchMigrationEntries.slice(initialPlan.applied.length)) {
+    const pendingMigrations = allWorkbenchMigrationEntries.filter(
+      (migration) => migration.migrationId > initialPlan.appliedByModule[migration.moduleId],
+    );
+    for (const migration of pendingMigrations) {
       yield* sql.withTransaction(
         Effect.gen(function* () {
           const tracker = yield* readWorkbenchTracker;
           const plan = planWorkbenchHistory(tracker.rows);
           if (!plan.ok) return yield* fail(plan.reason);
-          if (plan.applied.length !== migration.migrationId - 1) {
-            return yield* fail("Expert workbench migration history changed during upgrade.");
+          if (plan.appliedByModule[migration.moduleId] !== migration.migrationId - 1) {
+            return yield* fail(
+              `${migration.moduleId} workbench migration history changed during upgrade.`,
+            );
           }
           yield* ensureWorkbenchTracker;
           yield* ensureWorkbenchSchemaFormat;
           const schema = yield* readWorkbenchSchemaState;
-          const issue = validateWorkbenchSchemaState(plan.applied.length, schema);
+          const issue = validateWorkbenchSchemaState(plan.appliedByModule, schema);
           if (issue !== null) return yield* fail(issue);
 
-          yield* sql.unsafe(migration.statement);
+          if (migration.effect !== undefined) {
+            yield* migration.effect;
+          } else if (migration.statement !== undefined) {
+            yield* sql.unsafe(migration.statement);
+          } else {
+            return yield* fail(`Workbench migration ${migration.name} has no implementation.`);
+          }
           yield* sql`
             INSERT INTO workbench_sql_migrations (
               module_id, migration_id, name, checksum, applied_at
@@ -634,7 +820,7 @@ export const runWorkbenchMigrations = () =>
       executed.push(migration);
     }
 
-    if (initialPlan.applied.length === workbenchMigrationEntries.length) {
+    if (pendingMigrations.length === 0) {
       yield* sql.withTransaction(
         Effect.gen(function* () {
           yield* ensureWorkbenchTracker;
@@ -647,7 +833,7 @@ export const runWorkbenchMigrations = () =>
     const finalPlan = planWorkbenchHistory(finalTracker.rows);
     if (!finalPlan.ok) return yield* fail(finalPlan.reason);
     const finalSchema = yield* readWorkbenchSchemaState;
-    const finalIssue = validateWorkbenchSchemaState(finalPlan.applied.length, finalSchema);
+    const finalIssue = validateWorkbenchSchemaState(finalPlan.appliedByModule, finalSchema);
     if (finalIssue !== null) return yield* fail(finalIssue);
     const finalFormat = yield* readWorkbenchSchemaFormat;
     if (finalFormat.version !== WORKBENCH_SCHEMA_FORMAT_VERSION) {

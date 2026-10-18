@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as ts from "typescript";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const migrationsFile = "apps/server/src/persistence/Migrations.ts";
@@ -16,7 +17,8 @@ const upstreamLockFile = "workbench/upstream.lock.json";
  * Migration 111 was added to the official tracker during the fork's history.
  * Its SQL and tracker identity are now a frozen compatibility exception: old
  * databases may already have applied it, so neither its bytes nor its name
- * can be changed or moved into another ledger.
+ * can be changed. The active implementation now lives in the Context ledger;
+ * only the exact historical identity/schema may be adopted after backup.
  */
 export const FROZEN_NATIVE_COMPATIBILITY_MIGRATION = {
   id: 111,
@@ -299,21 +301,20 @@ export function validatePinnedUpstreamProvenance(
 const migrationIdentity = ({ id, name }: MigrationLineageEntry) => `${id}:${name}`;
 
 /**
- * Enforce ownership of the current native catalog against the two locked
- * upstream snapshots. Existing upstream files may have fork-local edits, so
- * their bytes are not blanket-compared. The upstream snapshots themselves
- * must preserve their shared migration bytes, while entries first introduced
- * by the candidate must match the approved upstream script exactly.
+ * Enforce byte-for-byte ownership of the complete active catalog against the
+ * pinned upstream candidate. The former native Context script is checked
+ * separately because it remains on disk for legacy adoption but is no longer
+ * an active native migration.
  */
 export function findMigrationOwnershipViolations(
   current: readonly MigrationCatalogEntry[],
   integratedBase: readonly MigrationCatalogEntry[],
   candidate: readonly MigrationCatalogEntry[],
+  frozenCompatibilitySha256?: string | undefined,
 ): string[] {
   const problems: string[] = [];
   const currentById = new Map(current.map((entry) => [entry.id, entry]));
   const currentIdentities = new Set(current.map(migrationIdentity));
-  const integratedById = new Map(integratedBase.map((entry) => [entry.id, entry]));
   const candidateById = new Map(candidate.map((entry) => [entry.id, entry]));
   const candidateIdentities = new Set(candidate.map(migrationIdentity));
 
@@ -345,49 +346,127 @@ export function findMigrationOwnershipViolations(
       continue;
     }
 
-    if (integratedById.has(entry.id)) continue;
     const local = currentById.get(entry.id);
     if (local?.sha256 === undefined || entry.sha256 === undefined) {
       problems.push(
-        `Cannot verify local script bytes for newly approved upstream migration ${entry.id} ("${entry.name}").`,
+        `Cannot verify local script bytes for official migration ${entry.id} ("${entry.name}").`,
       );
     } else if (local.sha256 !== entry.sha256) {
       problems.push(
-        `Newly approved upstream migration ${entry.id} ("${entry.name}") does not match its pinned upstream script bytes.`,
+        `Official migration ${entry.id} ("${entry.name}") does not match its pinned upstream script bytes.`,
       );
     }
   }
 
   const frozen = FROZEN_NATIVE_COMPATIBILITY_MIGRATION;
-  const frozenEntry = currentById.get(frozen.id);
-  if (frozenEntry === undefined || frozenEntry.name !== frozen.name) {
-    problems.push(
-      `Frozen native migration ${frozen.id}_${frozen.name} was removed, renamed, or moved to another ID.`,
-    );
-  } else {
-    if (frozenEntry.migrationFile !== frozen.migrationFile) {
-      problems.push(
-        `Frozen native migration ${frozen.id}_${frozen.name} must remain in ${frozen.migrationFile}.`,
-      );
-    }
-    if (frozenEntry.sha256 === undefined) {
-      problems.push(
-        `Cannot verify frozen native migration ${frozen.id}_${frozen.name} script bytes.`,
-      );
-    } else if (frozenEntry.sha256 !== frozen.sha256) {
-      problems.push(`Frozen native migration ${frozen.id}_${frozen.name} script bytes changed.`);
-    }
+  if (frozenCompatibilitySha256 === undefined) {
+    problems.push(`Cannot verify frozen compatibility script bytes at ${frozen.migrationFile}.`);
+  } else if (frozenCompatibilitySha256 !== frozen.sha256) {
+    problems.push(`Frozen compatibility script ${frozen.migrationFile} bytes changed.`);
   }
 
   for (const entry of current) {
     if (candidateIdentities.has(migrationIdentity(entry))) continue;
-    if (entry.id === frozen.id && entry.name === frozen.name) continue;
     problems.push(
       `Native migration ${entry.id} ("${entry.name}") is not owned by the pinned upstream catalog. ` +
         "Linx extensions belong in the independent workbench_sql_migrations ledger.",
     );
   }
   return problems;
+}
+
+/** Statically prove that the frozen script is still the active context1 implementation. */
+export function findContextLedgerOwnershipViolations(source: string): string[] {
+  const error = [
+    "Context ledger must register the frozen ContextV1 effect as (context, 1), and include it exactly once in the active workbench catalog.",
+  ];
+  const file = ts.createSourceFile("WorkbenchMigrations.ts", source, ts.ScriptTarget.Latest, true);
+  const declarations = new Map<string, ts.Expression>();
+  let frozenImport: string | undefined;
+  for (const statement of file.statements) {
+    if (
+      ts.isImportDeclaration(statement) &&
+      ts.isStringLiteral(statement.moduleSpecifier) &&
+      statement.moduleSpecifier.text === "../../persistence/Migrations/111_ContextV1.ts"
+    ) {
+      if (frozenImport !== undefined || statement.importClause?.isTypeOnly) return error;
+      frozenImport = statement.importClause?.name?.text;
+    }
+    if (
+      !ts.isVariableStatement(statement) ||
+      !statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ||
+      (statement.declarationList.flags & ts.NodeFlags.Const) === 0
+    )
+      continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
+      if (declarations.has(declaration.name.text)) return error;
+      declarations.set(declaration.name.text, declaration.initializer);
+    }
+  }
+  const unwrap = (expression: ts.Expression | undefined): ts.Expression | undefined => {
+    while (
+      expression &&
+      (ts.isAsExpression(expression) ||
+        ts.isParenthesizedExpression(expression) ||
+        ts.isSatisfiesExpression(expression))
+    )
+      expression = expression.expression;
+    return expression;
+  };
+  const context = unwrap(declarations.get("contextWorkbenchMigrationEntries"));
+  if (
+    !frozenImport ||
+    !context ||
+    !ts.isArrayLiteralExpression(context) ||
+    context.elements.length !== 1
+  )
+    return error;
+  const entry = context.elements[0];
+  if (!entry || !ts.isObjectLiteralExpression(entry)) return error;
+  const fields = new Map<string, ts.Expression>();
+  for (const property of entry.properties) {
+    if (
+      !ts.isPropertyAssignment(property) ||
+      !(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) ||
+      fields.has(property.name.text)
+    )
+      return error;
+    fields.set(property.name.text, property.initializer);
+  }
+  const literal = (name: string) => {
+    const value = unwrap(fields.get(name));
+    return value && (ts.isStringLiteral(value) || ts.isNumericLiteral(value))
+      ? value.text
+      : undefined;
+  };
+  const effect = unwrap(fields.get("effect"));
+  if (
+    fields.size !== 5 ||
+    literal("moduleId") !== "context" ||
+    literal("migrationId") !== "1" ||
+    literal("name") !== FROZEN_NATIVE_COMPATIBILITY_MIGRATION.name ||
+    literal("checksum") !== `sha256:${FROZEN_NATIVE_COMPATIBILITY_MIGRATION.sha256}` ||
+    !effect ||
+    !ts.isIdentifier(effect) ||
+    effect.text !== frozenImport
+  )
+    return error;
+  const all = unwrap(declarations.get("allWorkbenchMigrationEntries"));
+  const names = ["workbenchMigrationEntries", "contextWorkbenchMigrationEntries"];
+  if (
+    !all ||
+    !ts.isArrayLiteralExpression(all) ||
+    all.elements.length !== names.length ||
+    all.elements.some(
+      (element, index) =>
+        !ts.isSpreadElement(element) ||
+        !ts.isIdentifier(element.expression) ||
+        element.expression.text !== names[index],
+    )
+  )
+    return error;
+  return [];
 }
 
 export interface MigrationLineageViolation {
@@ -429,6 +508,8 @@ const HANDLED_RELEASED_DIVERGENCES: readonly MigrationLineageAllowance[] = [
   // official migrator runs. Their IDs are no longer in today's official list.
   { id: 109, name: "ProjectionThreadsExpertBinding" },
   { id: 110, name: "ExpertAppliedRuntimeRecords" },
+  // Exact legacy Context history is adopted into context1 after the same backup/transaction gate.
+  { id: 111, name: "ContextV1" },
 ];
 
 const entriesBlockPattern = /export const migrationEntries\s*=\s*\[([\s\S]*?)\]\s*as const;/u;
@@ -634,7 +715,37 @@ function auditCurrentMigrationOwnership(currentSource: string): string[] {
     return ["Migration ownership audit cannot verify pinned migration source files:", ...problems];
   }
 
-  return findMigrationOwnershipViolations(currentHashed.entries, base.entries, next.entries);
+  let frozenCompatibilitySha256: string;
+  try {
+    frozenCompatibilitySha256 = sha256(
+      readFileSync(resolve(repoRoot, FROZEN_NATIVE_COMPATIBILITY_MIGRATION.migrationFile)),
+    );
+  } catch {
+    return [
+      `Frozen compatibility migration is unreadable: ${FROZEN_NATIVE_COMPATIBILITY_MIGRATION.migrationFile}.`,
+    ];
+  }
+
+  let contextLedgerProblems: string[];
+  try {
+    contextLedgerProblems = findContextLedgerOwnershipViolations(
+      readFileSync(
+        resolve(repoRoot, "apps/server/src/workbench/persistence/WorkbenchMigrations.ts"),
+        "utf8",
+      ),
+    );
+  } catch {
+    contextLedgerProblems = ["Cannot verify the Context workbench ledger source."];
+  }
+  return [
+    ...findMigrationOwnershipViolations(
+      currentHashed.entries,
+      base.entries,
+      next.entries,
+      frozenCompatibilitySha256,
+    ),
+    ...contextLedgerProblems,
+  ];
 }
 
 const defaultListTags = (pattern: string): readonly string[] => {

@@ -91,7 +91,9 @@ export function ComposerEnvironmentPicker({
           <button
             type="button"
             className={
-              isPanel ? ENVIRONMENT_ROW_CLASS_NAME : COMPOSER_TOOLBAR_PICKER_TRIGGER_CLASS_NAME
+              isPanel
+                ? ENVIRONMENT_ROW_CLASS_NAME
+                : `${COMPOSER_TOOLBAR_PICKER_TRIGGER_CLASS_NAME} shrink-0`
             }
           />
         }
@@ -156,7 +158,7 @@ export function ComposerEnvironmentPicker({
           ) : null}
           {canHandoffToLocal && onHandoffToLocal ? (
             <WorkInMenuItem
-              icon={<HandoffIcon className={ENV_MENU_ICON_CLASS_NAME} />}
+              icon={<HandoffIcon className={ENV_MENU_ICON_CLASS_NAME} strokeWidth={1.75} />}
               label="Hand off to local"
               disabled={handoffBusy}
               onSelect={() => onHandoffToLocal()}

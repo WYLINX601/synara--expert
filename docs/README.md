@@ -5,6 +5,7 @@ folder keeps a small set of focused guides that stay in sync with the repository
 
 - [Quickstart](./quickstart.md) — from installation to your first reviewed change in about five minutes.
 - [Core concepts](./core-concepts.md) — projects, tasks, environments, provider sessions, and Git ownership.
+- [Hubs](./hubs.md) — a coordinator that runs parallel threads with shared instructions, memory, and a Library.
 - [Providers](./providers.md) — what Synara manages and what stays provider-owned.
 - [External MCP integrations](./external-mcp.md) — pair another local app with a scoped Synara task surface.
 - [Expert frontend redesign](./expert-frontend-redesign-plan.md) — expert configuration and per-expert MCP authorization flow.
@@ -13,6 +14,7 @@ folder keeps a small set of focused guides that stay in sync with the repository
 - [Workbench adaptation plan](./workbench-adaptation-plan.md) — static module entry points, host adapters, and scoped dependency boundaries.
 - [Workbench adaptation acceptance](./workbench-adaptation-acceptance.md) — implementation and actual verification results.
 - [Workbench development workflow](./workbench-development-workflow.md) — stages, scoped checks, and acceptance records.
+- [Connectors](./mcp-connectors.md) — Beta: sign in to remote MCP servers (Supabase, Linear, ...) for agents in Synara.
 - [Release process](./release.md) — release and signing setup checklist.
 - [Beta channel](../BETA.md) — the packaged Synara Beta flavor, its isolated update feed, and how beta releases are cut.
 - [Canary workflow](./canary.md) — install, update, operate, and roll back an isolated Canary build.

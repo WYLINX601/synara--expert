@@ -95,7 +95,7 @@
 
 新增或改变功能模块的宿主接入、导入依赖或保留例外时，增加 `bun run workbench:check-boundaries`，核对[接入点清单](../workbench/integration-points.json)与扫描范围；新目录不在现有扫描范围时需同步纳入或明确其宿主装配职责。边界规则变更增加其相关 Vitest 与非法导入反例。该静态检查不代替权限或生命周期实测。
 
-2026-10-16 起，清单声明的功能文件必须参与扫描，接入与回归路径必须存在；保留依赖按精确文件和 import 说明职责、原因与测试，不使用目录整体豁免。Context 功能复用宿主 `contextClient`，Space 辅助函数接收实际所需的命令能力。迁移归属由 `migrations:check` 审计：111 是身份和内容被冻结的历史兼容例外，新增原生迁移须可追溯到固定上游，新 Linx 扩展进入独立 ledger；缺少来源依据时先补证，不新增豁免。正式升级增加第七项边界门禁，历史六项结果保留原范围。实现与实际检查见[架构对齐验收](./workbench-adaptation-acceptance.md#alignment-implementation-20261016)，基线核对按[升级 SOP](./workbench-implementation-plan.md#sync-sop)执行。
+2026-10-16 起，清单声明的功能文件必须参与扫描，接入与回归路径必须存在；保留依赖按精确文件和 import 说明职责、原因与测试，不使用目录整体豁免。Context 功能复用宿主 `contextClient`，Space 辅助函数接收实际所需的命令能力。迁移归属由 `migrations:check` 审计：旧 111 的身份和内容被冻结；v1.0.5 候选经精确 schema 核验及统一备份后审计接管到 Context 独立 ledger，活动原生 catalog 归官方，新增原生迁移须可追溯到固定上游，新 Linx 扩展进入独立 ledger；缺少来源依据时先补证，不新增豁免。正式升级增加第七项边界门禁，历史六项结果保留原范围。实现与实际检查见[架构对齐验收](./workbench-adaptation-acceptance.md#alignment-implementation-20261016)，基线核对按[升级 SOP](./workbench-implementation-plan.md#sync-sop)执行。
 
 上游集成需要锁定稳定版本与完整目标 SHA，在隔离候选中处理并验证差异。继续执行现有候选门禁、SHA/runtime 绑定、原生与专家实际运行要求；不以本流程缩减上游验收。
 

@@ -18,6 +18,7 @@ describe("WsRequestAdmission", () => {
       "expensive-read",
     );
     expect(classifyWsRequest(WS_METHODS.terminalAckOutput)).toBe("control");
+    expect(classifyWsRequest(WS_METHODS.serverGetRuntimeStatus)).toBe("control");
   });
 
   it("reserves independent capacity for control traffic during an expensive-read flood", async () => {

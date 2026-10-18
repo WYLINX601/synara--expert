@@ -125,9 +125,10 @@
         "apps/server/src/persistence/MigrationBackup.ts",
         "apps/server/src/workbench/persistence/WorkbenchMigrations.ts",
         "apps/server/src/workbench/persistence/LegacyExpertMigrationAdoption.ts",
-        "apps/server/src/workbench/persistence/WorkbenchUpgradePlan.ts"
+        "apps/server/src/workbench/persistence/WorkbenchUpgradePlan.ts",
+        "apps/server/src/workbench/persistence/FrozenContextSchema.ts"
       ],
-      "responsibility": "Expert definitions, connection configuration and immutable snapshots use private files below the selected state directory. Thread bindings remain in the native projection schema and applied runtime records remain in the existing SQLite repository. WB-02 owns its migration ledger and read-only upgrade plan; integrated SqlitePersistence startup uses the existing connection/lifecycle lock and passes that plan through native pre-migration backup, resume and explicit restore. This native integration is required because the extension changes projection/table schema and must share the host's single SQLite ownership and recovery point. On tested source SHA 858, three synthetic file-backed SQLite rehearsal scenarios passed: successful startup and failure/retry using the same backup ran through the pinned Bun harness; the restore CLI ran with ELECTRON_RUN_AS_NODE=1 in the actual packaged Workbench Electron 43.4.1 executable and exited 0. The raw rehearsal report SHA-256 is e44bf0a069bc01f4a270e3a758a78835f6dcdfaec2a127c15787cc81fa13d5ef and its audit SHA-256 is bdd5506cea0f46b9e772428b60f45e71ffbe6453335137869d475938cf08eebc. These source-858 scenarios used synthetic data only, did not access a user database, and do not prove ordinary Electron startup/upgrade. A later independent rehearsal on source SHA f2483e077a100f8a7e775a65d7b20d59858bf8cc also passed three synthetic scenarios: the first two used the pinned Bun harness and the third ran the packaged Workbench Electron 43.4.1 restore CLI in ELECTRON_RUN_AS_NODE=1 mode (raw report SHA-256 8a31b94b8edf521a9592f452c3950598a700d90554ef7a48467c7a0be0913cf7). That result is source-bound and likewise does not prove ordinary Electron startup/upgrade or user-database migration. The official v0.9.2 migration history ends at 108; old fork rows 109/110 are recognized only by exact legacy identity and resulting schema, then adopted into local expert migration IDs, never treated as official published migrations.",
+      "responsibility": "Expert definitions, connection configuration and immutable snapshots use private files below the selected state directory. Thread bindings remain in the native projection schema and applied runtime records remain in the existing SQLite repository. WB-02 owns its migration ledger and read-only upgrade plan; integrated SqlitePersistence startup uses the existing connection/lifecycle lock and passes that plan through native pre-migration backup, resume and explicit restore. This native integration is required because the extension changes projection/table schema and must share the host's single SQLite ownership and recovery point. On tested source SHA 858, three synthetic file-backed SQLite rehearsal scenarios passed: successful startup and failure/retry using the same backup ran through the pinned Bun harness; the restore CLI ran with ELECTRON_RUN_AS_NODE=1 in the actual packaged Workbench Electron 43.4.1 executable and exited 0. The raw rehearsal report SHA-256 is e44bf0a069bc01f4a270e3a758a78835f6dcdfaec2a127c15787cc81fa13d5ef and its audit SHA-256 is bdd5506cea0f46b9e772428b60f45e71ffbe6453335137869d475938cf08eebc. These source-858 scenarios used synthetic data only, did not access a user database, and do not prove ordinary Electron startup/upgrade. A later independent rehearsal on source SHA f2483e077a100f8a7e775a65d7b20d59858bf8cc also passed three synthetic scenarios: the first two used the pinned Bun harness and the third ran the packaged Workbench Electron 43.4.1 restore CLI in ELECTRON_RUN_AS_NODE=1 mode (raw report SHA-256 8a31b94b8edf521a9592f452c3950598a700d90554ef7a48467c7a0be0913cf7). That result is source-bound and likewise does not prove ordinary Electron startup/upgrade or user-database migration. The official v0.9.2 migration history ends at 108; old fork rows 109/110 are recognized only by exact legacy identity and resulting schema, then adopted into local expert migration IDs, never treated as official published migrations. The v1.0.5 candidate uses the exact official native catalog through 135. Legacy Expert 109/110 and Context 111 are recognized by frozen identity and schema, audited in workbench_legacy_migration_adoptions and transferred atomically after the unified backup. Context uses context1 by importing the frozen Effect script; Expert IDs/checksums are unchanged. Recovery v3 binds each module progress and original identities to the existing snapshot; unexplainable old markers are preserved and rejected. Frozen Context recognition compares table DDL and the four delivery column definitions, including CHECK constraints, and rejects unknown objects attached to protected tables. The same read-only metadata query and pure validator are used by live startup and backup inspection; no trial writes validate a user database.",
       "tests": [
         "apps/server/src/experts/ExpertStore.test.ts",
         "apps/server/src/experts/ExpertConnectionStore.test.ts",
@@ -138,7 +139,11 @@
         "apps/server/src/persistence/MigrationBackup.test.ts",
         "apps/server/src/persistence/MigrationSchemaTooNewRecovery.test.ts",
         "apps/server/src/workbench/persistence/WorkbenchMigrations.test.ts",
-        "apps/server/src/workbench/persistence/WorkbenchUpgradePlan.test.ts"
+        "apps/server/src/workbench/persistence/WorkbenchUpgradePlan.test.ts",
+        "apps/server/src/workbench/persistence/ContextMigrationCompatibility.test.ts",
+        "apps/server/src/workbench/persistence/ContextMigrationRecovery.test.ts",
+        "apps/server/src/workbench/persistence/FrozenContextSchema.test.ts",
+        "apps/server/src/workbench/persistence/ContextSchemaRecognition.test.ts"
       ]
     },
     {
@@ -235,9 +240,19 @@
         "apps/server/src/persistence/Migrations/111_ContextV1.ts",
         "packages/contracts/src/context.ts",
         "packages/contracts/src/ws.ts",
-        "packages/contracts/src/rpc.ts"
+        "packages/contracts/src/rpc.ts",
+        "apps/server/src/workbench/persistence/WorkbenchMigrations.ts",
+        "apps/server/src/workbench/persistence/LegacyExpertMigrationAdoption.ts",
+        "apps/web/src/nativeApi.ts",
+        "apps/web/src/wsNativeApi.ts",
+        "apps/web/src/wsTransport.ts",
+        "apps/web/src/hooks/useNativeApiServerCapability.ts",
+        "apps/web/src/components/chat/environment/useProjectContextAutosave.ts",
+        "apps/web/src/components/chat/environment/projectContextAutosave.ts",
+        "apps/server/src/workbench/persistence/FrozenContextSchema.ts",
+        "apps/web/src/components/chat/chatSendTypes.ts"
       ],
-      "responsibility": "The sidebar owns Space controller and route synchronization because those modules use native navigation, the task store and the established Space mutation capability. The Context host client exposes read-only legacy project-instructions cache access to Context feature consumers with shared contracts; ChatView and chat execution/automation modules remain host integrations for their existing context injection and prompt flows. Server wsRpc/runtime assembly owns authenticated Context RPC admission and error mapping, contextThreadDetails combines the repository with live execution evidence, OrchestrationEngine and ProjectionPipeline own replayable Context lifecycle, ProviderCommandReactor loads thread bindings and context sessions for execution, ProviderService applies runtime Context and records execution state, and ContextRepository owns Context SQL persistence. The existing projection service owns Space projection; migration 111 contains the frozen Context schema compatibility exception audited by the repository migration-lineage guard, rather than a newly upstream-owned migration. Contracts keep the shared Context wire schema. This records ownership only; wire behavior, lifecycle and persistence semantics remain in their existing implementations.",
+      "responsibility": "The sidebar owns Space controller and route synchronization because those modules use native navigation, the task store and the established Space mutation capability. The Context host client exposes read-only legacy project-instructions cache access to Context feature consumers with shared contracts; ChatView and chat execution/automation modules remain host integrations for their existing context injection and prompt flows. Server wsRpc/runtime assembly owns authenticated Context RPC admission and error mapping, contextThreadDetails combines the repository with live execution evidence, OrchestrationEngine and ProjectionPipeline own replayable Context lifecycle, ProviderCommandReactor loads thread bindings and context sessions for execution, ProviderService applies runtime Context and records execution state, and ContextRepository owns Context SQL persistence. The existing projection service owns Space projection; the original 111_ContextV1 script remains frozen and is reused by the context1 ledger Effect; exact legacy tracker adoption shares the host connection, transaction, backup and recovery ownership, while active native 111 belongs to official GroupLibraryHosting. Contracts keep the shared Context wire schema. This records ownership only; wire behavior, lifecycle and persistence semantics remain in their existing implementations. Context capability negotiation distinguishes unknown, unsupported and supported. The existing WsTransport owns connection state and sessionVersion; its read-only host metadata fences shared query results and late asynchronous returns. Reconnect pauses Context writes immediately and resumes only after a real read in the current shared generation. Project autosave keeps the original API/data instance/project queue identity. Project and Space editors preserve dirty, pending and uncertain drafts across owner changes until explicit discard; Space reuses the existing draft guard and fields editor, including real close/navigation protection. A new owner cannot reuse a previous owner's draft or command attempt. Every actual Expert session start or native fork preflights required MCP before ProviderService admission; ordinary reuse keeps the existing lifecycle.",
       "tests": [
         "apps/web/src/components/useRouteSpaceSync.browser.tsx",
         "apps/web/src/lib/spaces.test.ts",
@@ -248,6 +263,8 @@
         "apps/web/src/components/chat/environment/projectContextNavigationGuard.test.ts",
         "apps/web/src/components/chat/environment/useProjectContextMigration.browser.tsx",
         "apps/web/src/workbench/host/contextClient.test.ts",
+        "apps/web/src/wsNativeApi.test.ts",
+        "apps/web/src/wsTransport.test.ts",
         "apps/server/src/workbench/host/contextRpc.test.ts",
         "apps/server/src/context/ContextRepository.test.ts",
         "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts",
@@ -255,7 +272,12 @@
         "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
         "apps/server/src/provider/Layers/ProviderService.test.ts",
         "apps/server/src/persistence/Migrations.test.ts",
-        "apps/server/src/wsRpc.errors.test.ts"
+        "apps/server/src/wsRpc.errors.test.ts",
+        "apps/server/src/workbench/persistence/ContextMigrationCompatibility.test.ts",
+        "apps/server/src/workbench/persistence/ContextMigrationRecovery.test.ts",
+        "apps/web/src/components/chat/environment/useProjectContextAutosave.browser.tsx",
+        "apps/server/src/workbench/persistence/FrozenContextSchema.test.ts",
+        "apps/server/src/workbench/persistence/ContextSchemaRecognition.test.ts"
       ]
     },
     {
@@ -265,10 +287,16 @@
         "scripts/check-migration-lineage.ts",
         "apps/server/src/persistence/Migrations.ts",
         "apps/server/src/persistence/Migrations/111_ContextV1.ts",
-        "workbench/upstream.lock.json"
+        "workbench/upstream.lock.json",
+        "apps/server/src/workbench/persistence/WorkbenchMigrations.ts",
+        "scripts/lib/workbench-build.ts"
       ],
-      "responsibility": "check-migration-lineage owns the repository audit for migration identity and upstream provenance. It freezes migration 111 ContextV1's tracker identity and script digest as a historical compatibility exception because shipped databases may already contain it; this does not make 111 a newly upstream-owned migration or authorize further native tracker additions. New Workbench-only migrations remain on the independent Workbench ledger.",
-      "tests": ["scripts/check-migration-lineage.test.ts"]
+      "responsibility": "The migration guard verifies every active native script against the fixed official catalog, preserves the exact historical Context 111 path/identity/digest, and statically proves that context1 imports the frozen Effect in the active module catalog. The build source parser records separate Expert/Context high-water marks and rejects unknown or omitted effect sources. Historical 109/110/111 tracker identities are compatibility inputs to the exact audited adoption path, never additional native catalog entries. Missing upstream evidence blocks the check; no directory-wide exemptions apply.",
+      "tests": [
+        "scripts/check-migration-lineage.test.ts",
+        "scripts/workbench-build.test.ts",
+        "apps/server/src/workbench/persistence/ContextMigrationCompatibility.test.ts"
+      ]
     },
     {
       "id": "web.expert-chat-slots",

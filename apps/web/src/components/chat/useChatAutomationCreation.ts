@@ -19,7 +19,7 @@ import { useCallback } from "react";
 import { promoteThreadCreate } from "~/lib/threadCreatePromotion";
 import { newCommandId, randomUUID } from "~/lib/utils";
 import { readNativeApi } from "~/nativeApi";
-import { readNativeApiServerCapability } from "~/nativeApi";
+import { readNativeApiServerCapabilityState } from "~/nativeApi";
 import { dispatchThreadNotes } from "~/pinnedMessages";
 import {
   mergeProjectInstructionsIntoThreadNotes,
@@ -46,6 +46,8 @@ function automationScheduleActivityPayload(schedule: AutomationSchedule) {
   switch (schedule.type) {
     case "manual":
       return { type: "manual" } as const;
+    case "project-event":
+      return { type: "project-event", projectId: schedule.projectId } as const;
     case "once":
       return { type: "once", runAt: schedule.runAt } as const;
     case "interval":
@@ -279,7 +281,9 @@ export function useChatAutomationCreation({
             associatedWorktreeBranch: activeThreadAssociatedWorktree.associatedWorktreeBranch,
             associatedWorktreeRef: activeThreadAssociatedWorktree.associatedWorktreeRef,
             lastKnownPr: activeThread.lastKnownPr ?? null,
-            createdAt: activeThread.createdAt,
+            // Promotion materializes the draft as a durable thread now; the draft's
+            // timestamp only records when its composer was opened.
+            createdAt: new Date().toISOString(),
           },
           api,
           { force: true },
@@ -293,10 +297,11 @@ export function useChatAutomationCreation({
           return null;
         }
 
-        const inheritedProjectInstructions = readNativeApiServerCapability(WS_CONTEXT_V1_CAPABILITY)
-          ? ""
-          : (useProjectInstructionsStore.getState().instructionsByProjectId[activeProject.id] ??
-            "");
+        const inheritedProjectInstructions =
+          readNativeApiServerCapabilityState(WS_CONTEXT_V1_CAPABILITY) !== "unsupported"
+            ? ""
+            : (useProjectInstructionsStore.getState().instructionsByProjectId[activeProject.id] ??
+              "");
         const inheritedThreadNotes = mergeProjectInstructionsIntoThreadNotes({
           threadNotes,
           projectInstructions: inheritedProjectInstructions,

@@ -86,23 +86,44 @@ describe("outbound HTTP policy", () => {
 describe("invokePinnedDnsLookup", () => {
   const pinned = { address: "1.2.3.4", family: 4 as const };
 
-  it("returns the legacy single-address form when all is not requested", () => {
-    let result: unknown;
-    invokePinnedDnsLookup(pinned, {}, (err, address, family) => {
-      result = { err, address, family };
+  it("returns the legacy single-address form when all is not requested", async () => {
+    const result = await new Promise((resolve) => {
+      invokePinnedDnsLookup(pinned, {}, (err, address, family) => {
+        resolve({ err, address, family });
+      });
     });
     expect(result).toEqual({ err: null, address: "1.2.3.4", family: 4 });
   });
 
-  it("returns the array form when Happy Eyeballs requests all addresses", () => {
-    let result: unknown;
-    invokePinnedDnsLookup(pinned, { all: true }, (err, address, family) => {
-      result = { err, address, family };
+  it("returns the array form when Happy Eyeballs requests all addresses", async () => {
+    const result = await new Promise((resolve) => {
+      invokePinnedDnsLookup(pinned, { all: true }, (err, address, family) => {
+        resolve({ err, address, family });
+      });
     });
     expect(result).toEqual({
       err: null,
       address: [{ address: "1.2.3.4", family: 4 }],
       family: undefined,
     });
+  });
+
+  it("offers every pinned address to Happy Eyeballs so IPv4 still works without IPv6", async () => {
+    const dualStack = [
+      { address: "2606:4700::1", family: 6 as const },
+      { address: "104.18.42.230", family: 4 as const },
+    ];
+    const all = await new Promise((resolve) => {
+      invokePinnedDnsLookup(dualStack, { all: true }, (err, address) => {
+        resolve({ err, address });
+      });
+    });
+    expect(all).toEqual({ err: null, address: dualStack });
+    const single = await new Promise((resolve) => {
+      invokePinnedDnsLookup(dualStack, {}, (err, address, family) => {
+        resolve({ err, address, family });
+      });
+    });
+    expect(single).toEqual({ err: null, address: "2606:4700::1", family: 6 });
   });
 });

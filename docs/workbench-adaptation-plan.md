@@ -40,6 +40,8 @@ Synara 宿主拥有认证、任务执行、Provider、事件投影、数据库�
 
 Context 页面、自动保存与旧指令迁移通过 `workbench/host/contextClient` 读取现有 `ContextApi` 和 capability，不再直接读取完整 native API 或旧指令 store。宿主保留“不支持”与“支持但连接不可用”的区别，返回原 API 对象，保持自动保存队列身份。Space 命令辅助函数只接收所需的 orchestration 方法；批量归属在传输结果不确定时仍保留 `getShellSnapshot` 校准能力。Space controller/路由同步、Context RPC/生命周期/投影/持久化继续作为明确登记的宿主接入。
 
+连接状态与共享连接代次由现有宿主 transport 提供。重连开始即暂停依赖 Context 的写入，当前代次的实际读取成功后再恢复；多个观察者复用同一查询结果，旧代次的晚返回不能授权新连接。自动保存队列仍按原 API、数据实例和项目区分。相同项目或 Space 切换数据所有者时，未保存、已发送待回执及结果不确定的操作都属于受保护状态；保留旧草稿及离开保护，明确丢弃后才采纳新所有者。首次发送与迁移交互在异步步骤返回后再次核对当前连接及数据归属，不以开始时的闭包快照放行。
+
 ### 路由与布局契约
 
 先核对真实父布局，再选择 URL 与挂载层级：
@@ -64,7 +66,9 @@ Hermes 优先作为常驻服务。实施前在专项方案中明确启动/停止
 
 扩展迁移沿用独立 ledger 与宿主连接、事务和恢复边界，兼容与回退按升级 SOP 执行。Beta 功能沿用 AGENTS 的共享功能门控、服务端拒绝、前端入口及 Stable 持久化状态要求，不改变应用身份、数据与更新渠道隔离。
 
-历史兼容例外：Context 已使用原生 tracker 的 `111_ContextV1`，按用户确认保留编号、名称、文件与 SQL 内容，不做 ledger 接管或搬表。[迁移检查](../scripts/check-migration-lineage.ts)冻结其身份与脚本 SHA-256，并要求新增原生迁移能追溯到锁定的上游 tag/完整 SHA；缺少来源时明确失败，新增 Linx 扩展使用 Workbench 独立 ledger。此例外不构成继续占用原生迁移编号的许可。 用户随后确认：上游 v1.0.1 已占用 111 时，允许在隔离升级候选实现旧 `ContextV1` 的精确 ledger 兼容接管，原脚本、身份和历史证据仍冻结保留；见[已确认兼容方案](./workbench-implementation-plan.md#v101-compatibility-proposal)。该方向尚未在当前 main 实施，不代表用户数据库已迁移。实际实现与检查见[架构对齐验收](./workbench-adaptation-acceptance.md#alignment-implementation-20261016)。
+历史兼容例外：旧 `111_ContextV1` 的身份、路径与原始脚本 SHA-256 永久冻结。2026-10-16 用户针对上游已复用 111 的冲突，批准精确 ledger 接管，并在后续固定 v1.0.5 计划中确认：候选从活动原生 catalog 退出旧 111，活动原生迁移逐项匹配官方 T（截至 135）；Context 通过 `(context, 1, ContextV1)` 引用冻结脚本，复用宿主连接、事务与统一备份。只有精确旧身份、官方前缀及预期 schema 匹配才允许备份后审计接管，未知或双重登记拒绝；Expert 编号与 checksum 保留。
+
+[迁移检查](../scripts/check-migration-lineage.ts)同时审计官方脚本、冻结文件和 Context ledger 静态归属，新增 Linx 扩展进入独立 ledger；不按编号或目录豁免。恢复 v3 分模块记录进度和旧身份，旧 v1/v2 只在来源及进度可解释时转换。源码集成、合成数据库验收与用户数据库升级分别记录；本轮不执行用户数据库迁移。操作见[兼容 SOP](./workbench-implementation-plan.md#v101-compatibility-proposal)，实际结果与同源交付记录入口见[v1.0.5 验收](./workbench-v105-upgrade-acceptance.md)。
 
 ---
 

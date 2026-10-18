@@ -7,7 +7,7 @@
 //      8k-line component.
 
 import {
-  WS_CONTEXT_V1_CAPABILITY,
+  type ContextApi,
   type ContextCommandResult,
   type ProjectId,
   type SpaceContextSaveInput,
@@ -37,7 +37,11 @@ import {
   updateSpace,
 } from "../lib/spaces";
 import { readNativeApi } from "../nativeApi";
-import { useNativeApiServerCapability } from "../hooks/useNativeApiServerCapability";
+import {
+  contextApiQueryIdentity,
+  readContextClient,
+  useContextClient,
+} from "../workbench/host/contextClient";
 import { useSpacesUiStore } from "../spacesUiStore";
 import { useStore } from "../store";
 import type { Project, SidebarThreadSummary, Space } from "../types";
@@ -47,6 +51,7 @@ import { useWorkspacePathsStore } from "../workspacePathsStore";
 import { sortThreadsForSidebar } from "./Sidebar.logic";
 import type { SpaceEditorMode, SpaceEditorValue } from "./SpaceEditorDialog";
 import type { SpaceContextFieldsDraft } from "./SpaceContextFieldsEditor";
+import { useExpertDraftGuard } from "./settings/useExpertDraftGuard";
 import { useRouteSpaceSync } from "./useRouteSpaceSync";
 import { toastManager } from "./ui/toast";
 
@@ -77,6 +82,7 @@ export function useSpacesController(input: {
   projectById: ReadonlyMap<ProjectId, Project>;
   sidebarThreads: readonly SidebarThreadSummary[];
   sidebarThreadSortOrder: SidebarThreadSortOrder;
+  sidebarThreadAttentionFirst: boolean;
   routeThreadId: ThreadId | null;
   routeProjectId: ProjectId | null;
   isOnKanban: boolean;
@@ -96,13 +102,14 @@ export function useSpacesController(input: {
     projectById,
     routeProjectId,
     routeThreadId,
+    sidebarThreadAttentionFirst,
     sidebarThreadSortOrder,
     sidebarThreads,
   } = input;
 
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const contextCapability = useNativeApiServerCapability(WS_CONTEXT_V1_CAPABILITY);
+  const contextClient = useContextClient();
   const spaces = useStore((store) => store.spaces);
   const requestedEditorSpaceId = useSpacesUiStore((store) => store.requestedEditorSpaceId);
   useEffect(() => {
@@ -129,9 +136,10 @@ export function useSpacesController(input: {
   const homeDir = useWorkspacePathsStore((store) => store.homeDir);
   const chatWorkspaceRoot = useWorkspacePathsStore((store) => store.chatWorkspaceRoot);
   const studioWorkspaceRoot = useWorkspacePathsStore((store) => store.studioWorkspaceRoot);
+  const groupsWorkspaceRoot = useWorkspacePathsStore((store) => store.groupsWorkspaceRoot);
   const workspacePaths = useMemo(
-    () => ({ homeDir, chatWorkspaceRoot, studioWorkspaceRoot }),
-    [chatWorkspaceRoot, homeDir, studioWorkspaceRoot],
+    () => ({ homeDir, chatWorkspaceRoot, studioWorkspaceRoot, groupsWorkspaceRoot }),
+    [chatWorkspaceRoot, groupsWorkspaceRoot, homeDir, studioWorkspaceRoot],
   );
 
   const routeSpaceProject =
@@ -144,13 +152,19 @@ export function useSpacesController(input: {
 
   const [spaceEditorState, setSpaceEditorState] = useState<SpaceEditorState | null>(null);
   const editingSpaceId = spaceEditorState?.mode === "edit" ? spaceEditorState.spaceId : null;
-  const contextApi = contextCapability ? (readNativeApi()?.context ?? null) : null;
+  const contextApi = contextClient.api;
+  const contextIdentity = contextApiQueryIdentity(contextApi);
   const spaceContextQuery = useQuery({
-    queryKey: ["context", "space", editingSpaceId],
-    enabled: Boolean(editingSpaceId && contextApi),
-    queryFn: () => {
+    queryKey: ["context", "space", contextIdentity, contextClient.generation, editingSpaceId],
+    enabled: Boolean(editingSpaceId && contextApi && contextClient.available),
+    queryFn: async () => {
       if (!editingSpaceId || !contextApi) throw new Error("Space context is unavailable.");
-      return contextApi.getSpace({ spaceId: editingSpaceId });
+      const generation = contextClient.generation;
+      const saved = await contextApi.getSpace({ spaceId: editingSpaceId });
+      const current = readContextClient();
+      if (!current.available || current.api !== contextApi || current.generation !== generation)
+        throw new Error("The Context connection changed before confirmation.");
+      return saved;
     },
     staleTime: 0,
   });
@@ -173,11 +187,37 @@ export function useSpacesController(input: {
   const initializedSpaceContextIdRef = useRef<SpaceId | null>(null);
   const spaceSaveAttemptRef = useRef<SpaceContextSaveInput | null>(null);
 
+  const [spaceContextOwner, setSpaceContextOwner] = useState<ContextApi | null>(null);
+  const savedCloseRef = useRef(false);
+  const spaceContextPending = Boolean(
+    spaceContextBase &&
+    (spaceContextSaving ||
+      spaceContextUncertain ||
+      spaceContextDraft.directionGoal !== spaceContextBase.directionGoal ||
+      spaceContextDraft.sharedInstructions !== spaceContextBase.sharedInstructions ||
+      (spaceEditorValueDraft &&
+        (spaceEditorValueDraft.name !== spaceContextBase.name ||
+          spaceEditorValueDraft.icon !== spaceContextBase.icon))),
+  );
+  const spaceContextDetached = Boolean(
+    spaceContextBase &&
+    (spaceContextOwner !== contextApi ||
+      (spaceContextQuery.data &&
+        spaceContextQuery.data.dataInstanceId !== spaceContextBase.dataInstanceId)),
+  );
+  const spaceContextAvailable =
+    contextClient.available &&
+    spaceContextQuery.isSuccess &&
+    !spaceContextDetached &&
+    spaceContextOwner === contextApi;
+
   useEffect(() => {
     if (!editingSpaceId) {
       initializedSpaceContextIdRef.current = null;
       spaceSaveAttemptRef.current = null;
       setSpaceContextBase(null);
+      setSpaceContextOwner(null);
+      setSpaceContextSaving(false);
       setSpaceContextConflict(null);
       setSpaceContextError(null);
       setSpaceContextUncertain(false);
@@ -187,8 +227,24 @@ export function useSpacesController(input: {
     }
     const confirmed = spaceContextQuery.data;
     if (!confirmed || confirmed.spaceId !== editingSpaceId) return;
-    if (initializedSpaceContextIdRef.current !== editingSpaceId) {
+    if (
+      initializedSpaceContextIdRef.current !== editingSpaceId ||
+      spaceContextBase?.dataInstanceId !== confirmed.dataInstanceId ||
+      spaceContextOwner !== contextApi
+    ) {
+      if (initializedSpaceContextIdRef.current === editingSpaceId && spaceContextPending) {
+        setSpaceContextConflict(confirmed);
+        setSpaceContextError(
+          "The Context owner changed. Use saved values to discard the preserved draft.",
+        );
+        return;
+      }
       initializedSpaceContextIdRef.current = editingSpaceId;
+      setSpaceContextOwner(contextApi);
+      const icon = isVoidSpaceIconName(confirmed.icon) ? confirmed.icon : DEFAULT_SPACE_ICON;
+      setSpaceEditorResetValue({ name: confirmed.name, icon });
+      setSpaceEditorValueDraft({ name: confirmed.name, icon });
+      setSpaceEditorResetVersion((value) => value + 1);
       setSpaceContextBase(confirmed);
       setSpaceContextDraft({
         directionGoal: confirmed.directionGoal,
@@ -210,7 +266,16 @@ export function useSpacesController(input: {
         "Space context changed elsewhere. Compare the saved values before saving.",
       );
     }
-  }, [editingSpaceId, spaceContextBase, spaceContextConflict, spaceContextQuery.data]);
+  }, [
+    editingSpaceId,
+    spaceContextBase,
+    spaceContextConflict,
+    spaceContextQuery.data,
+    spaceContextPending,
+    spaceContextOwner,
+    contextApi,
+  ]);
+  const ownsSpaceContext = contextClient.capability !== "unsupported" || spaceContextPending;
   const [spaceProjectPickerTargetId, setSpaceProjectPickerTargetId] = useState<SpaceId | null>(
     null,
   );
@@ -304,7 +369,10 @@ export function useSpacesController(input: {
         rememberedThreadId: getLastSpaceThreadId(spaceId),
         rememberedProjectId: getLastSpaceProjectId(spaceId),
         paths: workspacePaths,
-        sortThreads: (threads) => sortThreadsForSidebar(threads, sidebarThreadSortOrder),
+        sortThreads: (threads) =>
+          sortThreadsForSidebar(threads, sidebarThreadSortOrder, {
+            attentionFirst: sidebarThreadAttentionFirst,
+          }),
       });
 
       if (target.kind === "thread") {
@@ -341,6 +409,7 @@ export function useSpacesController(input: {
       projectById,
       rememberDepartingSpaceContext,
       selectSpaceForNavigation,
+      sidebarThreadAttentionFirst,
       sidebarThreadSortOrder,
       sidebarThreads,
       workspacePaths,
@@ -362,7 +431,9 @@ export function useSpacesController(input: {
       const icon = toSpaceIconName(value.icon);
 
       if (spaceEditorState.mode === "edit") {
-        if (contextApi) {
+        if (ownsSpaceContext) {
+          if (!spaceContextAvailable || !contextApi)
+            throw new Error("Context is disconnected. Reconnect before saving.");
           const currentSpaceContext = spaceContextBase;
           if (!currentSpaceContext || currentSpaceContext.spaceId !== spaceEditorState.spaceId) {
             throw new Error("Space context is still loading. Retry in a moment.");
@@ -413,30 +484,56 @@ export function useSpacesController(input: {
             attempt = previousAttempt!;
           }
 
+          const hostGeneration = contextClient.generation;
+          const currentAttempt = () => {
+            const current = readContextClient();
+            return (
+              spaceSaveAttemptRef.current === attempt &&
+              current.api === contextApi &&
+              current.generation === hostGeneration &&
+              current.available
+            );
+          };
+          const saveContextSpace = () => {
+            if (!currentAttempt())
+              throw new Error("Context is disconnected. Reconnect before saving.");
+            return contextApi.saveSpace(attempt);
+          };
           setSpaceContextSaving(true);
           setSpaceContextError(null);
           try {
             let result: ContextCommandResult;
             if (spaceContextUncertain) {
+              if (!currentAttempt())
+                throw new Error("The Context connection changed before confirmation.");
               result = await contextApi.getCommandResult({ commandId: attempt.commandId });
             } else {
-              result = await contextApi.saveSpace(attempt);
+              result = await saveContextSpace();
             }
             if (result.status === "unknown" || result.status === "pending") {
+              if (!currentAttempt())
+                throw new Error("The Context connection changed before confirmation.");
               result = await contextApi.getCommandResult({ commandId: attempt.commandId });
             }
             if (result.status === "unknown") {
-              result = await contextApi.saveSpace(attempt);
+              result = await saveContextSpace();
               if (result.status === "unknown" || result.status === "pending") {
+                if (!currentAttempt())
+                  throw new Error("The Context connection changed before confirmation.");
                 result = await contextApi.getCommandResult({ commandId: attempt.commandId });
               }
             }
+            if (!currentAttempt())
+              throw new Error(
+                "The Context connection or editor changed before this save completed.",
+              );
             if (result.status === "saved") {
               const saved =
                 result.space?.spaceId === currentSpaceContext.spaceId
                   ? result.space
                   : await contextApi.getSpace({ spaceId: currentSpaceContext.spaceId });
               if (
+                saved.dataInstanceId !== currentSpaceContext.dataInstanceId ||
                 saved.revision < currentSpaceContext.revision ||
                 saved.name !== attempt.name ||
                 saved.icon !== attempt.icon ||
@@ -447,6 +544,9 @@ export function useSpacesController(input: {
                   "The save completed but could not be confirmed with matching values.",
                 );
               }
+              if (!currentAttempt())
+                throw new Error("The Context connection or editor changed before confirmation.");
+              savedCloseRef.current = true;
               setSpaceContextBase(saved);
               setSpaceContextDraft({
                 directionGoal: saved.directionGoal,
@@ -456,7 +556,10 @@ export function useSpacesController(input: {
               setSpaceContextError(null);
               setSpaceContextUncertain(false);
               spaceSaveAttemptRef.current = null;
-              queryClient.setQueryData(["context", "space", saved.spaceId], saved);
+              queryClient.setQueryData(
+                ["context", "space", contextIdentity, contextClient.generation, saved.spaceId],
+                saved,
+              );
               void queryClient.invalidateQueries({ queryKey: ["context", "project"] });
               return;
             }
@@ -465,13 +568,18 @@ export function useSpacesController(input: {
                 result.space?.spaceId === currentSpaceContext.spaceId
                   ? result.space
                   : await contextApi.getSpace({ spaceId: currentSpaceContext.spaceId });
+              if (!currentAttempt() || latest.dataInstanceId !== currentSpaceContext.dataInstanceId)
+                throw new Error("The Context data instance or editor changed before confirmation.");
               setSpaceContextConflict(latest);
               setSpaceContextError(
                 result.message ?? "Space context changed elsewhere. Compare the saved values.",
               );
               setSpaceContextUncertain(false);
               spaceSaveAttemptRef.current = null;
-              queryClient.setQueryData(["context", "space", latest.spaceId], latest);
+              queryClient.setQueryData(
+                ["context", "space", contextIdentity, contextClient.generation, latest.spaceId],
+                latest,
+              );
               throw new Error("Space context changed elsewhere. Compare the saved values.");
             }
             if (result.status === "rejected") {
@@ -484,13 +592,18 @@ export function useSpacesController(input: {
               result.message ?? "The save is still being processed. Retry to confirm this command.",
             );
           } catch (error) {
+            if (!currentAttempt()) {
+              if (spaceSaveAttemptRef.current === attempt) setSpaceContextUncertain(true);
+              throw error;
+            }
             const message =
               error instanceof Error ? error.message : "Unable to save Space context.";
             setSpaceContextError(message);
             if (spaceSaveAttemptRef.current) setSpaceContextUncertain(true);
             throw error instanceof Error ? error : new Error(message);
           } finally {
-            setSpaceContextSaving(false);
+            if (spaceSaveAttemptRef.current === attempt || spaceSaveAttemptRef.current === null)
+              setSpaceContextSaving(false);
           }
         }
         // Only actual changes are sent, so an icon-only edit cannot collide with a
@@ -551,6 +664,10 @@ export function useSpacesController(input: {
       spaceEditorState,
       spaces,
       contextApi,
+      contextIdentity,
+      ownsSpaceContext,
+      contextClient.generation,
+      spaceContextAvailable,
       queryClient,
       spaceContextBase,
       spaceContextConflict,
@@ -713,13 +830,15 @@ export function useSpacesController(input: {
   );
 
   const openSpaceCreator = useCallback((projectIdAfterCreate: ProjectId | null = null) => {
+    savedCloseRef.current = false;
     setSpaceEditorState({ mode: "create", projectIdAfterCreate });
   }, []);
   const openSpaceEditor = useCallback((spaceId: SpaceId) => {
+    savedCloseRef.current = false;
     setSpaceEditorState({ mode: "edit", spaceId });
   }, []);
   const openVoidEditor = useCallback(() => setSpaceEditorState({ mode: "void" }), []);
-  const closeSpaceEditor = useCallback(() => setSpaceEditorState(null), []);
+
   const openSpaceProjectPicker = useCallback(
     (spaceId: SpaceId) => setSpaceProjectPickerTargetId(spaceId),
     [],
@@ -753,7 +872,10 @@ export function useSpacesController(input: {
 
   const handleUseSavedSpaceContext = useCallback(() => {
     if (!spaceContextConflict) return;
-    const saved = spaceContextConflict;
+    if (!contextClient.available || !spaceContextQuery.isSuccess) return;
+    const saved = spaceContextDetached ? spaceContextQuery.data : spaceContextConflict;
+    setSpaceContextOwner(contextApi);
+    setSpaceContextSaving(false);
     setSpaceContextBase(saved);
     setSpaceContextDraft({
       directionGoal: saved.directionGoal,
@@ -763,30 +885,90 @@ export function useSpacesController(input: {
     setSpaceContextError(null);
     setSpaceContextUncertain(false);
     spaceSaveAttemptRef.current = null;
-    queryClient.setQueryData(["context", "space", saved.spaceId], saved);
+    queryClient.setQueryData(
+      ["context", "space", contextIdentity, contextClient.generation, saved.spaceId],
+      saved,
+    );
     const icon = isVoidSpaceIconName(saved.icon) ? saved.icon : DEFAULT_SPACE_ICON;
     setSpaceEditorResetValue({ name: saved.name, icon });
     setSpaceEditorValueDraft({ name: saved.name, icon });
     setSpaceEditorResetVersion((value) => value + 1);
-  }, [editedSpace?.icon, queryClient, spaceContextConflict]);
+  }, [
+    queryClient,
+    contextIdentity,
+    contextClient.available,
+    contextClient.generation,
+    contextApi,
+    spaceContextConflict,
+    spaceContextDetached,
+    spaceContextQuery.data,
+    spaceContextQuery.isSuccess,
+  ]);
 
   const handleSpaceEditorValueChange = useCallback((value: SpaceEditorValue) => {
     setSpaceEditorValueDraft(value);
   }, []);
 
   const handleKeepSpaceContextDraft = useCallback(() => {
-    if (!spaceContextConflict) return;
+    if (!spaceContextConflict || spaceContextDetached || !spaceContextAvailable) return;
     const latest = spaceContextConflict;
     setSpaceContextBase(latest);
     setSpaceContextConflict(null);
     setSpaceContextError(null);
     setSpaceContextUncertain(false);
     spaceSaveAttemptRef.current = null;
-    queryClient.setQueryData(["context", "space", latest.spaceId], latest);
-  }, [queryClient, spaceContextConflict]);
+    queryClient.setQueryData(
+      ["context", "space", contextIdentity, contextClient.generation, latest.spaceId],
+      latest,
+    );
+  }, [
+    queryClient,
+    contextIdentity,
+    contextClient.generation,
+    spaceContextConflict,
+    spaceContextDetached,
+    spaceContextAvailable,
+  ]);
+
+  const spaceDraftGuard = useExpertDraftGuard({
+    isDirty: Boolean(editingSpaceId && spaceContextPending),
+    canSave:
+      spaceContextAvailable &&
+      !spaceContextSaving &&
+      !spaceContextUncertain &&
+      !spaceContextConflict,
+    saveDisabledReason: "Reconnect and resolve the Context owner before saving.",
+    onSave: async () => {
+      const value = spaceEditorValueDraft ?? spaceEditorInitialValue;
+      if (!value) return false;
+      await handleSpaceEditorSubmit(value);
+      savedCloseRef.current = false;
+      setSpaceEditorState(null);
+      return true;
+    },
+    onDiscard: () => {
+      savedCloseRef.current = false;
+      setSpaceEditorState(null);
+      spaceSaveAttemptRef.current = null;
+      setSpaceContextSaving(false);
+      setSpaceContextUncertain(false);
+      return true;
+    },
+  });
+  const closeSpaceEditor = useCallback(async () => {
+    if (savedCloseRef.current) {
+      savedCloseRef.current = false;
+      setSpaceEditorState(null);
+      return;
+    }
+    if (await spaceDraftGuard.confirmLeave()) {
+      savedCloseRef.current = false;
+      setSpaceEditorState(null);
+    }
+  }, [spaceDraftGuard.confirmLeave]);
 
   const spaceContextEditor =
-    contextApi && editingSpaceId
+    editingSpaceId && ownsSpaceContext
       ? {
           enabled: true,
           draft: spaceContextDraft,
@@ -794,9 +976,13 @@ export function useSpacesController(input: {
           loading: spaceContextQuery.isPending && spaceContextBase === null,
           ready: spaceContextBase !== null,
           saving: spaceContextSaving,
-          disabled: spaceContextSaving || spaceContextUncertain,
-          closeDisabled: spaceContextSaving || spaceContextUncertain,
+          disabled:
+            !spaceContextAvailable || !contextApi || spaceContextSaving || spaceContextUncertain,
+          closeDisabled: false,
+          keepDraftDisabled: !spaceContextAvailable || spaceContextDetached,
           submitDisabled:
+            !spaceContextAvailable ||
+            !contextApi ||
             spaceContextSaving ||
             spaceContextQuery.isPending ||
             spaceContextBase === null ||
@@ -804,6 +990,9 @@ export function useSpacesController(input: {
             spaceContextDraft.directionGoal.length > 4_096 ||
             spaceContextDraft.sharedInstructions.length > 16_384,
           error:
+            (!contextClient.available
+              ? "Context is disconnected. Reconnect before saving."
+              : null) ??
             spaceContextError ??
             (spaceContextQuery.error instanceof Error
               ? spaceContextQuery.error.message
@@ -823,6 +1012,7 @@ export function useSpacesController(input: {
 
   return {
     activeSpace,
+    spaceDraftGuardDialog: spaceDraftGuard.dialog,
     voidSpace,
     editedSpace,
     spaceEditorOpen:

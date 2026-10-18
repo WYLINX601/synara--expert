@@ -70,6 +70,88 @@ afterEach(() => {
 });
 
 describe("ProjectContextAutosave", () => {
+  it("pauses a debounced draft and resumes the same queue after capability negotiation recovers", async () => {
+    vi.useFakeTimers();
+    const api = fakeApi();
+    const controller = getProjectContextAutosave(api, settings());
+    controller.setDraft({ projectGoal: "paused goal", projectInstructions: "paused instructions" });
+    controller.setAvailable(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(api.saveProject).not.toHaveBeenCalled();
+    expect(controller.getState().dirty).toBe(true);
+    await expect(controller.flush()).resolves.toBe(false);
+    expect(getProjectContextAutosave(api, settings())).toBe(controller);
+    controller.setAvailable(true);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(api.saveProject).toHaveBeenCalledTimes(1);
+    expect(controller.getState().dirty).toBe(false);
+    expect(controller.getState().draft.projectInstructions).toBe("paused instructions");
+  });
+
+  it("keeps a shared queue available when one of two chat surfaces unmounts", async () => {
+    const api = fakeApi();
+    const controller = new ProjectContextAutosave({ api, initial: settings() });
+    const first = {};
+    const second = {};
+    controller.setOwnerAvailable(first, true);
+    controller.setOwnerAvailable(second, true);
+    controller.setOwnerAvailable(first, null);
+    controller.setDraft({
+      projectGoal: "remaining surface",
+      projectInstructions: "saved instructions",
+    });
+    await expect(controller.flush()).resolves.toBe(true);
+    expect(api.saveProject).toHaveBeenCalledTimes(1);
+    controller.setOwnerAvailable(second, null);
+    controller.setDraft({
+      projectGoal: "detached draft",
+      projectInstructions: "saved instructions",
+    });
+    await expect(controller.flush()).resolves.toBe(false);
+    expect(api.saveProject).toHaveBeenCalledTimes(1);
+  });
+
+  it("explicit detached discard keeps late acknowledgements local and never replays a paused write", async () => {
+    const pending = deferred<ContextCommandResult>();
+    const api = fakeApi({ saveProject: vi.fn(() => pending.promise) });
+    const controller = new ProjectContextAutosave({ api, initial: settings() });
+    controller.setDraft({
+      projectGoal: "submitted goal",
+      projectInstructions: "submitted instructions",
+    });
+    const flush = controller.flush();
+    await Promise.resolve();
+    const input = vi.mocked(api.saveProject).mock.calls[0]![0];
+    controller.setAvailable(false);
+    expect(controller.discardDetachedDraft()).toBe(true);
+    expect(controller.getState().dirty).toBe(false);
+    pending.resolve(
+      savedResult(
+        input.commandId,
+        settings({
+          projectGoal: input.projectGoal,
+          projectInstructions: input.projectInstructions,
+          revision: 1,
+        }),
+      ),
+    );
+    await expect(flush).resolves.toBe(false);
+    expect(controller.getState().dirty).toBe(false);
+    expect(api.saveProject).toHaveBeenCalledTimes(1);
+    expect(api.getCommandResult).not.toHaveBeenCalled();
+  });
+
+  it("can explicitly discard an unsent offline draft without writing to any owner", async () => {
+    const api = fakeApi();
+    const controller = new ProjectContextAutosave({ api, initial: settings() });
+    controller.setDraft({ projectGoal: "offline goal", projectInstructions: "offline draft" });
+    controller.setAvailable(false);
+    await expect(controller.discard()).resolves.toBe(true);
+    expect(controller.getState().dirty).toBe(false);
+    expect(api.saveProject).not.toHaveBeenCalled();
+    expect(api.getProject).not.toHaveBeenCalled();
+  });
+
   it("debounces for 500ms and serializes the latest draft after an earlier save", async () => {
     vi.useFakeTimers();
     const first = deferred<ContextCommandResult>();

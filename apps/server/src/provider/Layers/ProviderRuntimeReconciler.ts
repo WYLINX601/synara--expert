@@ -26,6 +26,7 @@ import {
   bindingActiveTurnId,
   DEFAULT_RUNTIME_RECONCILIATION_STALE_AFTER_MS,
   planProviderRuntimeReconciliation,
+  RUNTIME_RECONCILIATION_MAX_STALLED_START_AGE_MS,
   type ProviderRuntimeReconciliationPlan,
 } from "../providerRuntimeReconciliation.ts";
 import {
@@ -44,6 +45,7 @@ const DEFAULT_RECONCILIATION_CANDIDATE_LIMIT = 256;
 export interface ProviderRuntimeReconcilerLiveOptions {
   readonly intervalMs?: number;
   readonly staleAfterMs?: number;
+  readonly maxStalledStartAgeMs?: number;
   readonly candidateLimit?: number;
 }
 
@@ -78,6 +80,10 @@ const make = (options?: ProviderRuntimeReconcilerLiveOptions) =>
       1,
       Math.floor(options?.staleAfterMs ?? DEFAULT_RUNTIME_RECONCILIATION_STALE_AFTER_MS),
     );
+    const maxStalledStartAgeMs = Math.max(
+      staleAfterMs,
+      Math.floor(options?.maxStalledStartAgeMs ?? RUNTIME_RECONCILIATION_MAX_STALLED_START_AGE_MS),
+    );
     const candidateLimit = Math.max(
       1,
       Math.min(
@@ -94,6 +100,7 @@ const make = (options?: ProviderRuntimeReconcilerLiveOptions) =>
       current !== null &&
       current.status === next.status &&
       current.providerName === next.providerName &&
+      current.providerInstanceId === next.providerInstanceId &&
       current.runtimeMode === next.runtimeMode &&
       current.activeTurnId === next.activeTurnId &&
       current.lastError === next.lastError;
@@ -120,6 +127,13 @@ const make = (options?: ProviderRuntimeReconcilerLiveOptions) =>
           plan.action === "settle-terminal-projection"
             ? plan.terminalSession.providerName
             : plan.provider,
+        providerInstanceId:
+          plan.action === "settle-terminal-projection"
+            ? plan.terminalSession.providerInstanceId
+            : (input.binding?.providerInstanceId ??
+              thread.session?.providerInstanceId ??
+              thread.modelSelection.instanceId ??
+              thread.modelSelection.provider),
         runtimeMode:
           plan.action === "settle-terminal-projection"
             ? plan.terminalSession.runtimeMode
@@ -232,7 +246,9 @@ const make = (options?: ProviderRuntimeReconcilerLiveOptions) =>
       );
       // One batched read instead of up to `candidateLimit` point reads
       // contending on the single SQLite handle every reconciliation tick.
-      const threads = yield* projectionSnapshotQuery.getThreadShellsByIds(candidateThreadIds);
+      const threads = yield* projectionSnapshotQuery.getThreadShellsByIds(candidateThreadIds, {
+        includeLatestMessageActivity: true,
+      });
       const threadById = new Map(threads.map((thread) => [thread.id, thread]));
       const bindingByThreadId = new Map(bindings.map((binding) => [binding.threadId, binding]));
       const plans = planProviderRuntimeReconciliation({
@@ -243,6 +259,7 @@ const make = (options?: ProviderRuntimeReconcilerLiveOptions) =>
         runtimeJournalLagging,
         nowMs,
         staleAfterMs,
+        maxStalledStartAgeMs,
       });
       if (plans.length === 0) return;
 

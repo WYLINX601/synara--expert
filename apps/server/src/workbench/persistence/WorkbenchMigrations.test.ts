@@ -29,6 +29,20 @@ import {
   planLegacyExpertMigrationAdoption,
 } from "./LegacyExpertMigrationAdoption.ts";
 
+const absentContextSchema = {
+  contextSchemaObjects: [],
+  contextTableColumns: {
+    context_meta: null,
+    context_spaces: null,
+    context_projects: null,
+    context_migrations: null,
+    context_thread_bindings: null,
+    context_applied_runtime_records: null,
+    context_command_results: null,
+  },
+  contextDeliveryColumns: null,
+} as const;
+
 const frozenOfficialPrefix = migrationEntries
   .filter(([id]) => id <= 108)
   .map(([migration_id, name]) => ({ migration_id, name }));
@@ -78,12 +92,14 @@ const runtimeRecordColumns: readonly SqliteColumnInfo[] = [
 ];
 
 const adopted109Schema = {
+  ...absentContextSchema,
   projectionThreadsExists: true,
   bindingColumn,
   runtimeRecordColumns: null,
 } as const;
 
 const adopted110Schema = {
+  ...absentContextSchema,
   projectionThreadsExists: true,
   bindingColumn,
   runtimeRecordColumns,
@@ -137,7 +153,19 @@ it.effect("recognizes only the frozen 109/110 legacy identities and exact result
         officialRows: legacyRows(109),
         schemaState: adopted109Schema,
       }),
-      { kind: "adopt", migrationIds: [1] },
+      {
+        kind: "adopt",
+        migrationIds: [1],
+        contextMigrationIds: [],
+        legacyMigrations: LEGACY_EXPERT_OFFICIAL_MIGRATIONS.filter(({ workbenchId }) =>
+          [1].includes(workbenchId),
+        ).map(({ officialId, officialName, workbenchId }) => ({
+          officialId,
+          officialName,
+          workbenchId,
+          moduleId: "expert" as const,
+        })),
+      },
     );
     assert.deepStrictEqual(
       planLegacyExpertMigrationAdoption({
@@ -145,7 +173,19 @@ it.effect("recognizes only the frozen 109/110 legacy identities and exact result
         officialRows: legacyRows(110),
         schemaState: adopted110Schema,
       }),
-      { kind: "adopt", migrationIds: [1, 2] },
+      {
+        kind: "adopt",
+        migrationIds: [1, 2],
+        contextMigrationIds: [],
+        legacyMigrations: LEGACY_EXPERT_OFFICIAL_MIGRATIONS.filter(({ workbenchId }) =>
+          [1, 2].includes(workbenchId),
+        ).map(({ officialId, officialName, workbenchId }) => ({
+          officialId,
+          officialName,
+          workbenchId,
+          moduleId: "expert" as const,
+        })),
+      },
     );
 
     const legacy109Rows = legacyRows(109);
@@ -195,6 +235,7 @@ it.effect(
   () =>
     Effect.sync(() => {
       const missingProjectionSchema = {
+        ...absentContextSchema,
         projectionThreadsExists: false,
         bindingColumn: null,
         runtimeRecordColumns: null,
@@ -257,7 +298,7 @@ it.effect("allows an empty database to pass pre-migration history recognition", 
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const result = yield* adoptLegacyExpertMigrations();
-    assert.deepStrictEqual(result, { adoptedMigrationIds: [] });
+    assert.deepStrictEqual(result, { adoptedMigrationIds: [], adoptedContextMigrationIds: [] });
     const tables = yield* sql<{ readonly name: string }>`
       SELECT name FROM sqlite_master
       WHERE type = 'table' AND name IN ('effect_sql_migrations', 'workbench_sql_migrations', 'projection_threads')
@@ -273,18 +314,18 @@ it.effect("uses official migration IDs as versions even when the catalog reserve
       migration_id,
       name,
     }));
-    const catalog = [...currentEntries, [112, "OfficialChangeAfterSplit", Effect.void] as const];
+    const catalog = [...currentEntries, [137, "OfficialChangeAfterSplit", Effect.void] as const];
     const rows: OfficialMigrationRecord[] = [
       ...currentRows,
-      { migration_id: 112, name: "OfficialChangeAfterSplit" },
+      { migration_id: 137, name: "OfficialChangeAfterSplit" },
     ];
     assert.isNull(validateOfficialMigrationPrefixAgainstCatalog(rows, catalog));
     assert.isNull(validateCurrentOfficialMigrationPrefix(frozenOfficialPrefix));
     assert.isNull(validateCurrentOfficialMigrationPrefix(currentRows));
-    assert.strictEqual(currentOfficialMigrationCount(), 111);
-    assert.strictEqual(currentOfficialMigrationEntryCount(), 109);
-    assert.strictEqual(catalog.length, 110);
-    assert.strictEqual(officialMigrationCatalogHighWaterMark(catalog), 112);
+    assert.strictEqual(currentOfficialMigrationCount(), 135);
+    assert.strictEqual(currentOfficialMigrationEntryCount(), 135);
+    assert.strictEqual(catalog.length, 136);
+    assert.strictEqual(officialMigrationCatalogHighWaterMark(catalog), 137);
   }),
 );
 
@@ -292,6 +333,7 @@ it.effect("validates extension schema only after the official projection exists"
   Effect.sync(() => {
     assert.isNull(
       validateWorkbenchSchemaState(0, {
+        ...absentContextSchema,
         projectionThreadsExists: false,
         bindingColumn: null,
         runtimeRecordColumns: null,
@@ -299,6 +341,7 @@ it.effect("validates extension schema only after the official projection exists"
     );
     assert.isNotNull(
       validateWorkbenchSchemaState(1, {
+        ...absentContextSchema,
         projectionThreadsExists: false,
         bindingColumn: null,
         runtimeRecordColumns: null,
@@ -340,7 +383,10 @@ fullAdoptionLayer("legacy expert migration handoff", (test) => {
       `;
       assert.strictEqual(officialRows.length, currentOfficialMigrationEntryCount());
       assert.strictEqual(officialRows[107]?.name, "GatewayCompletions");
-      assert.deepStrictEqual(officialRows.at(-1), { migration_id: 111, name: "ContextV1" });
+      assert.deepStrictEqual(officialRows.at(-1), {
+        migration_id: 135,
+        name: "ProjectionMessageTurnActivityIndex",
+      });
 
       const binding = yield* sql<{ readonly expert_binding_json: string }>`
         SELECT expert_binding_json FROM projection_threads WHERE thread_id = 'legacy-thread'
@@ -363,6 +409,7 @@ fullAdoptionLayer("legacy expert migration handoff", (test) => {
         readonly checksum: string;
       }>`
         SELECT migration_id, name, checksum FROM workbench_sql_migrations
+        WHERE module_id = 'expert'
         ORDER BY module_id, migration_id
       `;
       assert.deepStrictEqual(
@@ -372,6 +419,11 @@ fullAdoptionLayer("legacy expert migration handoff", (test) => {
           name,
           checksum,
         ]),
+      );
+      const contextUpgrade = yield* runWorkbenchMigrations();
+      assert.deepStrictEqual(
+        contextUpgrade.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
+        [["context", 1]],
       );
       const rerun = yield* runWorkbenchMigrations();
       assert.deepStrictEqual(rerun.executed, []);
@@ -391,8 +443,11 @@ partialAdoptionLayer("legacy 109 intermediate handoff", (test) => {
 
       const result = yield* runWorkbenchMigrations();
       assert.deepStrictEqual(
-        result.executed.map(({ migrationId }) => migrationId),
-        [2],
+        result.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
+        [
+          ["expert", 2],
+          ["context", 1],
+        ],
       );
       const rows = yield* sql<{ readonly count: number }>`
         SELECT COUNT(*) AS count FROM workbench_sql_migrations WHERE module_id = 'expert'
@@ -411,8 +466,12 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
       const first = yield* runWorkbenchMigrations();
       const second = yield* runWorkbenchMigrations();
       assert.deepStrictEqual(
-        first.executed.map(({ migrationId }) => migrationId),
-        [1, 2],
+        first.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
+        [
+          ["expert", 1],
+          ["expert", 2],
+          ["context", 1],
+        ],
       );
       assert.deepStrictEqual(second.executed, []);
       const format = yield* sql<{ readonly format_version: number }>`

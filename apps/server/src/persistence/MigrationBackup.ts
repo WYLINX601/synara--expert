@@ -1,3 +1,7 @@
+import {
+  CONTEXT_SCHEMA_OBJECTS_QUERY,
+  type SqliteSchemaObject,
+} from "../workbench/persistence/FrozenContextSchema.ts";
 import { constants as fsConstants, type Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -36,6 +40,7 @@ import { migrationEntries, planOfficialMigrationLineage } from "./Migrations.ts"
 import {
   LEGACY_EXPERT_OFFICIAL_MIGRATIONS,
   LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
+  LEGACY_OFFICIAL_MIGRATIONS,
   FROZEN_LEGACY_OFFICIAL_PREFIX_HIGH_WATER_MARK,
   WORKBENCH_SCHEMA_FORMAT_VERSION,
   WORKBENCH_SCHEMA_METADATA_TABLE,
@@ -45,6 +50,9 @@ import {
   validateWorkbenchSchemaMetadataShape,
   validateWorkbenchTrackerShape,
   workbenchMigrationEntries,
+  contextWorkbenchMigrationEntries,
+  CONTEXT_TABLE_COLUMNS,
+  CONTEXT_DELIVERY_COLUMNS,
   type OfficialMigrationRecord,
   type SqliteColumnInfo,
   type WorkbenchMigrationRecord,
@@ -222,7 +230,7 @@ const latestMigrationId = Math.max(...migrationEntries.map(([id]) => id));
 function migrationBackupPlanFromWorkbenchUpgrade(
   upgrade: WorkbenchUpgradeReadyPlan,
 ): MigrationBackupPlan {
-  const legacySuffix = upgrade.legacyOfficialMigrations
+  const legacySuffix = upgrade.legacyMigrations
     .map(({ officialId }) => `-legacy${officialId}`)
     .join("");
   return {
@@ -239,7 +247,7 @@ function migrationBackupPlanFromWorkbenchUpgrade(
 
 function sourceVersionFromWorkbenchUpgrade(upgrade: WorkbenchUpgradeReadyPlan): string {
   if (upgrade.lineageDivergence !== undefined) return upgrade.official.sourceLabel;
-  const legacySuffix = upgrade.legacyOfficialMigrations
+  const legacySuffix = upgrade.legacyMigrations
     .map(({ officialId }) => `-legacy${officialId}`)
     .join("");
   return (
@@ -260,9 +268,14 @@ function assertBackupMatchesWorkbenchUpgrade(
     actual.official.sourceVersion !== expected.official.sourceVersion ||
     actual.official.sourceLabel !== expected.official.sourceLabel ||
     actual.workbench.sourceVersion !== expected.workbench.sourceVersion ||
+    actual.workbench.modules.expert.sourceVersion !==
+      expected.workbench.modules.expert.sourceVersion ||
+    actual.workbench.modules.context.sourceVersion !==
+      expected.workbench.modules.context.sourceVersion ||
     actual.format.sourceVersion !== expected.format.sourceVersion ||
     JSON.stringify(actual.legacyOfficialMigrations) !==
       JSON.stringify(expected.legacyOfficialMigrations) ||
+    JSON.stringify(actual.legacyMigrations) !== JSON.stringify(expected.legacyMigrations) ||
     JSON.stringify(actual.lineageDivergence ?? null) !==
       JSON.stringify(expected.lineageDivergence ?? null)
   ) {
@@ -279,11 +292,15 @@ const assertWorkbenchUpgradeTarget = (expected: WorkbenchUpgradeReadyPlan) =>
     if (
       actual.official.sourceVersion !== expected.official.targetVersion ||
       actual.workbench.sourceVersion !== expected.workbench.targetVersion ||
+      actual.workbench.modules.expert.sourceVersion !==
+        expected.workbench.modules.expert.targetVersion ||
+      actual.workbench.modules.context.sourceVersion !==
+        expected.workbench.modules.context.targetVersion ||
       actual.format.sourceVersion !== expected.format.targetVersion ||
       actual.official.hasPendingMigrations ||
       actual.workbench.hasPendingMigrations ||
       actual.format.hasPendingUpgrade ||
-      actual.legacyOfficialMigrations.length > 0 ||
+      actual.legacyMigrations.length > 0 ||
       actual.workbench.adoptedMigrationIds.length > 0
     ) {
       return yield* Effect.fail(
@@ -311,7 +328,7 @@ const assertWorkbenchUpgradePlanCurrent = (expected: WorkbenchUpgradeReadyPlan) 
 const assertRecordedWorkbenchUpgradeTarget = (payload: Record<string, unknown>) =>
   Effect.gen(function* () {
     const versions = migrationVersionsFromPayload(payload);
-    if (payload.version !== 2 || versions === null) {
+    if ((payload.version !== 2 && payload.version !== 3) || versions === null) {
       return yield* Effect.fail(
         new WorkbenchMigrationError({
           reason: "The workbench recovery record has no dual-version target.",
@@ -323,11 +340,15 @@ const assertRecordedWorkbenchUpgradeTarget = (payload: Record<string, unknown>) 
       actual.kind !== "ready" ||
       actual.official.sourceVersion !== versions.target.official ||
       actual.workbench.sourceVersion !== versions.target.workbench ||
+      actual.workbench.modules.expert.sourceVersion !==
+        moduleVersionsFromPayload(payload)?.target.expert ||
+      actual.workbench.modules.context.sourceVersion !==
+        moduleVersionsFromPayload(payload)?.target.context ||
       actual.format.sourceVersion !== versions.target.format ||
       actual.official.hasPendingMigrations ||
       actual.workbench.hasPendingMigrations ||
       actual.format.hasPendingUpgrade ||
-      actual.legacyOfficialMigrations.length > 0 ||
+      actual.legacyMigrations.length > 0 ||
       actual.workbench.adoptedMigrationIds.length > 0
     ) {
       return yield* Effect.fail(
@@ -341,7 +362,7 @@ const assertRecordedWorkbenchUpgradeTarget = (payload: Record<string, unknown>) 
 const assertRecordedWorkbenchUpgradeCanResume = (payload: Record<string, unknown>) =>
   Effect.gen(function* () {
     const versions = migrationVersionsFromPayload(payload);
-    if (payload.version !== 2 || versions === null) {
+    if ((payload.version !== 2 && payload.version !== 3) || versions === null) {
       return yield* Effect.fail(
         new WorkbenchMigrationError({
           reason: "The workbench recovery record has no dual-version target.",
@@ -353,11 +374,23 @@ const assertRecordedWorkbenchUpgradeCanResume = (payload: Record<string, unknown
       actual.kind !== "ready" ||
       actual.official.targetVersion !== versions.target.official ||
       actual.workbench.targetVersion !== versions.target.workbench ||
+      actual.workbench.modules.expert.targetVersion !==
+        moduleVersionsFromPayload(payload)?.target.expert ||
+      actual.workbench.modules.context.targetVersion !==
+        moduleVersionsFromPayload(payload)?.target.context ||
       actual.format.targetVersion !== versions.target.format ||
       actual.official.sourceVersion < versions.source.official ||
       actual.official.sourceVersion > versions.target.official ||
       actual.workbench.sourceVersion < versions.source.workbench ||
       actual.workbench.sourceVersion > versions.target.workbench ||
+      actual.workbench.modules.expert.sourceVersion <
+        (moduleVersionsFromPayload(payload)?.source.expert ?? 0) ||
+      actual.workbench.modules.expert.sourceVersion >
+        (moduleVersionsFromPayload(payload)?.target.expert ?? 0) ||
+      actual.workbench.modules.context.sourceVersion <
+        (moduleVersionsFromPayload(payload)?.source.context ?? 0) ||
+      actual.workbench.modules.context.sourceVersion >
+        (moduleVersionsFromPayload(payload)?.target.context ?? 0) ||
       actual.format.sourceVersion < versions.source.format ||
       actual.format.sourceVersion > versions.target.format
     ) {
@@ -365,6 +398,42 @@ const assertRecordedWorkbenchUpgradeCanResume = (payload: Record<string, unknown
         new WorkbenchMigrationError({
           reason:
             "The live database or migration program does not match the interrupted dual-version recovery target.",
+        }),
+      );
+    }
+    const expectedLegacy =
+      payload.version === 3 && Array.isArray(payload.legacyProgressMigrations)
+        ? (payload.legacyProgressMigrations as WorkbenchUpgradeReadyPlan["legacyMigrations"])
+        : [];
+    if (
+      actual.legacyMigrations.length > 0 &&
+      JSON.stringify(actual.legacyMigrations) !== JSON.stringify(expectedLegacy)
+    ) {
+      return yield* Effect.fail(
+        new WorkbenchMigrationError({
+          reason: "The live database legacy migration identities do not match the recovery record.",
+        }),
+      );
+    }
+    if (
+      actual.legacyMigrations.length === 0 &&
+      expectedLegacy.some(({ moduleId, workbenchId }) => {
+        const progress =
+          moduleId === "expert"
+            ? Math.max(
+                actual.workbench.modules.expert.sourceVersion,
+                ...actual.workbench.adoptedMigrationIds,
+              )
+            : Math.max(
+                actual.workbench.modules.context.sourceVersion,
+                ...actual.workbench.adoptedContextMigrationIds,
+              );
+        return progress < workbenchId;
+      })
+    ) {
+      return yield* Effect.fail(
+        new WorkbenchMigrationError({
+          reason: "The live database has lost an unadopted legacy migration identity.",
         }),
       );
     }
@@ -870,7 +939,7 @@ async function writePrivateJsonFile(filePath: string, payload: unknown): Promise
 function migrationRecoveryPayload(dbPath: string, backup: MigrationBackupResult) {
   const versionedUpgrade = backup.workbenchUpgrade;
   return {
-    version: versionedUpgrade === undefined ? 1 : 2,
+    version: versionedUpgrade === undefined ? 1 : 3,
     databasePath: dbPath,
     backupPath: backup.backupPath,
     sourceVersion: backup.sourceVersion,
@@ -891,6 +960,18 @@ function migrationRecoveryPayload(dbPath: string, backup: MigrationBackupResult)
               format: versionedUpgrade.format.targetVersion,
             },
           },
+          moduleVersions: {
+            source: {
+              expert: versionedUpgrade.workbench.modules.expert.sourceVersion,
+              context: versionedUpgrade.workbench.modules.context.sourceVersion,
+            },
+            target: {
+              expert: versionedUpgrade.workbench.modules.expert.targetVersion,
+              context: versionedUpgrade.workbench.modules.context.targetVersion,
+            },
+          },
+          legacyMigrations: versionedUpgrade.legacyMigrations,
+          legacyProgressMigrations: versionedUpgrade.legacyMigrations,
           legacyExpertMigrations: versionedUpgrade.legacyOfficialMigrations,
         }),
     phase: "migration-in-progress",
@@ -1007,6 +1088,8 @@ const restoreSqliteMigrationBackup = (input: {
         readonly workbench: number;
         readonly format: number;
         readonly legacyExpertMigrations: WorkbenchUpgradeReadyPlan["legacyOfficialMigrations"];
+        readonly legacyMigrations: WorkbenchUpgradeReadyPlan["legacyMigrations"];
+        readonly moduleVersions: { readonly expert: number; readonly context: number };
         readonly lineageDivergence?: MigrationDivergencePlan["lineageDivergence"] | undefined;
       }
     | undefined;
@@ -1238,7 +1321,33 @@ function inspectMigrationBackupDatabase(
   }
   const projectionColumns =
     projectionObject?.type === "table" ? readSqliteColumns(reader, "projection_threads") : [];
+  const contextTableColumns: Record<string, readonly SqliteColumnInfo[] | null> = {};
+  for (const tableName of Object.keys(CONTEXT_TABLE_COLUMNS)) {
+    const object = reader.all<{ readonly type: string }>(
+      `SELECT type FROM sqlite_master WHERE name = '${tableName}'`,
+    )[0];
+    if (object !== undefined && object.type !== "table") {
+      readError ??= `${tableName} exists but is not a table.`;
+    }
+    contextTableColumns[tableName] =
+      object?.type === "table" ? readSqliteColumns(reader, tableName) : null;
+  }
+  const deliveryObject = reader.all<{ readonly type: string }>(
+    "SELECT type FROM sqlite_master WHERE name = 'orchestration_event_deliveries'",
+  )[0];
+  if (deliveryObject !== undefined && deliveryObject.type !== "table") {
+    readError ??= "orchestration_event_deliveries exists but is not a table.";
+  }
+  const contextDeliveryColumns =
+    deliveryObject?.type === "table"
+      ? readSqliteColumns(reader, "orchestration_event_deliveries").filter(({ name }) =>
+          CONTEXT_DELIVERY_COLUMNS.some((expected) => expected.name === name),
+        )
+      : [];
   const schemaState = {
+    contextSchemaObjects: reader.all<SqliteSchemaObject>(CONTEXT_SCHEMA_OBJECTS_QUERY),
+    contextTableColumns,
+    contextDeliveryColumns: contextDeliveryColumns.length > 0 ? contextDeliveryColumns : null,
     projectionThreadsExists: projectionObject?.type === "table",
     bindingColumn: projectionColumns.find(({ name }) => name === "expert_binding_json") ?? null,
     runtimeRecordColumns:
@@ -1284,6 +1393,8 @@ function readSqliteColumns(
     "workbench_schema_metadata",
     "projection_threads",
     "expert_applied_runtime_records",
+    "orchestration_event_deliveries",
+    ...Object.keys(CONTEXT_TABLE_COLUMNS),
   ]);
   if (!safeTableNames.has(table)) throw new Error(`Unsupported migration table: ${table}`);
   return reader.all<SqliteColumnInfo>(
@@ -1332,6 +1443,8 @@ function assertMigrationBackupCompatible(
   if (
     upgrade.official.sourceVersion > latestSupportedMigrationId ||
     upgrade.workbench.sourceVersion > workbenchMigrationEntries.length ||
+    upgrade.workbench.modules.expert.sourceVersion > workbenchMigrationEntries.length ||
+    upgrade.workbench.modules.context.sourceVersion > contextWorkbenchMigrationEntries.length ||
     upgrade.format.sourceVersion > WORKBENCH_SCHEMA_FORMAT_VERSION
   ) {
     throw new Error(
@@ -1350,6 +1463,11 @@ function assertBackupMatchesRecordedSource(
     readonly workbench: number;
     readonly format: number;
     readonly legacyExpertMigrations: WorkbenchUpgradeReadyPlan["legacyOfficialMigrations"];
+    readonly legacyMigrations: WorkbenchUpgradeReadyPlan["legacyMigrations"];
+    readonly moduleVersions: {
+      readonly expert: number;
+      readonly context: number;
+    };
     readonly lineageDivergence?: MigrationDivergencePlan["lineageDivergence"] | undefined;
   },
 ): void {
@@ -1359,9 +1477,12 @@ function assertBackupMatchesRecordedSource(
     sourceVersionFromWorkbenchUpgrade(actual) !== expected.sourceVersion ||
     actual.official.sourceVersion !== expected.official ||
     actual.workbench.sourceVersion !== expected.workbench ||
+    actual.workbench.modules.expert.sourceVersion !== expected.moduleVersions.expert ||
+    actual.workbench.modules.context.sourceVersion !== expected.moduleVersions.context ||
     actual.format.sourceVersion !== expected.format ||
     JSON.stringify(actual.legacyOfficialMigrations) !==
       JSON.stringify(expected.legacyExpertMigrations) ||
+    JSON.stringify(actual.legacyMigrations) !== JSON.stringify(expected.legacyMigrations) ||
     JSON.stringify(actual.lineageDivergence ?? null) !==
       JSON.stringify(expected.lineageDivergence ?? null)
   ) {
@@ -1371,12 +1492,25 @@ function assertBackupMatchesRecordedSource(
 
 function migrationVersionSourceFromPayload(payload: Record<string, unknown>) {
   const versions = migrationVersionsFromPayload(payload);
-  if (versions === null || !Array.isArray(payload.legacyExpertMigrations)) {
+  const moduleVersions = moduleVersionsFromPayload(payload);
+  if (
+    versions === null ||
+    moduleVersions === null ||
+    !Array.isArray(payload.legacyExpertMigrations)
+  ) {
     throw new Error("The workbench recovery record has no valid source identity.");
   }
+  const legacyMigrations =
+    payload.version === 3
+      ? (payload.legacyMigrations as WorkbenchUpgradeReadyPlan["legacyMigrations"])
+      : (
+          payload.legacyExpertMigrations as WorkbenchUpgradeReadyPlan["legacyOfficialMigrations"]
+        ).map((legacy) => ({ ...legacy, moduleId: "expert" as const }));
   return {
     sourceVersion: payload.sourceVersion as string,
     ...versions.source,
+    moduleVersions: moduleVersions.source,
+    legacyMigrations,
     legacyExpertMigrations:
       payload.legacyExpertMigrations as WorkbenchUpgradeReadyPlan["legacyOfficialMigrations"],
     lineageDivergence: migrationLineageDivergenceFromPayload(payload),
@@ -1421,15 +1555,19 @@ function assertCompletedMigrationRecordMatchesLive(
   const upgrade = live.workbenchUpgrade;
   if (upgrade.kind !== "ready") throw mismatch();
 
-  if (payload.version === 2) {
+  if (payload.version === 2 || payload.version === 3) {
     const versions = migrationVersionsFromPayload(payload);
+    const modules = moduleVersionsFromPayload(payload);
     if (
       versions === null ||
+      modules === null ||
       upgrade.official.sourceVersion !== versions.target.official ||
       upgrade.workbench.sourceVersion !== versions.target.workbench ||
+      upgrade.workbench.modules.expert.sourceVersion !== modules.target.expert ||
+      upgrade.workbench.modules.context.sourceVersion !== modules.target.context ||
       upgrade.format.sourceVersion !== versions.target.format ||
       upgrade.lineageDivergence !== undefined ||
-      upgrade.legacyOfficialMigrations.length > 0 ||
+      upgrade.legacyMigrations.length > 0 ||
       upgrade.workbench.adoptedMigrationIds.length > 0
     ) {
       throw mismatch();
@@ -1574,11 +1712,12 @@ function assertValidMigrationBackupRecordPayload(
     const oldestSupportedV1Target = Math.max(
       currentOfficialMigrationCount(),
       LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
+      ...LEGACY_OFFICIAL_MIGRATIONS.map(({ officialId }) => officialId),
     );
     if ((payload.targetVersion as number) > oldestSupportedV1Target) invalid();
     return;
   }
-  if (payload.version !== 2) invalid();
+  if (payload.version !== 2 && payload.version !== 3) invalid();
 
   const versions = payload.migrationVersions;
   if (!isRecord(versions)) invalid();
@@ -1610,12 +1749,94 @@ function assertValidMigrationBackupRecordPayload(
   if (target.official !== payload.targetVersion) invalid();
   if (
     target.official > currentOfficialMigrationCount() ||
-    target.workbench > workbenchMigrationEntries.length ||
+    target.workbench >
+      Math.max(...workbenchMigrationEntries.map(({ migrationId }) => migrationId)) ||
     target.format > WORKBENCH_SCHEMA_FORMAT_VERSION
   ) {
     invalid();
   }
 
+  if (payload.version === 2) {
+    validateV2LegacyMigrationIdentity(payload, source, target, invalid);
+  } else {
+    const moduleVersions = moduleVersionsFromPayload(payload) ?? invalid();
+    const sourceModuleMaximum = Math.max(
+      moduleVersions.source.expert,
+      moduleVersions.source.context,
+    );
+    const targetModuleMaximum = Math.max(
+      moduleVersions.target.expert,
+      moduleVersions.target.context,
+    );
+    const expertTarget = Math.max(
+      ...workbenchMigrationEntries.map(({ migrationId }) => migrationId),
+    );
+    const contextTarget = Math.max(
+      ...contextWorkbenchMigrationEntries.map(({ migrationId }) => migrationId),
+    );
+    if (
+      source.workbench !== sourceModuleMaximum ||
+      target.workbench !== targetModuleMaximum ||
+      moduleVersions.source.expert > moduleVersions.target.expert ||
+      moduleVersions.source.context > moduleVersions.target.context ||
+      moduleVersions.target.expert !== expertTarget ||
+      moduleVersions.target.context !== contextTarget
+    ) {
+      invalid();
+    }
+    const legacyMigrations = parseLegacyMigrationIdentities(
+      payload.legacyMigrations,
+      moduleVersions.source,
+      moduleVersions.target,
+      invalid,
+    );
+    const legacyProgressMigrations = parseLegacyMigrationIdentities(
+      payload.legacyProgressMigrations,
+      { expert: 0, context: 0 },
+      moduleVersions.target,
+      invalid,
+    );
+    if (
+      legacyMigrations.some(
+        (item) =>
+          !legacyProgressMigrations.some(
+            (progress) =>
+              progress.moduleId === item.moduleId &&
+              progress.officialId === item.officialId &&
+              progress.officialName === item.officialName &&
+              progress.workbenchId === item.workbenchId,
+          ),
+      )
+    ) {
+      invalid();
+    }
+    if (legacyMigrations.length > 0 && source.official !== 108) invalid();
+    validateLegacyExpertAlias(payload.legacyExpertMigrations, legacyMigrations, invalid);
+  }
+
+  if (!Object.hasOwn(payload, "lineageDivergence")) invalid();
+  const divergence = migrationLineageDivergenceFromPayload(payload);
+  const legacy =
+    payload.version === 3
+      ? (payload.legacyMigrations as readonly unknown[])
+      : (payload.legacyExpertMigrations as readonly unknown[]);
+  if (
+    divergence !== undefined &&
+    (divergence.firstDivergedId <= 16 ||
+      divergence.highWaterMark < divergence.firstDivergedId ||
+      source.official !== divergence.firstDivergedId - 1 ||
+      legacy.length > 0)
+  ) {
+    invalid();
+  }
+}
+
+function validateV2LegacyMigrationIdentity(
+  payload: Record<string, unknown>,
+  source: { readonly official: number; readonly workbench: number },
+  target: { readonly workbench: number },
+  invalid: () => never,
+): void {
   const legacy = payload.legacyExpertMigrations;
   if (!Array.isArray(legacy)) invalid();
   const legacyMigrations = legacy as readonly unknown[];
@@ -1642,17 +1863,74 @@ function assertValidMigrationBackupRecordPayload(
   ) {
     invalid();
   }
-  if (!Object.hasOwn(payload, "lineageDivergence")) invalid();
-  const divergence = migrationLineageDivergenceFromPayload(payload);
+}
+
+function parseLegacyMigrationIdentities(
+  value: unknown,
+  source: { readonly expert: number; readonly context: number },
+  target: { readonly expert: number; readonly context: number },
+  invalid: () => never,
+): WorkbenchUpgradeReadyPlan["legacyMigrations"] {
+  if (!Array.isArray(value)) invalid();
+  const legacy = value as readonly unknown[];
+  let previousId = 0;
+  const parsed: Array<WorkbenchUpgradeReadyPlan["legacyMigrations"][number]> = [];
+  for (const item of legacy) {
+    if (!isRecord(item)) invalid();
+    const expected = LEGACY_OFFICIAL_MIGRATIONS.find(
+      (identity) => identity.officialId === item.officialId,
+    );
+    const moduleId =
+      expected === undefined
+        ? undefined
+        : LEGACY_EXPERT_OFFICIAL_MIGRATIONS.some(
+              (identity) => identity.officialId === expected.officialId,
+            )
+          ? "expert"
+          : "context";
+    if (
+      expected === undefined ||
+      moduleId === undefined ||
+      item.moduleId !== moduleId ||
+      item.officialName !== expected.officialName ||
+      item.workbenchId !== expected.workbenchId ||
+      expected.officialId <= previousId ||
+      source[moduleId] >= expected.workbenchId ||
+      target[moduleId] < expected.workbenchId
+    ) {
+      invalid();
+    }
+    previousId = expected.officialId;
+    parsed.push({
+      moduleId,
+      officialId: expected.officialId,
+      officialName: expected.officialName,
+      workbenchId: expected.workbenchId,
+    });
+  }
   if (
-    divergence !== undefined &&
-    (divergence.firstDivergedId <= 16 ||
-      divergence.highWaterMark < divergence.firstDivergedId ||
-      source.official !== divergence.firstDivergedId - 1 ||
-      legacyMigrations.length > 0)
+    parsed.some(({ officialId }) => officialId === 110) &&
+    !parsed.some(({ officialId }) => officialId === 109)
   ) {
     invalid();
   }
+  return parsed;
+}
+
+function validateLegacyExpertAlias(
+  value: unknown,
+  legacyMigrations: WorkbenchUpgradeReadyPlan["legacyMigrations"],
+  invalid: () => never,
+): void {
+  if (!Array.isArray(value)) invalid();
+  const expected = legacyMigrations
+    .filter(({ moduleId }) => moduleId === "expert")
+    .map(({ officialId, officialName, workbenchId }) => ({
+      officialId,
+      officialName,
+      workbenchId,
+    }));
+  if (JSON.stringify(value) !== JSON.stringify(expected)) invalid();
 }
 
 interface VersionedMigrationVersions {
@@ -1696,6 +1974,40 @@ function migrationVersionsFromPayload(
       workbench: target.workbench,
       format: target.format,
     },
+  };
+}
+
+interface VersionedModuleProgress {
+  readonly source: { readonly expert: number; readonly context: number };
+  readonly target: { readonly expert: number; readonly context: number };
+}
+
+function moduleVersionsFromPayload(
+  payload: Record<string, unknown>,
+): VersionedModuleProgress | null {
+  if (payload.version === 2) {
+    const versions = migrationVersionsFromPayload(payload);
+    if (versions === null) return null;
+    return {
+      source: { expert: versions.source.workbench, context: 0 },
+      target: { expert: versions.target.workbench, context: 0 },
+    };
+  }
+  if (payload.version !== 3 || !isRecord(payload.moduleVersions)) return null;
+  const source = payload.moduleVersions.source;
+  const target = payload.moduleVersions.target;
+  if (!isRecord(source) || !isRecord(target)) return null;
+  if (
+    !isVersion(source.expert) ||
+    !isVersion(source.context) ||
+    !isVersion(target.expert) ||
+    !isVersion(target.context)
+  ) {
+    return null;
+  }
+  return {
+    source: { expert: source.expert, context: source.context },
+    target: { expert: target.expert, context: target.context },
   };
 }
 
@@ -1855,6 +2167,9 @@ export async function inspectCompletedMigrationBackupForSchemaTooNew(
   if (
     inspection.workbenchUpgrade.kind !== "ready" ||
     inspection.workbenchUpgrade.workbench.sourceVersion > latestWorkbench ||
+    inspection.workbenchUpgrade.workbench.modules.expert.sourceVersion > latestWorkbench ||
+    inspection.workbenchUpgrade.workbench.modules.context.sourceVersion >
+      contextWorkbenchMigrationEntries.length ||
     inspection.workbenchUpgrade.format.sourceVersion > latestFormat
   ) {
     return { kind: "restore-unavailable", reason: "incompatible-backup" };
@@ -1967,14 +2282,14 @@ function rawOfficialVersionFromUpgrade(plan: WorkbenchUpgradeReadyPlan): number 
   if (plan.lineageDivergence !== undefined) return plan.lineageDivergence.highWaterMark;
   return Math.max(
     plan.official.sourceVersion,
-    ...plan.legacyOfficialMigrations.map(({ officialId }) => officialId),
+    ...plan.legacyMigrations.map(({ officialId }) => officialId),
   );
 }
 
 function knownV1Target(targetVersion: number): boolean {
   return (
     currentOfficialMigrationCatalog().some(([id]) => id === targetVersion) ||
-    LEGACY_EXPERT_OFFICIAL_MIGRATIONS.some(({ officialId }) => officialId === targetVersion)
+    LEGACY_OFFICIAL_MIGRATIONS.some(({ officialId }) => officialId === targetVersion)
   );
 }
 
@@ -1985,7 +2300,7 @@ function knownV1Target(targetVersion: number): boolean {
  * authorizing a future official migration that reuses ID 109 or 110.
  */
 export const canonicalOfficialTargetForV1Record = (targetVersion: number): number =>
-  LEGACY_EXPERT_OFFICIAL_MIGRATIONS.some(({ officialId }) => officialId === targetVersion)
+  LEGACY_OFFICIAL_MIGRATIONS.some(({ officialId }) => officialId === targetVersion)
     ? FROZEN_LEGACY_OFFICIAL_PREFIX_HIGH_WATER_MARK
     : targetVersion;
 
@@ -2013,6 +2328,8 @@ function assertV1WorkbenchResumeIdentity(
     backup.migrationId > targetVersion ||
     rawOfficialVersionFromUpgrade(source) > targetVersion ||
     source.workbench.sourceVersion !== 0 ||
+    source.workbench.modules.expert.sourceVersion !== 0 ||
+    source.workbench.modules.context.sourceVersion !== 0 ||
     source.format.sourceVersion !== 0
   ) {
     return fail();
@@ -2020,7 +2337,7 @@ function assertV1WorkbenchResumeIdentity(
 
   const legacyHighWaterMark = Math.max(
     0,
-    ...source.legacyOfficialMigrations.map(({ officialId }) => officialId),
+    ...source.legacyMigrations.map(({ officialId }) => officialId),
   );
   const expectedV1Source =
     legacyHighWaterMark > 0 ? `v${backup.migrationId}` : source.official.sourceLabel;
@@ -2033,36 +2350,50 @@ function assertV1WorkbenchResumeIdentity(
   }
 
   const liveRawVersion = rawOfficialVersionFromUpgrade(live);
-  const lowerBound = source.lineageDivergence ? source.official.sourceVersion : backup.migrationId;
+  // Exact legacy tracker IDs can disappear in the atomic adoption transaction.
+  // Their module ledger progress below proves that transfer; compare the native
+  // prefix rather than the removed legacy numeric high-water mark.
+  const lowerBound = source.official.sourceVersion;
   const sourceDivergence = source.lineageDivergence;
   const liveDivergence = live.lineageDivergence;
   if (
-    live.workbench.sourceVersion !== source.workbench.sourceVersion ||
-    live.format.sourceVersion !== source.format.sourceVersion ||
+    live.workbench.modules.expert.sourceVersion < source.workbench.modules.expert.sourceVersion ||
+    live.workbench.modules.expert.sourceVersion > current.workbench.modules.expert.targetVersion ||
+    live.workbench.modules.context.sourceVersion < source.workbench.modules.context.sourceVersion ||
+    live.workbench.modules.context.sourceVersion >
+      current.workbench.modules.context.targetVersion ||
+    live.format.sourceVersion < source.format.sourceVersion ||
+    live.format.sourceVersion > current.format.targetVersion ||
     liveRawVersion < lowerBound ||
     liveRawVersion > targetVersion ||
     (sourceDivergence === undefined && liveDivergence !== undefined) ||
     (sourceDivergence !== undefined &&
       liveDivergence !== undefined &&
       JSON.stringify(liveDivergence) !== JSON.stringify(sourceDivergence)) ||
-    live.legacyOfficialMigrations.some(({ officialId }, index) => {
-      const expected = LEGACY_EXPERT_OFFICIAL_MIGRATIONS[index];
-      return (
-        expected === undefined || officialId !== expected.officialId || officialId > targetVersion
+    live.legacyMigrations.some(({ officialId }) => officialId > targetVersion) ||
+    source.legacyMigrations.some((migration) => {
+      const stillOfficial = live.legacyMigrations.some(
+        (currentMigration) => JSON.stringify(currentMigration) === JSON.stringify(migration),
       );
-    }) ||
-    live.legacyOfficialMigrations.length < source.legacyOfficialMigrations.length ||
-    source.legacyOfficialMigrations.some(
-      (migration, index) =>
-        JSON.stringify(migration) !== JSON.stringify(live.legacyOfficialMigrations[index]),
-    )
+      const moduleProgress =
+        migration.moduleId === "expert"
+          ? Math.max(
+              live.workbench.modules.expert.sourceVersion,
+              ...live.workbench.adoptedMigrationIds,
+            )
+          : Math.max(
+              live.workbench.modules.context.sourceVersion,
+              ...live.workbench.adoptedContextMigrationIds,
+            );
+      return !stillOfficial && moduleProgress < migration.workbenchId;
+    })
   ) {
     return fail();
   }
 
   return {
     ...payload,
-    version: 2,
+    version: 3,
     sourceVersion: sourceVersionFromWorkbenchUpgrade(source),
     targetVersion: current.official.targetVersion,
     lineageDivergence: source.lineageDivergence ?? null,
@@ -2078,10 +2409,129 @@ function assertV1WorkbenchResumeIdentity(
         format: current.format.targetVersion,
       },
     },
+    moduleVersions: {
+      source: {
+        expert: source.workbench.modules.expert.sourceVersion,
+        context: source.workbench.modules.context.sourceVersion,
+      },
+      target: {
+        expert: current.workbench.modules.expert.targetVersion,
+        context: current.workbench.modules.context.targetVersion,
+      },
+    },
+    legacyMigrations: source.legacyMigrations,
+    legacyProgressMigrations: source.legacyMigrations,
     legacyExpertMigrations: source.legacyOfficialMigrations,
     legacyV1Provenance: { ...payload },
     resumeAttempts: marker.resumeAttempts,
   };
+}
+
+function assertV2WorkbenchResumeIdentity(
+  marker: MigrationRecoveryMarker,
+  backup: SqliteMigrationBackupInspection,
+  live: WorkbenchUpgradeReadyPlan,
+  current: WorkbenchUpgradeReadyPlan,
+): Record<string, unknown> {
+  const payload = marker.payload;
+  const source = backup.workbenchUpgrade;
+  const versions = migrationVersionsFromPayload(payload);
+  const modules = moduleVersionsFromPayload(payload);
+  const fail = (): never => {
+    throw new Error(
+      "The v2 migration recovery record, original backup, or live progress cannot be explained by this workbench build.",
+    );
+  };
+  if (
+    payload.version !== 2 ||
+    payload.phase !== "migration-in-progress" ||
+    source.kind !== "ready" ||
+    versions === null ||
+    modules === null ||
+    live.official.targetVersion !== versions.target.official ||
+    current.official.targetVersion !== versions.target.official ||
+    current.workbench.targetVersion !== versions.target.workbench ||
+    current.format.targetVersion !== versions.target.format ||
+    source.official.sourceVersion !== versions.source.official ||
+    source.workbench.sourceVersion !== versions.source.workbench ||
+    source.format.sourceVersion !== versions.source.format ||
+    source.workbench.modules.context.sourceVersion !== 0 ||
+    source.legacyMigrations.some(({ moduleId }) => moduleId !== "expert") ||
+    JSON.stringify(source.legacyOfficialMigrations) !==
+      JSON.stringify(payload.legacyExpertMigrations) ||
+    JSON.stringify(source.lineageDivergence ?? null) !==
+      JSON.stringify(migrationLineageDivergenceFromPayload(payload) ?? null)
+  ) {
+    return fail();
+  }
+
+  const progressIsInRange =
+    live.official.sourceVersion >= versions.source.official &&
+    live.official.sourceVersion <= versions.target.official &&
+    live.workbench.modules.expert.sourceVersion >= versions.source.workbench &&
+    live.workbench.modules.expert.sourceVersion <= versions.target.workbench &&
+    live.workbench.modules.context.sourceVersion === 0 &&
+    live.format.sourceVersion >= versions.source.format &&
+    live.format.sourceVersion <= versions.target.format;
+  if (!progressIsInRange) return fail();
+
+  const recordedLegacy = source.legacyMigrations;
+  if (
+    live.legacyMigrations.some(
+      (legacy) =>
+        legacy.moduleId !== "expert" ||
+        !recordedLegacy.some(
+          (sourceLegacy) => JSON.stringify(sourceLegacy) === JSON.stringify(legacy),
+        ),
+    ) ||
+    recordedLegacy.some((legacy) => {
+      const remains = live.legacyMigrations.some(
+        (currentLegacy) => JSON.stringify(currentLegacy) === JSON.stringify(legacy),
+      );
+      const applied = Math.max(
+        live.workbench.modules.expert.sourceVersion,
+        ...live.workbench.adoptedMigrationIds,
+      );
+      return !remains && applied < legacy.workbenchId;
+    })
+  ) {
+    return fail();
+  }
+
+  const converted: Record<string, unknown> = {
+    ...payload,
+    version: 3,
+    sourceVersion: sourceVersionFromWorkbenchUpgrade(source),
+    targetVersion: current.official.targetVersion,
+    migrationVersions: {
+      source: {
+        official: source.official.sourceVersion,
+        workbench: source.workbench.sourceVersion,
+        format: source.format.sourceVersion,
+      },
+      target: {
+        official: current.official.targetVersion,
+        workbench: current.workbench.targetVersion,
+        format: current.format.targetVersion,
+      },
+    },
+    moduleVersions: {
+      source: {
+        expert: source.workbench.modules.expert.sourceVersion,
+        context: source.workbench.modules.context.sourceVersion,
+      },
+      target: {
+        expert: current.workbench.modules.expert.targetVersion,
+        context: current.workbench.modules.context.targetVersion,
+      },
+    },
+    legacyMigrations: source.legacyMigrations,
+    legacyProgressMigrations: source.legacyMigrations,
+    legacyExpertMigrations: source.legacyOfficialMigrations,
+    legacyV2Provenance: { ...payload },
+    resumeAttempts: marker.resumeAttempts,
+  };
+  return converted;
 }
 
 /**
@@ -2135,6 +2585,26 @@ export const resumeMarkedMigration = <A, E, R>(
       // validation. A failure above leaves the v1 marker byte-for-byte intact.
       yield* attemptPromise(() => writePrivateJsonFile(marker.markerPath, payload));
     } else if (marker.payload.version === 2) {
+      const live = options.workbenchUpgradePlan;
+      if (live === undefined) {
+        return yield* Effect.fail(
+          new WorkbenchMigrationError({
+            reason: "A v2 workbench recovery record requires a current workbench upgrade plan.",
+          }),
+        );
+      }
+      const convertedPayload = yield* attemptPromise(async () => {
+        const inspection = await inspectSqliteMigrationBackup(marker.backupPath);
+        assertBackupMatchesRecordedSource(
+          inspection,
+          migrationVersionSourceFromPayload(marker.payload),
+        );
+        return assertV2WorkbenchResumeIdentity(marker, inspection, live, live);
+      });
+      yield* assertRecordedWorkbenchUpgradeCanResume(convertedPayload);
+      payload = convertedPayload;
+      yield* attemptPromise(() => writePrivateJsonFile(marker.markerPath, payload));
+    } else if (marker.payload.version === 3) {
       yield* assertRecordedWorkbenchUpgradeCanResume(marker.payload);
       yield* attemptPromise(async () => {
         const inspection = await inspectSqliteMigrationBackup(marker.backupPath);
@@ -2157,7 +2627,7 @@ export const resumeMarkedMigration = <A, E, R>(
     };
     yield* attemptPromise(() => writePrivateJsonFile(marker.markerPath, resumedPayload));
     const result = yield* migration;
-    if (resumedPayload.version === 2) {
+    if (resumedPayload.version === 2 || resumedPayload.version === 3) {
       yield* assertRecordedWorkbenchUpgradeTarget(resumedPayload);
     }
     yield* writeCompletedMigrationProvenance(dbPath, resumedPayload);
@@ -2245,7 +2715,7 @@ export const restoreMarkedMigrationBackup = (
         );
       }
       const versionedSource =
-        record.payload.version === 2
+        record.payload.version === 2 || record.payload.version === 3
           ? migrationVersionSourceFromPayload(record.payload)
           : undefined;
       const restoreMarkerPath = migrationRecoveryMarkerPath(dbPath);

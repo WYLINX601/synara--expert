@@ -3,7 +3,15 @@
 // Layer: Route/UI support
 // Exports: isBetaFeatureOn, visibleProviderDescriptors, VISIBLE_PROVIDER_DESCRIPTORS
 
-import { desktopFlavorFromProtocol, isBetaFeatureEnabled } from "@synara/shared/betaFeatures";
+import {
+  desktopFlavorFromProtocol,
+  GROUPS_BETA_FEATURE,
+  INBOX_BETA_FEATURE,
+  INLINE_VISUALS_BETA_FEATURE,
+  isBetaFeatureEnabled,
+  MCP_CONNECTORS_BETA_FEATURE,
+  PULL_REQUEST_AUTO_FIX_BETA_FEATURE,
+} from "@synara/shared/betaFeatures";
 import { PROVIDER_DESCRIPTORS } from "@synara/shared/providerMetadata";
 
 // The desktop serves the app from its own scheme, so the protocol names the
@@ -18,6 +26,34 @@ const DESKTOP_FLAVOR = desktopFlavorFromProtocol(
 
 export const isBetaFeatureOn = (feature: string): boolean =>
   isBetaFeatureEnabled(feature, DESKTOP_FLAVOR);
+
+/**
+ * Hubs is available in Stable and Beta. The shared feature policy also controls
+ * server APIs, background work, and whether saved hub folders act as containers.
+ */
+export const GROUPS_ON = isBetaFeatureOn(GROUPS_BETA_FEATURE);
+
+/**
+ * Inbox is available in Stable and Beta. Tasks within it retain their separate gate.
+ */
+export const INBOX_ON = isBetaFeatureOn(INBOX_BETA_FEATURE);
+
+/**
+ * Auto-fix CI is available in Stable and Beta; watching a PR remains opt-in.
+ */
+export const PULL_REQUEST_AUTO_FIX_ON = isBetaFeatureOn(PULL_REQUEST_AUTO_FIX_BETA_FEATURE);
+
+/**
+ * Inline visuals are available in Stable and Beta. HTML keeps the same
+ * sandbox and desktop-only execution boundary; component specs also work on the web.
+ */
+export const INLINE_VISUALS_ON = isBetaFeatureOn(INLINE_VISUALS_BETA_FEATURE);
+
+/**
+ * Connectors are Beta-only: Settings → Connectors and their `@` mentions. The
+ * server refuses the Connectors RPCs on Stable regardless.
+ */
+export const MCP_CONNECTORS_ON = isBetaFeatureOn(MCP_CONNECTORS_BETA_FEATURE);
 
 /**
  * Provider descriptors with Beta-only providers removed on Stable. A

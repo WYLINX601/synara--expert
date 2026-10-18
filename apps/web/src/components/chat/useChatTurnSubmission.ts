@@ -1,10 +1,13 @@
+import type { ThreadId } from "@synara/contracts";
 import { flushWorkspaceEditors } from "~/lib/workspaceEditorSession";
 import { resolveComputerInvocationMode } from "@synara/shared/computerInvocation";
+import { projectFoldersSessionIssue } from "@synara/shared/projectFolders";
 import {
   prepareComputerPermissionGuide,
   readLocalComputerPermissionBridge,
 } from "~/lib/computerProvisioning";
-import { useCallback } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
+import { hasActiveComposerSend } from "~/lib/composerSendOwnership";
 import {
   filterPromptProviderMentionReferences,
   filterPromptSkillReferences,
@@ -26,6 +29,7 @@ import {
 } from "../../lib/composerSend";
 import { appendFileCommentsToPrompt } from "../../lib/fileComments";
 import { appendPullRequestContextsToPrompt } from "../../lib/pullRequestContext";
+import { prepareQueuedComposerResumeAfterSend } from "../../lib/queuedComposerDrain";
 import {
   IMAGE_ONLY_BOOTSTRAP_PROMPT,
   appendTerminalContextsToPrompt,
@@ -34,13 +38,16 @@ import { setPendingUserInputCustomAnswer } from "../../pendingUserInput";
 import { resolvePlanFollowUpSubmission } from "../../proposedPlan";
 import { buildSourceProposedPlanReference } from "../../session-logic";
 import {
+  buildBlockedComposerSendToastCopy,
   buildExpiredTerminalContextToastCopy,
   createWorktreeSetupResolution,
   deriveComposerSendState,
   queuedChatTurnDispatchFields,
   queuedPlanFollowUpDispatchFields,
+  resolveBlockedComposerSendReason,
   resolveEnvironmentPanelPreferenceAfterFirstSend,
   resolveQueuedTurnDispatchSettings,
+  type BlockedComposerSendReason,
 } from "../ChatView.logic";
 import { toastManager } from "../ui/toast";
 import type { ChatTurnSubmissionInput } from "./chatSendTypes";
@@ -73,9 +80,25 @@ async function expertSendBlockReason(
   }
 }
 
+// One toast per chat: pressing Send again refreshes it instead of stacking copies.
+function notifyBlockedComposerSend(threadId: ThreadId, reason: BlockedComposerSendReason): void {
+  const copy = buildBlockedComposerSendToastCopy(reason);
+  toastManager.add({
+    id: `composer-send-blocked:${threadId}`,
+    type: copy.type,
+    title: copy.title,
+    description: copy.description,
+  });
+}
+
 export function useChatTurnSubmission({
+  hasPendingProjectContextDraft,
+  hasDetachedProjectContextDraft,
+  projectContextDataInstanceId,
   threadId,
   hasLiveTurn,
+  canSendWithProviderHandoff,
+  prepareProviderHandoffForSend,
   lateComposerSendHandlersRef,
   activeThread,
   isConnecting,
@@ -93,7 +116,7 @@ export function useChatTurnSubmission({
   hasNativeUserMessages,
   chatWorkspaceRoot,
   isHomeChatContainer,
-  isStudioContainer,
+  isGroupContainer,
   resolvedThreadWorktreePath,
   resolvedThreadWorkingDirectory,
   currentActiveGitBranch,
@@ -210,9 +233,18 @@ export function useChatTurnSubmission({
     localProjectName: activeProject?.name ?? "",
     localWorkspaceRoot: activeProject?.cwd ?? "",
     isLocalDraft: isLocalDraftThread,
+    hasPendingContextDraft: hasPendingProjectContextDraft ?? false,
+    hasDetachedContextDraft: hasDetachedProjectContextDraft ?? false,
+    contextDataInstanceId: projectContextDataInstanceId ?? null,
   });
   const beforeFirstSend = projectContextMigration.beforeFirstSend;
+  const anchorSentMessagesToTopRef = useRef(settings.anchorSentMessagesToTop);
+  useLayoutEffect(() => {
+    anchorSentMessagesToTopRef.current = settings.anchorSentMessagesToTop;
+  }, [settings.anchorSentMessagesToTop]);
   const executePreparedTurn = useChatTurnExecution({
+    prepareProviderHandoffForSend,
+    activeThreadIdRef,
     isServerThread,
     setStoreThreadWorkspace,
     clearLocalDispatchWorktreeSetup,
@@ -235,14 +267,6 @@ export function useChatTurnSubmission({
     failLocalDispatchWorktreeSetup,
     setOptimisticUserMessages,
     promptRef,
-    composerImagesRef,
-    composerFilesRef,
-    composerAssistantSelectionsRef,
-    composerBrowserAnnotationsRef,
-    composerFileCommentsRef,
-    composerTerminalContextsRef,
-    composerPastedTextsRef,
-    composerPullRequestContextsRef,
     setPrompt,
     setComposerCursor,
     addComposerImagesToDraft,
@@ -284,12 +308,28 @@ export function useChatTurnSubmission({
         !activeThread ||
         activeThread.claudeCacheReview != null ||
         activeThread.sidechatExpiredAt ||
-        isSendBusy ||
-        isConnecting ||
-        isVoiceTranscribing ||
-        sendPreflightInFlightRef.current ||
-        sendInFlightRef.current
+        isVoiceTranscribing
       ) {
+        return false;
+      }
+      const sendInFlight =
+        hasActiveComposerSend(activeThread.id) ||
+        isSendBusy ||
+        sendPreflightInFlightRef.current ||
+        sendInFlightRef.current;
+      if (sendInFlight || isConnecting) {
+        const blockedReason = resolveBlockedComposerSendReason({
+          sendInFlight,
+          sessionStarting: isConnecting,
+          hasComposerContent:
+            (composerEditorRef.current?.readSnapshot().value ?? promptRef.current).trim().length >
+              0 ||
+            composerImages.length > 0 ||
+            composerFiles.length > 0,
+        });
+        if (blockedReason !== null && !queuedTurn) {
+          notifyBlockedComposerSend(activeThread.id, blockedReason);
+        }
         return false;
       }
       if (isLocalDraftThread) {
@@ -302,6 +342,10 @@ export function useChatTurnSubmission({
       const hasPendingCacheReview = () =>
         getThreadFromState(useStore.getState(), activeThread.id)?.claudeCacheReview != null;
       if (hasPendingCacheReview()) return false;
+      const resumeQueueAfterSend =
+        !queuedTurn || dispatchMode === "steer"
+          ? prepareQueuedComposerResumeAfterSend(activeThread.id)
+          : undefined;
       sendPreflightInFlightRef.current = true;
       const editorSaved = await flushWorkspaceEditors(
         queryClient,
@@ -319,6 +363,9 @@ export function useChatTurnSubmission({
         sendPreflightInFlightRef.current = true;
         await waitForPendingComposerImages();
         sendPreflightInFlightRef.current = false;
+      }
+      if (!queuedTurn && !activePendingProgress && canSendWithProviderHandoff?.() === false) {
+        return false;
       }
       if (hasPendingCacheReview()) return false;
       if (activePendingProgress) {
@@ -526,6 +573,7 @@ export function useChatTurnSubmission({
             text: followUp.text,
             interactionMode: followUp.interactionMode,
             dispatchMode,
+            ...(resumeQueueAfterSend ? { resumeQueueAfterSend } : {}),
           });
         }
       }
@@ -575,7 +623,10 @@ export function useChatTurnSubmission({
         }
         return false;
       }
-      if (!activeProject) return false;
+      if (!activeProject) {
+        if (queuedChatTurn === null) notifyBlockedComposerSend(activeThread.id, "no-project");
+        return false;
+      }
       if (queuedChatTurn === null && !isLivePlanFollowUpSubmission) {
         const handled = await handleChatAutomationSend({
           threadId,
@@ -642,6 +693,7 @@ export function useChatTurnSubmission({
       sendPreflightInFlightRef.current = true;
       const sendProviderAvailability = await resolveProviderSendAvailabilityWithRefresh({
         provider: selectedModelSelectionForSend.provider,
+        instanceId: selectedModelSelectionForSend.instanceId,
         statuses: providerStatuses,
         refreshStatuses: () => refreshProviderStatuses({ silent: true }),
       }).finally(() => {
@@ -652,6 +704,19 @@ export function useChatTurnSubmission({
           type: "error",
           title: sendProviderAvailability.unavailableReason,
         });
+        return false;
+      }
+      // The server refuses these chats too; stopping here explains why and avoids
+      // creating a worktree the turn would never use.
+      const projectFolderIssue =
+        (activeProject.additionalFolders?.length ?? 0) > 0
+          ? projectFoldersSessionIssue({
+              provider: selectedModelSelectionForSend.provider,
+              worktree: envModeForSend === "worktree",
+            })
+          : null;
+      if (projectFolderIssue !== null) {
+        toastManager.add({ type: "error", title: projectFolderIssue });
         return false;
       }
       if (hasPendingCacheReview()) return false;
@@ -733,7 +798,7 @@ export function useChatTurnSubmission({
         activeProject,
         chatWorkspaceRoot,
         isHomeChatContainer,
-        isStudioContainer,
+        isGroupContainer,
         resolvedThreadWorktreePath,
         runtimeModeForSend,
         envModeForSend,
@@ -902,13 +967,16 @@ export function useChatTurnSubmission({
           source: "native",
         },
       ]);
-      // Mark the transcript as anchored before the optimistic row lands. The tail
-      // anchor sizes the spacer that lets this message sit at the viewport top,
-      // and its hook owns the slide; auto-follow stays armed for bookkeeping but
-      // pauses until the in-flight flag clears.
+      // Always follow the sent message. When anchoring is enabled, its hook owns
+      // the slide to the top; otherwise normal auto-follow keeps the tail visible.
+      // Read the current preference after async preflight so toggling it during
+      // preparation cannot leave an invisible anchor owning the scroll.
       armTranscriptAutoFollow(threadIdForSend, true);
-      tailAnchorScrollInFlightRef.current = true;
-      setTailAnchor({ threadId: threadIdForSend, messageId: messageIdForSend });
+      const anchorSentMessage = anchorSentMessagesToTopRef.current;
+      tailAnchorScrollInFlightRef.current = anchorSentMessage;
+      setTailAnchor(
+        anchorSentMessage ? { threadId: threadIdForSend, messageId: messageIdForSend } : null,
+      );
 
       setThreadError(threadIdForSend, null);
       if (expiredTerminalContextCount > 0) {
@@ -941,7 +1009,7 @@ export function useChatTurnSubmission({
         scheduleComposerFocus();
       }
 
-      return executePreparedTurn({
+      const sent = await executePreparedTurn({
         nextThreadEnvMode,
         nextThreadBranch,
         nextThreadWorktreePath,
@@ -993,6 +1061,12 @@ export function useChatTurnSubmission({
         composerSkillsSnapshot,
         composerMentionsSnapshot,
       });
+      // A message the user sends by hand (or steers from the queue) resumes a queue
+      // paused by Stop; it goes first and the queue follows once its turn ends.
+      if (sent) {
+        resumeQueueAfterSend?.();
+      }
+      return sent;
     },
     [
       threadId,
@@ -1017,7 +1091,7 @@ export function useChatTurnSubmission({
       hasNativeUserMessages,
       chatWorkspaceRoot,
       isHomeChatContainer,
-      isStudioContainer,
+      isGroupContainer,
       resolvedThreadWorktreePath,
       resolvedThreadWorkingDirectory,
       currentActiveGitBranch,
@@ -1090,6 +1164,7 @@ export function useChatTurnSubmission({
       setOptimisticUserMessages,
       executePreparedTurn,
       beforeFirstSend,
+      canSendWithProviderHandoff,
     ],
   );
   return { onSend, migrationDialog: projectContextMigration.dialog };

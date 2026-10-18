@@ -4,6 +4,10 @@
 // Exports: section ids, nav items, and search normalization helper
 
 import { WORKBENCH_MODULES, WORKBENCH_SETTINGS_SECTION_IDS } from "./workbench/registry";
+import { MCP_CONNECTORS_BETA_FEATURE } from "@synara/shared/betaFeatures";
+
+import { isBetaFeatureOn } from "~/betaFeatures";
+import { KEYBINDINGS_ICON_NAME } from "~/lib/icons";
 
 export const SETTINGS_SECTION_IDS = [
   "general",
@@ -21,8 +25,9 @@ export const SETTINGS_SECTION_IDS = [
   "skills",
   ...WORKBENCH_SETTINGS_SECTION_IDS,
   "usage",
-  // Legacy deep links remain accepted and normalize to the unified MCP page.
+  // Legacy Linx links normalize to the unified MCP page.
   "expert-connections",
+  "connectors",
   "integrations",
   "advanced",
 ] as const;
@@ -38,6 +43,7 @@ export type SettingsNavGroupId = "personal" | "integrations" | "coding" | "syste
  */
 export const SETTINGS_TARGETS = {
   providerUpdates: "provider-updates",
+  providerInstalls: "provider-installs",
   environmentPanel: "environment-panel",
 } as const;
 
@@ -68,7 +74,21 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
   { id: "archived", label: "Archived" },
 ] as const;
 
-export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
+/** Sections that exist only where their Beta-only feature is on. */
+const SETTINGS_SECTION_BETA_FEATURES: Partial<Record<SettingsSectionId, string>> = {
+  connectors: MCP_CONNECTORS_BETA_FEATURE,
+};
+
+/** False for a Beta-only section on Stable: no nav entry, search result, or deep link. */
+export function isSettingsSectionAvailable(
+  section: SettingsSectionId,
+  isOn: (feature: string) => boolean = isBetaFeatureOn,
+): boolean {
+  const feature = SETTINGS_SECTION_BETA_FEATURES[section];
+  return feature === undefined || isOn(feature);
+}
+
+const ALL_SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
   {
     id: "general",
     group: "personal",
@@ -113,8 +133,8 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     id: "shortcuts",
     group: "personal",
     label: "Keybindings",
-    description: "Capture, customize, and add shortcuts for every Synara command.",
-    icon: "shortcut",
+    description: "Change, add, or remove the shortcut for every Synara command.",
+    icon: KEYBINDINGS_ICON_NAME,
     eyebrow: "Key bindings",
   },
   {
@@ -143,6 +163,23 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     badge: "Beta",
   },
   {
+    id: "connectors",
+    group: "integrations",
+    label: "Connectors",
+    description: "Sign in to Supabase, Linear, Notion, and other services your agents can use.",
+    icon: "connectors-1",
+    eyebrow: "Remote MCP servers",
+    badge: "Beta",
+  },
+  {
+    id: "integrations",
+    group: "integrations",
+    label: "MCP connections",
+    description: "Give Codex, Claude, and other local agents scoped access to Synara tasks.",
+    icon: "plugin-1",
+    eyebrow: "External agents",
+  },
+  {
     id: "providers",
     group: "coding",
     label: "Agent providers",
@@ -154,7 +191,8 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     id: "models",
     group: "coding",
     label: "Models & writing",
-    description: "Choose the model used for Git writing and add custom model slugs.",
+    description:
+      "Choose the source control writing style, Git writing model, and custom model slugs.",
     icon: "brain",
     eyebrow: "Model configuration",
   },
@@ -193,6 +231,10 @@ export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
   },
 ] as const;
 
+export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = ALL_SETTINGS_NAV_ITEMS.filter(
+  (item) => isSettingsSectionAvailable(item.id),
+);
+
 /**
  * Stable DOM id for a settings row, derived from its (string) title. Shared by the row that
  * renders the anchor and by the search index that deep-links to it via `?target=…`, so the
@@ -211,15 +253,19 @@ export function normalizeSettingsSection(value: unknown): SettingsSectionId {
   if (typeof value !== "string") {
     return "general";
   }
-  if (value === "expert-connections" || value === "integrations") {
+  if (value === "expert-connections") {
     return "mcp";
   }
-  return SETTINGS_SECTION_IDS.find((candidate) => candidate === value) ?? "general";
+  return (
+    SETTINGS_SECTION_IDS.find(
+      (candidate) => candidate === value && isSettingsSectionAvailable(candidate),
+    ) ?? "general"
+  );
 }
 
 export function mcpSettingsTabForRoute(section: unknown, tab: unknown): McpSettingsTab {
   if (tab === "tools" || tab === "apps") return tab;
-  return section === "integrations" ? "apps" : "tools";
+  return "tools";
 }
 
 export function validateSettingsRouteSearch(

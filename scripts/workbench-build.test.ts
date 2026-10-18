@@ -181,6 +181,29 @@ function schemaCatalogSources(
   };
 }
 
+function contextSchemaCatalogSource(): { readonly official: string; readonly workbench: string } {
+  const sources = schemaCatalogSources(
+    '[135, "ProjectionMessageTurnActivityIndex"],',
+    workbenchCatalogEntry("EXPERT_WORKBENCH_MODULE_ID", 1, "Expert first"),
+  );
+  return {
+    ...sources,
+    workbench:
+      sources.workbench +
+      `
+import ContextV1Migration from "../../persistence/Migrations/111_ContextV1.ts";
+export const contextWorkbenchMigrationEntries = [{
+  moduleId: "context", migrationId: 1, name: "ContextV1",
+  checksum: "sha256:b7dbd84911484156f3f38093973338ca005dce9e8ba4b38b8972d9dfe79a4911",
+  effect: ContextV1Migration,
+}];
+export const allWorkbenchMigrationEntries = [
+  ...workbenchMigrationEntries, ...contextWorkbenchMigrationEntries,
+];
+`,
+  };
+}
+
 function workbenchCatalogEntry(moduleId: string, migrationId: number, name: string): string {
   return [
     "  {",
@@ -255,8 +278,8 @@ describe("workbench build manifest", () => {
     );
 
     expect(schemas).toEqual({
-      officialMigrationHighWater: 111,
-      workbenchMigrationHighWaterByModule: { expert: 2 },
+      officialMigrationHighWater: 135,
+      workbenchMigrationHighWaterByModule: { context: 1, expert: 2 },
       workbenchSchemaFormatVersion: 1,
     });
   });
@@ -277,6 +300,39 @@ describe("workbench build manifest", () => {
       workbenchMigrationHighWaterByModule: { expert: 1, files: 1, "files-next": 1 },
       workbenchSchemaFormatVersion: 1,
     });
+  });
+
+  it("includes the frozen Context effect catalog without executing the migration", () => {
+    const sources = contextSchemaCatalogSource();
+    expect(parseSchemaVersions(sources.official, sources.workbench)).toEqual({
+      officialMigrationHighWater: 135,
+      workbenchMigrationHighWaterByModule: { context: 1, expert: 1 },
+      workbenchSchemaFormatVersion: 1,
+    });
+  });
+
+  it.each([
+    [
+      "unknown effect",
+      (source: string) => source.replace("effect: ContextV1Migration", "effect: UnknownMigration"),
+    ],
+    ["wrong frozen script", (source: string) => source.replace("111_ContextV1.ts", "111_Other.ts")],
+    ["wrong frozen digest", (source: string) => source.replace("b7dbd849", "00000000")],
+    [
+      "omitted Context aggregate",
+      (source: string) =>
+        source.replace("...contextWorkbenchMigrationEntries", "...workbenchMigrationEntries"),
+    ],
+    [
+      "dynamic aggregate",
+      (source: string) =>
+        source.replace("...contextWorkbenchMigrationEntries", "...loadMigrations()"),
+    ],
+  ] as const)("refuses %s in the Context build catalog", (_label, change) => {
+    const sources = contextSchemaCatalogSource();
+    expect(() => parseSchemaVersions(sources.official, change(sources.workbench))).toThrow(
+      "workbench-schema-catalog-is-invalid",
+    );
   });
 
   it("retains a future official migration that reuses a legacy numeric ID with a new name", () => {

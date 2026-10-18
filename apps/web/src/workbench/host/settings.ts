@@ -26,7 +26,7 @@ export interface SettingsHostRoute {
 }
 
 function isMcpSection(section: unknown): boolean {
-  return section === "mcp" || section === "expert-connections" || section === "integrations";
+  return section === "mcp" || section === "expert-connections";
 }
 
 function searchString(value: unknown): string | undefined {

@@ -749,9 +749,15 @@ describe("migration backups", () => {
         yield* sql`PRAGMA journal_mode = WAL`;
         yield* runMigrations({ toMigrationInclusive: 16 });
         for (let id = 17; id <= latestId; id += 1) {
+          // Reserved workbench slots must carry canonical official identities;
+          // the consent flow only explains the foreign lineage outside them.
+          const name =
+            id >= 109 && id <= 111
+              ? migrationEntries.find(([migrationId]) => migrationId === id)![1]
+              : `ImportedMigration${id}`;
           yield* sql`
             INSERT INTO effect_sql_migrations (migration_id, name)
-            VALUES (${id}, ${`ImportedMigration${id}`})
+            VALUES (${id}, ${name})
           `;
         }
         yield* sql`CREATE TABLE imported_probe(value TEXT NOT NULL)`;
@@ -1034,8 +1040,9 @@ describe("migration backups", () => {
     const backupsBeforeRetry = await backupPaths(dbPath);
     expect(backupsBeforeRetry).toEqual([originalBackupPath]);
     expect(marker!.payload).toMatchObject({
-      version: 2,
+      version: 3,
       phase: "migration-in-progress",
+      moduleVersions: { source: { expert: 0, context: 0 }, target: { expert: 2, context: 1 } },
       migrationVersions: {
         source: { official: currentOfficialTarget, workbench: 0, format: 0 },
         target: { official: currentOfficialTarget, workbench: 2, format: 1 },
@@ -1059,22 +1066,15 @@ describe("migration backups", () => {
       })}\n`,
       { mode: 0o600 },
     );
-    const mismatchedMarker = await Effect.runPromise(inspectPendingMigrationRecovery(dbPath));
-    await expect(
-      runWithDatabase(
-        dbPath,
-        resumeMarkedMigration(
-          dbPath,
-          mismatchedMarker!,
-          Effect.gen(function* () {
-            const sql = yield* SqlClient.SqlClient;
-            yield* sql`CREATE TABLE should_not_resume_wrong_target(value TEXT NOT NULL)`;
-          }),
-        ),
-      ),
-    ).rejects.toThrow("does not match the interrupted dual-version recovery target");
-    const untouchedMarker = await Effect.runPromise(inspectPendingMigrationRecovery(dbPath));
-    expect(untouchedMarker).toMatchObject({ backupPath: originalBackupPath, resumeAttempts: 0 });
+    const mismatchedMarkerText = await fs.readFile(marker!.markerPath, "utf8");
+    await expect(Effect.runPromise(inspectPendingMigrationRecovery(dbPath))).rejects.toThrow(
+      "Invalid migration recovery marker version identity",
+    );
+    expect(await fs.readFile(marker!.markerPath, "utf8")).toBe(mismatchedMarkerText);
+    expect(JSON.parse(mismatchedMarkerText)).toMatchObject({
+      backupPath: originalBackupPath,
+      resumeAttempts: 0,
+    });
     expect(await backupPaths(dbPath)).toEqual(backupsBeforeRetry);
     await fs.writeFile(marker!.markerPath, originalMarkerText, { mode: 0o600 });
     const unchangedDatabase = new DatabaseSync(dbPath, { readOnly: true });
@@ -1111,7 +1111,7 @@ describe("migration backups", () => {
       await fs.readFile(migrationBackupProvenancePath(dbPath), "utf8"),
     ) as Record<string, unknown>;
     expect(completed).toMatchObject({
-      version: 2,
+      version: 3,
       phase: "migration-completed",
       backupPath: originalBackupPath,
       resumeAttempts: 2,
@@ -1179,9 +1179,13 @@ describe("migration backups", () => {
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           const rows = yield* sql<{ readonly migration_id: number }>`
-            SELECT migration_id FROM workbench_sql_migrations ORDER BY migration_id
+            SELECT module_id, migration_id FROM workbench_sql_migrations ORDER BY module_id, migration_id
           `;
-          expect(rows).toEqual([{ migration_id: 1 }, { migration_id: 2 }]);
+          expect(rows).toEqual([
+            { module_id: "context", migration_id: 1 },
+            { module_id: "expert", migration_id: 1 },
+            { module_id: "expert", migration_id: 2 },
+          ]);
         }).pipe(
           Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
         ),
@@ -1191,7 +1195,7 @@ describe("migration backups", () => {
         await fs.readFile(migrationBackupProvenancePath(dbPath), "utf8"),
       ) as Record<string, unknown>;
       expect(provenance).toMatchObject({
-        version: 2,
+        version: 3,
         phase: "migration-completed",
         migrationVersions: {
           source: { official: 108, workbench: 0, format: 0 },
@@ -1555,8 +1559,9 @@ describe("migration backups", () => {
       await fs.readFile(migrationBackupProvenancePath(dbPath), "utf8"),
     ) as Record<string, unknown>;
     expect(provenance).toMatchObject({
-      version: 2,
+      version: 3,
       phase: "migration-completed",
+      moduleVersions: { source: { expert: 0, context: 0 }, target: { expert: 2, context: 1 } },
       migrationVersions: {
         source: { official: currentOfficialMigrationCount(), workbench: 0, format: 0 },
         target: { official: currentOfficialMigrationCount(), workbench: 2, format: 1 },
@@ -1586,7 +1591,9 @@ describe("migration backups", () => {
           );
         }),
       ),
-    ).rejects.toThrow("Official migration history is not a supported prefix at 109.");
+    ).rejects.toThrow(
+      "Official migration 109 has an unknown identity in a reserved legacy workbench slot.",
+    );
 
     expect(await backupPaths(dbPath)).toEqual([]);
     await expect(fs.stat(migrationRecoveryMarkerPath(dbPath))).rejects.toMatchObject({

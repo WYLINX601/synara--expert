@@ -4,6 +4,7 @@ import { it, assert } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Path } from "effect";
 
 import { ProviderUnsupportedError } from "../src/provider/Errors.ts";
+import { ServerSecretStore } from "../src/auth/Services/ServerSecretStore.ts";
 import { ProviderAdapterRegistry } from "../src/provider/Services/ProviderAdapterRegistry.ts";
 import { ProviderSessionDirectoryLive } from "../src/provider/Layers/ProviderSessionDirectory.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
@@ -14,6 +15,7 @@ import {
 } from "../src/provider/Services/ProviderService.ts";
 import { SqlitePersistenceMemory } from "../src/persistence/Layers/Sqlite.ts";
 import { ProviderSessionRuntimeRepositoryLive } from "../src/persistence/Layers/ProviderSessionRuntime.ts";
+import { ServerSettingsService } from "../src/serverSettings.ts";
 
 import {
   makeTestProviderAdapterHarness,
@@ -59,6 +61,13 @@ const makeIntegrationFixture = Effect.gen(function* () {
   const shared = Layer.mergeAll(
     directoryLayer,
     Layer.succeed(ProviderAdapterRegistry, registry),
+    Layer.succeed(ServerSecretStore, {
+      get: () => Effect.succeed(null),
+      set: () => Effect.void,
+      getOrCreateRandom: (_name, bytes) => Effect.succeed(new Uint8Array(bytes)),
+      remove: () => Effect.void,
+    }),
+    ServerSettingsService.layerTest(),
   ).pipe(Layer.provide(SqlitePersistenceMemory));
 
   const layer = makeProviderServiceLive().pipe(

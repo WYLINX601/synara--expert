@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  BETA_ONLY_FEATURES,
   desktopFlavorFromBundleId,
   desktopFlavorFromProtocol,
+  GROUPS_BETA_FEATURE,
+  INLINE_VISUALS_BETA_FEATURE,
   isBetaFeatureEnabled,
+  MCP_CONNECTORS_BETA_FEATURE,
 } from "./betaFeatures";
 import {
   SYNARA_BETA_BUNDLE_ID,
@@ -19,9 +21,17 @@ import {
 } from "./desktopIdentity";
 
 describe("isBetaFeatureEnabled", () => {
-  it("turns a listed feature off only for the production flavor", () => {
-    expect(BETA_ONLY_FEATURES).toContain("omp");
+  it.each(["inbox", "pull-request-auto-fix", "tasks"])(
+    "offers %s in Stable and Beta",
+    (feature) => {
+      expect(isBetaFeatureEnabled(feature, "production")).toBe(true);
+      expect(isBetaFeatureEnabled(feature, "beta")).toBe(true);
+    },
+  );
+
+  it("enables Oh My Pi in Stable and all other flavors", () => {
     for (const flavor of [
+      "production",
       "development",
       "canary",
       "cua",
@@ -32,7 +42,43 @@ describe("isBetaFeatureEnabled", () => {
     ] as const) {
       expect(isBetaFeatureEnabled("omp", flavor)).toBe(true);
     }
-    expect(isBetaFeatureEnabled("omp", "production")).toBe(false);
+  });
+
+  it("offers Hubs in Stable and all other flavors", () => {
+    for (const flavor of [
+      "production",
+      "development",
+      "canary",
+      "cua",
+      "beta",
+      "unknown",
+    ] as const) {
+      expect(isBetaFeatureEnabled(GROUPS_BETA_FEATURE, flavor)).toBe(true);
+    }
+  });
+
+  it("offers inline visuals in Stable and all other flavors", () => {
+    expect(isBetaFeatureEnabled(INLINE_VISUALS_BETA_FEATURE, "production")).toBe(true);
+    for (const flavor of ["beta", "development", "canary", "cua", "unknown"] as const) {
+      expect(isBetaFeatureEnabled(INLINE_VISUALS_BETA_FEATURE, flavor)).toBe(true);
+    }
+  });
+
+  it("keeps connectors out of Stable only", () => {
+    expect(isBetaFeatureEnabled(MCP_CONNECTORS_BETA_FEATURE, "production")).toBe(false);
+    for (const flavor of ["beta", "development", "canary", "cua", "unknown"] as const) {
+      expect(isBetaFeatureEnabled(MCP_CONNECTORS_BETA_FEATURE, flavor)).toBe(true);
+    }
+  });
+
+  it("enables the rail sidebar layout in both Beta and Stable", () => {
+    expect(isBetaFeatureEnabled("sidebarV2", "beta")).toBe(true);
+    expect(isBetaFeatureEnabled("sidebarV2", "production")).toBe(true);
+  });
+
+  it("enables audio-driven message trails in both Beta and Stable", () => {
+    expect(isBetaFeatureEnabled("audio-trail", "beta")).toBe(true);
+    expect(isBetaFeatureEnabled("audio-trail", "production")).toBe(true);
   });
 
   it("leaves unlisted features enabled everywhere", () => {

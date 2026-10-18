@@ -15,7 +15,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 const contextClientMocks = vi.hoisted(() => ({
-  readContextClient: null as null | (() => { supported: boolean; api: null }),
+  readContextClient: null as
+    | null
+    | (() => {
+        capability: "supported" | "unsupported" | "unknown";
+        supported: boolean;
+        generation: string;
+        connected: boolean;
+        available: boolean;
+        api: null;
+      }),
 }));
 vi.mock("~/workbench/host/contextClient", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/workbench/host/contextClient")>();
@@ -274,7 +283,14 @@ describe("legacy Project Instructions migration gate", () => {
   it("blocks the first send when Context is supported but its API is unavailable", async () => {
     restoreNativeApi = setNativeApi({});
     useProjectInstructionsStore.getState().setInstructions(projectId, legacyInstructions);
-    contextClientMocks.readContextClient = () => ({ supported: true, api: null });
+    contextClientMocks.readContextClient = () => ({
+      capability: "supported",
+      supported: true,
+      generation: "unavailable:1",
+      connected: true,
+      available: false,
+      api: null,
+    });
     restoreContextClient = () => {
       contextClientMocks.readContextClient = null;
     };

@@ -18,10 +18,39 @@ import {
 /**
  * Features that ship only in non-Stable builds. Keep a feature out of Stable
  * by adding its key here; promote it by deleting the entry. A provider's key
- * is its ProviderKind: today that is "omp" only.
+ * is its ProviderKind. "groups" is Groups (below).
  */
 export type BetaOnlyFeature = string;
-export const BETA_ONLY_FEATURES: readonly BetaOnlyFeature[] = ["omp"];
+
+/** Hubs (Stable and Beta): the coordinator, its threads, the Hub panel and Library. */
+export const GROUPS_BETA_FEATURE = "groups";
+
+/** Inbox (Stable and Beta): the Inbox page and its `stats.getRecap` RPC. */
+export const INBOX_BETA_FEATURE = "inbox";
+
+/**
+ * Audio trail (Stable and Beta): the chat message trail moves with the Mac's
+ * audio output and/or the microphone, read by the AppSnap helper's `--audio-level` mode.
+ */
+export const AUDIO_TRAIL_BETA_FEATURE = "audio-trail";
+
+/** Auto-fix CI (Stable and Beta): the PR menu checkbox, RPCs, and check watcher. */
+export const PULL_REQUEST_AUTO_FIX_BETA_FEATURE = "pull-request-auto-fix";
+
+/**
+ * Inline visuals (Stable and Beta): the `synara_show_visual` agent tool,
+ * component-spec and sandboxed HTML transcript rows, and the document read.
+ */
+export const INLINE_VISUALS_BETA_FEATURE = "inline-visuals";
+
+/**
+ * Connectors (Beta only): remote MCP servers (Supabase, Linear, ...) the user
+ * signs in to from Settings, proxied to provider sessions through the agent
+ * gateway. Stable refuses the RPCs, the OAuth callback, and the proxy routes.
+ */
+export const MCP_CONNECTORS_BETA_FEATURE = "mcp-connectors";
+
+export const BETA_ONLY_FEATURES: readonly BetaOnlyFeature[] = [MCP_CONNECTORS_BETA_FEATURE];
 
 /**
  * Whether a Beta-only feature is on for this host. Only the Stable

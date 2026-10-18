@@ -9,7 +9,7 @@ import {
 } from "./settings";
 
 describe("settings host route adaptation", () => {
-  it("resolves old MCP section aliases while retaining the raw alias and deep-link values", () => {
+  it("keeps native integrations separate from the Linx MCP route", () => {
     const rawSearch = {
       section: "integrations",
       expertId: "planner",
@@ -17,32 +17,44 @@ describe("settings host route adaptation", () => {
       returnExpertId: "planner",
       search: "authorization",
     };
-    const route = resolveSettingsHostRoute(
-      { ...rawSearch, section: "mcp", tab: "apps" },
-      rawSearch,
-    );
+    const route = resolveSettingsHostRoute(rawSearch);
 
     expect(route).toMatchObject({
-      activeSection: "mcp",
-      pageId: "mcp-settings",
-      mcpTab: "apps",
+      activeSection: "integrations",
+      pageId: undefined,
+      mcpTab: "tools",
       originalSection: "integrations",
-      shouldCanonicalizeMcpRoute: true,
+      shouldCanonicalizeMcpRoute: false,
       expertId: "planner",
       connectionId: "linear",
       returnExpertId: "planner",
       initialSearch: "authorization",
     });
-    expect(
-      canonicalizeSettingsMcpSearch({
-        ...rawSearch,
-        tab: "apps",
-      }),
-    ).toEqual({
-      ...rawSearch,
-      section: "mcp",
-      tab: "apps",
+    expect(canonicalizeSettingsMcpSearch(rawSearch)).toEqual(rawSearch);
+  });
+
+  it("canonicalizes only Linx MCP and its legacy expert-connections alias", () => {
+    const alias = resolveSettingsHostRoute(
+      { section: "mcp", tab: "tools" },
+      { section: "expert-connections" },
+    );
+    expect(alias).toMatchObject({
+      activeSection: "mcp",
+      pageId: "mcp-settings",
+      mcpTab: "tools",
+      originalSection: "expert-connections",
+      shouldCanonicalizeMcpRoute: true,
     });
+    expect(
+      canonicalizeSettingsMcpSearch({ section: "expert-connections", expertId: "planner" }),
+    ).toEqual({
+      section: "mcp",
+      expertId: "planner",
+      tab: "tools",
+    });
+    expect(
+      resolveSettingsHostRoute({ section: "mcp", tab: "apps" }).shouldCanonicalizeMcpRoute,
+    ).toBe(false);
   });
 
   it("uses the legacy connections default and avoids rewriting a canonical route", () => {

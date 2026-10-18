@@ -6,7 +6,11 @@ import {
 import { useMutation, useQuery } from "@tanstack/react-query";
 
 import { newCommandId } from "~/lib/utils";
-import { useContextClient } from "~/workbench/host/contextClient";
+import {
+  contextApiQueryIdentity,
+  readContextClient,
+  useContextClient,
+} from "~/workbench/host/contextClient";
 import { Button } from "~/components/ui/button";
 import { EnvironmentCollapsibleSection } from "./environment/EnvironmentRow";
 import {
@@ -28,13 +32,27 @@ export function ContextDetailsDialog(props: {
   readonly onNewThread: () => void;
 }) {
   const contextClient = useContextClient();
-  const contextApi = contextClient.supported ? contextClient.api : null;
+  const contextApi = contextClient.available ? contextClient.api : null;
   const detailsQuery = useQuery({
-    queryKey: ["context", "thread", props.threadId],
+    queryKey: [
+      "context",
+      "thread",
+      contextApiQueryIdentity(contextClient.api),
+      contextClient.generation,
+      props.threadId,
+    ],
     enabled: Boolean(props.open && !props.isLocalDraft && props.threadId && contextApi),
-    queryFn: () => {
+    queryFn: async () => {
       if (!props.threadId || !contextApi) throw new Error("Thread Context is unavailable.");
-      return contextApi.getThread({ threadId: props.threadId });
+      const details = await contextApi.getThread({ threadId: props.threadId });
+      const current = readContextClient();
+      if (
+        !current.available ||
+        current.api !== contextApi ||
+        current.generation !== contextClient.generation
+      )
+        throw new Error("The Context connection changed before confirmation.");
+      return details;
     },
     refetchInterval: props.open && !props.isLocalDraft ? 2_000 : false,
     refetchIntervalInBackground: false,
@@ -72,7 +90,7 @@ export function ContextDetailsDialog(props: {
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="max-h-[65vh] space-y-4 overflow-y-auto text-ui">
-          {!contextClient.supported ? (
+          {contextClient.capability === "unsupported" ? (
             <p className="text-ui-sm text-muted-foreground">
               Context is unavailable on this server.
             </p>

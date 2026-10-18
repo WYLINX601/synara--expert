@@ -10,10 +10,14 @@ export const ClaudeCacheObservation = Schema.Struct({
   lastResponseAt: Schema.optional(IsoDateTime),
   // Earliest local observation of the API request that refreshed this prefix.
   cacheReferenceAt: Schema.optional(IsoDateTime),
-  // Observed from native usage, never inferred from the user's subscription.
+  // Longest observed native lifetime; expiry of the whole prefix requires it to elapse.
   ttlSeconds: Schema.optional(PositiveInt),
+  // A shorter-lived portion makes the prefix's overall warmth unknown in between.
+  partialTtlSeconds: Schema.optional(PositiveInt),
   state: Schema.Literals(["likely-warm", "likely-expired", "unknown"]),
   source: Schema.Literals(["session-start", "request-usage", "local-estimate"]),
+  // Accounting identity of one owned Claude query; independent of hook delivery time.
+  processId: Schema.optional(TrimmedNonEmptyString),
   estimatedCacheWriteUsd: Schema.optional(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
   lastRequest: Schema.optional(
     Schema.Struct({

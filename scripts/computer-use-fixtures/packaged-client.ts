@@ -17,7 +17,7 @@ import {
 } from "@synara/contracts";
 import { SYNARA_CUA_DESKTOP_ORIGIN } from "@synara/shared/desktopIdentity";
 import { Effect, Exit, Layer, ManagedRuntime, Schema, Scope } from "effect";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
+import { RpcClient, RpcClientError, RpcGroup, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 
 export function assertLoopbackUrl(value: string, protocol: "http:" | "ws:"): URL {
@@ -117,13 +117,23 @@ async function desktopSocketUrl(cdpPort: number): Promise<string> {
 
 const makeClient = RpcClient.make(WsFeatureRpcGroup.merge(WsComputerRpcGroup));
 
-export async function connectPackagedOwner(cdpPort: number) {
+type OwnerRpc = RpcGroup.Rpcs<typeof WsFeatureRpcGroup> | RpcGroup.Rpcs<typeof WsComputerRpcGroup>;
+
+export interface PackagedOwnerConnection {
+  readonly api: RpcClient.RpcClient<OwnerRpc, RpcClientError.RpcClientError>;
+  readonly serverPort: number;
+  readonly serverInstanceId: string;
+  readonly run: <A, E>(effect: Effect.Effect<A, E>) => Promise<A>;
+  readonly close: () => Promise<void>;
+}
+
+export async function connectPackagedOwner(cdpPort: number): Promise<PackagedOwnerConnection> {
   return connectOwnerUrl(await desktopSocketUrl(cdpPort));
 }
 
 /** Reusable by non-Electron isolated fixtures whose owner connection is
  * explicitly supplied in memory, never discovered from another instance. */
-export async function connectOwnerUrl(rawUrl: string) {
+export async function connectOwnerUrl(rawUrl: string): Promise<PackagedOwnerConnection> {
   const url = assertLoopbackUrl(rawUrl, "ws:");
   if (!url.searchParams.get("token")) throw new Error("An authenticated owner URL is required.");
   const negotiate = new URL(url);

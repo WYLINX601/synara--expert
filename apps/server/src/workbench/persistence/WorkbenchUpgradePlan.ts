@@ -13,11 +13,15 @@ import {
   readWorkbenchSchemaState,
   validateOfficialTrackerShape,
   validateWorkbenchTrackerShape,
+  validateWorkbenchSchemaState,
   readWorkbenchSchemaFormat,
   currentOfficialMigrationCatalog,
   officialMigrationCatalogHighWaterMark,
   LEGACY_EXPERT_OFFICIAL_MIGRATIONS,
+  LEGACY_OFFICIAL_MIGRATIONS,
   LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
+  LEGACY_CONTEXT_OFFICIAL_HIGH_WATER_MARK,
+  contextWorkbenchMigrationEntries,
   WORKBENCH_SCHEMA_FORMAT_VERSION,
   WORKBENCH_SCHEMA_METADATA_TABLE,
   planWorkbenchHistory,
@@ -66,6 +70,11 @@ export interface WorkbenchUpgradeReadyPlan {
     readonly targetVersion: number;
     /** Legacy migrations already applied in the official tracker. */
     readonly adoptedMigrationIds: readonly (1 | 2)[];
+    readonly adoptedContextMigrationIds: readonly 1[];
+    readonly modules: Readonly<{
+      expert: { readonly sourceVersion: number; readonly targetVersion: number };
+      context: { readonly sourceVersion: number; readonly targetVersion: number };
+    }>;
     readonly hasPendingMigrations: boolean;
   };
   readonly format: {
@@ -78,6 +87,12 @@ export interface WorkbenchUpgradeReadyPlan {
     readonly officialId: 109 | 110;
     readonly officialName: string;
     readonly workbenchId: 1 | 2;
+  }[];
+  readonly legacyMigrations: readonly {
+    readonly moduleId: "expert" | "context";
+    readonly officialId: number;
+    readonly officialName: string;
+    readonly workbenchId: number;
   }[];
   readonly lineageDivergence?: OfficialMigrationLineageDivergence | undefined;
   readonly databaseEmpty: boolean;
@@ -181,10 +196,14 @@ export const planWorkbenchUpgrade = (
       observedLineage.kind === "imported-divergence" &&
       observedLineage.rawHighWaterMark <= supportedOfficialVersion &&
       observation.workbenchRows.length === 0 &&
-      observation.schemaState.bindingColumn === null &&
-      observation.schemaState.runtimeRecordColumns === null &&
-      !LEGACY_EXPERT_OFFICIAL_MIGRATIONS.some(
+      validateWorkbenchSchemaState({ expert: 0, context: 0 }, observation.schemaState) === null &&
+      !LEGACY_OFFICIAL_MIGRATIONS.some(
         ({ officialId }) => officialId === observedLineage.divergence?.firstDivergedId,
+      ) &&
+      observation.officialRows.every(
+        (row) =>
+          !LEGACY_OFFICIAL_MIGRATIONS.some(({ officialId }) => officialId === row.migration_id) ||
+          officialCatalog.some(([id, name]) => id === row.migration_id && name === row.name),
       ) &&
       observation.officialRows.every(
         ({ migration_id }) => migration_id <= supportedOfficialVersion,
@@ -212,19 +231,24 @@ export const planWorkbenchUpgrade = (
       0,
       ...observation.workbenchRows.map(({ migration_id }) => migration_id),
     );
-    return appliedMaximum > workbenchMigrationEntries.length
+    const supportedWorkbenchVersion = Math.max(
+      ...workbenchMigrationEntries.map(({ migrationId }) => migrationId),
+    );
+    return appliedMaximum > supportedWorkbenchVersion
       ? rejected(
           workbenchHistory.reason,
           "workbench-too-new",
           appliedMaximum,
-          workbenchMigrationEntries.length,
+          supportedWorkbenchVersion,
         )
       : rejected(workbenchHistory.reason);
   }
-  const officialRowsForTarget =
-    adoption.kind === "adopt"
-      ? observation.officialRows.filter(({ migration_id }) => migration_id < 109)
-      : observation.officialRows;
+  const adoptedOfficialIds = new Set(
+    adoption.kind === "adopt" ? adoption.legacyMigrations.map(({ officialId }) => officialId) : [],
+  );
+  const officialRowsForTarget = observation.officialRows.filter(
+    ({ migration_id }) => !adoptedOfficialIds.has(migration_id),
+  );
   const normalizedOfficial = normalizeRecognizedOfficialMigrationRows(officialRowsForTarget);
   const lineagePlan =
     adoption.kind === "adopt"
@@ -239,38 +263,66 @@ export const planWorkbenchUpgrade = (
   const replayTargetVersion = Math.max(
     officialTargetVersion,
     LEGACY_EXPERT_OFFICIAL_HIGH_WATER_MARK,
+    LEGACY_CONTEXT_OFFICIAL_HIGH_WATER_MARK,
     ...migrationEntries.map(([id]) => id),
   );
+  const moduleProgress = {
+    expert: {
+      sourceVersion: workbenchHistory.appliedByModule.expert,
+      targetVersion: Math.max(...workbenchMigrationEntries.map(({ migrationId }) => migrationId)),
+    },
+    context: {
+      sourceVersion: workbenchHistory.appliedByModule.context,
+      targetVersion: Math.max(
+        ...contextWorkbenchMigrationEntries.map(({ migrationId }) => migrationId),
+      ),
+    },
+  } as const;
   const workbenchSourceVersion = Math.max(
-    0,
-    ...workbenchHistory.applied.map((migration) => migration.migrationId),
+    moduleProgress.expert.sourceVersion,
+    moduleProgress.context.sourceVersion,
   );
-  const workbenchTargetVersion = workbenchMigrationEntries.length;
+  const workbenchTargetVersion = Math.max(
+    moduleProgress.expert.targetVersion,
+    moduleProgress.context.targetVersion,
+  );
   const formatSourceVersion = observation.workbenchFormatVersion;
   const formatTargetVersion = WORKBENCH_SCHEMA_FORMAT_VERSION;
   const formatHasPendingUpgrade = formatSourceVersion < formatTargetVersion;
   const adoptedMigrationIds = adoption.kind === "adopt" ? adoption.migrationIds : [];
-  const effectiveWorkbenchSource = Math.max(workbenchSourceVersion, ...adoptedMigrationIds);
+  const adoptedContextMigrationIds = adoption.kind === "adopt" ? adoption.contextMigrationIds : [];
+  const effectiveExpertSource = Math.max(
+    moduleProgress.expert.sourceVersion,
+    ...adoptedMigrationIds,
+  );
+  const effectiveContextSource = Math.max(
+    moduleProgress.context.sourceVersion,
+    ...adoptedContextMigrationIds,
+  );
   const officialHasPendingMigrations =
     lineagePlan.kind === "imported-divergence" || officialSourceVersion < officialTargetVersion;
-  const workbenchHasPendingMigrations = effectiveWorkbenchSource < workbenchTargetVersion;
+  const workbenchHasPendingMigrations =
+    effectiveExpertSource < moduleProgress.expert.targetVersion ||
+    effectiveContextSource < moduleProgress.context.targetVersion;
   const legacyOfficialMigrations =
     adoption.kind === "adopt"
-      ? observation.officialRows
-          .filter((row) => row.migration_id === 109 || row.migration_id === 110)
-          .map((row) => ({
-            officialId: row.migration_id as 109 | 110,
-            officialName: row.name,
-            workbenchId: (row.migration_id - 108) as 1 | 2,
+      ? adoption.legacyMigrations
+          .filter(({ moduleId }) => moduleId === "expert")
+          .map(({ officialId, officialName, workbenchId }) => ({
+            officialId: officialId as 109 | 110,
+            officialName,
+            workbenchId: workbenchId as 1 | 2,
           }))
       : [];
+  const legacyMigrations = adoption.kind === "adopt" ? adoption.legacyMigrations : [];
   const requiresBackup =
     !observation.databaseEmpty &&
     (officialHasPendingMigrations ||
       normalizedOfficial.changed ||
       workbenchHasPendingMigrations ||
       formatHasPendingUpgrade ||
-      adoptedMigrationIds.length > 0);
+      adoptedMigrationIds.length > 0 ||
+      adoptedContextMigrationIds.length > 0);
 
   return {
     kind: "ready",
@@ -289,6 +341,17 @@ export const planWorkbenchUpgrade = (
       sourceVersion: workbenchSourceVersion,
       targetVersion: workbenchTargetVersion,
       adoptedMigrationIds,
+      adoptedContextMigrationIds,
+      modules: {
+        expert: {
+          sourceVersion: moduleProgress.expert.sourceVersion,
+          targetVersion: moduleProgress.expert.targetVersion,
+        },
+        context: {
+          sourceVersion: moduleProgress.context.sourceVersion,
+          targetVersion: moduleProgress.context.targetVersion,
+        },
+      },
       hasPendingMigrations: workbenchHasPendingMigrations,
     },
     format: {
@@ -298,6 +361,7 @@ export const planWorkbenchUpgrade = (
       hasPendingUpgrade: formatHasPendingUpgrade,
     },
     legacyOfficialMigrations,
+    legacyMigrations,
     databaseEmpty: observation.databaseEmpty,
     requiresBackup,
   };
@@ -312,9 +376,20 @@ const isWorkbenchTrackerRecord = (
 ): rows is readonly WorkbenchMigrationRecord[] => isWorkbenchRows(rows);
 
 const emptySchemaState: WorkbenchSchemaState = {
+  contextSchemaObjects: [],
   projectionThreadsExists: false,
   bindingColumn: null,
   runtimeRecordColumns: null,
+  contextTableColumns: {
+    context_meta: null,
+    context_spaces: null,
+    context_projects: null,
+    context_migrations: null,
+    context_thread_bindings: null,
+    context_applied_runtime_records: null,
+    context_command_results: null,
+  },
+  contextDeliveryColumns: null,
 };
 
 /** Read-only SQLite inspection. This value is intended to be shared with backup and execution. */

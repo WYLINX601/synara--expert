@@ -3,6 +3,7 @@ import {
   type ModelSlug,
   type ProviderNativeCommandDescriptor,
   type ProviderMentionReference,
+  type ProviderInstanceId,
   type ProviderKind,
   type ProviderPluginDescriptor,
   type ProviderSkillDescriptor,
@@ -29,6 +30,7 @@ import { formatSkillScope } from "~/lib/providerDiscovery";
 import { cn } from "~/lib/utils";
 import { FileEntryIcon } from "./FileEntryIcon";
 import { ProviderIcon } from "../ProviderIcon";
+import { ConnectorIcon } from "../ConnectorIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   COMPOSER_MENU_PANEL_GLYPH_CLASS_NAME,
@@ -89,6 +91,10 @@ function commandMenuTrailingMeta(item: ComposerCommandItem): string | null {
     return "Plugin";
   }
 
+  if (item.type === "connector") {
+    return "Connector";
+  }
+
   if (item.type === "thread") {
     return null;
   }
@@ -135,6 +141,7 @@ function commandMenuSecondaryText(item: ComposerCommandItem): string | null {
 
   if (
     item.type === "plugin" ||
+    item.type === "connector" ||
     item.type === "skill" ||
     item.type === "local-root" ||
     item.type === "thread"
@@ -196,6 +203,7 @@ export type ComposerCommandItem =
       id: string;
       type: "model";
       provider: ProviderKind;
+      instanceId: ProviderInstanceId;
       model: ModelSlug;
       label: string;
       description: string;
@@ -213,6 +221,15 @@ export type ComposerCommandItem =
       type: "thread";
       threadId: string;
       provider: ProviderKind;
+      mention: ProviderMentionReference;
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
+      type: "connector";
+      /** Display name, also what picks the brand mark or favicon. */
+      connectorName: string;
       mention: ProviderMentionReference;
       label: string;
       description: string;
@@ -246,12 +263,14 @@ export function groupCommandItems(
   groupSlashCommandSections: boolean,
 ): ComposerCommandGroupModel[] {
   if (triggerKind === "mention") {
+    const connectorItems = items.filter((item) => item.type === "connector");
     const pluginItems = items.filter((item) => item.type === "plugin");
     const threadItems = items.filter((item) => item.type === "thread");
     const localItems = items.filter((item) => item.type === "local-root" || item.type === "path");
     const agentItems = items.filter((item) => item.type === "agent");
     const otherItems = items.filter(
       (item) =>
+        item.type !== "connector" &&
         item.type !== "plugin" &&
         item.type !== "thread" &&
         item.type !== "local-root" &&
@@ -260,6 +279,9 @@ export function groupCommandItems(
     );
 
     const groups: ComposerCommandGroupModel[] = [];
+    if (connectorItems.length > 0) {
+      groups.push({ id: "connectors", label: "Connectors", items: connectorItems });
+    }
     if (pluginItems.length > 0) {
       groups.push({ id: "plugins", label: "Plugins", items: pluginItems });
     }
@@ -479,6 +501,8 @@ function commandMenuItemGlyph(item: ComposerCommandItem, theme: "light" | "dark"
       return <PluginIcon className={cls} />;
     case "thread":
       return <ProviderIcon provider={item.provider} className={cls} />;
+    case "connector":
+      return <ConnectorIcon name={item.connectorName} className={cls} />;
     case "skill":
       return <SkillCubeIcon className={cls} />;
     default:

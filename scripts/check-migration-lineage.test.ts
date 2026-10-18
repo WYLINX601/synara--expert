@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   FROZEN_NATIVE_COMPATIBILITY_MIGRATION,
   findMigrationOwnershipViolations,
+  findContextLedgerOwnershipViolations,
   findLineageStructureViolations,
   findReleasedLineageViolations,
   groupViolationsByPair,
@@ -265,52 +266,82 @@ describe("migration lineage guard", () => {
     expect(entries.length).toBeGreaterThan(50);
   });
 
-  it("accepts pinned upstream migrations and verifies bytes for entries added by the candidate", () => {
+  it("accepts the complete pinned upstream catalog and checks every script byte", () => {
     const integrated = [catalogEntry(1, "OrchestrationEvents", "a".repeat(64))];
     const candidate = [
       ...integrated,
       catalogEntry(2, "OrchestrationCommandReceipts", "b".repeat(64)),
     ];
-    const current = [...candidate, frozenCatalogEntry()];
-    expect(findMigrationOwnershipViolations(current, integrated, candidate)).toEqual([]);
     expect(
       findMigrationOwnershipViolations(
-        [
-          integrated[0]!,
-          catalogEntry(2, "OrchestrationCommandReceipts", "c".repeat(64)),
-          frozenCatalogEntry(),
-        ],
+        candidate,
         integrated,
         candidate,
+        FROZEN_NATIVE_COMPATIBILITY_MIGRATION.sha256,
+      ),
+    ).toEqual([]);
+    expect(
+      findMigrationOwnershipViolations(
+        [integrated[0]!, catalogEntry(2, "OrchestrationCommandReceipts", "c".repeat(64))],
+        integrated,
+        candidate,
+        FROZEN_NATIVE_COMPATIBILITY_MIGRATION.sha256,
       ),
     ).toContain(
-      'Newly approved upstream migration 2 ("OrchestrationCommandReceipts") does not match its pinned upstream script bytes.',
+      'Official migration 2 ("OrchestrationCommandReceipts") does not match its pinned upstream script bytes.',
     );
   });
 
-  it("rejects a changed frozen 111 script and a removed or renamed frozen identity", () => {
-    const changed = findMigrationOwnershipViolations([frozenCatalogEntry("c".repeat(64))], [], []);
-    expect(changed).toContain("Frozen native migration 111_ContextV1 script bytes changed.");
+  it("keeps frozen legacy 111 outside the active catalog while checking its exact bytes", () => {
+    const changed = findMigrationOwnershipViolations([], [], [], "c".repeat(64));
+    expect(changed).toContain(
+      "Frozen compatibility script apps/server/src/persistence/Migrations/111_ContextV1.ts bytes changed.",
+    );
 
     expect(findMigrationOwnershipViolations([], [], [])).toContain(
-      "Frozen native migration 111_ContextV1 was removed, renamed, or moved to another ID.",
+      "Cannot verify frozen compatibility script bytes at apps/server/src/persistence/Migrations/111_ContextV1.ts.",
     );
     expect(
       findMigrationOwnershipViolations(
         [catalogEntry(111, "RenamedContextV1", FROZEN_NATIVE_COMPATIBILITY_MIGRATION.sha256)],
         [],
         [],
+        FROZEN_NATIVE_COMPATIBILITY_MIGRATION.sha256,
       ),
     ).toContain(
-      "Frozen native migration 111_ContextV1 was removed, renamed, or moved to another ID.",
+      'Native migration 111 ("RenamedContextV1") is not owned by the pinned upstream catalog. ' +
+        "Linx extensions belong in the independent workbench_sql_migrations ledger.",
     );
+  });
+
+  it("proves Context ledger ownership from executable static declarations", () => {
+    const source = readFileSync(
+      new URL("../apps/server/src/workbench/persistence/WorkbenchMigrations.ts", import.meta.url),
+      "utf8",
+    );
+    expect(findContextLedgerOwnershipViolations(source)).toEqual([]);
+    for (const altered of [
+      source.replace("effect: ContextV1Migration", "effect: UnknownMigration"),
+      source.replace("111_ContextV1.ts", "111_Replacement.ts"),
+      source.replace('moduleId: "context"', 'moduleId: "other"'),
+      source.replace("b7dbd849", "00000000"),
+      source.replace("...contextWorkbenchMigrationEntries", "...loadMigrations()"),
+      source.replace("...contextWorkbenchMigrationEntries", "...workbenchMigrationEntries"),
+      source.replace(
+        "export const contextWorkbenchMigrationEntries",
+        "const contextWorkbenchMigrationEntries",
+      ),
+    ]) {
+      expect(findContextLedgerOwnershipViolations(altered)).not.toEqual([]);
+    }
   });
 
   it("rejects an unknown local migration in the native catalog", () => {
     const problems = findMigrationOwnershipViolations(
-      [frozenCatalogEntry(), catalogEntry(112, "LinxNativeExtension", "d".repeat(64))],
+      [catalogEntry(112, "LinxNativeExtension", "d".repeat(64))],
       [],
       [],
+      FROZEN_NATIVE_COMPATIBILITY_MIGRATION.sha256,
     );
     expect(problems).toContain(
       'Native migration 112 ("LinxNativeExtension") is not owned by the pinned upstream catalog. ' +

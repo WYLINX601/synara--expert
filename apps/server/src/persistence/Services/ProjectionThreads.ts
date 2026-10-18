@@ -9,6 +9,7 @@
 import {
   IsoDateTime,
   ExpertBinding,
+  MessageId,
   ModelSelection,
   NonNegativeInt,
   OrchestrationThreadPullRequest,
@@ -18,6 +19,7 @@ import {
   ThreadGoalAchievements,
   ThreadPinnedMessages,
   ThreadHandoff,
+  ThreadSidechatContext,
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
@@ -70,7 +72,10 @@ export const ProjectionThread = Schema.Struct({
   subagentNickname: Schema.optional(Schema.NullOr(Schema.String)),
   subagentRole: Schema.optional(Schema.NullOr(Schema.String)),
   forkSourceThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  forkSourceMessageId: Schema.optional(Schema.NullOr(MessageId)),
   sidechatSourceThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  // Standalone sidechats only (see ThreadSidechatContext); null for every other thread.
+  sidechatContext: Schema.optional(Schema.NullOr(ThreadSidechatContext)),
   sidechatLastActivityAt: Schema.optional(Schema.NullOr(IsoDateTime)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
@@ -106,6 +111,12 @@ export const ProjectionThread = Schema.Struct({
     Schema.withDecodingDefault(() => null),
   ),
   settledAt: Schema.optional(Schema.NullOr(IsoDateTime)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
+  snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)).pipe(
+    Schema.withDecodingDefault(() => null),
+  ),
+  snoozeReminderAt: Schema.optional(Schema.NullOr(IsoDateTime)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
   deletedAt: Schema.NullOr(IsoDateTime),

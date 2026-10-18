@@ -7,7 +7,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 const contextClientHarness = vi.hoisted(() => ({
-  value: null as null | { supported: boolean; api: null },
+  value: null as null | {
+    capability: "supported" | "unsupported" | "unknown";
+    supported: boolean;
+    generation: string | null;
+    connected: boolean;
+    available: boolean;
+    api: null;
+  },
 }));
 vi.mock("~/workbench/host/contextClient", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/workbench/host/contextClient")>();
@@ -107,7 +114,14 @@ describe("ContextDetailsDialog", () => {
   });
 
   it("shows a reconnect message and disables new chat when the supported API is unavailable", async () => {
-    contextClientHarness.value = { supported: true, api: null };
+    contextClientHarness.value = {
+      capability: "supported",
+      generation: "test:1",
+      connected: true,
+      available: false,
+      supported: true,
+      api: null,
+    };
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });

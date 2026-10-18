@@ -37,6 +37,8 @@ describe("Workbench web registry", () => {
       "usage",
       "appsnap",
       "computer",
+      "connectors",
+      "integrations",
       "providers",
       "models",
       "skills",
@@ -60,7 +62,7 @@ describe("Workbench web registry", () => {
     expect(SETTINGS_SECTION_IDS).toContain("expert-connections");
     expect(SETTINGS_SECTION_IDS).toContain("integrations");
     expect(normalizeSettingsSection("expert-connections")).toBe("mcp");
-    expect(normalizeSettingsSection("integrations")).toBe("mcp");
+    expect(normalizeSettingsSection("integrations")).toBe("integrations");
     expect(SETTINGS_NAV_ITEMS.find((item) => item.id === "mcp")).toEqual({
       id: "mcp",
       ...mcpModule!.settings.navigation,
@@ -77,24 +79,48 @@ describe("Workbench web registry", () => {
       },
     ]);
     expect(settingsSectionLabel("expert-connections")).toBe("MCP");
-    expect(settingsSectionLabel("integrations")).toBe("MCP");
+    expect(settingsSectionLabel("integrations")).toBe("MCP connections");
     expect(workbenchSettingsPageForSection("mcp")).toBe("mcp-settings");
     expect(mcpSettingsTabForRoute("mcp", undefined)).toBe("tools");
     expect(mcpSettingsTabForRoute("expert-connections", undefined)).toBe("tools");
-    expect(mcpSettingsTabForRoute("integrations", undefined)).toBe("apps");
+    expect(mcpSettingsTabForRoute("integrations", undefined)).toBe("tools");
     expect(mcpSettingsTabForRoute("integrations", "tools")).toBe("tools");
     expect(validateSettingsRouteSearch({ section: "integrations" })).toMatchObject({
-      section: "mcp",
-      tab: "apps",
+      section: "integrations",
+    });
+    expect(validateSettingsRouteSearch({ section: "connectors" })).toMatchObject({
+      section: "connectors",
     });
     expect(Route.options.validateSearch).toBe(validateSettingsRouteSearch);
-    expect(validateSettingsRouteSearch({ section: "integrations" })).toMatchObject({
-      section: "mcp",
-      tab: "apps",
-    });
     expect(validateSettingsRouteSearch({ section: "expert-connections" })).toMatchObject({
       section: "mcp",
       tab: "tools",
+    });
+  });
+
+  it("routes native Connectors, native integrations, and Linx MCP to separate panels", async () => {
+    const { resolveSettingsHostRoute } = await import("./host/settings");
+
+    expect(resolveSettingsHostRoute({ section: "connectors" })).toMatchObject({
+      activeSection: "connectors",
+      pageId: undefined,
+      shouldCanonicalizeMcpRoute: false,
+    });
+    expect(resolveSettingsHostRoute({ section: "integrations" })).toMatchObject({
+      activeSection: "integrations",
+      pageId: undefined,
+      shouldCanonicalizeMcpRoute: false,
+    });
+    expect(resolveSettingsHostRoute({ section: "mcp", tab: "tools" })).toMatchObject({
+      activeSection: "mcp",
+      pageId: "mcp-settings",
+      mcpTab: "tools",
+      shouldCanonicalizeMcpRoute: false,
+    });
+    expect(resolveSettingsHostRoute({ section: "expert-connections" })).toMatchObject({
+      activeSection: "mcp",
+      pageId: "mcp-settings",
+      shouldCanonicalizeMcpRoute: true,
     });
   });
 

@@ -27,6 +27,7 @@ import { ExternalMcpSettingsPanel } from "./ExternalMcpSettingsPanel";
 import { LocalMcpDiscoveryPanel } from "./LocalMcpDiscoveryPanel";
 import { SettingsCard, SettingsEmptyState, SettingsSectionShell } from "./SettingsPanelPrimitives";
 import { useExpertDraftGuard } from "./useExpertDraftGuard";
+import { useMcpOperationScope } from "./useMcpOperationScope";
 import {
   expertDraftFromDefinition,
   expertDraftsEqual,
@@ -67,7 +68,10 @@ type TestRecord = {
   error?: string;
 };
 type Impact = {
-  state: { revision: number };
+  connectionId: string;
+  configRevision: number;
+  stateRevision: number;
+  viewGeneration: number;
   refs: ExpertConnectionReferencesResult;
   action: "disabled" | "active" | "retired" | "delete";
 };
@@ -116,10 +120,16 @@ export function GlobalMcpSettingsPanel({
   const [tests, setTests] = useState<Readonly<Record<string, TestRecord | undefined>>>({});
   const [returnWhenClean, setReturnWhenClean] = useState(false);
   const [showLocalDiscovery, setShowLocalDiscovery] = useState(false);
-  const [pending, setPending] = useState(false);
+  const { begin, capture, finish, invalidate, isCurrent, isViewCurrent, pending, loadingImpact } =
+    useMcpOperationScope();
   const [errorText, setErrorText] = useState<string | null>(null);
   const [impact, setImpact] = useState<Impact | null>(null);
-  const [loadingImpact, setLoadingImpact] = useState(false);
+  const resetOperationScope = useCallback(() => {
+    invalidate();
+    setImpact(null);
+    setErrorText(null);
+    setReturnWhenClean(false);
+  }, [invalidate]);
   const configs = useQuery({
     queryKey: EXPERT_CONNECTIONS_QUERY_KEY,
     queryFn: () => ensureExpertClient().listExpertConnections(),
@@ -216,7 +226,8 @@ export function GlobalMcpSettingsPanel({
       setErrorText(issue);
       return false;
     }
-    setPending(true);
+    const operation = begin("write");
+    if (!operation) return false;
     setErrorText(null);
     try {
       const saved = await ensureExpertClient().saveExpertConnection(
@@ -226,10 +237,11 @@ export function GlobalMcpSettingsPanel({
         EXPERT_CONNECTIONS_QUERY_KEY,
         (old = []) =>
           old.some((x) => x.id === saved.id)
-            ? old.map((x) => (x.id === saved.id ? saved : x))
+            ? old.map((x) => (x.id === saved.id && x.revision < saved.revision ? saved : x))
             : [...old, saved],
       );
       await queryClient.invalidateQueries({ queryKey: EXPERT_CONNECTIONS_QUERY_KEY });
+      if (!isCurrent(operation)) return false;
       setConnectionId(saved.id);
       const clean = draftFromConnection(saved);
       setDraft(clean);
@@ -238,11 +250,11 @@ export function GlobalMcpSettingsPanel({
       toastManager.add({ type: "success", title: "MCP 连接配置已保存" });
       return true;
     } catch (cause) {
-      setErrorText(err(cause));
+      if (isCurrent(operation)) setErrorText(err(cause));
       void queryClient.invalidateQueries({ queryKey: EXPERT_CONNECTIONS_QUERY_KEY });
       return false;
     } finally {
-      setPending(false);
+      finish(operation);
     }
   }, [
     connectionDirty,
@@ -253,6 +265,9 @@ export function GlobalMcpSettingsPanel({
     revision,
     stateQuery.data,
     stateQuery.isError,
+    begin,
+    finish,
+    isCurrent,
   ]);
   const saveAuthorization = useCallback(
     async (returnAfterSave = false): Promise<boolean> => {
@@ -263,16 +278,18 @@ export function GlobalMcpSettingsPanel({
         setErrorText(issues[0]?.message ?? "授权内容无效。");
         return false;
       }
-      setPending(true);
+      const operation = begin("write");
+      if (!operation) return false;
       setErrorText(null);
       try {
         const saved = await ensureExpertClient().saveExpert(
           expertSaveInputForDraft(authDraft, authExpert),
         );
         queryClient.setQueryData<ReadonlyArray<ExpertDefinition>>(EXPERTS_QUERY_KEY, (old = []) =>
-          old.map((x) => (x.id === saved.id ? saved : x)),
+          old.map((x) => (x.id === saved.id && x.revision < saved.revision ? saved : x)),
         );
         await queryClient.invalidateQueries({ queryKey: EXPERTS_QUERY_KEY });
+        if (!isCurrent(operation)) return false;
         const clean = expertDraftFromDefinition(saved);
         setAuthExpert(saved);
         setAuthDraft(clean);
@@ -282,19 +299,32 @@ export function GlobalMcpSettingsPanel({
         if (returnAfterSave && returnExpertId && firstGrant) setReturnWhenClean(true);
         return true;
       } catch (cause) {
-        setErrorText(err(cause));
+        if (isCurrent(operation)) setErrorText(err(cause));
         void queryClient.invalidateQueries({ queryKey: EXPERTS_QUERY_KEY });
         return false;
       } finally {
-        setPending(false);
+        finish(operation);
       }
     },
-    [authDirty, authDraft, authExpert, firstGrant, pending, queryClient, returnExpertId],
+    [
+      authDirty,
+      authDraft,
+      authExpert,
+      firstGrant,
+      pending,
+      queryClient,
+      returnExpertId,
+      begin,
+      finish,
+      isCurrent,
+    ],
   );
   const saveAll = useCallback(async (): Promise<boolean> => {
+    const view = capture();
     if (!(await saveConnection())) return false;
+    if (!isViewCurrent(view)) return false;
     return saveAuthorization(false);
-  }, [saveAuthorization, saveConnection]);
+  }, [capture, isViewCurrent, saveAuthorization, saveConnection]);
   const { confirmLeave, dialog } = useExpertDraftGuard({
     isDirty: dirty,
     canSave,
@@ -302,25 +332,36 @@ export function GlobalMcpSettingsPanel({
     onSave: saveAll,
     onDiscard: discard,
   });
+  const confirmTransition = async () => {
+    const view = capture();
+    return (await confirmLeave()) && isViewCurrent(view);
+  };
   useEffect(() => {
     if (!returnWhenClean || dirty || !returnExpertId) return;
     setReturnWhenClean(false);
     onReturnToExpert?.({ expertId: returnExpertId, ...(connectionId ? { connectionId } : {}) });
   }, [connectionId, dirty, onReturnToExpert, returnWhenClean, returnExpertId]);
+  const previousInitialTab = useRef(initialTab);
   useEffect(() => {
+    if (previousInitialTab.current === initialTab) return;
+    previousInitialTab.current = initialTab;
+    resetOperationScope();
     setTab(initialTab);
-  }, [initialTab]);
+  }, [initialTab, resetOperationScope]);
   const changeDetail = async (next: DetailTab) => {
-    if (next === detail || !(await confirmLeave())) return;
+    if (next === detail || !(await confirmTransition())) return;
+    resetOperationScope();
     setDetail(next);
   };
   const changeTab = async (next: GlobalMcpTab) => {
-    if (next === tab || !(await confirmLeave())) return;
+    if (next === tab || !(await confirmTransition())) return;
+    resetOperationScope();
     setTab(next);
     onTabChange?.(next);
   };
   const open = async (connection: ExpertConnectionConfig, nextDetail: DetailTab = "config") => {
-    if (!(await confirmLeave())) return;
+    if (!(await confirmTransition())) return;
+    resetOperationScope();
     const owner = scrollOwner(root.current);
     scrollPosition.current = { owner, top: owner?.scrollTop ?? 0 };
     setConnectionId(connection.id);
@@ -336,7 +377,8 @@ export function GlobalMcpSettingsPanel({
     setErrorText(null);
   };
   const back = async () => {
-    if (!(await confirmLeave())) return;
+    if (!(await confirmTransition())) return;
+    resetOperationScope();
     setConnectionId(null);
     setDraft(null);
     setBaseline(null);
@@ -352,7 +394,8 @@ export function GlobalMcpSettingsPanel({
       });
   };
   const newConnection = async () => {
-    if (!(await confirmLeave())) return;
+    if (!(await confirmTransition())) return;
+    resetOperationScope();
     const owner = scrollOwner(root.current);
     scrollPosition.current = { owner, top: owner?.scrollTop ?? 0 };
     setConnectionId(null);
@@ -373,7 +416,8 @@ export function GlobalMcpSettingsPanel({
     setErrorText(null);
   };
   const openAuthorization = async (expert: ExpertDefinition, id = connectionId) => {
-    if (!(await confirmLeave())) return;
+    if (!(await confirmTransition())) return;
+    resetOperationScope();
     const baseAuth = expertDraftFromDefinition(expert);
     const exists = baseAuth.connections.some((x) => x.id === id);
     const auth =
@@ -430,19 +474,22 @@ export function GlobalMcpSettingsPanel({
   }, [configs.data, experts, expertsQuery.data, initialConnectionId, initialExpertId, connections]);
   const test = async () => {
     if (!selected || stateQuery.data?.status !== "active" || pending) return;
-    setPending(true);
+    const operation = begin("write");
+    if (!operation) return;
     setErrorText(null);
     try {
       const result = await ensureExpertClient().testExpertConnection({
         id: selected.id,
         expectedRevision: selected.revision,
       });
+      if (!isCurrent(operation)) return;
       setTests((old) => ({
         ...old,
         [selected.id]: { revision: result.revision, testedAt: Date.now(), tools: result.tools },
       }));
       toastManager.add({ type: "success", title: "已完成连接检查并读取工具" });
     } catch (cause) {
+      if (!isCurrent(operation)) return;
       setTests((old) => ({
         ...old,
         [selected.id]: {
@@ -454,51 +501,66 @@ export function GlobalMcpSettingsPanel({
       }));
       setErrorText(err(cause));
     } finally {
-      setPending(false);
+      finish(operation);
     }
   };
   const openImpact = async (action: Impact["action"]) => {
-    if (!selected || !stateQuery.data || stateQuery.isError || !(await confirmLeave())) return;
-    setLoadingImpact(true);
+    if (!selected || !stateQuery.data || stateQuery.isError || !(await confirmTransition())) return;
+    const operation = begin("impact");
+    if (!operation) return;
     setErrorText(null);
     try {
       const [state, refs] = await Promise.all([
         ensureExpertClient().getExpertConnectionState({ id: selected.id }),
         ensureExpertClient().readExpertConnectionReferences({ id: selected.id }),
       ]);
-      setImpact({ state, refs, action });
+      if (!isCurrent(operation)) return;
+      setImpact({
+        connectionId: selected.id,
+        configRevision: selected.revision,
+        stateRevision: state.revision,
+        viewGeneration: operation.generation,
+        refs,
+        action,
+      });
     } catch (cause) {
-      setErrorText(`无法读取最新状态或引用，操作已停止：${err(cause)}`);
+      if (isCurrent(operation)) setErrorText(`无法读取最新状态或引用，操作已停止：${err(cause)}`);
     } finally {
-      setLoadingImpact(false);
+      finish(operation);
     }
   };
   const applyImpact = async () => {
     if (
       !impact ||
-      !selected ||
+      !isViewCurrent(impact.viewGeneration) ||
       pending ||
       (impact.action === "delete" && referencesPreventDeletion(impact.refs))
     )
       return;
-    setPending(true);
+    const operation = begin("write");
+    if (!operation) return;
     try {
       if (impact.action === "delete") {
         await ensureExpertClient().removeExpertConnection({
-          id: selected.id,
-          expectedRevision: selected.revision,
+          id: impact.connectionId,
+          expectedRevision: impact.configRevision,
         });
         await queryClient.invalidateQueries({ queryKey: EXPERT_CONNECTIONS_QUERY_KEY });
+        if (!isCurrent(operation)) return;
         setImpact(null);
-        await back();
         toastManager.add({ type: "success", title: "连接配置已删除" });
+        await back();
       } else {
         const state = await ensureExpertClient().setExpertConnectionState({
-          id: selected.id,
+          id: impact.connectionId,
           status: impact.action,
-          expectedRevision: impact.state.revision,
+          expectedRevision: impact.stateRevision,
         });
-        queryClient.setQueryData(connectionStateQueryKey(selected.id), state);
+        queryClient.setQueryData<typeof state>(
+          connectionStateQueryKey(impact.connectionId),
+          (old) => (!old || old.revision < state.revision ? state : old),
+        );
+        if (!isCurrent(operation)) return;
         setImpact(null);
         toastManager.add({
           type: "success",
@@ -515,10 +577,12 @@ export function GlobalMcpSettingsPanel({
         });
       }
     } catch (cause) {
-      setErrorText(err(cause));
-      void queryClient.invalidateQueries({ queryKey: connectionStateQueryKey(selected.id) });
+      if (isCurrent(operation)) setErrorText(err(cause));
+      void queryClient.invalidateQueries({
+        queryKey: connectionStateQueryKey(impact.connectionId),
+      });
     } finally {
-      setPending(false);
+      finish(operation);
     }
   };
   const binding = authDraft?.connections.find((x) => x.id === connectionId);
@@ -599,12 +663,14 @@ export function GlobalMcpSettingsPanel({
             size="sm"
             variant="outline"
             onClick={() =>
-              void confirmLeave().then((ok) => {
-                if (ok)
+              void confirmTransition().then((ok) => {
+                if (ok) {
+                  resetOperationScope();
                   onReturnToExpert?.({
                     expertId: returnExpertId,
                     ...(connectionId ? { connectionId } : {}),
                   });
+                }
               })
             }
           >

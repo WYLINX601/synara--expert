@@ -198,23 +198,42 @@ function safeHttpOrigin(rawUrl: string): { origin?: string; valid: boolean; impo
   }
 }
 
-function exactHostReference(
-  value: string,
-  sourceKind: McpDiscoveryCandidate["sourceKind"],
-): string | undefined {
-  if (sourceKind !== "json") return undefined;
-  const match = /^\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}$/u.exec(value);
-  return match?.[1];
-}
+type JsonPlaceholderClassification =
+  | { readonly kind: "literal" }
+  | { readonly kind: "unsupported" }
+  | { readonly kind: "host-reference"; readonly envVar: string; readonly prefix?: string };
 
-function hasUnsupportedPlaceholder(
+function classifyJsonPlaceholder(
   value: string,
   sourceKind: McpDiscoveryCandidate["sourceKind"],
-): boolean {
-  if (sourceKind !== "json") return false;
-  return /\$\{(?:input:|command:|workspaceFolder|workspaceFolderBasename|userHome|execPath|pathSeparator)/iu.test(
-    value,
-  );
+  allowPrefix = false,
+): JsonPlaceholderClassification {
+  // Codex and other source adapters keep their existing literal-value semantics. This parser is
+  // deliberately limited to imported JSON configs, whose `${env:...}` references are explicit.
+  if (sourceKind !== "json") return { kind: "literal" };
+
+  const match = allowPrefix
+    ? /^(.*)\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}$/u.exec(value)
+    : /^\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}$/u.exec(value);
+  if (match) {
+    const prefix = allowPrefix ? match[1]! : "";
+    const envVar = allowPrefix ? match[2]! : match[1]!;
+    if (
+      prefix.length === 0 ||
+      (allowPrefix && prefix.length <= 64 && /^[A-Za-z][A-Za-z0-9._~-]* ?$/u.test(prefix))
+    ) {
+      return {
+        kind: "host-reference",
+        envVar,
+        ...(prefix.length === 0 ? {} : { prefix }),
+      };
+    }
+  }
+
+  // Fail closed for unsupported, repeated, suffixed, or malformed interpolation. In particular,
+  // none of these strings may fall through to the secret store as a literal credential.
+  if (value.includes("${")) return { kind: "unsupported" };
+  return { kind: "literal" };
 }
 
 function unknownExecutionField(
@@ -372,9 +391,9 @@ function analyzeStdio(
           "Environment settings need manual review.",
         );
       }
-      const hostName = exactHostReference(rawValue, source.kind);
-      if (hostName) {
-        if (!validEnvironmentName(hostName)) {
+      const placeholder = classifyJsonPlaceholder(rawValue, source.kind);
+      if (placeholder.kind === "host-reference") {
+        if (!validEnvironmentName(placeholder.envVar)) {
           return invalidAnalysis(
             "stdio",
             summary,
@@ -383,8 +402,8 @@ function analyzeStdio(
             "Environment settings need manual review.",
           );
         }
-        envFromHost.push({ name: envName, envVar: hostName });
-      } else if (hasUnsupportedPlaceholder(rawValue, source.kind)) {
+        envFromHost.push({ name: envName, envVar: placeholder.envVar });
+      } else if (placeholder.kind === "unsupported") {
         return invalidAnalysis(
           "stdio",
           summary,
@@ -589,10 +608,23 @@ function analyzeHttp(
           "Header settings need manual review.",
         );
       }
-      const hostName = exactHostReference(rawValue, source.kind);
-      if (hostName) {
-        headersFromHost.push({ name: headerName, envVar: hostName });
-      } else if (hasUnsupportedPlaceholder(rawValue, source.kind)) {
+      const placeholder = classifyJsonPlaceholder(rawValue, source.kind, true);
+      if (placeholder.kind === "host-reference") {
+        if (!validEnvironmentName(placeholder.envVar)) {
+          return invalidAnalysis(
+            "http",
+            summary,
+            name,
+            "needs-config",
+            "Header placeholders need manual review.",
+          );
+        }
+        headersFromHost.push({
+          name: headerName,
+          envVar: placeholder.envVar,
+          ...(placeholder.prefix === undefined ? {} : { prefix: placeholder.prefix }),
+        });
+      } else if (placeholder.kind === "unsupported") {
         return invalidAnalysis(
           "http",
           summary,

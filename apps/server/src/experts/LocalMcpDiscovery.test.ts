@@ -535,4 +535,156 @@ describe("LocalMcpDiscovery", () => {
     ]);
     expect(await connections.read("mcp_host_changed")).toBeNull();
   });
+
+  it("classifies JSON interpolation before credentials can become literal secrets", async () => {
+    const root = await makeRoot();
+    const sourcePath = join(root, "placeholders.json");
+    const envName = `SYNARA_MCP_PLACEHOLDER_${randomUUID().replaceAll("-", "_").toUpperCase()}`;
+    setFixtureEnvironment(envName, "host-token-value");
+    const placeholder = "${env:" + envName + "}";
+    await writeFile(
+      sourcePath,
+      JSON.stringify({
+        mcpServers: {
+          stdioExact: {
+            command: process.execPath,
+            args: ["--exact-placeholder"],
+            env: { TOKEN: placeholder },
+          },
+          stdioPrefixed: {
+            command: process.execPath,
+            args: ["--stdio-prefix-is-unsupported"],
+            env: { TOKEN: "Bearer " + placeholder },
+          },
+          multiple: {
+            command: process.execPath,
+            args: ["--multiple-placeholder"],
+            env: { TOKEN: "${env:FIRST}${env:SECOND}" },
+          },
+          suffix: {
+            command: process.execPath,
+            args: ["--suffix-placeholder"],
+            env: { TOKEN: placeholder + "-suffix" },
+          },
+          malformed: {
+            command: process.execPath,
+            args: ["--malformed-placeholder"],
+            env: { TOKEN: "${env:" + envName },
+          },
+          unsupported: {
+            command: process.execPath,
+            args: ["--unsupported-placeholder"],
+            env: { TOKEN: "${input:apiKey}" },
+          },
+          httpExact: {
+            url: "https://example.invalid/exact",
+            headers: { Authorization: placeholder },
+          },
+          httpPrefixed: {
+            url: "https://example.invalid/prefixed",
+            headers: { Authorization: "Bearer " + placeholder },
+          },
+          httpMultiple: {
+            url: "https://example.invalid/multiple",
+            headers: { Authorization: "Bearer ${env:FIRST}${env:SECOND}" },
+          },
+          httpSuffix: {
+            url: "https://example.invalid/suffix",
+            headers: { Authorization: placeholder + " trailing" },
+          },
+        },
+      }),
+    );
+
+    const stateDir = join(root, "state");
+    const connections = createExpertConnectionStore(stateDir);
+    const credentials = createExpertMcpCredentialStore(stateDir);
+    const discovery = createLocalMcpDiscovery({ connections, credentials, homeDir: root });
+    const scan = await discovery.discover({ sources: [{ kind: "json", path: sourcePath }] });
+
+    expect(candidateByName(scan, "stdioExact").status).toBe("ready");
+    expect(candidateByName(scan, "httpExact").status).toBe("ready");
+    expect(candidateByName(scan, "httpPrefixed").status).toBe("ready");
+    for (const name of [
+      "stdioPrefixed",
+      "multiple",
+      "suffix",
+      "malformed",
+      "unsupported",
+      "httpMultiple",
+      "httpSuffix",
+    ]) {
+      expect(candidateByName(scan, name)).toMatchObject({ status: "needs-config" });
+    }
+
+    const selectedNames = [
+      "stdioExact",
+      "stdioPrefixed",
+      "multiple",
+      "suffix",
+      "malformed",
+      "unsupported",
+      "httpExact",
+      "httpPrefixed",
+      "httpMultiple",
+      "httpSuffix",
+    ];
+    const imported = await discovery.importSelected({
+      scanId: scan.scanId,
+      items: selectedNames.map((name) => ({
+        candidateId: candidateByName(scan, name).candidateId,
+        targetId: `mcp_placeholder_${name.toLowerCase()}`,
+        mode: "create" as const,
+      })),
+    });
+    expect(imported.items[0]).toMatchObject({ status: "imported" });
+    expect(imported.items[6]).toMatchObject({ status: "imported" });
+    expect(imported.items[7]).toMatchObject({ status: "imported" });
+    expect(imported.items.slice(1, 6).every(({ status }) => status === "failed")).toBe(true);
+    expect(imported.items.slice(8).every(({ status }) => status === "failed")).toBe(true);
+
+    const stdio = await connections.read("mcp_placeholder_stdioexact");
+    const exactHttp = await connections.read("mcp_placeholder_httpexact");
+    const prefixedHttp = await connections.read("mcp_placeholder_httpprefixed");
+    expect(stdio?.transport).toMatchObject({
+      type: "stdio",
+      envFromSecret: { names: ["TOKEN"] },
+    });
+    expect(exactHttp?.transport).toMatchObject({
+      type: "http",
+      headersFromSecret: { names: ["Authorization"] },
+    });
+    expect(prefixedHttp?.transport).toMatchObject({
+      type: "http",
+      headersFromSecret: { names: ["Authorization"] },
+    });
+    if (
+      !stdio ||
+      stdio.transport.type !== "stdio" ||
+      !stdio.transport.envFromSecret ||
+      !exactHttp ||
+      exactHttp.transport.type !== "http" ||
+      !exactHttp.transport.headersFromSecret ||
+      !prefixedHttp ||
+      prefixedHttp.transport.type !== "http" ||
+      !prefixedHttp.transport.headersFromSecret
+    ) {
+      throw new Error("Expected imported placeholder credentials.");
+    }
+    expect(await credentials.read(stdio.transport.envFromSecret.credentialId)).toMatchObject({
+      env: { TOKEN: "host-token-value" },
+    });
+    expect(
+      await credentials.read(exactHttp.transport.headersFromSecret.credentialId),
+    ).toMatchObject({ headers: { Authorization: "host-token-value" } });
+    expect(
+      await credentials.read(prefixedHttp.transport.headersFromSecret.credentialId),
+    ).toMatchObject({ headers: { Authorization: "Bearer host-token-value" } });
+    expect(JSON.stringify([scan, imported, stdio, exactHttp, prefixedHttp])).not.toContain(
+      "host-token-value",
+    );
+    for (const name of selectedNames.slice(1, 6).concat(selectedNames.slice(8))) {
+      expect(await connections.read(`mcp_placeholder_${name.toLowerCase()}`)).toBeNull();
+    }
+  });
 });

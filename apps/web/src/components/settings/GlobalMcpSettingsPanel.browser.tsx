@@ -67,7 +67,9 @@ const harness = vi.hoisted(() => {
   });
   const state = {
     connection: makeConnection(),
+    extraConnections: [] as ReturnType<typeof makeConnection>[],
     expert: makeExpert(),
+    extraExperts: [] as ReturnType<typeof makeExpert>[],
     connectionStateFailure: false,
     referencesFailure: false,
     references: {
@@ -176,11 +178,21 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
   }),
   useQuery: ({ queryKey }: { queryKey: ReadonlyArray<unknown> }) => {
     if (queryKey[1] === "experts")
-      return { data: [harness.expert], isLoading: false, isError: false, error: undefined };
+      return {
+        data: [harness.expert, ...harness.extraExperts],
+        isLoading: false,
+        isError: false,
+        error: undefined,
+      };
     if (queryKey[1] === "expertConnectionState")
       return harness.stateResult(String(queryKey[2] ?? ""));
     if (queryKey[1] === "expertConnectionReferences") return harness.referencesResult();
-    return { data: [harness.connection], isLoading: false, isError: false, error: undefined };
+    return {
+      data: [harness.connection, ...harness.extraConnections],
+      isLoading: false,
+      isError: false,
+      error: undefined,
+    };
   },
   useQueries: ({ queries }: { queries: ReadonlyArray<{ queryKey: ReadonlyArray<unknown> }> }) =>
     queries.map((query) => harness.stateResult(String(query.queryKey[2] ?? ""))),
@@ -193,6 +205,25 @@ import { GlobalMcpSettingsPanel } from "./GlobalMcpSettingsPanel";
 import { toastManager } from "~/components/ui/toast";
 
 let cleanupMountedPanel: (() => Promise<void>) | null = null;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+function addSecondConnection() {
+  harness.extraConnections = [{ ...harness.connection, id: "second", name: "Second MCP" }];
+}
+
+async function leaveDraft() {
+  await page.getByRole("button", { name: "← 返回连接列表", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "放弃更改", exact: true }).click();
+}
 
 async function renderPanel(props: Parameters<typeof GlobalMcpSettingsPanel>[0] = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
@@ -225,6 +256,9 @@ afterEach(async () => {
 });
 
 beforeEach(() => {
+  harness.extraConnections = [];
+  harness.extraExperts = [];
+  vi.mocked(toastManager.add).mockClear();
   harness.connection = {
     id: "linear",
     name: "Linear 工作区",
@@ -332,6 +366,245 @@ beforeEach(() => {
 });
 
 describe("GlobalMcpSettingsPanel wrapper", () => {
+  it.each([false, true])(
+    "ignores a late retirement check after navigation (reopen A: %s)",
+    async (reopen) => {
+      addSecondConnection();
+      const oldState = deferred<NonNullable<ReturnType<typeof harness.stateResult>["data"]>>();
+      harness.server.getExpertConnectionState.mockImplementationOnce(() => oldState.promise);
+      await renderPanel({ initialConnectionId: "linear" });
+      await page.getByRole("button", { name: "退役", exact: true }).click();
+      await expect.poll(() => harness.server.getExpertConnectionState.mock.calls.length).toBe(1);
+      await page.getByRole("button", { name: "← 返回连接列表", exact: true }).click();
+      await page.getByRole("button", { name: "Second MCP", exact: true }).click();
+      if (reopen) {
+        await page.getByRole("button", { name: "← 返回连接列表", exact: true }).click();
+        await page.getByRole("button", { name: "Linear 工作区", exact: true }).click();
+      }
+      oldState.resolve(harness.stateResult("linear").data!);
+      await expect.poll(() => page.getByRole("alertdialog").length).toBe(0);
+      expect(harness.server.setExpertConnectionState).not.toHaveBeenCalled();
+
+      await page.getByRole("button", { name: "退役", exact: true }).click();
+      await expect.element(page.getByRole("alertdialog")).toBeVisible();
+      await page.getByRole("button", { name: "确认退役", exact: true }).click();
+      await expect.poll(() => harness.server.setExpertConnectionState.mock.calls.length).toBe(1);
+      expect(harness.server.setExpertConnectionState).toHaveBeenCalledWith({
+        id: reopen ? "linear" : "second",
+        status: "retired",
+        expectedRevision: 2,
+      });
+    },
+  );
+
+  it("keeps a newer connection check pending when an older request fails", async () => {
+    addSecondConnection();
+    const oldCheck = deferred<{ revision: number; tools: string[] }>();
+    const newCheck = deferred<{ revision: number; tools: string[] }>();
+    harness.server.testExpertConnection
+      .mockImplementationOnce(() => oldCheck.promise)
+      .mockImplementationOnce(() => newCheck.promise);
+    await renderPanel({ initialConnectionId: "linear" });
+    await page.getByRole("button", { name: "检查连接并读取工具", exact: true }).click();
+    await page.getByRole("button", { name: "← 返回连接列表", exact: true }).click();
+    await page.getByRole("button", { name: "Second MCP", exact: true }).click();
+    await page.getByRole("button", { name: "检查连接并读取工具", exact: true }).click();
+    oldCheck.reject(new Error("old connection failure"));
+    await expect.element(page.getByRole("button", { name: "检查中…", exact: true })).toBeDisabled();
+    expect(page.getByText("old connection failure").length).toBe(0);
+    newCheck.resolve({ revision: 3, tools: ["second.tool"] });
+    await expect
+      .element(page.getByRole("button", { name: "检查连接并读取工具", exact: true }))
+      .toBeEnabled();
+  });
+
+  it.each(["success", "failure"] as const)(
+    "does not replace B's draft after A's late save %s",
+    async (outcome) => {
+      addSecondConnection();
+      const saved = deferred<typeof harness.connection>();
+      harness.server.saveExpertConnection.mockImplementationOnce(() => saved.promise);
+      await renderPanel({ initialConnectionId: "linear" });
+      await page.getByRole("textbox", { name: "显示名称", exact: true }).fill("A edited");
+      await page.getByRole("button", { name: "保存连接配置", exact: true }).click();
+      await leaveDraft();
+      await page.getByRole("button", { name: "Second MCP", exact: true }).click();
+      const name = page.getByRole("textbox", { name: "显示名称", exact: true });
+      await name.fill("B unsaved");
+      if (outcome === "success")
+        saved.resolve({ ...harness.connection, name: "A saved", revision: 4 });
+      else saved.reject(new Error("A save failed"));
+      await expect.element(name).toHaveValue("B unsaved");
+      await expect
+        .element(page.getByRole("button", { name: "保存连接配置", exact: true }))
+        .toBeEnabled();
+      expect(page.getByText("A save failed").length).toBe(0);
+      expect(toastManager.add).not.toHaveBeenCalled();
+      if (outcome === "success")
+        await expect.poll(() => harness.setQueryData.mock.calls.length).toBe(1);
+      else await expect.poll(() => harness.invalidateQueries.mock.calls.length).toBe(1);
+    },
+  );
+
+  it.each(["success", "failure"] as const)(
+    "does not replace a newly selected expert after a late authorization save %s",
+    async (outcome) => {
+      const grant = {
+        id: "linear",
+        enabled: true,
+        required: false,
+        toolMode: "all" as const,
+        tools: [],
+      };
+      harness.expert.connections = [grant];
+      harness.extraExperts = [{ ...harness.expert, id: "reviewer", name: "审查专家" }];
+      const saved = deferred<typeof harness.expert>();
+      harness.server.saveExpert.mockImplementationOnce(() => saved.promise);
+      const onReturnToExpert = vi.fn();
+      await renderPanel({
+        initialConnectionId: "linear",
+        initialExpertId: "planner",
+        returnExpertId: "planner",
+        onReturnToExpert,
+      });
+      await page.getByRole("radio", { name: "阻止启动", exact: true }).click();
+      await page.getByRole("button", { name: "保存此专家授权", exact: true }).click();
+      await page.getByRole("combobox", { name: "选择专家", exact: true }).selectOptions("reviewer");
+      await page.getByRole("dialog").getByRole("button", { name: "放弃更改", exact: true }).click();
+      await expect
+        .element(page.getByRole("combobox", { name: "选择专家", exact: true }))
+        .toHaveValue("reviewer");
+      if (outcome === "success") {
+        saved.resolve({
+          ...harness.expert,
+          revision: 8,
+          connections: [{ ...grant, required: true }],
+        });
+        await expect.poll(() => harness.setQueryData.mock.calls.length).toBe(1);
+      } else {
+        saved.reject(new Error("Old authorization failed"));
+        await expect.poll(() => harness.invalidateQueries.mock.calls.length).toBe(1);
+      }
+      await expect
+        .element(page.getByRole("combobox", { name: "选择专家", exact: true }))
+        .toHaveValue("reviewer");
+      await expect
+        .element(page.getByRole("radio", { name: "阻止启动", exact: true }))
+        .not.toBeChecked();
+      expect(onReturnToExpert).not.toHaveBeenCalled();
+      expect(toastManager.add).not.toHaveBeenCalled();
+      expect(page.getByText("Old authorization failed").length).toBe(0);
+    },
+  );
+
+  it("only updates the original cache when a save settles after unmount", async () => {
+    const saved = deferred<typeof harness.connection>();
+    harness.server.saveExpertConnection.mockImplementationOnce(() => saved.promise);
+    await renderPanel({ initialConnectionId: "linear" });
+    await page.getByRole("textbox", { name: "显示名称", exact: true }).fill("A edited");
+    await page.getByRole("button", { name: "保存连接配置", exact: true }).click();
+    await cleanupMountedPanel?.();
+    cleanupMountedPanel = null;
+    saved.resolve({ ...harness.connection, name: "A saved", revision: 4 });
+    await expect.poll(() => harness.setQueryData.mock.calls.length).toBe(1);
+    expect(toastManager.add).not.toHaveBeenCalled();
+  });
+
+  it("does not roll back newer state after an older A confirmation settles on a reopened A", async () => {
+    addSecondConnection();
+    let cached = harness.stateResult("linear").data!;
+    const readState = vi.spyOn(harness, "stateResult").mockImplementation((id) => ({
+      data: { ...cached, id },
+      isError: false,
+      isLoading: false,
+      error: undefined,
+    }));
+    harness.setQueryData.mockImplementation((key, update) => {
+      if (key[1] === "expertConnectionState" && key[2] === "linear") {
+        cached = typeof update === "function" ? update(cached) : update;
+      }
+    });
+    const oldUpdate = deferred<typeof cached>();
+    harness.server.setExpertConnectionState.mockImplementationOnce(() => oldUpdate.promise);
+    try {
+      await renderPanel({ initialConnectionId: "linear" });
+      await page.getByRole("button", { name: "停用连接", exact: true }).click();
+      await page.getByRole("button", { name: "确认停用", exact: true }).click();
+      await expect.poll(() => harness.server.setExpertConnectionState.mock.calls.length).toBe(1);
+      // The server committed disable, but its response is still in flight. A new view reads it.
+      cached = { ...cached, status: "disabled", revision: 3 };
+      const oldResponse = cached;
+      await cleanupMountedPanel?.();
+      cleanupMountedPanel = null;
+      await renderPanel({ initialConnectionId: "second" });
+      await page.getByRole("button", { name: "← 返回连接列表", exact: true }).click();
+      await page.getByRole("button", { name: "Linear 工作区", exact: true }).click();
+      harness.server.getExpertConnectionState.mockImplementationOnce(async () => cached);
+      harness.server.setExpertConnectionState.mockResolvedValueOnce({
+        ...cached,
+        status: "active",
+        revision: 4,
+      });
+      await page.getByRole("button", { name: "启用连接", exact: true }).click();
+      await page.getByRole("button", { name: "确认启用", exact: true }).click();
+      await expect.poll(() => cached.revision).toBe(4);
+      oldUpdate.resolve(oldResponse);
+      await expect.poll(() => harness.setQueryData.mock.calls.length).toBe(2);
+      expect(cached).toMatchObject({ status: "active", revision: 4 });
+      await expect
+        .element(page.getByRole("button", { name: "停用连接", exact: true }))
+        .toBeVisible();
+      expect(toastManager.add).toHaveBeenCalledTimes(1);
+    } finally {
+      readState.mockRestore();
+      harness.setQueryData.mockReset();
+    }
+  });
+
+  it("uses the checked state version and blocks duplicate confirmation synchronously", async () => {
+    harness.server.getExpertConnectionState.mockResolvedValueOnce({
+      ...harness.stateResult("linear").data,
+      revision: 8,
+    });
+    const update = deferred<{ id: string; status: string; revision: number; updatedAt: string }>();
+    harness.server.setExpertConnectionState.mockImplementationOnce(() => update.promise);
+    await renderPanel({ initialConnectionId: "linear" });
+    await page.getByRole("button", { name: "退役", exact: true }).click();
+    const button = page.getByRole("button", { name: "确认退役", exact: true });
+    await expect.element(button).toBeVisible();
+    (button.element() as HTMLButtonElement).click();
+    (button.element() as HTMLButtonElement).click();
+    await expect.poll(() => harness.server.setExpertConnectionState.mock.calls.length).toBe(1);
+    expect(harness.server.setExpertConnectionState).toHaveBeenCalledWith({
+      id: "linear",
+      status: "retired",
+      expectedRevision: 8,
+    });
+    update.reject(new Error("Connection state changed; reload before updating."));
+    await expect
+      .element(
+        page
+          .getByRole("alertdialog")
+          .getByText("Connection state changed; reload before updating."),
+      )
+      .toBeVisible();
+    expect(toastManager.add).not.toHaveBeenCalled();
+  });
+
+  it("uses the fixed config version for deletion", async () => {
+    await renderPanel({ initialConnectionId: "linear" });
+    await page.getByRole("button", { name: "删除", exact: true }).click();
+    await page.getByRole("button", { name: "删除配置", exact: true }).click();
+    await expect.poll(() => harness.server.removeExpertConnection.mock.calls.length).toBe(1);
+    expect(harness.server.removeExpertConnection).toHaveBeenCalledWith({
+      id: "linear",
+      expectedRevision: 3,
+    });
+    await expect
+      .element(page.getByRole("button", { name: "Linear 工作区", exact: true }))
+      .toBeVisible();
+  });
+
   it("keeps an invalid first grant behind the dirty-tab guard with discard still available", async () => {
     await renderPanel({ initialConnectionId: "linear", initialExpertId: "planner" });
     const pageSave = page.getByRole("button", { name: "保存此专家授权", exact: true });

@@ -385,7 +385,7 @@ jobs:
   # Released (id, name) migration pairs are recorded in every user's
   # effect_sql_migrations table, so renumbering or renaming one corrupts existing
   # installs. This job needs the release tags, hence the unshallow checkout; the
-  # dependency-free guard needs a real tag history, never a missing-history skip.
+  # guard needs its TypeScript dependency and real history, never a missing-history skip.
   migration_lineage:
     name: Migration Lineage
     runs-on: ubuntu-24.04
@@ -402,12 +402,10 @@ jobs:
       - name: Fetch official release tags
         run: git fetch --no-tags https://github.com/Emanuele-web04/synara.git 'refs/tags/v*:refs/tags/v*'
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - name: Setup workspace
+        uses: ./.github/actions/setup-workspace
         with:
-          node-version-file: package.json
+          scope: "static"
 
       - name: Verify released migration lineage
-        run: |
-          test -n "$(git tag --list 'v[0-9]*')" || { echo "::error::Release tags are missing; lineage cannot be verified."; exit 1; }
-          node scripts/check-migration-lineage.ts
+        run: node scripts/check-migration-lineage.ts

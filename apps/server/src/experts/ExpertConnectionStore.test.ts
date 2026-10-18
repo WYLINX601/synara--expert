@@ -3,6 +3,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readFile,
   readdir,
   rename,
   rm,
@@ -471,5 +472,76 @@ describe("ExpertConnectionStore", () => {
         }),
       ),
     ).rejects.toMatchObject({ code: "invalid_input" });
+  });
+
+  it("limits the final UTF-8 JSON bytes before writing any revision", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const store = createExpertConnectionStore(stateDir);
+    const argsFor = (paddingLength: number): string[] => {
+      let remaining = paddingLength;
+      const args = ['汉字"\\\n'];
+      for (let index = 0; index < 9; index += 1) {
+        const length = Math.min(8_192, remaining);
+        args.push("x".repeat(length));
+        remaining -= length;
+      }
+      if (remaining !== 0) throw new Error("Boundary fixture exceeds the argument schema.");
+      return args;
+    };
+    const inputFor = (
+      paddingLength: number,
+      expectedRevision?: number,
+    ): ExpertConnectionSaveInput => ({
+      id: "byte-limit",
+      name: "含中文的 MCP",
+      transport: { type: "stdio", command: "node", args: argsFor(paddingLength), envFromHost: [] },
+      importedFrom: [{ kind: "json", path: "/tmp/空间.json", entryId: "mcpServers:fixture" }],
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    });
+    const projectedBytes = (input: ExpertConnectionSaveInput, revision: number): number => {
+      const { expectedRevision: _ignored, ...persistedInput } = input;
+      void _ignored;
+      return Buffer.byteLength(
+        JSON.stringify(
+          {
+            ...persistedInput,
+            revision,
+            updatedAt: "2026-10-18T00:00:00.000Z",
+          },
+          null,
+          2,
+        ) + "\n",
+        "utf8",
+      );
+    };
+
+    let low = 0;
+    let high = 9 * 8_192;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (projectedBytes(inputFor(middle), 1) <= 64 * 1024) low = middle;
+      else high = middle - 1;
+    }
+    const exactInput = inputFor(low);
+    expect(projectedBytes(exactInput, 1)).toBe(64 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(exactInput), "utf8")).toBeLessThan(64 * 1024);
+
+    const saved = await store.save(exactInput);
+    const currentPath = path.join(stateDir, "expert-connections", "byte-limit.json");
+    const currentContents = await readFile(currentPath, "utf8");
+    expect(Buffer.byteLength(currentContents, "utf8")).toBe(64 * 1024);
+    expect(currentContents.endsWith("\n")).toBe(true);
+    expect(await store.read("byte-limit")).toEqual(saved);
+
+    const revisionDirectory = path.join(stateDir, "expert-connections", "revisions", "byte-limit");
+    await rm(path.join(revisionDirectory, "1.json"));
+    const before = await readFile(currentPath);
+    const tooLarge = inputFor(low + 1, 1);
+    expect(projectedBytes(tooLarge, 2)).toBe(64 * 1024 + 1);
+    expect(Buffer.byteLength(JSON.stringify(tooLarge), "utf8")).toBeLessThan(64 * 1024);
+    await expect(store.save(tooLarge)).rejects.toMatchObject({ code: "invalid_input" });
+    expect(await readFile(currentPath)).toEqual(before);
+    expect(await readdir(revisionDirectory)).toEqual([]);
   });
 });

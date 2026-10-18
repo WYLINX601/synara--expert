@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -210,15 +213,63 @@ describe("migration lineage guard", () => {
     ).toHaveLength(1);
   });
 
-  it("checks every release tag, newest first, and degrades to an empty list", () => {
+  it("checks only release tags that are ancestors of HEAD and preserves version ordering", () => {
+    const root = mkdtempSync(join(tmpdir(), "synara-migration-lineage-git-"));
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+    try {
+      git("init", "--quiet", "--initial-branch=main");
+      git("config", "user.name", "Migration Lineage Test");
+      git("config", "user.email", "migration-lineage@example.invalid");
+      writeFileSync(join(root, "main.txt"), "main history\n", "utf8");
+      git("add", "main.txt");
+      git("commit", "--quiet", "-m", "main history");
+      git("tag", "v0.6.0");
+
+      git("switch", "--quiet", "--orphan", "unrelated-release");
+      git("rm", "--quiet", "--force", "--ignore-unmatch", "-r", ".");
+      writeFileSync(join(root, "other.txt"), "unrelated history\n", "utf8");
+      git("add", "other.txt");
+      git("commit", "--quiet", "-m", "unrelated history");
+      git("tag", "v9.0.0");
+      git("switch", "--quiet", "main");
+
+      const releaseTags = resolveReleaseTags(
+        (pattern) =>
+          git("tag", "--merged", "HEAD", "--list", pattern, "--sort=-v:refname")
+            .trim()
+            .split("\n")
+            .filter(Boolean),
+        () => false,
+      );
+
+      expect(releaseTags).toEqual(["v0.6.0"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when release tags or complete history are unavailable", () => {
     // Users skip versions: a database is wedged by the release it was created
     // under, not by the newest one.
-    expect(resolveReleaseTags(() => ["v0.6.0", "v0.5.5", "v0.5.4"])).toEqual([
-      "v0.6.0",
-      "v0.5.5",
-      "v0.5.4",
-    ]);
-    expect(resolveReleaseTags(() => [])).toEqual([]);
+    expect(
+      resolveReleaseTags(
+        () => ["v0.6.0", "v0.5.5", "v0.5.4"],
+        () => false,
+      ),
+    ).toEqual(["v0.6.0", "v0.5.5", "v0.5.4"]);
+    expect(() =>
+      resolveReleaseTags(
+        () => [],
+        () => false,
+      ),
+    ).toThrow(/No release tag is reachable/u);
+    expect(() =>
+      resolveReleaseTags(
+        () => ["v0.6.0"],
+        () => true,
+      ),
+    ).toThrow(/shallow Git checkout/u);
   });
 
   it("exempts a divergence the runtime declares it can repair", () => {

@@ -23,6 +23,7 @@ import { ensurePrivateDirectorySync, syncDirectoryEntry } from "../privatePathPe
 import {
   assertPrivateDirectory,
   readPrivateJsonFile,
+  serializeJsonWithinByteLimit,
   writePrivateFileAtomically,
 } from "./ExpertMcpStorage.ts";
 
@@ -637,7 +638,28 @@ export function createExpertConnectionStore(stateDir: string): ExpertConnectionS
     await writePrivateFileAtomically(target, contents);
   };
 
-  const archiveImmutable = async (config: ExpertConnectionConfig): Promise<void> => {
+  const serializeStoreJson = (
+    value: unknown,
+    maxBytes: number,
+    message: string,
+    code: "invalid_input" | "corrupt",
+  ): string => {
+    try {
+      return serializeJsonWithinByteLimit(value, maxBytes, message);
+    } catch (cause) {
+      throw new ExpertConnectionStoreError(message, code, { cause });
+    }
+  };
+
+  const archiveImmutable = async (
+    config: ExpertConnectionConfig,
+    serializedContents = serializeStoreJson(
+      config,
+      MAX_CONFIG_BYTES,
+      "Expert connection file is too large or invalid.",
+      "corrupt",
+    ),
+  ): Promise<void> => {
     await assertStoreDirectories();
     await assertDirectory(revisionsDir, "Expert connection revisions directory is invalid.", false);
     const target = revisionPath(config.id, config.revision);
@@ -649,7 +671,7 @@ export function createExpertConnectionStore(stateDir: string): ExpertConnectionS
         "revision_conflict",
       );
     }
-    await writeJsonAtomically(target, JSON.stringify(config, null, 2) + "\n");
+    await writeJsonAtomically(target, serializedContents);
   };
 
   const highestArchivedRevision = async (id: string): Promise<number> => {
@@ -758,7 +780,6 @@ export function createExpertConnectionStore(stateDir: string): ExpertConnectionS
         );
       }
 
-      if (previous) await archiveImmutable(previous);
       const latestRevision = await highestArchivedRevision(input.id);
       const nextRevision = Math.max(previous?.revision ?? 0, latestRevision) + 1;
       const config = decode<ExpertConnectionConfig>(
@@ -774,10 +795,27 @@ export function createExpertConnectionStore(stateDir: string): ExpertConnectionS
         "Expert connection input is invalid.",
         "invalid_input",
       );
+      // Check the exact bytes that will be persisted before publishing either the old or new
+      // immutable revision. This includes metadata, pretty-printing, UTF-8 and the final newline.
+      const previousContents = previous
+        ? serializeStoreJson(
+            previous,
+            MAX_CONFIG_BYTES,
+            "Expert connection file is too large or invalid.",
+            "corrupt",
+          )
+        : undefined;
+      const configContents = serializeStoreJson(
+        config,
+        MAX_CONFIG_BYTES,
+        "Expert connection file is too large or invalid.",
+        "invalid_input",
+      );
+      if (previous && previousContents) await archiveImmutable(previous, previousContents);
       // The immutable revision is published first. A failed current-file replacement can only
       // leave an orphan archive; the previous current config remains readable.
-      await archiveImmutable(config);
-      await writeJsonAtomically(filePath(config.id), JSON.stringify(config, null, 2) + "\n");
+      await archiveImmutable(config, configContents);
+      await writeJsonAtomically(filePath(config.id), configContents);
       return config;
     });
 
@@ -819,7 +857,13 @@ export function createExpertConnectionStore(stateDir: string): ExpertConnectionS
         "Expert connection state is invalid.",
         "invalid_input",
       );
-      await writeJsonAtomically(statePath(state.id), JSON.stringify(state, null, 2) + "\n");
+      const stateContents = serializeStoreJson(
+        state,
+        MAX_STATE_BYTES,
+        "Expert connection state is too large or invalid.",
+        "invalid_input",
+      );
+      await writeJsonAtomically(statePath(state.id), stateContents);
       publishStateChange(directory, state);
       return state;
     });
@@ -879,8 +923,14 @@ export function createExpertConnectionStore(stateDir: string): ExpertConnectionS
         "Retired expert connection state is invalid.",
         "corrupt",
       );
+      const retiredContents = serializeStoreJson(
+        retired,
+        MAX_STATE_BYTES,
+        "Retired expert connection state is too large or invalid.",
+        "corrupt",
+      );
       // Persist the tombstone before unlinking current so a crash cannot make this ID reusable.
-      await writeJsonAtomically(statePath(id), JSON.stringify(retired, null, 2) + "\n");
+      await writeJsonAtomically(statePath(id), retiredContents);
       publishStateChange(directory, retired);
       try {
         await fs.unlink(filePath(id));

@@ -4,20 +4,29 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  rename,
   readdir,
   rm,
   symlink,
+  stat,
   writeFile,
 } from "node:fs/promises";
+import nodeFs from "node:fs";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
 import type { ExpertSaveInput } from "@synara/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createExpertStore } from "./ExpertStore.ts";
+import { createExpertStore, readVerifiedStoredExpertSnapshot } from "./ExpertStore.ts";
 import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
+
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
 
 const temporaryRoots: string[] = [];
 
@@ -307,11 +316,15 @@ describe("ExpertStore", () => {
     );
   });
 
-  it("continues to verify a pre-MCP snapshot with its original content hash", async () => {
+  it("continues to verify legacy snapshots without MCP binding or execute metadata", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
     const store = createExpertStore(stateDir);
-    const expert = await store.save(definitionInput("Legacy snapshot hash"));
+    const reference = path.join(root, "legacy-reference.md");
+    await writeFile(reference, "Legacy reference body", "utf8");
+    const expert = await store.save(
+      definitionInput("Legacy snapshot hash", { references: [reference] }),
+    );
     const current = await store.prepareSnapshot(expert.id);
     const snapshotsDir = path.join(stateDir, "experts", "snapshots");
     const currentDir = path.join(snapshotsDir, current.snapshotId);
@@ -334,9 +347,16 @@ describe("ExpertStore", () => {
         mcpBinding?: unknown;
         createdAt: string;
       };
-      resources: Array<{ path: string; kind: "file" | "directory"; size: number; sha256: string }>;
+      resources: Array<{
+        path: string;
+        kind: "file" | "directory";
+        size: number;
+        sha256: string;
+        executable?: boolean;
+      }>;
     };
     delete stored.snapshot.mcpBinding;
+    for (const resource of stored.resources) delete resource.executable;
     const payload = {
       expertId: stored.snapshot.expertId,
       displayName: stored.snapshot.displayName,
@@ -375,12 +395,169 @@ describe("ExpertStore", () => {
     await mkdir(legacyDir, { mode: 0o700 });
     await mkdir(path.join(legacyDir, "skills"), { mode: 0o700 });
     await mkdir(path.join(legacyDir, "references"), { mode: 0o700 });
+    const legacyResource = stored.resources.find((resource) => resource.kind === "file")!;
+    const legacyResourcePath = path.join(legacyDir, ...legacyResource.path.split("/"));
+    await mkdir(path.dirname(legacyResourcePath), { recursive: true, mode: 0o700 });
+    await writeFile(legacyResourcePath, "Legacy reference body", { mode: 0o400 });
     await writeFile(path.join(legacyDir, "snapshot.json"), `${JSON.stringify(stored, null, 2)}\n`);
 
     const restored = await store.readSnapshot(legacySnapshotId);
     expect(restored.snapshotId).toBe(legacySnapshotId);
     expect(restored.mcpBinding).toBeUndefined();
   });
+
+  it.skipIf(process.platform === "win32")(
+    "preserves executable skill files and validates execute-bit integrity",
+    async () => {
+      const root = await makeTempRoot();
+      const stateDir = path.join(root, "state");
+      const skill = path.join(root, "skills", "print.sh");
+      await mkdir(path.dirname(skill), { recursive: true });
+      await writeFile(skill, "#!/bin/sh\nprintf snapshot-executable\n", { mode: 0o700 });
+      await chmod(skill, 0o700);
+
+      const store = createExpertStore(stateDir);
+      const expert = await store.save(
+        definitionInput("Executable skill", {
+          skills: [{ name: "Executable skill", path: skill }],
+        }),
+      );
+      const binding = await store.prepareSnapshot(expert.id);
+      const snapshot = await store.readSnapshot(binding.snapshotId);
+      const copiedSkill = snapshot.skills[0]!.path;
+      expect((await stat(copiedSkill)).mode & 0o777).toBe(0o500);
+      expect(spawnSync(copiedSkill, { encoding: "utf8" })).toMatchObject({
+        status: 0,
+        stdout: "snapshot-executable",
+      });
+
+      const manifestPath = path.join(
+        stateDir,
+        "experts",
+        "snapshots",
+        binding.snapshotId,
+        "snapshot.json",
+      );
+      const stored = JSON.parse(await readFile(manifestPath, "utf8")) as {
+        resources: Array<{ path: string; executable?: boolean }>;
+      };
+      const relativeSkillPath = snapshot.skills[0]!.path.replace(
+        `${snapshot.skillsRoot}/`,
+        "skills/",
+      );
+      expect(
+        stored.resources.find((resource) => resource.path === relativeSkillPath)?.executable,
+      ).toBe(true);
+
+      await chmod(copiedSkill, 0o400);
+      await expect(store.readSnapshot(binding.snapshotId)).rejects.toMatchObject({
+        code: "snapshot_corrupt",
+      });
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "publishes durable resource modes before locking the snapshot root",
+    async () => {
+      const root = await makeTempRoot();
+      const stateDir = path.join(root, "state");
+      const skill = path.join(root, "skills", "publish.sh");
+      const reference = path.join(root, "reference.md");
+      await mkdir(path.dirname(skill), { recursive: true });
+      await writeFile(skill, "#!/bin/sh\nprintf published\n", { mode: 0o700 });
+      await chmod(skill, 0o700);
+      await writeFile(reference, "read-only reference", { mode: 0o600 });
+
+      const store = createExpertStore(stateDir);
+      const expert = await store.save(
+        definitionInput("Snapshot publish boundary", {
+          skills: [{ name: "Publish script", path: skill }],
+          references: [reference],
+        }),
+      );
+      const renameMock = vi.mocked(rename);
+      const realRename = nodeFs.promises.rename.bind(nodeFs.promises);
+      let sawStagingRename = false;
+      renameMock.mockImplementation(async (source, destination) => {
+        if (path.basename(String(source)).startsWith(".staging-")) {
+          const stagePath = String(source);
+          const stored = JSON.parse(
+            await readFile(path.join(stagePath, "snapshot.json"), "utf8"),
+          ) as {
+            snapshot: { snapshotId: string };
+            resources: Array<{
+              path: string;
+              kind: "file" | "directory";
+              executable?: boolean;
+            }>;
+          };
+          expect((await stat(stagePath)).mode & 0o777).toBe(0o700);
+          expect((await stat(path.join(stagePath, "snapshot.json"))).mode & 0o777).toBe(0o400);
+          expect((await stat(path.join(stagePath, "skills"))).mode & 0o777).toBe(0o500);
+          expect((await stat(path.join(stagePath, "references"))).mode & 0o777).toBe(0o500);
+          for (const resource of stored.resources) {
+            const resourcePath = path.join(stagePath, ...resource.path.split("/"));
+            const mode = (await stat(resourcePath)).mode & 0o777;
+            expect(mode).toBe(
+              resource.kind === "directory" || resource.executable === true ? 0o500 : 0o400,
+            );
+          }
+          await realRename(source, destination);
+          expect((await stat(String(destination))).mode & 0o777).toBe(0o700);
+          const verified = await readVerifiedStoredExpertSnapshot(
+            String(destination),
+            stored.snapshot.snapshotId,
+          );
+          expect(verified.snapshotId).toBe(stored.snapshot.snapshotId);
+          sawStagingRename = true;
+          return;
+        }
+        return realRename(source, destination);
+      });
+
+      try {
+        const binding = await store.prepareSnapshot(expert.id);
+        expect(sawStagingRename).toBe(true);
+        const snapshot = await store.readSnapshot(binding.snapshotId);
+        expect(await readFile(snapshot.skills[0]!.path, "utf8")).toContain("published");
+        expect((await stat(snapshot.skills[0]!.path)).mode & 0o777).toBe(0o500);
+        expect((await stat(path.dirname(snapshot.skillsRoot))).mode & 0o777).toBe(0o500);
+      } finally {
+        renameMock.mockImplementation(realRename);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "uses manifest execute metadata when reading snapshots with Windows semantics",
+    async () => {
+      const root = await makeTempRoot();
+      const stateDir = path.join(root, "state");
+      const skill = path.join(root, "skills", "print.sh");
+      await mkdir(path.dirname(skill), { recursive: true });
+      await writeFile(skill, "#!/bin/sh\nprintf snapshot-executable\n", { mode: 0o700 });
+      await chmod(skill, 0o700);
+      const store = createExpertStore(stateDir);
+      const expert = await store.save(
+        definitionInput("Windows-compatible skill", {
+          skills: [{ name: "Executable skill", path: skill }],
+        }),
+      );
+      const binding = await store.prepareSnapshot(expert.id);
+      const snapshot = await store.readSnapshot(binding.snapshotId);
+      await chmod(snapshot.skills[0]!.path, 0o400);
+
+      const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+      Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+      try {
+        await expect(store.readSnapshot(binding.snapshotId)).resolves.toMatchObject({
+          snapshotId: binding.snapshotId,
+        });
+      } finally {
+        Object.defineProperty(process, "platform", platformDescriptor);
+      }
+    },
+  );
 
   it("copies resources into a reusable immutable snapshot", async () => {
     const root = await makeTempRoot();

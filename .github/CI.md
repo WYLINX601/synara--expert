@@ -5,8 +5,11 @@ It aggregates results only. Static checks start independently. Normal code
 changes run typechecking, five unit partitions, six stable browser partitions,
 desktop build, native Windows regression and migration lineage. Forked CI fetches
 official `v*` tags read-only from the [Synara repository](https://github.com/Emanuele-web04/synara.git)
-for lineage verification; checkout credentials stay disabled and the guard still
-rejects missing tags. Docs-only
+for lineage verification. The migration lane uses the shared `static` workspace
+setup for pinned Node/Bun and its TypeScript dependency, compares only release
+tags on HEAD's ancestry, and continues to verify the pinned upstream source.
+Checkout credentials stay disabled; missing tags, incomplete history, or
+unreadable required lineage fail the check. Docs-only
 detection and nightly geometry ownership are unchanged.
 
 After workspace setup and CI contract validation, `static-fast` uses GitHub
@@ -50,8 +53,9 @@ desktop build jobs keep the entire workspace. Only verified consumers opt into
 smaller installs:
 
 - `static`: root and `@synara/scripts`, including its workspace dependencies.
-  Identity, Windows boundary, formatting, lint, release smoke and CI contract
-  tests all run. Root-only or root + shared installs cannot own release smoke.
+  Identity, Windows boundary, formatting, lint, release smoke, migration lineage
+  and CI contract tests use this scope. Root-only or root + shared installs
+  cannot own release smoke.
 - `runtime`: all workspaces except marketing. Windows runs every existing native
   PTY/process/filesystem/shutdown/recovery test with lifecycle scripts enabled.
 - Native release artifact builders exclude marketing with `--ignore-scripts`

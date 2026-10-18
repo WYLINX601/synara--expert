@@ -1035,82 +1035,6 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         appliedAt: new Date().toISOString(),
       });
     };
-    const persistAppliedExpertRuntimeOrRetire = (input: {
-      readonly operation: string;
-      readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
-      readonly expertSession: ProviderExpertSession | undefined;
-      readonly session: ProviderSession;
-      readonly lifecycleGeneration: string;
-    }) =>
-      recordAppliedExpertRuntime(
-        input.expertSession,
-        input.session,
-        input.lifecycleGeneration,
-      ).pipe(
-        Effect.catchCause((cause) =>
-          input.adapter.stopSession(input.session.threadId).pipe(
-            Effect.timeoutOption(PROVIDER_STOP_SESSION_TIMEOUT),
-            Effect.flatMap((stopped) =>
-              Option.match(stopped, {
-                onNone: () =>
-                  Effect.logError("provider.expert.applied_runtime_cleanup_timed_out", {
-                    threadId: input.session.threadId,
-                    provider: input.session.provider,
-                    lifecycleGeneration: input.lifecycleGeneration,
-                    timeoutMs: Duration.toMillis(PROVIDER_STOP_SESSION_TIMEOUT),
-                  }),
-                onSome: () =>
-                  withBindingWriteLock(
-                    input.session.threadId,
-                    Effect.gen(function* () {
-                      const binding = Option.getOrUndefined(
-                        yield* directory.getBinding(input.session.threadId),
-                      );
-                      if (binding?.lifecycleGeneration !== input.lifecycleGeneration) return;
-                      yield* directory.upsert({
-                        threadId: binding.threadId,
-                        provider: binding.provider,
-                        ...(binding.adapterKey !== undefined
-                          ? { adapterKey: binding.adapterKey }
-                          : {}),
-                        ...(binding.runtimeMode !== undefined
-                          ? { runtimeMode: binding.runtimeMode }
-                          : {}),
-                        status: "stopped",
-                        lifecycleGeneration: input.lifecycleGeneration,
-                        ...(binding.resumeCursor !== undefined
-                          ? { resumeCursor: binding.resumeCursor }
-                          : {}),
-                        runtimePayload: {
-                          ...runtimePayloadRecord(binding.runtimePayload),
-                          activeTurnId: null,
-                        },
-                      });
-                    }),
-                  ),
-              }),
-            ),
-            Effect.catchCause((stopCause) =>
-              Effect.logError("provider.expert.applied_runtime_cleanup_failed", {
-                threadId: input.session.threadId,
-                provider: input.session.provider,
-                lifecycleGeneration: input.lifecycleGeneration,
-                cause: Cause.pretty(stopCause),
-              }),
-            ),
-            Effect.andThen(
-              Effect.fail(
-                toValidationError(
-                  input.operation,
-                  `Failed to persist the applied Expert runtime record for thread '${input.session.threadId}'.`,
-                  Cause.pretty(cause),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-
     const persistAppliedContextRuntime = (input: {
       readonly contextSession: ContextSessionType | undefined;
       readonly expertSession: ProviderExpertSession | undefined;
@@ -1147,28 +1071,31 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       return contextRepository.upsertApplied(record);
     };
 
-    const persistAppliedContextRuntimeOrRetire = (input: {
+    const persistAppliedRuntimeOrRetire = <E>(input: {
       readonly operation: string;
+      readonly source: "Expert" | "Context";
       readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
-      readonly contextSession: ContextSessionType | undefined;
-      readonly expertSession: ProviderExpertSession | undefined;
       readonly session: ProviderSession;
       readonly lifecycleGeneration: string;
+      readonly persist: Effect.Effect<void, E>;
     }) =>
-      Effect.matchCauseEffect(persistAppliedContextRuntime(input), {
+      Effect.matchCauseEffect(input.persist, {
         onSuccess: () => Effect.void,
-        onFailure: (cause) =>
-          input.adapter.stopSession(input.session.threadId).pipe(
+        onFailure: (cause) => {
+          const cleanup = input.adapter.stopSession(input.session.threadId).pipe(
             Effect.timeoutOption(PROVIDER_STOP_SESSION_TIMEOUT),
             Effect.flatMap((stopped) =>
               Option.match(stopped, {
                 onNone: () =>
-                  Effect.logError("provider.context.applied_runtime_cleanup_timed_out", {
-                    threadId: input.session.threadId,
-                    provider: input.session.provider,
-                    lifecycleGeneration: input.lifecycleGeneration,
-                    timeoutMs: Duration.toMillis(PROVIDER_STOP_SESSION_TIMEOUT),
-                  }),
+                  Effect.logError(
+                    `provider.${input.source.toLowerCase()}.applied_runtime_cleanup_timed_out`,
+                    {
+                      threadId: input.session.threadId,
+                      provider: input.session.provider,
+                      lifecycleGeneration: input.lifecycleGeneration,
+                      timeoutMs: Duration.toMillis(PROVIDER_STOP_SESSION_TIMEOUT),
+                    },
+                  ),
                 onSome: () =>
                   withBindingWriteLock(
                     input.session.threadId,
@@ -1178,19 +1105,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                       );
                       if (binding?.lifecycleGeneration !== input.lifecycleGeneration) return;
                       yield* directory.upsert({
-                        threadId: binding.threadId,
-                        provider: binding.provider,
-                        ...(binding.adapterKey !== undefined
-                          ? { adapterKey: binding.adapterKey }
-                          : {}),
-                        ...(binding.runtimeMode !== undefined
-                          ? { runtimeMode: binding.runtimeMode }
-                          : {}),
+                        ...binding,
                         status: "stopped",
                         lifecycleGeneration: input.lifecycleGeneration,
-                        ...(binding.resumeCursor !== undefined
-                          ? { resumeCursor: binding.resumeCursor }
-                          : {}),
                         runtimePayload: {
                           ...runtimePayloadRecord(binding.runtimePayload),
                           activeTurnId: null,
@@ -1200,24 +1117,31 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                   ),
               }),
             ),
+          );
+
+          return cleanup.pipe(
             Effect.catchCause((stopCause) =>
-              Effect.logError("provider.context.applied_runtime_cleanup_failed", {
-                threadId: input.session.threadId,
-                provider: input.session.provider,
-                lifecycleGeneration: input.lifecycleGeneration,
-                cause: Cause.pretty(stopCause),
-              }),
+              Effect.logError(
+                `provider.${input.source.toLowerCase()}.applied_runtime_cleanup_failed`,
+                {
+                  threadId: input.session.threadId,
+                  provider: input.session.provider,
+                  lifecycleGeneration: input.lifecycleGeneration,
+                  cause: Cause.pretty(stopCause),
+                },
+              ),
             ),
             Effect.andThen(
               Effect.fail(
                 toValidationError(
                   input.operation,
-                  `Failed to persist the applied Context runtime record for thread '${input.session.threadId}'.`,
-                  String(cause),
+                  `Failed to persist the applied ${input.source} runtime record for thread '${input.session.threadId}'.`,
+                  Cause.pretty(cause),
                 ),
               ),
             ),
-          ),
+          );
+        },
       });
     const serverSettings = yield* ServerSettingsService;
     const secretStore = yield* ServerSecretStore;
@@ -2954,20 +2878,30 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 ),
               ),
             );
-            yield* persistAppliedExpertRuntimeOrRetire({
+            yield* persistAppliedRuntimeOrRetire({
               operation: input.operation,
+              source: "Expert",
               adapter,
-              expertSession: persistedExpertSession,
               session: resumed,
               lifecycleGeneration: lease.generation,
+              persist: recordAppliedExpertRuntime(
+                persistedExpertSession,
+                resumed,
+                lease.generation,
+              ),
             });
-            yield* persistAppliedContextRuntimeOrRetire({
+            yield* persistAppliedRuntimeOrRetire({
               operation: input.operation,
+              source: "Context",
               adapter,
-              contextSession: persistedContextSession,
-              expertSession: persistedExpertSession ?? undefined,
               session: resumed,
               lifecycleGeneration: lease.generation,
+              persist: persistAppliedContextRuntime({
+                contextSession: persistedContextSession,
+                expertSession: persistedExpertSession ?? undefined,
+                session: resumed,
+                lifecycleGeneration: lease.generation,
+              }),
             });
             lease.commit();
             return adapter;
@@ -3821,20 +3755,30 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     },
                   }),
                 );
-                yield* persistAppliedExpertRuntimeOrRetire({
+                yield* persistAppliedRuntimeOrRetire({
                   operation: "ProviderService.startSession",
+                  source: "Expert",
                   adapter,
-                  expertSession: input.expertSession,
                   session,
                   lifecycleGeneration: lease.generation,
+                  persist: recordAppliedExpertRuntime(
+                    input.expertSession,
+                    session,
+                    lease.generation,
+                  ),
                 });
-                yield* persistAppliedContextRuntimeOrRetire({
+                yield* persistAppliedRuntimeOrRetire({
                   operation: "ProviderService.startSession",
+                  source: "Context",
                   adapter,
-                  contextSession: input.contextSession,
-                  expertSession: input.expertSession,
                   session,
                   lifecycleGeneration: lease.generation,
+                  persist: persistAppliedContextRuntime({
+                    contextSession: input.contextSession,
+                    expertSession: input.expertSession,
+                    session,
+                    lifecycleGeneration: lease.generation,
+                  }),
                 });
                 lease.commit();
                 startupLifecycle.transition("running");
@@ -4012,20 +3956,30 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                             },
                           }),
                         );
-                        yield* persistAppliedExpertRuntimeOrRetire({
+                        yield* persistAppliedRuntimeOrRetire({
                           operation: "ProviderService.startSession",
+                          source: "Expert",
                           adapter: previousAdapter,
-                          expertSession: previousExpertSession ?? undefined,
                           session: restored,
                           lifecycleGeneration: previousGeneration,
+                          persist: recordAppliedExpertRuntime(
+                            previousExpertSession ?? undefined,
+                            restored,
+                            previousGeneration,
+                          ),
                         });
-                        yield* persistAppliedContextRuntimeOrRetire({
+                        yield* persistAppliedRuntimeOrRetire({
                           operation: "ProviderService.startSession",
+                          source: "Context",
                           adapter: previousAdapter,
-                          contextSession: previousContextSession ?? undefined,
-                          expertSession: previousExpertSession ?? undefined,
                           session: restored,
                           lifecycleGeneration: previousGeneration,
+                          persist: persistAppliedContextRuntime({
+                            contextSession: previousContextSession ?? undefined,
+                            expertSession: previousExpertSession ?? undefined,
+                            session: restored,
+                            lifecycleGeneration: previousGeneration,
+                          }),
                         });
                         // The restored runtime stamps its events with the exact
                         // generation persisted above, so the coordinator must end
@@ -4384,20 +4338,30 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                   contextSession: effectiveContextSession ?? null,
                 },
               });
-              yield* persistAppliedExpertRuntimeOrRetire({
+              yield* persistAppliedRuntimeOrRetire({
                 operation: "ProviderService.forkThread",
+                source: "Expert",
                 adapter,
-                expertSession: effectiveExpertSession ?? undefined,
                 session,
                 lifecycleGeneration: lease.generation,
+                persist: recordAppliedExpertRuntime(
+                  effectiveExpertSession ?? undefined,
+                  session,
+                  lease.generation,
+                ),
               });
-              yield* persistAppliedContextRuntimeOrRetire({
+              yield* persistAppliedRuntimeOrRetire({
                 operation: "ProviderService.forkThread",
+                source: "Context",
                 adapter,
-                contextSession: effectiveContextSession ?? undefined,
-                expertSession: effectiveExpertSession ?? undefined,
                 session,
                 lifecycleGeneration: lease.generation,
+                persist: persistAppliedContextRuntime({
+                  contextSession: effectiveContextSession ?? undefined,
+                  expertSession: effectiveExpertSession ?? undefined,
+                  session,
+                  lifecycleGeneration: lease.generation,
+                }),
               });
             } else {
               const forkedAt = new Date().toISOString();

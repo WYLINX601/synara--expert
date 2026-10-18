@@ -38,6 +38,8 @@ vi.mock("../nativeApi", () => ({
   readNativeApi: () => api,
   ensureNativeApi: () => api,
   readNativeApiServerCapability: () => false,
+  readNativeApiServerCapabilityState: () => "unsupported",
+  readNativeApiServerConnection: () => ({ generation: "groups-browser-test", connected: true }),
   onNativeApiServerCapabilitiesChange: () => () => {},
 }));
 

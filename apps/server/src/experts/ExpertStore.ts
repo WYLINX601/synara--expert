@@ -31,6 +31,7 @@ const ResourceEntry = Schema.Struct({
   kind: Schema.Literals(["file", "directory"]),
   size: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+  executable: Schema.optional(Schema.Boolean),
 });
 const StoredSnapshot = Schema.Struct({
   snapshot: ExpertSnapshotSchema,
@@ -198,7 +199,10 @@ function decodeDefinition(value: unknown): ExpertDefinition {
   return definition;
 }
 
-async function safeReadFile(filePath: string, allowedRoot?: string): Promise<Buffer> {
+async function safeReadFileWithMetadata(
+  filePath: string,
+  allowedRoot?: string,
+): Promise<{ readonly bytes: Buffer; readonly executable: boolean }> {
   const before = await fs.lstat(filePath);
   if (!before.isFile() || before.isSymbolicLink()) {
     throw new ExpertStoreError(`Expected a regular file: ${filePath}`, "invalid_resource");
@@ -233,16 +237,28 @@ async function safeReadFile(filePath: string, allowedRoot?: string): Promise<Buf
       after.ino !== opened.ino ||
       after.size !== opened.size ||
       after.mtimeMs !== opened.mtimeMs ||
+      (process.platform !== "win32" &&
+        ((after.mode & 0o100) !== (opened.mode & 0o100) ||
+          (pathAfter.mode & 0o100) !== (opened.mode & 0o100))) ||
       pathAfter.dev !== opened.dev ||
       pathAfter.ino !== opened.ino ||
       (allowedRoot && !isWithin(allowedRoot, realAfter))
     ) {
       throw new ExpertStoreError(`File changed while being read: ${filePath}`, "invalid_resource");
     }
-    return bytes;
+    return {
+      bytes,
+      // Windows does not provide POSIX execute-bit semantics. Do not infer
+      // executable status from a filename or a synthetic mode bit there.
+      executable: process.platform !== "win32" && (opened.mode & 0o100) !== 0,
+    };
   } finally {
     await handle.close();
   }
+}
+
+async function safeReadFile(filePath: string, allowedRoot?: string): Promise<Buffer> {
+  return (await safeReadFileWithMetadata(filePath, allowedRoot)).bytes;
 }
 
 async function collectTree(input: {
@@ -284,12 +300,13 @@ async function collectTree(input: {
     if (!stat.isFile()) {
       throw new ExpertStoreError(`Unsupported resource file: ${source}`, "invalid_resource");
     }
-    const bytes = await safeReadFile(source, input.realSourceRoot);
+    const { bytes, executable } = await safeReadFileWithMetadata(source, input.realSourceRoot);
     await input.onEntry({
       path: target,
       kind: "file",
       size: bytes.byteLength,
       sha256: createHash("sha256").update(bytes).digest("hex"),
+      executable,
       sourcePath: source,
       bytes,
     });
@@ -468,18 +485,119 @@ async function copyResources(
   }
 }
 
-async function makeSnapshotReadOnly(directory: string): Promise<void> {
-  const visit = async (entryPath: string): Promise<void> => {
-    const stat = await fs.lstat(entryPath);
-    if (stat.isSymbolicLink()) throw new Error(`Unexpected symlink in new snapshot: ${entryPath}`);
-    if (stat.isDirectory()) {
+async function makeSnapshotReadOnly(
+  directory: string,
+  resources: ReadonlyArray<ResourceEntry>,
+): Promise<void> {
+  const resourcesByPath = new Map(resources.map((resource) => [resource.path, resource]));
+  const noFollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
+  const directoryOnly = process.platform === "win32" ? 0 : fsConstants.O_DIRECTORY;
+  const visit = async (entryPath: string, isStageRoot = false): Promise<void> => {
+    const before = await fs.lstat(entryPath);
+    if (before.isSymbolicLink())
+      throw new Error(`Unexpected symlink in new snapshot: ${entryPath}`);
+    if (before.isDirectory()) {
       for (const name of await fs.readdir(entryPath)) await visit(path.join(entryPath, name));
-      await fs.chmod(entryPath, 0o500);
-    } else if (stat.isFile()) {
-      await fs.chmod(entryPath, (stat.mode & 0o100) | 0o400);
+      // A read-only source directory cannot be atomically renamed on Darwin.
+      // Keep only the unhashed staging root writable until publication; all
+      // resource and child-directory modes are final and durable beforehand.
+      if (isStageRoot) return;
+      if (process.platform === "win32") {
+        await fs.chmod(entryPath, 0o500);
+      } else {
+        const handle = await fs.open(entryPath, fsConstants.O_RDONLY | directoryOnly | noFollow);
+        try {
+          const opened = await handle.stat();
+          const pathAfter = await fs.lstat(entryPath);
+          if (
+            !opened.isDirectory() ||
+            pathAfter.isSymbolicLink() ||
+            !pathAfter.isDirectory() ||
+            opened.dev !== before.dev ||
+            opened.ino !== before.ino ||
+            pathAfter.dev !== opened.dev ||
+            pathAfter.ino !== opened.ino
+          ) {
+            throw new Error(`Snapshot directory changed while publishing: ${entryPath}`);
+          }
+          await handle.chmod(0o500);
+        } finally {
+          await handle.close();
+        }
+        // Persist both the directory contents and its read-only mode before it
+        // becomes reachable at the final snapshot path.
+        await syncDirectoryEntry(entryPath);
+      }
+    } else if (before.isFile()) {
+      const relativePath = path.relative(directory, entryPath).split(path.sep).join("/");
+      const resource = resourcesByPath.get(relativePath);
+      const mode = resource?.executable === true ? 0o500 : 0o400;
+      if (process.platform === "win32") {
+        await fs.chmod(entryPath, mode);
+        return;
+      }
+      const handle = await fs.open(entryPath, fsConstants.O_RDONLY | noFollow);
+      try {
+        const opened = await handle.stat();
+        const pathAfter = await fs.lstat(entryPath);
+        if (
+          !opened.isFile() ||
+          pathAfter.isSymbolicLink() ||
+          !pathAfter.isFile() ||
+          opened.dev !== before.dev ||
+          opened.ino !== before.ino ||
+          pathAfter.dev !== opened.dev ||
+          pathAfter.ino !== opened.ino
+        ) {
+          throw new Error(`Snapshot file changed while publishing: ${entryPath}`);
+        }
+        await handle.chmod(mode);
+        // Contents were synced when copied. Sync again after chmod so the
+        // executable/read-only inode metadata is durable before publication.
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
     }
   };
-  await visit(directory);
+  await visit(directory, true);
+}
+
+async function makeSnapshotRootReadOnly(directory: string): Promise<void> {
+  const before = await fs.lstat(directory);
+  if (before.isSymbolicLink() || !before.isDirectory()) {
+    throw new Error(`Unexpected snapshot root while publishing: ${directory}`);
+  }
+  if (process.platform === "win32") {
+    // Windows keeps the established guarded path chmod behavior; directory
+    // handles and POSIX directory fsync are not portable there.
+    await fs.chmod(directory, 0o500);
+    return;
+  }
+
+  const handle = await fs.open(
+    directory,
+    fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+  );
+  try {
+    const opened = await handle.stat();
+    const pathAfter = await fs.lstat(directory);
+    if (
+      !opened.isDirectory() ||
+      pathAfter.isSymbolicLink() ||
+      !pathAfter.isDirectory() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      pathAfter.dev !== opened.dev ||
+      pathAfter.ino !== opened.ino
+    ) {
+      throw new Error(`Snapshot root changed while publishing: ${directory}`);
+    }
+    await handle.chmod(0o500);
+  } finally {
+    await handle.close();
+  }
+  await syncDirectoryEntry(directory);
 }
 
 async function makeTreeWritable(directory: string): Promise<void> {
@@ -502,8 +620,12 @@ async function makeTreeWritable(directory: string): Promise<void> {
   await visit(directory);
 }
 
-async function collectSnapshotResources(snapshotRoot: string): Promise<ResourceEntry[]> {
+async function collectSnapshotResources(
+  snapshotRoot: string,
+  expectedResources?: ReadonlyArray<ResourceEntry>,
+): Promise<ResourceEntry[]> {
   const collected: ResourceEntry[] = [];
+  const expectedByPath = new Map(expectedResources?.map((resource) => [resource.path, resource]));
   let totalBytes = 0;
   const realSnapshotRoot = await fs.realpath(snapshotRoot);
   const addTree = async (relativeRoot: string): Promise<void> => {
@@ -531,11 +653,19 @@ async function collectSnapshotResources(snapshotRoot: string): Promise<ResourceE
               );
             }
           }
+          const expected = expectedByPath.get(entry.path);
+          const executable =
+            entry.kind !== "file" || expected?.executable === undefined
+              ? undefined
+              : process.platform === "win32"
+                ? expected.executable
+                : entry.executable;
           collected.push({
             path: entry.path,
             kind: entry.kind,
             size: entry.size,
             sha256: entry.sha256,
+            ...(executable !== undefined ? { executable } : {}),
           });
         },
       });
@@ -621,7 +751,7 @@ export async function readVerifiedStoredExpertSnapshot(
   ) {
     throw new ExpertStoreError("Snapshot resource references are invalid.", "snapshot_corrupt");
   }
-  const actualResources = await collectSnapshotResources(snapshotRoot);
+  const actualResources = await collectSnapshotResources(snapshotRoot, stored.resources);
   if (stableJson(actualResources) !== stableJson(stored.resources)) {
     throw new ExpertStoreError(
       "Snapshot resources failed integrity validation.",
@@ -922,11 +1052,12 @@ export function createExpertStore(stateDir: string): ExpertStore {
       });
     }
     const resources = collected
-      .map(({ path: resourcePath, kind, size, sha256 }) => ({
+      .map(({ path: resourcePath, kind, size, sha256, executable }) => ({
         path: resourcePath,
         kind,
         size,
         sha256,
+        ...(executable !== undefined ? { executable } : {}),
       }))
       .sort((left, right) => left.path.localeCompare(right.path));
     const relativeSnapshot: ExpertSnapshot = {
@@ -994,17 +1125,16 @@ export function createExpertStore(stateDir: string): ExpertStore {
         await handle.close();
       }
       await syncDirectoryEntry(stagePath);
-      let published = false;
+      await makeSnapshotReadOnly(stagePath, resources);
       try {
         await fs.rename(stagePath, finalPath);
-        published = true;
       } catch (cause) {
         const maybeExisting = await fs.lstat(finalPath).catch(() => null);
         if (!maybeExisting) throw cause;
         await safeRemoveTree(stagePath);
       }
+      await makeSnapshotRootReadOnly(finalPath);
       await syncDirectoryEntry(snapshotsDir);
-      if (published) await makeSnapshotReadOnly(finalPath);
     } catch (cause) {
       await safeRemoveTree(stagePath).catch(() => undefined);
       throw cause;

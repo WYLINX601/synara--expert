@@ -129,6 +129,7 @@ Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的�
 
 ## 当前工作状态与边界
 
+- 2026-10-18 专家/MCP 审核修复：六类缺陷、主 CI 和局部代码精简已在基于 `9bceb21d` 的 `codex/expert-mcp-reliability` 完成本地验证；完整六包 17,499 项通过、39 项跳过，另有 34 项浏览器回归通过。本轮未提交、推送、安装或发布，实际检查及兼容限制统一见[审核修复验收](../docs/expert-mcp-reliability-acceptance.md)，不复用旧源码的通过结论。
 - 2026-10-15 至 10-16 MCP 交互与授权调整：本机导入取消结果页、改用 toast；专家按连接添加，全部工具由首次任务启动自动读取并固定，后续新任务可读取新增工具。旧配置缺少 `toolMode` 时维持显式允许列表，旧任务不扩权。该增量为本地未提交改动，检查与实测边界统一见 [MCP 调整验收](../docs/mcp-connection-selection-acceptance.md)。
 - 主目录的本地 `main` 是后续开发入口，当前源码以实际 Git HEAD 与工作区状态为准。2026-10-15 浏览器整合验收对应产品源码 `3a754ee69`；后续文档/历史整合及未提交 Expert/MCP 增量不自动继承该验收。v1.1 规范核对的 HEAD 与历史状态差异见上方基线入口。
 - 整合预览位于 `.synara/browser-integration`（`codex/browser-integration`），使用独立测试 home；不是正式用户数据库。预览与完整检查见[最新接入验收](../docs/space-project-context-v1-acceptance.md#8-2026-10-15-浏览器版整合补充)。

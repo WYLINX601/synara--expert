@@ -749,7 +749,7 @@ function auditCurrentMigrationOwnership(currentSource: string): string[] {
 }
 
 const defaultListTags = (pattern: string): readonly string[] => {
-  const result = git(["tag", "--list", pattern, "--sort=-v:refname"]);
+  const result = git(["tag", "--merged", "HEAD", "--list", pattern, "--sort=-v:refname"]);
   return result.status === 0
     ? result.stdout
         .split("\n")
@@ -758,15 +758,36 @@ const defaultListTags = (pattern: string): readonly string[] => {
     : [];
 };
 
+const defaultIsShallowRepository = (): boolean => {
+  const result = git(["rev-parse", "--is-shallow-repository"]);
+  if (
+    result.status !== 0 ||
+    (result.stdout.trim() !== "true" && result.stdout.trim() !== "false")
+  ) {
+    throw new Error("Cannot determine whether this checkout has complete Git history.");
+  }
+  return result.stdout.trim() === "true";
+};
+
 /**
- * Every reachable release tag, newest first, or an empty list when history has
- * none — a shallow CI clone or a fork without tags must degrade to a warning,
- * never a hard failure.
+ * Every release tag whose commit is an ancestor of HEAD, newest first. Tags on
+ * unrelated remote branches are excluded. Missing or shallow history is a
+ * hard failure because the guard cannot prove which migrations have shipped.
  */
 export function resolveReleaseTags(
   listTags: (pattern: string) => readonly string[] = defaultListTags,
+  isShallowRepository: () => boolean = defaultIsShallowRepository,
 ): string[] {
-  return [...listTags("v[0-9]*")];
+  if (isShallowRepository()) {
+    throw new Error("Migration lineage cannot be verified from a shallow Git checkout.");
+  }
+  const tags = [...listTags("v[0-9]*")];
+  if (tags.length === 0) {
+    throw new Error(
+      "No release tag is reachable from this checkout; migration lineage cannot be verified.",
+    );
+  }
+  return tags;
 }
 
 interface TaggedViolation {
@@ -826,54 +847,46 @@ function main(): void {
     );
   }
 
-  const tags = resolveReleaseTags();
-  if (tags.length === 0) {
-    console.warn(
-      "Migration lineage check skipped: no release tag is reachable from this checkout. " +
-        "Fetch tags (actions/checkout with fetch-depth: 0) to enable it.",
+  let tags: string[];
+  try {
+    tags = resolveReleaseTags();
+  } catch (error) {
+    console.error(
+      `Migration lineage history check failed: ${error instanceof Error ? error.message : String(error)}`,
     );
+    process.exitCode = 1;
     return;
   }
 
   const checked: string[] = [];
-  const skipped: string[] = [];
   const perTag: Array<{ tag: string; violations: readonly MigrationLineageViolation[] }> = [];
   for (const tag of tags) {
     const released = git(["show", `${tag}:${migrationsFile}`]);
     if (released.status !== 0) {
-      // Predates the file, or history is too shallow to read it. Either way this
-      // tag carries no lineage claim we can verify.
-      skipped.push(tag);
-      continue;
+      console.error(`Cannot read ${migrationsFile} from release tag ${tag}.`);
+      process.exitCode = 1;
+      return;
     }
     let releasedEntries: MigrationLineageEntry[];
     try {
       releasedEntries = parseMigrationLineage(released.stdout);
-    } catch {
-      // A release whose entries array we cannot parse predates the shape this
-      // guard understands; failing on it would block every future change.
-      skipped.push(tag);
-      continue;
+    } catch (error) {
+      console.error(
+        `Cannot verify migration lineage at release tag ${tag}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exitCode = 1;
+      return;
     }
     checked.push(tag);
     const violations = findReleasedLineageViolations(releasedEntries, currentEntries, allowances);
     if (violations.length > 0) perTag.push({ tag, violations });
   }
 
-  if (checked.length === 0) {
-    console.warn(
-      `Migration lineage check skipped: ${migrationsFile} is not readable at any of the ` +
-        `${tags.length} release tags. Fetch full history to enable it.`,
-    );
-    return;
-  }
-
-  const skippedNote = skipped.length === 0 ? "" : ` (${skipped.length} unreadable tags skipped)`;
   if (perTag.length === 0) {
     console.log(
       `Migration lineage check passed: all migrations shipped across ${checked.length} release ` +
         `tags (${checked[checked.length - 1]}..${checked[0]}) keep their released (id, name)` +
-        `${skippedNote}.`,
+        ".",
     );
     return;
   }

@@ -155,6 +155,8 @@ function closeRuntimeConnection(
   return connection.closePromise;
 }
 
+type ToolIdentity = { readonly connectionId: string; readonly downstreamName: string };
+
 function gatewayToolName(connectionId: string, downstreamName: string): string {
   const original = `expert_${connectionId}_${downstreamName}`;
   const readable = original.replace(/[^A-Za-z0-9_-]/gu, "_");
@@ -166,13 +168,79 @@ function gatewayToolName(connectionId: string, downstreamName: string): string {
   return `${readable.slice(0, 115)}_${digest}`;
 }
 
+function toolIdentityKey(identity: ToolIdentity): string {
+  return JSON.stringify([identity.connectionId, identity.downstreamName]);
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Allocate names against the complete snapshot authorization set. A currently
+ * unavailable optional server still participates, so reconnecting it cannot
+ * rename a tool that was already exposed by another server.
+ */
+function gatewayToolNames(identities: ReadonlyArray<ToolIdentity>): ReadonlyMap<string, string> {
+  const unique = new Map(identities.map((identity) => [toolIdentityKey(identity), identity]));
+  const legacyGroups = new Map<string, ToolIdentity[]>();
+  for (const identity of unique.values()) {
+    const legacyName = gatewayToolName(identity.connectionId, identity.downstreamName);
+    const group = legacyGroups.get(legacyName) ?? [];
+    group.push(identity);
+    legacyGroups.set(legacyName, group);
+  }
+
+  const names = new Map<string, string>();
+  const reserved = new Set<string>();
+  for (const [legacyName, group] of legacyGroups) {
+    if (group.length === 1) {
+      names.set(toolIdentityKey(group[0]!), legacyName);
+      reserved.add(legacyName);
+    }
+  }
+  for (const [legacyName, group] of [...legacyGroups].toSorted(([left], [right]) =>
+    compareText(left, right),
+  )) {
+    if (group.length === 1) continue;
+    for (const identity of group.toSorted((left, right) =>
+      compareText(toolIdentityKey(left), toolIdentityKey(right)),
+    )) {
+      const key = toolIdentityKey(identity);
+      const digest = createHash("sha256").update(key).digest("hex");
+      let suffixLength = 12;
+      let candidate: string;
+      do {
+        const suffix = digest.slice(0, suffixLength);
+        candidate = `${legacyName.slice(0, 127 - suffix.length)}_${suffix}`;
+        if (reserved.has(candidate) && suffixLength < digest.length) {
+          suffixLength = Math.min(suffixLength + 4, digest.length);
+        } else if (reserved.has(candidate)) {
+          // Also avoid an intentional collision with a legacy tool name.
+          let ordinal = 1;
+          let fallback = "";
+          do {
+            const fallbackSuffix = `${digest}_${ordinal++}`;
+            fallback = `${legacyName.slice(0, 127 - fallbackSuffix.length)}_${fallbackSuffix}`;
+          } while (reserved.has(fallback));
+          candidate = fallback;
+        }
+      } while (reserved.has(candidate));
+      reserved.add(candidate);
+      names.set(key, candidate);
+    }
+  }
+  return names;
+}
+
 function toolDefinition(
   connectionId: string,
   downstream: ConnectedExpertMcp["tools"][number],
+  exposedName: string,
 ): McpToolDefinition {
   const annotations = downstream.annotations;
   return {
-    name: gatewayToolName(connectionId, downstream.name),
+    name: exposedName,
     description:
       downstream.description ??
       `Tool ${downstream.name} supplied by expert connection ${connectionId}.`,
@@ -205,8 +273,15 @@ function toolDefinition(
 function callResult(value: Awaited<ReturnType<ConnectedExpertMcp["callTool"]>>): McpToolCallResult {
   const raw = value as Record<string, unknown>;
   const content: McpToolCallResult["content"][number][] = [];
-  for (const item of Array.isArray(raw.content) ? raw.content : []) {
-    if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+  const issues: string[] = [];
+  if (raw.content !== undefined && !Array.isArray(raw.content)) {
+    issues.push("MCP result content is not an array.");
+  }
+  for (const [index, item] of (Array.isArray(raw.content) ? raw.content : []).entries()) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      issues.push(`MCP result content block ${index} is invalid.`);
+      continue;
+    }
     const block = item as Record<string, unknown>;
     if (block.type === "text" && typeof block.text === "string") {
       content.push({ type: "text", text: block.text });
@@ -218,7 +293,50 @@ function callResult(value: Awaited<ReturnType<ConnectedExpertMcp["callTool"]>>):
       typeof block.mimeType === "string"
     ) {
       content.push({ type: "image", data: block.data, mimeType: block.mimeType });
+      continue;
     }
+    if (block.type === "resource") {
+      const resource =
+        block.resource !== null &&
+        typeof block.resource === "object" &&
+        !Array.isArray(block.resource)
+          ? (block.resource as Record<string, unknown>)
+          : undefined;
+      if (resource && typeof resource.text === "string") {
+        const uri = typeof resource.uri === "string" ? resource.uri : "(missing URI)";
+        const mimeType =
+          typeof resource.mimeType === "string" ? resource.mimeType : "(unspecified)";
+        content.push({
+          type: "text",
+          text: `Embedded resource\nURI: ${uri}\nMIME type: ${mimeType}\n\n${resource.text}`,
+        });
+        if (typeof resource.uri !== "string") {
+          issues.push(`MCP embedded resource block ${index} has invalid metadata.`);
+        }
+      } else {
+        issues.push(`MCP embedded resource block ${index} is unsupported or invalid.`);
+      }
+      continue;
+    }
+    if (block.type === "resource_link") {
+      const name = typeof block.name === "string" ? block.name : "(unnamed resource)";
+      const description =
+        typeof block.description === "string" ? block.description : "(no description)";
+      const uri = typeof block.uri === "string" ? block.uri : "(missing URI)";
+      content.push({
+        type: "text",
+        text: `Resource link\nName: ${name}\nDescription: ${description}\nURI: ${uri}`,
+      });
+      if (typeof block.name !== "string" || typeof block.uri !== "string") {
+        issues.push(`MCP resource link block ${index} has invalid metadata.`);
+      }
+      continue;
+    }
+    issues.push(
+      typeof block.type === "string"
+        ? `MCP result content block ${index} has unsupported type: ${block.type}.`
+        : `MCP result content block ${index} has no valid type.`,
+    );
   }
   const structuredContent =
     raw.structuredContent !== null &&
@@ -226,6 +344,9 @@ function callResult(value: Awaited<ReturnType<ConnectedExpertMcp["callTool"]>>):
     !Array.isArray(raw.structuredContent)
       ? (raw.structuredContent as Record<string, unknown>)
       : undefined;
+  if (issues.length > 0) {
+    content.push({ type: "text", text: issues.join(" ") });
+  }
   return {
     content:
       content.length > 0
@@ -235,10 +356,14 @@ function callResult(value: Awaited<ReturnType<ConnectedExpertMcp["callTool"]>>):
               type: "text",
               text: structuredContent
                 ? JSON.stringify(structuredContent, null, 2)
-                : "Tool completed.",
+                : raw.isError === true
+                  ? "Tool returned an error without content."
+                  : "Tool completed.",
             },
           ],
-    ...(typeof raw.isError === "boolean" ? { isError: raw.isError } : {}),
+    ...(typeof raw.isError === "boolean" || issues.length > 0
+      ? { isError: raw.isError === true || issues.length > 0 }
+      : {}),
     ...(structuredContent ? { structuredContent } : {}),
   };
 }
@@ -436,7 +561,17 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
     if (record.closed) return;
     const binding = await resolveSnapshotMcpBinding(snapshot, options.stateDir, connectionStore);
     if (record.closed) return;
-    const exposedNames = new Set<string>();
+    const authorizedByConnection = new Map(
+      binding.servers.map((server) => [
+        server.id,
+        server.toolMode === "all" ? (server.effectiveTools ?? []) : server.tools,
+      ]),
+    );
+    const pendingConnections: Array<{
+      readonly server: (typeof binding.servers)[number];
+      readonly runtimeConnection: RuntimeConnection;
+      readonly authorizedTools: ReadonlyArray<string>;
+    }> = [];
     const seenConnectionIds = new Set<string>();
     const freezeOptionalUnavailable = async (server: (typeof binding.servers)[number]) => {
       if (server.toolMode !== "all" || server.effectiveTools !== undefined) return;
@@ -580,6 +715,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
               throw new Error(`Effective tools were not persisted for connection ${server.id}.`);
             }
             if (resolvedServer.resolutionStatus === "unavailable") {
+              authorizedByConnection.set(server.id, resolvedServer.effectiveTools);
               await client.close().catch(() => undefined);
               if (server.required) {
                 throw new Error(
@@ -591,6 +727,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
             authorizedTools = resolvedServer.effectiveTools;
           }
         }
+        authorizedByConnection.set(server.id, authorizedTools);
         if (authorizedTools.length === 0) {
           await client.close().catch(() => undefined);
           continue;
@@ -613,7 +750,17 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
           }
           continue;
         }
+        pendingConnections.push({ server, runtimeConnection, authorizedTools });
+      }
 
+      const toolNames = gatewayToolNames(
+        [...authorizedByConnection].flatMap(([connectionId, downstreamNames]) =>
+          downstreamNames.map((downstreamName) => ({ connectionId, downstreamName })),
+        ),
+      );
+      const exposedNames = new Set<string>();
+      for (const { server, runtimeConnection, authorizedTools } of pendingConnections) {
+        const client = runtimeConnection.client;
         const downstreamByName = new Map(client.tools.map((tool) => [tool.name, tool]));
         for (const downstreamName of authorizedTools) {
           const downstream = downstreamByName.get(downstreamName);
@@ -625,7 +772,10 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
             }
             continue;
           }
-          const definition = toolDefinition(server.id, downstream);
+          const identity = { connectionId: server.id, downstreamName };
+          const exposedName = toolNames.get(toolIdentityKey(identity));
+          if (!exposedName) throw new Error(`Expert tool name was not allocated: ${server.id}`);
+          const definition = toolDefinition(server.id, downstream, exposedName);
           if (exposedNames.has(definition.name)) {
             throw new Error(`Expert tool name collision: ${definition.name}`);
           }

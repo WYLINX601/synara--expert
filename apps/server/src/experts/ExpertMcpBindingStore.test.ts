@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
@@ -90,5 +90,40 @@ describe("ExpertMcpBindingStore", () => {
     await rm(filePath);
     await symlink(externalFile, filePath);
     await expect(fileStore.read(snapshotId)).rejects.toMatchObject({ code: "corrupt" });
+  });
+
+  it("checks the final binding bytes before create and resolution writes", async () => {
+    const stateDir = path.join(await makeTempRoot(), "state");
+    const store = createExpertMcpBindingStore(stateDir);
+    const oversizedTools = Array.from(
+      { length: 80 },
+      (_, index) => `tool-${index}-` + "x".repeat(4_000),
+    );
+
+    await expect(
+      store.createOnce(snapshotId, {
+        ...binding,
+        servers: [{ ...binding.servers[0]!, tools: oversizedTools }],
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    const bindingsDir = path.join(stateDir, "expert-mcp-bindings");
+    expect(await store.read(snapshotId)).toBeNull();
+    expect(await readdir(bindingsDir)).toEqual([]);
+
+    const allModeBinding = {
+      ...binding,
+      servers: [{ id: "mcp-one", required: true, tools: [], toolMode: "all" as const }],
+    };
+    await store.createOnce(snapshotId, allModeBinding);
+    const filePath = path.join(bindingsDir, snapshotId + ".json");
+    const before = await readFile(filePath);
+    await expect(
+      store.resolveToolsOnce(snapshotId, "mcp-one", {
+        status: "resolved",
+        tools: oversizedTools,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(await readFile(filePath)).toEqual(before);
+    expect(await store.read(snapshotId)).toEqual(allModeBinding);
   });
 });

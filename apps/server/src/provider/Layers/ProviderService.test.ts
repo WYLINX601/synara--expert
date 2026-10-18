@@ -1062,6 +1062,154 @@ contextFailureRouting.layer("ProviderService Context V1.1 persistence failure", 
       );
     }),
   );
+
+  it.effect("does not mark a Context generation stopped when adapter cleanup times out", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const enteredCleanup = yield* Deferred.make<void>();
+      const threadId = asThreadId("thread-context-record-failure-cleanup-timeout");
+      contextFailureRepository.setContext(threadId, contextFailureSession);
+      contextFailureRouting.codex.stopSession.mockImplementationOnce(() =>
+        Deferred.succeed(enteredCleanup, undefined).pipe(Effect.andThen(Effect.never)),
+      );
+
+      const pending = yield* provider
+        .startSession(threadId, {
+          provider: "codex",
+          threadId,
+          runtimeMode: "full-access",
+          contextSession: contextFailureSession,
+        })
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.await(enteredCleanup);
+      yield* TestClock.adjust("10 seconds");
+      const result = yield* Fiber.join(pending);
+
+      assert.isTrue(Exit.isFailure(result));
+      assert.isTrue(yield* contextFailureRouting.codex.hasSession(threadId));
+      const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.notEqual(binding.status, "stopped");
+      const originalError = Cause.findErrorOption(
+        Exit.isFailure(result) ? result.cause : Cause.empty,
+      ).pipe(Option.getOrUndefined);
+      assert.instanceOf(originalError, ProviderValidationError);
+      if (originalError instanceof ProviderValidationError) {
+        assert.include(originalError.issue, "Context");
+        assert.include(
+          String(Reflect.get(originalError, "cause")),
+          "injected applied record failure",
+        );
+      }
+      yield* contextFailureRouting.codex.stopSession.getMockImplementation()!(threadId);
+    }),
+  );
+
+  it.effect("preserves the Context persistence failure when adapter cleanup fails", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = asThreadId("thread-context-record-failure-cleanup-fails");
+      contextFailureRepository.setContext(threadId, contextFailureSession);
+      const originalStop = contextFailureRouting.codex.stopSession.getMockImplementation()!;
+      const stopError = new ProviderAdapterProcessError({
+        provider: "codex",
+        threadId,
+        detail: "injected cleanup stop failure",
+      });
+      const stopCallsBefore = contextFailureRouting.codex.stopSession.mock.calls.length;
+      contextFailureRouting.codex.stopSession.mockImplementationOnce(() => Effect.fail(stopError));
+
+      const result = yield* Effect.exit(
+        provider.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          runtimeMode: "full-access",
+          contextSession: contextFailureSession,
+        }),
+      );
+
+      assert.isTrue(Exit.isFailure(result));
+      assert.isTrue(yield* contextFailureRouting.codex.hasSession(threadId));
+      assert.equal(contextFailureRouting.codex.stopSession.mock.calls.length, stopCallsBefore + 1);
+      const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.notEqual(binding.status, "stopped");
+      const originalError = Cause.findErrorOption(
+        Exit.isFailure(result) ? result.cause : Cause.empty,
+      ).pipe(Option.getOrUndefined);
+      assert.instanceOf(originalError, ProviderValidationError);
+      if (originalError instanceof ProviderValidationError) {
+        assert.include(originalError.issue, "Context");
+        const persistenceCause = String(Reflect.get(originalError, "cause"));
+        assert.include(persistenceCause, "injected applied record failure");
+        assert.notInclude(persistenceCause, "injected cleanup stop failure");
+      }
+
+      yield* originalStop(threadId);
+    }),
+  );
+
+  it.effect("does not stop a newer Context binding after old-generation cleanup", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const enteredCleanup = yield* Deferred.make<void>();
+      const releaseCleanup = yield* Deferred.make<void>();
+      const threadId = asThreadId("thread-context-record-failure-new-generation");
+      contextFailureRepository.setContext(threadId, contextFailureSession);
+      const originalStop = contextFailureRouting.codex.stopSession.getMockImplementation()!;
+      contextFailureRouting.codex.stopSession.mockImplementationOnce((stoppedThreadId) =>
+        Deferred.succeed(enteredCleanup, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseCleanup)),
+          Effect.andThen(originalStop(stoppedThreadId)),
+        ),
+      );
+
+      const pending = yield* provider
+        .startSession(threadId, {
+          provider: "codex",
+          threadId,
+          runtimeMode: "full-access",
+          contextSession: contextFailureSession,
+        })
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.await(enteredCleanup);
+      const oldBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      const newerGeneration = "newer-context-generation";
+      yield* directory.upsert({
+        ...oldBinding,
+        status: "running",
+        lifecycleGeneration: newerGeneration,
+        resumeCursor: { opaque: "newer-context-cursor" },
+        runtimePayload: {
+          ...asRuntimePayloadRecord(oldBinding.runtimePayload),
+          durableMarker: "newer-context-runtime",
+          activeTurnId: "newer-context-turn",
+        },
+      });
+      yield* Deferred.succeed(releaseCleanup, undefined);
+      const result = yield* Fiber.join(pending);
+
+      assert.isTrue(Exit.isFailure(result));
+      const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(binding.lifecycleGeneration, newerGeneration);
+      assert.equal(binding.status, "running");
+      assert.deepEqual(binding.resumeCursor, { opaque: "newer-context-cursor" });
+      assert.equal(
+        asRuntimePayloadRecord(binding.runtimePayload).durableMarker,
+        "newer-context-runtime",
+      );
+      const originalError = Cause.findErrorOption(
+        Exit.isFailure(result) ? result.cause : Cause.empty,
+      ).pipe(Option.getOrUndefined);
+      assert.instanceOf(originalError, ProviderValidationError);
+      if (originalError instanceof ProviderValidationError)
+        assert.include(
+          String(Reflect.get(originalError, "cause")),
+          "injected applied record failure",
+        );
+    }),
+  );
 });
 
 const contextRestoreRepository = makeMutableContextRepository();
@@ -6197,6 +6345,192 @@ routing.layer("ProviderServiceLive routing", (it) => {
         );
       }).pipe(Effect.provide(expertAppliedRuntimeFailureRouting.rawLayer)),
   );
+
+  expertAppliedRuntimeFailureRouting.layer("ProviderService Expert cleanup timeout", (it) => {
+    it.effect("keeps the failed Expert runtime unretired when adapter cleanup times out", () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const enteredCleanup = yield* Deferred.make<void>();
+        const threadId = asThreadId("thread-expert-record-failure-cleanup-timeout");
+        expertAppliedRuntimeFailureRouting.codex.stopSession.mockImplementationOnce(() =>
+          Deferred.succeed(enteredCleanup, undefined).pipe(Effect.andThen(Effect.never)),
+        );
+
+        const pending = yield* provider
+          .startSession(threadId, {
+            provider: "codex",
+            threadId,
+            runtimeMode: "full-access",
+            expertSession: {
+              snapshotId: "snapshot-expert-cleanup-timeout",
+              persona: "Use the reviewer persona.",
+              skills: [],
+              references: [],
+            },
+          })
+          .pipe(Effect.exit, Effect.forkChild);
+        yield* Deferred.await(enteredCleanup);
+        yield* TestClock.adjust("10 seconds");
+        const result = yield* Fiber.join(pending);
+
+        assert.isTrue(Exit.isFailure(result));
+        assert.isTrue(yield* expertAppliedRuntimeFailureRouting.codex.hasSession(threadId));
+        const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.notEqual(binding.status, "stopped");
+        assert.equal(
+          (
+            asRuntimePayloadRecord(binding.runtimePayload).expertSession as
+              | { readonly snapshotId?: string }
+              | undefined
+          )?.snapshotId,
+          "snapshot-expert-cleanup-timeout",
+        );
+        const originalError = Cause.findErrorOption(
+          Exit.isFailure(result) ? result.cause : Cause.empty,
+        ).pipe(Option.getOrUndefined);
+        assert.instanceOf(originalError, ProviderValidationError);
+        if (originalError instanceof ProviderValidationError) {
+          assert.include(originalError.issue, "Expert");
+          assert.include(
+            String(Reflect.get(originalError, "cause")),
+            "injected applied runtime write failure",
+          );
+        }
+      }),
+    );
+
+    it.effect("preserves the Expert persistence failure when adapter cleanup fails", () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId("thread-expert-record-failure-cleanup-fails");
+        const originalStop =
+          expertAppliedRuntimeFailureRouting.codex.stopSession.getMockImplementation()!;
+        const stopError = new ProviderAdapterProcessError({
+          provider: "codex",
+          threadId,
+          detail: "injected cleanup stop failure",
+        });
+        const stopCallsBefore =
+          expertAppliedRuntimeFailureRouting.codex.stopSession.mock.calls.length;
+        expertAppliedRuntimeFailureRouting.codex.stopSession.mockImplementationOnce(() =>
+          Effect.fail(stopError),
+        );
+
+        const result = yield* Effect.exit(
+          provider.startSession(threadId, {
+            provider: "codex",
+            threadId,
+            runtimeMode: "full-access",
+            expertSession: {
+              snapshotId: "snapshot-expert-cleanup-fails",
+              persona: "Use the reviewer persona.",
+              skills: [],
+              references: [],
+            },
+          }),
+        );
+
+        assert.isTrue(Exit.isFailure(result));
+        assert.isTrue(yield* expertAppliedRuntimeFailureRouting.codex.hasSession(threadId));
+        assert.equal(
+          expertAppliedRuntimeFailureRouting.codex.stopSession.mock.calls.length,
+          stopCallsBefore + 1,
+        );
+        const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.notEqual(binding.status, "stopped");
+        assert.equal(
+          (
+            asRuntimePayloadRecord(binding.runtimePayload).expertSession as
+              | { readonly snapshotId?: string }
+              | undefined
+          )?.snapshotId,
+          "snapshot-expert-cleanup-fails",
+        );
+        const originalError = Cause.findErrorOption(
+          Exit.isFailure(result) ? result.cause : Cause.empty,
+        ).pipe(Option.getOrUndefined);
+        assert.instanceOf(originalError, ProviderValidationError);
+        if (originalError instanceof ProviderValidationError) {
+          assert.include(originalError.issue, "Expert");
+          const persistenceCause = String(Reflect.get(originalError, "cause"));
+          assert.include(persistenceCause, "injected applied runtime write failure");
+          assert.notInclude(persistenceCause, "injected cleanup stop failure");
+        }
+
+        yield* originalStop(threadId);
+      }),
+    );
+
+    it.effect("does not stop a newer Expert binding after old-generation cleanup", () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const enteredCleanup = yield* Deferred.make<void>();
+        const releaseCleanup = yield* Deferred.make<void>();
+        const threadId = asThreadId("thread-expert-record-failure-new-generation");
+        const originalStop =
+          expertAppliedRuntimeFailureRouting.codex.stopSession.getMockImplementation()!;
+        expertAppliedRuntimeFailureRouting.codex.stopSession.mockImplementationOnce(
+          (stoppedThreadId) =>
+            Deferred.succeed(enteredCleanup, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseCleanup)),
+              Effect.andThen(originalStop(stoppedThreadId)),
+            ),
+        );
+
+        const pending = yield* provider
+          .startSession(threadId, {
+            provider: "codex",
+            threadId,
+            runtimeMode: "full-access",
+            expertSession: {
+              snapshotId: "snapshot-expert-new-generation",
+              persona: "Use the reviewer persona.",
+              skills: [],
+              references: [],
+            },
+          })
+          .pipe(Effect.exit, Effect.forkChild);
+        yield* Deferred.await(enteredCleanup);
+        const oldBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        const newerGeneration = "newer-expert-generation";
+        yield* directory.upsert({
+          ...oldBinding,
+          status: "running",
+          lifecycleGeneration: newerGeneration,
+          resumeCursor: { opaque: "newer-expert-cursor" },
+          runtimePayload: {
+            ...asRuntimePayloadRecord(oldBinding.runtimePayload),
+            durableMarker: "newer-expert-runtime",
+            activeTurnId: "newer-expert-turn",
+          },
+        });
+        yield* Deferred.succeed(releaseCleanup, undefined);
+        const result = yield* Fiber.join(pending);
+
+        assert.isTrue(Exit.isFailure(result));
+        const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.equal(binding.lifecycleGeneration, newerGeneration);
+        assert.equal(binding.status, "running");
+        assert.deepEqual(binding.resumeCursor, { opaque: "newer-expert-cursor" });
+        assert.equal(
+          asRuntimePayloadRecord(binding.runtimePayload).durableMarker,
+          "newer-expert-runtime",
+        );
+        const originalError = Cause.findErrorOption(
+          Exit.isFailure(result) ? result.cause : Cause.empty,
+        ).pipe(Option.getOrUndefined);
+        assert.instanceOf(originalError, ProviderValidationError);
+        if (originalError instanceof ProviderValidationError)
+          assert.include(
+            String(Reflect.get(originalError, "cause")),
+            "injected applied runtime write failure",
+          );
+      }),
+    );
+  });
 
   it.effect("recovers stale claudeAgent sessions for sendTurn using persisted cwd", () =>
     Effect.gen(function* () {

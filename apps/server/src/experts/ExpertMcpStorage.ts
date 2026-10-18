@@ -80,6 +80,25 @@ export async function readPrivateJsonFile(
   }
 }
 
+export function serializeJsonWithinByteLimit(
+  value: unknown,
+  maxBytes: number,
+  message: string,
+): string {
+  let contents: string;
+  try {
+    const serialized = JSON.stringify(value, null, 2);
+    if (serialized === undefined) throw new TypeError("Value is not JSON serializable.");
+    contents = serialized + "\n";
+  } catch (cause) {
+    throw new ExpertMcpStorageError(message, { cause });
+  }
+  if (Buffer.byteLength(contents, "utf8") > maxBytes) {
+    throw new ExpertMcpStorageError(message);
+  }
+  return contents;
+}
+
 export async function writePrivateFileAtomically(target: string, contents: string): Promise<void> {
   ensurePrivateDirectorySync(path.dirname(target));
   await Effect.runPromise(writeFileStringAtomically({ filePath: target, contents }));

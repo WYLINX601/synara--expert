@@ -71,7 +71,16 @@ test("required check, independent static lane and full-history lineage stay inta
   );
   assert.ok(!workflow.includes("  release_smoke:"));
   assert.ok(workflow.includes("fetch-depth: 0"));
-  assert.ok(workflow.includes("git tag --list 'v[0-9]*'"));
+  assert.ok(
+    workflow.includes(
+      "git fetch --no-tags https://github.com/Emanuele-web04/synara.git 'refs/tags/v*:refs/tags/v*'",
+    ),
+  );
+  const lineage = workflow.split("  migration_lineage:\n")[1];
+  assert.ok(lineage.includes("uses: ./.github/actions/setup-workspace"));
+  assert.ok(lineage.includes('scope: "static"'));
+  assert.ok(lineage.includes("run: node scripts/check-migration-lineage.ts"));
+  assert.ok(!lineage.includes("node-version-file:"));
   assert.ok(!workflow.includes("continue-on-error"));
 });
 test("filtered scopes preserve lifecycle scripts and the scripts workspace links", () => {

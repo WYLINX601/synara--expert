@@ -1,7 +1,12 @@
 import { chmod, lstat, mkdir, mkdtemp, readdir, rename, rm } from "node:fs/promises";
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { ExpertConnectionConfig, ExpertSaveInput } from "@synara/contracts";
 import { Effect, Option } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -100,6 +105,113 @@ async function makeScenario(
   return { stateDir, snapshotId: binding.snapshotId };
 }
 
+async function startResourceResultMcpFixture(): Promise<{
+  readonly url: string;
+  readonly calls: () => number;
+  close(): Promise<void>;
+}> {
+  type FixtureSession = {
+    readonly server: McpServer;
+    readonly transport: StreamableHTTPServerTransport;
+  };
+  const sessions = new Set<FixtureSession>();
+  const sessionsById = new Map<string, FixtureSession>();
+  let calls = 0;
+  let closing = false;
+
+  const createSession = async (): Promise<FixtureSession> => {
+    if (closing) throw new Error("resource-result-fixture-is-closing");
+    const server = new McpServer({ name: "resource-result-fixture", version: "1.0.0" });
+    let session!: FixtureSession;
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      enableJsonResponse: true,
+      onsessioninitialized: (sessionId) => {
+        sessionsById.set(sessionId, session);
+      },
+      onsessionclosed: (sessionId) => {
+        if (sessionsById.get(sessionId) === session) sessionsById.delete(sessionId);
+      },
+    });
+    server.registerTool(
+      "workbench_probe_resources",
+      { description: "Return an embedded resource and a resource link.", inputSchema: {} },
+      () => {
+        calls += 1;
+        return {
+          content: [
+            {
+              type: "resource",
+              resource: {
+                uri: "file:///fixture/complete-guide.md",
+                mimeType: "text/markdown",
+                text: "Full guide body from the HTTP MCP fixture.",
+              },
+            },
+            {
+              type: "resource_link",
+              name: "Reference guide",
+              description: "Open the full reference guide.",
+              uri: "https://fixture.invalid/reference-guide",
+              mimeType: "text/markdown",
+            },
+          ],
+        };
+      },
+    );
+    session = { server, transport };
+    sessions.add(session);
+    await server.connect(transport as unknown as Transport);
+    return session;
+  };
+
+  const httpServer: HttpServer = createHttpServer((request, response) => {
+    void (async () => {
+      const sessionId = request.headers["mcp-session-id"];
+      const session =
+        typeof sessionId === "string" ? sessionsById.get(sessionId) : await createSession();
+      if (!session) {
+        request.resume();
+        response.writeHead(404, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "unknown-session" }));
+        return;
+      }
+      await session.transport.handleRequest(request, response);
+    })().catch(() => {
+      if (!response.headersSent) response.writeHead(500).end();
+      else response.destroy();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once("error", reject);
+    httpServer.listen(0, "127.0.0.1", () => {
+      httpServer.off("error", reject);
+      resolve();
+    });
+  });
+  const address = httpServer.address();
+  if (!address || typeof address === "string") throw new Error("fixture-port-resolution-failed");
+
+  let closePromise: Promise<void> | undefined;
+  return {
+    url: `http://127.0.0.1:${address.port}/mcp`,
+    calls: () => calls,
+    close: () => {
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        closing = true;
+        await Promise.all([...sessions].map((session) => session.server.close()));
+        httpServer.closeAllConnections();
+        await new Promise<void>((resolve, reject) => {
+          if (!httpServer.listening) return resolve();
+          httpServer.close((error) => (error ? reject(error) : resolve()));
+        });
+      })();
+      return closePromise;
+    },
+  };
+}
+
 describe("ExpertGatewayTools", () => {
   it("exposes only the snapshot allowlist and forwards calls with cancellation", async () => {
     const { stateDir, snapshotId } = await makeScenario([
@@ -145,6 +257,131 @@ describe("ExpertGatewayTools", () => {
     controller.abort();
     await cancelled;
     await expect(pending).rejects.toThrow();
+    await resolver.closeAll();
+  });
+
+  it("keeps gateway names stable when a colliding optional tool reconnects", async () => {
+    const { stateDir, snapshotId } = await makeScenario([
+      { id: "a", required: true, tools: ["b_c"] },
+      { id: "a_b", required: false, tools: ["c"] },
+    ]);
+    const firstClient = fakeClient([fakeTool("b_c")]);
+    const firstResolver = makeExpertGatewayToolResolver({
+      stateDir,
+      connect: vi.fn(async (config: ExpertConnectionConfig) => {
+        if (config.id === "a_b") throw new Error("temporarily unavailable");
+        return firstClient;
+      }) as typeof connectExpertMcp,
+    });
+    const firstTools = await firstResolver.resolve("session-name-stability", snapshotId);
+    expect(firstTools).toHaveLength(1);
+    const firstName = firstTools[0]!.definition.name;
+    expect(firstName).not.toBe("expert_a_b_c");
+    await firstResolver.closeAll();
+
+    const secondClients = new Map([
+      ["a", fakeClient([fakeTool("b_c")])],
+      ["a_b", fakeClient([fakeTool("c")])],
+    ]);
+    const secondResolver = makeExpertGatewayToolResolver({
+      stateDir,
+      connect: vi.fn(
+        async (config: ExpertConnectionConfig) => secondClients.get(config.id)!,
+      ) as typeof connectExpertMcp,
+    });
+    const secondTools = await secondResolver.resolve("session-name-stability", snapshotId);
+    const secondNames = secondTools.map(({ definition }) => definition.name);
+    expect(secondNames).toHaveLength(2);
+    expect(new Set(secondNames).size).toBe(2);
+    expect(secondNames).not.toContain("expert_a_b_c");
+    expect(secondNames).toContain(firstName);
+    await secondResolver.closeAll();
+  });
+
+  it("preserves ordered MCP content and reports unsupported result blocks as errors", async () => {
+    const { stateDir, snapshotId } = await makeScenario([
+      { id: "git", required: true, tools: ["review"] },
+    ]);
+    const structuredContent = { reviewed: true };
+    const client = fakeClient(
+      [fakeTool("review")],
+      vi.fn(async () => ({
+        content: [
+          { type: "text", text: "before" },
+          { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+          {
+            type: "resource",
+            resource: {
+              uri: "file:///workspace/guide.md",
+              mimeType: "text/markdown",
+              text: "Complete embedded resource body",
+            },
+          },
+          {
+            type: "resource_link",
+            name: "Guide",
+            description: "Read the full guide",
+            uri: "https://example.test/guide",
+          },
+          { type: "audio", data: "YXVkaW8=", mimeType: "audio/wav" },
+          { type: "text", text: "after" },
+        ],
+        isError: false,
+        structuredContent,
+      })) as unknown as FakeCallTool,
+    );
+    const resolver = makeExpertGatewayToolResolver({
+      stateDir,
+      connect: vi.fn(async () => client) as typeof connectExpertMcp,
+    });
+    const [tool] = await resolver.resolve("session-result-content", snapshotId);
+    const result = await Effect.runPromise(tool!.handler({}, {} as never));
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toEqual(structuredContent);
+    expect(result.content).toEqual([
+      { type: "text", text: "before" },
+      { type: "image", data: "aW1hZ2U=", mimeType: "image/png" },
+      {
+        type: "text",
+        text: "Embedded resource\nURI: file:///workspace/guide.md\nMIME type: text/markdown\n\nComplete embedded resource body",
+      },
+      {
+        type: "text",
+        text: "Resource link\nName: Guide\nDescription: Read the full guide\nURI: https://example.test/guide",
+      },
+      { type: "text", text: "after" },
+      { type: "text", text: "MCP result content block 4 has unsupported type: audio." },
+    ]);
+    await resolver.closeAll();
+  });
+
+  it("preserves upstream error state and rejects malformed content explicitly", async () => {
+    const { stateDir, snapshotId } = await makeScenario([
+      { id: "git", required: true, tools: ["review"] },
+    ]);
+    const client = fakeClient(
+      [fakeTool("review")],
+      vi.fn(async () => ({
+        content: [{ type: "text", text: "partial result" }, null],
+        isError: true,
+        structuredContent: { partial: true },
+      })) as unknown as FakeCallTool,
+    );
+    const resolver = makeExpertGatewayToolResolver({
+      stateDir,
+      connect: vi.fn(async () => client) as typeof connectExpertMcp,
+    });
+    const [tool] = await resolver.resolve("session-invalid-result", snapshotId);
+    const result = await Effect.runPromise(tool!.handler({}, {} as never));
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { partial: true },
+      content: [
+        { type: "text", text: "partial result" },
+        { type: "text", text: "MCP result content block 1 is invalid." },
+      ],
+    });
     await resolver.closeAll();
   });
 
@@ -475,6 +712,63 @@ describe("ExpertGatewayTools", () => {
         structuredContent: { echoMarker: fixture.echoMarker, value: "snapshot-call" },
       });
       expect(fixture.stats()).toMatchObject({ echoCalls: 1, waitCalls: 0, activeWaits: 0 });
+    } finally {
+      const cleanupResults = await Promise.allSettled([
+        ...(resolver ? [resolver.closeAll()] : []),
+        fixture.close(),
+      ]);
+      const cleanupFailure = cleanupResults.find((result) => result.status === "rejected");
+      if (cleanupFailure?.status === "rejected") throw cleanupFailure.reason;
+    }
+  });
+
+  it("converts SDK resource blocks from the production HTTP MCP connector", async () => {
+    const root = await makeTempRoot();
+    const fixture = await startResourceResultMcpFixture();
+    const stateDir = path.join(root, "state");
+    const experts = createExpertStore(stateDir);
+    const connections = createExpertConnectionStore(stateDir);
+    let resolver: ReturnType<typeof makeExpertGatewayToolResolver> | undefined;
+
+    try {
+      await connections.save({
+        id: "resource-http",
+        name: "Resource result HTTP MCP",
+        transport: { type: "http", url: fixture.url, headersFromHost: [] },
+      });
+      const expert = await experts.save({
+        id: "resource-http-results",
+        name: "Resource HTTP results",
+        description: "Exercise the production connector's resource result conversion.",
+        useCases: "Preserve the resource text and links returned by MCP.",
+        persona: "Use only the authorized local fixture.",
+        outputRequirements: "Keep the full resource body and link metadata.",
+        skills: [],
+        references: [],
+        connections: [
+          { id: "resource-http", required: true, tools: ["workbench_probe_resources"] },
+        ],
+      });
+      const binding = await experts.prepareSnapshot(expert.id);
+      resolver = makeExpertGatewayToolResolver({ stateDir, connect: connectExpertMcp });
+      const tools = await resolver.resolve("session-resource-http", binding.snapshotId);
+      expect(tools.map(({ definition }) => definition.name)).toEqual([
+        "expert_resource-http_workbench_probe_resources",
+      ]);
+
+      await expect(Effect.runPromise(tools[0]!.handler({}, {} as never))).resolves.toMatchObject({
+        content: [
+          {
+            type: "text",
+            text: "Embedded resource\nURI: file:///fixture/complete-guide.md\nMIME type: text/markdown\n\nFull guide body from the HTTP MCP fixture.",
+          },
+          {
+            type: "text",
+            text: "Resource link\nName: Reference guide\nDescription: Open the full reference guide.\nURI: https://fixture.invalid/reference-guide",
+          },
+        ],
+      });
+      expect(fixture.calls()).toBe(1);
     } finally {
       const cleanupResults = await Promise.allSettled([
         ...(resolver ? [resolver.closeAll()] : []),

@@ -7,6 +7,7 @@ import { ensurePrivateDirectorySync } from "../privatePathPermissions";
 import {
   assertPrivateDirectory,
   readPrivateJsonFile,
+  serializeJsonWithinByteLimit,
   writePrivateFileAtomically,
 } from "./ExpertMcpStorage.ts";
 
@@ -106,6 +107,22 @@ async function assertBindingDirectory(directory: string): Promise<void> {
   }
 }
 
+function serializeBinding(binding: ExpertMcpBinding): string {
+  try {
+    return serializeJsonWithinByteLimit(
+      binding,
+      MAX_BINDING_BYTES,
+      "Expert MCP binding is too large or invalid.",
+    );
+  } catch (cause) {
+    throw new ExpertMcpBindingStoreError(
+      "Expert MCP binding is too large or invalid.",
+      "invalid_input",
+      { cause },
+    );
+  }
+}
+
 export function createExpertMcpBindingStore(stateDir: string): ExpertMcpBindingStore {
   if (!path.isAbsolute(stateDir) || stateDir.includes("\0")) {
     throw new ExpertMcpBindingStoreError("State directory must be absolute.", "invalid_input");
@@ -151,10 +168,7 @@ export function createExpertMcpBindingStore(stateDir: string): ExpertMcpBindingS
         "revision_conflict",
       );
     }
-    const contents = JSON.stringify(binding, null, 2) + "\n";
-    if (Buffer.byteLength(contents, "utf8") > MAX_BINDING_BYTES) {
-      throw new ExpertMcpBindingStoreError("Expert MCP binding is too large.", "invalid_input");
-    }
+    const contents = serializeBinding(binding);
     await assertBindingDirectory(directory);
     await writePrivateFileAtomically(filePath(snapshotId), contents);
     return binding;
@@ -238,10 +252,7 @@ export function createExpertMcpBindingStore(stateDir: string): ExpertMcpBindingS
           : entry,
       );
       const updated = decodeBinding({ ...current, servers }, "invalid_input");
-      const contents = JSON.stringify(updated, null, 2) + "\n";
-      if (Buffer.byteLength(contents, "utf8") > MAX_BINDING_BYTES) {
-        throw new ExpertMcpBindingStoreError("Expert MCP binding is too large.", "invalid_input");
-      }
+      const contents = serializeBinding(updated);
       await assertBindingDirectory(directory);
       await writePrivateFileAtomically(filePath(snapshotId), contents);
       return updated;

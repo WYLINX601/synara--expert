@@ -35,6 +35,15 @@ const ProviderSessionStatus = Schema.Literals([
   "closed",
 ]);
 
+/** Resource projection verified by the provider adapter for this session. */
+export const ProviderExpertApplication = Schema.Struct({
+  snapshotId: TrimmedNonEmptyString,
+  projectionVersion: TrimmedNonEmptyString,
+  instructionsHash: TrimmedNonEmptyString,
+  skills: Schema.Array(ProviderSkillReference),
+});
+export type ProviderExpertApplication = typeof ProviderExpertApplication.Type;
+
 export const ProviderSession = Schema.Struct({
   provider: ProviderDriverKind,
   providerInstanceId: Schema.optional(ProviderInstanceId),
@@ -51,6 +60,8 @@ export const ProviderSession = Schema.Struct({
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   lastError: Schema.optional(TrimmedNonEmptyString),
+  expertApplication: Schema.optional(ProviderExpertApplication),
+  contextAppliedSnapshotId: Schema.optional(TrimmedNonEmptyString),
 });
 export type ProviderSession = typeof ProviderSession.Type;
 

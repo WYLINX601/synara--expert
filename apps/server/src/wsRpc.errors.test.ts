@@ -36,10 +36,12 @@ const mapRpcError = <A, E, R>(effect: Effect.Effect<A, E, R>, fallbackMessage: s
 const makeExpertRpcHandlers = <R>(
   runtime: ReturnType<typeof createWorkbenchExpertRuntime>,
   requireOwner: Effect.Effect<void, WsRpcError, R>,
+  previewProvider?: Parameters<typeof makeWorkbenchExpertRpcHandlers>[0]["previewProvider"],
 ) =>
   makeWorkbenchExpertRpcHandlers({
     runtime,
     requireOwner,
+    ...(previewProvider ? { previewProvider } : {}),
     rpcEffect: mapRpcError,
     expertRpcEffect,
     loadProjectionThreads: () => Effect.succeed([]),
@@ -377,5 +379,51 @@ describe("orchestration RPC rejection evidence", () => {
     }),
   ])("does not turn ambiguous errors into rejection evidence: $name", (error) => {
     expect(toWsRpcError(error, "Dispatch failed").code).toBeUndefined();
+  });
+});
+
+describe("instance-scoped Expert provider preflight", () => {
+  it("checks the selected instance after authorization and preserves incompatibility reasons", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "synara-expert-provider-preview-"));
+    try {
+      const runtime = createWorkbenchExpertRuntime({
+        stateDir: root,
+        expertAppliedRuntimeRepository: emptyExpertAppliedRuntimeRepository(),
+      });
+      const expert = await runtime.experts.save({
+        name: "Fixed reviewer",
+        description: "",
+        useCases: "",
+        persona: "Review",
+        outputRequirements: "",
+        skills: [],
+        references: [],
+        connections: [],
+        preferredProvider: "omp",
+      });
+      const check = vi.fn(() => Effect.succeed(["The selected runtime filters a required skill."]));
+      const request = {
+        expertId: expert.id,
+        provider: "omp" as const,
+        providerInstanceId: "omp-work",
+        cwd: "/workspace/work",
+      };
+      const denied = makeExpertRpcHandlers(
+        runtime,
+        Effect.fail(new WsRpcError({ message: "Owner required" })),
+        check,
+      );
+      await expect(
+        Effect.runPromise(denied[WS_METHODS.serverPreviewExpert](request)),
+      ).rejects.toMatchObject({ message: "Owner required" });
+      expect(check).not.toHaveBeenCalled();
+      const allowed = makeExpertRpcHandlers(runtime, Effect.void, check);
+      const result = await Effect.runPromise(allowed[WS_METHODS.serverPreviewExpert](request));
+      expect(check).toHaveBeenCalledWith(request, []);
+      expect(result.status).toBe("incompatible");
+      expect(result.issues).toContain("The selected runtime filters a required skill.");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

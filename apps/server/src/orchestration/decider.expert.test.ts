@@ -116,39 +116,42 @@ describe("expert thread binding", () => {
     });
   });
 
-  it("inherits a fixed snapshot or uses a newly prepared snapshot on continuation", async () => {
-    const model = await readModel();
-    const command = {
-      type: "thread.handoff.create" as const,
-      commandId: CommandId.makeUnsafe("expert-handoff-command"),
-      threadId: continuationId,
-      sourceThreadId: sourceId,
-      projectId,
-      title: "Continue review",
-      modelSelection: { provider: "pi" as const, model: "gpt-5-codex" },
-      runtimeMode: "full-access" as const,
-      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-      envMode: "local" as const,
-      branch: null,
-      worktreePath: null,
-      importedMessages: [],
-      createdAt: at,
-    };
-    const inherited = await Effect.runPromise(
-      decideOrchestrationCommand({ command, readModel: model }),
-    );
-    expect(Array.isArray(inherited) ? inherited[0] : inherited).toMatchObject({
-      payload: { expertBinding: first },
-    });
-    const refreshed = await Effect.runPromise(
-      decideOrchestrationCommand({
-        command: { ...command, expertId: "reviewer" },
-        readModel: model,
-        expertBinding: updated,
-      }),
-    );
-    expect(Array.isArray(refreshed) ? refreshed[0] : refreshed).toMatchObject({
-      payload: { expertBinding: updated },
-    });
-  });
+  it.each(["pi", "claudeAgent", "omp"] as const)(
+    "inherits a fixed snapshot or uses a newly prepared snapshot on %s continuation",
+    async (provider) => {
+      const model = await readModel();
+      const command = {
+        type: "thread.handoff.create" as const,
+        commandId: CommandId.makeUnsafe("expert-handoff-command"),
+        threadId: continuationId,
+        sourceThreadId: sourceId,
+        projectId,
+        title: "Continue review",
+        modelSelection: { provider, model: "selected-test-model" },
+        runtimeMode: "full-access" as const,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        envMode: "local" as const,
+        branch: null,
+        worktreePath: null,
+        importedMessages: [],
+        createdAt: at,
+      };
+      const inherited = await Effect.runPromise(
+        decideOrchestrationCommand({ command, readModel: model }),
+      );
+      expect(Array.isArray(inherited) ? inherited[0] : inherited).toMatchObject({
+        payload: { expertBinding: first },
+      });
+      const refreshed = await Effect.runPromise(
+        decideOrchestrationCommand({
+          command: { ...command, expertId: "reviewer" },
+          readModel: model,
+          expertBinding: updated,
+        }),
+      );
+      expect(Array.isArray(refreshed) ? refreshed[0] : refreshed).toMatchObject({
+        payload: { expertBinding: updated },
+      });
+    },
+  );
 });

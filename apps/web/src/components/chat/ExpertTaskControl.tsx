@@ -4,11 +4,14 @@ import type {
   ExpertConnectionConfig,
   ExpertDefinition,
   ProviderKind,
+  ProviderInstanceId,
   ThreadId,
 } from "@synara/contracts";
 import { useEffect, useRef, useState } from "react";
+import { isExpertProvider } from "@synara/shared/expertProviders";
 
 import { ensureExpertClient } from "~/workbench/host/expertClient";
+import { expertPreviewQueryKey } from "../settings/expertSettingsQueries";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -24,6 +27,8 @@ export function ExpertTaskControl(props: {
   threadId: ThreadId;
   binding: ExpertBinding;
   provider: ProviderKind;
+  providerInstanceId?: ProviderInstanceId;
+  cwd?: string | null;
   model: string;
   canContinue: boolean;
   onContinue: (expertId: string) => Promise<void>;
@@ -59,14 +64,25 @@ export function ExpertTaskControl(props: {
     enabled: open,
   });
   const selected = experts.data?.find((expert) => expert.id === selectedId);
+  const previewProvider = isExpertProvider(props.provider) ? props.provider : null;
   const preview = useQuery({
-    queryKey: ["server", "expertPreview", selectedId, selected?.revision, props.provider],
-    queryFn: () =>
-      ensureExpertClient().previewExpert({
-        expertId: selectedId!,
-        provider: props.provider as "codex" | "pi",
-      }),
-    enabled: open && !!selectedId && (props.provider === "codex" || props.provider === "pi"),
+    queryKey: expertPreviewQueryKey(
+      selectedId ?? "",
+      selected?.revision ?? 0,
+      props.provider,
+      props.providerInstanceId,
+      props.cwd,
+    ),
+    queryFn: () => {
+      if (!selectedId || !previewProvider) throw new Error("当前 Provider 不支持专家。");
+      return ensureExpertClient().previewExpert({
+        expertId: selectedId,
+        provider: previewProvider,
+        ...(props.providerInstanceId ? { providerInstanceId: props.providerInstanceId } : {}),
+        ...(props.cwd ? { cwd: props.cwd } : {}),
+      });
+    },
+    enabled: open && !!selectedId && previewProvider !== null,
   });
   const canStart =
     props.canContinue &&
@@ -388,8 +404,8 @@ export function ExpertTaskControl(props: {
                   {preview.data.issues.length ? `: ${preview.data.issues.join("; ")}` : ""}
                 </p>
               ) : null}
-              {props.provider !== "codex" && props.provider !== "pi" ? (
-                <p className="text-destructive">专家目前支持 Codex 和 Pi。</p>
+              {!previewProvider ? (
+                <p className="text-destructive">当前 Provider 暂不支持专家。</p>
               ) : null}
               {!props.canContinue ? (
                 <p className="text-muted-foreground">请先完成或取消当前工作，再创建接续任务。</p>

@@ -3,6 +3,11 @@ import { Schema } from "effect";
 import { IsoDateTime, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
 import { ExpertMcpBindingSchema, McpConfigSourceReferenceSchema, McpConnectionId } from "./mcp";
 import { ProviderSkillReference } from "./providerDiscovery";
+import { ProviderInstanceId } from "./providerInstance";
+
+export const EXPERT_PROVIDER_KINDS = ["codex", "pi", "claudeAgent", "omp"] as const;
+export const ExpertProviderKind = Schema.Literals(EXPERT_PROVIDER_KINDS);
+export type ExpertProviderKind = typeof ExpertProviderKind.Type;
 
 const ExpertConnection = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -139,7 +144,7 @@ export const ExpertDefinition = Schema.Struct({
   skills: Schema.Array(ProviderSkillReference),
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
-  preferredProvider: Schema.optional(Schema.Literals(["codex", "pi"])),
+  preferredProvider: Schema.optional(ExpertProviderKind),
   revision: PositiveInt,
   archived: Schema.Boolean,
   updatedAt: IsoDateTime,
@@ -157,7 +162,7 @@ export const ExpertSaveInput = Schema.Struct({
   skills: Schema.Array(ProviderSkillReference),
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
-  preferredProvider: Schema.optional(Schema.Literals(["codex", "pi"])),
+  preferredProvider: Schema.optional(ExpertProviderKind),
 });
 export type ExpertSaveInput = typeof ExpertSaveInput.Type;
 
@@ -184,7 +189,8 @@ export type ExpertDeleteInput = typeof ExpertDeleteInput.Type;
 
 export const ExpertPreviewInput = Schema.Struct({
   expertId: TrimmedNonEmptyString,
-  provider: Schema.Literals(["codex", "pi"]),
+  provider: ExpertProviderKind,
+  providerInstanceId: Schema.optional(ProviderInstanceId),
   cwd: Schema.optional(TrimmedNonEmptyString),
 });
 export type ExpertPreviewInput = typeof ExpertPreviewInput.Type;
@@ -210,7 +216,7 @@ export const ExpertSnapshot = Schema.Struct({
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
   mcpBinding: Schema.optional(ExpertMcpBindingSchema),
-  preferredProvider: Schema.optional(Schema.Literals(["codex", "pi"])),
+  preferredProvider: Schema.optional(ExpertProviderKind),
   createdAt: IsoDateTime,
 });
 export type ExpertSnapshot = typeof ExpertSnapshot.Type;
@@ -230,7 +236,7 @@ export type ExpertBinding = typeof ExpertBinding.Type;
 export const ExpertAppliedRuntimeRecord = Schema.Struct({
   threadId: ThreadId,
   snapshotId: TrimmedNonEmptyString,
-  provider: Schema.Literals(["codex", "pi"]),
+  provider: ExpertProviderKind,
   model: Schema.optional(TrimmedNonEmptyString),
   runtimeComponent: Schema.optional(TrimmedNonEmptyString),
   runtimeVersion: Schema.optional(TrimmedNonEmptyString),

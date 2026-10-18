@@ -52,6 +52,7 @@ import {
   Stream,
 } from "effect";
 import { TestClock } from "effect/testing";
+import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   buildCodexProcessEnv,
@@ -323,6 +324,7 @@ function asRuntimePayloadRecord(value: unknown): Record<string, unknown> {
 function makeFakeCodexAdapter(
   provider: ProviderKind = "codex",
   options?: {
+    readonly confirmExpertApplication?: boolean;
     readonly conversationRollback?: "native" | "restart-session";
     readonly runtimeEventDelivery?: "fresh-ids-once";
     readonly didResumeSession?: NonNullable<
@@ -345,6 +347,28 @@ function makeFakeCodexAdapter(
           runtimeMode: input.runtimeMode,
           runtimeComponent: provider === "pi" ? "pi-sdk" : `${provider}-cli`,
           runtimeVersion: "test-runtime-version",
+          ...(options?.confirmExpertApplication && input.expertSession
+            ? {
+                expertApplication: {
+                  snapshotId: input.expertSession.snapshotId,
+                  projectionVersion: "fake-verified-v1",
+                  skills: input.expertSession.skills,
+                  instructionsHash: createHash("sha256")
+                    .update(
+                      composeProviderBaseInstructions({
+                        expertPersona: input.expertSession.persona,
+                        contextInstructions: input.contextSession?.hasContent
+                          ? input.contextSession.text
+                          : undefined,
+                      }) ?? "",
+                    )
+                    .digest("hex"),
+                },
+              }
+            : {}),
+          ...(options?.confirmExpertApplication && input.contextSession
+            ? { contextAppliedSnapshotId: input.contextSession.snapshotId }
+            : {}),
           ...(input.modelSelection?.model ? { model: input.modelSelection.model } : {}),
           ...(input.lifecycleGeneration !== undefined
             ? { lifecycleGeneration: input.lifecycleGeneration }
@@ -612,6 +636,8 @@ function makeProviderServiceLayer(
     readonly freshRuntimeEventDelivery?: boolean;
     readonly includeRestartRollbackDroid?: boolean;
     readonly includePi?: boolean;
+    readonly includeOmp?: boolean;
+    readonly confirmExpertApplication?: boolean;
     readonly contextRepository?: ContextRepositoryShape;
     readonly codexDidResumeSession?: NonNullable<
       ProviderAdapterShape<ProviderAdapterError>["didResumeSession"]
@@ -633,7 +659,12 @@ function makeProviderServiceLayer(
       ? { didResumeSession: providers.codexDidResumeSession }
       : {}),
   });
-  const claude = makeFakeCodexAdapter("claudeAgent");
+  const claude = makeFakeCodexAdapter("claudeAgent", {
+    confirmExpertApplication: providers?.confirmExpertApplication === true,
+  });
+  const omp = makeFakeCodexAdapter("omp", {
+    confirmExpertApplication: providers?.confirmExpertApplication === true,
+  });
   const antigravity = makeFakeCodexAdapter("antigravity");
   const droid = makeFakeCodexAdapter("droid", { conversationRollback: "restart-session" });
   const pi = makeFakeCodexAdapter("pi");
@@ -647,9 +678,11 @@ function makeProviderServiceLayer(
             ? Effect.succeed(antigravity.adapter)
             : provider === "droid" && providers?.includeRestartRollbackDroid === true
               ? Effect.succeed(droid.adapter)
-              : provider === "pi" && providers?.includePi === true
-                ? Effect.succeed(pi.adapter)
-                : Effect.fail(new ProviderUnsupportedError({ provider })),
+              : provider === "omp" && providers?.includeOmp === true
+                ? Effect.succeed(omp.adapter)
+                : provider === "pi" && providers?.includePi === true
+                  ? Effect.succeed(pi.adapter)
+                  : Effect.fail(new ProviderUnsupportedError({ provider })),
     listProviders: () =>
       Effect.succeed([
         "codex",
@@ -657,6 +690,7 @@ function makeProviderServiceLayer(
         "antigravity",
         ...(providers?.includeRestartRollbackDroid === true ? (["droid"] as const) : []),
         ...(providers?.includePi === true ? (["pi"] as const) : []),
+        ...(providers?.includeOmp === true ? (["omp"] as const) : []),
       ] as const),
   };
 
@@ -708,6 +742,7 @@ function makeProviderServiceLayer(
   return {
     codex,
     claude,
+    omp,
     antigravity,
     droid,
     pi,
@@ -10883,3 +10918,192 @@ liveFallback.layer("ProviderServiceLive live-fallback settled turns", (it) => {
     }),
   );
 });
+
+for (const providerKind of ["claudeAgent", "omp"] as const) {
+  const repository = makeMutableContextRepository();
+  const appliedWrites: ExpertAppliedRuntimeRecord[] = [];
+  const verified = makeProviderServiceLayer(
+    {
+      persistExpertAppliedRuntime: (record) =>
+        Effect.sync(() => {
+          appliedWrites.push(record);
+        }),
+    },
+    { includeOmp: true, confirmExpertApplication: true, contextRepository: repository.repository },
+  );
+  verified.layer(`ProviderService ${providerKind} Expert projections`, (it) => {
+    it.effect("persists verified Expert and Context receipts across recovery", () =>
+      Effect.gen(function* () {
+        const service = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId(`verified-expert-${providerKind}`);
+        const contextSession = makeTestContextSession(
+          `context-${providerKind}`,
+          "Frozen project context.",
+        );
+        repository.setContext(threadId, contextSession);
+        const expertSession = {
+          snapshotId: `expert-${providerKind}`,
+          persona: "Frozen reviewer.",
+          skills: [{ name: "review", path: "/snapshot/skills/review/SKILL.md" }],
+          references: [],
+        };
+        const initial = yield* service.startSession(threadId, {
+          provider: providerKind,
+          threadId,
+          runtimeMode: "full-access",
+          expertSession,
+          contextSession,
+        });
+        assert.equal(initial.expertApplication?.snapshotId, expertSession.snapshotId);
+        assert.equal(repository.applied.get(threadId)?.snapshotId, contextSession.snapshotId);
+        const firstGeneration = appliedWrites.at(-1)?.lifecycleGeneration;
+        const adapter = providerKind === "omp" ? verified.omp : verified.claude;
+        yield* adapter.stopAll();
+        yield* service.sendTurn({ threadId, input: "continue", attachments: [] });
+        assert.notEqual(appliedWrites.at(-1)?.lifecycleGeneration, firstGeneration);
+        const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.deepEqual(
+          asRuntimePayloadRecord(binding.runtimePayload).expertSession,
+          expertSession,
+        );
+        assert.equal(
+          (
+            asRuntimePayloadRecord(binding.runtimePayload).expertApplication as {
+              snapshotId: string;
+            }
+          ).snapshotId,
+          expertSession.snapshotId,
+        );
+        yield* service.stopSession({ threadId });
+      }),
+    );
+    it.effect("keeps native forks pending until the target starts and applies snapshots", () =>
+      Effect.gen(function* () {
+        const service = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const source = asThreadId(`fork-source-${providerKind}`);
+        const target = asThreadId(`fork-target-${providerKind}`);
+        const contextSession = makeTestContextSession(
+          `fork-context-${providerKind}`,
+          "Frozen fork context.",
+        );
+        repository.setContext(source, contextSession);
+        repository.setContext(target, contextSession);
+        const expertSession = {
+          snapshotId: `fork-expert-${providerKind}`,
+          persona: "Frozen reviewer.",
+          skills: [],
+          references: [],
+        };
+        yield* service.startSession(source, {
+          provider: providerKind,
+          threadId: source,
+          runtimeMode: "full-access",
+          expertSession,
+          contextSession,
+        });
+        const result = yield* service.forkThread!({
+          sourceThreadId: source,
+          threadId: target,
+          runtimeMode: "full-access",
+        });
+        assert.equal(result?.threadId, target);
+        assert.equal(Option.getOrThrow(yield* directory.getBinding(target)).status, "stopped");
+        assert.isUndefined(repository.applied.get(target));
+        yield* service.sendTurn({ threadId: target, input: "continue fork", attachments: [] });
+        assert.equal(repository.applied.get(target)?.snapshotId, contextSession.snapshotId);
+        assert.equal(appliedWrites.at(-1)?.snapshotId, expertSession.snapshotId);
+        yield* service.stopSession({ threadId: source });
+        yield* service.stopSession({ threadId: target });
+      }),
+    );
+    for (const invalid of ["snapshot", "instructions", "skills", "shape"] as const) {
+      it.effect(`rejects an invalid ${invalid} receipt before writing Expert success`, () =>
+        Effect.gen(function* () {
+          const service = yield* ProviderService;
+          const adapter = providerKind === "omp" ? verified.omp : verified.claude;
+          const start = adapter.startSession.getMockImplementation()!;
+          adapter.startSession.mockImplementationOnce((input) =>
+            start(input).pipe(
+              Effect.map((session) => ({
+                ...session,
+                expertApplication: {
+                  ...session.expertApplication!,
+                  ...(invalid === "snapshot" ? { snapshotId: "wrong" } : {}),
+                  ...(invalid === "instructions" ? { instructionsHash: "wrong" } : {}),
+                  ...(invalid === "skills" ? { skills: [] } : {}),
+                  ...(invalid === "shape" ? { skills: null as never } : {}),
+                },
+              })),
+            ),
+          );
+          const before = appliedWrites.length;
+          const threadId = asThreadId(`invalid-${invalid}-${providerKind}`);
+          const outcome = yield* Effect.exit(
+            service.startSession(threadId, {
+              provider: providerKind,
+              threadId,
+              runtimeMode: "full-access",
+              expertSession: {
+                snapshotId: "expected-snapshot",
+                persona: "Frozen expert",
+                skills: [{ name: "required", path: "/snapshot/required/SKILL.md" }],
+                references: [],
+              },
+            }),
+          );
+          assert.isTrue(Exit.isFailure(outcome));
+          assert.equal(appliedWrites.length, before);
+          assert.equal(yield* adapter.hasSession(threadId), false);
+        }),
+      );
+    }
+    it.effect("applies non-empty Context without requiring an Expert", () =>
+      Effect.gen(function* () {
+        const service = yield* ProviderService;
+        const threadId = asThreadId(`context-only-${providerKind}`);
+        const contextSession = makeTestContextSession(`only-${providerKind}`, "Project facts.");
+        repository.setContext(threadId, contextSession);
+        yield* service.startSession(threadId, {
+          provider: providerKind,
+          threadId,
+          runtimeMode: "full-access",
+          contextSession,
+        });
+        assert.equal(repository.applied.get(threadId)?.snapshotId, contextSession.snapshotId);
+        yield* service.sendTurn({ threadId, input: "continue", attachments: [] });
+        yield* service.stopSession({ threadId });
+      }),
+    );
+  });
+  const unverified = makeProviderServiceLayer(undefined, { includeOmp: true });
+  unverified.layer(`ProviderService ${providerKind} unverified Expert`, (it) => {
+    it.effect("retires a runtime that fails to verify the fixed resources", () =>
+      Effect.gen(function* () {
+        const service = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const threadId = asThreadId(`unverified-${providerKind}`);
+        const exit = yield* Effect.exit(
+          service.startSession(threadId, {
+            provider: providerKind,
+            threadId,
+            runtimeMode: "full-access",
+            expertSession: {
+              snapshotId: "missing-receipt",
+              persona: "Reviewer",
+              skills: [],
+              references: [],
+            },
+          }),
+        );
+        assert.isTrue(Exit.isFailure(exit));
+        assert.equal(Option.getOrThrow(yield* directory.getBinding(threadId)).status, "stopped");
+        assert.equal(
+          yield* (providerKind === "omp" ? unverified.omp : unverified.claude).hasSession(threadId),
+          false,
+        );
+      }),
+    );
+  });
+}

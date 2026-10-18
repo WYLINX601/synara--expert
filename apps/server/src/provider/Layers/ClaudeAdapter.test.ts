@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -11,6 +12,7 @@ import type {
   PermissionResult,
   PermissionUpdate,
   SDKControlGetContextUsageResponse,
+  SDKControlInitializeResponse,
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -23,6 +25,7 @@ import {
 } from "@synara/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import { assessClaudeCache } from "@synara/shared/claudeCache";
+import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import {
   Deferred,
   Effect,
@@ -100,6 +103,15 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public supportedCommandList: Array<{ name: string; description: string; argumentHint: string }> =
     [];
   public supportedCommandsNeverResolves = false;
+  public initializationResponse: SDKControlInitializeResponse = {
+    commands: [],
+    agents: [],
+    output_style: "default",
+    available_output_styles: [],
+    models: [],
+    account: {},
+  };
+  public initializationResultCalls = 0;
 
   emit(message: SDKMessage): void {
     if (this.done) {
@@ -191,6 +203,11 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   > => {
     if (this.supportedCommandsNeverResolves) return new Promise(() => {});
     return this.supportedCommandList;
+  };
+
+  readonly initializationResult = async (): Promise<SDKControlInitializeResponse> => {
+    this.initializationResultCalls += 1;
+    return this.initializationResponse;
   };
 
   readonly supportedModels = async (): Promise<Array<ModelInfo>> => {
@@ -440,6 +457,8 @@ function makeHarness(config?: {
   readonly baseDir?: string;
   readonly workflowRuntimePollIntervalMs?: number;
   readonly onCreate?: (options: ClaudeQueryOptions) => void;
+  readonly readClaudeCliVersion?: ClaudeAdapterLiveOptions["readClaudeCliVersion"];
+  readonly readClaudeCliHelp?: ClaudeAdapterLiveOptions["readClaudeCliHelp"];
 }) {
   const query = new FakeClaudeQuery();
   let createInput:
@@ -455,6 +474,8 @@ function makeHarness(config?: {
       config?.onCreate?.(input.options);
       return query;
     },
+    ...(config?.readClaudeCliVersion ? { readClaudeCliVersion: config.readClaudeCliVersion } : {}),
+    ...(config?.readClaudeCliHelp ? { readClaudeCliHelp: config.readClaudeCliHelp } : {}),
     ...(config?.nativeEventLogger
       ? {
           nativeEventLogger: config.nativeEventLogger,
@@ -716,6 +737,82 @@ function effortLevelFromOptions(options: ClaudeQueryOptions | undefined): string
 
 const THREAD_ID = ThreadId.makeUnsafe("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.makeUnsafe("thread-claude-resume");
+const temporaryExpertDirectories: string[] = [];
+
+afterEach(() => {
+  for (const directory of temporaryExpertDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function makeClaudeExpertFixture(): {
+  readonly root: string;
+  readonly cwd: string;
+  readonly skillsRoot: string;
+  readonly skillPath: string;
+  readonly expertSession: {
+    readonly snapshotId: string;
+    readonly persona: string;
+    readonly skillsRoot: string;
+    readonly skills: ReadonlyArray<{ readonly name: string; readonly path: string }>;
+    readonly references: ReadonlyArray<string>;
+  };
+  readonly contextSession: {
+    readonly snapshotId: string;
+    readonly snapshotHash: string;
+    readonly text: string;
+    readonly hasContent: true;
+  };
+} {
+  const root = mkdtempSync(path.join(os.tmpdir(), "synara-claude-adapter-expert-"));
+  temporaryExpertDirectories.push(root);
+  const cwd = path.join(root, "workspace");
+  const skillsRoot = path.join(root, "snapshot", "skills");
+  const skillPath = path.join(skillsRoot, "reviewer", "SKILL.md");
+  mkdirSync(cwd, { recursive: true });
+  mkdirSync(path.dirname(skillPath), { recursive: true });
+  writeFileSync(
+    skillPath,
+    "---\nname: reviewer\ndescription: Review code changes for correctness and safety.\n---\nReview the change.\n",
+  );
+  return {
+    root,
+    cwd,
+    skillsRoot,
+    skillPath,
+    expertSession: {
+      snapshotId: "expert-snapshot-1",
+      persona: "Apply the selected reviewer persona.",
+      skillsRoot,
+      skills: [{ name: "reviewer", path: skillPath }],
+      references: [],
+    },
+    contextSession: {
+      snapshotId: "context-snapshot-1",
+      snapshotHash: "context-hash-1",
+      text: "Use the selected project context.",
+      hasContent: true,
+    },
+  };
+}
+
+function setClaudeExpertInitialization(
+  query: FakeClaudeQuery,
+  options?: {
+    readonly includeSkill?: boolean;
+    readonly pluginsApplied?: boolean;
+  },
+): void {
+  const includeSkill = options?.includeSkill !== false;
+  query.initializationResponse = {
+    ...query.initializationResponse,
+    claude_code_version: "2.1.296",
+    plugins_applied: options?.pluginsApplied ?? true,
+    commands: includeSkill
+      ? [{ name: "synara-expert:reviewer", description: "Review safely.", argumentHint: "" }]
+      : [],
+  };
+}
 
 // `name` or `name:alias`.
 function fakeSlashCommand(entry: string) {
@@ -744,6 +841,430 @@ describe("Claude Synara harness policy", () => {
 });
 
 describe("ClaudeAdapterLive", () => {
+  it.effect(
+    "applies and verifies Expert skills plus context before returning a Claude session",
+    () => {
+      const fixture = makeClaudeExpertFixture();
+      let detectedBinary: string | undefined;
+      const harness = makeHarness({
+        cwd: fixture.cwd,
+        baseDir: path.join(fixture.root, "app-data"),
+        readClaudeCliVersion: async ({ binaryPath }) => {
+          detectedBinary = binaryPath;
+          return "2.1.296";
+        },
+        readClaudeCliHelp: async ({ binaryPath }) => {
+          detectedBinary = binaryPath;
+          return "Usage: claude --plugin-dir <path>";
+        },
+        onCreate: (options) => {
+          const plugin = options.plugins?.find((entry) => entry.type === "local");
+          if (!plugin || plugin.type !== "local") throw new Error("Expected local Expert plugin.");
+          setClaudeExpertInitialization(harness.query);
+        },
+      });
+
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: "claudeAgent",
+          cwd: fixture.cwd,
+          runtimeMode: "full-access",
+          expertSession: fixture.expertSession,
+          contextSession: fixture.contextSession,
+        });
+
+        const queryOptions = harness.getLastCreateQueryInput()?.options;
+        const systemPrompt = queryOptions?.systemPrompt;
+        if (
+          !systemPrompt ||
+          typeof systemPrompt !== "object" ||
+          !("type" in systemPrompt) ||
+          systemPrompt.type !== "preset"
+        ) {
+          assert.fail("Expected Claude Code native preset prompt.");
+        }
+        const baseInstructions =
+          composeProviderBaseInstructions({
+            expertPersona: fixture.expertSession.persona,
+            contextInstructions: fixture.contextSession.text,
+          }) ?? "";
+        const nativeAppend = buildEmbeddedClaudeSystemPromptAppend(false);
+        const promptAppend = systemPrompt.append ?? "";
+        assert.include(promptAppend, baseInstructions);
+        assert.isBelow(promptAppend.indexOf(baseInstructions), promptAppend.indexOf(nativeAppend));
+        assert.equal(queryOptions?.pluginDelivery, "initialize");
+        assert.equal(queryOptions?.plugins?.length, 1);
+        assert.equal(detectedBinary, "claude");
+        assert.equal(session.runtimeComponent, "claude-code-cli");
+        assert.equal(session.runtimeVersion, "2.1.296");
+        assert.equal(harness.query.initializationResultCalls, 1);
+        assert.equal(harness.query.iteratorNextCalls, 1);
+        assert.equal(session.contextAppliedSnapshotId, fixture.contextSession.snapshotId);
+        assert.equal(session.expertApplication?.snapshotId, fixture.expertSession.snapshotId);
+        assert.equal(
+          session.expertApplication?.instructionsHash,
+          createHash("sha256").update(baseInstructions, "utf8").digest("hex"),
+        );
+        assert.equal(session.expertApplication?.projectionVersion, "claude-skills-v1");
+        assert.equal(session.expertApplication?.skills[0]?.name, "reviewer");
+        assert.equal(
+          session.expertApplication?.skills[0]?.path,
+          path.join(
+            queryOptions?.plugins?.[0]?.type === "local" ? queryOptions.plugins[0].path : "",
+            "skills",
+            "reviewer",
+            "SKILL.md",
+          ),
+        );
+        assert.notEqual(session.expertApplication?.skills[0]?.path, fixture.skillPath);
+        assert.equal(readFileSync(fixture.skillPath, "utf8").includes("Review the change."), true);
+        yield* adapter.stopSession(THREAD_ID);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
+    "preserves Context and Expert fingerprints after a completed turn for resume and fork",
+    () => {
+      const fixture = makeClaudeExpertFixture();
+      const queries: FakeClaudeQuery[] = [];
+      const nativeSessionId = "00000000-0000-4000-8000-000000000031";
+      const layer = makeClaudeAdapterLive({
+        readClaudeCliVersion: async () => "2.1.296",
+        readClaudeCliHelp: async () => "Usage: claude --plugin-dir <path>",
+        forkNativeSession: async () => ({ sessionId: "00000000-0000-4000-8000-000000000032" }),
+        createQuery: () => {
+          const query = new FakeClaudeQuery();
+          setClaudeExpertInitialization(query);
+          queries.push(query);
+          return query;
+        },
+      }).pipe(
+        Layer.provideMerge(
+          ServerConfig.layerTest(fixture.cwd, path.join(fixture.root, "app-data")),
+        ),
+        Layer.provideMerge(NodeServices.layer),
+      );
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const input = {
+          threadId: THREAD_ID,
+          provider: "claudeAgent" as const,
+          cwd: fixture.cwd,
+          runtimeMode: "full-access" as const,
+          expertSession: fixture.expertSession,
+          contextSession: fixture.contextSession,
+        };
+        yield* adapter.startSession(input);
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* adapter.sendTurn({ threadId: THREAD_ID, input: "review" });
+        emitAssistantUsage(queries[0]!, nativeSessionId, "assistant-context", "Reviewed.", {});
+        emitSuccessResult(queries[0]!, nativeSessionId, "result-context", {});
+        yield* Fiber.join(completed);
+        const cursor = (yield* adapter.listSessions())[0]!.resumeCursor as Record<string, unknown>;
+        assert.equal(cursor.contextAppliedSnapshotId, fixture.contextSession.snapshotId);
+        assert.equal(cursor.expertSnapshotId, fixture.expertSession.snapshotId);
+        yield* adapter.stopSession(THREAD_ID);
+        const resumed = yield* adapter.startSession({ ...input, resumeCursor: cursor });
+        assert.equal(resumed.contextAppliedSnapshotId, fixture.contextSession.snapshotId);
+        yield* adapter.stopSession(THREAD_ID);
+        const forked = yield* adapter.forkThread!({
+          sourceThreadId: THREAD_ID,
+          threadId: RESUME_THREAD_ID,
+          sourceCwd: fixture.cwd,
+          sourceResumeCursor: cursor,
+          runtimeMode: "full-access",
+          expertSession: fixture.expertSession,
+          contextSession: fixture.contextSession,
+        });
+        assert.equal(
+          (forked.resumeCursor as Record<string, unknown>).contextAppliedSnapshotId,
+          fixture.contextSession.snapshotId,
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(layer),
+      );
+    },
+  );
+
+  it.effect("fails closed when control init misses a skill or plugin load acknowledgment", () => {
+    const cases = [{ includeSkill: false as const }, { pluginsApplied: false as const }];
+    return Effect.forEach(cases, (initOptions) => {
+      const fixture = makeClaudeExpertFixture();
+      const harness = makeHarness({
+        cwd: fixture.cwd,
+        baseDir: path.join(fixture.root, "app-data"),
+        readClaudeCliVersion: async () => "2.1.296",
+        readClaudeCliHelp: async () => "Usage: claude --plugin-dir <path>",
+        onCreate: (options) => {
+          const plugin = options.plugins?.find((entry) => entry.type === "local");
+          if (!plugin || plugin.type !== "local") throw new Error("Expected local Expert plugin.");
+          setClaudeExpertInitialization(harness.query, initOptions);
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const result = yield* Effect.result(
+          adapter.startSession({
+            threadId: THREAD_ID,
+            provider: "claudeAgent",
+            cwd: fixture.cwd,
+            runtimeMode: "full-access",
+            expertSession: fixture.expertSession,
+          }),
+        );
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.match(
+            providerValidationIssue(result.failure),
+            /native initialization|Expert plugin|Expert skill/u,
+          );
+        }
+        assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  });
+
+  it.effect("reports a later system init that contradicts the verified Expert plugin path", () => {
+    const fixture = makeClaudeExpertFixture();
+    let projectedPluginPath: string | undefined;
+    const harness = makeHarness({
+      cwd: fixture.cwd,
+      baseDir: path.join(fixture.root, "app-data"),
+      readClaudeCliVersion: async () => "2.1.296",
+      readClaudeCliHelp: async () => "Usage: claude --plugin-dir <path>",
+      onCreate: (options) => {
+        const plugin = options.plugins?.find((entry) => entry.type === "local");
+        if (!plugin || plugin.type !== "local") throw new Error("Expected local Expert plugin.");
+        projectedPluginPath = plugin.path;
+        setClaudeExpertInitialization(harness.query);
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+        expertSession: fixture.expertSession,
+      });
+      const runtimeErrorFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) => event.type === "runtime.error",
+      ).pipe(Stream.runHead, Effect.forkChild);
+      harness.query.emit({
+        type: "system",
+        subtype: "init",
+        apiKeySource: "none",
+        claude_code_version: "2.1.296",
+        cwd: fixture.cwd,
+        tools: [],
+        mcp_servers: [],
+        model: "claude-test",
+        permissionMode: "default",
+        slash_commands: ["synara-expert:reviewer"],
+        output_style: "default",
+        skills: ["synara-expert:reviewer"],
+        plugins: [{ name: "synara-expert", path: "/wrong/expert-plugin" }],
+        uuid: "00000000-0000-4000-8000-000000000001",
+        session_id: "00000000-0000-4000-8000-000000000002",
+      } as SDKMessage);
+      const runtimeError = yield* Fiber.join(runtimeErrorFiber);
+      assert.equal(runtimeError._tag, "Some");
+      if (runtimeError._tag === "Some" && runtimeError.value.type === "runtime.error") {
+        assert.match(runtimeError.value.payload.message, /projected Expert plugin path/u);
+      }
+      assert.isDefined(projectedPluginPath);
+      assert.equal(yield* adapter.hasSession(THREAD_ID), false);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("uses the native control handshake for Expert and Context without skills", () => {
+    const fixture = makeClaudeExpertFixture();
+    const harness = makeHarness({
+      cwd: fixture.cwd,
+      baseDir: path.join(fixture.root, "app-data"),
+      readClaudeCliVersion: async () => "2.1.92",
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+        expertSession: { ...fixture.expertSession, skills: [] },
+        contextSession: fixture.contextSession,
+      });
+      const queryOptions = harness.getLastCreateQueryInput()?.options;
+      assert.equal(harness.query.initializationResultCalls, 1);
+      assert.equal(session.runtimeVersion, "2.1.92");
+      assert.equal(session.expertApplication?.snapshotId, fixture.expertSession.snapshotId);
+      assert.deepEqual(session.expertApplication?.skills, []);
+      assert.equal(session.contextAppliedSnapshotId, fixture.contextSession.snapshotId);
+      assert.equal(queryOptions?.plugins, undefined);
+      assert.equal(queryOptions?.pluginDelivery, undefined);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "blocks Expert skills on CLI 2.1.92 with an upgrade issue before query creation",
+    () => {
+      const fixture = makeClaudeExpertFixture();
+      const harness = makeHarness({
+        cwd: fixture.cwd,
+        baseDir: path.join(fixture.root, "app-data"),
+        readClaudeCliVersion: async () => "2.1.92",
+        readClaudeCliHelp: async () => "Usage: claude --plugin-dir <path>",
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        if (!adapter.previewExpert) assert.fail("Expected Claude expert preview capability.");
+        const issues = yield* adapter.previewExpert({
+          cwd: fixture.cwd,
+          skills: fixture.expertSession.skills,
+          providerOptions: { claudeAgent: { binaryPath: "/opt/claude" } },
+        });
+        assert.isTrue(issues.some((issue) => issue.includes("upgrade to 2.1.261")));
+        const start = yield* Effect.result(
+          adapter.startSession({
+            threadId: THREAD_ID,
+            provider: "claudeAgent",
+            cwd: fixture.cwd,
+            runtimeMode: "full-access",
+            expertSession: fixture.expertSession,
+          }),
+        );
+        assert.equal(start._tag, "Failure");
+        if (start._tag === "Failure") {
+          assert.include(providerValidationIssue(start.failure), "upgrade to 2.1.261");
+        }
+        assert.isUndefined(harness.getLastCreateQueryInput());
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("previews Claude Expert CLI compatibility without creating a query", () => {
+    const fixture = makeClaudeExpertFixture();
+    const probeCalls: Array<{ readonly binaryPath: string; readonly cwd?: string }> = [];
+    const harness = makeHarness({
+      cwd: fixture.cwd,
+      baseDir: path.join(fixture.root, "app-data"),
+      readClaudeCliVersion: async ({ binaryPath, cwd }) => {
+        probeCalls.push({ binaryPath, ...(cwd ? { cwd } : {}) });
+        return "2.1.296";
+      },
+      readClaudeCliHelp: async ({ binaryPath, cwd }) => {
+        probeCalls.push({ binaryPath, ...(cwd ? { cwd } : {}) });
+        return "Usage: claude --plugin-dir <path>";
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      if (!adapter.previewExpert) assert.fail("Expected Claude expert preview capability.");
+      const issues = yield* adapter.previewExpert({
+        cwd: fixture.cwd,
+        skills: fixture.expertSession.skills,
+        providerOptions: { claudeAgent: { binaryPath: "/opt/claude" } },
+      });
+      assert.deepEqual(issues, []);
+      assert.equal(probeCalls.length, 2);
+      assert.isTrue(probeCalls.every((call) => call.binaryPath === "/opt/claude"));
+      assert.isTrue(probeCalls.every((call) => call.cwd === fixture.cwd));
+      assert.isUndefined(harness.getLastCreateQueryInput());
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("blocks native resume when the applied Expert or Context snapshot changed", () => {
+    const fixture = makeClaudeExpertFixture();
+    const harness = makeHarness({ cwd: fixture.cwd, baseDir: path.join(fixture.root, "app-data") });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const result = yield* Effect.result(
+        adapter.startSession({
+          threadId: THREAD_ID,
+          provider: "claudeAgent",
+          cwd: fixture.cwd,
+          runtimeMode: "full-access",
+          resumeCursor: {
+            resume: "00000000-0000-4000-8000-000000000010",
+            expertSnapshotId: "older-expert-snapshot",
+            expertPersonaHash: createHash("sha256").update("older persona").digest("hex"),
+            contextAppliedSnapshotId: "older-context-snapshot",
+          },
+          expertSession: fixture.expertSession,
+          contextSession: fixture.contextSession,
+        }),
+      );
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.match(
+          providerValidationIssue(result.failure),
+          /different or unverified Expert or Context/u,
+        );
+      }
+      assert.isUndefined(harness.getLastCreateQueryInput());
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("allows a legacy native resume with an empty Context and no Expert receipt", () => {
+    const fixture = makeClaudeExpertFixture();
+    const harness = makeHarness({ cwd: fixture.cwd, baseDir: path.join(fixture.root, "app-data") });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        cwd: fixture.cwd,
+        runtimeMode: "full-access",
+        resumeCursor: { resume: "00000000-0000-4000-8000-000000000030" },
+        contextSession: {
+          snapshotId: "empty-context-snapshot",
+          snapshotHash: "empty-context-hash",
+          text: "",
+          hasContent: false,
+        },
+      });
+      assert.equal(
+        harness.getLastCreateQueryInput()?.options.resume,
+        "00000000-0000-4000-8000-000000000030",
+      );
+      assert.isUndefined(session.contextAppliedSnapshotId);
+      yield* adapter.stopSession(THREAD_ID);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("grants a multi-folder project's extra folders as additional directories", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -12581,6 +13102,75 @@ describe("ClaudeAdapterLive forkThread", () => {
       Layer.provideMerge(NodeServices.layer),
     );
   }
+
+  it.effect(
+    "carries verified Expert and Context fingerprints through native fork into first start",
+    () => {
+      const fixture = makeClaudeExpertFixture();
+      const forkedSessionId = "00000000-0000-4000-8000-000000000020";
+      const query = new FakeClaudeQuery();
+      let resumedQueryOptions: ClaudeQueryOptions | undefined;
+      const layer = makeClaudeAdapterLive({
+        readClaudeCliVersion: async () => "2.1.296",
+        readClaudeCliHelp: async () => "Usage: claude --plugin-dir <path>",
+        forkNativeSession: async () => ({ sessionId: forkedSessionId }),
+        createQuery: ({ options }) => {
+          resumedQueryOptions = options;
+          const plugin = options.plugins?.find((entry) => entry.type === "local");
+          if (!plugin || plugin.type !== "local") throw new Error("Expected local Expert plugin.");
+          setClaudeExpertInitialization(query);
+          return query;
+        },
+      }).pipe(
+        Layer.provideMerge(
+          ServerConfig.layerTest(fixture.cwd, path.join(fixture.root, "app-data")),
+        ),
+        Layer.provideMerge(NodeServices.layer),
+      );
+      const sourceResumeCursor = {
+        resume: SOURCE_SESSION_ID,
+        expertSnapshotId: fixture.expertSession.snapshotId,
+        expertPersonaHash: createHash("sha256")
+          .update(fixture.expertSession.persona, "utf8")
+          .digest("hex"),
+        contextAppliedSnapshotId: fixture.contextSession.snapshotId,
+      };
+
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const forked = yield* adapter.forkThread!({
+          sourceThreadId: THREAD_ID,
+          threadId: RESUME_THREAD_ID,
+          runtimeMode: "full-access",
+          sourceCwd: fixture.cwd,
+          sourceResumeCursor,
+          expertSession: fixture.expertSession,
+          contextSession: fixture.contextSession,
+        });
+        const forkCursor = forked.resumeCursor as Record<string, unknown>;
+        assert.equal(forkCursor.expertSnapshotId, fixture.expertSession.snapshotId);
+        assert.equal(forkCursor.expertPersonaHash, sourceResumeCursor.expertPersonaHash);
+        assert.equal(forkCursor.contextAppliedSnapshotId, fixture.contextSession.snapshotId);
+
+        const session = yield* adapter.startSession({
+          threadId: RESUME_THREAD_ID,
+          provider: "claudeAgent",
+          cwd: fixture.cwd,
+          runtimeMode: "full-access",
+          resumeCursor: forked.resumeCursor,
+          expertSession: fixture.expertSession,
+          contextSession: fixture.contextSession,
+        });
+        assert.equal(session.expertApplication?.snapshotId, fixture.expertSession.snapshotId);
+        assert.equal(session.contextAppliedSnapshotId, fixture.contextSession.snapshotId);
+        assert.equal(resumedQueryOptions?.resume, forkedSessionId);
+        yield* adapter.stopSession(RESUME_THREAD_ID);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(layer),
+      );
+    },
+  );
 
   it.effect("forks natively from the persisted cursor and drops source uuid pins", () => {
     const forkCalls: Array<{

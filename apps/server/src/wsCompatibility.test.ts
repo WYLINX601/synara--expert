@@ -38,8 +38,8 @@ describe("WebSocket compatibility bootstrap", () => {
     expect(WS_CLIENT_REQUIRED_CAPABILITIES).not.toContain(WS_PROJECT_FILE_WATCH_CAPABILITY);
   });
 
-  it.each([1, 2, 3])(
-    "rejects revision-%s clients because its event shapes predate the merged protocol",
+  it.each([1, 2, 3, 4])(
+    "rejects revision-%s clients because it cannot decode the current typed protocol",
     async (revision) => {
       const error = await Effect.runPromise(
         negotiateWsCompatibility({

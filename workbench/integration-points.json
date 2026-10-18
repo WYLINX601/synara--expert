@@ -36,9 +36,10 @@
         "packages/contracts/src/rpc.ts",
         "apps/server/src/workbench/host/expertRpc.ts",
         "apps/web/src/workbench/host/expertClient.ts",
-        "apps/web/src/wsNativeApi.ts"
+        "apps/web/src/wsNativeApi.ts",
+        "apps/server/src/provider/Services/ProviderService.ts"
       ],
-      "responsibility": "wsRpc owns authenticated connection context, admission, requireOwner and the distinct rpcEffect/expertRpcEffect error mappings. A static host assembly supplies Expert/MCP handlers using the existing Workbench runtime and projection read capability. Web feature consumers use the existing NativeApi server ExpertClient type subset without a second transport/cache. Wire method names, schemas and durable ownership remain unchanged.",
+      "responsibility": "wsRpc owns authenticated connection context, admission, requireOwner and the distinct rpcEffect/expertRpcEffect error mappings. A static host assembly supplies Expert/MCP handlers using the existing Workbench runtime and projection read capability. Web feature consumers use the existing NativeApi server ExpertClient type subset without a second transport/cache. Wire method names, schemas and durable ownership remain unchanged. Instance-scoped preview delegates a narrow read-only compatibility request to ProviderService; owner authorization precedes native configuration inspection.",
       "tests": [
         "apps/server/src/workbench/runtimeLayer.test.ts",
         "apps/server/src/wsRpc.auth.test.ts",
@@ -58,7 +59,9 @@
       "responsibility": "The existing orchestration command path validates the selected Expert and prepares an immutable snapshot before committing thread creation. Provider startup reads the thread binding and enforces required connection preflight; failures continue to block startup with the existing command errors.",
       "tests": [
         "apps/server/src/experts/ExpertStore.test.ts",
-        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts"
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
+        "apps/server/src/orchestration/decider.expert.test.ts",
+        "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts"
       ]
     },
     {
@@ -67,14 +70,26 @@
       "entryFiles": [
         "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts",
         "apps/server/src/provider/Layers/ProviderService.ts",
-        "apps/server/src/provider/Services/ProviderAdapter.ts"
+        "apps/server/src/provider/Services/ProviderAdapter.ts",
+        "apps/server/src/provider/Layers/ClaudeAdapter.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.ts",
+        "apps/server/src/provider/acp/OmpAcpSupport.ts",
+        "packages/contracts/src/provider.ts",
+        "packages/shared/src/expertProviders.ts",
+        "apps/server/src/provider/claudeExpertSession.ts",
+        "apps/server/src/provider/acp/OmpExpertSession.ts"
       ],
-      "responsibility": "Resume reuses the persisted provider runtime payload and the thread's pinned Expert snapshot. It does not resolve the current Expert definition when restoring an existing session; provider-specific application remains owned by each adapter.",
+      "responsibility": "Resume reuses the persisted provider runtime payload and the thread's pinned Expert snapshot. It does not resolve the current Expert definition when restoring an existing session; provider-specific application remains owned by each adapter. Claude and OMP verify immutable native projections and return application receipts. Cursor-only native forks remain stopped with the inherited snapshots until their first start; only a verified running generation may persist applied records.",
       "tests": [
         "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
         "apps/server/src/provider/Layers/ProviderService.test.ts",
         "apps/server/src/provider/Layers/CodexAdapter.test.ts",
-        "apps/server/src/provider/Layers/PiAdapter.lifecycle.test.ts"
+        "apps/server/src/provider/Layers/PiAdapter.lifecycle.test.ts",
+        "apps/server/src/provider/Layers/ClaudeAdapter.test.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.test.ts",
+        "apps/server/src/provider/acp/OmpAcpSupport.test.ts",
+        "apps/server/src/provider/claudeExpertSession.test.ts",
+        "apps/server/src/provider/acp/OmpExpertSession.test.ts"
       ]
     },
     {
@@ -172,7 +187,8 @@
         "apps/web/src/components/chat/environment/projectContextNavigationGuard.ts",
         "apps/web/src/components/chat/environment/useProjectContextAutosave.ts",
         "apps/web/src/components/chat/environment/useProjectContextMigration.tsx",
-        "apps/web/src/lib/spaces.ts"
+        "apps/web/src/lib/spaces.ts",
+        "apps/web/src/components/chat/expertSendPreflight.ts"
       ],
       "retainedImports": [
         {

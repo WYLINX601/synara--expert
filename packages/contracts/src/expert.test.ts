@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { ExpertSaveInput } from "./expert";
+import { EXPERT_PROVIDER_KINDS, ExpertPreviewInput, ExpertSaveInput } from "./expert";
 
 function definition(connections: unknown[]) {
   return {
@@ -33,5 +33,32 @@ describe("Expert connection tool modes", () => {
     );
 
     expect(decoded.connections).toEqual([{ id: "mcp", required: false, tools: ["search"] }]);
+  });
+});
+
+describe("Expert provider compatibility", () => {
+  it.each(EXPERT_PROVIDER_KINDS)(
+    "accepts %s preferences and instance-scoped preview",
+    (provider) => {
+      expect(
+        Schema.decodeUnknownSync(ExpertSaveInput)({
+          ...definition([]),
+          preferredProvider: provider,
+        }).preferredProvider,
+      ).toBe(provider);
+      expect(
+        Schema.decodeUnknownSync(ExpertPreviewInput)({
+          expertId: "reviewer",
+          provider,
+          providerInstanceId: `${provider}-work`,
+          cwd: "/workspace",
+        }),
+      ).toMatchObject({ provider, providerInstanceId: `${provider}-work` });
+    },
+  );
+  it("does not enable unrelated providers through Expert contracts", () => {
+    expect(() =>
+      Schema.decodeUnknownSync(ExpertPreviewInput)({ expertId: "reviewer", provider: "opencode" }),
+    ).toThrow();
   });
 });

@@ -10,8 +10,11 @@ export const WS_PROTOCOL_EPOCH = 1;
 // call methods this server no longer serves and could not decode the new error.
 // Revision 4 combines the upstream revision-3 changes with Linx Context events.
 // Neither earlier revision-3 client can decode the complete merged protocol.
-export const WS_PROTOCOL_MIN_REVISION = 4;
-export const WS_PROTOCOL_MAX_REVISION = 4;
+// Revision 5 extends Expert provider enums and native application receipts.
+// A revision-4 client cannot decode Claude/OMP Expert definitions or applied
+// records, so require the matching client/server pair rather than fail after RPC.
+export const WS_PROTOCOL_MIN_REVISION = 5;
+export const WS_PROTOCOL_MAX_REVISION = 5;
 export const WS_BOOTSTRAP_METHOD = "bootstrap.negotiate";
 export const WS_BOOTSTRAP_PATH = "/ws/bootstrap";
 export const WS_NEGOTIATE_HTTP_PATH = "/ws/negotiate";

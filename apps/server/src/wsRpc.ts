@@ -1356,6 +1356,10 @@ const makeWsRpcHandlersLayer = () =>
       });
       const workbenchExpertRpcHandlers = makeWorkbenchExpertRpcHandlers({
         runtime: workbenchExpertRuntime,
+        previewProvider: (request, skills) =>
+          providerService.previewExpert
+            ? providerService.previewExpert({ ...request, skills })
+            : Effect.succeed(["Provider compatibility checks are unavailable."]),
         requireOwner,
         rpcEffect,
         expertRpcEffect,

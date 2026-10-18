@@ -1,3 +1,4 @@
+import { isExpertProvider } from "@synara/shared/expertProviders";
 import type {
   ChatAttachment,
   ExpertBinding,
@@ -441,10 +442,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         command.type === "thread.turn.start"
           ? (command.modelSelection?.provider ?? thread.modelSelection.provider)
           : thread.modelSelection.provider;
-      if (preview.hasContent && provider !== "codex" && provider !== "pi") {
+      if (preview.hasContent && !isExpertProvider(provider)) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: "Project Context with content is currently supported only for Codex and Pi.",
+          detail: "The selected provider does not support Project Context.",
         });
       }
       const existingRequest = events.find(
@@ -1342,10 +1343,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           ) {
             const requestedExpert = command.expertId;
             const provider = command.modelSelection.provider;
-            if (provider !== "codex" && provider !== "pi") {
+            if (!isExpertProvider(provider)) {
               return yield* new OrchestrationCommandInvariantError({
                 commandType: command.type,
-                detail: `Experts currently support Codex and Pi, not '${provider}'.`,
+                detail: `Experts do not support '${provider}'.`,
               });
             }
             const preview = yield* Effect.tryPromise({

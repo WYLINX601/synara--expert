@@ -9,6 +9,7 @@ import {
   type ExpertConnectionSaveInput,
   type ExpertConnectionTestInput,
   type ExpertPreviewInput,
+  type ProviderSkillReference,
   type ExpertReadInput,
   type ExpertRestoreInput,
   type ExpertSaveInput,
@@ -41,6 +42,11 @@ type ExpertReferenceThread = Pick<OrchestrationThread, "id" | "title" | "expertB
  */
 export function makeWorkbenchExpertRpcHandlers<R>(input: {
   readonly runtime: WorkbenchExpertRuntime;
+  readonly previewProvider?: (
+    request: ExpertPreviewInput,
+    skills: ReadonlyArray<ProviderSkillReference>,
+  ) => Effect.Effect<ReadonlyArray<string>, unknown>;
+
   readonly requireOwner: Effect.Effect<void, WsRpcError, R>;
   readonly rpcEffect: RpcEffect;
   readonly expertRpcEffect: ExpertRpcEffect;
@@ -76,11 +82,30 @@ export function makeWorkbenchExpertRpcHandlers<R>(input: {
         () => runtime.experts.remove(input.id, input.expectedRevision),
         "Failed to delete expert",
       ),
-    [WS_METHODS.serverPreviewExpert]: (input: ExpertPreviewInput) =>
+    [WS_METHODS.serverPreviewExpert]: (request: ExpertPreviewInput) =>
       expertRpcEffect(
         requireOwner,
-        () => runtime.experts.preview(input),
+        () => runtime.experts.preview(request),
         "Failed to preview expert",
+      ).pipe(
+        Effect.flatMap((preview) => {
+          if (!input.previewProvider || preview.status === "incompatible")
+            return Effect.succeed(preview);
+          return rpcEffect(
+            input.previewProvider(request, preview.definition.skills),
+            "Failed to check Expert provider compatibility",
+          ).pipe(
+            Effect.map((issues) =>
+              issues.length === 0
+                ? preview
+                : {
+                    ...preview,
+                    status: "incompatible" as const,
+                    issues: [...preview.issues, ...issues],
+                  },
+            ),
+          );
+        }),
       ),
     [WS_METHODS.serverReadExpertSnapshot]: (input: ExpertSnapshotReadInput) =>
       expertRpcEffect(

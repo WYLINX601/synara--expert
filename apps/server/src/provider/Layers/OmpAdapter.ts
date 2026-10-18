@@ -12,6 +12,7 @@ import {
   type ProviderListCommandsResult,
   type ProviderListModelsResult,
   type ProviderRuntimeEvent,
+  type ProviderSkillReference,
   type ProviderSession,
   type ProviderUserInputAnswers,
   RuntimeRequestId,
@@ -48,6 +49,7 @@ import { AgentGatewayCredentials } from "../../agentGateway/Services/AgentGatewa
 import {
   PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY,
   resolveProviderSessionInstanceId,
+  type ProviderAdapterSessionStartInput,
 } from "../Services/ProviderAdapter.ts";
 import {
   acquireAgentGatewaySessionLease,
@@ -117,9 +119,11 @@ import {
   parseOmpCliModelList,
   resolveOmpAgentDir,
   resolveOmpCliBinaryPath,
+  runOmpAcpCliCommand,
   type OmpAccountBoundary,
   type OmpAcpRuntimeSettings,
 } from "../acp/OmpAcpSupport.ts";
+import { OMP_EXPERT_PROJECTION_VERSION, prepareOmpExpertSession } from "../acp/OmpExpertSession.ts";
 import { makeSessionTeardownGate } from "../acp/SessionTeardownGate.ts";
 import { cancelTurnAndWait } from "../acp/TurnCancellation.ts";
 import {
@@ -438,6 +442,51 @@ export function makeOmpAdapter(
       homeDir: serverConfig.homeDir,
       isolationRootDir: serverConfig.stateDir,
     });
+    const effectiveOmpSettings = (
+      providerOptions: ProviderAdapterSessionStartInput["providerOptions"],
+      providerInstanceId: ProviderAdapterSessionStartInput["providerInstanceId"],
+    ): OmpAcpRuntimeSettings => {
+      const providerOmpOptions = providerOptions?.omp;
+      return {
+        ...(ompSettings.binaryPath !== undefined ? { binaryPath: ompSettings.binaryPath } : {}),
+        ...(providerOmpOptions?.binaryPath !== undefined
+          ? { binaryPath: providerOmpOptions.binaryPath }
+          : {}),
+        ...(ompSettings.agentDir !== undefined ? { agentDir: ompSettings.agentDir } : {}),
+        ...(providerOmpOptions?.agentDir !== undefined
+          ? { agentDir: providerOmpOptions.agentDir }
+          : {}),
+        ...ompAccount({
+          environment: providerOmpOptions?.environment,
+          instanceId: providerInstanceId,
+        }),
+      };
+    };
+    const prepareExpertProjection = (input: {
+      readonly cwd: string;
+      readonly settings: OmpAcpRuntimeSettings;
+      readonly expertSession?: ProviderAdapterSessionStartInput["expertSession"];
+      readonly contextSession?: ProviderAdapterSessionStartInput["contextSession"];
+      readonly skills?: ReadonlyArray<ProviderSkillReference>;
+    }) => {
+      const env = buildOmpProcessEnv(input.settings);
+      const binaryPath = resolveOmpCliBinaryPath(input.settings.binaryPath);
+      return prepareOmpExpertSession({
+        cwd: input.cwd,
+        env,
+        ...(input.expertSession ? { expertSession: input.expertSession } : {}),
+        ...(input.contextSession ? { contextSession: input.contextSession } : {}),
+        ...(input.skills ? { skills: input.skills } : {}),
+        runCli: (args, cwd, childEnv) =>
+          runOmpAcpCliCommand({
+            childProcessSpawner,
+            binaryPath,
+            args,
+            cwd,
+            env: childEnv,
+          }),
+      });
+    };
     const collectDiscoveryStreamAsString = <E>(
       stream: Stream.Stream<Uint8Array, E>,
     ): Effect.Effect<string, E> => {
@@ -877,22 +926,28 @@ export function makeOmpAdapter(
             payloadLimit: OMP_ACP_LOG_PAYLOAD_LIMIT,
             shouldMirrorIncomingRaw: () => false,
           });
-          const providerOmpOptions = input.providerOptions?.omp;
           const providerInstanceId = resolveProviderSessionInstanceId(input);
-          const effectiveOmpSettings: OmpAcpRuntimeSettings = {
-            ...(ompSettings.binaryPath !== undefined ? { binaryPath: ompSettings.binaryPath } : {}),
-            ...(providerOmpOptions?.binaryPath !== undefined
-              ? { binaryPath: providerOmpOptions.binaryPath }
-              : {}),
-            ...(ompSettings.agentDir !== undefined ? { agentDir: ompSettings.agentDir } : {}),
-            ...(providerOmpOptions?.agentDir !== undefined
-              ? { agentDir: providerOmpOptions.agentDir }
-              : {}),
-            ...ompAccount({
-              environment: providerOmpOptions?.environment,
-              instanceId: providerInstanceId,
-            }),
-          };
+          const effectiveSettings = effectiveOmpSettings(input.providerOptions, providerInstanceId);
+
+          const expertPreparation =
+            input.expertSession || input.contextSession?.hasContent
+              ? yield* prepareExpertProjection({
+                  cwd,
+                  settings: effectiveSettings,
+                  ...(input.expertSession ? { expertSession: input.expertSession } : {}),
+                  ...(input.contextSession ? { contextSession: input.contextSession } : {}),
+                })
+              : undefined;
+          if (expertPreparation?.issues.length) {
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/start",
+              detail: expertPreparation.issues.join(" "),
+            });
+          }
+          if (expertPreparation) {
+            yield* Scope.addFinalizer(sessionScope, expertPreparation.cleanup());
+          }
 
           yield* Effect.logInfo("omp.acp.start", {
             marker: OMP_ACP_TRANSPORT_DEBUG_MARKER,
@@ -900,11 +955,23 @@ export function makeOmpAdapter(
             threadId: input.threadId,
             cwd,
             resume: resumeSessionId !== undefined,
-            binaryPath: effectiveOmpSettings.binaryPath ?? "omp",
+            binaryPath: effectiveSettings.binaryPath ?? "omp",
           });
 
           const acp = yield* makeOmpAcpRuntime({
-            ompSettings: effectiveOmpSettings,
+            ompSettings: effectiveSettings,
+            ...(expertPreparation
+              ? {
+                  expertSessionSpawn: {
+                    ...(expertPreparation.configOverlayPath
+                      ? { configOverlayPath: expertPreparation.configOverlayPath }
+                      : {}),
+                    ...(expertPreparation.appendSystemPromptPath
+                      ? { appendSystemPromptPath: expertPreparation.appendSystemPromptPath }
+                      : {}),
+                  },
+                }
+              : {}),
             childProcessSpawner,
             cwd,
             ...(resumeSessionId ? { resumeSessionId } : {}),
@@ -1093,6 +1160,9 @@ export function makeOmpAdapter(
           const session: ProviderSession = {
             provider: PROVIDER,
             status: "ready",
+            ...(expertPreparation?.cliVersion
+              ? { runtimeComponent: "omp-cli", runtimeVersion: expertPreparation.cliVersion }
+              : {}),
             runtimeMode: input.runtimeMode,
             cwd,
             model: ompModelSelection?.model,
@@ -1104,6 +1174,19 @@ export function makeOmpAdapter(
             },
             createdAt: now,
             updatedAt: now,
+            ...(input.expertSession && expertPreparation
+              ? {
+                  expertApplication: {
+                    snapshotId: input.expertSession.snapshotId,
+                    projectionVersion: OMP_EXPERT_PROJECTION_VERSION,
+                    instructionsHash: expertPreparation.instructionsHash,
+                    skills: expertPreparation.loadedSkills,
+                  },
+                }
+              : {}),
+            ...(input.contextSession
+              ? { contextAppliedSnapshotId: input.contextSession.snapshotId }
+              : {}),
           };
 
           ctx = {
@@ -2348,6 +2431,20 @@ export function makeOmpAdapter(
     );
 
     const streamEvents = Stream.fromPubSub(runtimeEventPubSub);
+    const previewExpert: NonNullable<OmpAdapterShape["previewExpert"]> = (input) =>
+      Effect.gen(function* () {
+        const cwd = resolveOmpSessionCwd(input.cwd, serverConfig);
+        if (cwd === undefined) {
+          return ["A project cwd is required to verify OMP Expert compatibility."];
+        }
+        const preparation = yield* prepareExpertProjection({
+          cwd,
+          settings: effectiveOmpSettings(input.providerOptions, input.providerInstanceId),
+          skills: input.skills,
+        });
+        yield* preparation.cleanup();
+        return preparation.issues;
+      });
 
     return {
       provider: PROVIDER,
@@ -2355,6 +2452,7 @@ export function makeOmpAdapter(
         sessionModelSwitch: "restart-session",
         conversationRollback: "restart-session",
       },
+      previewExpert,
       startSession,
       sendTurn,
       interruptTurn,

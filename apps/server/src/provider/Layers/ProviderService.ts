@@ -1,3 +1,4 @@
+import { isExpertProvider } from "@synara/shared/expertProviders";
 /**
  * ProviderServiceLive - Cross-provider orchestration layer.
  *
@@ -30,6 +31,7 @@ import {
   ProviderSteerTurnInput,
   ProviderSessionStartInput,
   ProviderExpertSession,
+  ProviderExpertApplication,
   type ExpertAppliedRuntimeRecord,
   ProviderStopSessionInput,
   ProviderStartOptions,
@@ -1009,15 +1011,36 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       expertSession: ProviderExpertSession | undefined,
       session: ProviderSession,
       lifecycleGeneration: string,
+      contextSession?: ContextSessionType,
     ) => {
       if (!expertSession) return Effect.void;
-      if (session.provider !== "codex" && session.provider !== "pi") {
+      if (!isExpertProvider(session.provider)) {
         return Effect.fail(
           toValidationError(
             "ProviderService.startSession",
             `Expert sessions are not supported by provider '${session.provider}'.`,
           ),
         );
+      }
+      if (session.provider === "claudeAgent" || session.provider === "omp") {
+        const application = Schema.is(ProviderExpertApplication)(session.expertApplication)
+          ? session.expertApplication
+          : undefined;
+        const expectedNames = expertSession.skills.map((skill) => skill.name).sort();
+        const loadedNames = application?.skills.map((skill) => skill.name).sort();
+        if (
+          application?.snapshotId !== expertSession.snapshotId ||
+          application.instructionsHash !==
+            sha256(composeRuntimeBaseInstructions(expertSession, contextSession)) ||
+          JSON.stringify(loadedNames) !== JSON.stringify(expectedNames)
+        ) {
+          return Effect.fail(
+            toValidationError(
+              "ProviderService.startSession",
+              `Provider '${session.provider}' did not verify the pinned Expert resources.`,
+            ),
+          );
+        }
       }
       const persist = options?.persistExpertAppliedRuntime;
       if (persist === undefined) return Effect.void;
@@ -1041,12 +1064,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       readonly session: ProviderSession;
       readonly lifecycleGeneration: string;
     }): Effect.Effect<void, ContextRepositoryError | ProviderValidationError> => {
+      const submittedInstructions = composeRuntimeBaseInstructions(
+        input.expertSession,
+        input.contextSession,
+      );
       if (!input.contextSession) return Effect.void;
-      if (
-        input.contextSession.hasContent &&
-        input.session.provider !== "codex" &&
-        input.session.provider !== "pi"
-      ) {
+      if (input.contextSession.hasContent && !isExpertProvider(input.session.provider)) {
         return Effect.fail(
           toValidationError(
             "ProviderService.startSession",
@@ -1054,10 +1077,18 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           ),
         );
       }
-      const submittedInstructions = composeRuntimeBaseInstructions(
-        input.expertSession,
-        input.contextSession,
-      );
+      if (
+        input.contextSession.hasContent &&
+        (input.session.provider === "claudeAgent" || input.session.provider === "omp") &&
+        input.session.contextAppliedSnapshotId !== input.contextSession.snapshotId
+      ) {
+        return Effect.fail(
+          toValidationError(
+            "ProviderService.startSession",
+            `Provider '${input.session.provider}' did not verify the pinned Context.`,
+          ),
+        );
+      }
       const record: ContextAppliedRuntimeRecord = {
         threadId: input.session.threadId,
         snapshotId: input.contextSession.snapshotId,
@@ -1584,6 +1615,28 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         } as const;
       });
 
+    const previewExpert: NonNullable<ProviderServiceShape["previewExpert"]> = (input) =>
+      Effect.gen(function* () {
+        const resolved = yield* resolveLaunchProviderInstance({
+          operation: "ProviderService.previewExpert",
+          provider: input.provider,
+          ...(input.providerInstanceId ? { providerInstanceId: input.providerInstanceId } : {}),
+        });
+        const adapter = yield* getAdapterForInstance(resolved.instance);
+        if (!isExpertProvider(adapter.provider)) return ["The provider does not support Experts."];
+        if (!adapter.previewExpert) {
+          return adapter.provider === "codex" || adapter.provider === "pi"
+            ? []
+            : ["The provider cannot verify Expert compatibility."];
+        }
+        return yield* adapter.previewExpert({
+          ...(input.cwd ? { cwd: input.cwd } : {}),
+          providerInstanceId: resolved.instance.instanceId,
+          ...(resolved.providerOptions ? { providerOptions: resolved.providerOptions } : {}),
+          skills: input.skills,
+        });
+      });
+
     const runIdleSensitiveProviderWork = <A, E, R>(
       threadId: ThreadId,
       effect: Effect.Effect<A, E, R>,
@@ -1792,6 +1845,10 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         runtimePayload: {
           ...toRuntimePayloadFromSession(session, credentialsFingerprintKey, extra),
           ...extra?.runtimePayload,
+          ...(session.expertApplication ? { expertApplication: session.expertApplication } : {}),
+          ...(session.contextAppliedSnapshotId
+            ? { contextAppliedSnapshotId: session.contextAppliedSnapshotId }
+            : {}),
         },
       });
 
@@ -2783,8 +2840,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             }
             if (
               persistedContextSession?.hasContent === true &&
-              binding.provider !== "codex" &&
-              binding.provider !== "pi"
+              !isExpertProvider(binding.provider)
             ) {
               return yield* toValidationError(
                 input.operation,
@@ -2888,6 +2944,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 persistedExpertSession,
                 resumed,
                 lease.generation,
+                persistedContextSession ?? undefined,
               ),
             });
             yield* persistAppliedRuntimeOrRetire({
@@ -3314,7 +3371,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             `Cannot dispatch a turn for thread '${input.threadId}' because its frozen Context differs from the current binding.`,
           );
         }
-        if (providerBinding.provider !== "codex" && providerBinding.provider !== "pi") {
+        if (!isExpertProvider(providerBinding.provider)) {
           return yield* toValidationError(
             input.operation,
             `Cannot dispatch non-empty Context through unsupported provider '${providerBinding.provider}'.`,
@@ -3405,14 +3462,16 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           input.provider,
           input.runtimeMode,
         );
-        if (
-          input.contextSession?.hasContent === true &&
-          input.provider !== "codex" &&
-          input.provider !== "pi"
-        ) {
+        if (input.contextSession?.hasContent === true && !isExpertProvider(input.provider)) {
           return yield* toValidationError(
             "ProviderService.startSession",
             `Non-empty Context is not supported by provider '${input.provider}'.`,
+          );
+        }
+        if (input.expertSession && !isExpertProvider(input.provider)) {
+          return yield* toValidationError(
+            "ProviderService.startSession",
+            `Expert sessions are not supported by provider '${input.provider}'.`,
           );
         }
         yield* validateContextSessionStart(
@@ -3765,6 +3824,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     input.expertSession,
                     session,
                     lease.generation,
+                    input.contextSession,
                   ),
                 });
                 yield* persistAppliedRuntimeOrRetire({
@@ -3846,8 +3906,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               }
               if (
                 previousContextSession?.hasContent === true &&
-                persistedBinding.provider !== "codex" &&
-                persistedBinding.provider !== "pi"
+                !isExpertProvider(persistedBinding.provider)
               ) {
                 return yield* toValidationError(
                   "ProviderService.startSession",
@@ -3966,6 +4025,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                             previousExpertSession ?? undefined,
                             restored,
                             previousGeneration,
+                            previousContextSession ?? undefined,
                           ),
                         });
                         yield* persistAppliedRuntimeOrRetire({
@@ -4252,11 +4312,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           effectiveContextSession,
           "ProviderService.forkThread",
         );
-        if (
-          effectiveContextSession?.hasContent === true &&
-          adapter.provider !== "codex" &&
-          adapter.provider !== "pi"
-        ) {
+        if (effectiveContextSession?.hasContent === true && !isExpertProvider(adapter.provider)) {
           return yield* toValidationError(
             "ProviderService.forkThread",
             `Non-empty Context is not supported by provider '${adapter.provider}'.`,
@@ -4304,7 +4360,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             const forkedSession = (yield* adapter.listSessions()).find(
               (session) => session.threadId === input.threadId,
             );
-            if (effectiveContextSession?.hasContent && !forkedSession) {
+            if (
+              effectiveContextSession?.hasContent &&
+              !forkedSession &&
+              adapter.provider !== "claudeAgent" &&
+              adapter.provider !== "omp"
+            ) {
               return yield* toValidationError(
                 "ProviderService.forkThread",
                 `Provider '${adapter.provider}' acknowledged the fork without an active session to apply Context.`,
@@ -4348,6 +4409,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                   effectiveExpertSession ?? undefined,
                   session,
                   lease.generation,
+                  effectiveContextSession ?? undefined,
                 ),
               });
               yield* persistAppliedRuntimeOrRetire({
@@ -5948,6 +6010,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     yield* Effect.addFinalizer(() => closeRuntimeEvents);
 
     return {
+      previewExpert,
       startSession,
       startSessionWithOutcome,
       getPersistedSessionProfile,

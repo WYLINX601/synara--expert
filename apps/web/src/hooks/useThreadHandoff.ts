@@ -11,6 +11,7 @@ import {
   type ProviderInstanceId,
   type ProviderKind,
 } from "@synara/contracts";
+import { isExpertProvider } from "@synara/shared/expertProviders";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useProviderStatusesForLocalConfig } from "./useProviderStatusesForLocalConfig";
 import { useRefreshProviderStatusesNow } from "./useProviderStatusRefresh";
@@ -113,7 +114,7 @@ export function useThreadHandoff() {
     });
     const expertContinuationAvailable =
       sameProviderExpertContinuation &&
-      (targetProvider === "codex" || targetProvider === "pi") &&
+      isExpertProvider(targetProvider) &&
       targetAvailability.usable &&
       serverSettingsQuery.data?.providers[targetProvider].enabled === true;
     if (!targetAvailability.usable) {

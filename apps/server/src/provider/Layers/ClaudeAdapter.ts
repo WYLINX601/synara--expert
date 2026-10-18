@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import path from "node:path";
+
 import { providerProcessPriorityEnabled } from "../../providerProcessPriority";
 import { claudeTurnResultUsage, type ClaudeResultUsageBaseline } from "../claudeResultUsage.ts";
 import { restoreClaudeImportedCopyDates } from "../claudeImportedCopyDates.ts";
@@ -25,6 +28,8 @@ import type {
   SDKMessage,
   SDKResultMessage,
   SDKControlGetContextUsageResponse,
+  SDKControlInitializeResponse,
+  SDKSystemMessage,
   Settings,
   SettingSource,
   SDKUserMessage,
@@ -84,6 +89,7 @@ import { buildClaudeSubagentPrompt } from "@synara/shared/agentMentions";
 import { assessClaudeCache } from "@synara/shared/claudeCache";
 import { approvalSessionGrantWidensSessionPolicy } from "@synara/shared/approvalSessionGrant";
 import { approvalRequestKindFromRequestType } from "@synara/shared/threadSummary";
+import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { nonEmptyTrimmed } from "@synara/shared/text";
 import {
   claudeCacheContextTokens,
@@ -120,7 +126,10 @@ import {
   shouldAllowSynaraComputerProviderTool,
 } from "../../agentGateway/computerToolPermission.ts";
 import { AgentGatewayCredentials } from "../../agentGateway/Services/AgentGatewayCredentials.ts";
-import { PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY } from "../Services/ProviderAdapter.ts";
+import {
+  PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY,
+  type ProviderExpertCompatibilityInput,
+} from "../Services/ProviderAdapter.ts";
 import {
   acquireAgentGatewaySessionLease,
   cancelAgentGatewayTurn,
@@ -194,6 +203,13 @@ import {
 } from "../Errors.ts";
 import { extractProposedPlanMarkdown, withProviderPlanModePrompt } from "../planMode.ts";
 import { ClaudeAdapter, type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import {
+  CLAUDE_EXPERT_PLUGIN_NAME,
+  CLAUDE_EXPERT_PROJECTION_VERSION,
+  createClaudeExpertProjection,
+  inspectClaudeExpertSkills,
+  type ClaudeExpertProjection,
+} from "../claudeExpertSession.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import {
   teardownChildProcessTree,
@@ -204,7 +220,85 @@ import {
 export { claudeHomeEnvironment } from "../claudeEnvironment.ts";
 
 const PROVIDER = "claudeAgent" as const;
+const MINIMUM_CLAUDE_EXPERT_PLUGIN_CLI_VERSION = "2.1.261";
 const CLAUDE_DISCOVERY_THREAD_ID = ThreadId.makeUnsafe("claude:discovery");
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function validateClaudeExpertInit(
+  message: SDKSystemMessage,
+  projection: ClaudeExpertProjection,
+): ReadonlyArray<string> {
+  const issues: string[] = [];
+  const expectedPath = path.resolve(projection.pluginPath);
+  const loadedPlugin = Array.isArray(message.plugins)
+    ? message.plugins.find((plugin) => path.resolve(message.cwd, plugin.path) === expectedPath)
+    : undefined;
+  if (!loadedPlugin || loadedPlugin.name !== projection.pluginName) {
+    issues.push("Claude Code did not confirm the projected Expert plugin path in native init.");
+  }
+
+  const pluginErrors = Array.isArray(message.plugin_errors) ? message.plugin_errors : [];
+  if (
+    pluginErrors.some((error) => {
+      const pluginName = error.plugin.split("@")[0];
+      const errorPath = error.path ? path.resolve(message.cwd, error.path) : undefined;
+      return (
+        errorPath === expectedPath ||
+        pluginName === projection.pluginName ||
+        pluginName === "inline[0]"
+      );
+    })
+  ) {
+    issues.push("Claude Code reported an error while loading the projected Expert plugin.");
+  }
+
+  const nativeSkills = Array.isArray(message.skills) ? message.skills : [];
+  for (const nativeSkillName of projection.nativeSkillNames) {
+    const alias = nativeSkillName.slice(`${projection.pluginName}:`.length);
+    const skillMatches = nativeSkills.filter(
+      (skill) => skill === nativeSkillName || skill === alias,
+    ).length;
+    if (skillMatches !== 1) {
+      issues.push("Claude Code did not confirm every projected Expert skill in native init.");
+      break;
+    }
+  }
+  return issues;
+}
+
+function validateClaudeExpertInitialization(
+  initialization: SDKControlInitializeResponse,
+  projection: ClaudeExpertProjection,
+): ReadonlyArray<string> {
+  const issues: string[] = [];
+  // In SDK initialize delivery, the CLI acknowledges that every configured
+  // plugin was loaded from the launch-time plugin set. This is the only
+  // pre-prompt evidence available on the supported CLI line; system/init may
+  // not arrive until a user prompt is sent.
+  if (initialization.plugins_applied === undefined) {
+    issues.push(
+      `Claude Code cannot confirm the Expert plugin load from native initialization. Expert skills require Claude Code ${MINIMUM_CLAUDE_EXPERT_PLUGIN_CLI_VERSION} or newer.`,
+    );
+  } else if (!initialization.plugins_applied) {
+    issues.push(
+      "Claude Code native initialization reported that the Expert plugin was not loaded.",
+    );
+  }
+  const commands = Array.isArray(initialization.commands) ? initialization.commands : [];
+  for (const expectedName of projection.nativeSkillNames) {
+    const matches = commands.filter((command) => command.name === expectedName).length;
+    if (matches !== 1) {
+      issues.push(
+        `Claude Code did not confirm Expert skill "${expectedName}" in native initialization.`,
+      );
+    }
+  }
+  return issues;
+}
+
 type ClaudeToolResultStreamKind = Extract<
   RuntimeContentStreamKind,
   "command_output" | "file_change_output"
@@ -254,6 +348,9 @@ interface ClaudeResumeState {
   readonly threadId?: ThreadId;
   readonly resume?: string;
   readonly resumeSessionAt?: string;
+  readonly expertSnapshotId?: string;
+  readonly expertPersonaHash?: string;
+  readonly contextAppliedSnapshotId?: string;
   readonly turnBoundaries?: ReadonlyArray<ClaudeTurnBoundary>;
   readonly turnCount?: number;
   readonly trackedTasks?: ReadonlyArray<ClaudeTrackedTask>;
@@ -418,6 +515,10 @@ interface ClaudeSessionContext {
   readonly artifactsEnabled: boolean;
   // Tool names from Claude's `init` message, once the first turn has produced it.
   initToolNames?: ReadonlySet<string>;
+  readonly expertProjection?: ClaudeExpertProjection;
+  readonly expertSnapshotId?: string;
+  readonly expertPersonaHash?: string;
+  readonly contextAppliedSnapshotId?: string;
   readonly commandDiscoveryKey: string;
   readonly accountDiscoveryKey: string;
   readonly messageStream?: AsyncIterable<SDKMessage>;
@@ -615,6 +716,7 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly getContextUsage: (options?: {
     readonly detail?: "summary" | "full";
   }) => Promise<SDKControlGetContextUsageResponse>;
+  readonly initializationResult?: () => Promise<SDKControlInitializeResponse>;
   readonly supportedCommands: () => Promise<SlashCommand[]>;
   readonly supportedModels: () => Promise<ModelInfo[]>;
   readonly supportedAgents: () => Promise<AgentInfo[]>;
@@ -723,6 +825,34 @@ async function readInstalledClaudeCliVersion(input: {
   });
 }
 
+async function readInstalledClaudeCliHelp(input: {
+  readonly binaryPath: string;
+  readonly cwd?: string;
+  readonly env: NodeJS.ProcessEnv;
+}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execProcessFile(
+      input.binaryPath,
+      ["--help"],
+      {
+        requireExecutable: true,
+        ...(input.cwd ? { cwd: input.cwd } : {}),
+        env: input.env,
+        timeout: 10_000,
+        maxBuffer: 256 * 1024,
+        encoding: "utf8",
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(`${stdout}\n${stderr}`);
+      },
+    );
+  });
+}
+
 export interface ClaudeAdapterLiveOptions {
   // Async because the default implementation lazily imports the Claude Agent
   // SDK; test doubles may still return a runtime synchronously.
@@ -749,6 +879,11 @@ export interface ClaudeAdapterLiveOptions {
     readonly cwd?: string;
     readonly env: NodeJS.ProcessEnv;
   }) => Promise<string | null>;
+  readonly readClaudeCliHelp?: (input: {
+    readonly binaryPath: string;
+    readonly cwd?: string;
+    readonly env: NodeJS.ProcessEnv;
+  }) => Promise<string>;
 }
 
 const CLAUDE_NATIVE_COMMAND_LOOKUP_TIMEOUT_MS = 2_000;
@@ -1197,6 +1332,9 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     resume?: unknown;
     sessionId?: unknown;
     resumeSessionAt?: unknown;
+    expertSnapshotId?: unknown;
+    expertPersonaHash?: unknown;
+    contextAppliedSnapshotId?: unknown;
     turnBoundaries?: unknown;
     turnCount?: unknown;
     trackedTasks?: unknown;
@@ -1237,6 +1375,16 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     ...(threadId ? { threadId } : {}),
     ...(resume ? { resume } : {}),
     ...(resumeSessionAt ? { resumeSessionAt } : {}),
+    ...(typeof cursor.expertSnapshotId === "string" && cursor.expertSnapshotId.trim()
+      ? { expertSnapshotId: cursor.expertSnapshotId }
+      : {}),
+    ...(typeof cursor.expertPersonaHash === "string" && cursor.expertPersonaHash.trim()
+      ? { expertPersonaHash: cursor.expertPersonaHash }
+      : {}),
+    ...(typeof cursor.contextAppliedSnapshotId === "string" &&
+    cursor.contextAppliedSnapshotId.trim()
+      ? { contextAppliedSnapshotId: cursor.contextAppliedSnapshotId }
+      : {}),
     ...(turnBoundaries.length > 0 ? { turnBoundaries } : {}),
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
@@ -2381,6 +2529,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
     };
     const teardownProcessTree = options?.teardownProcessTree ?? teardownProviderProcessTree;
     const readClaudeCliVersion = options?.readClaudeCliVersion ?? readInstalledClaudeCliVersion;
+    const readClaudeCliHelp = options?.readClaudeCliHelp ?? readInstalledClaudeCliHelp;
 
     const sessions = new Map<ThreadId, ClaudeSessionContext>();
     const failedStartupProcessOwners = new Map<ThreadId, ClaudeProcessOwner>();
@@ -2643,6 +2792,15 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(context.cacheObservation ? { claudeCache: context.cacheObservation } : {}),
           threadId,
           ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
+          ...(context.expertSnapshotId && context.expertPersonaHash
+            ? {
+                expertSnapshotId: context.expertSnapshotId,
+                expertPersonaHash: context.expertPersonaHash,
+              }
+            : {}),
+          ...(context.contextAppliedSnapshotId
+            ? { contextAppliedSnapshotId: context.contextAppliedSnapshotId }
+            : {}),
           ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
           ...(context.turnBoundaries.length > 0
             ? { turnBoundaries: [...context.turnBoundaries] }
@@ -5384,7 +5542,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
     const handleSystemMessage = (
       context: ClaudeSessionContext,
       message: SDKMessage,
-    ): Effect.Effect<void> =>
+    ): Effect.Effect<void, ProviderAdapterProcessError> =>
       Effect.gen(function* () {
         if (message.type !== "system") {
           return;
@@ -5603,8 +5761,25 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
 
         switch (message.subtype) {
           case "init":
+            context.session = {
+              ...context.session,
+              runtimeComponent: "claude-code-cli",
+              ...(message.claude_code_version
+                ? { runtimeVersion: message.claude_code_version }
+                : {}),
+            };
             if (Array.isArray(message.tools)) {
               context.initToolNames = new Set(message.tools);
+            }
+            if (context.expertProjection) {
+              const issues = validateClaudeExpertInit(message, context.expertProjection);
+              if (issues.length > 0) {
+                return yield* new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: String(context.session.threadId),
+                  detail: issues.join(" "),
+                });
+              }
             }
             context.lastFastModeSignature = claudeFastModeSignature(message);
             yield* offerRuntimeEvent(context, {
@@ -6594,7 +6769,9 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           )
         : Effect.succeed(undefined);
 
-    // Keep version/binary validation ahead of retirement for permission Auto.
+    // Capture the binary version when Auto, Expert, or non-empty Context needs
+    // a runtime receipt. Ordinary sessions keep their existing startup path
+    // and rely on the native init version when the first turn arrives.
     const resolveClaudeStartPreflight = (
       input: Parameters<ClaudeAdapterShape["startSession"]>[0],
     ) =>
@@ -6604,23 +6781,36 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           input.providerOptions?.claudeAgent?.environment,
           input.providerInstanceId,
         );
-        if (input.runtimeMode !== "auto") return { claudeSdkEnv, snapshotSupported: false };
         const binaryPath = input.providerOptions?.claudeAgent?.binaryPath ?? "claude";
-        const installedVersion = yield* Effect.tryPromise({
-          try: () =>
-            readClaudeCliVersion({
-              binaryPath,
-              ...(input.cwd ? { cwd: input.cwd } : {}),
-              env: claudeSdkEnv,
-            }),
-          catch: (cause) =>
-            new ProviderAdapterValidationError({
-              provider: PROVIDER,
-              operation: "startSession",
-              issue: `Could not verify Auto mode support for Claude CLI at "${binaryPath}": ${toMessage(cause, "version probe failed")}`,
-            }),
-        });
-        if (!isClaudeAutoModeCliVersionSupported(installedVersion)) {
+        const versionProbe = {
+          binaryPath,
+          ...(input.cwd ? { cwd: input.cwd } : {}),
+          env: claudeSdkEnv,
+        };
+        const needsVersion =
+          input.runtimeMode === "auto" ||
+          input.expertSession !== undefined ||
+          input.contextSession?.hasContent === true;
+        const installedVersion = !needsVersion
+          ? undefined
+          : input.runtimeMode === "auto"
+            ? yield* Effect.tryPromise({
+                try: () => readClaudeCliVersion(versionProbe),
+                catch: (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue: `Could not verify Auto mode support for Claude CLI at "${binaryPath}": ${toMessage(cause, "version probe failed")}`,
+                  }),
+              })
+            : yield* Effect.tryPromise({
+                try: () => readClaudeCliVersion(versionProbe),
+                catch: () => null,
+              }).pipe(Effect.orElseSucceed(() => null));
+        if (
+          input.runtimeMode === "auto" &&
+          !isClaudeAutoModeCliVersionSupported(installedVersion ?? null)
+        ) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,
             operation: "startSession",
@@ -6632,10 +6822,57 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         }
         return {
           claudeSdkEnv,
+          detectedCliVersion: installedVersion ?? null,
           snapshotSupported:
-            installedVersion !== null && compareSemverVersions(installedVersion, "2.1.267") >= 0,
+            input.runtimeMode === "auto" &&
+            typeof installedVersion === "string" &&
+            compareSemverVersions(installedVersion, "2.1.267") >= 0,
         };
       });
+
+    const inspectExpertCompatibility = async (
+      input: ProviderExpertCompatibilityInput & { readonly skillsRoot?: string },
+      claudeSdkEnv: NodeJS.ProcessEnv,
+      preReadCliVersion?: string | null,
+    ): Promise<{ readonly issues: ReadonlyArray<string>; readonly cliVersion?: string }> => {
+      const inspection = await inspectClaudeExpertSkills({
+        skills: input.skills,
+        ...(input.skillsRoot !== undefined ? { skillsRoot: input.skillsRoot } : {}),
+      });
+      const issues = [...inspection.issues];
+      if (input.skills.length === 0) return { issues };
+
+      const binaryPath = input.providerOptions?.claudeAgent?.binaryPath ?? "claude";
+      const probeInput = {
+        binaryPath,
+        ...(input.cwd ? { cwd: input.cwd } : {}),
+        env: claudeSdkEnv,
+      };
+      const [installedVersion, help] = await Promise.all([
+        preReadCliVersion === undefined
+          ? readClaudeCliVersion(probeInput).catch(() => null)
+          : Promise.resolve(preReadCliVersion),
+        readClaudeCliHelp(probeInput).catch(() => ""),
+      ]);
+      if (!installedVersion || !parseGenericCliVersion(installedVersion)) {
+        issues.push("Could not determine a supported Claude Code CLI version for Expert skills.");
+      } else if (
+        compareSemverVersions(installedVersion, MINIMUM_CLAUDE_EXPERT_PLUGIN_CLI_VERSION) < 0
+      ) {
+        issues.push(
+          `Claude Code CLI ${installedVersion} cannot verify Expert plugin loading before the first prompt; upgrade to ${MINIMUM_CLAUDE_EXPERT_PLUGIN_CLI_VERSION} or newer.`,
+        );
+      }
+      if (!/(^|\s)--plugin-dir(?:\s|$)/mu.test(help)) {
+        issues.push("The configured Claude Code CLI does not advertise plugin directory support.");
+      }
+      return {
+        issues,
+        ...(installedVersion && parseGenericCliVersion(installedVersion)
+          ? { cliVersion: installedVersion }
+          : {}),
+      };
+    };
 
     const prepareSessionReplacement: NonNullable<
       ClaudeAdapterShape["prepareSessionReplacement"]
@@ -6705,6 +6942,23 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         const resumeState = readClaudeResumeState(input.resumeCursor);
         const threadId = input.threadId;
         const existingResumeSessionId = resumeState?.resume;
+        const expertPersonaHash = input.expertSession
+          ? sha256(input.expertSession.persona)
+          : undefined;
+        if (
+          existingResumeSessionId &&
+          (resumeState?.expertSnapshotId !== input.expertSession?.snapshotId ||
+            resumeState?.expertPersonaHash !== expertPersonaHash ||
+            resumeState?.contextAppliedSnapshotId !==
+              (input.contextSession?.hasContent ? input.contextSession.snapshotId : undefined))
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue:
+              "Claude cannot resume a native session with a different or unverified Expert or Context configuration. Start a new provider session to apply the selected configuration.",
+          });
+        }
         const newSessionId =
           existingResumeSessionId === undefined ? yield* Random.nextUUIDv4 : undefined;
         const sessionId = existingResumeSessionId ?? newSessionId;
@@ -7216,8 +7470,76 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(ultracode ? { ultracode: true } : {}),
         };
         const claudeSubagents = buildClaudeSdkSubagents();
-        const { claudeSdkEnv, snapshotSupported } =
+        const { claudeSdkEnv, snapshotSupported, detectedCliVersion } =
           preflight ?? (yield* resolveClaudeStartPreflight(input));
+        let expertProjection: ClaudeExpertProjection | undefined;
+        let expertCliVersion: string | undefined;
+        if (input.expertSession?.skills.length) {
+          const expertSession = input.expertSession;
+          const skillsRoot = expertSession.skillsRoot;
+          if (!skillsRoot) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: "Claude Expert skills require an immutable snapshot skills root.",
+            });
+          }
+          const compatibility = yield* Effect.tryPromise({
+            try: () =>
+              inspectExpertCompatibility(
+                {
+                  ...(input.cwd ? { cwd: input.cwd } : {}),
+                  ...(providerInstanceId ? { providerInstanceId } : {}),
+                  ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
+                  skills: expertSession.skills,
+                  skillsRoot,
+                },
+                claudeSdkEnv,
+                detectedCliVersion,
+              ),
+            catch: () =>
+              new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "startSession",
+                issue: "Claude Expert skill compatibility could not be verified.",
+              }),
+          });
+          if (compatibility.issues.length > 0) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: compatibility.issues.join(" "),
+            });
+          }
+          expertCliVersion = compatibility.cliVersion;
+          expertProjection = yield* Effect.tryPromise({
+            try: () =>
+              createClaudeExpertProjection({
+                outputRoot: path.join(serverConfig.stateDir, "claude-expert"),
+                snapshotId: expertSession.snapshotId,
+                skillsRoot,
+                skills: expertSession.skills,
+              }),
+            catch: () =>
+              new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "startSession",
+                issue: "Claude could not create a skills-only Expert projection from its snapshot.",
+              }),
+          });
+        }
+        const baseInstructions =
+          composeProviderBaseInstructions({
+            expertPersona: input.expertSession?.persona,
+            contextInstructions: input.contextSession?.hasContent
+              ? input.contextSession.text
+              : undefined,
+          }) ?? "";
+        const expertInstructionsHash = sha256(baseInstructions);
+        const nativePromptAppend = buildEmbeddedClaudeSystemPromptAppend(
+          agentGatewayCredentials !== undefined,
+          input.enableComputerControl === true,
+        );
         const failedStartupProcessOwner = failedStartupProcessOwners.get(threadId);
         if (failedStartupProcessOwner) {
           // A prior createQuery failure may have happened after spawning. Do
@@ -7248,10 +7570,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           systemPrompt: {
             type: "preset",
             preset: "claude_code",
-            append: buildEmbeddedClaudeSystemPromptAppend(
-              agentGatewayCredentials !== undefined,
-              input.enableComputerControl === true,
-            ),
+            append: [baseInstructions, nativePromptAppend].filter(Boolean).join("\n\n"),
             // Strip per-user dynamic sections (working directory, auto-memory
             // path) into the first user message so the cached system-prompt
             // prefix stays static across sessions and users. Tradeoff: that
@@ -7260,6 +7579,12 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             ...(snapshotSupported ? { snapshot: true } : {}),
           },
           ...(Object.keys(claudeSubagents).length > 0 ? { agents: claudeSubagents } : {}),
+          ...(expertProjection
+            ? {
+                plugins: [{ type: "local" as const, path: expertProjection.pluginPath }],
+                pluginDelivery: "initialize" as const,
+              }
+            : {}),
           // Only `max` effort is spawn-fixed; every other level rides in
           // `settings.effortLevel` so it can change live mid-session.
           ...(effectiveEffort === "max" ? { effort: "max" as const } : {}),
@@ -7392,12 +7717,18 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                   : {}),
               }
             : undefined;
+          const requiresInitializationHandshake =
+            input.expertSession !== undefined || input.contextSession?.hasContent === true;
           const session: ProviderSession = {
             threadId,
             provider: PROVIDER,
             ...(providerInstanceId ? { providerInstanceId } : {}),
             status: "ready",
             runtimeMode: input.runtimeMode,
+            runtimeComponent: "claude-code-cli",
+            ...((expertCliVersion ?? detectedCliVersion)
+              ? { runtimeVersion: expertCliVersion ?? detectedCliVersion! }
+              : {}),
             ...(input.cwd ? { cwd: input.cwd } : {}),
             ...(modelSelection?.model ? { model: modelSelection.model } : {}),
             ...(threadId ? { threadId } : {}),
@@ -7405,6 +7736,15 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               ...(initialCacheObservation ? { claudeCache: initialCacheObservation } : {}),
               ...(threadId ? { threadId } : {}),
               ...(existingResumeSessionId ? { resume: existingResumeSessionId } : {}),
+              ...(input.expertSession && expertPersonaHash
+                ? {
+                    expertSnapshotId: input.expertSession.snapshotId,
+                    expertPersonaHash,
+                  }
+                : {}),
+              ...(input.contextSession?.hasContent
+                ? { contextAppliedSnapshotId: input.contextSession.snapshotId }
+                : {}),
               ...(resumeState?.resumeSessionAt
                 ? { resumeSessionAt: resumeState.resumeSessionAt }
                 : {}),
@@ -7419,6 +7759,20 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             },
             createdAt: startedAt,
             updatedAt: startedAt,
+            ...(input.expertSession
+              ? {
+                  expertApplication: {
+                    snapshotId: input.expertSession.snapshotId,
+                    projectionVersion:
+                      expertProjection?.projectionVersion ?? CLAUDE_EXPERT_PROJECTION_VERSION,
+                    instructionsHash: expertInstructionsHash,
+                    skills: expertProjection?.skills ?? [],
+                  },
+                }
+              : {}),
+            ...(input.contextSession?.hasContent
+              ? { contextAppliedSnapshotId: input.contextSession.snapshotId }
+              : {}),
           };
 
           const context: ClaudeSessionContext = {
@@ -7426,6 +7780,16 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             ...(existingResumeSessionId ? { resultUsageMayIncludeResumedTotals: true } : {}),
             ...(gatewaySessionLease ? { gatewaySessionLease } : {}),
             session,
+            ...(expertProjection ? { expertProjection } : {}),
+            ...(input.expertSession && expertPersonaHash
+              ? {
+                  expertSnapshotId: input.expertSession.snapshotId,
+                  expertPersonaHash,
+                }
+              : {}),
+            ...(input.contextSession?.hasContent
+              ? { contextAppliedSnapshotId: input.contextSession.snapshotId }
+              : {}),
             artifactsEnabled: providerOptions?.enableArtifacts === true,
             ...(input.lifecycleGeneration !== undefined
               ? { lifecycleGeneration: input.lifecycleGeneration }
@@ -7580,6 +7944,65 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             });
           });
 
+          const installedContext = installationContext;
+          if (installedContext && requiresInitializationHandshake) {
+            const initializationResult = installedContext.query.initializationResult;
+            if (!initializationResult) {
+              return yield* new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "startSession",
+                issue: "Claude native initialization details could not be verified.",
+              });
+            }
+            const initialization = yield* Effect.tryPromise({
+              try: () => initializationResult.call(installedContext.query),
+              catch: () =>
+                new ProviderAdapterValidationError({
+                  provider: PROVIDER,
+                  operation: "startSession",
+                  issue: "Claude native initialization handshake failed.",
+                }),
+            }).pipe(
+              Effect.timeoutOrElse({
+                duration: Duration.seconds(30),
+                onTimeout: () =>
+                  Effect.fail(
+                    new ProviderAdapterValidationError({
+                      provider: PROVIDER,
+                      operation: "startSession",
+                      issue: "Claude native initialization handshake timed out.",
+                    }),
+                  ),
+              }),
+            );
+            if (installedContext.expertProjection) {
+              const issues = validateClaudeExpertInitialization(
+                initialization,
+                installedContext.expertProjection,
+              );
+              if (issues.length > 0) {
+                return yield* new ProviderAdapterValidationError({
+                  provider: PROVIDER,
+                  operation: "startSession",
+                  issue: issues.join(" "),
+                });
+              }
+            }
+            const runtimeVersion = initialization.claude_code_version ?? detectedCliVersion;
+            if (!runtimeVersion) {
+              return yield* new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "startSession",
+                issue: "Claude native initialization did not report a verifiable CLI version.",
+              });
+            }
+            installedContext.session = {
+              ...installedContext.session,
+              runtimeComponent: "claude-code-cli",
+              runtimeVersion,
+            };
+          }
+
           installationComplete = true;
           return {
             ...context.session,
@@ -7614,6 +8037,32 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
 
     const startSession: ClaudeAdapterShape["startSession"] = (input) =>
       withSessionLifecycleLock(input.threadId, startSessionUnlocked(input));
+
+    const previewExpert: NonNullable<ClaudeAdapterShape["previewExpert"]> = (input) =>
+      Effect.gen(function* () {
+        const claudeOptions = input.providerOptions?.claudeAgent;
+        const claudeSdkEnv = yield* resolveClaudeSdkEnv(
+          claudeOptions?.homePath,
+          claudeOptions?.environment,
+          input.providerInstanceId,
+        );
+        const compatibility = yield* Effect.tryPromise({
+          try: () => inspectExpertCompatibility(input, claudeSdkEnv),
+          catch: () =>
+            new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "previewExpert",
+              issue: "Claude Expert compatibility could not be verified.",
+            }),
+        }).pipe(
+          Effect.catch(() =>
+            Effect.succeed({
+              issues: ["Claude Expert compatibility could not be verified."],
+            }),
+          ),
+        );
+        return compatibility.issues;
+      });
 
     const getClaudeCacheObservation: NonNullable<
       ClaudeAdapterShape["getClaudeCacheObservation"]
@@ -8426,6 +8875,28 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           });
         }
         const sourceState = readClaudeResumeState(input.sourceResumeCursor);
+        const sourceExpertSnapshotId =
+          liveSource?.expertSnapshotId ?? sourceState?.expertSnapshotId;
+        const sourceExpertPersonaHash =
+          liveSource?.expertPersonaHash ?? sourceState?.expertPersonaHash;
+        const sourceContextSnapshotId =
+          liveSource?.contextAppliedSnapshotId ?? sourceState?.contextAppliedSnapshotId;
+        const targetExpertPersonaHash = input.expertSession
+          ? sha256(input.expertSession.persona)
+          : undefined;
+        if (
+          sourceExpertSnapshotId !== input.expertSession?.snapshotId ||
+          sourceExpertPersonaHash !== targetExpertPersonaHash ||
+          sourceContextSnapshotId !==
+            (input.contextSession?.hasContent ? input.contextSession.snapshotId : undefined)
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "forkThread",
+            issue:
+              "The source Claude session's verified Expert or Context differs from the fork configuration; Synara will rebuild the fork from its retained transcript.",
+          });
+        }
         const sourceSessionId = liveSource?.resumeSessionId ?? sourceState?.resume;
         if (!sourceSessionId) {
           return yield* new ProviderAdapterValidationError({
@@ -8564,6 +9035,15 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         const resumeCursor = {
           threadId: input.threadId,
           resume: forked.sessionId,
+          ...(input.expertSession && targetExpertPersonaHash
+            ? {
+                expertSnapshotId: input.expertSession.snapshotId,
+                expertPersonaHash: targetExpertPersonaHash,
+              }
+            : {}),
+          ...(input.contextSession?.hasContent
+            ? { contextAppliedSnapshotId: input.contextSession.snapshotId }
+            : {}),
           turnCount: Math.max(liveSource?.turns.length ?? 0, sourceState?.turnCount ?? 0),
           processedTokenTotal: 0,
           tokenAccountingVersion: 1,
@@ -8996,6 +9476,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         supportsForkThroughTurn: true,
       },
       startSession,
+      previewExpert,
       didResumeSession,
       prepareSessionReplacement,
       getClaudeCacheObservation,

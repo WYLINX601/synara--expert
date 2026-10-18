@@ -58,6 +58,21 @@ describe("buildOmpAcpSpawnInput", () => {
     expect(spawn.env).toBeDefined();
   });
 
+  it("passes per-session read-only projection paths after the ACP command", () => {
+    const spawn = buildOmpAcpSpawnInput({ binaryPath: "/usr/local/bin/omp" }, "/tmp/project", {
+      configOverlayPath: "/tmp/synara-omp/config.yml",
+      appendSystemPromptPath: "/tmp/synara-omp/APPEND_SYSTEM.md",
+    });
+    expect(spawn.args).toEqual([
+      "acp",
+      "--config",
+      "/tmp/synara-omp/config.yml",
+      "--append-system-prompt",
+      "/tmp/synara-omp/APPEND_SYSTEM.md",
+    ]);
+    expect(spawn.cwd).toBe("/tmp/project");
+  });
+
   it("passes a configured agent dir through PI_CODING_AGENT_DIR", () => {
     const spawn = buildOmpAcpSpawnInput({ agentDir: "/profiles/work" }, "/tmp/project");
     expect(spawn.env?.PI_CODING_AGENT_DIR).toBe("/profiles/work");

@@ -27,6 +27,7 @@ import type {
   ProviderReadPluginResult,
   ProviderListSkillsResult,
   ProviderListSkillsInput,
+  ProviderSkillReference,
   ProviderInstanceId,
   ProviderStartReviewInput,
   ProviderUserInputAnswers,
@@ -144,12 +145,23 @@ export type ProviderAdapterSessionStartInput = ProviderSessionStartInput &
 export type ProviderAdapterForkThreadInput = ProviderForkThreadInput &
   ProviderContinuationLaunchRequirements;
 
+/** Read-only checks against the same instance settings used for startup. */
+export interface ProviderExpertCompatibilityInput {
+  readonly cwd?: string;
+  readonly providerInstanceId?: ProviderInstanceId;
+  readonly providerOptions?: ProviderStartOptions;
+  readonly skills: ReadonlyArray<ProviderSkillReference>;
+}
+
 export interface ProviderAdapterShape<TError> {
   /**
    * Provider kind implemented by this adapter.
    */
   readonly provider: ProviderKind;
   readonly capabilities: ProviderAdapterCapabilities;
+  readonly previewExpert?: (
+    input: ProviderExpertCompatibilityInput,
+  ) => Effect.Effect<ReadonlyArray<string>, TError>;
 
   /**
    * Start a provider-backed session.

@@ -15,11 +15,12 @@ import {
   type ProviderModelDescriptor,
   OMP_THINKING_LEVEL_OPTIONS,
 } from "@synara/contracts";
-import { Effect, Layer, Scope, ServiceMap } from "effect";
+import { Effect, Layer, Option, Scope, ServiceMap, Stream } from "effect";
 import * as AcpErrors from "./AcpErrors.ts";
 import type * as Acp from "@agentclientprotocol/sdk";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
+import { makeEffectProcessCommand } from "../../platform/effectProcessRuntime.ts";
 import { expandProviderAccountHomePath } from "../../providerAccountHomePath.ts";
 import { buildProviderChildEnvironment } from "../../providerChildEnvironment.ts";
 import { buildProviderProcessEnv } from "../providerProcessEnv.ts";
@@ -127,6 +128,92 @@ export interface OmpAcpRuntimeInput extends Omit<
 > {
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly ompSettings: OmpAcpRuntimeSettings | null | undefined;
+  readonly expertSessionSpawn?: OmpAcpExpertSessionSpawnOptions;
+}
+
+export interface OmpAcpExpertSessionSpawnOptions {
+  readonly configOverlayPath?: string;
+  readonly appendSystemPromptPath?: string;
+}
+
+export interface OmpAcpCliCommandResult {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number;
+}
+
+const OMP_EXPERT_CLI_TIMEOUT_MS = 30_000;
+const OMP_EXPERT_CLI_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
+
+function collectOmpCliOutput(
+  stream: Stream.Stream<Uint8Array, unknown>,
+): Effect.Effect<string, Error> {
+  const decoder = new TextDecoder();
+  let text = "";
+  let byteCount = 0;
+  let exceeded = false;
+  return Stream.runForEach(stream, (chunk) =>
+    Effect.sync(() => {
+      byteCount += chunk.byteLength;
+      if (byteCount > OMP_EXPERT_CLI_MAX_OUTPUT_BYTES) {
+        exceeded = true;
+        return;
+      }
+      text += decoder.decode(chunk, { stream: true });
+    }),
+  ).pipe(
+    Effect.mapError((cause) =>
+      cause instanceof Error ? cause : new Error("OMP compatibility command stream failed."),
+    ),
+    Effect.andThen(
+      Effect.suspend(() => {
+        text += decoder.decode();
+        return exceeded
+          ? Effect.fail(new Error("OMP compatibility command output exceeded the safety limit."))
+          : Effect.succeed(text);
+      }),
+    ),
+  );
+}
+
+/** Runs a read-only OMP CLI probe under the exact account environment used by ACP. */
+export function runOmpAcpCliCommand(input: {
+  readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
+  readonly binaryPath: string;
+  readonly args: ReadonlyArray<string>;
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+}): Effect.Effect<OmpAcpCliCommandResult, Error> {
+  const scoped = Effect.scoped(
+    Effect.gen(function* () {
+      const command = makeEffectProcessCommand(input.binaryPath, [...input.args], {
+        cwd: input.cwd,
+        env: input.env,
+        stdin: "ignore",
+      });
+      const child = yield* input.childProcessSpawner.spawn(command);
+      yield* Effect.addFinalizer(() => child.kill().pipe(Effect.ignore));
+      const [stdout, stderr, exitCode] = yield* Effect.all(
+        [
+          collectOmpCliOutput(child.stdout),
+          collectOmpCliOutput(child.stderr),
+          child.exitCode.pipe(Effect.map(Number)),
+        ],
+        { concurrency: "unbounded" },
+      );
+      return { stdout, stderr, exitCode } satisfies OmpAcpCliCommandResult;
+    }),
+  );
+
+  return scoped.pipe(
+    Effect.timeoutOption(OMP_EXPERT_CLI_TIMEOUT_MS),
+    Effect.flatMap(
+      Option.match({
+        onNone: () => Effect.fail(new Error("OMP compatibility command timed out.")),
+        onSome: Effect.succeed,
+      }),
+    ),
+  );
 }
 
 export interface OmpAcpModelSelectionErrorContext {
@@ -182,10 +269,18 @@ export function resolveOmpCliBinaryPath(
 export function buildOmpAcpSpawnInput(
   ompSettings: OmpAcpRuntimeSettings | null | undefined,
   cwd: string,
+  expertSessionSpawn?: OmpAcpExpertSessionSpawnOptions,
 ): AcpSpawnInput {
+  const args = ["acp"];
+  if (expertSessionSpawn?.configOverlayPath) {
+    args.push("--config", expertSessionSpawn.configOverlayPath);
+  }
+  if (expertSessionSpawn?.appendSystemPromptPath) {
+    args.push("--append-system-prompt", expertSessionSpawn.appendSystemPromptPath);
+  }
   return {
     command: resolveOmpCliBinaryPath(ompSettings?.binaryPath),
-    args: ["acp"],
+    args,
     cwd,
     env: buildOmpProcessEnv(ompSettings ?? {}),
   };
@@ -217,7 +312,7 @@ export const makeOmpAcpRuntime = (
     const acpContext = yield* Layer.build(
       AcpSessionRuntime.layer({
         ...input,
-        spawn: buildOmpAcpSpawnInput(input.ompSettings, input.cwd),
+        spawn: buildOmpAcpSpawnInput(input.ompSettings, input.cwd, input.expertSessionSpawn),
         resolveAuthMethodId: (initializeResult) =>
           resolveOmpAcpAuthMethodId(initializeResult, input.ompSettings?.agentDir),
         authenticateMeta: { headless: true },

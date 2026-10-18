@@ -4985,6 +4985,8 @@ export default function ChatView({
   const composerExpertPreview = useExpertComposerPreview(
     composerExpertId,
     selectedProvider,
+    selectedModelSelection.instanceId,
+    threadWorkspaceCwd,
     isLocalDraftThread && Boolean(composerExpertId),
   );
   const composerExpertSendBlocked =
@@ -6905,6 +6907,10 @@ export default function ChatView({
                 threadId={activeThread.id}
                 binding={activeThread.expertBinding}
                 provider={activeThread.session?.provider ?? activeThread.modelSelection.provider}
+                {...(activeThreadProviderInstanceId
+                  ? { providerInstanceId: activeThreadProviderInstanceId }
+                  : {})}
+                cwd={threadWorkspaceCwd}
                 model={activeThread.modelSelection.model}
                 canContinue={!handoffDisabled}
                 onContinue={async (expertId) => {

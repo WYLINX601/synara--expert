@@ -459,6 +459,10 @@
     "./keybindingRules": {
       "types": "./src/keybindingRules.ts",
       "import": "./src/keybindingRules.ts"
+    },
+    "./expertProviders": {
+      "types": "./src/expertProviders.ts",
+      "import": "./src/expertProviders.ts"
     }
   },
   "scripts": {

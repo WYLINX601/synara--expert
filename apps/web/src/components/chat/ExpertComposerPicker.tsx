@@ -1,30 +1,37 @@
-import { type ExpertDefinition, type ExpertPreview, type ProviderKind } from "@synara/contracts";
+import {
+  type ExpertDefinition,
+  type ExpertPreview,
+  type ProviderInstanceId,
+  type ProviderKind,
+} from "@synara/contracts";
 import { useQuery } from "@tanstack/react-query";
+import { isExpertProvider } from "@synara/shared/expertProviders";
 
 import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { CheckIcon, ChevronDownIcon } from "~/lib/icons";
 import { Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuTrigger } from "../ui/menu";
+import { expertPreviewQueryKey } from "../settings/expertSettingsQueries";
 import { ComposerPickerMenuPopup } from "./ComposerPickerMenuPopup";
 import { COMPOSER_TOOLBAR_PICKER_TRIGGER_CLASS_NAME } from "./composerPickerStyles";
 
 const EXPERTS_QUERY_KEY = ["server", "experts"] as const;
 
-function isPreviewProvider(provider: ProviderKind): provider is "codex" | "pi" {
-  return provider === "codex" || provider === "pi";
-}
-
 export function useExpertComposerPreview(
   expertId: string | undefined,
   provider: ProviderKind,
+  providerInstanceId: ProviderInstanceId | undefined,
+  cwd: string | null | undefined,
   enabled: boolean,
 ) {
-  const previewProvider = isPreviewProvider(provider) ? provider : null;
+  const previewProvider = isExpertProvider(provider) ? provider : null;
   const query = useQuery({
-    queryKey: [...EXPERTS_QUERY_KEY, "preview", expertId ?? null, provider],
+    queryKey: expertPreviewQueryKey(expertId ?? "", 0, provider, providerInstanceId, cwd),
     queryFn: () =>
       ensureExpertClient().previewExpert({
         expertId: expertId ?? "",
         provider: previewProvider ?? "codex",
+        ...(providerInstanceId ? { providerInstanceId } : {}),
+        ...(cwd ? { cwd } : {}),
       }),
     enabled: Boolean(enabled && expertId && previewProvider),
     staleTime: 10_000,

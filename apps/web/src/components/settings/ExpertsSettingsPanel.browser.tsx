@@ -235,6 +235,30 @@ beforeEach(() => {
 });
 
 describe("ExpertsSettingsPanel browser interactions", () => {
+  it("offers Claude and Oh My Pi as expert preferred providers", async () => {
+    const { close } = await mountPanel("/settings?expertId=planner");
+    await page.getByRole("tab", { name: "设置", exact: true }).click();
+    const provider = page.getByRole("combobox", { name: "专家首选 Provider", exact: true });
+
+    for (const [providerId, displayName] of [
+      ["claudeAgent", "Claude"],
+      ["omp", "Oh My Pi"],
+    ] as const) {
+      await provider.click();
+      await page.getByRole("option", { name: displayName, exact: true }).click();
+      await expect.element(provider).toHaveTextContent(displayName);
+      await page.getByRole("button", { name: "保存更改", exact: true }).click();
+      await expect
+        .poll(() => harness.server.saveExpert.mock.calls.length)
+        .toBe(providerId === "claudeAgent" ? 1 : 2);
+      expect(harness.server.saveExpert.mock.calls.at(-1)?.[0]).toMatchObject({
+        preferredProvider: providerId,
+      });
+    }
+
+    await close();
+  });
+
   it("grows compact instructions with content and preserves independent fields across tabs and save", async () => {
     const { close } = await mountPanel("/settings?expertId=planner");
     const persona = page.getByRole("textbox", { name: "专家角色与工作方式" });
@@ -846,6 +870,74 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     expect(harness.server.testExpertConnection).not.toHaveBeenCalled();
     await view.unmount();
     queryClient.clear();
+  });
+
+  it("previews Claude and Oh My Pi using the active provider instance and cwd", async () => {
+    for (const [provider, providerInstanceId] of [
+      ["claudeAgent", "claude-work"],
+      ["omp", "omp-work"],
+    ] as const) {
+      harness.server.previewExpert.mockClear();
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false, gcTime: 0 } },
+      });
+      harness.server.readExpertSnapshot.mockResolvedValue({
+        snapshotId: "snapshot-planner-v7",
+        expertId: "planner",
+        revision: 7,
+        displayName: "规划专家",
+        description: "帮助规划任务",
+        useCases: "",
+        persona: "先澄清目标",
+        outputRequirements: "",
+        skills: [],
+        references: [],
+        connections: [],
+        skillsRoot: "/skills",
+        createdAt: "2026-10-03T00:00:00.000Z",
+      } as never);
+      const onContinue = vi.fn(async () => {});
+      const view = await render(
+        <QueryClientProvider client={queryClient}>
+          <ExpertTaskControl
+            threadId={"thread-1" as never}
+            binding={
+              {
+                snapshotId: "snapshot-planner-v7",
+                expertId: "planner",
+                revision: 7,
+                displayName: "规划专家",
+              } as never
+            }
+            provider={provider as never}
+            providerInstanceId={providerInstanceId as never}
+            cwd="/workspace/project"
+            model="test-model"
+            canContinue
+            onContinue={onContinue}
+          />
+        </QueryClientProvider>,
+      );
+
+      await page.getByRole("button", { name: "规划专家", exact: true }).click();
+      await page.getByRole("button", { name: "规划专家 · v7", exact: true }).click();
+      await expect.poll(() => harness.server.previewExpert.mock.calls.length).toBe(1);
+      expect(harness.server.previewExpert).toHaveBeenLastCalledWith({
+        expertId: "planner",
+        provider,
+        providerInstanceId,
+        cwd: "/workspace/project",
+      });
+      await expect.element(page.getByRole("button", { name: "创建接续任务" })).toBeEnabled();
+      await expect
+        .element(page.getByText("当前 Provider 暂不支持专家。", { exact: true }))
+        .not.toBeInTheDocument();
+      await page.getByRole("button", { name: "创建接续任务" }).click();
+      await expect.poll(() => onContinue.mock.calls.length).toBe(1);
+
+      await view.unmount();
+      queryClient.clear();
+    }
   });
   it("distinguishes the pinned MCP revision from an explicit current-configuration check", async () => {
     harness.server.testExpertConnection.mockResolvedValue({ tools: ["issues.search"] });

@@ -1,3 +1,4 @@
+import { isExpertProvider } from "@synara/shared/expertProviders";
 import type {
   OrchestrationCommand,
   OrchestrationEvent,
@@ -1349,12 +1350,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       }
       if (
         (expertBinding ?? sourceThread.expertBinding) &&
-        command.modelSelection.provider !== "codex" &&
-        command.modelSelection.provider !== "pi"
+        !isExpertProvider(command.modelSelection.provider)
       ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: "Expert tasks can currently continue only with Codex or Pi.",
+          detail: "The target provider does not support Expert tasks.",
         });
       }
 

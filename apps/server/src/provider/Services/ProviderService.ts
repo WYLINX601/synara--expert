@@ -13,6 +13,7 @@
  */
 import type {
   ClaudeCacheObservation,
+  ExpertPreviewInput,
   ProviderBackgroundTaskInput,
   ProviderForkThreadInput,
   ProviderForkThreadResult,
@@ -44,6 +45,7 @@ import type { PersistedProviderRuntimeEvent } from "../../persistence/Services/P
 import type {
   ProviderAdapterCapabilities,
   ProviderTurnDispatchOptions,
+  ProviderExpertCompatibilityInput,
 } from "./ProviderAdapter.ts";
 
 export type ProviderRuntimeEventPumpStatus = "starting" | "healthy" | "recovering" | "degraded";
@@ -87,6 +89,10 @@ export interface PersistedProviderSessionProfile {
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
 export interface ProviderServiceShape {
+  readonly previewExpert?: (
+    input: Pick<ExpertPreviewInput, "provider" | "providerInstanceId" | "cwd"> &
+      Pick<ProviderExpertCompatibilityInput, "skills">,
+  ) => Effect.Effect<ReadonlyArray<string>, ProviderServiceError>;
   readonly startClaudeCompaction?: (input: {
     readonly threadId: ThreadId;
     readonly turnId: TurnId;

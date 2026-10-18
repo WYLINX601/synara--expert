@@ -3985,7 +3985,10 @@ describe("OrchestrationEngine", () => {
         }),
       );
 
-      const startTurn = (suffix: string, modelProvider?: "codex" | "claudeAgent") =>
+      const startTurn = (
+        suffix: string,
+        modelProvider?: "codex" | "claudeAgent" | "omp" | "opencode",
+      ) =>
         engine.dispatch({
           type: "thread.turn.start",
           commandId: CommandId.makeUnsafe(`context-first-bind-turn-${suffix}`),
@@ -4002,7 +4005,11 @@ describe("OrchestrationEngine", () => {
                 modelSelection:
                   modelProvider === "codex"
                     ? { provider: "codex" as const, model: "gpt-5-codex" }
-                    : { provider: "claudeAgent" as const, model: "claude-test" },
+                    : modelProvider === "claudeAgent"
+                      ? { provider: "claudeAgent" as const, model: "claude-test" }
+                      : modelProvider === "omp"
+                        ? { provider: "omp" as const, model: "omp-test" }
+                        : { provider: "opencode" as const, model: "opencode-test" },
               }),
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
@@ -4026,12 +4033,13 @@ describe("OrchestrationEngine", () => {
         }),
       );
 
-      await expect(system.run(startTurn("unsupported-provider", "claudeAgent"))).rejects.toThrow(
-        "currently supported only for Codex and Pi",
+      await expect(system.run(startTurn("unsupported-provider", "opencode"))).rejects.toThrow(
+        "selected provider does not support Project Context",
       );
       expect(await system.run(context.getThreadBinding(threadId))).toEqual({ mode: "unbound" });
 
-      await system.run(startTurn("accepted"));
+      await system.run(startTurn("accepted", "claudeAgent"));
+      await system.run(startTurn("accepted-omp", "omp"));
       const binding = await system.run(context.getThreadBinding(threadId));
       expect(binding?.mode).toBe("bound");
       expect(binding?.snapshot?.project.projectGoal).toBe(

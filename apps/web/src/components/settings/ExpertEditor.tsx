@@ -1,4 +1,10 @@
-import type { ExpertConnectionConfig, ExpertSaveInput } from "@synara/contracts";
+import {
+  EXPERT_PROVIDER_KINDS,
+  type ExpertConnectionConfig,
+  type ExpertSaveInput,
+} from "@synara/contracts";
+import { isExpertProvider } from "@synara/shared/expertProviders";
+import { PROVIDER_DESCRIPTOR_BY_KIND } from "@synara/shared/providerMetadata";
 import type { KeyboardEvent, ReactNode } from "react";
 import type { ExpertDraftIssue, ExpertDraftField } from "./expertSettingsModel";
 import { Input } from "../ui/input";
@@ -191,7 +197,7 @@ export function ExpertEditor({
                   value={draft.preferredProvider ?? "unspecified"}
                   onValueChange={(value) =>
                     onChange({
-                      preferredProvider: value === "codex" || value === "pi" ? value : undefined,
+                      preferredProvider: isExpertProvider(value) ? value : undefined,
                     })
                   }
                   disabled={readonly}
@@ -202,23 +208,20 @@ export function ExpertEditor({
                     className="w-full sm:w-48"
                   >
                     <SelectValue>
-                      {draft.preferredProvider === "codex"
-                        ? "Codex"
-                        : draft.preferredProvider === "pi"
-                          ? "Pi"
-                          : "不指定"}
+                      {draft.preferredProvider
+                        ? PROVIDER_DESCRIPTOR_BY_KIND[draft.preferredProvider].displayName
+                        : "不指定"}
                     </SelectValue>
                   </SelectTrigger>
                   <SettingsSelectPopup>
                     <SelectItem value="unspecified" hideIndicator>
                       不指定
                     </SelectItem>
-                    <SelectItem value="codex" hideIndicator>
-                      Codex
-                    </SelectItem>
-                    <SelectItem value="pi" hideIndicator>
-                      Pi
-                    </SelectItem>
+                    {EXPERT_PROVIDER_KINDS.map((provider) => (
+                      <SelectItem key={provider} value={provider} hideIndicator>
+                        {PROVIDER_DESCRIPTOR_BY_KIND[provider].displayName}
+                      </SelectItem>
+                    ))}
                   </SettingsSelectPopup>
                 </Select>
               </div>

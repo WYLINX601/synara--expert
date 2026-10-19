@@ -129,9 +129,9 @@ Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的�
 
 ## 当前工作状态与边界
 
-- 2026-10-19 专家扩展交付：用户明确要求合入、安装和发布；`caf748a61` 已合入并推送个人仓库 main，原 26 项 MCP 修复完整保留。按本机现有 Personal Workbench 身份准备 0.1.1 本机版本；实际产物、安装、备份与 Claude 401 限制见[交付记录](../docs/expert-workbench-release-2026-10-19.md)。
+- 2026-10-19 专家扩展交付：用户明确要求合入、安装和发布；`caf748a61` 已合入并推送个人仓库 main，原 26 项 MCP 修复完整保留。Personal Workbench 0.1.1 已本机安装启动，旧程序与一致性数据备份、原文件 hash 和应用身份核对通过；实际产物、安装、备份与 Claude 401 限制见[交付记录](../docs/expert-workbench-release-2026-10-19.md)。
 
-- 2026-10-18 Claude Code / oh-my-pi 专家扩展：按用户确认方案，在 `codex/expert-claude-omp` 隔离候选中扩展固定 Persona、Skills、MCP、Context 与恢复/派生，沿用现有专家界面。兼容版本、实际检查与真实回合状态见[扩展验收](../docs/expert-multi-provider-acceptance.md)；不继承其他候选的验收，也未合入主目录、安装或发布。
+- 2026-10-18 Claude Code / oh-my-pi 专家扩展：按用户确认方案，在 `codex/expert-claude-omp` 隔离候选中扩展固定 Persona、Skills、MCP、Context 与恢复/派生，沿用现有专家界面。兼容版本、实际检查与真实回合状态见[扩展验收](../docs/expert-multi-provider-acceptance.md)；该条是实现阶段记录，不继承其他候选的验收；后续合入与本机安装读取 2026-10-19 交付记录。
 
 - 2026-10-18 专家/MCP 审核修复：六类缺陷、主 CI 和局部代码精简已在基于 `9bceb21d` 的 `codex/expert-mcp-reliability` 完成本地验证；完整六包 17,499 项通过、39 项跳过，另有 34 项浏览器回归通过。本轮未提交、推送、安装或发布，实际检查及兼容限制统一见[审核修复验收](../docs/expert-mcp-reliability-acceptance.md)，不复用旧源码的通过结论。
 - 2026-10-15 至 10-16 MCP 交互与授权调整：本机导入取消结果页、改用 toast；专家按连接添加，全部工具由首次任务启动自动读取并固定，后续新任务可读取新增工具。旧配置缺少 `toolMode` 时维持显式允许列表，旧任务不扩权。该增量为本地未提交改动，检查与实测边界统一见 [MCP 调整验收](../docs/mcp-connection-selection-acceptance.md)。

@@ -54,10 +54,10 @@ export function useExpertDefinitions(enabled: boolean) {
   });
 }
 
-function statusLabel(status: ExpertPreview["status"]): string {
+function statusLabel(status: ExpertPreview["status"]): string | null {
   switch (status) {
     case "available":
-      return "可用";
+      return null;
     case "partial":
       return "部分可用";
     case "blocked":
@@ -72,44 +72,6 @@ function statusTone(status: ExpertPreview["status"] | undefined): string {
     return "text-[var(--color-text-destructive)]";
   }
   return "text-muted-foreground";
-}
-
-interface ExpertComposerSummaryProps {
-  expertId: string | undefined;
-  provider: ProviderKind;
-  preview: ExpertPreview | undefined;
-  previewFetching: boolean;
-  previewError: boolean;
-  unsupportedProvider: boolean;
-}
-
-export function ExpertComposerSummary({ expertId }: ExpertComposerSummaryProps) {
-  const expertsQuery = useExpertDefinitions(Boolean(expertId));
-  if (!expertId) return null;
-
-  const expert = expertsQuery.data?.find((definition) => definition.id === expertId);
-  const name = expert?.name ?? "已选专家";
-  const description = expert?.description.trim() || expert?.useCases.trim() || "";
-
-  return (
-    <div
-      className="mb-2 flex min-w-0 items-center gap-2 rounded-xl border border-border/60 bg-[var(--color-background-elevated-secondary)] px-3 py-2"
-      role="status"
-      aria-live="polite"
-    >
-      <span className="max-w-40 shrink-0 truncate text-ui-sm font-medium" title={name}>
-        {name}
-      </span>
-      {description ? (
-        <span
-          className="min-w-0 flex-1 truncate text-ui-xs text-muted-foreground"
-          title={description}
-        >
-          {description}
-        </span>
-      ) : null}
-    </div>
-  );
 }
 
 interface ExpertComposerPickerProps {
@@ -142,13 +104,16 @@ export function ExpertComposerPicker({
       : preview?.status
     : undefined;
   const triggerLabel = selectedExpert?.name ?? (expertId ? "已选专家" : "通用");
-  const previewSummary = selectedStatus
-    ? statusLabel(selectedStatus)
-    : previewFetching
-      ? "正在检查"
-      : previewError
-        ? "检查失败"
-        : null;
+  const previewSummary =
+    (selectedStatus ? statusLabel(selectedStatus) : null) ??
+    (previewFetching ? "正在检查" : previewError ? "检查失败" : null);
+  const footerStatus = unsupportedProvider
+    ? "当前 Provider 不支持专家"
+    : (previewSummary ?? (selectedStatus === "available" ? null : "等待预览结果"));
+  const showPreviewFooter = Boolean(
+    expertId &&
+    (selectedStatus !== "available" || previewFetching || previewError || preview?.issues.length),
+  );
 
   const commitSelection = (nextExpertId: string | undefined) => {
     onSelect(nextExpertId);
@@ -164,8 +129,8 @@ export function ExpertComposerPicker({
             className={COMPOSER_TOOLBAR_PICKER_TRIGGER_CLASS_NAME}
             aria-label={selectedExpert ? `专家：${selectedExpert.name}` : "选择专家"}
             title={
-              selectedStatus
-                ? `${triggerLabel} · ${statusLabel(selectedStatus)}`
+              selectedStatus && previewSummary
+                ? `${triggerLabel} · ${previewSummary}`
                 : `${triggerLabel} · 选择要用于新任务的专家`
             }
           />
@@ -209,13 +174,13 @@ export function ExpertComposerPicker({
             ))
           )}
         </MenuGroup>
-        {expertId ? (
+        {showPreviewFooter ? (
           <div className="space-y-1.5 border-t border-border/60 px-2.5 py-2">
-            <div className={`text-ui-sm font-medium ${statusTone(selectedStatus)}`}>
-              {unsupportedProvider
-                ? "当前 Provider 不支持专家"
-                : (previewSummary ?? "等待预览结果")}
-            </div>
+            {footerStatus ? (
+              <div className={`text-ui-sm font-medium ${statusTone(selectedStatus)}`}>
+                {footerStatus}
+              </div>
+            ) : null}
             {preview?.issues.length ? (
               <ul className="list-disc space-y-1 pl-4 text-ui-xs text-muted-foreground">
                 {preview.issues.slice(0, 4).map((issue, index) => (

@@ -330,7 +330,7 @@ import {
 import { ProviderInstancePicker } from "./chat/ProviderInstancePicker";
 import {
   ExpertComposerPicker,
-  ExpertComposerSummary,
+  useExpertDefinitions,
   useExpertComposerPreview,
 } from "./chat/ExpertComposerPicker";
 import { ComposerPendingApprovalPanel } from "./chat/ComposerPendingApprovalPanel";
@@ -4982,6 +4982,12 @@ export default function ChatView({
     ],
   );
   const composerExpertId = isLocalDraftThread ? draftThread?.expertId : undefined;
+  const composerExpertsQuery = useExpertDefinitions(Boolean(composerExpertId));
+  const composerExpert = composerExpertsQuery.data?.find(
+    (expert) => expert.id === composerExpertId,
+  );
+  const composerExpertPlaceholder =
+    composerExpert?.description.trim() || composerExpert?.useCases.trim();
   const composerExpertPreview = useExpertComposerPreview(
     composerExpertId,
     selectedProvider,
@@ -6544,16 +6550,6 @@ export default function ChatView({
                 }}
               />
             ) : null}
-            {isLocalDraftThread && composerExpertId ? (
-              <ExpertComposerSummary
-                expertId={composerExpertId}
-                provider={selectedProvider}
-                preview={composerExpertPreview.preview}
-                previewFetching={composerExpertPreview.isFetching}
-                previewError={composerExpertPreview.isError}
-                unsupportedProvider={composerExpertPreview.unsupportedProvider}
-              />
-            ) : null}
             {emptyLandingControls}
           </div>
           <div
@@ -6751,7 +6747,7 @@ export default function ChatView({
                               ? "Ask for follow-up changes"
                               : standaloneSidechatContext
                                 ? `Ask about this ${standaloneSidechatItemNoun}`
-                                : "Do anything in Synara"
+                                : composerExpertPlaceholder || "Do anything in Synara"
                   }
                   disabled={isComposerEditorDisabled}
                   singleLine={composerSingleRow}

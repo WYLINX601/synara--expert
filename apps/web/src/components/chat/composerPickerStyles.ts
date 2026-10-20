@@ -212,9 +212,8 @@ export const COMPOSER_PICKER_SELECT_OPTION_CLASS_NAME = `${COMPOSER_PICKER_MENU_
 export const COMPOSER_PICKER_TOOLTIP_SURFACE_CLASS_NAME = `${COMPOSER_PICKER_MENU_SURFACE_CLASS_NAME} font-normal text-[var(--color-text-foreground)]`;
 
 /** Floating panel for the slash/mention command menu, the + panel and the @local browser.
- *  Wears the composer's own glass and border (`.chat-composer-menu-surface` shares
- *  `.chat-composer-surface`'s fill and blur in index.css): the 40px blur turns the transcript
- *  behind it into a wash, exactly as it does behind the input. */
+ *  Uses an opaque theme fill in index.css so transcript text cannot show through,
+ *  including on translucent desktop windows where backdrop blur cannot hide it. */
 export const COMPOSER_COMMAND_MENU_SURFACE_CLASS_NAME = `chat-composer-menu-surface relative overflow-hidden rounded-2xl border ${RAISED_SURFACE_BORDER_CLASS_NAME} text-popover-foreground`;
 
 /** Environment panel card. Opaque for the same reason as the command menu (it overlays the

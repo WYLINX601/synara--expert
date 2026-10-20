@@ -1,11 +1,16 @@
 import "../../index.css";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { page } from "vitest/browser";
 import { render } from "vitest-browser-react";
 
+import { ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerColumnFrame } from "./ComposerColumnFrame";
 import { ComposerStackedPanel } from "./ComposerStackedPanel";
-import { COMPOSER_INPUT_SURFACE_CLASS_NAME } from "./composerPickerStyles";
+import {
+  COMPOSER_COMMAND_MENU_FLOATING_WRAPPER_CLASS_NAME,
+  COMPOSER_INPUT_SURFACE_CLASS_NAME,
+} from "./composerPickerStyles";
 
 const root = document.documentElement;
 let previousAttributes: Record<string, string | null>;
@@ -140,5 +145,71 @@ describe("chat composer on sidebar-only macOS glass", () => {
         .poll(() => fillAlpha(surface(name)))
         .toBeCloseTo(name === "composer" ? 0.4 : 0.2, 2);
     }
+  });
+});
+
+describe("composer menus over the transcript", () => {
+  it.each(
+    ["light", "dark"].flatMap((theme) =>
+      ["none", "sidebar", "window"].map((scope) => ({ theme, scope })),
+    ),
+  )("covers transcript text in $theme / $scope mode", async ({ theme, scope }) => {
+    await page.viewport(900, 650);
+    root.classList.toggle("dark", theme === "dark");
+    root.style.setProperty(
+      "--popover",
+      theme === "dark" ? "rgb(40, 50, 60)" : "rgb(255, 255, 255)",
+    );
+    root.dataset.windowTransparent = scope === "none" ? "false" : "true";
+    root.dataset.windowMaterial = scope === "none" ? "opaque" : "translucent";
+    root.dataset.windowTranslucency = scope;
+    await render(
+      <div style={{ position: "relative", paddingTop: 340, width: 600 }}>
+        <p style={{ position: "absolute", inset: 0, fontSize: 24 }}>
+          Transcript text behind the menu must stay hidden. This is a long assistant response.
+        </p>
+        <div data-chat-composer-slot>
+          <ComposerColumnFrame>
+            <div className={COMPOSER_INPUT_SURFACE_CLASS_NAME}>
+              <div className={COMPOSER_COMMAND_MENU_FLOATING_WRAPPER_CLASS_NAME}>
+                <ComposerCommandMenu
+                  items={Array.from({ length: 24 }, (_, index) => ({
+                    id: `command-${index}`,
+                    type: "provider-native-command",
+                    provider: "omp",
+                    command: `command-${index}`,
+                    label: `Command ${index}`,
+                    description: "A provider command",
+                  }))}
+                  resolvedTheme={theme === "dark" ? "dark" : "light"}
+                  isLoading={false}
+                  triggerKind="slash-command"
+                  activeItemId="command-0"
+                  onHighlightedItemChange={() => {}}
+                  onSelect={() => {}}
+                />
+              </div>
+              Draft input
+            </div>
+          </ComposerColumnFrame>
+        </div>
+      </div>,
+      { container: appRoot },
+    );
+
+    const menu = appRoot.querySelector<HTMLElement>(".chat-composer-menu-surface")!;
+    if (theme === "light" && scope === "window") {
+      await page.screenshot({ path: "../../../../../output/playwright/composer-menu-opaque.png" });
+    }
+    expect(fillAlpha(menu)).toBe(1);
+    expect(getComputedStyle(menu).opacity).toBe("1");
+    const list = menu.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]')!;
+    expect(list.scrollHeight).toBeGreaterThan(list.clientHeight);
+    list.scrollTop = list.scrollHeight;
+    expect(list.scrollTop).toBeGreaterThan(0);
+
+    // Changing the window material while a menu is open must not restore a thin fill.
+    root.dataset.windowTranslucency = scope === "window" ? "sidebar" : "window";
+    expect(fillAlpha(menu)).toBe(1);
   });
 });

@@ -15,6 +15,7 @@ import {
   DEFAULT_AUTOMATION_STOP_AFTER_CONSECUTIVE_FAILURES,
   DEFAULT_MODEL_BY_PROVIDER,
   EventId,
+  type ExpertDefinition,
   MessageId,
   DEVICE_WS_METHODS,
   COMPUTER_WS_METHODS,
@@ -170,6 +171,7 @@ interface TestFixture {
   welcome: WsWelcomePayload;
   gitBranchByCwd: Record<string, string>;
   projectAgentOverviews: Record<string, unknown>;
+  experts: ExpertDefinition[];
 }
 
 let fixture: TestFixture;
@@ -547,6 +549,7 @@ function buildFixture(snapshot: OrchestrationReadModel): TestFixture {
     providerStatusesSnapshot: null,
     gitBranchByCwd: {},
     projectAgentOverviews: {},
+    experts: [],
     welcome: {
       cwd: "/repo/project",
       projectName: "Project",
@@ -1255,7 +1258,12 @@ function resolveWsRpc(body: WsRequestEnvelope["body"]): unknown {
     return fixture.serverConfig;
   }
   if (tag === WS_METHODS.serverListExperts) {
-    return [];
+    return fixture.experts;
+  }
+  if (tag === WS_METHODS.serverPreviewExpert) {
+    const definition = fixture.experts.find((expert) => expert.id === body.expertId);
+    if (!definition) throw new Error("Missing expert preview fixture");
+    return { definition, status: "available", issues: [] };
   }
   if (tag === WS_METHODS.contextGetProject) {
     const project = fixture.snapshot.projects.find((entry) => entry.id === body.projectId);
@@ -7710,10 +7718,113 @@ describe("ChatView transcript geometry (full app)", () => {
       });
       await page.getByRole("button", { name: "Composer extras", exact: true }).click();
       await expect.element(page.getByText("查看上下文", { exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Composer extras", exact: true }).click();
+      const editor = await waitForComposerEditor();
+      await userEvent.type(editor, "/");
+      await expect.element(page.getByText("Plan Mode", { exact: true })).toBeVisible();
+      await userEvent.keyboard("{ArrowDown}{ArrowDown}{Tab}");
+      await vi.waitFor(() =>
+        expect(
+          useComposerDraftStore.getState().draftThreadsByThreadId[THREAD_ID]?.interactionMode,
+        ).toBe("plan"),
+      );
+      expect(document.querySelector(".chat-composer-menu-surface")).toBeNull();
+      await userEvent.type(editor, "/");
+      await expect.element(page.getByText("Plan Mode", { exact: true })).toBeVisible();
+      // The composer uses a second slash to dismiss the menu and clear the lone slash.
+      await userEvent.keyboard("/");
+      await vi.waitFor(() =>
+        expect(document.querySelector(".chat-composer-menu-surface")).toBeNull(),
+      );
+      expect(editor.textContent).toBe("");
     } finally {
       await mounted.cleanup();
     }
   });
+
+  it.each([
+    { description: "  梳理需求并撰写 PRD。  ", useCases: "适用场景", hint: "梳理需求并撰写 PRD。" },
+    { description: "  ", useCases: "  审核方案与任务计划。  ", hint: "审核方案与任务计划。" },
+    { description: "", useCases: " ", hint: "Do anything in Synara" },
+  ])(
+    "uses the selected expert's empty-input hint: $hint",
+    async ({ description, useCases, hint }) => {
+      useComposerDraftStore.setState({
+        draftThreadsByThreadId: {
+          [THREAD_ID]: {
+            projectId: PROJECT_ID,
+            createdAt: NOW_ISO,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            entryPoint: "chat",
+            branch: "main",
+            worktreePath: null,
+            envMode: "local",
+          },
+        },
+        projectDraftThreadIdByProjectId: { [PROJECT_ID]: THREAD_ID },
+      });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createDraftOnlySnapshot(),
+        configureFixture: (state) => {
+          state.experts = [
+            {
+              id: "planner",
+              name: "规划专家",
+              description,
+              useCases,
+              persona: "先澄清目标",
+              outputRequirements: "给出步骤和依据",
+              skills: [],
+              references: [],
+              connections: [],
+              revision: 1,
+              archived: false,
+              updatedAt: NOW_ISO,
+            },
+          ];
+        },
+      });
+      try {
+        const editor = await waitForComposerEditor();
+        expect(editor.getAttribute("aria-placeholder")).toBe("Do anything in Synara");
+        await page.getByRole("button", { name: "选择专家", exact: true }).click();
+        await page.getByRole("menuitem", { name: "规划专家", exact: true }).click();
+        await vi.waitFor(() => expect(editor.getAttribute("aria-placeholder")).toBe(hint));
+        await expect.element(page.getByText(hint, { exact: true })).toBeVisible();
+        if (description.trim()) {
+          await page.screenshot({
+            path: "../../../../output/playwright/composer-expert-placeholder.png",
+          });
+        }
+        // Only the picker contains the name; no standalone expert summary remains.
+        expect(document.querySelector('form [role="status"]')?.textContent ?? "").not.toContain(
+          "规划专家",
+        );
+        await userEvent.type(editor, "Keep my draft");
+        await expect.element(page.getByText(hint, { exact: true })).not.toBeInTheDocument();
+        expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
+          "Keep my draft",
+        );
+        await page.getByRole("button", { name: "专家：规划专家", exact: true }).click();
+        await page.getByRole("menuitem", { name: "通用", exact: true }).click();
+        await vi.waitFor(() =>
+          expect(editor.getAttribute("aria-placeholder")).toBe("Do anything in Synara"),
+        );
+        expect(editor.textContent).toBe("Keep my draft");
+        await userEvent.clear(editor);
+        await expect
+          .element(page.getByText("Do anything in Synara", { exact: true }))
+          .toBeVisible();
+        expect(
+          wsRequests.some((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
+        ).toBe(false);
+      } finally {
+        await mounted.cleanup();
+      }
+    },
+  );
 
   it("promotes draft chats before creating composer heartbeat automations", async () => {
     useComposerDraftStore.setState({

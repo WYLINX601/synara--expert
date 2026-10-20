@@ -332,7 +332,7 @@ import {
 import { ProviderInstancePicker } from "./chat/ProviderInstancePicker";
 import {
   ExpertComposerPicker,
-  ExpertComposerSummary,
+  useExpertDefinitions,
   useExpertComposerPreview,
 } from "./chat/ExpertComposerPicker";
 import { ComposerPendingApprovalPanel } from "./chat/ComposerPendingApprovalPanel";
@@ -614,6 +614,12 @@ interface ChatViewProps {
    * reserves gutter space for it so it never covers the transcript. Absent
    * in editor-rail and dock-sidechat views, which keep no preview.
    */
+}
+
+function getExpertComposerPlaceholder(
+  expert: { readonly description: string; readonly useCases: string } | undefined,
+) {
+  return expert?.description.trim() || expert?.useCases.trim();
 }
 
 // Builds an ephemeral transcript bubble for the conversational automation-setup
@@ -2393,6 +2399,11 @@ export default function ChatView({
   );
   const [isContextWindowMeterOpen, setIsContextWindowMeterOpen] = useState(false);
   const composerExpertId = isLocalDraftThread ? draftThread?.expertId : undefined;
+  const composerExpertsQuery = useExpertDefinitions(Boolean(composerExpertId));
+  const composerExpert = composerExpertsQuery.data?.find(
+    (expert) => expert.id === composerExpertId,
+  );
+  const composerExpertPlaceholder = getExpertComposerPlaceholder(composerExpert);
   const composerExpertPreview = useExpertComposerPreview(
     composerExpertId,
     selectedProvider,
@@ -6592,16 +6603,6 @@ export default function ChatView({
                 }}
               />
             ) : null}
-            {isLocalDraftThread && composerExpertId ? (
-              <ExpertComposerSummary
-                expertId={composerExpertId}
-                provider={selectedProvider}
-                preview={composerExpertPreview.preview}
-                previewFetching={composerExpertPreview.isFetching}
-                previewError={composerExpertPreview.isError}
-                unsupportedProvider={composerExpertPreview.unsupportedProvider}
-              />
-            ) : null}
             {emptyLandingControls}
           </div>
           <div
@@ -6809,7 +6810,7 @@ export default function ChatView({
                               ? "Ask for follow-up changes"
                               : standaloneSidechatContext
                                 ? `Ask about this ${standaloneSidechatItemNoun}`
-                                : "Do anything in Synara"
+                                : composerExpertPlaceholder || "Do anything in Synara"
                   }
                   disabled={isComposerEditorDisabled}
                   singleLine={composerSingleRow}

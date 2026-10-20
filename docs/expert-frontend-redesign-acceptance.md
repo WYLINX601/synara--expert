@@ -134,3 +134,7 @@
 证据目录：`/Users/wangyuelin/.codex/task-artifacts/composer-ui-2026-10-19/`。`menu-before.png` / `menu-after.png` 为同一浏览器组件夹具的修复前后截图；`expert-before-user.png` 是用户提供的原界面截图，`expert-after.png` 是完整 ChatView mock 夹具的修复后截图，两者不作为同源桌面前后测量。该目录保留各检查日志及菜单旧样式复现日志。
 
 本次共 102 项定向测试通过；未运行完整工作区套件。浏览器使用隔离 mock/组件夹具，未连接生产数据库或真实 Provider；未重验 macOS 原生透明材质合成、Windows/Linux 桌面或安装产物。没有提交、推送、安装、打包或发布；日用应用仍为原安装版本。
+
+## 2026-10-20 后续合入与本机安装
+
+用户后续授权与 Hub 工作树一并合入 main、推送并安装。集成时修复了原占位提示表达式引起的 React Compiler bailout，保持已确认的描述/适用场景/默认提示语义。最终全量重验、真实包与安装依据见[集成安装回执](./hub-ui-integration-release-2026-10-20.md)；原 102 项定向验收不改写为本轮全量结果。

@@ -123,3 +123,7 @@
 浏览器通过后仅更新了 `ContextMigrationCompatibility.test.ts` 的当前 ledger 预期，前端源码没有变化；`browser-source-binding.json` 记录浏览器受检摘要到最终源码摘要的差异。
 
 边界检查实际覆盖清单中原有 54 个精确源码入口及相应禁止依赖规则；新增设置通过既有 ExpertClient 宿主能力读取，人类设置不能成为 Agent 名单写能力。SQL 和主进程宿主仍由原模块及行为测试负责，不把静态检查声明成完整运行隔离。
+
+## 2026-10-20 后续合入与本机安装
+
+用户后续明确授权与输入区 UI 修复一并合入、推送并安装。原隔离验收、未交付时的状态和失败证据保留原范围；最终源码、全量重验、备份与 Personal Workbench 0.1.2 安装结果见[集成安装回执](./hub-ui-integration-release-2026-10-20.md)。

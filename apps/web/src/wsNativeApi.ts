@@ -964,6 +964,7 @@ export function createWsNativeApi(): NativeApi {
     },
     projectAgent: {
       getOverview: (input) => transport.request(WS_METHODS.projectAgentGetOverview, input),
+      listExperts: (input) => transport.request(WS_METHODS.projectAgentListExperts, input),
       listSummaries: (input = {}) => transport.request(WS_METHODS.projectAgentListSummaries, input),
       configure: (input) => transport.request(WS_METHODS.projectAgentConfigure, input),
       linkProject: (input) => transport.request(WS_METHODS.projectAgentLinkProject, input),
@@ -995,6 +996,11 @@ export function createWsNativeApi(): NativeApi {
       writeDocument: (input) => transport.request(WS_METHODS.projectAgentWriteDocument, input),
       exportDocuments: (input) => transport.request(WS_METHODS.projectAgentExportDocuments, input),
       refreshDigest: (input) => transport.request(WS_METHODS.projectAgentRefreshDigest, input),
+      deliverables: {
+        list: (input) => transport.request(WS_METHODS.projectAgentDeliverablesList, input),
+        read: (input) => transport.request(WS_METHODS.projectAgentDeliverablesRead, input),
+        withdraw: (input) => transport.request(WS_METHODS.projectAgentDeliverablesWithdraw, input),
+      },
       library: {
         list: (input) => transport.request(WS_METHODS.projectAgentLibraryList, input),
         mkdir: (input) => transport.request(WS_METHODS.projectAgentLibraryMkdir, input),

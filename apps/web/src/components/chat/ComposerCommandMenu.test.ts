@@ -89,6 +89,40 @@ describe("groupCommandItems", () => {
   });
 });
 
+describe("Hub deliverable groups", () => {
+  it("keeps every key deliverable under one heading while preserving source order", () => {
+    const items: Extract<ComposerCommandItem, { type: "hub-deliverable" }>[] = [
+      {
+        id: "artifact:one",
+        type: "hub-deliverable",
+        label: "brief.md",
+        mention: { name: "brief.md", path: "synara://hub/a/deliverables/one/brief.md?revision=2" },
+        expertDisplayName: "Design snapshot",
+        description: "",
+        disabled: false,
+      },
+      {
+        id: "artifact:two",
+        type: "hub-deliverable",
+        label: "brief.md",
+        mention: { name: "brief.md", path: "synara://hub/a/deliverables/two/brief.md?revision=4" },
+        expertDisplayName: "Research snapshot",
+        description: "",
+        disabled: true,
+      },
+    ];
+
+    expect(groupCommandItems(items, "mention", true)).toEqual([
+      { id: "deliverables", label: "关键产物", items },
+    ]);
+    expect(items.map((item) => item.mention.path)).toEqual([
+      "synara://hub/a/deliverables/one/brief.md?revision=2",
+      "synara://hub/a/deliverables/two/brief.md?revision=4",
+    ]);
+    expect(items[1]?.disabled).toBe(true);
+  });
+});
+
 describe("groupCommandItems connectors", () => {
   it("puts connectors in their own first group", () => {
     const items: ComposerCommandItem[] = [

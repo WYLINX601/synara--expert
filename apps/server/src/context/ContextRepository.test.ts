@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_PROJECT_AGENT_LIMITS,
   EventId,
   ProjectId,
   SpaceId,
@@ -12,9 +13,12 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { createHash } from "node:crypto";
 
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import { ProjectAgentRepositoryLive } from "../persistence/Layers/ProjectAgentRepository.ts";
+import { ProjectAgentRepository } from "../persistence/Services/ProjectAgentRepository.ts";
 import {
   ContextRepository,
   ContextRepositoryLive,
+  ContextSourceUnavailableError,
   type ContextRepositoryShape,
 } from "./ContextRepository.ts";
 
@@ -31,13 +35,20 @@ type ContextEvent = Extract<
   }
 >;
 
-const repoLayer = it.layer(ContextRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)));
+const repoLayer = it.layer(
+  Layer.merge(ContextRepositoryLive, ProjectAgentRepositoryLive).pipe(
+    Layer.provideMerge(SqlitePersistenceMemory),
+  ),
+);
 const now = "2026-10-14T10:00:00.000Z";
 const spaceId = SpaceId.makeUnsafe("ctx-space");
 const projectId = ProjectId.makeUnsafe("ctx-project");
 const threadId = ThreadId.makeUnsafe("ctx-thread");
 const emptyProjectId = ProjectId.makeUnsafe("ctx-empty-project");
 const emptyThreadId = ThreadId.makeUnsafe("ctx-empty-thread");
+const hubWorkerThreadId = ThreadId.makeUnsafe("ctx-hub-worker-thread");
+const executionProjectId = ProjectId.makeUnsafe("ctx-execution-project");
+const executionThreadId = ThreadId.makeUnsafe("ctx-execution-thread");
 let nextEventId = 0;
 
 const event = (type: ContextEvent["type"], payload: ContextEvent["payload"]): ContextEvent =>
@@ -107,14 +118,17 @@ const prepareAndApply = (repository: ContextRepositoryShape, input: ContextEvent
 
 const seedRows = (sql: SqlClient.SqlClient) =>
   Effect.gen(function* () {
-    yield* sql`DELETE FROM context_thread_bindings WHERE thread_id IN (${threadId}, ${emptyThreadId})`;
-    yield* sql`DELETE FROM context_applied_runtime_records WHERE thread_id IN (${threadId}, ${emptyThreadId})`;
-    yield* sql`DELETE FROM context_projects WHERE project_id IN (${projectId}, ${emptyProjectId})`;
+    yield* sql`DELETE FROM project_agent_linked_projects WHERE project_id = ${emptyProjectId}`;
+    yield* sql`DELETE FROM project_agent_configs WHERE project_id = ${emptyProjectId}`;
+    yield* sql`DELETE FROM hub_project_origins WHERE hub_id = ${emptyProjectId}`;
+    yield* sql`DELETE FROM context_thread_bindings WHERE thread_id IN (${threadId}, ${emptyThreadId}, ${hubWorkerThreadId}, ${executionThreadId})`;
+    yield* sql`DELETE FROM context_applied_runtime_records WHERE thread_id IN (${threadId}, ${emptyThreadId}, ${hubWorkerThreadId}, ${executionThreadId})`;
+    yield* sql`DELETE FROM context_projects WHERE project_id IN (${projectId}, ${emptyProjectId}, ${executionProjectId})`;
     yield* sql`DELETE FROM context_spaces WHERE space_id = ${spaceId}`;
-    yield* sql`DELETE FROM context_migrations WHERE project_id IN (${projectId}, ${emptyProjectId})`;
+    yield* sql`DELETE FROM context_migrations WHERE project_id IN (${projectId}, ${emptyProjectId}, ${executionProjectId})`;
     yield* sql`DELETE FROM context_command_results`;
-    yield* sql`DELETE FROM projection_threads WHERE thread_id IN (${threadId}, ${emptyThreadId})`;
-    yield* sql`DELETE FROM projection_projects WHERE project_id IN (${projectId}, ${emptyProjectId})`;
+    yield* sql`DELETE FROM projection_threads WHERE thread_id IN (${threadId}, ${emptyThreadId}, ${hubWorkerThreadId}, ${executionThreadId})`;
+    yield* sql`DELETE FROM projection_projects WHERE project_id IN (${projectId}, ${emptyProjectId}, ${executionProjectId})`;
     yield* sql`DELETE FROM projection_spaces WHERE space_id = ${spaceId}`;
     yield* sql`
       INSERT INTO projection_spaces (
@@ -140,11 +154,38 @@ const seedRows = (sql: SqlClient.SqlClient) =>
       )
     `;
     yield* sql`
+      INSERT INTO projection_projects (
+        project_id, kind, title, workspace_root, default_model_selection_json,
+        scripts_json, created_at, updated_at, deleted_at, space_id
+      ) VALUES (
+        ${executionProjectId}, 'project', 'Execution project', '/tmp/ctx-execution', NULL,
+        '[]', ${now}, ${now}, NULL, ${spaceId}
+      )
+    `;
+    yield* sql`
       INSERT INTO projection_threads (
         thread_id, project_id, title, model_selection_json, branch, worktree_path,
         latest_turn_id, created_at, updated_at, deleted_at
       ) VALUES (
         ${threadId}, ${projectId}, 'Kernel thread', '{"provider":"codex","model":"gpt-5.5"}',
+        NULL, NULL, NULL, ${now}, ${now}, NULL
+      )
+    `;
+    yield* sql`
+      INSERT INTO projection_threads (
+        thread_id, project_id, title, model_selection_json, branch, worktree_path,
+        latest_turn_id, created_at, updated_at, deleted_at
+      ) VALUES (
+        ${hubWorkerThreadId}, ${emptyProjectId}, 'Hub worker', '{"provider":"codex","model":"gpt-5.5"}',
+        NULL, NULL, NULL, ${now}, ${now}, NULL
+      )
+    `;
+    yield* sql`
+      INSERT INTO projection_threads (
+        thread_id, project_id, title, model_selection_json, branch, worktree_path,
+        latest_turn_id, created_at, updated_at, deleted_at
+      ) VALUES (
+        ${executionThreadId}, ${executionProjectId}, 'Execution worker', '{"provider":"codex","model":"gpt-5.5"}',
         NULL, NULL, NULL, ${now}, ${now}, NULL
       )
     `;
@@ -160,6 +201,280 @@ const seedRows = (sql: SqlClient.SqlClient) =>
   });
 
 repoLayer("ContextRepository", (it) => {
+  it.effect(
+    "binds a Hub coordinator to its explicit source Project and preserves that snapshot after edits or deletion",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const repository = yield* ContextRepository;
+        const agents = yield* ProjectAgentRepository;
+        yield* seedRows(sql);
+        yield* sql`UPDATE projection_projects SET kind = 'group' WHERE project_id = ${emptyProjectId}`;
+        yield* sql`INSERT INTO context_projects (project_id, project_goal, project_instructions, revision, updated_at)
+        VALUES (${projectId}, 'Source goal', 'Source constraints', 1, ${now})`;
+        yield* agents.saveConfig(
+          {
+            projectId: emptyProjectId,
+            coordinatorThreadId: emptyThreadId,
+            coordinatorName: "Hub",
+            coordinatorModelSelection: { provider: "codex", model: "gpt-5.5" },
+            limits: DEFAULT_PROJECT_AGENT_LIMITS,
+            captureEnabled: true,
+            enabled: true,
+            automationId: null,
+            revision: 1,
+            createdAt: now,
+            updatedAt: now,
+            disabledAt: null,
+            sourceProjectId: projectId,
+          },
+          null,
+        );
+        const sourceSnapshot = yield* repository.buildBindingSnapshot(
+          emptyThreadId,
+          "preview",
+          now,
+        );
+        assert.strictEqual(sourceSnapshot.schemaVersion, 1);
+        if (sourceSnapshot.schemaVersion === 1) {
+          assert.strictEqual(sourceSnapshot.project.projectId, projectId);
+        }
+        yield* repository.applyEvent(
+          event("context.thread.binding-set", { threadId: emptyThreadId, mode: "unbound" }),
+        );
+        yield* prepareAndApply(
+          repository,
+          event("context.thread.bind-requested", { threadId: emptyThreadId, createdAt: now }),
+        );
+        const before = yield* repository.getThreadBinding(emptyThreadId);
+        assert.strictEqual(
+          before?.snapshot?.schemaVersion === 1 ? before.snapshot.project.projectGoal : null,
+          "Source goal",
+        );
+        assert.strictEqual(before?.snapshot?.space?.spaceId, spaceId);
+        yield* sql`UPDATE context_projects SET project_goal = 'New goal', revision = 2 WHERE project_id = ${projectId}`;
+        assert.deepStrictEqual(yield* repository.getThreadBinding(emptyThreadId), before);
+        assert.strictEqual((yield* repository.getThreadDetails(emptyThreadId)).hasNewVersion, true);
+        yield* sql`UPDATE projection_projects SET deleted_at = ${now} WHERE project_id = ${projectId}`;
+        const missingSourceProject = yield* Effect.result(
+          repository.buildBindingSnapshot(emptyThreadId, "later", now),
+        );
+        assert.strictEqual(missingSourceProject._tag, "Failure");
+        if (missingSourceProject._tag === "Failure") {
+          assert.strictEqual(
+            missingSourceProject.failure instanceof ContextSourceUnavailableError,
+            true,
+          );
+          if (missingSourceProject.failure instanceof ContextSourceUnavailableError) {
+            assert.strictEqual(missingSourceProject.failure.source, "hub-source-project");
+          }
+        }
+        assert.deepStrictEqual(yield* repository.getThreadBinding(emptyThreadId), before);
+        yield* sql`DELETE FROM project_agent_configs WHERE project_id = ${emptyProjectId}`;
+        yield* sql`DELETE FROM hub_project_origins WHERE hub_id = ${emptyProjectId}`;
+      }),
+  );
+
+  it.effect(
+    "binds Hub workspace threads to versioned Space-only or empty Context and replays frozen v2 snapshots",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const repository = yield* ContextRepository;
+        const agents = yield* ProjectAgentRepository;
+        yield* sql`DELETE FROM project_agent_configs WHERE project_id = ${emptyProjectId}`;
+        yield* sql`DELETE FROM hub_project_origins WHERE hub_id = ${emptyProjectId}`;
+        yield* seedRows(sql);
+        yield* sql`UPDATE projection_projects SET kind = 'group', space_id = ${spaceId}
+          WHERE project_id = ${emptyProjectId}`;
+        yield* sql`UPDATE projection_projects SET kind = 'group', space_id = NULL
+          WHERE project_id = ${projectId}`;
+        yield* sql`INSERT INTO context_spaces (
+          space_id, direction_goal, shared_instructions, revision, updated_at
+        ) VALUES (${spaceId}, 'Grow the research direction.', 'Use only committed Space context.', 1, ${now})`;
+        yield* sql`INSERT INTO context_projects (
+          project_id, project_goal, project_instructions, revision, updated_at
+        ) VALUES (${executionProjectId}, 'Execution Project goal.', 'Execution Project rules.', 3, ${now})`;
+        yield* agents.linkProject({
+          projectId: emptyProjectId,
+          linkedProjectId: executionProjectId,
+          createdAt: now,
+        });
+
+        const spaceContext = yield* repository.getThreadContext!(emptyThreadId);
+        assert.strictEqual(spaceContext.project, null);
+        assert.strictEqual(spaceContext.preview.schemaVersion, 2);
+        if (spaceContext.preview.schemaVersion === 2) {
+          assert.strictEqual(spaceContext.preview.source, "space");
+          if (spaceContext.preview.source === "space") {
+            assert.strictEqual(spaceContext.preview.space.spaceId, spaceId);
+          }
+          assert.strictEqual("project" in spaceContext.preview, false);
+        }
+        assert.include(spaceContext.preview.text, "Grow the research direction.");
+        assert.notInclude(spaceContext.preview.text, "项目目标");
+        const otherHubWorkspaceThreadContext =
+          yield* repository.getThreadContext!(hubWorkerThreadId);
+        assert.strictEqual(otherHubWorkspaceThreadContext.project, null);
+        assert.strictEqual(otherHubWorkspaceThreadContext.preview.schemaVersion, 2);
+        if (otherHubWorkspaceThreadContext.preview.schemaVersion === 2) {
+          assert.strictEqual(otherHubWorkspaceThreadContext.preview.source, "space");
+        }
+        const linkedWorkerContext = yield* repository.getThreadContext!(executionThreadId);
+        assert.strictEqual(linkedWorkerContext.project?.projectId, executionProjectId);
+        assert.strictEqual(linkedWorkerContext.preview.schemaVersion, 1);
+        if (linkedWorkerContext.preview.schemaVersion === 1) {
+          assert.strictEqual(
+            linkedWorkerContext.preview.project.projectGoal,
+            "Execution Project goal.",
+          );
+        }
+
+        yield* repository.applyEvent(
+          event("context.thread.binding-set", { threadId: emptyThreadId, mode: "unbound" }),
+        );
+        const committedSpaceBind = yield* prepareAndApply(
+          repository,
+          event("context.thread.bind-requested", { threadId: emptyThreadId, createdAt: now }),
+        );
+        const spaceBinding = yield* repository.getThreadBinding(emptyThreadId);
+        assert.strictEqual(spaceBinding?.mode, "bound");
+        assert.strictEqual(spaceBinding?.snapshot?.schemaVersion, 2);
+        if (spaceBinding?.snapshot?.schemaVersion === 2) {
+          assert.strictEqual(spaceBinding.snapshot.source, "space");
+          assert.strictEqual("project" in spaceBinding.snapshot, false);
+        }
+        assert.strictEqual((yield* repository.getContextSession(emptyThreadId))?.hasContent, true);
+
+        yield* sql`UPDATE context_spaces SET direction_goal = 'Updated direction.', revision = 2
+          WHERE space_id = ${spaceId}`;
+        assert.strictEqual((yield* repository.getThreadDetails(emptyThreadId)).hasNewVersion, true);
+        yield* sql`DELETE FROM context_thread_bindings WHERE thread_id = ${emptyThreadId}`;
+        yield* repository.applyEvent(
+          event("context.thread.binding-set", { threadId: emptyThreadId, mode: "unbound" }),
+        );
+        yield* repository.applyEvent(committedSpaceBind);
+        assert.deepStrictEqual(yield* repository.getThreadBinding(emptyThreadId), spaceBinding);
+
+        const secondSpaceBind = yield* prepareAndApply(
+          repository,
+          event("context.thread.bind-requested", {
+            threadId: emptyThreadId,
+            createdAt: "2026-10-15T10:00:00.000Z",
+          }),
+        );
+        if (secondSpaceBind.type === "context.thread.bind-requested") {
+          assert.notStrictEqual(
+            secondSpaceBind.payload.snapshot?.snapshotId,
+            spaceBinding?.snapshot?.snapshotId,
+          );
+        }
+        assert.deepStrictEqual(yield* repository.getThreadBinding(emptyThreadId), spaceBinding);
+
+        const emptyContext = yield* repository.getThreadContext!(threadId);
+        assert.strictEqual(emptyContext.project, null);
+        assert.strictEqual(emptyContext.preview.schemaVersion, 2);
+        if (emptyContext.preview.schemaVersion === 2) {
+          assert.strictEqual(emptyContext.preview.source, "none");
+          assert.strictEqual(emptyContext.preview.space, null);
+        }
+        assert.strictEqual(emptyContext.preview.text, "");
+        yield* repository.applyEvent(
+          event("context.thread.binding-set", { threadId, mode: "unbound" }),
+        );
+        const committedEmptyBind = yield* prepareAndApply(
+          repository,
+          event("context.thread.bind-requested", { threadId, createdAt: now }),
+        );
+        const emptyBinding = yield* repository.getThreadBinding(threadId);
+        assert.strictEqual(emptyBinding?.snapshot?.schemaVersion, 2);
+        if (emptyBinding?.snapshot?.schemaVersion === 2) {
+          assert.strictEqual(emptyBinding.snapshot.source, "none");
+          assert.strictEqual(emptyBinding.snapshot.space, null);
+        }
+
+        // A first-run null Space is frozen as no external Context; later filing the Hub
+        // cannot replace that bound snapshot.
+        yield* sql`UPDATE projection_projects SET space_id = ${spaceId} WHERE project_id = ${projectId}`;
+        assert.strictEqual((yield* repository.getThreadDetails(threadId)).hasNewVersion, true);
+        yield* sql`DELETE FROM context_thread_bindings WHERE thread_id = ${threadId}`;
+        yield* repository.applyEvent(
+          event("context.thread.binding-set", { threadId, mode: "unbound" }),
+        );
+        yield* repository.applyEvent(committedEmptyBind);
+        assert.deepStrictEqual(yield* repository.getThreadBinding(threadId), emptyBinding);
+        yield* sql`UPDATE projection_spaces SET deleted_at = ${now} WHERE space_id = ${spaceId}`;
+        const missingSpace = yield* Effect.result(
+          repository.buildBindingSnapshot(emptyThreadId, "missing-space", now),
+        );
+        assert.strictEqual(missingSpace._tag, "Failure");
+        if (missingSpace._tag === "Failure") {
+          assert.strictEqual(missingSpace.failure instanceof ContextSourceUnavailableError, true);
+          if (missingSpace.failure instanceof ContextSourceUnavailableError) {
+            assert.strictEqual(missingSpace.failure.source, "hub-space");
+          }
+        }
+      }),
+  );
+
+  it.effect("decodes and replays the original v1 snapshot bytes and hash", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ContextRepository;
+      yield* seedRows(sql);
+      const hashable = {
+        schemaVersion: 1,
+        rendererVersion: 1,
+        space: null,
+        project: {
+          projectId,
+          title: "Kernel test",
+          workspaceRoot: "/tmp/ctx-kernel",
+          revision: 0,
+          projectGoal: "",
+          projectInstructions: "",
+        },
+        text: "",
+        hasContent: false,
+      } as const;
+      const snapshot = {
+        schemaVersion: 1,
+        rendererVersion: 1,
+        space: null,
+        project: hashable.project,
+        text: "",
+        snapshotHash: createHash("sha256").update(JSON.stringify(hashable), "utf8").digest("hex"),
+        hasContent: false,
+        snapshotId: "legacy-v1-snapshot",
+        createdAt: now,
+      } as const;
+      const originalBytes = JSON.stringify(snapshot);
+      yield* sql`
+        INSERT INTO context_thread_bindings (thread_id, mode, snapshot_json)
+        VALUES (${threadId}, 'bound', ${originalBytes})
+      `;
+
+      const decoded = yield* repository.getThreadBinding(threadId);
+      assert.deepStrictEqual(decoded?.snapshot, snapshot);
+      assert.strictEqual(decoded?.snapshot?.schemaVersion, 1);
+
+      yield* sql`DELETE FROM context_thread_bindings WHERE thread_id = ${threadId}`;
+      yield* repository.applyEvent(
+        event("context.thread.binding-set", {
+          threadId,
+          mode: "bound",
+          snapshot,
+        }),
+      );
+      const replayed = yield* sql<{ readonly snapshotJson: string }>`
+        SELECT snapshot_json AS "snapshotJson" FROM context_thread_bindings
+        WHERE thread_id = ${threadId}
+      `;
+      assert.strictEqual(replayed[0]?.snapshotJson, originalBytes);
+      assert.deepStrictEqual(yield* repository.getThreadBinding(threadId), decoded);
+    }),
+  );
+
   it.effect("persists atomic CAS saves, exact command results, and replay-safe revisions", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
@@ -684,7 +999,10 @@ repoLayer("ContextRepository", (it) => {
       const committedBindEvent = yield* prepareAndApply(repository, unpreparedBindEvent);
       const binding = yield* repository.getThreadBinding(threadId);
       assert.strictEqual(binding?.mode, "bound");
-      assert.strictEqual(binding?.snapshot?.project.projectGoal, "First project goal.");
+      assert.strictEqual(
+        binding?.snapshot?.schemaVersion === 1 ? binding.snapshot.project.projectGoal : null,
+        "First project goal.",
+      );
       const session = yield* repository.getContextSession(threadId);
       assert.strictEqual(session?.hasContent, true);
       assert.include(session?.text ?? "", "First shared instructions.");

@@ -227,6 +227,24 @@
             "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
             "apps/web/src/components/settings/GlobalMcpSettingsPanel.browser.tsx"
           ]
+        },
+        {
+          "file": "apps/server/src/agentGateway/hubExpertDispatch.ts",
+          "specifiers": [
+            "../provider/Services/ProviderDiscoveryService.ts",
+            "./targetResolver.ts",
+            "./toolInput.ts"
+          ],
+          "owner": "Hub creation host adapter",
+          "reason": "Acceptance preflight receives the existing read-only Provider discovery capability and reuses native target validation; it does not start or switch runtimes. Native Gateway input errors preserve the existing typed failure surface.",
+          "tests": ["apps/server/src/agentGateway/hubWorkGateway.test.ts"]
+        },
+        {
+          "file": "apps/server/src/projectAgent/hubDeliverables.ts",
+          "specifiers": ["effect/unstable/sql/SqlClient"],
+          "owner": "Workbench Hub deliverables persistence",
+          "reason": "The service owns only its independent-ledger collection and request tables on the host connection. Publication pointers and maintenance intents require the existing SQL transaction capability.",
+          "tests": ["apps/server/src/projectAgent/hubDeliverables.test.ts"]
         }
       ]
     },
@@ -321,13 +339,191 @@
       "entryFiles": [
         "apps/web/src/components/ChatView.tsx",
         "apps/web/src/components/chat/ExpertComposerPicker.tsx",
-        "apps/web/src/components/chat/ExpertTaskControl.tsx"
+        "apps/web/src/components/chat/ExpertTaskControl.tsx",
+        "apps/web/src/components/chat/useComposerDiscovery.ts"
       ],
-      "responsibility": "Reuse existing typed props for picker and task controls. ChatView owns draft/thread identity, disabled state and handoff command; feature UI reads only ExpertClient capabilities. No empty wrapper, store duplication or transcript dispatch was introduced. Deep task binding remains in native orchestration.",
+      "responsibility": "Reuse existing typed props for picker and task controls. ChatView owns draft/thread identity, disabled state and handoff command; feature UI reads only ExpertClient capabilities. No empty wrapper, store duplication or transcript dispatch was introduced. Deep task binding remains in native orchestration. Composer Skill discovery reads the accepted Expert snapshot through ExpertClient for bound threads and reuses the existing Expert preview for unsent drafts. Accepted bindings take precedence; neither path falls back to the Harness catalog on empty, pending, or failed reads. Ordinary threads and native slash commands retain their existing discovery.",
       "tests": [
         "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
         "apps/web/src/components/ChatView.logic.test.ts",
-        "apps/web/src/components/ChatView.queuedAutoDispatch.test.ts"
+        "apps/web/src/components/ChatView.queuedAutoDispatch.test.ts",
+        "apps/web/src/components/chat/useComposerDiscovery.browser.tsx"
+      ]
+    },
+    {
+      "id": "server.hub-expert-v1",
+      "surface": "agent-gateway",
+      "featureFiles": [
+        "apps/server/src/agentGateway/hubExpertDispatch.ts",
+        "apps/server/src/projectAgent/hubDeliverables.ts"
+      ],
+      "entryFiles": [
+        "apps/server/src/agentGateway/hubWorkGateway.ts",
+        "apps/server/src/agentGateway/hubExpertDispatch.ts",
+        "apps/server/src/agentGateway/creationCoordinator.ts",
+        "apps/server/src/agentGateway/hubDeliverableTools.ts",
+        "apps/server/src/agentGateway/projectAgentTools.ts",
+        "apps/server/src/projectAgent/Layers/ProjectAgentService.ts",
+        "apps/server/src/projectAgent/hubDeliverables.ts",
+        "apps/server/src/context/ContextRepository.ts",
+        "apps/server/src/workbench/persistence/WorkbenchMigrations.ts",
+        "apps/server/src/wsRpc.ts",
+        "apps/web/src/wsNativeApi.ts",
+        "packages/contracts/src/hubDeliverables.ts",
+        "scripts/lib/workbench-build.ts"
+      ],
+      "responsibility": "Hub coordinator creation resolves the target and immutable Expert binding before durable queue acceptance. The server-only orchestration dispatch context carries that binding; public tool/RPC payloads never authorize a binding. ProjectAgent resolves explicit Project Context sources and authenticated Hub identities. Key collections reference Git Library commits and use an extension-ledger SQL pointer/journal; workers publish/withdraw only their own collection and read authorized same-Hub publications. Existing RPC, Context, Library and Provider lifecycles remain the host seams. The boundary scan is static and does not prove runtime isolation.",
+      "tests": [
+        "apps/server/src/agentGateway/hubWorkGateway.test.ts",
+        "apps/server/src/agentGateway/creationCoordinator.hubWork.test.ts",
+        "apps/server/src/agentGateway/hubDeliverableTools.test.ts",
+        "apps/server/src/projectAgent/hubDeliverables.test.ts",
+        "apps/server/src/context/ContextRepository.test.ts",
+        "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts",
+        "apps/server/src/workbench/persistence/WorkbenchMigrations.test.ts",
+        "apps/server/src/persistence/MigrationBackup.test.ts",
+        "apps/server/src/workbench/persistence/ContextMigrationCompatibility.test.ts",
+        "apps/server/src/workbench/persistence/ContextMigrationRecovery.test.ts",
+        "scripts/workbench-build.test.ts"
+      ]
+    },
+    {
+      "id": "web.hub-expert-v1",
+      "surface": "web",
+      "entryFiles": [
+        "apps/web/src/components/Sidebar.tsx",
+        "apps/web/src/lib/groupProjects.ts",
+        "apps/web/src/components/chat/group/GroupSettingsDialog.tsx",
+        "apps/web/src/components/chat/group/HubWorkItemCard.tsx",
+        "apps/web/src/components/chat/project/GroupOverview.tsx",
+        "apps/web/src/components/chat/project/ProjectPanel.tsx",
+        "apps/web/src/components/chat/group/LibraryPanel.tsx",
+        "apps/web/src/components/chat/group/useGroupLibrary.ts",
+        "apps/web/src/components/WorkspaceFilePreview.tsx",
+        "apps/web/src/components/PdfFilePreview.tsx",
+        "apps/web/src/components/chat/WorkspaceFilePreviewHeader.tsx",
+        "apps/web/src/wsNativeApi.ts"
+      ],
+      "featureFiles": [
+        "apps/web/src/components/chat/group/libraryPanel.logic.ts",
+        "apps/web/src/components/chat/group/groupSettingsDialog.logic.ts",
+        "apps/web/src/components/chat/project/groupOverview.logic.ts"
+      ],
+      "responsibility": "The approved UI extends the native Project menu, Hub cards/rows and Library only. Sidebar and onboarding own native create/link/configure/navigation capabilities; the existing Hub overview supplies accepted Expert names. Library consumes typed publication metadata and pinned reads through the existing authenticated NativeApi subset. WorkspaceFilePreview accepts read-only pinned content without live-path fallback. Native chat layout, subscriptions, split picker, permissions, file preview/history and lifecycle remain host-owned. Static boundary checks cover the declared pure derivations and backend services, not runtime isolation.",
+      "tests": [
+        "apps/web/src/lib/groupProjects.test.ts",
+        "apps/web/src/components/chat/group/GroupSettingsDialog.browser.tsx",
+        "apps/web/src/components/chat/group/groupSettingsDialog.logic.test.ts",
+        "apps/web/src/components/chat/project/GroupOverview.test.tsx",
+        "apps/web/src/components/chat/project/groupOverview.logic.test.ts",
+        "apps/web/src/components/chat/group/LibraryPanel.browser.tsx",
+        "apps/web/src/components/chat/group/libraryPanel.logic.test.ts",
+        "apps/web/src/components/PdfResourceLifecycle.browser.tsx"
+      ]
+    },
+    {
+      "id": "web.hub-expert-v1-1",
+      "surface": "web-host-integration",
+      "entryFiles": [
+        "apps/web/src/components/Sidebar.tsx",
+        "apps/web/src/components/SidebarGroupsSurface.tsx",
+        "apps/web/src/components/SidebarGroupsSurface.logic.ts",
+        "apps/web/src/components/ChatView.tsx",
+        "apps/web/src/components/useSpacesController.ts",
+        "apps/web/src/components/useRouteSpaceSync.ts",
+        "apps/web/src/routes/-chatIndexRoute.logic.ts",
+        "apps/web/src/components/chat/ContextDetailsDialog.tsx",
+        "apps/web/src/components/chat/group/LibraryPanel.tsx",
+        "apps/web/src/components/chat/group/useGroupLibrary.ts",
+        "apps/web/src/components/chat/group/useHubComposerReferences.ts",
+        "apps/web/src/components/chat/group/hubComposerReferences.logic.ts",
+        "apps/web/src/components/chat/group/hubDeliverablePresentation.ts",
+        "apps/web/src/workbench/host/hubReferenceClient.ts",
+        "apps/web/src/components/chat/useComposerReferences.ts",
+        "apps/web/src/components/ComposerPromptEditor.tsx",
+        "apps/web/src/composer-editor-mentions.ts",
+        "apps/web/src/lib/composerMentions.ts",
+        "apps/web/src/components/composer-nodes/index.tsx",
+        "apps/web/src/components/chat/InlineMentionChip.tsx",
+        "apps/web/src/components/chat/MentionChipIcon.tsx",
+        "apps/web/src/components/chat/MessagesTimeline.tsx",
+        "apps/web/src/components/chat/project/hubWorkItems.ts",
+        "apps/web/src/components/chat/project/useHubWorkItems.ts",
+        "packages/shared/src/hubReferences.ts"
+      ],
+      "featureFiles": [
+        "apps/web/src/components/SidebarGroupsSurface.logic.ts",
+        "apps/web/src/lib/spaceNavigation.ts",
+        "apps/web/src/components/chat/group/hubComposerReferences.logic.ts",
+        "apps/web/src/components/chat/group/hubDeliverablePresentation.ts"
+      ],
+      "responsibility": "The native Sidebar, ChatView, Space route helpers and Context dialog remain host integrations. Hub worker ownership is resolved from server-confirmed membership and Hub Space assignment so the same thread lands in a consistent Hub/Space surface; the pure navigation derivations remain static-scanned. The read-only hubReferenceClient exposes authenticated NativeApi discovery with connection generation, and useHubComposerReferences fences query results to that generation. Shared hubReferences owns the canonical versioned mention URI parser/builder used by composition, persistence, display and server projection. The pure deliverable presentation helper groups active publications by accepted Expert identity and source work for both Library and the composer chooser; files retain pinned-version selection metadata, while missing entries remain visible/disabled and withdrawn collections are excluded. Context details render v2 Space-only and Hub-background snapshots while retaining v1 Space-to-Project snapshots. Native chat state, routing, persistence and runtime authorization remain host-owned. Static coverage is a direct-import check of declared feature sources, not transitive or runtime isolation.",
+      "tests": [
+        "apps/web/src/components/SidebarGroupsSurface.logic.test.ts",
+        "apps/web/src/components/SidebarGroupsSurface.browser.tsx",
+        "apps/web/src/lib/spaceNavigation.test.ts",
+        "apps/web/src/components/chat/ContextDetailsDialog.browser.tsx",
+        "apps/web/src/components/chat/group/hubComposerReferences.logic.test.ts",
+        "apps/web/src/components/chat/group/hubDeliverablePresentation.test.ts",
+        "apps/web/src/components/chat/group/LibraryPanel.browser.tsx",
+        "apps/web/src/components/ComposerPromptEditor.hubReferences.browser.tsx",
+        "apps/web/src/composer-editor-mentions.test.ts",
+        "apps/web/src/lib/composerMentions.test.ts",
+        "apps/web/src/components/chat/MessagesTimeline.hubWork.browser.tsx",
+        "apps/web/src/components/chat/project/useHubWorkItems.browser.tsx",
+        "packages/shared/src/hubReferences.test.ts"
+      ]
+    },
+    {
+      "id": "server.hub-expert-v1-1",
+      "surface": "hub-space-and-reference-projection",
+      "entryFiles": [
+        "apps/server/src/agentGateway/hubExpertCatalog.ts",
+        "apps/server/src/agentGateway/providerAvailability.ts",
+        "apps/server/src/agentGateway/hubWorkSource.ts",
+        "apps/server/src/agentGateway/Layers/AgentGateway.ts",
+        "apps/server/src/projectAgent/hubWorkService.ts",
+        "apps/server/src/projectAgent/Layers/ProjectAgentService.ts",
+        "apps/server/src/provider/hubReferenceProjection.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts",
+        "apps/server/src/orchestration/decider.ts",
+        "apps/server/src/context/ContextRepository.ts",
+        "apps/server/src/wsRpc.ts",
+        "apps/web/src/wsNativeApi.ts",
+        "packages/contracts/src/context.ts",
+        "packages/contracts/src/projectAgent.ts",
+        "packages/contracts/src/hubWork.ts",
+        "packages/contracts/src/hubDeliverables.ts",
+        "packages/contracts/src/ws.ts",
+        "packages/contracts/src/rpc.ts",
+        "packages/contracts/src/ipc.ts",
+        "packages/shared/src/hubReferences.ts",
+        "apps/server/src/workbench/persistence/HubExpertParticipantsMigration.ts",
+        "apps/server/src/persistence/Layers/ProjectAgentRepository.ts",
+        "apps/server/src/persistence/Layers/HubWorkRepository.ts",
+        "apps/server/src/agentGateway/hubExpertDispatch.ts",
+        "apps/web/src/components/chat/group/GroupExpertsSection.tsx"
+      ],
+      "featureFiles": [
+        "apps/server/src/provider/hubReferenceProjection.ts",
+        "packages/shared/src/hubReferences.ts"
+      ],
+      "responsibility": "Native project metadata and event replay own Hub Space membership; ContextRepository resolves explicit source Project or standalone Hub Space and freezes versioned snapshots without rewriting v1 history. The authenticated user RPC exposes read-only Expert availability through the same dispatch target rules. ProviderCommandReactor supplies the authenticated current-thread capability to the Hub reference projector before Provider startup. The projector consumes reserved app references, validates same-Hub publication metadata and emits bounded read instructions without file bodies; ordinary provider mentions continue through native projection. HubWork source extraction copies references only from durable human messages. The existing work repository and immutable Expert store supply publication identity and work titles through a narrow resolver injected by ProjectAgentService. Static boundary coverage adds the pure URI parser and capability-driven projector; host lifecycle, SQL, native projection, and runtime authorization remain owned by their existing modules and require behavioral tests. Participant discovery reads only ProjectAgentConfig.expertIds; settings use the existing authenticated ExpertClient catalogue. Workbench migration expert/5 owns roster rows; ProjectAgentRepository replaces them transactionally with config revision. New Hub work acceptance rechecks revision and membership after replay lookup; accepted work keeps its frozen binding. The host-only resolveParticipatingExpert validates current Coordinator mentions and supplies trusted names. These seams grant no Agent roster-write capability.",
+      "tests": [
+        "packages/shared/src/hubReferences.test.ts",
+        "apps/server/src/provider/hubReferenceProjection.test.ts",
+        "apps/server/src/agentGateway/hubExpertCatalog.test.ts",
+        "apps/server/src/agentGateway/hubWorkSource.test.ts",
+        "apps/server/src/agentGateway/hubWorkGateway.test.ts",
+        "apps/server/src/projectAgent/hubDeliverables.test.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
+        "apps/server/src/orchestration/spaces.test.ts",
+        "apps/server/src/context/ContextRepository.test.ts",
+        "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts",
+        "apps/server/src/persistence/Layers/ProjectAgentRepository.test.ts",
+        "apps/server/src/persistence/Layers/HubWorkRepository.test.ts",
+        "apps/server/src/projectAgent/hubWorkService.test.ts",
+        "apps/server/src/projectAgent/Layers/ProjectAgentService.test.ts"
       ]
     }
   ]

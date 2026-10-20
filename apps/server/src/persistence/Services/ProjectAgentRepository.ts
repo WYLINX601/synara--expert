@@ -76,10 +76,18 @@ export interface ProjectAgentRepositoryShape {
   readonly listLinkedProjectIds: (
     projectId: ProjectId,
   ) => Effect.Effect<ReadonlyArray<ProjectId>, ProjectAgentRepositoryError>;
+  readonly getSourceProjectId?: (
+    projectId: ProjectId,
+  ) => Effect.Effect<ProjectId | null, ProjectAgentRepositoryError>;
+  readonly listUnconfiguredSourceHubs?: () => Effect.Effect<
+    readonly { readonly projectId: ProjectId; readonly sourceProjectId: ProjectId }[],
+    ProjectAgentRepositoryError
+  >;
   readonly linkProject: (input: {
     readonly projectId: ProjectId;
     readonly linkedProjectId: ProjectId;
     readonly createdAt: string;
+    readonly contextSource?: true;
   }) => Effect.Effect<void, ProjectAgentRepositoryError>;
   readonly unlinkProject: (input: {
     readonly projectId: ProjectId;

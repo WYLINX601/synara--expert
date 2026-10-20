@@ -23,7 +23,10 @@ import {
   type GroupSettingsDraft,
 } from "./groupSettingsDialog.logic";
 
-const codexSelection: ModelSelection = { provider: "codex", model: "gpt-5-codex" };
+const codexSelection: ModelSelection = {
+  provider: "codex",
+  model: "gpt-5-codex",
+};
 const claudeSelection: ModelSelection = {
   provider: "claudeAgent",
   model: "claude-opus-4-5",
@@ -56,6 +59,7 @@ function makeDraft(overrides: Partial<GroupSettingsDraft> = {}): GroupSettingsDr
     name: "alpha",
     icon: "🐝",
     goal: "ship it",
+    expertIds: [],
     coordinatorIcon: "",
     coordinatorColor: "",
     coordinatorModelSelection: codexSelection,
@@ -84,7 +88,11 @@ describe("buildGroupSettingsDraft", () => {
         ...baseConfig,
         icon: "🌊",
         goal: "keep it tidy",
-        workerRouting: { modelSelection: claudeSelection, environment: "worktree" },
+        expertIds: ["research", "writer"],
+        workerRouting: {
+          modelSelection: claudeSelection,
+          environment: "worktree",
+        },
         autoMemoryEnabled: false,
         libraryPath: "/tmp/lib",
         libraryRemoteUrl: "https://example.com/lib.git",
@@ -95,6 +103,7 @@ describe("buildGroupSettingsDraft", () => {
     });
     expect(draft.icon).toBe("🌊");
     expect(draft.goal).toBe("keep it tidy");
+    expect(draft.expertIds).toEqual(["research", "writer"]);
     expect(draft.coordinatorModelSelection).toEqual(codexSelection);
     expect(draft.workerModelSelection).toEqual(claudeSelection);
     expect(draft.workerEnvironment).toBe("worktree");
@@ -122,6 +131,7 @@ describe("buildGroupSettingsDraft", () => {
     });
     expect(noDefault.coordinatorModelSelection).toEqual(FALLBACK_GROUP_MODEL_SELECTION);
     expect(noDefault.workerModelSelection).toEqual(FALLBACK_GROUP_MODEL_SELECTION);
+    expect(noDefault.expertIds).toEqual([]);
   });
 
   it("snapshots the config into the baseline", () => {
@@ -171,6 +181,18 @@ describe("groupSettingsDirtySections", () => {
     expect(groupSettingsDirtySections(makeDraft({ name: "  alpha  " }), baseline).size).toBe(0);
   });
 
+  it("compares participant selections as sets", () => {
+    expect(
+      groupSettingsDirtySections(
+        makeDraft({ expertIds: ["writer", "research"] }),
+        makeDraft({ expertIds: ["research", "writer"] }),
+      ),
+    ).toEqual(new Set());
+    expect(groupSettingsDirtySections(makeDraft({ expertIds: ["research"] }), baseline)).toEqual(
+      new Set(["experts"]),
+    );
+  });
+
   it("marks memory for autoMemoryEnabled only", () => {
     expect(groupSettingsDirtySections(makeDraft({ autoMemoryEnabled: false }), baseline)).toEqual(
       new Set(["memory"]),
@@ -194,7 +216,11 @@ describe("groupSettingsDirtySections", () => {
 
   it("accumulates across sections and never flags plugins", () => {
     const dirty = groupSettingsDirtySections(
-      makeDraft({ name: "beta", autoMemoryEnabled: false, libraryPushOnChange: true }),
+      makeDraft({
+        name: "beta",
+        autoMemoryEnabled: false,
+        libraryPushOnChange: true,
+      }),
       baseline,
     );
     expect(dirty).toEqual(new Set(["general", "memory", "environment"]));
@@ -208,7 +234,11 @@ describe("modelSelectionsEqual", () => {
     expect(modelSelectionsEqual(codexSelection, claudeSelection)).toBe(false);
     expect(
       modelSelectionsEqual(
-        { provider: "codex", model: "gpt-5-codex", options: { reasoningEffort: "high" } },
+        {
+          provider: "codex",
+          model: "gpt-5-codex",
+          options: { reasoningEffort: "high" },
+        },
         { provider: "codex", model: "gpt-5-codex" },
       ),
     ).toBe(false);
@@ -222,11 +252,17 @@ describe("modelSelectionsEqual", () => {
 
   it("tells accounts of one provider apart and treats no account as the default one", () => {
     expect(
-      modelSelectionsEqual(codexSelection, { ...codexSelection, instanceId: "codex_work" }),
+      modelSelectionsEqual(codexSelection, {
+        ...codexSelection,
+        instanceId: "codex_work",
+      }),
     ).toBe(false);
-    expect(modelSelectionsEqual(codexSelection, { ...codexSelection, instanceId: "codex" })).toBe(
-      true,
-    );
+    expect(
+      modelSelectionsEqual(codexSelection, {
+        ...codexSelection,
+        instanceId: "codex",
+      }),
+    ).toBe(true);
   });
 });
 
@@ -287,10 +323,64 @@ describe("resolveSaveAttemptRequestId", () => {
       }),
     ).toBe("req-fresh");
   });
+
+  it("fingerprints expert selections as a set for retry stability", () => {
+    const first = saveAttemptFingerprint({
+      mode: "edit",
+      draft: makeDraft({ expertIds: ["writer", "research"] }),
+      importedInstructions: undefined,
+    });
+    const reordered = saveAttemptFingerprint({
+      mode: "edit",
+      draft: makeDraft({ expertIds: ["research", "writer"] }),
+      importedInstructions: undefined,
+    });
+    const changed = saveAttemptFingerprint({
+      mode: "edit",
+      draft: makeDraft({ expertIds: ["research"] }),
+      importedInstructions: undefined,
+    });
+    expect(reordered).toBe(first);
+    expect(changed).not.toBe(first);
+  });
 });
 
 describe("buildGroupConfigureInput", () => {
   const projectId = ProjectId.makeUnsafe("project-1");
+
+  it("persists an explicitly linked source Project on the first configure", () => {
+    const sourceProjectId = ProjectId.makeUnsafe("project-source");
+    const input = buildGroupConfigureInput({
+      projectId,
+      sourceProjectId,
+      requestId: "req-source",
+      mode: "onboarding",
+      draft: makeDraft(),
+      baseline: makeBaseline(),
+    });
+
+    expect(input.sourceProjectId).toBe(sourceProjectId);
+  });
+
+  it("sends the selected experts, including an explicit empty selection", () => {
+    const selected = buildGroupConfigureInput({
+      projectId,
+      requestId: "req-experts",
+      mode: "edit",
+      draft: makeDraft({ expertIds: ["writer", "research", "writer"] }),
+      baseline: makeBaseline(),
+    });
+    expect(selected.expertIds).toEqual(["writer", "research"]);
+
+    const empty = buildGroupConfigureInput({
+      projectId,
+      requestId: "req-empty-experts",
+      mode: "onboarding",
+      draft: makeDraft({ expertIds: [] }),
+      baseline: makeBaseline({}, null),
+    });
+    expect(empty).toHaveProperty("expertIds", []);
+  });
 
   it("keeps coordinatorModelSelection required and merges workerRouting from the baseline snapshot", () => {
     const input = buildGroupConfigureInput({
@@ -331,7 +421,9 @@ describe("buildGroupConfigureInput", () => {
         {},
         {
           ...baseConfig,
-          coordinatorProviderOptions: { codex: { binaryPath: "/usr/bin/codex" } },
+          coordinatorProviderOptions: {
+            codex: { binaryPath: "/usr/bin/codex" },
+          },
         },
       ),
     });
@@ -420,7 +512,11 @@ describe("buildGroupConfigureInput", () => {
       requestId: "req",
       mode: "edit",
       draft: makeDraft({ icon: "", libraryPath: "", libraryRemoteUrl: "" }),
-      baseline: makeBaseline({ icon: "", libraryPath: "", libraryRemoteUrl: "" }),
+      baseline: makeBaseline({
+        icon: "",
+        libraryPath: "",
+        libraryRemoteUrl: "",
+      }),
     });
     expect("icon" in alreadyEmpty).toBe(false);
     expect("libraryPath" in alreadyEmpty).toBe(false);
@@ -584,9 +680,12 @@ describe("isGroupOnboardingDiscardable", () => {
   });
 
   it("is not discardable once a repository is linked", () => {
-    expect(isGroupOnboardingDiscardable({ ...empty, linkedProjectIds: ["proj-linked"] })).toBe(
-      false,
-    );
+    expect(
+      isGroupOnboardingDiscardable({
+        ...empty,
+        linkedProjectIds: ["proj-linked"],
+      }),
+    ).toBe(false);
   });
 
   it("is not discardable once a real file exists", () => {
@@ -597,7 +696,10 @@ describe("isGroupOnboardingDiscardable", () => {
       }),
     ).toBe(false);
     expect(
-      isGroupOnboardingDiscardable({ ...empty, documentPaths: [...seedPaths, "uploads/logo.png"] }),
+      isGroupOnboardingDiscardable({
+        ...empty,
+        documentPaths: [...seedPaths, "uploads/logo.png"],
+      }),
     ).toBe(false);
   });
 });

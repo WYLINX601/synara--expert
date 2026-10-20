@@ -3,6 +3,7 @@ import { assert, it } from "@effect/vitest";
 import {
   ProjectId,
   MessageId,
+  type ExpertBinding,
   ThreadId,
   type ChatAttachment,
   type HubWorkRecord,
@@ -15,7 +16,10 @@ import { Effect, Layer, Option } from "effect";
 
 import type { ServerConfigShape } from "../config.ts";
 import type { GitCoreShape } from "../git/Services/GitCore.ts";
-import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
+import type {
+  OrchestrationDispatchContext,
+  OrchestrationEngineShape,
+} from "../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { HubWorkRepositoryLive } from "../persistence/Layers/HubWorkRepository.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
@@ -84,7 +88,7 @@ function work(workId: string): HubWorkRecord {
     scopeKey: `hub-saga-source:${workId}`,
     fingerprint: "hub-saga-plan",
     taskIndex: 0,
-    creationSpec: INPUT.threads[0]!,
+    creationSpec: { ...INPUT.threads[0]!, target: TARGET },
     sourceMessages: [],
     slotHeld: true,
     admittedAt: NOW,
@@ -107,6 +111,7 @@ const makeFixture = Effect.fn(function* (
   const hubWork = yield* HubWorkRepository;
   yield* hubWork.submit([work(workId)]);
   const commands: OrchestrationCommand[] = [];
+  const dispatchContexts: Array<OrchestrationDispatchContext | undefined> = [];
   const prepareCalls: Array<{ threadId: string; messageId: string }> = [];
   let authorized = true;
   let revokeDuringPreparation = false;
@@ -121,7 +126,7 @@ const makeFixture = Effect.fn(function* (
       assistantMessageId: MessageId.makeUnsafe("assistant-source"),
     },
   ];
-  const dispatch: OrchestrationEngineShape["dispatch"] = (command) =>
+  const dispatch: OrchestrationEngineShape["dispatch"] = (command, context) =>
     Effect.gen(function* () {
       if (failCleanup && command.type === "thread.delete")
         return yield* Effect.fail(
@@ -132,6 +137,7 @@ const makeFixture = Effect.fn(function* (
           }),
         );
       commands.push(command);
+      dispatchContexts.push(context);
       return { sequence: commands.length };
     });
   const handler = yield* makeCreateThreadsHandler({
@@ -154,10 +160,15 @@ const makeFixture = Effect.fn(function* (
         ),
     } as unknown as ProjectionSnapshotQueryShape,
     providerDiscovery: {
-      listModels: () => Effect.succeed({ models: [{ slug: TARGET.model, name: TARGET.model }] }),
+      listModels: () =>
+        Effect.succeed({
+          models: [{ slug: TARGET.model, name: TARGET.model }],
+        }),
     } as unknown as ProviderDiscoveryServiceShape,
     git: {} as GitCoreShape,
-    serverConfig: { worktreesDir: "/tmp/hub-saga-worktrees" } as ServerConfigShape,
+    serverConfig: {
+      worktreesDir: "/tmp/hub-saga-worktrees",
+    } as ServerConfigShape,
     loadProviderAvailabilities: Effect.succeed(new Map()),
     requireThreadShell: () => Effect.succeed({ ...caller, runtimeMode }),
   });
@@ -198,6 +209,7 @@ const makeFixture = Effect.fn(function* (
     handler,
     context,
     commands,
+    dispatchContexts,
     prepareCalls,
     attachments,
     hubWork,
@@ -231,7 +243,11 @@ const layer = it.layer(
 layer("Hub work creation saga", (it) => {
   for (const { target, explicit, expected } of [
     { target: TARGET, explicit: undefined, expected: "auto" },
-    { target: TARGET, explicit: "approval-required", expected: "approval-required" },
+    {
+      target: TARGET,
+      explicit: "approval-required",
+      expected: "approval-required",
+    },
     {
       target: { provider: "devin", model: TARGET.model },
       explicit: undefined,
@@ -252,10 +268,17 @@ layer("Hub work creation saga", (it) => {
             {
               ...INPUT,
               threads: [
-                { ...INPUT.threads[0]!, target, ...(explicit ? { runtimeMode: explicit } : {}) },
+                {
+                  ...INPUT.threads[0]!,
+                  target,
+                  ...(explicit ? { runtimeMode: explicit } : {}),
+                },
               ],
             },
-            { ...fixture.context, inheritedRuntimeMode: "auto" } as GatewayCreationContext,
+            {
+              ...fixture.context,
+              inheritedRuntimeMode: "auto",
+            } as GatewayCreationContext,
           );
           assert.notEqual(result.isError, true);
           const create = fixture.commands.find((command) => command.type === "thread.create");
@@ -279,6 +302,67 @@ layer("Hub work creation saga", (it) => {
       const create = fixture.commands.find((command) => command.type === "thread.create");
       assert.equal(create?.runtimeMode, "approval-required");
     }),
+  );
+
+  it.effect("rejects an Expert binding on an ordinary provider-session creation", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture("expert-provider-session");
+      const result = yield* fixture.handler(
+        {
+          ...INPUT,
+          requestId: "expert-provider-session-request",
+          threads: [{ ...INPUT.threads[0]!, expertId: "expert-one" }],
+        },
+        {
+          kind: "provider-session",
+          callerThreadId: CALLER_ID,
+          callerTurnId: "expert-provider-session-turn",
+          assertAuthority: () => Effect.void,
+        },
+      );
+      assert.equal(result.isError, true);
+      assert.include(JSON.stringify(result), "Only a Hub coordinator can dispatch");
+      assert.deepEqual(fixture.commands, []);
+    }),
+  );
+
+  it.effect(
+    "requires a matching frozen binding and forwards only that trusted Hub capability",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture("expert-trusted-binding");
+        const binding: ExpertBinding = {
+          expertId: "expert-one",
+          snapshotId: "snapshot-one",
+          displayName: "Pinned Expert",
+          revision: 1,
+        };
+        const input = {
+          ...INPUT,
+          threads: [{ ...INPUT.threads[0]!, expertId: binding.expertId }],
+        };
+        const missing = yield* fixture.handler(input, fixture.context);
+        assert.equal(missing.isError, true);
+        assert.deepEqual(fixture.commands, []);
+
+        const mismatched = yield* fixture.handler(input, {
+          ...fixture.context,
+          expertBinding: { ...binding, expertId: "other-expert" },
+        });
+        assert.equal(mismatched.isError, true);
+        assert.deepEqual(fixture.commands, []);
+
+        const result = yield* fixture.handler(input, {
+          ...fixture.context,
+          expertBinding: binding,
+        });
+        assert.notEqual(result.isError, true);
+        const createIndex = fixture.commands.findIndex(
+          (command) => command.type === "thread.create",
+        );
+        assert.isAtLeast(createIndex, 0);
+        assert.deepEqual(fixture.dispatchContexts[createIndex]?.hubExpertBinding, binding);
+      }),
   );
 
   it.effect(

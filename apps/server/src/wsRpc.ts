@@ -1,6 +1,7 @@
 import { readEventLoopStatus } from "./eventLoopMonitor";
 import { makeGitActionRunner } from "./git/gitActionRunner";
 import { AgentGatewaySessionRegistry } from "./agentGateway/Services/AgentGatewaySessionRegistry";
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 
 import {
@@ -186,6 +187,9 @@ import { redactSensitiveProcessArgs } from "./processArgumentRedaction";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment";
 import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
 import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
+import { createExpertStore } from "./experts/ExpertStore";
+import { readHubExpertCatalog } from "./agentGateway/hubExpertCatalog";
+import { buildAgentGatewayProviderAvailabilities } from "./agentGateway/providerAvailability";
 import { makeWorkbenchExpertRpcHandlers } from "./workbench/host/expertRpc.ts";
 import { makeWorkbenchContextRpcHandlers } from "./workbench/host/contextRpc.ts";
 import { readThreadContextDetails } from "./workbench/host/contextThreadDetails.ts";
@@ -2814,6 +2818,30 @@ const makeWsRpcHandlersLayer = () =>
             automationService.resolveProposal(input),
             "Failed to resolve automation proposal",
           ),
+        [WS_METHODS.projectAgentListExperts]: (input) =>
+          rpcEffect(
+            readHubExpertCatalog({
+              projectId: input.projectId,
+              snapshotQuery: projectionReadModelQuery,
+              loadConfig: (projectId) =>
+                projectAgentRepository
+                  .getConfig(projectId)
+                  .pipe(Effect.map((config) => (Option.isSome(config) ? config.value : null))),
+              dependencies: {
+                expertStore: createExpertStore(config.stateDir),
+                providerDiscovery: providerDiscoveryService,
+                loadProviderAvailabilities: Effect.all([
+                  serverSettings.getSettings,
+                  providerHealth.getStatuses,
+                ]).pipe(
+                  Effect.map(([settings, statuses]) =>
+                    buildAgentGatewayProviderAvailabilities(settings, statuses),
+                  ),
+                ),
+              },
+            }),
+            "Failed to list Hub experts",
+          ),
         [WS_METHODS.projectAgentGetOverview]: (input) =>
           rpcEffect(
             projectAgentService.getOverview(input, { kind: "user" }),
@@ -2994,6 +3022,41 @@ const makeWsRpcHandlersLayer = () =>
             projectAgentService.refreshDigest(input, { kind: "user" }),
             "Failed to refresh project digest",
           ),
+        [WS_METHODS.projectAgentDeliverablesList]: (input) =>
+          projectAgentService.deliverables
+            ? rpcEffect(
+                projectAgentService.deliverables.list(input, { kind: "user" }),
+                "Failed to list key deliverables",
+              )
+            : Effect.fail(
+                new WsRpcError({ message: "Key deliverables are unavailable on this server." }),
+              ),
+        [WS_METHODS.projectAgentDeliverablesRead]: (input) =>
+          projectAgentService.deliverables
+            ? rpcEffect(
+                projectAgentService.deliverables.read(input, { kind: "user" }),
+                "Failed to read the published version",
+              )
+            : Effect.fail(
+                new WsRpcError({ message: "Key deliverables are unavailable on this server." }),
+              ),
+        [WS_METHODS.projectAgentDeliverablesWithdraw]: (input) =>
+          requireWsOwnerSession.pipe(
+            Effect.andThen(
+              Effect.suspend(() =>
+                projectAgentService.deliverables
+                  ? rpcEffect(
+                      projectAgentService.deliverables.withdraw(input, { kind: "user" }),
+                      "Failed to withdraw key deliverables",
+                    )
+                  : Effect.fail(
+                      new WsRpcError({
+                        message: "Key deliverables are unavailable on this server.",
+                      }),
+                    ),
+              ),
+            ),
+          ),
         [WS_METHODS.projectAgentLibraryList]: (input) =>
           rpcEffect(
             withLibraryRootLock(
@@ -3062,12 +3125,39 @@ const makeWsRpcHandlersLayer = () =>
                         yield* ensureLibraryRepo(git, root, input.projectId, {
                           isManaged: libraryIsManaged,
                         });
+                        const operationId = randomUUID();
+                        if (projectAgentService.deliverables) {
+                          yield* projectAgentService.deliverables.maintainLibraryPaths({
+                            projectId: input.projectId,
+                            root,
+                            change: {
+                              kind: "rename",
+                              phase: "prepare",
+                              operationId,
+                              from: input.from,
+                              to: input.to,
+                            },
+                          });
+                        }
                         yield* renameLibraryEntry(root, input.from, input.to);
                         const { commitSha } = yield* commitLibraryChange(
                           git,
                           root,
                           `Rename ${input.from} to ${input.to}`,
                         );
+                        if (projectAgentService.deliverables) {
+                          yield* projectAgentService.deliverables.maintainLibraryPaths({
+                            projectId: input.projectId,
+                            root,
+                            change: {
+                              kind: "rename",
+                              phase: "finalize",
+                              operationId,
+                              from: input.from,
+                              to: input.to,
+                            },
+                          });
+                        }
                         yield* pushGroupLibraryInBackground(root, agentConfig);
                         return { commitSha };
                       }),
@@ -3100,6 +3190,13 @@ const makeWsRpcHandlersLayer = () =>
                           root,
                           `Delete ${input.relativePath}`,
                         );
+                        if (projectAgentService.deliverables) {
+                          yield* projectAgentService.deliverables.maintainLibraryPaths({
+                            projectId: input.projectId,
+                            root,
+                            change: { kind: "delete", path: input.relativePath },
+                          });
+                        }
                         yield* pushGroupLibraryInBackground(root, agentConfig);
                         return { commitSha };
                       }),
@@ -3159,6 +3256,13 @@ const makeWsRpcHandlersLayer = () =>
                           relativePath,
                           input.sha,
                         );
+                        if (projectAgentService.deliverables) {
+                          yield* projectAgentService.deliverables.maintainLibraryPaths({
+                            projectId: input.projectId,
+                            root,
+                            change: { kind: "restore", path: relativePath },
+                          });
+                        }
                         yield* pushGroupLibraryInBackground(root, agentConfig);
                         return result;
                       }),

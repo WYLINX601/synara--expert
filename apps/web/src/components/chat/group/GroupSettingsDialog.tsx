@@ -1,10 +1,17 @@
 // FILE: GroupSettingsDialog.tsx
-// Purpose: Two-pane group settings dialog (General / Memory / Environment / Plugins)
+// Purpose: Two-pane group settings dialog (General / Experts / Memory / Environment / Plugins)
 //          used both for group onboarding and for editing a configured group.
 // Layer: Group settings dialog
 // Exports: GroupSettingsDialog
 
-import type { ModelSelection, ProjectAgentOverview, ProjectId } from "@synara/contracts";
+import type {
+  ExpertDefinition,
+  ModelSelection,
+  ProjectAgentOverview,
+  ProjectId,
+  SpaceId,
+} from "@synara/contracts";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, type ComponentType } from "react";
 
 import { createCentralIconComponent } from "~/lib/central-icons";
@@ -38,6 +45,7 @@ import { useProfileName } from "~/components/profile/useProfileName";
 import { isDefaultGroupCoordinatorName } from "~/lib/groupCoordinatorName";
 import { cn, newCommandId } from "~/lib/utils";
 import { readNativeApi } from "~/nativeApi";
+import { ensureExpertClient } from "~/workbench/host/expertClient";
 import {
   SETTINGS_SIDEBAR_ICON_CLASS_NAME,
   SETTINGS_SIDEBAR_ITEM_CLASS_NAME,
@@ -48,8 +56,12 @@ import {
 } from "~/settingsSidebarNavStyles";
 import { useStore } from "~/store";
 import { useWorkspacePathsStore } from "~/workspacePathsStore";
+import { useVoidSpaceStore } from "~/voidSpaceStore";
+import { toastManager } from "~/components/ui/toast";
+import { EXPERTS_QUERY_KEY } from "~/components/settings/expertSettingsQueries";
 
 import { GroupEnvironmentSection } from "./GroupEnvironmentSection";
+import { GroupExpertsSection } from "./GroupExpertsSection";
 import { GroupGeneralSection } from "./GroupGeneralSection";
 import { GroupLifecycleSection } from "./GroupLifecycleSection";
 import { GroupMemorySection } from "./GroupMemorySection";
@@ -73,6 +85,7 @@ const GROUP_SETTINGS_SECTION_ICONS: Record<
   ComponentType<{ className?: string }>
 > = {
   general: createCentralIconComponent("settings-gear-4"),
+  experts: createCentralIconComponent("people"),
   memory: createCentralIconComponent("brain"),
   environment: FolderOpenIcon,
   plugins: createCentralIconComponent("plugin-1"),
@@ -87,15 +100,51 @@ export function GroupSettingsDialog(props: {
   readonly defaultModelSelection: ModelSelection | null;
   readonly initialSection?: GroupSettingsSection | undefined;
   readonly importedInstructions?: string | undefined;
+  /** The explicitly linked source for a Hub created from a Project. */
+  readonly sourceProjectId?: ProjectId | undefined;
+  /** Reused if the initial source-link attempt needs to be retried. */
+  readonly sourceLinkRequestId?: string | undefined;
+  /** Notifies the caller after the explicit source association has persisted. */
+  readonly onSourceProjectLinked?:
+    | ((input: {
+        projectId: ProjectId;
+        sourceProjectId: ProjectId;
+        sourceLinkRequestId: string;
+      }) => void)
+    | undefined;
+  /** Notifies the caller only after this newly created Hub was deleted successfully. */
+  readonly onDiscarded?:
+    | ((input: {
+        projectId: ProjectId;
+        sourceProjectId: ProjectId;
+        sourceLinkRequestId?: string | undefined;
+      }) => void)
+    | undefined;
   // Only set when this dialog opening also created the group — discard is
   // "undo create", never an offer for a group that already existed.
   readonly allowDiscard?: boolean | undefined;
   readonly onOpenChange: (open: boolean) => void;
   readonly onSaved?: ((overview: ProjectAgentOverview) => void) | undefined;
 }) {
-  const agent = useProjectAgent({ projectId: props.projectId, enabled: props.open });
+  const queryClient = useQueryClient();
+  const expertsQuery = useQuery<ReadonlyArray<ExpertDefinition>>({
+    queryKey: EXPERTS_QUERY_KEY,
+    queryFn: () => ensureExpertClient().listExperts(),
+    enabled: props.open,
+  });
+  const agent = useProjectAgent({
+    projectId: props.projectId,
+    enabled: props.open,
+  });
   const homeDir = useWorkspacePathsStore((store) => store.homeDir);
   const renameProjectLocally = useStore((store) => store.renameProjectLocally);
+  const spaces = useStore((store) => store.spaces);
+  const projectSpaceId = useStore(
+    (store) => store.projects.find((project) => project.id === props.projectId)?.spaceId ?? null,
+  );
+  const voidSpace = useVoidSpaceStore((store) => store.voidSpace);
+  const [pendingSpaceId, setPendingSpaceId] = useState<SpaceId | null | undefined>(undefined);
+  const selectedSpaceId = pendingSpaceId !== undefined ? pendingSpaceId : projectSpaceId;
   const { name: userDisplayName } = useProfileName(
     toDisplayName(
       (homeDir ?? "")
@@ -121,7 +170,14 @@ export function GroupSettingsDialog(props: {
   const [discarding, setDiscarding] = useState(false);
   // The most recent failed save attempt; a retry reuses its requestId only while
   // the payload fingerprint matches so server receipts dedupe the replay.
-  const failedAttemptRef = useRef<{ requestId: string; fingerprint: string } | null>(null);
+  const failedAttemptRef = useRef<{
+    requestId: string;
+    fingerprint: string;
+  } | null>(null);
+  const sourceLinkRequestRef = useRef<{
+    projectId: ProjectId;
+    requestId: string;
+  } | null>(null);
   const openRef = useRef(false);
   const seededNameRef = useRef(props.projectName);
 
@@ -137,12 +193,48 @@ export function GroupSettingsDialog(props: {
       setBaseline(null);
       setSaving(false);
       setSaveError(null);
+      setPendingSpaceId(undefined);
       return;
     }
     if (!props.open) {
       openRef.current = false;
     }
   }, [props.open, props.initialSection, props.projectName]);
+
+  useEffect(() => {
+    if (pendingSpaceId !== undefined && pendingSpaceId === projectSpaceId) {
+      setPendingSpaceId(undefined);
+    }
+  }, [pendingSpaceId, projectSpaceId]);
+
+  const moveHubToSpace = async (spaceId: SpaceId | null) => {
+    if (spaceId === selectedSpaceId) return;
+    const api = readNativeApi();
+    if (!api) {
+      toastManager.add({
+        type: "error",
+        title: "Unable to move Hub",
+        description: "The app server is unavailable.",
+      });
+      return;
+    }
+    setPendingSpaceId(spaceId);
+    try {
+      await api.orchestration.dispatchCommand({
+        type: "project.meta.update",
+        commandId: newCommandId(),
+        projectId: props.projectId,
+        spaceId,
+      });
+    } catch (error) {
+      setPendingSpaceId(undefined);
+      toastManager.add({
+        type: "error",
+        title: "Unable to move Hub",
+        description: error instanceof Error ? error.message : "Try again.",
+      });
+    }
+  };
 
   useEffect(() => {
     if (!props.open || draft !== null || agent.overview === null) return;
@@ -181,6 +273,7 @@ export function GroupSettingsDialog(props: {
   const dirtySections =
     draft && baseline ? groupSettingsDirtySections(draft, baseline.draft) : new Set();
   const dirty = draft !== null && baseline !== null && dirtySections.size > 0;
+  const sourceProjectId = props.sourceProjectId ?? agent.overview?.sourceProjectId;
 
   const handleSave = async () => {
     if (!draft || !baseline || saving) return;
@@ -203,13 +296,51 @@ export function GroupSettingsDialog(props: {
       mode: props.mode,
       draft,
       importedInstructions,
+      sourceProjectId,
     });
     const requestId = resolveSaveAttemptRequestId({
       failed: failedAttemptRef.current,
       fingerprint,
     });
+    if (sourceProjectId && !agent.overview?.linkedProjectIds?.includes(sourceProjectId)) {
+      const currentLinkRequest = sourceLinkRequestRef.current;
+      const sourceLinkRequestId =
+        (sourceProjectId === props.sourceProjectId ? props.sourceLinkRequestId : undefined) ??
+        (currentLinkRequest?.projectId === sourceProjectId
+          ? currentLinkRequest.requestId
+          : crypto.randomUUID());
+      sourceLinkRequestRef.current = {
+        projectId: sourceProjectId,
+        requestId: sourceLinkRequestId,
+      };
+      let linkedOverview: ProjectAgentOverview;
+      try {
+        linkedOverview = await api.projectAgent.linkProject({
+          requestId: sourceLinkRequestId,
+          projectId: props.projectId,
+          linkedProjectId: sourceProjectId,
+          contextSource: true,
+        });
+      } catch (error) {
+        setSaving(false);
+        setSaveError(
+          error instanceof Error ? error.message : "Could not link the source project. Try again.",
+        );
+        return;
+      }
+      useProjectAgentSummariesStore.getState().applyOverview(linkedOverview);
+      const onSourceProjectLinked = props.onSourceProjectLinked;
+      if (onSourceProjectLinked) {
+        onSourceProjectLinked({
+          projectId: props.projectId,
+          sourceProjectId,
+          sourceLinkRequestId,
+        });
+      }
+    }
     const result = await saveGroupSettings({
       projectId: props.projectId,
+      sourceProjectId,
       requestId,
       mode: props.mode,
       draft,
@@ -272,6 +403,7 @@ export function GroupSettingsDialog(props: {
     }
     failedAttemptRef.current = null;
     useProjectAgentSummariesStore.getState().applyOverview(result.overview);
+    void queryClient.invalidateQueries({ queryKey: ["hub-references"] });
     void agent.load();
     props.onSaved?.(result.overview);
     props.onOpenChange(false);
@@ -329,6 +461,13 @@ export function GroupSettingsDialog(props: {
     if (result === null) {
       setDiscardError("Could not delete this hub. Try again from the hub's settings.");
       return;
+    }
+    if (props.sourceProjectId) {
+      props.onDiscarded?.({
+        projectId: props.projectId,
+        sourceProjectId: props.sourceProjectId,
+        sourceLinkRequestId: props.sourceLinkRequestId,
+      });
     }
     setDiscardConfirmOpen(false);
     props.onOpenChange(false);
@@ -418,6 +557,10 @@ export function GroupSettingsDialog(props: {
                     draft={draft}
                     defaultModelSelection={props.defaultModelSelection}
                     projectCwd={props.workspacePath}
+                    spaceId={selectedSpaceId}
+                    spaces={spaces}
+                    voidSpace={voidSpace}
+                    onSpaceChange={(spaceId) => void moveHubToSpace(spaceId)}
                     onChange={(patch) =>
                       setDraft((current) => (current ? { ...current, ...patch } : current))
                     }
@@ -430,6 +573,22 @@ export function GroupSettingsDialog(props: {
                     />
                   ) : null}
                 </>
+              ) : section === "experts" ? (
+                <GroupExpertsSection
+                  expertIds={draft.expertIds}
+                  experts={expertsQuery.data}
+                  loading={expertsQuery.isPending || expertsQuery.isFetching}
+                  error={
+                    expertsQuery.error instanceof Error
+                      ? expertsQuery.error.message
+                      : expertsQuery.error
+                        ? "请重试。"
+                        : null
+                  }
+                  onChange={(expertIds) =>
+                    setDraft((current) => (current ? { ...current, expertIds } : current))
+                  }
+                />
               ) : section === "memory" ? (
                 <GroupMemorySection
                   configured={agent.overview?.configured === true}

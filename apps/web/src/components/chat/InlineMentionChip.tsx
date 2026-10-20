@@ -19,7 +19,7 @@ import {
 } from "../composerInlineChip";
 import { InlineChipContent } from "../InlineChip";
 import { MentionChipIcon, type MentionChipKind } from "./MentionChipIcon";
-import { resolveMentionChipKind } from "~/lib/composerMentions";
+import { hubReferenceMentionLabel, resolveMentionChipKind } from "~/lib/composerMentions";
 
 interface InlineMentionChipProps {
   path: string;
@@ -42,11 +42,14 @@ export function InlineMentionChip(props: InlineMentionChipProps) {
     ...(props.kind ? { kind: props.kind } : {}),
     ...(props.mentionReferences ? { mentionReferences: props.mentionReferences } : {}),
   });
+  const safeHubLabel = hubReferenceMentionLabel(props.path, props.mentionReferences);
   const label =
+    safeHubLabel ??
     props.label ??
     (resolvedKind === "thread" || resolvedKind === "connector"
       ? props.path
       : basenameOfPath(props.path));
+  const title = safeHubLabel ?? props.path;
   const inner = (
     <InlineChipContent
       icon={
@@ -65,13 +68,14 @@ export function InlineMentionChip(props: InlineMentionChipProps) {
   // viewer when the hosting surface provides one, so every file reference in
   // the chat stays clickable. Plugin chips and non-file paths stay static.
   const contextOpenable =
+    safeHubLabel === null &&
     props.href === undefined &&
     props.onActivate === undefined &&
     opener !== null &&
     (props.kind === undefined || props.kind === "path") &&
     pathLooksLikeKnownFile(props.path);
 
-  if (props.href !== undefined || props.onActivate || contextOpenable) {
+  if (safeHubLabel === null && (props.href !== undefined || props.onActivate || contextOpenable)) {
     const href = props.href ?? (contextOpenable ? props.path : undefined);
     const handleActivate =
       props.onActivate ??
@@ -90,7 +94,7 @@ export function InlineMentionChip(props: InlineMentionChipProps) {
     return (
       <a
         className={COMPOSER_INLINE_MENTION_CHIP_INTERACTIVE_CLASS_NAME}
-        title={props.path}
+        title={title}
         {...(href !== undefined ? { href } : {})}
         {...(handleActivate ? { onClick: handleActivate } : {})}
         {...(props.onContextMenu ? { onContextMenu: props.onContextMenu } : {})}
@@ -104,7 +108,7 @@ export function InlineMentionChip(props: InlineMentionChipProps) {
   }
 
   return (
-    <span className={COMPOSER_INLINE_MENTION_CHIP_CLASS_NAME} title={props.path}>
+    <span className={COMPOSER_INLINE_MENTION_CHIP_CLASS_NAME} title={title}>
       {inner}
     </span>
   );

@@ -1,5 +1,13 @@
 import { Schema } from "effect";
 import type {
+  ProjectAgentDeliverablesListInput,
+  ProjectAgentDeliverablesReadInput,
+  ProjectAgentDeliverablesWithdrawInput,
+  HubDeliverableListResult,
+  HubDeliverableReadResult,
+  HubDeliverableMutationResult,
+} from "./hubDeliverables";
+import type {
   LoadProjectImportHistoryInput,
   LoadProjectImportHistoryResult,
   ImportProjectInput,
@@ -102,6 +110,8 @@ import type {
   ProjectAgentExportDocumentsInput,
   ProjectAgentExportDocumentsResult,
   ProjectAgentGetOverviewInput,
+  ProjectAgentListExpertsInput,
+  ProjectAgentListExpertsResult,
   ProjectAgentDeleteGroupInput,
   ProjectAgentGroupControlInput,
   ProjectAgentDeleteGroupResult,
@@ -1479,6 +1489,7 @@ export interface NativeApi {
   };
   projectAgent: {
     getOverview: (input: ProjectAgentGetOverviewInput) => Promise<ProjectAgentOverview>;
+    listExperts?: (input: ProjectAgentListExpertsInput) => Promise<ProjectAgentListExpertsResult>;
     listSummaries: (
       input?: ProjectAgentListSummariesInput,
     ) => Promise<ProjectAgentListSummariesResult>;
@@ -1518,6 +1529,13 @@ export interface NativeApi {
     resolveWorker: (
       input: ProjectAgentResolveWorkerInput,
     ) => Promise<ProjectAgentResolveWorkerResult>;
+    deliverables?: {
+      list: (input: ProjectAgentDeliverablesListInput) => Promise<HubDeliverableListResult>;
+      read: (input: ProjectAgentDeliverablesReadInput) => Promise<HubDeliverableReadResult>;
+      withdraw: (
+        input: ProjectAgentDeliverablesWithdrawInput,
+      ) => Promise<HubDeliverableMutationResult>;
+    };
     library: {
       list: (input: ProjectAgentLibraryListInput) => Promise<ProjectAgentLibraryListResult>;
       mkdir: (input: ProjectAgentLibraryMkdirInput) => Promise<ProjectAgentLibraryMutationResult>;

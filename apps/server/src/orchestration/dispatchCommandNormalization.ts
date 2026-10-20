@@ -69,6 +69,7 @@ export function makeDispatchCommandNormalizer<E>(options: DispatchCommandNormali
     readonly title: string | undefined;
     readonly workspaceRoot: string;
     readonly excludeProjectId?: ProjectId | undefined;
+    readonly creationProjectId?: ProjectId | undefined;
   }): Effect.Effect<string, E> => {
     const { kind, title, workspaceRoot, excludeProjectId } = input;
     if (kind !== "group" || !options.groupsWorkspaceRoot) {
@@ -76,6 +77,17 @@ export function makeDispatchCommandNormalizer<E>(options: DispatchCommandNormali
     }
     const groupsWorkspaceRoot = options.groupsWorkspaceRoot;
     const baseSlug = slugifyGroupTitle(title?.trim() || workspaceRoot);
+    // Native Hub creation carries its request identity in a safe folder name.
+    // Preserve that name instead of racing two same-title requests for one slug.
+    // Other/legacy clients keep their existing slug-allocation behavior below.
+    const identity = input.creationProjectId;
+    const folderName = workspaceRoot
+      .replace(/[\\/]+$/g, "")
+      .split(/[\\/]/)
+      .at(-1);
+    if (identity && /^[a-z0-9_-]+$/i.test(identity) && folderName === `${baseSlug}-${identity}`) {
+      return Effect.succeed(options.path.join(groupsWorkspaceRoot, folderName));
+    }
     return Effect.gen(function* () {
       const takenRoots: string[] = [];
       let ownRoot: string | null = null;
@@ -237,6 +249,7 @@ export function makeDispatchCommandNormalizer<E>(options: DispatchCommandNormali
         kind: input.command.kind,
         title: input.command.title,
         workspaceRoot: input.command.workspaceRoot,
+        creationProjectId: input.command.projectId,
       });
       const workspaceRoot = yield* options.canonicalizeProjectWorkspaceRoot(
         requestedWorkspaceRoot,

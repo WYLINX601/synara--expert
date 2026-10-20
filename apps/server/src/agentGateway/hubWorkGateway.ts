@@ -16,6 +16,9 @@ import type { OrchestrationCommandReceiptRepositoryShape } from "../persistence/
 import type { GitCoreShape } from "../git/Services/GitCore";
 import type { QueuedTurnPromotionRepositoryShape } from "../persistence/Services/QueuedTurnPromotions";
 import type { ServerConfigShape } from "../config";
+import type { ProviderDiscoveryServiceShape } from "../provider/Services/ProviderDiscoveryService";
+import type { AgentGatewayProviderAvailability } from "./targetResolver";
+import type { ExpertStore } from "../experts/ExpertStore";
 import { LOCAL_LOOPBACK_ATTACHMENT_PRINCIPAL } from "../managedAttachmentPrincipal";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery";
 import type { HubWorkRepositoryShape } from "../persistence/Services/HubWorkRepository";
@@ -23,6 +26,7 @@ import type { ManagedAttachmentRepositoryShape } from "../persistence/Services/M
 import type { ProjectAgentRepositoryShape } from "../persistence/Services/ProjectAgentRepository";
 import { GROUPS_BETA_ONLY_MESSAGE, isServerGroupsEnabled } from "../projectAgent/groupsBetaGate";
 import { makeHubWorkService } from "../projectAgent/hubWorkService";
+import { listHubExpertSummaries, resolveHubCreationSpec } from "./hubExpertDispatch";
 import type { ProjectAgentServiceShape } from "../projectAgent/Services/ProjectAgentService";
 import type { makeCreateThreadsHandler } from "./creationCoordinator";
 import { stableGatewayDigest } from "./creationUtils";
@@ -53,6 +57,15 @@ export function makeHubWorkGateway(dependencies: {
   readonly snapshotQuery: ProjectionSnapshotQueryShape;
   readonly attachments: ManagedAttachmentRepositoryShape;
   readonly serverConfig: ServerConfigShape;
+  readonly expertStore: Pick<
+    ExpertStore,
+    "list" | "read" | "preview" | "prepareSnapshot" | "readSnapshot"
+  >;
+  readonly providerDiscovery: ProviderDiscoveryServiceShape;
+  readonly loadProviderAvailabilities: Effect.Effect<
+    ReadonlyMap<import("@synara/contracts").ProviderKind, AgentGatewayProviderAvailability>,
+    unknown
+  >;
   readonly createThreads: CreateThreads;
 }) {
   const { repository, projectAgentRepository, projectAgentService, snapshotQuery } = dependencies;
@@ -61,6 +74,26 @@ export function makeHubWorkGateway(dependencies: {
     projectAgentRepository,
     projectAgentService,
     snapshotQuery,
+    resolveCreationSpec: ({ callerThreadId, targetProjectId, spec }) =>
+      Effect.gen(function* () {
+        const caller = yield* snapshotQuery.getThreadShellById(ThreadId.makeUnsafe(callerThreadId));
+        if (Option.isNone(caller))
+          return yield* Effect.fail(new ToolInputError("Coordinator thread was not found."));
+        const project = yield* snapshotQuery.getProjectShellById(targetProjectId);
+        if (Option.isNone(project))
+          return yield* Effect.fail(new ToolInputError("Target project was not found."));
+        return yield* resolveHubCreationSpec({
+          dependencies: {
+            expertStore: dependencies.expertStore,
+            providerDiscovery: dependencies.providerDiscovery,
+            loadProviderAvailabilities: dependencies.loadProviderAvailabilities,
+            getProjectWorkspaceRoot: () => Effect.succeed(project.value.workspaceRoot),
+          },
+          targetProjectId,
+          callerTarget: caller.value.modelSelection,
+          spec,
+        });
+      }),
     ...(dependencies.messages ? { messages: dependencies.messages } : {}),
     ...(dependencies.commandReceipts ? { commandReceipts: dependencies.commandReceipts } : {}),
     ...(dependencies.queuedTurnPromotions
@@ -122,12 +155,13 @@ export function makeHubWorkGateway(dependencies: {
       // nonterminal saga here would also block the scanner waiting for that saga.
       if (yield* hasUnfinishedCreation(record)) return;
       const spec = record.creationSpec;
+      const { expertBinding, ...creationSpec } = spec;
       const result = yield* dependencies.createThreads(
         {
           requestId: record.id,
           threads: [
             {
-              ...spec,
+              ...creationSpec,
               notifyCreatorOnComplete: false,
               projectId: record.targetProjectId,
               prompt: renderHubWorkPrompt({
@@ -140,6 +174,7 @@ export function makeHubWorkGateway(dependencies: {
         },
         {
           kind: "hub-work",
+          ...(expertBinding ? { expertBinding } : {}),
           inheritedRuntimeMode: spec.inheritedRuntimeMode,
           workItemId: record.id,
           batchId: `hub-work-batch:${stableGatewayDigest({ projectId: record.projectId, scopeKey: record.scopeKey }, 40)}`,
@@ -204,7 +239,10 @@ export function makeHubWorkGateway(dependencies: {
     for (const { projectId } of configs) {
       yield* processProjectQueue(projectId).pipe(
         Effect.catch((error) =>
-          Effect.logWarning("Hub queue scan failed", { projectId, error: errorText(error) }),
+          Effect.logWarning("Hub queue scan failed", {
+            projectId,
+            error: errorText(error),
+          }),
         ),
       );
     }
@@ -238,10 +276,14 @@ export function makeHubWorkGateway(dependencies: {
       if (Option.isNone(caller))
         return yield* Effect.fail(new ToolInputError("Coordinator thread was not found."));
       const inheritedRuntimeMode = caller.value.runtimeMode;
+      const hubConfig = yield* projectAgentRepository.getConfig(principal.projectId);
+      if (Option.isNone(hubConfig))
+        return yield* Effect.fail(new ToolInputError("Hub was not found."));
+      const defaultTargetProjectId = hubConfig.value.sourceProjectId ?? principal.projectId;
       const tasks = [];
       for (const [taskIndex, spec] of input.threads.entries()) {
         const project = yield* snapshotQuery.getProjectShellById(
-          spec.projectId ?? principal.projectId,
+          spec.projectId ?? defaultTargetProjectId,
         );
         if (Option.isNone(project))
           return yield* Effect.fail(new ToolInputError("Target project was not found."));
@@ -280,10 +322,67 @@ export function makeHubWorkGateway(dependencies: {
     {
       requiredCapability: "thread:read",
       definition: {
+        name: "synara_hub_list_experts",
+        description:
+          "List only this Hub’s participating Experts and their dispatch availability. An empty list has no Experts. If no participant matches authorized work, omit expertId and supply an explicit target to create an ordinary Worker. Explicit unavailable Expert or target requests must fail.",
+        inputSchema: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
+        annotations: {
+          title: "List Hub Experts",
+          ...READ_ONLY_TOOL_ANNOTATIONS,
+        },
+      },
+      handler: (_args, context) =>
+        Effect.gen(function* () {
+          const principal = yield* principalFor(context);
+          if (principal.kind !== "coordinator")
+            return yield* Effect.fail(
+              new ToolInputError("Only a Hub coordinator can list Experts."),
+            );
+          const config = yield* dependencies.projectAgentRepository.getConfig(principal.projectId);
+          if (Option.isNone(config))
+            return yield* Effect.fail(new ToolInputError("Hub was not found."));
+          const caller = yield* snapshotQuery.getThreadShellById(principal.threadId);
+          if (Option.isNone(caller))
+            return yield* Effect.fail(new ToolInputError("Coordinator thread was not found."));
+          return mcpToolResultJson({
+            experts: yield* listHubExpertSummaries({
+              dependencies: {
+                expertStore: dependencies.expertStore,
+                providerDiscovery: dependencies.providerDiscovery,
+                loadProviderAvailabilities: dependencies.loadProviderAvailabilities,
+                getProjectWorkspaceRoot: (projectId) =>
+                  snapshotQuery.getProjectShellById(projectId).pipe(
+                    Effect.flatMap(
+                      Option.match({
+                        onNone: () =>
+                          Effect.fail(new ToolInputError("Target project was not found.")),
+                        onSome: (project) => Effect.succeed(project.workspaceRoot),
+                      }),
+                    ),
+                  ),
+              },
+              callerTarget: caller.value.modelSelection,
+              projectId: principal.projectId,
+              expertIds: config.value.expertIds ?? [],
+            }),
+          });
+        }).pipe(Effect.catch((error) => Effect.succeed(mcpToolResultError(errorText(error))))),
+    },
+    {
+      requiredCapability: "thread:read",
+      definition: {
         name: "synara_hub_list_work",
         description:
           "Read durable Hub task cards, queue state and progress revisions for your Hub.",
-        inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        inputSchema: {
+          type: "object",
+          properties: {},
+          additionalProperties: false,
+        },
         annotations: { title: "Read Hub work", ...READ_ONLY_TOOL_ANNOTATIONS },
       },
       handler: (_args, context) =>
@@ -317,7 +416,10 @@ export function makeHubWorkGateway(dependencies: {
                 properties: {
                   id: { type: "string" },
                   text: { type: "string" },
-                  status: { type: "string", enum: ["pending", "inProgress", "completed"] },
+                  status: {
+                    type: "string",
+                    enum: ["pending", "inProgress", "completed"],
+                  },
                 },
                 required: ["id", "text", "status"],
                 additionalProperties: false,
@@ -327,7 +429,10 @@ export function makeHubWorkGateway(dependencies: {
           required: ["workItemId", "expectedRevision", "steps"],
           additionalProperties: false,
         },
-        annotations: { title: "Update Hub progress", ...WRITE_TOOL_ANNOTATIONS },
+        annotations: {
+          title: "Update Hub progress",
+          ...WRITE_TOOL_ANNOTATIONS,
+        },
       },
       handler: (args, context) =>
         Effect.gen(function* () {
@@ -367,7 +472,11 @@ export function makeHubWorkGateway(dependencies: {
           return mcpToolResultJson(
             hubWorkItem(
               yield* service.cancel(
-                { workItemId: readStringArg(args, "workItemId", { required: true })! },
+                {
+                  workItemId: readStringArg(args, "workItemId", {
+                    required: true,
+                  })!,
+                },
                 principal,
               ),
             ),

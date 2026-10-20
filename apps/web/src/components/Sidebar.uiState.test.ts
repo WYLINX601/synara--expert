@@ -63,6 +63,7 @@ describe("Sidebar.uiState", () => {
 
   it("defaults collapsed sidebar UI state with no thread list paging", () => {
     expect(readSidebarUiState()).toEqual({
+      projectsSectionExpanded: true,
       chatSectionExpanded: false,
       chatThreadListExtraPages: 0,
       projectThreadListExtraPagesByCwd: {},
@@ -75,6 +76,7 @@ describe("Sidebar.uiState", () => {
 
   it("persists project thread list paging by normalized cwd", () => {
     persistSidebarUiState({
+      projectsSectionExpanded: false,
       chatSectionExpanded: true,
       chatThreadListExtraPages: 2,
       projectThreadListExtraPagesByCwd: {
@@ -94,6 +96,7 @@ describe("Sidebar.uiState", () => {
     });
 
     expect(readSidebarUiState()).toEqual({
+      projectsSectionExpanded: false,
       chatSectionExpanded: true,
       chatThreadListExtraPages: 2,
       projectThreadListExtraPagesByCwd: {
@@ -140,6 +143,7 @@ describe("Sidebar.uiState", () => {
     );
 
     expect(readSidebarUiState()).toEqual({
+      projectsSectionExpanded: true,
       chatSectionExpanded: true,
       chatThreadListExtraPages: 0,
       projectThreadListExtraPagesByCwd: {
@@ -167,6 +171,7 @@ describe("Sidebar.uiState", () => {
     );
 
     expect(readSidebarUiState()).toMatchObject({
+      projectsSectionExpanded: true,
       chatThreadListExtraPages: 1,
       projectThreadListExtraPagesByCwd: {
         [normalizeSidebarProjectThreadListCwd("/Users/tester/Code/demo")]: 1,
@@ -187,6 +192,7 @@ describe("Sidebar.uiState", () => {
     );
 
     expect(readSidebarUiState()).toEqual({
+      projectsSectionExpanded: true,
       chatSectionExpanded: false,
       chatThreadListExtraPages: 0,
       projectThreadListExtraPagesByCwd: {},

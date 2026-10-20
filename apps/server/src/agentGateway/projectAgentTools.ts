@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { makeHubDeliverableTools } from "./hubDeliverableTools";
 
 import {
   ProjectAgentForgetInput,
@@ -414,5 +415,6 @@ export function makeProjectAgentTools(
     libraryList,
     libraryAdd,
     listThreads,
+    ...makeHubDeliverableTools(projectAgent),
   ];
 }

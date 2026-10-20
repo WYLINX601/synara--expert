@@ -27,7 +27,7 @@ import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
   type TerminalContextDraft,
 } from "~/lib/terminalContext";
-import { formatComposerMentionToken } from "~/lib/composerMentions";
+import { formatComposerMentionToken, hubReferenceMentionLabel } from "~/lib/composerMentions";
 import { basenameOfPath } from "~/file-icons";
 import { createCentralIconElement } from "~/lib/central-icons";
 import {
@@ -56,6 +56,7 @@ import { ProviderIcon } from "../ProviderIcon";
 export type SerializedComposerMentionNode = Spread<
   {
     kind?: MentionChipKind;
+    label?: string;
     path: string;
     provider?: ProviderKind;
     threadId?: string;
@@ -126,6 +127,7 @@ function renderMentionChipDom(
   pathValue: string,
   kind: MentionChipKind,
   provider?: ProviderKind,
+  displayLabel?: string,
 ): void {
   resetInlineChipContainer(container);
 
@@ -154,7 +156,9 @@ function renderMentionChipDom(
   const label = document.createElement("span");
   label.className = COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME;
   label.textContent =
-    kind === "thread" || kind === "connector" ? pathValue : basenameOfPath(pathValue);
+    displayLabel ??
+    hubReferenceMentionLabel(pathValue, undefined) ??
+    (kind === "thread" || kind === "connector" ? pathValue : basenameOfPath(pathValue));
 
   container.append(icon, label);
 }
@@ -240,6 +244,7 @@ function ComposerLinkDecorator(props: { url: string }) {
 
 export class ComposerMentionNode extends TextNode {
   __kind: MentionChipKind;
+  __label: string | undefined;
   __path: string;
   __provider: ProviderKind | undefined;
   __threadId: string | undefined;
@@ -254,6 +259,7 @@ export class ComposerMentionNode extends TextNode {
       node.__kind,
       node.__provider,
       node.__threadId,
+      node.__label,
       node.__key,
     );
   }
@@ -264,6 +270,7 @@ export class ComposerMentionNode extends TextNode {
       serializedNode.kind,
       serializedNode.provider,
       serializedNode.threadId,
+      serializedNode.label,
     );
   }
 
@@ -272,6 +279,7 @@ export class ComposerMentionNode extends TextNode {
     kind: MentionChipKind = "path",
     provider?: ProviderKind,
     threadId?: string,
+    label?: string,
     key?: NodeKey,
   ) {
     const normalizedPath = path.startsWith("@") ? path.slice(1) : path;
@@ -280,6 +288,7 @@ export class ComposerMentionNode extends TextNode {
     this.__kind = kind;
     this.__provider = provider;
     this.__threadId = threadId;
+    this.__label = label;
   }
 
   getMentionThreadId(): string | undefined {
@@ -299,6 +308,7 @@ export class ComposerMentionNode extends TextNode {
     return {
       ...super.exportJSON(),
       kind: this.__kind,
+      ...(this.__label ? { label: this.__label } : {}),
       path: this.__path,
       ...(this.__provider ? { provider: this.__provider } : {}),
       ...(this.__threadId ? { threadId: this.__threadId } : {}),
@@ -312,7 +322,7 @@ export class ComposerMentionNode extends TextNode {
     dom.className = COMPOSER_EDITOR_INLINE_CHIP_CLASS_NAME;
     dom.contentEditable = "false";
     dom.setAttribute("spellcheck", "false");
-    renderMentionChipDom(dom, this.__path, this.__kind, this.__provider);
+    renderMentionChipDom(dom, this.__path, this.__kind, this.__provider, this.__label);
     return dom;
   }
 
@@ -326,9 +336,10 @@ export class ComposerMentionNode extends TextNode {
       prevNode.__text !== this.__text ||
       prevNode.__path !== this.__path ||
       prevNode.__kind !== this.__kind ||
-      prevNode.__provider !== this.__provider
+      prevNode.__provider !== this.__provider ||
+      prevNode.__label !== this.__label
     ) {
-      renderMentionChipDom(dom, this.__path, this.__kind, this.__provider);
+      renderMentionChipDom(dom, this.__path, this.__kind, this.__provider, this.__label);
     }
     return false;
   }
@@ -355,8 +366,9 @@ export function $createComposerMentionNode(
   kind: MentionChipKind = "path",
   provider?: ProviderKind,
   threadId?: string,
+  label?: string,
 ): ComposerMentionNode {
-  return $applyNodeReplacement(new ComposerMentionNode(path, kind, provider, threadId));
+  return $applyNodeReplacement(new ComposerMentionNode(path, kind, provider, threadId, label));
 }
 
 // ── ComposerSkillNode ─────────────────────────────────────────────────

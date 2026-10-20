@@ -463,6 +463,10 @@
     "./expertProviders": {
       "types": "./src/expertProviders.ts",
       "import": "./src/expertProviders.ts"
+    },
+    "./hubReferences": {
+      "types": "./src/hubReferences.ts",
+      "import": "./src/hubReferences.ts"
     }
   },
   "scripts": {

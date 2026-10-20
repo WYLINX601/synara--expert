@@ -11,6 +11,7 @@ import {
   providerMentionReferencesEqual,
   providerSkillReferencesEqual,
 } from "~/lib/composerMentions";
+import { isHubReferenceUri } from "@synara/shared/hubReferences";
 import { useComposerDraftStore } from "../../composerDraftStore";
 
 interface ComposerReferencesInput {
@@ -105,7 +106,8 @@ export function useComposerReferences({
     });
   }, [prompt, updateSelectedComposerMentions]);
 
-  // Provider references are provider-specific; keep draft restores from looking like manual switches.
+  // Native provider references are provider-specific. App-owned Hub references
+  // carry canonical Synara identities and remain valid across provider changes.
   useEffect(() => {
     const previous = previousSelectedProviderRef.current;
     previousSelectedProviderRef.current = {
@@ -116,7 +118,9 @@ export function useComposerReferences({
       return;
     }
     updateSelectedComposerSkills([]);
-    updateSelectedComposerMentions([]);
+    updateSelectedComposerMentions((existing) =>
+      existing.filter((mention) => isHubReferenceUri(mention.path)),
+    );
   }, [selectedProvider, threadId, updateSelectedComposerMentions, updateSelectedComposerSkills]);
   return {
     selectedComposerSkills,

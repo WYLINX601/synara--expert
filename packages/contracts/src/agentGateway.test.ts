@@ -26,7 +26,10 @@ const thread = {
 describe("agent gateway contracts", () => {
   it("returns inherited Auto without accepting it as an explicit creation input", () => {
     assert.throws(() =>
-      decodeCreate({ requestId: "auto-input", threads: [{ ...thread, runtimeMode: "auto" }] }),
+      decodeCreate({
+        requestId: "auto-input",
+        threads: [{ ...thread, runtimeMode: "auto" }],
+      }),
     );
     assert.throws(() =>
       decodeCreate({
@@ -54,8 +57,10 @@ describe("agent gateway contracts", () => {
   it("accepts one through twenty exact creation entries", () => {
     assert.equal(decodeCreate({ requestId: "request-1", threads: [thread] }).threads.length, 1);
     assert.equal(
-      decodeCreate({ requestId: "request-20", threads: Array.from({ length: 20 }, () => thread) })
-        .threads.length,
+      decodeCreate({
+        requestId: "request-20",
+        threads: Array.from({ length: 20 }, () => thread),
+      }).threads.length,
       20,
     );
   });
@@ -63,7 +68,10 @@ describe("agent gateway contracts", () => {
   it("rejects empty and oversized creation plans", () => {
     assert.throws(() => decodeCreate({ requestId: "empty", threads: [] }));
     assert.throws(() =>
-      decodeCreate({ requestId: "too-many", threads: Array.from({ length: 21 }, () => thread) }),
+      decodeCreate({
+        requestId: "too-many",
+        threads: Array.from({ length: 21 }, () => thread),
+      }),
     );
   });
 
@@ -111,7 +119,7 @@ describe("agent gateway contracts", () => {
         },
       ],
     });
-    assert.equal(instanceTarget.threads[0]?.target.instanceId, "codex_work");
+    assert.equal(instanceTarget.threads[0]?.target?.instanceId, "codex_work");
   });
 
   it("bounds wait targets and timeout", () => {
@@ -231,7 +239,10 @@ describe("agent gateway contracts", () => {
     );
     assert.doesNotThrow(() =>
       Schema.decodeUnknownSync(SynaraGatewayErrorResult)({
-        error: { code: "creation_plan_locked", message: "A plan already exists." },
+        error: {
+          code: "creation_plan_locked",
+          message: "A plan already exists.",
+        },
       }),
     );
   });

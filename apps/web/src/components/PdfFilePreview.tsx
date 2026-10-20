@@ -31,6 +31,8 @@ export function PdfFilePreview(props: {
    */
   filePath: string;
   cwd: string | null | undefined;
+  /** Exact immutable bytes supplied by a published snapshot, bypassing live file routes. */
+  immutableSourceUrl?: string | undefined;
   previewGrant?: string | null | undefined;
   cacheKey?: string | number | undefined;
   /** Pre-resolved target for the "Open in editor" control in the toolbar. */
@@ -40,12 +42,17 @@ export function PdfFilePreview(props: {
   onPreviewReady?: (() => void) | undefined;
   onPreviewError?: (() => void) | undefined;
 }) {
-  const previewUrl = buildLocalImageUrl({
-    src: props.filePath,
-    cwd: props.cwd ?? undefined,
-    grant: props.previewGrant,
-    cacheKey: props.cacheKey,
-  });
+  const immutableSource = props.immutableSourceUrl !== undefined;
+  const previewUrl =
+    props.immutableSourceUrl ??
+    buildLocalImageUrl({
+      src: props.filePath,
+      cwd: props.cwd ?? undefined,
+      grant: props.previewGrant,
+      cacheKey: props.cacheKey,
+    });
+  const openInTarget = immutableSource ? null : props.openInTarget;
+  const onReload = immutableSource ? undefined : props.onReload;
   const fileName = basenameOfPath(props.filePath);
   const doc = usePdfDocument(previewUrl);
 
@@ -97,8 +104,8 @@ export function PdfFilePreview(props: {
           onSetScale={zoom.onSetScale}
           onFitWidth={zoom.onFitWidth}
           onFitPage={zoom.onFitPage}
-          openInTarget={props.openInTarget}
-          onReload={props.onReload}
+          openInTarget={openInTarget}
+          onReload={onReload}
         />
         <div ref={setScrollRoot} className="pdf-viewer-scroll min-h-0 flex-1 overflow-auto">
           {containerSize
@@ -126,11 +133,11 @@ export function PdfFilePreview(props: {
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
           <TriangleAlertIcon className="size-5 text-destructive/80" aria-hidden="true" />
           <p className="text-ui text-muted-foreground">{doc.error ?? "Could not open this PDF."}</p>
-          {props.onReload ? (
+          {onReload ? (
             <button
               type="button"
               className="rounded-md px-2 py-1 text-ui leading-snug hover:bg-foreground/8"
-              onClick={props.onReload}
+              onClick={onReload}
             >
               Reload file from disk
             </button>

@@ -31,6 +31,7 @@ import { cn } from "~/lib/utils";
 import { FileEntryIcon } from "./FileEntryIcon";
 import { ProviderIcon } from "../ProviderIcon";
 import { ConnectorIcon } from "../ConnectorIcon";
+import { CommandStatus } from "../ui/command";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   COMPOSER_MENU_PANEL_GLYPH_CLASS_NAME,
@@ -82,7 +83,18 @@ function commandMenuTitle(
   }
 }
 
-function commandMenuTrailingMeta(item: ComposerCommandItem): string | null {
+function commandMenuTrailingMeta(item: ComposerCommandItem): ReactNode | null {
+  if (item.type === "hub-expert") return item.disabled ? "Unavailable" : "Available";
+  if (item.type === "hub-deliverable") {
+    return (
+      <span className="flex min-w-0 items-center gap-2">
+        <span className="block max-w-36 truncate" title={item.expertDisplayName}>
+          {item.expertDisplayName}
+        </span>
+        {item.disabled ? <span className="shrink-0">Unavailable</span> : null}
+      </span>
+    );
+  }
   if (item.type === "agent") {
     return "delegate task to subagent";
   }
@@ -96,7 +108,11 @@ function commandMenuTrailingMeta(item: ComposerCommandItem): string | null {
   }
 
   if (item.type === "thread") {
-    return null;
+    return item.description ? (
+      <span className="block max-w-36 truncate" title={item.description}>
+        {item.description}
+      </span>
+    ) : null;
   }
 
   if (item.type === "local-root") {
@@ -125,6 +141,7 @@ function commandMenuTrailingMeta(item: ComposerCommandItem): string | null {
 }
 
 function commandMenuSecondaryText(item: ComposerCommandItem): string | null {
+  if (item.type === "hub-expert") return item.description;
   // The menu is driven from the composer, so focus never reaches the warning icon:
   // the row itself has to say why the command will not work.
   if (item.type === "provider-native-command" && item.notice) {
@@ -143,8 +160,7 @@ function commandMenuSecondaryText(item: ComposerCommandItem): string | null {
     item.type === "plugin" ||
     item.type === "connector" ||
     item.type === "skill" ||
-    item.type === "local-root" ||
-    item.type === "thread"
+    item.type === "local-root"
   ) {
     return item.description;
   }
@@ -153,6 +169,23 @@ function commandMenuSecondaryText(item: ComposerCommandItem): string | null {
 }
 
 export type ComposerCommandItem =
+  | {
+      id: string;
+      type: "hub-expert";
+      mention: ProviderMentionReference;
+      label: string;
+      description: string;
+      disabled: boolean;
+    }
+  | {
+      id: string;
+      type: "hub-deliverable";
+      mention: ProviderMentionReference;
+      label: string;
+      expertDisplayName: string;
+      description: string;
+      disabled: boolean;
+    }
   | {
       id: string;
       type: "path";
@@ -275,10 +308,18 @@ export function groupCommandItems(
         item.type !== "thread" &&
         item.type !== "local-root" &&
         item.type !== "path" &&
+        item.type !== "hub-expert" &&
+        item.type !== "hub-deliverable" &&
         item.type !== "agent",
     );
 
     const groups: ComposerCommandGroupModel[] = [];
+    const experts = items.filter((item) => item.type === "hub-expert");
+    if (experts.length > 0) groups.push({ id: "experts", label: "Experts", items: experts });
+    const deliverables = items.filter((item) => item.type === "hub-deliverable");
+    if (deliverables.length > 0) {
+      groups.push({ id: "deliverables", label: "关键产物", items: deliverables });
+    }
     if (connectorItems.length > 0) {
       groups.push({ id: "connectors", label: "Connectors", items: connectorItems });
     }
@@ -356,6 +397,7 @@ export function ComposerCommandMenu(props: {
   triggerKind: ComposerTriggerKind | null;
   groupSlashCommandSections?: boolean;
   emptyStateText?: string;
+  statusText?: string | null;
   activeItemId: string | null;
   onHighlightedItemChange: (itemId: string | null) => void;
   onSelect: (item: ComposerCommandItem) => void;
@@ -370,6 +412,7 @@ export function ComposerCommandMenu(props: {
     label: group.label,
     rows: group.items.map((item) => ({
       id: item.id,
+      disabled: "disabled" in item && item.disabled,
       icon: commandMenuItemGlyph(item, props.resolvedTheme),
       title:
         item.type === "slash-command" || item.type === "provider-native-command"
@@ -396,7 +439,7 @@ export function ComposerCommandMenu(props: {
       onHighlightRow={props.onHighlightedItemChange}
       onSelectRow={(rowId) => {
         const item = itemsById.get(rowId);
-        if (item) props.onSelect(item);
+        if (item && !("disabled" in item && item.disabled)) props.onSelect(item);
       }}
       footer={
         props.triggerKind === "mention" ? (
@@ -417,29 +460,33 @@ export function ComposerCommandMenu(props: {
         ) : null
       }
       status={
-        props.items.length === 0 ? (
-          <p
-            className={cn(
-              "text-muted-foreground/50 text-ui-sm",
-              props.isLoading
-                ? "flex h-[calc(1.625rem+0.5rem)] items-center px-2 text-left"
-                : "px-2 py-1.5",
-            )}
-          >
-            {props.isLoading
-              ? props.triggerKind === "mention"
-                ? "Searching mentions..."
-                : props.triggerKind === "skill"
-                  ? "Loading skills..."
-                  : "Loading commands..."
-              : (props.emptyStateText ??
-                (props.triggerKind === "mention"
-                  ? "No matching plugin, chat, or file."
+        <CommandStatus>
+          {props.statusText ? (
+            <p className="px-2 py-1 text-ui-xs text-warning">{props.statusText}</p>
+          ) : props.items.length === 0 ? (
+            <p
+              className={cn(
+                "text-muted-foreground/50 text-ui-sm",
+                props.isLoading
+                  ? "flex h-[calc(1.625rem+0.5rem)] items-center px-2 text-left"
+                  : "px-2 py-1.5",
+              )}
+            >
+              {props.isLoading
+                ? props.triggerKind === "mention"
+                  ? "Searching mentions..."
                   : props.triggerKind === "skill"
-                    ? "No matching skill."
-                    : "No matching command."))}
-          </p>
-        ) : null
+                    ? "Loading skills..."
+                    : "Loading commands..."
+                : (props.emptyStateText ??
+                  (props.triggerKind === "mention"
+                    ? "No matching plugin, chat, or file."
+                    : props.triggerKind === "skill"
+                      ? "No matching skill."
+                      : "No matching command."))}
+            </p>
+          ) : null}
+        </CommandStatus>
       }
     />
   );
@@ -461,6 +508,10 @@ function commandMenuSlashGlyph(command: string, fallback: LucideIcon): ReactNode
 function commandMenuItemGlyph(item: ComposerCommandItem, theme: "light" | "dark"): ReactNode {
   const cls = COMPOSER_COMMAND_ITEM_GLYPH_CLASSNAME;
   switch (item.type) {
+    case "hub-expert":
+      return <BotIcon className={cls} />;
+    case "hub-deliverable":
+      return <FileEntryIcon pathValue={item.label} kind="file" theme={theme} className={cls} />;
     case "path":
       return (
         <FileEntryIcon

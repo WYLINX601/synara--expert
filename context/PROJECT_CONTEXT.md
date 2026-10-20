@@ -1,6 +1,6 @@
 # Linx / Synara Expert 项目上下文
 
-更新日期：2026-10-18
+更新日期：2026-10-19
 
 范围：以 Linx V2.0 组织长期方向管理、专业任务执行与能力进化，并在现有 Synara Expert / MCP / 工作台适配层上增量推进。本文只负责项目路由、设计边界与当前状态；产品、技术和验收细节以链接的权威文档为准。
 
@@ -33,6 +33,20 @@
 - **维护续办**：Beta 两项已修复为隔离安装探测，聚焦 32 项通过，完整六包随后为 13,366 通过、0 失败、36 既有跳过，详见[维护验收](../docs/workbench-adaptation-acceptance.md#maintenance-followup-20261016)。远端 prepare 的固定 v1.0.1 有 30 项合并冲突、原本地快照有 46 项；该目标已被 v1.0.5 替代。旧 111 精确兼容授权和原由保留在[兼容方案](../docs/workbench-implementation-plan.md#v101-compatibility-proposal)，活动实现及验收见下节。
 - **远端自动保护未启用**：2026-10-16 只读 API 返回 main 未保护、rulesets 为空；按开发 SOP 人工执行相同门禁，不宣称已有强制保护。
 - **定时链路已触发但未成功验收**：查询返回 1 次 schedule，prepare 失败，verify/publish 跳过；下一维护任务先查该失败，再验收手动与定时路径。运行链接和范围仅维护在[远端核对](../workbench/WB-05-automation.md#2026-10-16-remote-read-only-audit)。本轮未改变仓库设置、触发 workflow、推送或发布。
+
+## Hub 参与专家与选择器调整（本地验收完成）
+
+2026-10-20 用户已批准后续计划：新旧 Hub 默认空参与名单，名单约束发现和新派发，既有接受任务及历史成果不重绑；设置页增加 Experts，多选可为空，无适合专家时仍走原普通 Worker。`@关键产物` 单板块、专家名称及聊天辅助信息浅色右对齐，侧栏三个标题箭头一致。设计和接口见[V1.1 方案补充](../docs/hub-expert-v1-1-design.md#2026-10-20-参与专家与选择器调整)，本轮真实结果见[独立补充验收](../docs/hub-expert-v1-1-acceptance.md#2026-10-20-参与专家与选择器布局补充验收)；旧 V1.1 数量不代表本轮。本轮冻结源码完整测试 17,663 通过、39 原有跳过，格式、lint、类型、迁移、边界通过；受影响浏览器 47 项，真实 Codex 7 项场景断言通过，包含移除后拒绝新派发、旧任务恢复与固定版本读取、空名单/无匹配普通 Worker。当前独立预览端口 19736；继续隔离工作树，未推送/安装/发布。
+
+## Hub × Expert V1.1（本地验收完成）
+
+2026-10-19 用户确认统一导航、专家选择、关键产物双视图和固定版本引用，并要求实施。Hub 独立归属 Space；从 Project 创建仍进入 Hubs 分组；Hub Worker 默认在 Hub 下展开。专家引用仅限 Coordinator 派发，独立新 Hub 首次固定 Space Context。行为和接口见[V1.1 方案](../docs/hub-expert-v1-1-design.md)，本轮进度与证据见[V1.1 验收](../docs/hub-expert-v1-1-acceptance.md)。沿用 V1 隔离工作树与已保存基线。用户已确认精简原型，并补充 @ 单列和专家 Skill 筛选；正式界面已落地，草稿读取所选专家预览，已有线程读取固定快照。Codex 真实运行覆盖选择、排队归档、固定版本读取、取消与重启恢复。最终冻结源码完整测试 17,645 通过、39 原有跳过；格式、lint、类型、边界及受影响浏览器检查通过。其余 Provider、外部 MCP、Windows 实机及人工回放范围见验收记录。预览端口 19734，未合入、推送或安装 Synara 应用；验收时误触的 Provider CLI 更新已回退并记录。
+
+## Hub × Expert V1（本地验收完成）
+
+2026-10-19 用户审核通过 [Figma V2 原型](https://www.figma.com/design/mJatQwnjWkdzXUfLBtjNfk/?node-id=15-56) 并允许开发，保留原有 Hub 浮动面板、紧凑线程列表、完整 Worker 对话及分屏和 Library 能力。专项行为、接口及宿主接入见 [Hub × Expert V1](../docs/hub-expert-v1-design.md)。隔离分支 `codex/hub-expert-v1` 从 `850de05e08ab9c116c639e7b1cb8145e0b6e05d5` 开发，不包含原工作区输入框改动。Project 创建入口、接受前 Expert 快照与目标固定、关键集合和原生 Library 增量已实现；真实 Codex 文本链路、队列归档、取消后续接、重启恢复、版本读取及 Library 维护已有独立数据证据。
+
+最终源码、检查与边界以[本地验收记录](../docs/hub-expert-v1-acceptance.md)为准；最终完整测试 17,603 项通过、39 项跳过，相关浏览器 66 项通过，格式、lint、类型、迁移及边界检查通过；源码清单与日志摘要已固定。未验证其他 Provider、Windows 运行包及 PDF／DOCX 的 Agent 正文读取；发布有每文件 1 MB 的工程上限。本轮不包含推送、安装或发布。
 
 ## 当前升级：Synara v1.0.5 源码与验收入口
 

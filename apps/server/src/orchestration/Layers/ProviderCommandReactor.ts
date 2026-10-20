@@ -126,6 +126,7 @@ import {
   threadMentionContextSuffix,
 } from "../../provider/threadMentionContext.ts";
 import { projectConnectorMentions } from "../../provider/connectorMentionContext.ts";
+import { resolveHubReferencePromptProjection } from "../../provider/hubReferenceProjection.ts";
 import {
   TextGeneration,
   type BranchNameGenerationInput,
@@ -3276,8 +3277,30 @@ const make = Effect.gen(function* () {
     // assembled provider input rather than joining `<latest_user_message>`.
     const projectContextPrefix = projectContext.trim().length > 0 ? `${projectContext}\n\n` : "";
     const promptWithProjectContext = `${projectContextPrefix}${authoredMessageText}`;
-    const connectorMentionProjection = projectConnectorMentions({
+    const hubReferenceProjection = yield* resolveHubReferencePromptProjection({
       mentions: input.mentions,
+      callerThreadId: input.threadId,
+      projectAgentService: Option.isSome(projectAgentService) ? projectAgentService.value : null,
+      maxTotalContextChars: availableThreadMentionContextChars(
+        promptWithProjectContext,
+        providerPromptOverheadChars,
+      ),
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderAdapterValidationError({
+            provider:
+              input.modelSelection?.provider ??
+              thread.session?.providerName ??
+              thread.modelSelection.provider,
+            operation: "thread.turn.start",
+            issue: cause.message,
+            cause,
+          }),
+      ),
+    );
+    const connectorMentionProjection = projectConnectorMentions({
+      mentions: hubReferenceProjection.providerMentions,
       enabled: isServerBetaFeatureEnabled(MCP_CONNECTORS_BETA_FEATURE),
     });
     const threadMentionProjection = yield* resolveThreadMentionPromptProjection({
@@ -3288,10 +3311,12 @@ const make = Effect.gen(function* () {
       maxTotalContextChars: availableThreadMentionContextChars(
         promptWithProjectContext,
         providerPromptOverheadChars +
+          threadMentionContextSuffix(hubReferenceProjection.contextBlocks).length +
           threadMentionContextSuffix(connectorMentionProjection.contextBlocks).length,
       ),
     });
     const mentionContextBlocks = [
+      ...hubReferenceProjection.contextBlocks,
       ...threadMentionProjection.contextBlocks,
       ...connectorMentionProjection.contextBlocks,
     ];

@@ -79,6 +79,35 @@ const configure = (hubId = projectId) =>
 
 layer("Hub work durable admission", (it) => {
   it.effect(
+    "enforces participant membership in the acceptance transaction and prioritizes replay",
+    () =>
+      Effect.gen(function* () {
+        const hubId = ProjectId.makeUnsafe("guard-hub");
+        yield* configure(hubId);
+        const repository = yield* HubWorkRepository;
+        const record = {
+          ...work("guard-work", 0),
+          projectId: hubId,
+          creationSpec: {
+            prompt: "Expert work",
+            expertId: "unselected",
+            target: { provider: "codex" as const, model: "gpt-5" },
+          },
+        };
+        const rejected = yield* Effect.exit(
+          repository.submit([record], { expectedConfigRevision: 1 }),
+        );
+        assert.equal(Exit.isFailure(rejected), true);
+        assert.equal((yield* repository.list(hubId)).length, 0);
+        // Simulates an already accepted historical record predating the roster feature.
+        yield* repository.submit([record]);
+        const replay = yield* repository.submit([record], { expectedConfigRevision: 999 });
+        assert.equal(replay.replayed, true);
+        assert.equal(replay.items[0]?.creationSpec.expertId, "unselected");
+      }),
+  );
+
+  it.effect(
     "claims FIFO without oversubscribing concurrent starts and releases capacity durably",
     () =>
       Effect.gen(function* () {

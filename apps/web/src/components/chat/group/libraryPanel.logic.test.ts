@@ -1,11 +1,14 @@
-import type { LibraryEntry } from "@synara/contracts";
+import type { HubDeliverableCollection, LibraryEntry } from "@synara/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_LIBRARY_SORT,
   DEFAULT_EXPANDED_DIRECTORIES,
   compareLibraryEntries,
   entryMatchesLibraryFilters,
   flattenLibraryRows,
+  indexLibraryKeyDeliverables,
+  libraryKeyDeliverableDirectoryPaths,
   libraryEntryTypeBucket,
   nextLibrarySort,
   sortLibraryEntries,
@@ -18,6 +21,37 @@ const entry = (
   kind: LibraryEntry["kind"],
   modifiedAt: string,
 ): LibraryEntry => ({ name, relativePath, kind, sizeBytes: 1, modifiedAt });
+
+const deliverableCollection = (
+  files: readonly Record<string, unknown>[],
+  options: { state?: "active" | "withdrawn"; workerThreadId?: string; revision?: number } = {},
+) =>
+  ({
+    hubId: "hub-1",
+    workerThreadId: options.workerThreadId ?? "worker-1",
+    revision: options.revision ?? 2,
+    state: options.state ?? "active",
+    commitSha: "a".repeat(40),
+    provenance: {
+      hubId: "hub-1",
+      workerThreadId: options.workerThreadId ?? "worker-1",
+      expertBindingSnapshotId: "snapshot-1",
+      publishedAt: "2026-10-18T12:00:00Z",
+    },
+    files,
+    updatedAt: "2026-10-18T12:00:00Z",
+  }) as unknown as HubDeliverableCollection;
+
+const publishedFile = (libraryPath: string, extra: Record<string, unknown> = {}) => ({
+  path: "out/report.md",
+  libraryPath,
+  name: "report.md",
+  description: null,
+  mediaType: "text/markdown",
+  sizeBytes: 20,
+  sha256: "b".repeat(64),
+  ...extra,
+});
 
 describe("libraryEntryTypeBucket", () => {
   it("buckets by file-icon name", () => {
@@ -97,6 +131,26 @@ describe("entryMatchesLibraryFilters", () => {
     expect(entryMatchesLibraryFilters(note, { typeFilter: "documents", query: "" })).toBe(true);
     expect(entryMatchesLibraryFilters(dir, { typeFilter: "images", query: "" })).toBe(true);
   });
+
+  it("matches only published key file paths when the key filter is enabled", () => {
+    const key = entry("note.md", "docs/note.md", "file", "2026-01-01T00:00:00Z");
+    expect(
+      entryMatchesLibraryFilters(key, {
+        typeFilter: "all",
+        query: "",
+        onlyKeyDeliverables: true,
+        keyDeliverablePaths: new Set(["docs/note.md"]),
+      }),
+    ).toBe(true);
+    expect(
+      entryMatchesLibraryFilters(entry("other.md", "other.md", "file", ""), {
+        typeFilter: "all",
+        query: "",
+        onlyKeyDeliverables: true,
+        keyDeliverablePaths: new Set(["docs/note.md"]),
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("flattenLibraryRows", () => {
@@ -166,6 +220,73 @@ describe("flattenLibraryRows", () => {
       typeFilter: "images",
     });
     expect(rows.map((row) => row.entry.relativePath)).toEqual(["Images", "Images/shot.png"]);
+  });
+
+  it("keeps ancestor directories for matching key deliverables", () => {
+    const nested = new Map<string, readonly LibraryEntry[]>([
+      ["", [entry("Artifacts", "Artifacts", "directory", "")]],
+      ["Artifacts", [entry("Reports", "Artifacts/Reports", "directory", "")]],
+      [
+        "Artifacts/Reports",
+        [
+          entry("final.md", "Artifacts/Reports/final.md", "file", ""),
+          entry("draft.md", "Artifacts/Reports/draft.md", "file", ""),
+        ],
+      ],
+    ]);
+    const rows = flattenLibraryRows({
+      entriesByDir: nested,
+      expandedDirectories: new Set<string>(),
+      sort: DEFAULT_LIBRARY_SORT,
+      typeFilter: "all",
+      query: "",
+      onlyKeyDeliverables: true,
+      keyDeliverablePaths: new Set(["Artifacts/Reports/final.md"]),
+    });
+    expect(rows.map((row) => row.entry.relativePath)).toEqual([
+      "Artifacts",
+      "Artifacts/Reports",
+      "Artifacts/Reports/final.md",
+    ]);
+  });
+});
+
+describe("indexLibraryKeyDeliverables", () => {
+  it("matches the mutable server Library path, retains missing files, and omits withdrawn publications", () => {
+    const active = deliverableCollection([
+      publishedFile("Artifacts/original.md", {
+        currentLibraryPath: "Artifacts/renamed.md",
+        libraryState: "available",
+      }),
+      publishedFile("Artifacts/deleted.md", { libraryState: "missing" }),
+    ]);
+    const withdrawn = deliverableCollection([publishedFile("Artifacts/withdrawn.md")], {
+      state: "withdrawn",
+      workerThreadId: "worker-2",
+    });
+    const indexed = indexLibraryKeyDeliverables([active, withdrawn]);
+
+    expect(Array.from(indexed.keys())).toEqual(["Artifacts/renamed.md", "Artifacts/deleted.md"]);
+    expect(indexed.get("Artifacts/renamed.md")?.file.libraryPath).toBe("Artifacts/original.md");
+    expect(indexed.get("Artifacts/renamed.md")?.collection.revision).toBe(2);
+    expect(indexed.get("Artifacts/deleted.md")?.file.libraryState).toBe("missing");
+    expect(libraryKeyDeliverableDirectoryPaths(indexed)).toEqual(["Artifacts"]);
+  });
+
+  it("loads each ancestor directory once in parent-first order", () => {
+    const indexed = indexLibraryKeyDeliverables([
+      deliverableCollection([
+        publishedFile("Artifacts/Reports/final.md"),
+        publishedFile("Artifacts/Reports/summary.md"),
+        publishedFile("Research/Notes/result.md"),
+      ]),
+    ]);
+    expect(libraryKeyDeliverableDirectoryPaths(indexed)).toEqual([
+      "Artifacts",
+      "Research",
+      "Artifacts/Reports",
+      "Research/Notes",
+    ]);
   });
 });
 

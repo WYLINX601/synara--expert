@@ -8,6 +8,10 @@ import {
   type OrchestrationThread,
 } from "@synara/contracts";
 import { Effect, Layer, Option } from "effect";
+import {
+  buildHubDeliverableReferenceUri,
+  buildHubExpertReferenceUri,
+} from "@synara/shared/hubReferences";
 
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProjectionTurnRepositoryLive } from "../persistence/Layers/ProjectionTurns.ts";
@@ -355,3 +359,63 @@ it("serializes original text and attachment references independently of the coor
   assert.deepEqual(originals[0]!.attachments, [quote]);
   assert.notInclude(originals[0]!.text, "Investigate only");
 });
+
+it.effect("persists only server-extracted Hub refs from selected original human messages", () =>
+  Effect.gen(function* () {
+    const expertUri = buildHubExpertReferenceUri("writer");
+    const deliverableUri = buildHubDeliverableReferenceUri({
+      hubId: "hub-1",
+      workerThreadId: "worker-1",
+      path: "index.md",
+      revision: 2,
+    });
+    const original = message("with-hub-refs", {
+      text: "Continue from this exact publication.",
+      mentions: [
+        { name: "Writer", path: expertUri },
+        { name: "Index", path: deliverableUri },
+        { name: "Local path", path: "/workspace/notes.md" },
+      ],
+    });
+    const [resolved] = yield* resolveHubWorkSource({
+      snapshotQuery: snapshotQuery([original]),
+      callerThreadId: threadId,
+      callerTurnId: turnId,
+      contextMessageIds: [original.id],
+    });
+    assert.deepEqual(resolved!.references, [
+      { name: "Writer", path: expertUri },
+      { name: "Index", path: deliverableUri },
+    ]);
+
+    const prompt = renderHubWorkPrompt({
+      brief: "Continue the assigned work.",
+      sourceMessages: [resolved!],
+    });
+    const originals = JSON.parse(prompt.split("\n\n").at(-1)!) as Array<{
+      references?: ReadonlyArray<{ name: string; path: string }>;
+    }>;
+    assert.deepEqual(originals[0]!.references, resolved!.references);
+    assert.include(prompt, "index.md?revision=2");
+    assert.notInclude(prompt, "/workspace/notes.md");
+  }),
+);
+
+it.effect("rejects malformed app references in selected source messages", () =>
+  Effect.gen(function* () {
+    const original = message("malformed-hub-ref", {
+      mentions: [{ name: "Broken", path: "synara://hub/hub-1/deliverables/worker-1/file.md" }],
+    });
+    const result = yield* resolveHubWorkSource({
+      snapshotQuery: snapshotQuery([original]),
+      callerThreadId: threadId,
+      callerTurnId: turnId,
+      contextMessageIds: [original.id],
+    }).pipe(Effect.result);
+    assert.equal(result._tag, "Failure");
+    if (result._tag === "Failure") {
+      assert.instanceOf(result.failure, ToolInputError);
+      assert.include(result.failure.message, "malformed or unsupported");
+    }
+  }),
+);

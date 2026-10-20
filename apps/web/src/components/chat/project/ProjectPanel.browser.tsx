@@ -22,6 +22,8 @@ import { render } from "vitest-browser-react";
 import type { SidebarThreadSummary } from "~/types";
 
 const PROJECT_ID = ProjectId.makeUnsafe("project-group-1");
+const HUB_PROJECT_ID = ProjectId.makeUnsafe("project-hub-1");
+const EXECUTION_PROJECT_ID = ProjectId.makeUnsafe("project-execution-1");
 
 const harness = vi.hoisted(() => {
   const projectAgentListeners = new Set<(event: unknown) => void>();
@@ -94,6 +96,7 @@ vi.mock("~/components/PluginLibrary", () => ({
 
 import { makeProject } from "~/storeTestFixtures";
 import { useStore } from "~/store";
+import { useWorkspacePathsStore } from "~/workspacePathsStore";
 import { useProjectAgentSummariesStore } from "./useProjectAgentSummaries";
 
 import { ProjectPanel } from "./ProjectPanel";
@@ -140,15 +143,15 @@ function emitProjectAgentEvent(event: ProjectAgentStreamEvent) {
   harness.projectAgentListeners.forEach((listener) => listener(event));
 }
 
-function renderPanel() {
+function renderPanel(input: { projectId?: ProjectId; projectName?: string } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
       <ProjectPanel
         open
         variant="docked"
-        projectId={PROJECT_ID}
-        projectName="alpha"
+        projectId={input.projectId ?? PROJECT_ID}
+        projectName={input.projectName ?? "alpha"}
         workspacePath="/tmp/group"
         defaultModelSelection={{ provider: "codex", model: "gpt-5-codex" }}
         onOpenCoordinator={vi.fn()}
@@ -168,6 +171,7 @@ describe("ProjectPanel configured state", () => {
     harness.api.projectAgent.getOverview.mockResolvedValue(
       overview({ configured: false, config: null, coordinatorStatus: "unconfigured" }),
     );
+    harness.api.projectAgent.listSummaries.mockResolvedValue({ summaries: [] });
     useStore.setState({
       projects: [makeProject({ id: PROJECT_ID, kind: "group", name: "alpha", cwd: "/tmp/group" })],
       sidebarThreadSummaryById: {},
@@ -176,6 +180,12 @@ describe("ProjectPanel configured state", () => {
     useProjectAgentSummariesStore.setState({
       summariesByProjectId: new Map(),
       loaded: false,
+    });
+    useWorkspacePathsStore.setState({
+      homeDir: "/tmp",
+      chatWorkspaceRoot: "/tmp/chats",
+      studioWorkspaceRoot: "/tmp/studio",
+      groupsWorkspaceRoot: "/tmp/groups",
     });
   });
 
@@ -321,6 +331,7 @@ describe("ProjectPanel polished sections", () => {
     vi.clearAllMocks();
     harness.projectAgentListeners.clear();
     harness.api.projectAgent.getOverview.mockResolvedValue(overview());
+    harness.api.projectAgent.listSummaries.mockResolvedValue({ summaries: [] });
     harness.api.projectAgent.listThreadIndex.mockResolvedValue(threadIndexEntries([]));
     useStore.setState({
       projects: [makeProject({ id: PROJECT_ID, kind: "group", name: "alpha", cwd: "/tmp/group" })],
@@ -330,6 +341,12 @@ describe("ProjectPanel polished sections", () => {
     useProjectAgentSummariesStore.setState({
       summariesByProjectId: new Map(),
       loaded: false,
+    });
+    useWorkspacePathsStore.setState({
+      homeDir: "/tmp",
+      chatWorkspaceRoot: "/tmp/chats",
+      studioWorkspaceRoot: "/tmp/studio",
+      groupsWorkspaceRoot: "/tmp/groups",
     });
   });
 
@@ -394,6 +411,80 @@ describe("ProjectPanel polished sections", () => {
     });
     expect(document.body.textContent).not.toContain("No threads in progress or waiting on you.");
     expect(document.body.textContent).not.toContain("Other threads");
+  });
+
+  it("labels a Hub worker in an ordinary Project overview and keeps execution Project labels in Hub overview", async () => {
+    const worker = makeThreadSummary(ThreadId.makeUnsafe("thread-cross-project-worker"), {
+      title: "Implement linked repo change",
+      projectId: EXECUTION_PROJECT_ID,
+    });
+    const unknownMembershipWorker = makeThreadSummary(
+      ThreadId.makeUnsafe("thread-unconfirmed-worker"),
+      { title: "Unconfirmed worker", projectId: EXECUTION_PROJECT_ID },
+    );
+    const hubSummary: ProjectAgentSummary = {
+      projectId: HUB_PROJECT_ID,
+      configured: true,
+      coordinatorThreadId: ThreadId.makeUnsafe("thread-hub-coordinator"),
+      coordinatorName: "Hub Alpha Coordinator",
+      coordinatorIcon: null,
+      coordinatorColor: null,
+      coordinatorStatus: "idle",
+      revision: 1,
+      memberThreadIds: [worker.id],
+      needsYouThreadIds: [],
+    };
+    harness.api.projectAgent.listSummaries.mockResolvedValue({ summaries: [hubSummary] });
+    harness.api.projectAgent.listThreadIndex.mockResolvedValue(
+      threadIndexEntries([worker.id, unknownMembershipWorker.id]),
+    );
+    setSidebarSummaries([worker]);
+    useStore.setState({
+      projects: [
+        makeProject({
+          id: PROJECT_ID,
+          kind: "project",
+          name: "Project Alpha",
+          cwd: "/tmp/project",
+        }),
+        makeProject({
+          id: EXECUTION_PROJECT_ID,
+          kind: "project",
+          name: "Execution Project",
+          cwd: "/tmp/execution",
+        }),
+        makeProject({
+          id: HUB_PROJECT_ID,
+          kind: "group",
+          name: "Hub Alpha",
+          cwd: "/tmp/groups/hub-alpha",
+        }),
+      ],
+      sidebarThreadSummaryById: {
+        [worker.id]: worker,
+        [unknownMembershipWorker.id]: unknownMembershipWorker,
+      },
+      threadIds: [worker.id, unknownMembershipWorker.id],
+    });
+    harness.api.projectAgent.getOverview.mockResolvedValue(overview());
+
+    const ordinaryPanel = await renderPanel({
+      projectId: PROJECT_ID,
+      projectName: "Project Alpha",
+    });
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Hub · Hub Alpha"));
+    expect(document.body.textContent).toContain("Implement linked repo change");
+    expect(document.body.textContent).toContain("Execution Project");
+    expect(document.body.textContent).toContain("Unconfirmed worker");
+    await ordinaryPanel.unmount();
+
+    // The Hub's own overview keeps the execution Project in the same metadata slot.
+    harness.api.projectAgent.getOverview.mockResolvedValue(overview({ projectId: HUB_PROJECT_ID }));
+    const hubPanel = await renderPanel({ projectId: HUB_PROJECT_ID, projectName: "Hub Alpha" });
+    await vi.waitFor(() => expect(document.body.textContent).toContain("Execution Project"));
+    expect(document.body.textContent).not.toContain("Hub · Hub Alpha");
+    await hubPanel.unmount();
+    harness.api.projectAgent.listSummaries.mockResolvedValue({ summaries: [] });
   });
 
   it("caps the panel at the overlay height and scrolls inside, keeping the bar pinned", async () => {

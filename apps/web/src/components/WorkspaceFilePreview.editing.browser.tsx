@@ -938,3 +938,27 @@ it("preserves the lightweight Markdown editor while its preview is open", async 
     restoreNativeApi();
   }
 });
+
+it("keeps published snapshot content read-only even when the caller enables editing", async () => {
+  const readFile = vi.fn();
+  const restoreNativeApi = installNativeApi({ projects: { readFile } } as unknown as NativeApi);
+  try {
+    await render(
+      <QueryClientProvider client={makeQueryClient()}>
+        <WorkspaceFilePreview
+          workspaceRoot={WORKSPACE_ROOT}
+          filePath={FILE_PATH}
+          editable
+          pinnedContent={{ encoding: "utf-8", text: "export const published = true;\n" }}
+          pinnedVersionKey="published-revision-1"
+        />
+      </QueryClientProvider>,
+    );
+
+    await expect.element(page.getByText("export const published = true;")).toBeVisible();
+    expect(page.getByRole("textbox", { name: `Edit ${FILE_PATH}` }).length).toBe(0);
+    expect(readFile).not.toHaveBeenCalled();
+  } finally {
+    restoreNativeApi();
+  }
+});

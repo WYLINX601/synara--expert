@@ -45,6 +45,7 @@ export * from "./environment";
 export * from "./project";
 export * from "./projectAgent";
 export * from "./hubWork";
+export * from "./hubDeliverables";
 export * from "./projectImport";
 export * from "./studio";
 export * from "./inlineVisual";

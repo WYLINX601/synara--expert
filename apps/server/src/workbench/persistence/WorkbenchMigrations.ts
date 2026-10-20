@@ -9,6 +9,9 @@ import {
 } from "../../persistence/Migrations.ts";
 import { migrationEntries } from "../../persistence/Migrations.ts";
 import ContextV1Migration from "../../persistence/Migrations/111_ContextV1.ts";
+import { HUB_PROJECT_ORIGIN_SQL } from "./HubProjectOriginMigration.ts";
+import { HUB_EXPERT_V1_SQL, HUB_EXPERT_V1_EFFECT } from "./HubExpertV1Migration.ts";
+import { HUB_EXPERT_PARTICIPANTS_SQL } from "./HubExpertParticipantsMigration.ts";
 import {
   CONTEXT_SCHEMA_OBJECTS_QUERY,
   validateFrozenContextSchema,
@@ -323,6 +326,28 @@ export const workbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] 
     checksum: "sha256:fb5efd19411fc0445ad0a2eabbe52e3115f4cf1a29a9f044fe868689e59889a7",
     statement:
       "CREATE TABLE expert_applied_runtime_records (thread_id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, provider TEXT NOT NULL, model TEXT, runtime_component TEXT, runtime_version TEXT, lifecycle_generation TEXT NOT NULL, applied_at TEXT NOT NULL)",
+  },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 3,
+    name: "HubProjectOrigin",
+    checksum: "sha256:828b1a4627e3e09d525bfb9975a9f81fad553071d7ee131d567657a8b6917e55",
+    statement: HUB_PROJECT_ORIGIN_SQL,
+  },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 4,
+    name: "HubExpertDeliverables",
+    checksum: "sha256:fec59450c54d3e12905d05f47a634989432f28770095b025f9f5ed1745c8d5fc",
+    statement: HUB_EXPERT_V1_SQL,
+    effect: HUB_EXPERT_V1_EFFECT,
+  },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 5,
+    name: "HubExpertParticipants",
+    checksum: "sha256:47fed115ba3ae457e8c899ea3a4a49eb51c2ad83ab29b4948d90a3cc485523d4",
+    statement: HUB_EXPERT_PARTICIPANTS_SQL,
   },
 ];
 

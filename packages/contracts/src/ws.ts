@@ -1,5 +1,10 @@
 import { Schema, Struct } from "effect";
 import {
+  ProjectAgentDeliverablesListInput,
+  ProjectAgentDeliverablesReadInput,
+  ProjectAgentDeliverablesWithdrawInput,
+} from "./hubDeliverables";
+import {
   LoadProjectImportHistoryInput,
   ImportProjectInput,
   ListProjectImportsInput,
@@ -56,6 +61,7 @@ import {
   ProjectAgentUnlinkProjectInput,
   ProjectAgentExportDocumentsInput,
   ProjectAgentGetOverviewInput,
+  ProjectAgentListExpertsInput,
   ProjectAgentListSummariesInput,
   ProjectAgentGoalControlInput,
   ProjectAgentListActivityInput,
@@ -437,6 +443,7 @@ export const WS_METHODS = {
   todoDelete: "todo.delete",
   subscribeTodoEvents: "todo.subscribe",
   projectAgentGetOverview: "projectAgent.getOverview",
+  projectAgentListExperts: "projectAgent.listExperts",
   projectAgentListSummaries: "projectAgent.listSummaries",
   projectAgentConfigure: "projectAgent.configure",
   projectAgentLinkProject: "projectAgent.linkProject",
@@ -466,6 +473,9 @@ export const WS_METHODS = {
   projectAgentRestartCoordinator: "projectAgent.restartCoordinator",
   projectAgentDeleteGroup: "projectAgent.delete",
   projectAgentLibraryList: "projectAgent.library.list",
+  projectAgentDeliverablesList: "projectAgent.deliverables.list",
+  projectAgentDeliverablesRead: "projectAgent.deliverables.read",
+  projectAgentDeliverablesWithdraw: "projectAgent.deliverables.withdraw",
   projectAgentLibraryMkdir: "projectAgent.library.mkdir",
   projectAgentLibraryRename: "projectAgent.library.rename",
   projectAgentLibraryDelete: "projectAgent.library.delete",
@@ -745,6 +755,7 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.todoDelete, TodoDeleteInput),
   tagRequestBody(WS_METHODS.subscribeTodoEvents, Schema.Struct({})),
   tagRequestBody(WS_METHODS.projectAgentGetOverview, ProjectAgentGetOverviewInput),
+  tagRequestBody(WS_METHODS.projectAgentListExperts, ProjectAgentListExpertsInput),
   tagRequestBody(WS_METHODS.projectAgentListSummaries, ProjectAgentListSummariesInput),
   tagRequestBody(WS_METHODS.projectAgentConfigure, ProjectAgentConfigureInput),
   tagRequestBody(WS_METHODS.projectAgentLinkProject, ProjectAgentLinkProjectInput),
@@ -774,6 +785,12 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.projectAgentRestartCoordinator, ProjectAgentGroupControlInput),
   tagRequestBody(WS_METHODS.projectAgentDeleteGroup, ProjectAgentDeleteGroupInput),
   tagRequestBody(WS_METHODS.projectAgentLibraryList, ProjectAgentLibraryListInput),
+  tagRequestBody(WS_METHODS.projectAgentDeliverablesList, ProjectAgentDeliverablesListInput),
+  tagRequestBody(WS_METHODS.projectAgentDeliverablesRead, ProjectAgentDeliverablesReadInput),
+  tagRequestBody(
+    WS_METHODS.projectAgentDeliverablesWithdraw,
+    ProjectAgentDeliverablesWithdrawInput,
+  ),
   tagRequestBody(WS_METHODS.projectAgentLibraryMkdir, ProjectAgentLibraryMkdirInput),
   tagRequestBody(WS_METHODS.projectAgentLibraryRename, ProjectAgentLibraryRenameInput),
   tagRequestBody(WS_METHODS.projectAgentLibraryDelete, ProjectAgentLibraryDeleteInput),

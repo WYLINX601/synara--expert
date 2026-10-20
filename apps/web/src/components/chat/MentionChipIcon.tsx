@@ -18,6 +18,7 @@ import { MessageCircleIcon, PluginIcon, FolderIcon } from "~/lib/icons";
 import { COMPOSER_INLINE_MENTION_CHIP_ICON_CLASS_NAME } from "../composerInlineChip";
 import type { ProviderMentionReference } from "@synara/contracts";
 import { threadIdFromThreadMentionPath } from "@synara/shared/threadMentions";
+import { parseHubReferenceUri } from "@synara/shared/hubReferences";
 import { useStore } from "~/store";
 import { resolveThreadDisplayProvider } from "~/lib/threadDisplayProvider";
 import { ProviderIcon } from "../ProviderIcon";
@@ -30,13 +31,23 @@ function composerMentionChipCentralIconName(
   path: string,
   kind: MentionChipKind = "path",
 ): string | null {
-  if (kind === "plugin" || path.startsWith("plugin://")) {
+  const resolvedKind = resolveMentionChipKind(path, { kind });
+  if (resolvedKind === "expert") return "brain";
+  if (resolvedKind === "plugin" || path.startsWith("plugin://")) {
     return "puzzle";
   }
-  if (inferEntryKindFromPath(path) === "directory") {
+  const reference = parseHubReferenceUri(path);
+  const iconPath =
+    resolvedKind === "deliverable"
+      ? reference?.kind === "deliverable"
+        ? reference.path
+        : ""
+      : path;
+  if (iconPath.length === 0) return "file-text";
+  if (inferEntryKindFromPath(iconPath) === "directory") {
     return null;
   }
-  return getFileIconName(path);
+  return getFileIconName(iconPath);
 }
 
 // `theme` is retained for call-site compatibility but no longer affects icon
@@ -82,14 +93,27 @@ export const MentionChipIcon = function MentionChipIcon(props: {
   if (resolvedKind === "connector") {
     return <ConnectorIcon name={props.path} className={className} />;
   }
-  const kind = inferEntryKindFromPath(props.path);
+  if (resolvedKind === "expert") {
+    return <CentralIcon name="brain" className={className} />;
+  }
+  const reference = parseHubReferenceUri(props.path);
+  const iconPath =
+    resolvedKind === "deliverable"
+      ? reference?.kind === "deliverable"
+        ? reference.path
+        : ""
+      : props.path;
+  if (iconPath.length === 0) {
+    return <CentralIcon name="file-text" className={className} />;
+  }
+  const kind = inferEntryKindFromPath(iconPath);
   if (kind === "directory") {
     return <FolderIcon className={className} />;
   }
   // Masked Central glyph painted with `bg-current`, so the file icon inherits the
   // chip's text color (it shares the filename's color) instead of a per-filetype
   // tint. `getFileIconName` already falls back to the bracket glyph when unknown.
-  return <CentralIcon name={getFileIconName(props.path)} className={className} />;
+  return <CentralIcon name={getFileIconName(iconPath)} className={className} />;
 };
 
 // Lexical composer only — use a single masked Central icon (same as skill chips)

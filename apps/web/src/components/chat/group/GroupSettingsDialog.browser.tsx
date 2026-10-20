@@ -1,8 +1,8 @@
 import "~/index.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ProjectId, ThreadId } from "@synara/contracts";
-import type { ProjectAgentOverview } from "@synara/contracts";
+import { ProjectId, SpaceId, ThreadId } from "@synara/contracts";
+import type { ExpertDefinition, ProjectAgentOverview } from "@synara/contracts";
 import { page } from "vitest/browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -10,6 +10,24 @@ import { render } from "vitest-browser-react";
 const PROJECT_ID = ProjectId.makeUnsafe("project-group-1");
 const LINKED_ID = ProjectId.makeUnsafe("project-linked");
 const CANDIDATE_ID = ProjectId.makeUnsafe("project-candidate");
+const SOURCE_ID = ProjectId.makeUnsafe("project-source");
+
+function expert(input: { id: string; name: string; archived?: boolean }): ExpertDefinition {
+  return {
+    id: input.id,
+    name: input.name,
+    description: `${input.name} description`,
+    useCases: "Research and writing",
+    persona: "Helpful expert",
+    outputRequirements: "Clear result",
+    skills: [],
+    references: [],
+    connections: [],
+    revision: 1,
+    archived: input.archived ?? false,
+    updatedAt: "2026-10-19T00:00:00.000Z",
+  };
+}
 
 const api = vi.hoisted(() => {
   const readDocumentResult = {
@@ -35,7 +53,9 @@ const api = vi.hoisted(() => {
       listTasks: vi.fn(async () => ({ tasks: [] })),
       listActivity: vi.fn(async () => ({ activity: [], nextCursor: null })),
       listDocuments: vi.fn(async () => ({ documents: [] })),
-      listThreadIndex: vi.fn(async () => ({ threads: [] as Array<{ threadId: string }> })),
+      listThreadIndex: vi.fn(async () => ({
+        threads: [] as Array<{ threadId: string }>,
+      })),
       subscribe: vi.fn(async () => undefined),
       unsubscribe: vi.fn(async () => undefined),
       onEvent: vi.fn(() => () => undefined),
@@ -55,8 +75,13 @@ const api = vi.hoisted(() => {
       })),
     },
     orchestration: { dispatchCommand: vi.fn(async () => ({ sequence: 1 })) },
-    server: { getConfig: vi.fn(async () => ({ cwd: "/srv" })) },
-    provider: { listModels: vi.fn(async () => ({ models: [], source: "disabled" })) },
+    server: {
+      getConfig: vi.fn(async () => ({ cwd: "/srv" })),
+      listExperts: vi.fn(async () => [] as ReadonlyArray<ExpertDefinition>),
+    },
+    provider: {
+      listModels: vi.fn(async () => ({ models: [], source: "disabled" })),
+    },
   };
 });
 
@@ -112,7 +137,9 @@ function overview(overrides: Partial<ProjectAgentOverview> = {}): ProjectAgentOv
 }
 
 function renderDialog(props: Partial<Parameters<typeof GroupSettingsDialog>[0]> = {}) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
     <QueryClientProvider client={queryClient}>
       <GroupSettingsDialog
@@ -132,6 +159,7 @@ function renderDialog(props: Partial<Parameters<typeof GroupSettingsDialog>[0]> 
 describe("GroupSettingsDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    api.server.listExperts.mockResolvedValue([]);
     api.projectAgent.getOverview.mockResolvedValue(overview());
     api.projectAgent.configure.mockResolvedValue(overview());
     useStore.setState({ projects: [], sidebarThreadSummaryById: {} });
@@ -155,6 +183,38 @@ describe("GroupSettingsDialog", () => {
   it("opens at initialSection when provided", async () => {
     await renderDialog({ initialSection: "memory" });
     await expect.element(page.getByLabelText("Hub instructions")).toBeInTheDocument();
+  });
+
+  it("moves a Hub to the selected Space independently of its linked Projects", async () => {
+    const targetSpaceId = SpaceId.makeUnsafe("space-research");
+    useStore.setState({
+      projects: [makeProject({ id: PROJECT_ID, kind: "group", spaceId: null })],
+      spaces: [
+        {
+          id: targetSpaceId,
+          name: "Research",
+          icon: "bag",
+          sortOrder: 0,
+          createdAt: "2026-10-19T00:00:00.000Z",
+          updatedAt: "2026-10-19T00:00:00.000Z",
+        },
+      ],
+      sidebarThreadSummaryById: {},
+    });
+    await renderDialog();
+
+    await page.getByRole("combobox", { name: "Hub Space" }).click();
+    await page.getByRole("option", { name: "Research", exact: true }).click();
+
+    await vi.waitFor(() =>
+      expect(api.orchestration.dispatchCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "project.meta.update",
+          projectId: PROJECT_ID,
+          spaceId: targetSpaceId,
+        }),
+      ),
+    );
   });
 
   it("saves General edits through projectAgent.configure", async () => {
@@ -184,6 +244,95 @@ describe("GroupSettingsDialog", () => {
     expect(typeof payload.requestId).toBe("string");
     // Name unchanged: no rename command dispatched.
     expect(api.orchestration.dispatchCommand).not.toHaveBeenCalled();
+  });
+
+  it("loads human experts, filters the multiselect, and saves the selected IDs", async () => {
+    api.server.listExperts.mockResolvedValue([
+      expert({ id: "research", name: "Research" }),
+      expert({ id: "writer", name: "Writer" }),
+      expert({ id: "archived", name: "Archived", archived: true }),
+    ]);
+    const existing = overview();
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({ config: { ...existing.config!, expertIds: ["research"] } }),
+    );
+    await renderDialog();
+
+    await page.getByRole("button", { name: "Experts" }).click();
+    await expect.element(page.getByText("已选择 1 位专家")).toBeInTheDocument();
+    await expect.element(page.getByRole("checkbox", { name: "Research" })).toBeChecked();
+    await page.getByLabelText("搜索专家").fill("writer");
+    await expect.element(page.getByRole("checkbox", { name: "Writer" })).toBeInTheDocument();
+    await expect.element(page.getByText("Research description")).not.toBeInTheDocument();
+    await page.getByRole("checkbox", { name: "Writer" }).click();
+    await expect.element(page.getByText("已选择 2 位专家")).toBeInTheDocument();
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+
+    await vi.waitFor(() => expect(api.projectAgent.configure).toHaveBeenCalledOnce());
+    const payload = api.projectAgent.configure.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.expertIds).toEqual(["research", "writer"]);
+    expect(api.server.listExperts).toHaveBeenCalledOnce();
+  });
+
+  it("shows archived and missing selections as removable and allows other edits to save", async () => {
+    api.server.listExperts.mockResolvedValue([
+      expert({ id: "archived", name: "Archived", archived: true }),
+    ]);
+    const existing = overview();
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({ config: { ...existing.config!, expertIds: ["archived", "deleted"] } }),
+    );
+    await renderDialog();
+
+    await page.getByRole("button", { name: "Experts" }).click();
+    await expect.element(page.getByText("Archived · 已归档，不可用于新线程")).toBeInTheDocument();
+    await expect.element(page.getByText("deleted · 不可用")).toBeInTheDocument();
+    await page.getByRole("button", { name: "移除专家 Archived" }).click();
+    await page.getByRole("button", { name: "移除专家 deleted" }).click();
+    await page.getByRole("button", { name: "General" }).click();
+    await page.getByLabelText("Hub goal").fill("updated without unavailable experts");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+
+    await vi.waitFor(() => expect(api.projectAgent.configure).toHaveBeenCalledOnce());
+    const payload = api.projectAgent.configure.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.expertIds).toEqual([]);
+    expect(payload.goal).toBe("updated without unavailable experts");
+  });
+
+  it("shows a human roster error while preserving existing selections for unrelated saves", async () => {
+    api.server.listExperts.mockRejectedValue(new Error("roster offline"));
+    const existing = overview();
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({ config: { ...existing.config!, expertIds: ["persisted"] } }),
+    );
+    await renderDialog();
+
+    await page.getByRole("button", { name: "Experts" }).click();
+    await expect.element(page.getByRole("alert")).toHaveTextContent("无法读取专家：roster offline");
+    await page.getByRole("button", { name: "General" }).click();
+    await page.getByLabelText("Hub goal").fill("save despite roster outage");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+
+    await vi.waitFor(() => expect(api.projectAgent.configure).toHaveBeenCalledOnce());
+    const payload = api.projectAgent.configure.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.expertIds).toEqual(["persisted"]);
+    expect(payload.goal).toBe("save despite roster outage");
+  });
+
+  it("allows zero-expert onboarding after a visible roster failure", async () => {
+    api.server.listExperts.mockRejectedValue(new Error("roster offline"));
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({ configured: false, config: null, coordinatorStatus: "unconfigured" }),
+    );
+    await renderDialog({ mode: "onboarding" });
+
+    await page.getByRole("button", { name: "Experts" }).click();
+    await expect.element(page.getByRole("alert")).toHaveTextContent("roster offline");
+    await page.getByRole("button", { name: "Create hub" }).click();
+
+    await vi.waitFor(() => expect(api.projectAgent.configure).toHaveBeenCalledOnce());
+    const payload = api.projectAgent.configure.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.expertIds).toEqual([]);
   });
 
   it("shows the effective ceiling for a legacy limit while preserving the saved value until explicitly changed", async () => {
@@ -249,7 +398,9 @@ describe("GroupSettingsDialog", () => {
     await brainButton.click();
     await expect.element(brainButton).toHaveAttribute("aria-pressed", "true");
 
-    const violetSwatch = page.getByRole("button", { name: "Hub icon color Violet" });
+    const violetSwatch = page.getByRole("button", {
+      name: "Hub icon color Violet",
+    });
     await violetSwatch.click();
     await expect.element(violetSwatch).toHaveAttribute("aria-pressed", "true");
 
@@ -320,9 +471,18 @@ describe("GroupSettingsDialog", () => {
   it("links and unlinks repositories from Environment", async () => {
     useStore.setState({
       projects: [
-        makeProject({ id: PROJECT_ID, kind: "group", name: "alpha", cwd: "/tmp/group" }),
+        makeProject({
+          id: PROJECT_ID,
+          kind: "group",
+          name: "alpha",
+          cwd: "/tmp/group",
+        }),
         makeProject({ id: LINKED_ID, name: "linked-repo", cwd: "/tmp/linked" }),
-        makeProject({ id: CANDIDATE_ID, name: "candidate-repo", cwd: "/tmp/candidate" }),
+        makeProject({
+          id: CANDIDATE_ID,
+          name: "candidate-repo",
+          cwd: "/tmp/candidate",
+        }),
       ],
     });
     api.projectAgent.getOverview.mockResolvedValue(overview({ linkedProjectIds: [LINKED_ID] }));
@@ -336,7 +496,10 @@ describe("GroupSettingsDialog", () => {
     await page.getByRole("button", { name: "Remove" }).click();
     await vi.waitFor(() =>
       expect(api.projectAgent.unlinkProject).toHaveBeenCalledWith(
-        expect.objectContaining({ projectId: PROJECT_ID, linkedProjectId: LINKED_ID }),
+        expect.objectContaining({
+          projectId: PROJECT_ID,
+          linkedProjectId: LINKED_ID,
+        }),
       ),
     );
 
@@ -344,26 +507,161 @@ describe("GroupSettingsDialog", () => {
     await page.getByRole("button", { name: /candidate-repo/ }).click();
     await vi.waitFor(() =>
       expect(api.projectAgent.linkProject).toHaveBeenCalledWith(
-        expect.objectContaining({ projectId: PROJECT_ID, linkedProjectId: CANDIDATE_ID }),
+        expect.objectContaining({
+          projectId: PROJECT_ID,
+          linkedProjectId: CANDIDATE_ID,
+        }),
       ),
     );
   });
 
   it("shows the onboarding copy and Create hub button", async () => {
     api.projectAgent.getOverview.mockResolvedValue(
-      overview({ configured: false, config: null, coordinatorStatus: "unconfigured" }),
+      overview({
+        configured: false,
+        config: null,
+        coordinatorStatus: "unconfigured",
+      }),
     );
     await renderDialog({ mode: "onboarding" });
     expect(document.body.textContent).toContain("Set up your hub");
     await expect.element(page.getByRole("button", { name: "Create hub" })).toBeInTheDocument();
   });
 
+  it("links a source Project before configuring and retries the same Hub after a link failure", async () => {
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({
+        configured: false,
+        config: null,
+        coordinatorStatus: "unconfigured",
+      }),
+    );
+    api.projectAgent.linkProject
+      .mockRejectedValueOnce(new Error("temporary link failure"))
+      .mockResolvedValueOnce(
+        overview({
+          configured: false,
+          config: null,
+          linkedProjectIds: [SOURCE_ID],
+        }),
+      );
+    const onSourceProjectLinked = vi.fn();
+    await renderDialog({
+      mode: "onboarding",
+      sourceProjectId: SOURCE_ID,
+      sourceLinkRequestId: "source-link-request-1",
+      onSourceProjectLinked,
+    });
+
+    await page.getByRole("button", { name: "Create hub" }).click();
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain("temporary link failure");
+    });
+    expect(api.projectAgent.configure).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Create hub" }).click();
+    await vi.waitFor(() => expect(api.projectAgent.configure).toHaveBeenCalledOnce());
+
+    expect(api.projectAgent.linkProject).toHaveBeenCalledTimes(2);
+    expect(api.projectAgent.linkProject.mock.calls[0]?.[0]).toEqual({
+      requestId: "source-link-request-1",
+      projectId: PROJECT_ID,
+      linkedProjectId: SOURCE_ID,
+      contextSource: true,
+    });
+    expect(api.projectAgent.linkProject.mock.calls[1]?.[0]).toEqual(
+      api.projectAgent.linkProject.mock.calls[0]?.[0],
+    );
+    const configurePayload = api.projectAgent.configure.mock.calls[0]?.[0] as Record<
+      string,
+      unknown
+    >;
+    expect(configurePayload.sourceProjectId).toBe(SOURCE_ID);
+    expect(api.projectAgent.linkProject.mock.invocationCallOrder[1]).toBeLessThan(
+      api.projectAgent.configure.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    expect(onSourceProjectLinked).toHaveBeenCalledOnce();
+    expect(onSourceProjectLinked).toHaveBeenCalledWith({
+      projectId: PROJECT_ID,
+      sourceProjectId: SOURCE_ID,
+      sourceLinkRequestId: "source-link-request-1",
+    });
+  });
+
+  it("does not repeat an already successful source link when configuring", async () => {
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({
+        configured: false,
+        config: null,
+        linkedProjectIds: [SOURCE_ID],
+        coordinatorStatus: "unconfigured",
+      }),
+    );
+    await renderDialog({ mode: "onboarding", sourceProjectId: SOURCE_ID });
+
+    await page.getByRole("button", { name: "Create hub" }).click();
+    await vi.waitFor(() => expect(api.projectAgent.configure).toHaveBeenCalledOnce());
+
+    expect(api.projectAgent.linkProject).not.toHaveBeenCalled();
+    expect(api.projectAgent.configure.mock.calls[0]?.[0]).toMatchObject({
+      projectId: PROJECT_ID,
+      sourceProjectId: SOURCE_ID,
+    });
+  });
+
+  it("restores the explicit source from an unconfigured Hub overview after reopening", async () => {
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({
+        configured: false,
+        config: null,
+        sourceProjectId: SOURCE_ID,
+        linkedProjectIds: [SOURCE_ID],
+        coordinatorStatus: "unconfigured",
+      }),
+    );
+    await renderDialog({ mode: "onboarding" });
+
+    await page.getByRole("button", { name: "Create hub" }).click();
+    await vi.waitFor(() => expect(api.projectAgent.configure).toHaveBeenCalledOnce());
+
+    expect(api.projectAgent.linkProject).not.toHaveBeenCalled();
+    expect(api.projectAgent.configure.mock.calls[0]?.[0]).toMatchObject({
+      projectId: PROJECT_ID,
+      sourceProjectId: SOURCE_ID,
+    });
+  });
+
+  it("does not infer origin from ordinary linked projects", async () => {
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({
+        configured: false,
+        config: null,
+        linkedProjectIds: [LINKED_ID],
+        coordinatorStatus: "unconfigured",
+      }),
+    );
+    await renderDialog({ mode: "onboarding" });
+
+    await page.getByRole("button", { name: "Create hub" }).click();
+    await vi.waitFor(() => expect(api.projectAgent.configure).toHaveBeenCalledOnce());
+
+    expect(api.projectAgent.configure.mock.calls[0]?.[0]).not.toHaveProperty("sourceProjectId");
+  });
+
   it("keeps the hub and closes onboarding when discard is declined", async () => {
     api.projectAgent.getOverview.mockResolvedValue(
-      overview({ configured: false, config: null, coordinatorStatus: "unconfigured" }),
+      overview({
+        configured: false,
+        config: null,
+        coordinatorStatus: "unconfigured",
+      }),
     );
     const onOpenChange = vi.fn();
-    await renderDialog({ mode: "onboarding", allowDiscard: true, onOpenChange });
+    await renderDialog({
+      mode: "onboarding",
+      allowDiscard: true,
+      onOpenChange,
+    });
 
     await page.getByRole("button", { name: "Cancel" }).click();
     await expect.element(page.getByRole("button", { name: "Keep hub" })).toBeInTheDocument();
@@ -377,10 +675,18 @@ describe("GroupSettingsDialog", () => {
 
   it("discards a still-empty onboarding hub with requireEmpty", async () => {
     api.projectAgent.getOverview.mockResolvedValue(
-      overview({ configured: false, config: null, coordinatorStatus: "unconfigured" }),
+      overview({
+        configured: false,
+        config: null,
+        coordinatorStatus: "unconfigured",
+      }),
     );
     const onOpenChange = vi.fn();
-    await renderDialog({ mode: "onboarding", allowDiscard: true, onOpenChange });
+    await renderDialog({
+      mode: "onboarding",
+      allowDiscard: true,
+      onOpenChange,
+    });
 
     await page.getByRole("button", { name: "Cancel" }).click();
     await page.getByRole("button", { name: "Discard hub" }).click();
@@ -397,15 +703,72 @@ describe("GroupSettingsDialog", () => {
     await vi.waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   });
 
+  it("notifies the caller after a source-linked onboarding hub is discarded", async () => {
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({
+        configured: false,
+        config: null,
+        coordinatorStatus: "unconfigured",
+      }),
+    );
+    const onDiscarded = vi.fn();
+    await renderDialog({
+      mode: "onboarding",
+      allowDiscard: true,
+      sourceProjectId: SOURCE_ID,
+      sourceLinkRequestId: "source-link-request",
+      onDiscarded,
+    });
+
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await page.getByRole("button", { name: "Discard hub" }).click();
+
+    await vi.waitFor(() =>
+      expect(onDiscarded).toHaveBeenCalledWith({
+        projectId: PROJECT_ID,
+        sourceProjectId: SOURCE_ID,
+        sourceLinkRequestId: "source-link-request",
+      }),
+    );
+  });
+
+  it("retains the pending caller identity when hub deletion fails", async () => {
+    api.projectAgent.deleteGroup.mockResolvedValueOnce(null as never);
+    const onDiscarded = vi.fn();
+    await renderDialog({
+      mode: "onboarding",
+      allowDiscard: true,
+      sourceProjectId: SOURCE_ID,
+      sourceLinkRequestId: "source-link-request",
+      onDiscarded,
+    });
+
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await page.getByRole("button", { name: "Discard hub" }).click();
+
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("Could not delete this hub."),
+    );
+    expect(onDiscarded).not.toHaveBeenCalled();
+  });
+
   it("never offers discard for a hub that already has threads", async () => {
     api.projectAgent.getOverview.mockResolvedValue(
-      overview({ configured: false, config: null, coordinatorStatus: "unconfigured" }),
+      overview({
+        configured: false,
+        config: null,
+        coordinatorStatus: "unconfigured",
+      }),
     );
     api.projectAgent.listThreadIndex.mockResolvedValue({
       threads: [{ threadId: "worker-1" }],
     });
     const onOpenChange = vi.fn();
-    await renderDialog({ mode: "onboarding", allowDiscard: true, onOpenChange });
+    await renderDialog({
+      mode: "onboarding",
+      allowDiscard: true,
+      onOpenChange,
+    });
 
     await page.getByRole("button", { name: "Cancel" }).click();
 

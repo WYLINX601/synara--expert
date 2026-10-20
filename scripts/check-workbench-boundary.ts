@@ -38,6 +38,22 @@ const databasePackages = [
 // regression paths are recorded in workbench/integration-points.json.
 export const WORKBENCH_RETAINED_IMPORTS = [
   {
+    file: "apps/server/src/agentGateway/hubExpertDispatch.ts",
+    specifier: "../provider/Services/ProviderDiscoveryService.ts",
+  },
+  {
+    file: "apps/server/src/agentGateway/hubExpertDispatch.ts",
+    specifier: "./targetResolver.ts",
+  },
+  {
+    file: "apps/server/src/agentGateway/hubExpertDispatch.ts",
+    specifier: "./toolInput.ts",
+  },
+  {
+    file: "apps/server/src/projectAgent/hubDeliverables.ts",
+    specifier: "effect/unstable/sql/SqlClient",
+  },
+  {
     file: "apps/server/src/experts/ExpertGatewayTools.ts",
     specifier: "../agentGateway/protocol.ts",
   },

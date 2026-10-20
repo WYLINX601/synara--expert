@@ -28,6 +28,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
 import {
+  PersistenceSqlError,
   toPersistenceDecodeError,
   toPersistenceSqlError,
   toPersistenceSqlOrDecodeError,
@@ -521,11 +522,26 @@ const makeProjectAgentRepository = Effect.gen(function* () {
   });
 
   const withLinkedIds = (config: ProjectAgentConfig) =>
-    listLinkedIds({ projectId: config.projectId }).pipe(
-      Effect.map((rows) => ({
+    Effect.gen(function* () {
+      const rows = yield* listLinkedIds({ projectId: config.projectId });
+      const expertRows = yield* sql<{ readonly expertId: string }>`
+        SELECT expert_id AS "expertId" FROM hub_expert_participants
+        WHERE hub_id = ${config.projectId}
+        ORDER BY expert_id
+      `;
+      const origins = yield* sql<{ readonly sourceProjectId: string }>`
+        SELECT source_project_id AS "sourceProjectId" FROM hub_project_origins
+        WHERE hub_id = ${config.projectId}
+      `;
+      return {
         ...config,
         linkedProjectIds: rows.map((row) => row.linkedProjectId),
-      })),
+        expertIds: expertRows.map((row) => row.expertId),
+        ...(origins[0]
+          ? { sourceProjectId: ProjectId.makeUnsafe(origins[0].sourceProjectId) }
+          : {}),
+      };
+    }).pipe(
       Effect.mapError(
         toPersistenceSqlOrDecodeError("ProjectAgentRepository.linkedProjects", "linked"),
       ),
@@ -718,15 +734,63 @@ const makeProjectAgentRepository = Effect.gen(function* () {
           toPersistenceSqlOrDecodeError("ProjectAgentRepository.listLinkedProjectIds", "linked"),
         ),
       ),
+    listUnconfiguredSourceHubs: () =>
+      sql<{ readonly projectId: string; readonly sourceProjectId: string }>`
+        SELECT o.hub_id AS "projectId", o.source_project_id AS "sourceProjectId"
+        FROM hub_project_origins o
+        LEFT JOIN project_agent_configs c ON c.project_id = o.hub_id
+        WHERE c.project_id IS NULL
+      `.pipe(
+        Effect.map((rows) =>
+          rows.map((row) => ({
+            projectId: ProjectId.makeUnsafe(row.projectId),
+            sourceProjectId: ProjectId.makeUnsafe(row.sourceProjectId),
+          })),
+        ),
+        Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.listUnconfiguredSourceHubs")),
+      ),
+    getSourceProjectId: (projectId) =>
+      sql<{ readonly sourceProjectId: string }>`
+        SELECT source_project_id AS "sourceProjectId" FROM hub_project_origins
+        WHERE hub_id = ${projectId}
+      `.pipe(
+        Effect.map((rows) => (rows[0] ? ProjectId.makeUnsafe(rows[0].sourceProjectId) : null)),
+        Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.getSourceProjectId")),
+      ),
     linkProject: (input) =>
-      sql`
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            if (input.contextSource) {
+              yield* sql`
+            INSERT INTO hub_project_origins (hub_id, source_project_id)
+            VALUES (${input.projectId}, ${input.linkedProjectId})
+            ON CONFLICT (hub_id) DO NOTHING
+          `;
+              const rows = yield* sql<{ readonly source: string }>`
+            SELECT source_project_id AS source FROM hub_project_origins
+            WHERE hub_id = ${input.projectId}
+          `;
+              if (rows[0]?.source !== input.linkedProjectId) {
+                return yield* Effect.fail(
+                  new PersistenceSqlError({
+                    operation: "ProjectAgentRepository.linkProject",
+                    detail: "The Hub's Context source cannot be changed.",
+                  }),
+                );
+              }
+            }
+            yield* sql`
         INSERT INTO project_agent_linked_projects (project_id, linked_project_id, created_at)
         VALUES (${input.projectId}, ${input.linkedProjectId}, ${input.createdAt})
         ON CONFLICT (project_id, linked_project_id) DO NOTHING
-      `.pipe(
-        Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.linkProject")),
-        Effect.asVoid,
-      ),
+        `;
+          }),
+        )
+        .pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.linkProject")),
+          Effect.asVoid,
+        ),
     unlinkProject: (input) =>
       sql`
         DELETE FROM project_agent_linked_projects
@@ -752,26 +816,74 @@ const makeProjectAgentRepository = Effect.gen(function* () {
       ),
     saveConfig: (config, expectedRevision) => {
       const row = toConfigRow(config);
+      const normalizedExpertIds =
+        config.expertIds === undefined
+          ? undefined
+          : [...new Set(config.expertIds.map((expertId) => expertId.trim()))].toSorted();
+      const savedConfig =
+        normalizedExpertIds === undefined ? config : { ...config, expertIds: normalizedExpertIds };
+      const saveOrigin =
+        config.sourceProjectId === undefined
+          ? Effect.void
+          : sql`
+        INSERT INTO hub_project_origins (hub_id, source_project_id)
+        VALUES (${config.projectId}, ${config.sourceProjectId})
+        ON CONFLICT (hub_id) DO NOTHING
+      `.pipe(
+              Effect.asVoid,
+              Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveOrigin")),
+            );
+      const saveExpertIds =
+        normalizedExpertIds === undefined
+          ? Effect.void
+          : Effect.gen(function* () {
+              yield* sql`
+                DELETE FROM hub_expert_participants WHERE hub_id = ${config.projectId}
+              `;
+              for (const expertId of normalizedExpertIds) {
+                yield* sql`
+                  INSERT INTO hub_expert_participants (hub_id, expert_id)
+                  VALUES (${config.projectId}, ${expertId})
+                `;
+              }
+            }).pipe(Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveExpertIds")));
       if (expectedRevision === null) {
-        return insertConfig(row).pipe(
-          Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveConfig:insert")),
-          Effect.as(config),
-        );
+        return sql
+          .withTransaction(
+            insertConfig(row).pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveConfig:insert")),
+              Effect.andThen(saveOrigin),
+              Effect.andThen(saveExpertIds),
+              Effect.as(savedConfig),
+            ),
+          )
+          .pipe(
+            Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveConfig:transaction")),
+          );
       }
-      return updateConfig({ row, expectedRevision }).pipe(
-        Effect.mapError(
-          toPersistenceSqlOrDecodeError("ProjectAgentRepository.saveConfig:update", "changed"),
-        ),
-        Effect.flatMap((result) =>
-          result.changed === 1
-            ? Effect.succeed(config)
-            : Effect.fail(
-                toPersistenceSqlError("ProjectAgentRepository.saveConfig")(
-                  revisionMismatch("config"),
-                ),
-              ),
-        ),
-      );
+      return sql
+        .withTransaction(
+          updateConfig({ row, expectedRevision }).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError("ProjectAgentRepository.saveConfig:update", "changed"),
+            ),
+            Effect.flatMap((result) =>
+              result.changed === 1
+                ? Effect.succeed(config)
+                : Effect.fail(
+                    toPersistenceSqlError("ProjectAgentRepository.saveConfig")(
+                      revisionMismatch("config"),
+                    ),
+                  ),
+            ),
+            Effect.andThen(saveOrigin),
+            Effect.andThen(saveExpertIds),
+            Effect.as(savedConfig),
+          ),
+        )
+        .pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveConfig:transaction")),
+        );
     },
     getActiveGoal: (projectId) =>
       getActiveGoalRow({ projectId }).pipe(
@@ -1187,6 +1299,26 @@ const makeProjectAgentRepository = Effect.gen(function* () {
                   ),
                 ),
             { discard: true },
+          ).pipe(
+            Effect.andThen(
+              Effect.forEach(
+                [
+                  "hub_expert_deliverable_requests",
+                  "hub_expert_deliverable_collections",
+                  "hub_expert_participants",
+                  "hub_project_origins",
+                ] as const,
+                (table) =>
+                  sql
+                    .unsafe(`DELETE FROM ${table} WHERE hub_id = ?`, [projectId])
+                    .pipe(
+                      Effect.mapError(
+                        toPersistenceSqlError(`ProjectAgentRepository.deleteProjectData:${table}`),
+                      ),
+                    ),
+                { discard: true },
+              ),
+            ),
           ),
         )
         .pipe(Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.deleteProjectData"))),

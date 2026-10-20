@@ -1,9 +1,15 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { assert, it } from "@effect/vitest";
 import {
   MessageId,
   ProjectId,
+  type ProviderKind,
   ThreadId,
   TurnId,
+  DEFAULT_MODEL_BY_PROVIDER,
+  type ExpertBinding,
+  type ExpertDefinition,
+  type ExpertSnapshot,
   type OrchestrationThread,
   type RuntimeMode,
   type SynaraCreateThreadsInput,
@@ -63,12 +69,19 @@ function harness(name: string) {
         turnId: turn,
       },
     };
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO projection_projects (project_id, kind, title, workspace_root, scripts_json, created_at, updated_at)
+      VALUES (${projectId}, 'group', 'Hub', '/tmp/hub', '[]', ${now}, ${now})`;
     yield* projectAgentRepository.saveConfig(
       {
         projectId,
         coordinatorThreadId: coordinator,
         coordinatorName: "Hub",
-        coordinatorModelSelection: { provider: "codex", model: "fixture-model" },
+        expertIds: ["expert-v1"],
+        coordinatorModelSelection: {
+          provider: "codex",
+          model: "fixture-model",
+        },
         limits: {
           maxConcurrentWorkers: 1,
           maxNewWorkersPerTurn: 8,
@@ -98,13 +111,80 @@ function harness(name: string) {
     let failWithPendingCleanup = false;
     let brokenProject: string | null = null;
     type Dependencies = Parameters<typeof makeHubWorkGateway>[0];
+    let expertRevision = 1;
+    let expertArchived = false;
+    let expertName = "Pinned Expert";
+    let preferredProvider: ExpertDefinition["preferredProvider"] = "claudeAgent";
+    let expertPreviewBlocked = false;
+    const expertSnapshots = new Map<string, ExpertSnapshot>();
+    const expertDefinition = (): ExpertDefinition => ({
+      id: "expert-v1",
+      name: expertName,
+      description: "Fixture Expert",
+      useCases: "Fixture",
+      persona: "Fixture persona",
+      outputRequirements: "Fixture output",
+      skills: [],
+      references: [],
+      connections: [],
+      ...(preferredProvider !== undefined ? { preferredProvider } : {}),
+      revision: expertRevision,
+      archived: expertArchived,
+      updatedAt: now,
+    });
+    const expertStore: Dependencies["expertStore"] = {
+      list: async () => [expertDefinition()],
+      read: async (id) => (id === "expert-v1" ? expertDefinition() : null),
+      preview: async () => ({
+        definition: expertDefinition(),
+        status: expertPreviewBlocked ? "blocked" : "available",
+        issues: expertPreviewBlocked ? ["Required Expert resource is unavailable."] : [],
+      }),
+      prepareSnapshot: async (id) => {
+        const definition = expertDefinition();
+        if (id !== definition.id || definition.archived) throw new Error("Expert unavailable");
+        const snapshotId = `snapshot-${definition.revision}`;
+        const snapshot: ExpertSnapshot = {
+          snapshotId,
+          expertId: definition.id,
+          displayName: definition.name,
+          revision: definition.revision,
+          description: definition.description,
+          useCases: definition.useCases,
+          persona: definition.persona,
+          outputRequirements: definition.outputRequirements,
+          skills: [],
+          skillsRoot: "/fixture/skills",
+          references: [],
+          connections: [],
+          preferredProvider: definition.preferredProvider,
+          createdAt: now,
+        };
+        expertSnapshots.set(snapshotId, snapshot);
+        return {
+          expertId: definition.id,
+          snapshotId,
+          displayName: definition.name,
+          revision: definition.revision,
+        } satisfies ExpertBinding;
+      },
+      readSnapshot: async (snapshotId) => {
+        const snapshot = expertSnapshots.get(snapshotId);
+        if (!snapshot) throw new Error("Expert snapshot not found");
+        return snapshot;
+      },
+    };
+    const expertBindings: Array<ExpertBinding | undefined> = [];
     const dependencies = {
       repository: {
         ...repository,
         list: (id) =>
           id === brokenProject
             ? Effect.fail(
-                new HubWorkRepositoryError({ code: "storage", message: "damaged work record" }),
+                new HubWorkRepositoryError({
+                  code: "storage",
+                  message: "damaged work record",
+                }),
               )
             : repository.list(id),
       },
@@ -114,7 +194,11 @@ function harness(name: string) {
       projectAgentRepository,
       projectAgentService: {
         resolvePrincipalForThread: () =>
-          Effect.succeed({ kind: "coordinator", threadId: coordinator, projectId }),
+          Effect.succeed({
+            kind: "coordinator",
+            threadId: coordinator,
+            projectId,
+          }),
         assertCallerMayCreateThreadInProject: () =>
           denyTarget ? Effect.fail(new Error("Repository was unlinked")) : Effect.void,
         notifyWorkItemChanged: () => Effect.void,
@@ -123,13 +207,45 @@ function harness(name: string) {
         getThreadShellById: () => Effect.succeed(Option.some({ id: coordinator, runtimeMode })),
         getThreadDetailById: () =>
           Effect.succeed(
-            Option.some({ id: coordinator, messages } as unknown as OrchestrationThread),
+            Option.some({
+              id: coordinator,
+              messages,
+            } as unknown as OrchestrationThread),
           ),
         getProjectShellById: () =>
-          Effect.succeed(Option.some({ id: projectId, kind: "group", workspaceRoot: "/fixture" })),
+          Effect.succeed(
+            Option.some({
+              id: projectId,
+              kind: "group",
+              workspaceRoot: "/fixture",
+            }),
+          ),
       } as unknown as Dependencies["snapshotQuery"],
       attachments: {} as Dependencies["attachments"],
-      serverConfig: { attachmentsDir: "/unused" } as Dependencies["serverConfig"],
+      serverConfig: {
+        attachmentsDir: "/unused",
+      } as Dependencies["serverConfig"],
+      expertStore,
+      providerDiscovery: {
+        listModels: ({ provider }: { readonly provider: ProviderKind }) =>
+          Effect.succeed({
+            models: [
+              {
+                slug:
+                  provider === "claudeAgent"
+                    ? DEFAULT_MODEL_BY_PROVIDER.claudeAgent
+                    : "fixture-model",
+                name: "Fixture model",
+              },
+            ],
+          }),
+      } as unknown as Dependencies["providerDiscovery"],
+      loadProviderAvailabilities: Effect.succeed(
+        new Map([
+          ["codex", { enabled: true }],
+          ["claudeAgent", { enabled: true }],
+        ]),
+      ) as Dependencies["loadProviderAvailabilities"],
       git: {
         readBranchContext: () =>
           Effect.succeed({ isRepo: true, branch: "main", upstreamRef: null }),
@@ -141,6 +257,9 @@ function harness(name: string) {
           inheritedModes.push(
             creationContext.kind === "hub-work" ? creationContext.inheritedRuntimeMode : undefined,
           );
+          expertBindings.push(
+            creationContext.kind === "hub-work" ? creationContext.expertBinding : undefined,
+          );
           if (failWithPendingCleanup) {
             cleanupPending = true;
             return mcpToolResultError("Cleanup remains pending");
@@ -151,7 +270,9 @@ function harness(name: string) {
           yield* creationContext.recordWorker(
             ThreadId.makeUnsafe(`worker-${name}-${calls.length}`),
           );
-          return mcpToolResultJson({ threadIds: [`worker-${name}-${calls.length}`] });
+          return mcpToolResultJson({
+            threadIds: [`worker-${name}-${calls.length}`],
+          });
         }).pipe(Effect.catch((error) => Effect.succeed(mcpToolResultError(error.message)))),
     } satisfies Dependencies;
     const gateway = makeHubWorkGateway(dependencies);
@@ -172,6 +293,7 @@ function harness(name: string) {
       projectId,
       calls,
       inheritedModes,
+      expertBindings,
       setRuntimeMode: (mode: RuntimeMode) => {
         runtimeMode = mode;
       },
@@ -190,6 +312,20 @@ function harness(name: string) {
       },
       failCreation: () => {
         failCreation = true;
+      },
+      editExpert: (revision: number, name: string) => {
+        expertRevision = revision;
+        expertName = name;
+      },
+      archiveExpert: () => {
+        expertArchived = true;
+        expertRevision += 1;
+      },
+      setPreferredProvider: (provider: ExpertDefinition["preferredProvider"]) => {
+        preferredProvider = provider;
+      },
+      blockExpertPreview: () => {
+        expertPreviewBlocked = true;
       },
     };
   });
@@ -221,7 +357,10 @@ tests("Hub work gateway integration", (it) => {
             const first = (yield* h.repository.list(h.projectId)).find(
               (record) => record.workerThreadId !== null,
             )!;
-            yield* h.gateway.service.setState({ workItemId: first.id, state: "completed" });
+            yield* h.gateway.service.setState({
+              workItemId: first.id,
+              state: "completed",
+            });
             yield* h.recreate().tick;
             assert.deepEqual(h.inheritedModes, ["auto", "auto"]);
           }
@@ -234,7 +373,10 @@ tests("Hub work gateway integration", (it) => {
       const h = yield* harness("explicit-approval");
       h.setRuntimeMode("auto");
       yield* h.gateway.submit(
-        { ...h.input, threads: [{ ...h.input.threads[0]!, runtimeMode: "approval-required" }] },
+        {
+          ...h.input,
+          threads: [{ ...h.input.threads[0]!, runtimeMode: "approval-required" }],
+        },
         h.context,
       );
       yield* h.gateway.tick;
@@ -263,7 +405,10 @@ tests("Hub work gateway integration", (it) => {
           {
             ...h.input,
             requestId: "different-wake-id",
-            threads: h.input.threads.map((spec) => ({ ...spec, contextMessageIds: [source.id] })),
+            threads: h.input.threads.map((spec) => ({
+              ...spec,
+              contextMessageIds: [source.id],
+            })),
           },
           { ...h.context, callerTurnId: "another-turn" },
         );
@@ -271,7 +416,10 @@ tests("Hub work gateway integration", (it) => {
         yield* h.gateway.tick;
         assert.equal(h.calls.length, 1);
         const first = (yield* h.repository.list(h.projectId))[0]!;
-        yield* h.gateway.service.setState({ workItemId: first.id, state: "completed" });
+        yield* h.gateway.service.setState({
+          workItemId: first.id,
+          state: "completed",
+        });
         yield* h.gateway.tick;
         assert.equal(h.calls.length, 2);
       }),
@@ -361,6 +509,145 @@ tests("Hub work gateway integration", (it) => {
         (yield* h.repository.list(h.projectId)).every((record) => record.state === "failed"),
         true,
       );
+    }),
+  );
+
+  it.effect("freezes Expert binding and preferred-provider target before queue replay", () =>
+    Effect.gen(function* () {
+      const h = yield* harness("expert-binding-freeze");
+      const expertInput: SynaraCreateThreadsInput = {
+        requestId: "expert-freeze-request",
+        threads: [{ prompt: "Use the pinned Expert", expertId: "expert-v1" }],
+      };
+      const accepted = yield* h.gateway.submit(expertInput, h.context);
+      assert.equal(accepted?.isError, undefined);
+      const acceptedContent = accepted!.content[0]!;
+      if (acceptedContent.type !== "text") throw new Error("Expected JSON Hub work result");
+      const acceptedBody = JSON.parse(acceptedContent.text) as {
+        readonly workItems: ReadonlyArray<{
+          readonly expertBinding?: {
+            readonly expertId: string;
+            readonly displayName: string;
+            readonly revision: number;
+          };
+        }>;
+      };
+      assert.deepEqual(acceptedBody.workItems[0]?.expertBinding, {
+        expertId: "expert-v1",
+        displayName: "Pinned Expert",
+        revision: 1,
+      });
+      const frozen = (yield* h.repository.list(h.projectId))[0]!;
+      assert.deepEqual(frozen.creationSpec.target, {
+        provider: "claudeAgent",
+        instanceId: "claudeAgent",
+        model: DEFAULT_MODEL_BY_PROVIDER.claudeAgent,
+      });
+      assert.equal(frozen.creationSpec.expertBinding?.snapshotId, "snapshot-1");
+
+      h.editExpert(2, "Renamed Expert");
+      h.archiveExpert();
+      const currentConfig = yield* h.projectAgentRepository.getConfig(h.projectId);
+      if (Option.isSome(currentConfig))
+        yield* h.projectAgentRepository.saveConfig(
+          { ...currentConfig.value, expertIds: [], revision: currentConfig.value.revision + 1 },
+          currentConfig.value.revision,
+        );
+      const replay = yield* h.recreate().submit(expertInput, h.context);
+      assert.equal(replay?.isError, undefined);
+      const replayContent = replay!.content[0]!;
+      if (replayContent.type !== "text") throw new Error("Expected JSON Hub work result");
+      const replayBody = JSON.parse(replayContent.text) as {
+        readonly replayed: boolean;
+        readonly workItems: ReadonlyArray<{
+          readonly expertBinding?: {
+            readonly expertId: string;
+            readonly displayName: string;
+            readonly revision: number;
+          };
+        }>;
+      };
+      assert.equal(replayBody.replayed, true);
+      assert.deepEqual(replayBody.workItems[0]?.expertBinding, {
+        expertId: "expert-v1",
+        displayName: "Pinned Expert",
+        revision: 1,
+      });
+
+      yield* h.recreate().tick;
+      assert.deepEqual(h.expertBindings, [frozen.creationSpec.expertBinding]);
+      assert.equal(h.calls[0]?.threads[0]?.target?.model, DEFAULT_MODEL_BY_PROVIDER.claudeAgent);
+    }),
+  );
+
+  it.effect("rejects new Expert dispatch after roster removal but allows ordinary work", () =>
+    Effect.gen(function* () {
+      const h = yield* harness("expert-removed");
+      const config = yield* h.projectAgentRepository.getConfig(h.projectId);
+      if (Option.isSome(config))
+        yield* h.projectAgentRepository.saveConfig(
+          { ...config.value, expertIds: [], revision: config.value.revision + 1 },
+          config.value.revision,
+        );
+      const rejected = yield* h.gateway.submit(
+        { requestId: "unselected", threads: [{ prompt: "Must reject", expertId: "expert-v1" }] },
+        h.context,
+      );
+      assert.equal(rejected?.isError, true);
+      assert.equal((yield* h.repository.list(h.projectId)).length, 0);
+      const ordinary = yield* h.gateway.submit(h.input, h.context);
+      assert.equal(ordinary?.isError, undefined);
+      yield* h.gateway.tick;
+      assert.equal(h.expertBindings[0], undefined);
+    }),
+  );
+
+  it.effect("rejects unavailable Expert preflight before accepting durable Hub work", () =>
+    Effect.gen(function* () {
+      const h = yield* harness("expert-preflight-rejected");
+      h.blockExpertPreview();
+      const result = yield* h.gateway.submit(
+        {
+          requestId: "expert-blocked",
+          threads: [{ prompt: "Blocked Expert task", expertId: "expert-v1" }],
+        },
+        h.context,
+      );
+      assert.equal(result?.isError, true);
+      assert.include(JSON.stringify(result), "Required Expert resource is unavailable.");
+      assert.equal((yield* h.repository.list(h.projectId)).length, 0);
+    }),
+  );
+
+  it.effect(
+    "does not guess a preferred provider model when discovery has no configured default",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness("expert-no-default-model");
+        h.setPreferredProvider("pi");
+        const result = yield* h.gateway.submit(
+          {
+            requestId: "expert-no-default",
+            threads: [{ prompt: "Needs an explicit model", expertId: "expert-v1" }],
+          },
+          h.context,
+        );
+        assert.equal(result?.isError, true);
+        assert.include(JSON.stringify(result), "has no configured default model");
+        assert.equal((yield* h.repository.list(h.projectId)).length, 0);
+      }),
+  );
+
+  it.effect("requires a target for ordinary Hub workers", () =>
+    Effect.gen(function* () {
+      const h = yield* harness("plain-worker-target-required");
+      const result = yield* h.gateway.submit(
+        { requestId: "missing-target", threads: [{ prompt: "No target" }] },
+        h.context,
+      );
+      assert.equal(result?.isError, true);
+      assert.include(JSON.stringify(result), "A target is required for a plain worker.");
+      assert.equal((yield* h.repository.list(h.projectId)).length, 0);
     }),
   );
   it.effect("keeps explicit old sources separate from implicit current sources in one batch", () =>

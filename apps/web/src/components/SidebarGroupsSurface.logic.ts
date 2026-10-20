@@ -8,7 +8,7 @@
 import type { ProjectAgentSummary, ProjectId, ThreadId } from "@synara/contracts";
 
 import { resolveGroupCoordinatorDisplayName } from "../lib/groupCoordinatorName";
-import type { Project } from "../types";
+import type { Project, SidebarThreadSummary } from "../types";
 
 /** A hub worker can belong to the hub while running in a linked repository. */
 export function isGroupThreadRoute(input: {
@@ -32,6 +32,54 @@ export function isGroupThreadRoute(input: {
     }
   }
   return false;
+}
+
+/** Remove only server-confirmed Hub workers from their execution Project's ordinary rows. */
+export function filterHubMemberThreadsFromProjectBuckets<
+  T extends Pick<SidebarThreadSummary, "id">,
+>(input: {
+  readonly sortedSidebarThreadsByProjectId: ReadonlyMap<ProjectId, T[]>;
+  readonly memberThreadIdsByProjectId: ReadonlyMap<ProjectId, ReadonlySet<ThreadId>>;
+}): ReadonlyMap<ProjectId, T[]> {
+  if (input.memberThreadIdsByProjectId.size === 0) {
+    return input.sortedSidebarThreadsByProjectId;
+  }
+  const memberThreadIds = new Set<ThreadId>();
+  for (const ids of input.memberThreadIdsByProjectId.values()) {
+    for (const threadId of ids) memberThreadIds.add(threadId);
+  }
+  if (memberThreadIds.size === 0) return input.sortedSidebarThreadsByProjectId;
+  let filtered: Map<ProjectId, T[]> | null = null;
+  for (const [projectId, threads] of input.sortedSidebarThreadsByProjectId) {
+    const visible = threads.filter((thread) => !memberThreadIds.has(thread.id));
+    if (visible.length === threads.length) continue;
+    filtered ??= new Map(input.sortedSidebarThreadsByProjectId);
+    filtered.set(projectId, visible);
+  }
+  return filtered ?? input.sortedSidebarThreadsByProjectId;
+}
+
+const HUB_SECTION_STORAGE_KEY = "synara:sidebar-hubs-expanded:v1";
+
+export function readHubSectionExpanded(storage?: Pick<Storage, "getItem">): boolean {
+  try {
+    const source = storage ?? (typeof window === "undefined" ? null : window.localStorage);
+    return source?.getItem(HUB_SECTION_STORAGE_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+export function persistHubSectionExpanded(
+  expanded: boolean,
+  storage?: Pick<Storage, "setItem">,
+): void {
+  try {
+    const target = storage ?? (typeof window === "undefined" ? null : window.localStorage);
+    target?.setItem(HUB_SECTION_STORAGE_KEY, String(expanded));
+  } catch {
+    // Keep the current in-memory state if browser storage is unavailable.
+  }
 }
 
 export function resolveGroupCoordinatorRowLabel(input: {

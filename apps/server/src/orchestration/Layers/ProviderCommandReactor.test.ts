@@ -9849,6 +9849,40 @@ describe("ProviderCommandReactor", () => {
     expect(input?.mentions).toBeUndefined();
   });
 
+  it("rejects malformed Hub app references before provider adapter dispatch", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-malformed-hub-reference"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("malformed-hub-reference"),
+          role: "user",
+          text: "Read this Hub item.",
+          attachments: [],
+          mentions: [
+            {
+              name: "Broken Hub reference",
+              path: "synara://hub/hub-1/deliverables/worker-1/index.md",
+            },
+          ],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => (await readHarnessThread(harness))?.session?.status === "error");
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect((await readHarnessThread(harness))?.session?.lastError).toContain(
+      "malformed or unsupported",
+    );
+  });
+
   it("rejects a provider-max input that cannot also fit the persistent thread goal", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();

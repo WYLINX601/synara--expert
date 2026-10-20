@@ -36,6 +36,11 @@ import {
 } from "./WorkbenchMigrations.ts";
 import { inspectWorkbenchUpgradePlan } from "./WorkbenchUpgradePlan.ts";
 
+const currentExpertTarget = Math.max(
+  ...workbenchMigrationEntries.map((entry) => entry.migrationId),
+);
+const historicalExpertEntries = workbenchMigrationEntries.filter((entry) => entry.migrationId <= 2);
+
 const directories: string[] = [];
 afterEach(async () => {
   await Promise.all(
@@ -64,7 +69,7 @@ const seedOld111 = (expert: "legacy" | "ledger" | "absent" = "ledger") =>
           (109, 'ProjectionThreadsExpertBinding'), (110, 'ExpertAppliedRuntimeRecords')`;
       } else {
         yield* ensureWorkbenchTracker;
-        for (const migration of workbenchMigrationEntries) {
+        for (const migration of historicalExpertEntries) {
           yield* sql`INSERT INTO workbench_sql_migrations (module_id, migration_id, name, checksum, applied_at)
             VALUES ('expert', ${migration.migrationId}, ${migration.name}, ${migration.checksum}, '2026-10-12')`;
         }
@@ -165,11 +170,11 @@ it.each(["legacy", "ledger"] as const)(
       resumeAttempts: 0,
       migrationVersions: {
         source: { official: 108, workbench: expert === "ledger" ? 2 : 0, format: 0 },
-        target: { official: 135, workbench: 2, format: 1 },
+        target: { official: 135, workbench: currentExpertTarget, format: 1 },
       },
       moduleVersions: {
         source: { expert: expert === "ledger" ? 2 : 0, context: 0 },
-        target: { expert: 2, context: 1 },
+        target: { expert: currentExpertTarget, context: 1 },
       },
     });
     expect(await backupPaths(dbPath)).toEqual([completed.backupPath]);
@@ -242,8 +247,8 @@ for (const point of [
     expect(marker?.payload).toMatchObject({
       version: 3,
       resumeAttempts: 0,
-      moduleVersions: { target: { expert: 2, context: 1 } },
-      migrationVersions: { target: { official: 135, workbench: 2, format: 1 } },
+      moduleVersions: { target: { expert: currentExpertTarget, context: 1 } },
+      migrationVersions: { target: { official: 135, workbench: currentExpertTarget, format: 1 } },
     });
     expect(await backupPaths(dbPath)).toEqual([marker!.backupPath]);
     expect(inspectFile(marker!.backupPath)).toEqual(original);
@@ -406,7 +411,9 @@ for (const version of [1, 2] as const) {
           );
         }),
       );
-      if (target === 111) {
+      // A historical v2 marker authorized only Expert 1/2. The new catalog
+      // must not enlarge that range during recovery, even at official 135.
+      if (target === 111 || version === 2) {
         await expect(tryConversion).rejects.toThrow(
           version === 1
             ? "targets an older official schema"
@@ -421,6 +428,7 @@ for (const version of [1, 2] as const) {
         expect(freshPlan).toMatchObject({
           kind: "ready",
           official: { targetVersion: 135 },
+          workbench: { modules: { expert: { targetVersion: currentExpertTarget } } },
           requiresBackup: true,
         });
         await startNormally(dbPath);
@@ -445,7 +453,7 @@ for (const version of [1, 2] as const) {
             targetVersion: 135,
             moduleVersions: {
               source: { expert: 0, context: 0 },
-              target: { expert: 2, context: 1 },
+              target: { expert: currentExpertTarget, context: 1 },
             },
           },
         });
@@ -480,7 +488,7 @@ for (const version of [1, 2] as const) {
 }
 
 for (const afterOfficial of [false, true]) {
-  it(`converts a v2 legacy Expert backup after adoption${afterOfficial ? " and official replay" : ""}, survives another restart and restores the original legacy rows`, async () => {
+  it(`preserves a v2 Expert target after adoption${afterOfficial ? " and official replay" : ""} and requires restore before a wider upgrade`, async () => {
     const dbPath = await makeDbPath();
     const backup = await runWithDatabase(
       dbPath,
@@ -539,6 +547,8 @@ for (const afterOfficial of [false, true]) {
       { mode: 0o600 },
     );
     const marker = await Effect.runPromise(inspectPendingMigrationRecovery(dbPath));
+    const markerText = await fs.readFile(migrationRecoveryMarkerPath(dbPath), "utf8");
+    const liveBeforeResume = inspectV2Fixture(dbPath);
     await expect(
       runWithDatabase(
         dbPath,
@@ -555,37 +565,23 @@ for (const afterOfficial of [false, true]) {
           );
         }),
       ),
-    ).rejects.toThrow("converted legacy Expert then interrupted");
-    const converted = await Effect.runPromise(inspectPendingMigrationRecovery(dbPath));
-    expect(converted).toMatchObject({
-      backupPath: backup.backupPath,
-      resumeAttempts: 1,
-      payload: {
-        version: 3,
-        legacyMigrations: originalLegacy.map(({ officialId, officialName, workbenchId }) => ({
-          moduleId: "expert",
-          officialId,
-          officialName,
-          workbenchId,
-        })),
-        legacyExpertMigrations: originalLegacy,
-      },
-    });
-    expect(converted!.payload.legacyProgressMigrations).toEqual(
-      converted!.payload.legacyMigrations,
-    );
+    ).rejects.toThrow("cannot be explained by this workbench build");
+    expect(await fs.readFile(migrationRecoveryMarkerPath(dbPath), "utf8")).toBe(markerText);
+    expect(inspectV2Fixture(dbPath)).toEqual(liveBeforeResume);
     expect(await backupPaths(dbPath)).toEqual([backup.backupPath]);
     expect(inspectV2Fixture(backup.backupPath)).toEqual(original);
-    await runWithDatabase(dbPath, resumeMarkedMigration(dbPath, converted!, fullUpgrade));
-    expect(await Effect.runPromise(inspectPendingMigrationRecovery(dbPath))).toBeNull();
+    await Effect.runPromise(restoreMarkedMigrationBackup(dbPath));
+    expect(inspectV2Fixture(dbPath)).toEqual(original);
+    await startNormally(dbPath);
     const completed = JSON.parse(await fs.readFile(migrationBackupProvenancePath(dbPath), "utf8"));
     expect(completed).toMatchObject({
       version: 3,
       phase: "migration-completed",
-      backupPath: backup.backupPath,
-      resumeAttempts: 2,
+      resumeAttempts: 0,
+      moduleVersions: { target: { expert: currentExpertTarget, context: 1 } },
     });
-    expect(await backupPaths(dbPath)).toEqual([backup.backupPath]);
+    expect(completed.backupPath).not.toBe(backup.backupPath);
+    expect(await backupPaths(dbPath)).toContain(backup.backupPath);
     await Effect.runPromise(restoreMarkedMigrationBackup(dbPath));
     expect(inspectV2Fixture(dbPath)).toEqual(original);
     await runWithDatabase(
@@ -664,9 +660,12 @@ for (const afterOfficial of [false, true]) {
         version: 3,
         migrationVersions: {
           source: { official: 108, workbench: 0, format: 0 },
-          target: { official: 135, workbench: 2, format: 1 },
+          target: { official: 135, workbench: currentExpertTarget, format: 1 },
         },
-        moduleVersions: { source: { expert: 0, context: 0 }, target: { expert: 2, context: 1 } },
+        moduleVersions: {
+          source: { expert: 0, context: 0 },
+          target: { expert: currentExpertTarget, context: 1 },
+        },
       },
     });
     expect(converted!.payload.legacyProgressMigrations).toEqual(

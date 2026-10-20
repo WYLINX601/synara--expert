@@ -9,6 +9,7 @@ import {
   ThreadId,
   TurnId,
   type ChatAttachment,
+  type ExpertBinding,
   type MessageId,
   type ModelSelection,
   type OrchestrationThreadShell,
@@ -133,6 +134,8 @@ export type GatewayCreationContext =
     }
   | {
       readonly kind: "hub-work";
+      /** Server-owned, acceptance-frozen Expert binding. Never tool input. */
+      readonly expertBinding?: ExpertBinding | undefined;
       readonly inheritedRuntimeMode?: RuntimeMode | undefined;
       readonly callerThreadId: string;
       readonly workItemId: string;
@@ -385,7 +388,12 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
         ...(callerTurnId ? { callerTurnId } : {}),
         requestId: input.requestId,
       })}`;
-      const fingerprint = stableGatewayDigest(input, 64);
+      const fingerprint = stableGatewayDigest(
+        context.kind === "hub-work"
+          ? { input, expertBinding: context.expertBinding ?? null }
+          : input,
+        64,
+      );
       const externalOperationRepository =
         context.kind === "external-client" ? externalMcpRepository : undefined;
       if (context.kind === "external-client" && externalOperationRepository === undefined) {
@@ -525,6 +533,37 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
 
       const prepared = yield* Effect.forEach(input.threads, (spec, index) =>
         Effect.gen(function* () {
+          if (spec.expertId !== undefined && context.kind !== "hub-work") {
+            return yield* Effect.fail(
+              new ToolInputError("Only a Hub coordinator can dispatch work with an Expert."),
+            );
+          }
+          if (spec.target === undefined) {
+            return yield* Effect.fail(
+              new ToolInputError(
+                spec.expertId
+                  ? "Expert dispatch must resolve and freeze a target before worker creation."
+                  : "A target is required for a plain worker.",
+              ),
+            );
+          }
+          if (
+            context.kind === "hub-work" &&
+            (spec.expertId === undefined) !== (context.expertBinding === undefined)
+          ) {
+            return yield* Effect.fail(
+              new ToolInputError("Hub Expert work is missing its acceptance-frozen binding."),
+            );
+          }
+          if (
+            spec.expertId !== undefined &&
+            context.kind === "hub-work" &&
+            context.expertBinding?.expertId !== spec.expertId
+          ) {
+            return yield* Effect.fail(
+              new ToolInputError("Hub Expert work does not match its acceptance-frozen binding."),
+            );
+          }
           if (context.kind === "external-client" && spec.projectId === undefined) {
             return yield* Effect.fail(
               new ToolInputError("External MCP task creation requires an explicit projectId."),
@@ -1167,49 +1206,54 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
                     });
                   }
                   yield* orchestrationEngine
-                    .dispatch({
-                      type: "thread.create",
-                      commandId: entry.ids.threadCreateCommandId,
-                      threadId: entry.ids.threadId,
-                      projectId: entry.projectId,
-                      title: entry.title,
-                      modelSelection: entry.target,
-                      runtimeMode: entry.runtimeMode,
-                      interactionMode,
-                      envMode: entry.environment,
-                      branch,
-                      worktreePath,
-                      creationSource:
-                        context.kind === "external-client" ? "external_mcp" : "synara_mcp",
-                      ...(context.kind !== "external-client"
-                        ? {
-                            sourceThreadId: ThreadId.makeUnsafe(context.callerThreadId),
-                            ...((
-                              context.kind === "provider-session"
-                                ? callerTurnId
-                                : context.sourceTurnId
-                            )
-                              ? {
-                                  sourceTurnId: TurnId.makeUnsafe(
-                                    (context.kind === "provider-session"
-                                      ? callerTurnId
-                                      : context.sourceTurnId)!,
-                                  ),
-                                }
-                              : {}),
-                          }
-                        : {}),
-                      gatewayOperationId: operationId,
-                      gatewayOperationIndex: entry.index,
-                      ...(worktreePath !== null
-                        ? {
-                            associatedWorktreePath: worktreePath,
-                            associatedWorktreeBranch: branch,
-                            associatedWorktreeRef,
-                          }
-                        : {}),
-                      createdAt: gatewayIsoNow(),
-                    })
+                    .dispatch(
+                      {
+                        type: "thread.create",
+                        commandId: entry.ids.threadCreateCommandId,
+                        threadId: entry.ids.threadId,
+                        projectId: entry.projectId,
+                        title: entry.title,
+                        modelSelection: entry.target,
+                        runtimeMode: entry.runtimeMode,
+                        interactionMode,
+                        envMode: entry.environment,
+                        branch,
+                        worktreePath,
+                        creationSource:
+                          context.kind === "external-client" ? "external_mcp" : "synara_mcp",
+                        ...(context.kind !== "external-client"
+                          ? {
+                              sourceThreadId: ThreadId.makeUnsafe(context.callerThreadId),
+                              ...((
+                                context.kind === "provider-session"
+                                  ? callerTurnId
+                                  : context.sourceTurnId
+                              )
+                                ? {
+                                    sourceTurnId: TurnId.makeUnsafe(
+                                      (context.kind === "provider-session"
+                                        ? callerTurnId
+                                        : context.sourceTurnId)!,
+                                    ),
+                                  }
+                                : {}),
+                            }
+                          : {}),
+                        gatewayOperationId: operationId,
+                        gatewayOperationIndex: entry.index,
+                        ...(worktreePath !== null
+                          ? {
+                              associatedWorktreePath: worktreePath,
+                              associatedWorktreeBranch: branch,
+                              associatedWorktreeRef,
+                            }
+                          : {}),
+                        createdAt: gatewayIsoNow(),
+                      },
+                      context.kind === "hub-work" && context.expertBinding
+                        ? { hubExpertBinding: context.expertBinding }
+                        : undefined,
+                    )
                     .pipe(
                       Effect.tap(() => Effect.sync(() => createdThreads.push(entry))),
                       Effect.uninterruptible,
@@ -1288,7 +1332,11 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
           // before the existing compensation path removes created resources.
           // Once this completes, late cancellation cannot undo the operation.
           yield* operationStore.complete(
-            { operationId, resultJson: JSON.stringify(result), now: gatewayIsoNow() },
+            {
+              operationId,
+              resultJson: JSON.stringify(result),
+              now: gatewayIsoNow(),
+            },
             Effect.gen(function* () {
               if (recordManagedWorkerThreads && caller)
                 yield* recordManagedWorkerThreads({

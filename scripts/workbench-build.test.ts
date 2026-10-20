@@ -279,9 +279,29 @@ describe("workbench build manifest", () => {
 
     expect(schemas).toEqual({
       officialMigrationHighWater: 135,
-      workbenchMigrationHighWaterByModule: { context: 1, expert: 2 },
+      workbenchMigrationHighWaterByModule: { context: 1, expert: 5 },
       workbenchSchemaFormatVersion: 1,
     });
+  });
+
+  it("reads SQL batch effect metadata without importing or executing the effect", () => {
+    const sources = schemaCatalogSources(
+      '[108, "Current"],\n  [109, "Legacy109"],',
+      workbenchCatalogEntry("EXPERT_WORKBENCH_MODULE_ID", 1, "Batch").replace(
+        'statement: "SELECT 1",',
+        'statement: "SELECT 1", effect: BatchEffect,',
+      ),
+      'import { BatchEffect } from "./not-executable-in-manifest.ts";',
+    );
+    expect(parseSchemaVersions(sources.official, sources.workbench)).toMatchObject({
+      workbenchMigrationHighWaterByModule: { expert: 1 },
+    });
+    expect(() =>
+      parseSchemaVersions(
+        sources.official,
+        sources.workbench.replace("effect: BatchEffect", "effect: BatchEffect()"),
+      ),
+    ).toThrow("workbench-schema-catalog-is-invalid");
   });
 
   it("resolves exported static module IDs and accepts literal IDs for new modules", () => {

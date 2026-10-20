@@ -179,6 +179,7 @@ export function useChatComposerCommands({
 }: ChatComposerCommandsInput) {
   const onSelectComposerItem = useCallback(
     (item: ComposerCommandItem) => {
+      if ("disabled" in item && item.disabled) return;
       if (composerSelectLockRef.current) return;
       composerSelectLockRef.current = true;
       window.requestAnimationFrame(() => {
@@ -198,6 +199,19 @@ export function useChatComposerCommands({
       }
       const { snapshot, trigger } = resolveActiveComposerTrigger();
       if (!trigger) return;
+      if (item.type === "hub-expert" || item.type === "hub-deliverable") {
+        applyComposerTriggerReplacement({
+          snapshot,
+          trigger,
+          base: `${formatComposerMentionToken(item.mention.path)} `,
+          onApplied: () =>
+            updateSelectedComposerMentions((existing) => [
+              ...existing.filter((mention) => mention.path !== item.mention.path),
+              item.mention,
+            ]),
+        });
+        return;
+      }
       if (item.type === "path") {
         applyComposerTriggerReplacement({
           snapshot,
@@ -311,18 +325,21 @@ export function useChatComposerCommands({
   );
   const nudgeComposerMenuHighlight = useCallback(
     (key: "ArrowDown" | "ArrowUp") => {
-      if (composerMenuItems.length === 0) {
+      const selectableItems = composerMenuItems.filter(
+        (item) => !("disabled" in item && item.disabled),
+      );
+      if (selectableItems.length === 0) {
         return;
       }
-      const highlightedIndex = composerMenuItems.findIndex(
+      const highlightedIndex = selectableItems.findIndex(
         (item) => item.id === composerHighlightedItemId,
       );
       const normalizedIndex =
         highlightedIndex >= 0 ? highlightedIndex : key === "ArrowDown" ? -1 : 0;
       const offset = key === "ArrowDown" ? 1 : -1;
       const nextIndex =
-        (normalizedIndex + offset + composerMenuItems.length) % composerMenuItems.length;
-      const nextItem = composerMenuItems[nextIndex];
+        (normalizedIndex + offset + selectableItems.length) % selectableItems.length;
+      const nextItem = selectableItems[nextIndex];
       setComposerHighlightedItemId(nextItem?.id ?? null);
     },
     [setComposerHighlightedItemId, composerHighlightedItemId, composerMenuItems],

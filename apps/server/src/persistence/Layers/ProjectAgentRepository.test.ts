@@ -51,14 +51,151 @@ layer("ProjectAgentRepository", (it) => {
       };
       yield* repository.saveConfig(config, null);
       const stale = yield* Effect.exit(
-        repository.saveConfig({ ...config, revision: 2, coordinatorName: "Stale" }, 0),
+        repository.saveConfig(
+          { ...config, revision: 2, coordinatorName: "Stale", expertIds: ["must-not-clear"] },
+          0,
+        ),
       );
       assert.equal(Exit.isFailure(stale), true);
       const loaded = yield* repository.getConfig(projectId);
       assert.equal(Option.isSome(loaded), true);
       if (Option.isSome(loaded)) {
         assert.equal(loaded.value.coordinatorName, "Demo Coordinator");
+        assert.deepEqual(loaded.value.expertIds, []);
       }
+    }),
+  );
+
+  it.effect("normalizes explicit expert rosters and preserves them when omitted", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectAgentRepository;
+      const rosterProjectId = ProjectId.makeUnsafe("project-expert-roster");
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES (${rosterProjectId}, 'Hub', '/tmp/hub', '[]', ${now}, ${now})
+      `;
+      const config = {
+        projectId: rosterProjectId,
+        coordinatorThreadId: ThreadId.makeUnsafe("thread-expert-roster"),
+        coordinatorName: "Roster Coordinator",
+        coordinatorModelSelection: { provider: "codex" as const, model: "gpt-5-codex" },
+        limits,
+        captureEnabled: true,
+        enabled: true,
+        automationId: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+        disabledAt: null,
+        expertIds: ["zeta", "alpha", "zeta"],
+      };
+
+      yield* repository.saveConfig(config, null);
+      const created = yield* repository.getConfig(rosterProjectId);
+      assert.deepStrictEqual(Option.isSome(created) ? created.value.expertIds : null, [
+        "alpha",
+        "zeta",
+      ]);
+
+      yield* repository.saveConfig(
+        { ...config, revision: 2, coordinatorName: "Updated Coordinator", expertIds: undefined },
+        1,
+      );
+      const preserved = yield* repository.getConfig(rosterProjectId);
+      assert.deepStrictEqual(Option.isSome(preserved) ? preserved.value.expertIds : null, [
+        "alpha",
+        "zeta",
+      ]);
+
+      yield* repository.saveConfig({ ...config, revision: 3, expertIds: [] }, 2);
+      const cleared = yield* repository.getConfig(rosterProjectId);
+      assert.deepStrictEqual(Option.isSome(cleared) ? cleared.value.expertIds : null, []);
+    }),
+  );
+
+  it.effect("rolls back the config revision when an expert roster replacement fails", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectAgentRepository;
+      const atomicProjectId = ProjectId.makeUnsafe("project-expert-roster-atomic");
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES (${atomicProjectId}, 'Hub', '/tmp/hub', '[]', ${now}, ${now})
+      `;
+      const config = {
+        projectId: atomicProjectId,
+        coordinatorThreadId: ThreadId.makeUnsafe("thread-expert-roster-atomic"),
+        coordinatorName: "Atomic Coordinator",
+        coordinatorModelSelection: { provider: "codex" as const, model: "gpt-5-codex" },
+        limits,
+        captureEnabled: true,
+        enabled: true,
+        automationId: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+        disabledAt: null,
+        expertIds: ["kept"],
+      };
+      yield* repository.saveConfig(config, null);
+      yield* sql`
+        CREATE TRIGGER reject_hub_expert_participant
+        BEFORE INSERT ON hub_expert_participants
+        WHEN NEW.expert_id = 'reject'
+        BEGIN SELECT RAISE(ABORT, 'rejected participant'); END
+      `;
+
+      const failed = yield* Effect.exit(
+        repository.saveConfig({ ...config, revision: 2, expertIds: ["reject"] }, 1),
+      );
+      assert.isTrue(Exit.isFailure(failed));
+      const loaded = yield* repository.getConfig(atomicProjectId);
+      assert.isTrue(Option.isSome(loaded));
+      if (Option.isSome(loaded)) {
+        assert.strictEqual(loaded.value.revision, 1);
+        assert.deepStrictEqual(loaded.value.expertIds, ["kept"]);
+      }
+    }),
+  );
+
+  it.effect("clears the stored roster when project-agent data is deleted", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectAgentRepository;
+      const cleanupProjectId = ProjectId.makeUnsafe("project-expert-roster-cleanup");
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES (${cleanupProjectId}, 'Hub', '/tmp/hub', '[]', ${now}, ${now})
+      `;
+      yield* repository.saveConfig(
+        {
+          projectId: cleanupProjectId,
+          coordinatorThreadId: ThreadId.makeUnsafe("thread-expert-roster-cleanup"),
+          coordinatorName: "Cleanup Coordinator",
+          coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },
+          limits,
+          captureEnabled: true,
+          enabled: true,
+          automationId: null,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+          disabledAt: null,
+          expertIds: ["reviewer"],
+        },
+        null,
+      );
+
+      yield* repository.deleteProjectData(cleanupProjectId);
+      const rows = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM hub_expert_participants
+        WHERE hub_id = ${cleanupProjectId}
+      `;
+      assert.strictEqual(rows[0]?.count, 0);
     }),
   );
 

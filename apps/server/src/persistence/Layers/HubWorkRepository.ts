@@ -43,7 +43,7 @@ export const makeHubWorkRepository = Effect.gen(function* () {
             ) < MIN(8, COALESCE(json_extract(config.limits_json, '$.maxConcurrentWorkers'), 8))`;
 
   const repository: HubWorkRepositoryShape = {
-    submit: (records) =>
+    submit: (records, admission) =>
       sql
         .withTransaction(
           Effect.gen(function* () {
@@ -96,6 +96,31 @@ export const makeHubWorkRepository = Effect.gen(function* () {
                 VALUES (${first.projectId}, ${first.requestId}, ${first.scopeKey}, ${first.fingerprint})
               `;
               return { items: existing, replayed: true };
+            }
+            if (admission) {
+              const [config] = yield* sql<{ readonly revision: number }>`
+                SELECT revision FROM project_agent_configs WHERE project_id = ${first.projectId}
+              `;
+              if (!config || config.revision !== admission.expectedConfigRevision) {
+                return yield* Effect.fail(
+                  conflict("Hub settings changed during work preflight. Reload and retry."),
+                );
+              }
+              const participants = yield* sql<{ readonly expertId: string }>`
+                SELECT expert_id AS "expertId" FROM hub_expert_participants WHERE hub_id = ${first.projectId}
+              `;
+              const selected = new Set(participants.map((row) => row.expertId));
+              if (
+                records.some(
+                  (record) =>
+                    record.creationSpec.expertId !== undefined &&
+                    !selected.has(record.creationSpec.expertId),
+                )
+              ) {
+                return yield* Effect.fail(
+                  conflict("The Expert no longer participates in this Hub. Reload and retry."),
+                );
+              }
             }
             for (const record of records) {
               yield* sql`

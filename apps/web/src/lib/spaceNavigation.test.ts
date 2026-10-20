@@ -1,4 +1,4 @@
-import { ProjectId, SpaceId, ThreadId } from "@synara/contracts";
+import { ProjectId, SpaceId, ThreadId, type ProjectAgentSummary } from "@synara/contracts";
 import { describe, expect, it } from "vitest";
 
 import { resolveChatIndexRestoreRoute } from "../routes/-chatIndexRoute.logic";
@@ -317,11 +317,159 @@ describe("resolveSpaceSelectionTarget", () => {
       }),
     ).toEqual({ kind: "thread", threadId: parent.id });
   });
+
+  it("uses the Hub's Space for a coordinator and its server-confirmed Worker", () => {
+    const hubSpaceId = SpaceId.makeUnsafe("space-hub");
+    const executionProject = project({ id: "project-execution", spaceId: workSpaceId });
+    const hub = project({ id: "hub-project", kind: "group", spaceId: hubSpaceId });
+    const worker = thread({ id: "hub-worker", projectId: executionProject.id });
+    const coordinator = thread({ id: "hub-coordinator", projectId: hub.id });
+    const summariesByProjectId = new Map([
+      [
+        hub.id,
+        {
+          coordinatorThreadId: coordinator.id,
+          memberThreadIds: [worker.id],
+        },
+      ],
+    ]);
+    const common = {
+      projects: [executionProject],
+      hubProjects: [hub],
+      summariesByProjectId,
+      projectById: new Map([
+        [executionProject.id, executionProject],
+        [hub.id, hub],
+      ]),
+      threads: [worker, coordinator],
+      rememberedThreadId: worker.id,
+      rememberedProjectId: null,
+      paths,
+      sortThreads: (threads: readonly SidebarThreadSummary[]) => threads,
+    };
+
+    expect(resolveSpaceSelectionTarget({ ...common, spaceId: hubSpaceId })).toEqual({
+      kind: "thread",
+      threadId: worker.id,
+    });
+    expect(
+      resolveSpaceSelectionTarget({ ...common, spaceId: workSpaceId, rememberedThreadId: null }),
+    ).toEqual({ kind: "empty", spaceId: workSpaceId });
+  });
+
+  it("keeps unconfirmed Workers reachable through their execution Project", () => {
+    const executionProject = project({ id: "project-execution", spaceId: workSpaceId });
+    const hub = project({
+      id: "hub-project",
+      kind: "group",
+      spaceId: SpaceId.makeUnsafe("hub-space"),
+    });
+    const worker = thread({ id: "hub-worker-unconfirmed", projectId: executionProject.id });
+    expect(
+      resolveSpaceSelectionTarget({
+        spaceId: workSpaceId,
+        projects: [executionProject],
+        hubProjects: [hub],
+        summariesByProjectId: new Map(),
+        projectById: new Map([
+          [executionProject.id, executionProject],
+          [hub.id, hub],
+        ]),
+        threads: [worker],
+        rememberedThreadId: worker.id,
+        rememberedProjectId: null,
+        paths,
+        sortThreads: (threads) => threads,
+      }),
+    ).toEqual({ kind: "thread", threadId: worker.id });
+  });
 });
 
 describe("isThreadReachableFromSpace", () => {
   it("fails closed on a project the client cannot resolve", () => {
     expect(isThreadReachableFromSpace({ project: undefined, spaceId: null, paths })).toBe(false);
+  });
+
+  it("uses a Hub container's own Space while keeping Chats global", () => {
+    const hub = project({ id: "hub-space-owner", kind: "group", spaceId: workSpaceId });
+    expect(isThreadReachableFromSpace({ project: hub, spaceId: workSpaceId, paths })).toBe(true);
+    expect(isThreadReachableFromSpace({ project: hub, spaceId: null, paths })).toBe(false);
+    expect(isThreadReachableFromSpace({ project: homeChatContainer, spaceId: null, paths })).toBe(
+      true,
+    );
+  });
+});
+
+describe("restoring Hub threads from a selected Space", () => {
+  const hubSpaceId = SpaceId.makeUnsafe("space-hub");
+  const executionProject = project({ id: "project-execution", spaceId: workSpaceId });
+  const hub = project({ id: "hub-owner", kind: "group", spaceId: hubSpaceId });
+  const hubProjectById = new Map([
+    [executionProject.id, executionProject],
+    [hub.id, hub],
+  ]);
+
+  function restore(input: {
+    thread: SidebarThreadSummary;
+    spaceId: SpaceId;
+    summariesByProjectId?: ReadonlyMap<
+      ProjectId,
+      Pick<ProjectAgentSummary, "coordinatorThreadId" | "memberThreadIds">
+    >;
+  }) {
+    return resolveChatIndexRestoreRoute({
+      lastThreadRoute: { threadId: input.thread.id },
+      availableSplitViewIds: new Set(),
+      threadIds: [input.thread.id],
+      sidebarThreadSummaryById: {
+        [input.thread.id]: { projectId: input.thread.projectId },
+      },
+      groupProjectIds: new Set([hub.id]),
+      ...(input.summariesByProjectId ? { summariesByProjectId: input.summariesByProjectId } : {}),
+      draftProjectIdByThreadId: new Map(),
+      rememberedSplitViewThreadIds: undefined,
+      landingSpace: {
+        spaceId: input.spaceId,
+        projectById: hubProjectById,
+        workspacePaths: paths,
+      },
+    });
+  }
+
+  it("restores a Coordinator from its Hub Space", () => {
+    const coordinator = thread({ id: "hub-coordinator", projectId: hub.id });
+    const summary = new Map<
+      ProjectId,
+      Pick<ProjectAgentSummary, "coordinatorThreadId" | "memberThreadIds">
+    >([[hub.id, { coordinatorThreadId: coordinator.id, memberThreadIds: [] }]]);
+    expect(
+      restore({ thread: coordinator, spaceId: hubSpaceId, summariesByProjectId: summary }),
+    ).toEqual({
+      threadId: coordinator.id,
+    });
+    expect(
+      restore({ thread: coordinator, spaceId: workSpaceId, summariesByProjectId: summary }),
+    ).toBeNull();
+  });
+
+  it("restores a confirmed Worker from the Hub Space, not its execution Project Space", () => {
+    const worker = thread({ id: "hub-worker", projectId: executionProject.id });
+    const summary = new Map([
+      [hub.id, { coordinatorThreadId: null, memberThreadIds: [worker.id] }],
+    ]);
+    expect(restore({ thread: worker, spaceId: hubSpaceId, summariesByProjectId: summary })).toEqual(
+      {
+        threadId: worker.id,
+      },
+    );
+    expect(
+      restore({ thread: worker, spaceId: workSpaceId, summariesByProjectId: summary }),
+    ).toBeNull();
+  });
+
+  it("keeps a Worker reachable from its execution Project until Hub membership is known", () => {
+    const worker = thread({ id: "pending-hub-worker", projectId: executionProject.id });
+    expect(restore({ thread: worker, spaceId: workSpaceId })).toEqual({ threadId: worker.id });
   });
 });
 
@@ -335,7 +483,9 @@ it("does not restore a linked-repository hub worker from the Home landing", () =
       threadIds: [workerId],
       sidebarThreadSummaryById: { [workerId]: { projectId: ProjectId.makeUnsafe("repo") } },
       groupProjectIds: new Set([hubId]),
-      summariesByProjectId: new Map([[hubId, { memberThreadIds: [workerId] }]]),
+      summariesByProjectId: new Map([
+        [hubId, { coordinatorThreadId: null, memberThreadIds: [workerId] }],
+      ]),
       draftProjectIdByThreadId: new Map(),
       rememberedSplitViewThreadIds: undefined,
       landingSpace: null,

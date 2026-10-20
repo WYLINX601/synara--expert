@@ -90,6 +90,7 @@ const nowIso = () => new Date().toISOString();
 // buffer that withholds the whole assistant message until turn completion.
 const DEFAULT_ASSISTANT_DELIVERY_MODE = "streaming" as const;
 const GROUP_CONTAINER_PROJECT_KIND_SET = new Set<ProjectKind>(["studio", "group"]);
+const SPACE_ASSIGNABLE_PROJECT_KIND_SET = new Set<ProjectKind>(["project", "studio", "group"]);
 // Kinds that claim exclusive ownership of a workspace root. Chat containers are excluded: they
 // use placeholder roots (e.g. the home dir) that legitimately coexist with real projects.
 const WORKSPACE_OWNING_PROJECT_KIND_SET = new Set<ProjectKind>(["project", "studio", "group"]);
@@ -1001,7 +1002,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command.spaceId != null ? findSpaceById(readModel, command.spaceId) : undefined;
       const creationSpaceId =
         command.spaceId != null &&
-        nextProjectKind === "project" &&
+        SPACE_ASSIGNABLE_PROJECT_KIND_SET.has(nextProjectKind) &&
         requestedSpace !== undefined &&
         requestedSpace.deletedAt === null &&
         !isLegacyHomeChatContainerRow({
@@ -1047,7 +1048,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       const requestedSpaceId =
         command.spaceId !== undefined
           ? command.spaceId
-          : nextProjectKind !== "project" && existingProject.spaceId !== null
+          : nextProjectKind === "chat" && existingProject.spaceId !== null
             ? null
             : undefined;
       const effectiveSpaceId =
@@ -1124,10 +1125,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             detail: "Deleted projects cannot be assigned to a space.",
           });
         }
-        if (nextProjectKind !== "project") {
+        if (!SPACE_ASSIGNABLE_PROJECT_KIND_SET.has(nextProjectKind)) {
           return yield* new OrchestrationCommandInvariantError({
             commandType: command.type,
-            detail: "Only ordinary projects can be assigned to a space.",
+            detail: "Only ordinary projects and Hub workspaces can be assigned to a space.",
           });
         }
         yield* requireSpace({ readModel, command, spaceId: command.spaceId });

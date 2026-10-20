@@ -9,14 +9,22 @@
 import {
   type LibraryCommit,
   type LibraryEntry,
+  type HubDeliverableCollection,
+  type HubDeliverableReadResult,
+  type ProjectAgentDeliverablesReadInput,
   type ProjectAgentLibraryStatusResult,
   type ProjectId,
 } from "@synara/contracts";
 import { LIBRARY_UPLOAD_ROUTE_PATH } from "@synara/shared/binaryTransfer";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { resolveWsHttpUrl } from "~/lib/wsHttpUrl";
 import { readNativeApi } from "~/nativeApi";
+
+import {
+  indexLibraryKeyDeliverables,
+  libraryKeyDeliverableDirectoryPaths,
+} from "./libraryPanel.logic";
 
 const ROOT_DIRECTORY = "";
 
@@ -41,6 +49,9 @@ export function useGroupLibrary(input: {
     new Map(),
   );
   const [status, setStatus] = useState<ProjectAgentLibraryStatusResult | null>(null);
+  const [deliverables, setDeliverables] = useState<readonly HubDeliverableCollection[]>([]);
+  const [deliverablesError, setDeliverablesError] = useState<string | null>(null);
+  const [deliverablesLoading, setDeliverablesLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const projectIdRef = useRef(input.projectId);
@@ -50,6 +61,37 @@ export function useGroupLibrary(input: {
   // coalesce into a single follow-up instead of stacking sequential reloads.
   const refreshInFlightRef = useRef<Promise<void> | null>(null);
   const refreshQueuedRef = useRef(false);
+
+  const refreshDeliverables = async (projectId: ProjectId, generation?: number) => {
+    const expectedGeneration = generation ?? loadGeneration.current;
+    const isCurrent = () =>
+      projectIdRef.current === projectId && loadGeneration.current === expectedGeneration;
+    const api = readNativeApi();
+    if (!api?.projectAgent?.deliverables) {
+      if (isCurrent()) {
+        setDeliverables([]);
+        setDeliverablesError("Published key deliverables are unavailable on this server.");
+        setDeliverablesLoading(false);
+      }
+      return;
+    }
+    if (isCurrent()) setDeliverablesLoading(true);
+    try {
+      const nextDeliverables = await api.projectAgent.deliverables.list({ projectId });
+      if (isCurrent()) {
+        setDeliverables(nextDeliverables);
+        setDeliverablesError(null);
+        setDeliverablesLoading(false);
+      }
+    } catch (cause) {
+      if (isCurrent()) {
+        setDeliverablesError(
+          libraryErrorMessage(cause, "Failed to load published key deliverables."),
+        );
+        setDeliverablesLoading(false);
+      }
+    }
+  };
 
   // Refresh in place: keep every cached listing until its directory's fresh one
   // lands, so expanded subfolders never flash empty. The root plus every
@@ -86,7 +128,7 @@ export function useGroupLibrary(input: {
           }
         }),
       );
-      await refreshStatus(projectId);
+      await Promise.all([refreshStatus(projectId), refreshDeliverables(projectId, generation)]);
       if (stillCurrent() && !refreshFailed) setError(null);
     })();
     refreshInFlightRef.current = run;
@@ -110,6 +152,9 @@ export function useGroupLibrary(input: {
       setRoot(null);
       setEntriesByDir(new Map());
       setStatus(null);
+      setDeliverables([]);
+      setDeliverablesError(null);
+      setDeliverablesLoading(false);
       loadedDirs.current = new Set();
       return;
     }
@@ -117,6 +162,10 @@ export function useGroupLibrary(input: {
     const stillCurrent = () =>
       projectIdRef.current === projectId && loadGeneration.current === generation;
     setEntriesByDir(new Map());
+    setDeliverables([]);
+    setDeliverablesError(null);
+    setDeliverablesLoading(true);
+    void refreshDeliverables(projectId, generation);
     loadedDirs.current = new Set();
     void (async () => {
       try {
@@ -159,7 +208,7 @@ export function useGroupLibrary(input: {
     })();
   }, [input.enabled, input.projectId]);
 
-  const loadDirectory = async (relativePath: string | undefined) => {
+  const loadDirectory = useCallback(async (relativePath: string | undefined) => {
     const api = readNativeApi();
     const projectId = projectIdRef.current;
     if (!api?.projectAgent || !projectId) return false;
@@ -178,7 +227,7 @@ export function useGroupLibrary(input: {
       }
       return false;
     }
-  };
+  }, []);
 
   const reloadLoadedDirectories = async (projectId: ProjectId) => {
     let refreshed = true;
@@ -213,7 +262,7 @@ export function useGroupLibrary(input: {
       await work(api.projectAgent.library, projectId);
       if (projectIdRef.current === projectId) {
         const refreshed = await reloadLoadedDirectories(projectId);
-        await refreshStatus(projectId);
+        await Promise.all([refreshStatus(projectId), refreshDeliverables(projectId)]);
         if (projectIdRef.current === projectId) {
           if (refreshed) setError(null);
         }
@@ -294,7 +343,7 @@ export function useGroupLibrary(input: {
       } else {
         if (projectIdRef.current === projectId) {
           const refreshed = await reloadLoadedDirectories(projectId);
-          await refreshStatus(projectId);
+          await Promise.all([refreshStatus(projectId), refreshDeliverables(projectId)]);
           if (projectIdRef.current === projectId) {
             if (refreshed) setError(null);
           }
@@ -310,14 +359,49 @@ export function useGroupLibrary(input: {
     return succeeded;
   };
 
+  const loadKeyDeliverableDirectories = useCallback(async () => {
+    const keyDeliverables = indexLibraryKeyDeliverables(deliverables);
+    const directories = libraryKeyDeliverableDirectoryPaths(keyDeliverables);
+    const projectId = projectIdRef.current;
+    if (!projectId) return false;
+    let complete = true;
+    for (const directory of directories) {
+      if (projectIdRef.current !== projectId) return false;
+      const loaded = await loadDirectory(directory);
+      if (!loaded) complete = false;
+    }
+    return complete;
+  }, [deliverables, loadDirectory]);
+
+  const readDeliverable = useCallback(
+    async (
+      input: Omit<ProjectAgentDeliverablesReadInput, "projectId">,
+    ): Promise<HubDeliverableReadResult | null> => {
+      const api = readNativeApi();
+      const projectId = projectIdRef.current;
+      const read = api?.projectAgent?.deliverables?.read;
+      if (!projectId || !read) {
+        throw new Error("Published key deliverables are unavailable on this server.");
+      }
+      const result = await read({ projectId, ...input });
+      return projectIdRef.current === projectId ? result : null;
+    },
+    [],
+  );
+
   return {
     root,
     entriesByDir,
     status,
+    deliverables,
+    deliverablesError,
+    deliverablesLoading,
     error,
     busy,
     load,
     loadDirectory,
+    loadKeyDeliverableDirectories,
+    readDeliverable,
     mkdir,
     rename,
     deleteEntry,

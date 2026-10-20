@@ -456,7 +456,13 @@ function $setComposerEditorPrompt(
         : undefined;
       const provider = thread ? resolveThreadDisplayProvider(thread) : undefined;
       paragraph.append(
-        $createComposerMentionNode(segment.path, segment.kind, provider, segment.threadId),
+        $createComposerMentionNode(
+          segment.path,
+          segment.kind,
+          provider,
+          segment.threadId,
+          segment.label,
+        ),
       );
       continue;
     }

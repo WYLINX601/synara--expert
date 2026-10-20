@@ -3,7 +3,7 @@
 //          per-directory entry listing the `projectAgent.library.*` RPCs return.
 // Layer: Chat UI logic (framework-free)
 
-import type { LibraryEntry } from "@synara/contracts";
+import type { HubDeliverableCollection, HubDeliverableFile, LibraryEntry } from "@synara/contracts";
 
 import { getFileIconName } from "~/file-icons";
 
@@ -22,6 +22,55 @@ export const DEFAULT_LIBRARY_SORT: LibrarySortState = { key: "name", direction: 
 export interface LibraryRow {
   readonly entry: LibraryEntry;
   readonly depth: number;
+}
+
+/** Library bookkeeping is mutable while the published revision remains pinned. */
+export type LibraryPublishedFile = HubDeliverableFile & {
+  readonly currentLibraryPath?: string;
+  readonly libraryState?: "available" | "missing";
+};
+
+export interface LibraryKeyDeliverable {
+  readonly collection: HubDeliverableCollection;
+  readonly file: LibraryPublishedFile;
+  readonly libraryPath: string;
+}
+
+/** Resolve visible Library entries from server-owned publication metadata. */
+export function indexLibraryKeyDeliverables(
+  collections: readonly HubDeliverableCollection[],
+): ReadonlyMap<string, LibraryKeyDeliverable> {
+  const byPath = new Map<string, LibraryKeyDeliverable>();
+  for (const collection of collections) {
+    if (collection.state !== "active") continue;
+    for (const rawFile of collection.files) {
+      const file = rawFile as LibraryPublishedFile;
+      const libraryPath = file.currentLibraryPath ?? file.libraryPath;
+      // Collections arrive newest first; preserve the newest publication if
+      // several Expert threads publish to the same Library path.
+      if (!byPath.has(libraryPath)) byPath.set(libraryPath, { collection, file, libraryPath });
+    }
+  }
+  return byPath;
+}
+
+export function libraryKeyDeliverableDirectoryPaths(
+  deliverables: ReadonlyMap<string, LibraryKeyDeliverable>,
+): string[] {
+  const directories = new Set<string>();
+  for (const [libraryPath, deliverable] of deliverables) {
+    if (deliverable.file.libraryState === "missing") continue;
+    const parts = libraryPath.split("/");
+    parts.pop();
+    for (let index = 1; index <= parts.length; index += 1) {
+      const directory = parts.slice(0, index).join("/");
+      if (directory.length > 0) directories.add(directory);
+    }
+  }
+  return Array.from(directories).toSorted((a, b) => {
+    const depth = a.split("/").length - b.split("/").length;
+    return depth === 0 ? a.localeCompare(b) : depth;
+  });
 }
 
 // Buckets are derived from the shared file-icon table so the Type filter stays
@@ -89,7 +138,12 @@ export function sortLibraryEntries(
 
 export function entryMatchesLibraryFilters(
   entry: LibraryEntry,
-  filter: { readonly typeFilter: LibraryTypeFilter; readonly query: string },
+  filter: {
+    readonly typeFilter: LibraryTypeFilter;
+    readonly query: string;
+    readonly onlyKeyDeliverables?: boolean;
+    readonly keyDeliverablePaths?: ReadonlySet<string>;
+  },
 ): boolean {
   const query = filter.query.trim().toLowerCase();
   if (query.length > 0) {
@@ -98,6 +152,12 @@ export function entryMatchesLibraryFilters(
   }
   if (filter.typeFilter !== "all" && entry.kind === "file") {
     if (libraryEntryTypeBucket(entry) !== filter.typeFilter) return false;
+  }
+  if (
+    filter.onlyKeyDeliverables &&
+    (entry.kind !== "file" || !filter.keyDeliverablePaths?.has(entry.relativePath))
+  ) {
+    return false;
   }
   return true;
 }
@@ -134,12 +194,14 @@ function flattenInto(
     sort: LibrarySortState;
     typeFilter: LibraryTypeFilter;
     query: string;
+    onlyKeyDeliverables: boolean;
+    keyDeliverablePaths: ReadonlySet<string>;
   },
 ): void {
   const entries = input.entriesByDir.get(dirPath);
   if (!entries) return;
   const searching = input.query.trim().length > 0;
-  const filtering = input.typeFilter !== "all";
+  const filtering = input.typeFilter !== "all" || input.onlyKeyDeliverables;
   for (const entry of sortLibraryEntries(entries, input.sort)) {
     if (entry.kind === "directory") {
       // Descend into a directory when it is expanded, or when a search/type
@@ -178,9 +240,15 @@ export function flattenLibraryRows(input: {
   readonly sort: LibrarySortState;
   readonly typeFilter: LibraryTypeFilter;
   readonly query: string;
+  readonly onlyKeyDeliverables?: boolean;
+  readonly keyDeliverablePaths?: ReadonlySet<string>;
 }): LibraryRow[] {
   const rows: LibraryRow[] = [];
-  flattenInto(rows, "", 0, input);
+  flattenInto(rows, "", 0, {
+    ...input,
+    onlyKeyDeliverables: input.onlyKeyDeliverables ?? false,
+    keyDeliverablePaths: input.keyDeliverablePaths ?? new Set<string>(),
+  });
   return rows;
 }
 

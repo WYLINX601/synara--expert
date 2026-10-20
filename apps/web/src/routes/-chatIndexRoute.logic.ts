@@ -15,7 +15,7 @@ import type {
 import { isGroupThreadRoute } from "../components/SidebarGroupsSurface.logic";
 import { resolveRestorableThreadRoute, type LastThreadRoute } from "../chatRouteRestore";
 import type { ServerWorkspacePaths } from "../lib/serverWorkspacePaths";
-import { isThreadReachableFromSpace } from "../lib/spaceNavigation";
+import { isThreadReachableFromSpace, resolveOwningHubProject } from "../lib/spaceNavigation";
 import type { Project } from "../types";
 import { isSidechatThread } from "@synara/shared/sidechatThread";
 
@@ -50,7 +50,7 @@ export function resolveChatIndexRestoreRoute(input: {
   readonly groupProjectIds: ReadonlySet<ProjectId>;
   readonly summariesByProjectId?: ReadonlyMap<
     ProjectId,
-    Pick<ProjectAgentSummary, "memberThreadIds">
+    Pick<ProjectAgentSummary, "coordinatorThreadId" | "memberThreadIds">
   >;
   /**
    * Still-unsent chat drafts. They have a route id but no sidebar summary yet, so the summary
@@ -68,6 +68,11 @@ export function resolveChatIndexRestoreRoute(input: {
   const { draftProjectIdByThreadId, landingSpace, sidebarThreadSummaryById, groupProjectIds } =
     input;
   const summariesByProjectId = input.summariesByProjectId ?? new Map();
+  const hubProjects = landingSpace
+    ? Array.from(groupProjectIds, (projectId) => landingSpace.projectById.get(projectId)).filter(
+        (project): project is Project => project !== undefined,
+      )
+    : [];
 
   const availableThreadIds = new Set<string>();
   for (const threadId of [...input.threadIds, ...draftProjectIdByThreadId.keys()]) {
@@ -78,10 +83,11 @@ export function resolveChatIndexRestoreRoute(input: {
     if (threadSummary && isSidechatThread(threadSummary)) continue;
     const projectId = threadSummary?.projectId ?? draftProjectIdByThreadId.get(threadId);
     if (projectId === undefined) continue;
-    // Hub members belong to Hubs even when their project is a linked repository;
-    // restoring one from "/" would silently
-    // switch the user into that segment.
+    // Without Space intent, Hub threads stay on the global Hubs route. When a Space was
+    // explicitly selected, resolve their Hub owner so Coordinators and confirmed Workers restore
+    // in the Hub's Space even when a Worker executes in another Project.
     if (
+      !landingSpace &&
       isGroupThreadRoute({
         threadId: threadId as ThreadId,
         projectId,
@@ -90,15 +96,22 @@ export function resolveChatIndexRestoreRoute(input: {
       })
     )
       continue;
-    if (
-      landingSpace &&
-      !isThreadReachableFromSpace({
-        project: landingSpace.projectById.get(projectId),
-        spaceId: landingSpace.spaceId,
-        paths: landingSpace.workspacePaths,
-      })
-    ) {
-      continue;
+    if (landingSpace) {
+      const hubOwner = resolveOwningHubProject({
+        threadId: threadId as ThreadId,
+        projectId,
+        hubProjects,
+        summariesByProjectId,
+      });
+      if (
+        !isThreadReachableFromSpace({
+          project: hubOwner ?? landingSpace.projectById.get(projectId),
+          spaceId: landingSpace.spaceId,
+          paths: landingSpace.workspacePaths,
+        })
+      ) {
+        continue;
+      }
     }
     availableThreadIds.add(threadId);
   }

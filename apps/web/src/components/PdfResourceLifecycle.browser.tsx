@@ -15,17 +15,20 @@ import { LocalImagePreview } from "./LocalImagePreview";
 import { PdfFilePreview } from "./PdfFilePreview";
 import { PdfViewerToolbar } from "./pdf/PdfViewerToolbar";
 
-const { loadPdfDocumentMock } = vi.hoisted(() => ({
+const { loadPdfDocumentMock, renderPageTextLayerMock } = vi.hoisted(() => ({
   loadPdfDocumentMock: vi.fn(),
+  renderPageTextLayerMock: vi.fn(),
 }));
 
 vi.mock("~/lib/pdf/pdfEngine", () => ({
   loadPdfDocument: loadPdfDocumentMock,
-  renderPageTextLayer: vi.fn(),
+  renderPageTextLayer: renderPageTextLayerMock,
 }));
 
 vi.mock("./chat/OpenInPicker", () => ({
-  OpenInPicker: () => null,
+  OpenInPicker: ({ openInTarget }: { openInTarget: string | null }) => (
+    <span data-testid="pdf-open-target">{openInTarget ?? "disabled"}</span>
+  ),
 }));
 
 interface Deferred<T> {
@@ -56,6 +59,8 @@ function createPdfDocument(label: string): {
     getPage: vi.fn(() =>
       Promise.resolve({
         getViewport: () => ({ width: 612, height: 792 }),
+        getAnnotations: async () => [],
+        render: () => ({ promise: Promise.resolve(), cancel: vi.fn() }),
       }),
     ),
   } as unknown as PDFDocumentProxy;
@@ -69,6 +74,8 @@ let fetchRequests: Map<string, Deferred<Response>[]>;
 beforeEach(() => {
   fetchRequests = new Map();
   loadPdfDocumentMock.mockReset();
+  renderPageTextLayerMock.mockReset();
+  renderPageTextLayerMock.mockResolvedValue({ promise: Promise.resolve(), cancel: vi.fn() });
   vi.stubGlobal(
     "fetch",
     vi.fn((input: RequestInfo | URL) => {
@@ -162,6 +169,34 @@ describe("local preview resource generations", () => {
       "document.pdf",
       "document.pdf",
     ]);
+  });
+
+  it("renders an immutable PDF URL with native controls and no live path actions", async () => {
+    const sourceUrl =
+      "data:application/pdf;base64,JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAxMDAgMTAwXSAvUmVzb3VyY2VzIDw8ID4+IC9Db250ZW50cyA0IDAgUiA+PgplbmRvYmoKNCAwIG9iago8PCAvTGVuZ3RoIDAgPj4Kc3RyZWFtCgplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA1CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDAwOSAwMDAwMCBuIAowMDAwMDAwMDU4IDAwMDAwIG4gCjAwMDAwMDAxMTUgMDAwMDAgbiAKMDAwMDAwMDIxOSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDUgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjI2OAolJUVPRgo=";
+    const pinnedDocument = createPdfDocument("published");
+    const onReload = vi.fn();
+    loadPdfDocumentMock.mockResolvedValueOnce(pinnedDocument.document);
+
+    await render(
+      <PdfFilePreview
+        filePath="plan.pdf"
+        cwd="/server-cwd"
+        immutableSourceUrl={sourceUrl}
+        openInTarget="/server-cwd/plan.pdf"
+        onReload={onReload}
+      />,
+    );
+
+    await vi.waitFor(() => expect(fetchRequests.get(sourceUrl)).toHaveLength(1));
+    expect([...fetchRequests.keys()]).toEqual([sourceUrl]);
+    fetchRequests.get(sourceUrl)?.[0]?.resolve(responseForDocument(3));
+
+    await expect.element(browserPage.getByRole("textbox", { name: "Current page" })).toBeVisible();
+    await expect.element(browserPage.getByRole("button", { name: "Zoom in" })).toBeVisible();
+    expect(document.querySelector('[data-testid="pdf-open-target"]')?.textContent).toBe("disabled");
+    expect(browserPage.getByRole("button", { name: "Reload file from disk" }).length).toBe(0);
+    expect(onReload).not.toHaveBeenCalled();
   });
 
   it("renders a fresh image after an errored A -> B -> A transition", async () => {

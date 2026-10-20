@@ -105,7 +105,7 @@ const adopted110Schema = {
   runtimeRecordColumns,
 } as const;
 
-const workbenchRows = (count: 0 | 1 | 2): readonly WorkbenchMigrationRecord[] =>
+const workbenchRows = (count: number): readonly WorkbenchMigrationRecord[] =>
   workbenchMigrationEntries.slice(0, count).map((migration) => ({
     module_id: migration.moduleId,
     migration_id: migration.migrationId,
@@ -128,7 +128,7 @@ it.effect("uses stable expert checksums and rejects malformed or future extensio
     const wrongChecksum = [{ ...firstWorkbenchRow, checksum: "sha256:wrong" }];
     const wrongName = [{ ...firstWorkbenchRow, name: "DifferentMigration" }];
     const gap = [workbenchRows(2)[1]!];
-    const future = [{ ...workbenchRows(1)[0]!, migration_id: 3, name: "FutureExpertMigration" }];
+    const future = [{ ...workbenchRows(1)[0]!, migration_id: 6, name: "FutureExpertMigration" }];
     const unsupportedModule = [{ ...workbenchRows(1)[0]!, module_id: "future-module" }];
 
     assert.isFalse(planWorkbenchHistory(wrongChecksum).ok);
@@ -414,16 +414,17 @@ fullAdoptionLayer("legacy expert migration handoff", (test) => {
       `;
       assert.deepStrictEqual(
         extension.map(({ migration_id, name, checksum }) => [migration_id, name, checksum]),
-        workbenchMigrationEntries.map(({ migrationId, name, checksum }) => [
-          migrationId,
-          name,
-          checksum,
-        ]),
+        workbenchMigrationEntries
+          .slice(0, 2)
+          .map(({ migrationId, name, checksum }) => [migrationId, name, checksum]),
       );
       const contextUpgrade = yield* runWorkbenchMigrations();
       assert.deepStrictEqual(
         contextUpgrade.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
-        [["context", 1]],
+        [
+          ...workbenchMigrationEntries.slice(2).map(({ migrationId }) => ["expert", migrationId]),
+          ["context", 1],
+        ],
       );
       const rerun = yield* runWorkbenchMigrations();
       assert.deepStrictEqual(rerun.executed, []);
@@ -445,14 +446,14 @@ partialAdoptionLayer("legacy 109 intermediate handoff", (test) => {
       assert.deepStrictEqual(
         result.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
         [
-          ["expert", 2],
+          ...workbenchMigrationEntries.slice(1).map(({ migrationId }) => ["expert", migrationId]),
           ["context", 1],
         ],
       );
       const rows = yield* sql<{ readonly count: number }>`
         SELECT COUNT(*) AS count FROM workbench_sql_migrations WHERE module_id = 'expert'
       `;
-      assert.strictEqual(rows[0]?.count, 2);
+      assert.strictEqual(rows[0]?.count, workbenchMigrationEntries.length);
     }),
   );
 });
@@ -468,8 +469,7 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
       assert.deepStrictEqual(
         first.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
         [
-          ["expert", 1],
-          ["expert", 2],
+          ...workbenchMigrationEntries.map(({ migrationId }) => ["expert", migrationId]),
           ["context", 1],
         ],
       );
@@ -478,6 +478,40 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
         SELECT format_version FROM workbench_schema_metadata
       `;
       assert.deepStrictEqual(format, [{ format_version: WORKBENCH_SCHEMA_FORMAT_VERSION }]);
+      const columns = yield* sql<{ readonly name: string; readonly pk: number }>`
+        SELECT name, pk FROM pragma_table_info('hub_expert_participants') ORDER BY pk
+      `;
+      assert.deepStrictEqual(columns, [
+        { name: "hub_id", pk: 1 },
+        { name: "expert_id", pk: 2 },
+      ]);
+      const foreignKeys = yield* sql<{
+        readonly table: string;
+        readonly from: string;
+        readonly to: string;
+        readonly on_delete: string;
+      }>`
+        SELECT "table", "from", "to", on_delete
+        FROM pragma_foreign_key_list('hub_expert_participants')
+      `;
+      assert.deepStrictEqual(foreignKeys, [
+        { table: "projection_projects", from: "hub_id", to: "project_id", on_delete: "CASCADE" },
+      ]);
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES ('hub-participants-test', 'Hub', '/tmp/hub', '[]', 'now', 'now')
+      `;
+      yield* sql`
+        INSERT INTO hub_expert_participants (hub_id, expert_id)
+        VALUES ('hub-participants-test', 'reviewer')
+      `;
+      yield* sql`DELETE FROM projection_projects WHERE project_id = 'hub-participants-test'`;
+      const cascadedParticipants = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM hub_expert_participants
+        WHERE hub_id = 'hub-participants-test'
+      `;
+      assert.strictEqual(cascadedParticipants[0]?.count, 0);
     }),
   );
 });

@@ -34,7 +34,13 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "../../config.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
-import { ContextRepository, ContextRepositoryLive } from "../../context/ContextRepository.ts";
+import {
+  ContextRepository,
+  ContextRepositoryLive,
+  ContextSourceUnavailableError,
+  type ContextRepositoryError,
+  type ContextResolutionError,
+} from "../../context/ContextRepository.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   toPersistenceSqlError,
@@ -115,6 +121,7 @@ interface CommandEnvelope {
   command: OrchestrationCommand;
   settleOnly: boolean;
   contextOrigin?: "historical" | "provider_native";
+  hubExpertBinding?: ExpertBinding;
   attachmentPrincipal: ManagedAttachmentPrincipal;
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
   executionState: Ref.Ref<CommandExecutionState>;
@@ -227,7 +234,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   // the atomic decision/commit/publication section compete here. Priority is
   // nonpreemptive: it cannot interrupt the current holder, bypass a same-key
   // predecessor, or make a command ready while all four workers are preparing.
-  type MaintenanceTicket = { readonly priority: number; readonly ready: Deferred.Deferred<void> };
+  type MaintenanceTicket = {
+    readonly priority: number;
+    readonly ready: Deferred.Deferred<void>;
+  };
   const maintenanceWaiters: MaintenanceTicket[] = [];
   let activeMaintenanceTicket: MaintenanceTicket | undefined;
   const withMaintenancePriority =
@@ -235,7 +245,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
       Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
-          const ticket: MaintenanceTicket = { priority, ready: yield* Deferred.make<void>() };
+          const ticket: MaintenanceTicket = {
+            priority,
+            ready: yield* Deferred.make<void>(),
+          };
           yield* Effect.sync(() => {
             if (activeMaintenanceTicket === undefined) {
               activeMaintenanceTicket = ticket;
@@ -404,6 +417,26 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       };
     });
 
+  const mapUnavailableContextSource = <A>(
+    command: OrchestrationCommand,
+    effect: Effect.Effect<A, ContextResolutionError>,
+  ): Effect.Effect<A, ContextRepositoryError | OrchestrationCommandInvariantError> =>
+    effect.pipe(
+      Effect.catchTag("ContextSourceUnavailableError", (error) =>
+        Effect.fail(
+          new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail:
+              error.source === "hub-source-project"
+                ? "This Hub's source Project is unavailable; restore or select an active source Project before first execution."
+                : error.source === "hub-space"
+                  ? "This Hub's assigned Space is unavailable; assign an active Space before first execution."
+                  : "This thread's Project workspace is unavailable; restore the Project before first execution.",
+          }),
+        ),
+      ),
+    );
+
   const validateAndMakeExecutionBindEvent = (
     command: OrchestrationCommand,
     events: ReadonlyArray<Omit<OrchestrationEvent, "sequence">>,
@@ -429,15 +462,32 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           "The thread disappeared during Context admission.",
         );
       }
-      const project = yield* contextRepository.getProject(thread.projectId);
-      if (project.migration?.status === "pending" || project.migration?.status === "conflict") {
+      let project: import("@synara/contracts").ProjectContextSettings | null;
+      let preview: import("@synara/contracts").ContextPreview;
+      if (contextRepository.getThreadContext) {
+        const context = yield* mapUnavailableContextSource(
+          command,
+          contextRepository.getThreadContext(command.threadId),
+        );
+        project = context.project;
+        preview = context.preview;
+      } else {
+        const contextProjectId = contextRepository.resolveContextProjectId
+          ? yield* mapUnavailableContextSource(
+              command,
+              contextRepository.resolveContextProjectId(command.threadId),
+            )
+          : thread.projectId;
+        project = yield* contextRepository.getProject(contextProjectId);
+        preview = yield* contextRepository.getPreview(contextProjectId);
+      }
+      if (project?.migration?.status === "pending" || project?.migration?.status === "conflict") {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail:
             "Resolve the claimed legacy Project instructions before starting a new execution.",
         });
       }
-      const preview = yield* contextRepository.getPreview(thread.projectId);
       const provider =
         command.type === "thread.turn.start"
           ? (command.modelSelection?.provider ?? thread.modelSelection.provider)
@@ -453,19 +503,25 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           event.type === "context.thread.bind-requested",
       );
       if (existingRequest) {
-        return yield* contextRepository.prepareBinding(existingRequest);
+        return yield* mapUnavailableContextSource(
+          command,
+          contextRepository.prepareBinding(existingRequest),
+        );
       }
       const occurredAt = command.createdAt;
-      return yield* contextRepository.prepareBinding({
-        ...contextEventBase({
-          commandId: command.commandId,
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt,
+      return yield* mapUnavailableContextSource(
+        command,
+        contextRepository.prepareBinding({
+          ...contextEventBase({
+            commandId: command.commandId,
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+          }),
+          type: "context.thread.bind-requested" as const,
+          payload: { threadId: command.threadId, createdAt: occurredAt },
         }),
-        type: "context.thread.bind-requested" as const,
-        payload: { threadId: command.threadId, createdAt: occurredAt },
-      });
+      );
     });
 
   const validateCommandReceiptIdentity = (
@@ -683,7 +739,12 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             }
           }
         }
-        return { probeFailed: false, highWaterSequence, lagByProjector, missingProjectors };
+        return {
+          probeFailed: false,
+          highWaterSequence,
+          lagByProjector,
+          missingProjectors,
+        };
       }).pipe(
         Effect.catch(() =>
           Effect.succeed({
@@ -725,7 +786,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
     if (commandSequence < commandReadModel.snapshotSequence) {
       return commandReadModel;
     }
-    commandReadModel = { ...nextCommandReadModel, snapshotSequence: commandSequence };
+    commandReadModel = {
+      ...nextCommandReadModel,
+      snapshotSequence: commandSequence,
+    };
     return commandReadModel;
   }).pipe(
     Effect.catchCause((cause) =>
@@ -850,7 +914,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           return Effect.succeed(commandReadModel);
         }
         return messageRepository
-          .getByThreadAndMessageId({ threadId: command.threadId, messageId: command.messageId })
+          .getByThreadAndMessageId({
+            threadId: command.threadId,
+            messageId: command.messageId,
+          })
           .pipe(
             Effect.mapError(
               (error) =>
@@ -874,7 +941,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         // Read the exact message, including a resumed message older than the
         // transcript window. This avoids loading a whole thread to finalize it.
         return messageRepository
-          .getByThreadAndMessageId({ threadId: command.threadId, messageId: command.messageId })
+          .getByThreadAndMessageId({
+            threadId: command.threadId,
+            messageId: command.messageId,
+          })
           .pipe(
             Effect.mapError(
               (error) =>
@@ -1037,7 +1107,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       // ever running. The accepted receipt is the source of truth — a command
       // with one owns its file; only a command with none loses the candidate.
       const receiptExit = yield* Effect.exit(
-        commandReceiptRepository.getByCommandId({ commandId: envelope.command.commandId }),
+        commandReceiptRepository.getByCommandId({
+          commandId: envelope.command.commandId,
+        }),
       );
       // A failed lookup cannot establish non-commit. Leave the candidate for
       // a later authoritative prune rather than deleting an accepted objective.
@@ -1262,7 +1334,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             ),
         });
         materializedGoalFilePath = goalFilePath;
-        command = { ...goalCommand, goal: threadGoalFileReference(goalFilePath) };
+        command = {
+          ...goalCommand,
+          goal: threadGoalFileReference(goalFilePath),
+        };
       }
 
       let resolvedGoal: string | null = null;
@@ -1337,7 +1412,41 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           }
 
           let expertBinding: ExpertBinding | undefined;
-          if (
+          if (envelope.hubExpertBinding !== undefined) {
+            if (command.type !== "thread.create" || command.expertId !== undefined) {
+              return yield* new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: "A Hub Expert binding is valid only for a plain thread.create command.",
+              });
+            }
+            const provider = command.modelSelection.provider;
+            if (!isExpertProvider(provider)) {
+              return yield* new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: `Experts do not support '${provider}'.`,
+              });
+            }
+            const binding = envelope.hubExpertBinding;
+            const snapshot = yield* Effect.tryPromise({
+              try: () => expertStore.readSnapshot(binding.snapshotId),
+              catch: (error) =>
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail: `Could not read frozen Hub Expert '${binding.expertId}': ${String(error)}`,
+                }),
+            });
+            if (
+              snapshot.expertId !== binding.expertId ||
+              snapshot.displayName !== binding.displayName ||
+              snapshot.revision !== binding.revision
+            ) {
+              return yield* new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: "The frozen Hub Expert binding does not match its immutable snapshot.",
+              });
+            }
+            expertBinding = binding;
+          } else if (
             (command.type === "thread.create" || command.type === "thread.handoff.create") &&
             command.expertId
           ) {
@@ -1500,7 +1609,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                   preparedEvent = yield* contextRepository.prepareMigrationResolve(nextEvent);
                   break;
                 case "context.thread.bind-requested":
-                  preparedEvent = yield* contextRepository.prepareBinding(nextEvent);
+                  preparedEvent = yield* mapUnavailableContextSource(
+                    command,
+                    contextRepository.prepareBinding(nextEvent),
+                  );
                   break;
                 default:
                   break;
@@ -1510,7 +1622,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                   ? preparedEvent
                   : {
                       ...preparedEvent,
-                      metadata: { ...preparedEvent.metadata, checkpointRuntimeSequence },
+                      metadata: {
+                        ...preparedEvent.metadata,
+                        checkpointRuntimeSequence,
+                      },
                     },
               );
               nextCommandReadModel = yield* projectEvent(nextCommandReadModel, savedEvent);
@@ -1692,7 +1807,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
         );
       }
 
-      yield* Deferred.succeed(envelope.result, { sequence: committedCommand.lastSequence });
+      yield* Deferred.succeed(envelope.result, {
+        sequence: committedCommand.lastSequence,
+      });
     }).pipe(
       // Interrupts never surface as a typed failure, so they need their own
       // cleanup hook. This finalizer is scoped to the gen, so it runs both when
@@ -1729,8 +1846,14 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               envelope.settleOnly,
             ).pipe(
               Effect.match({
-                onFailure: (resolvedError) => ({ _tag: "Left" as const, left: resolvedError }),
-                onSuccess: (value) => ({ _tag: "Right" as const, right: value }),
+                onFailure: (resolvedError) => ({
+                  _tag: "Left" as const,
+                  left: resolvedError,
+                }),
+                onSuccess: (value) => ({
+                  _tag: "Right" as const,
+                  right: value,
+                }),
               }),
             );
             if (resolvedTimeoutOutcome._tag === "Right") {
@@ -1794,7 +1917,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             envelope.settleOnly,
           ).pipe(
             Effect.match({
-              onFailure: (resolvedError) => ({ _tag: "Left" as const, left: resolvedError }),
+              onFailure: (resolvedError) => ({
+                _tag: "Left" as const,
+                left: resolvedError,
+              }),
               onSuccess: (value) => ({ _tag: "Right" as const, right: value }),
             }),
           );
@@ -2019,12 +2145,24 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command, context) =>
     Effect.gen(function* () {
+      if (
+        context?.hubExpertBinding !== undefined &&
+        (command.type !== "thread.create" || command.expertId !== undefined)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A Hub Expert binding is valid only for a plain thread.create command.",
+        });
+      }
       const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
       const executionState = yield* Ref.make<CommandExecutionState>("queued");
       const envelope: CommandEnvelope = {
         command,
         settleOnly: context?.settleOnly === true,
         ...(context?.contextOrigin !== undefined ? { contextOrigin: context.contextOrigin } : {}),
+        ...(context?.hubExpertBinding !== undefined
+          ? { hubExpertBinding: context.hubExpertBinding }
+          : {}),
         attachmentPrincipal: context?.attachmentPrincipal ?? LOCAL_LOOPBACK_ATTACHMENT_PRINCIPAL,
         result,
         executionState,

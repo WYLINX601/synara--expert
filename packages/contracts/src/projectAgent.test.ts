@@ -28,6 +28,21 @@ it.effect("defaults coordinator limits and capture", () =>
   }),
 );
 
+it.effect("keeps an omitted expert roster distinct from an explicit empty roster", () =>
+  Effect.gen(function* () {
+    const base = {
+      requestId: "req-expert-roster",
+      projectId: "project-expert-roster",
+      coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },
+    };
+    const omitted = yield* decode(ProjectAgentConfigureInput, base);
+    const empty = yield* decode(ProjectAgentConfigureInput, { ...base, expertIds: [] });
+
+    assert.isFalse(Object.hasOwn(omitted, "expertIds"));
+    assert.deepStrictEqual(empty.expertIds, []);
+  }),
+);
+
 it.effect("keeps review distinct from done", () =>
   Effect.gen(function* () {
     const review = yield* decode(ProjectTaskStatus, "review");

@@ -620,7 +620,7 @@ describe("Spaces", () => {
     }));
     expect(readModel.projects.find((p) => p.id === "project-dangling")?.spaceId).toBeNull();
 
-    // …and non-ordinary kinds ignore the field entirely.
+    // Chats are never filed into a Space.
     ({ readModel } = await dispatch(readModel, {
       type: "project.create",
       commandId: CommandId.makeUnsafe("cmd-create-chat-kind"),
@@ -632,6 +632,130 @@ describe("Spaces", () => {
       createdAt,
     }));
     expect(readModel.projects.find((p) => p.id === "project-chat-kind")?.spaceId).toBeNull();
+  });
+
+  it("assigns new group and studio Hubs, preserves membership on metadata edits, and clears it on Space deletion", async () => {
+    const createdAt = "2026-07-15T10:00:00.000Z";
+    const spaceId = SpaceId.makeUnsafe("space-hubs");
+    const groupId = ProjectId.makeUnsafe("group-hub");
+    const studioId = ProjectId.makeUnsafe("studio-hub");
+    const legacyHubId = ProjectId.makeUnsafe("legacy-hub");
+    const chatId = ProjectId.makeUnsafe("chat-container");
+    let readModel = createEmptyReadModel(createdAt);
+
+    ({ readModel } = await dispatch(readModel, {
+      type: "space.create",
+      commandId: CommandId.makeUnsafe("cmd-space-hubs"),
+      spaceId,
+      name: "Research",
+      icon: "book",
+      createdAt,
+    }));
+
+    for (const [projectId, kind, title, workspaceRoot, assignedSpaceId] of [
+      [groupId, "group", "Group Hub", "/tmp/group-hub", spaceId],
+      [studioId, "studio", "Studio Hub", "/tmp/studio-hub", spaceId],
+      [legacyHubId, "group", "Legacy Hub", "/tmp/legacy-hub", undefined],
+      [chatId, "chat", "Chats", "/tmp/chats", undefined],
+    ] as const) {
+      ({ readModel } = await dispatch(readModel, {
+        type: "project.create",
+        commandId: CommandId.makeUnsafe(`cmd-create-${projectId}`),
+        projectId,
+        kind,
+        title,
+        workspaceRoot,
+        ...(assignedSpaceId !== undefined ? { spaceId: assignedSpaceId } : {}),
+        createdAt,
+      }));
+    }
+
+    expect(readModel.projects.map(({ id, spaceId: assigned }) => [id, assigned])).toEqual([
+      [groupId, spaceId],
+      [studioId, spaceId],
+      [legacyHubId, null],
+      [chatId, null],
+    ]);
+
+    ({ readModel } = await dispatch(readModel, {
+      type: "project.meta.update",
+      commandId: CommandId.makeUnsafe("cmd-meta-group-hub"),
+      projectId: groupId,
+      title: "Renamed Group Hub",
+    }));
+    ({ readModel } = await dispatch(readModel, {
+      type: "project.meta.update",
+      commandId: CommandId.makeUnsafe("cmd-meta-studio-hub"),
+      projectId: studioId,
+      title: "Studio Hub renamed",
+    }));
+    ({ readModel } = await dispatch(readModel, {
+      type: "project.meta.update",
+      commandId: CommandId.makeUnsafe("cmd-meta-legacy-hub"),
+      projectId: legacyHubId,
+      title: "Legacy Hub renamed",
+    }));
+    expect(readModel.projects.find(({ id }) => id === legacyHubId)?.spaceId).toBeNull();
+
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          command: {
+            type: "space.projects.assign",
+            commandId: CommandId.makeUnsafe("cmd-batch-assign-hub"),
+            spaceId,
+            projectIds: [legacyHubId],
+          },
+          readModel,
+        }),
+      ),
+    ).rejects.toThrow(/only ordinary projects/i);
+
+    ({ readModel } = await dispatch(readModel, {
+      type: "project.meta.update",
+      commandId: CommandId.makeUnsafe("cmd-assign-legacy-hub"),
+      projectId: legacyHubId,
+      spaceId,
+    }));
+    expect(readModel.projects.map(({ id, spaceId: assigned }) => [id, assigned])).toEqual([
+      [groupId, spaceId],
+      [studioId, spaceId],
+      [legacyHubId, spaceId],
+      [chatId, null],
+    ]);
+
+    const deletion = await dispatch(readModel, {
+      type: "space.delete",
+      commandId: CommandId.makeUnsafe("cmd-delete-hub-space"),
+      spaceId,
+    });
+    expect(deletion.events.map((event) => event.type)).toEqual(["space.deleted"]);
+    expect(
+      deletion.readModel.projects.map(({ id, spaceId: assigned, deletedAt }) => [
+        id,
+        assigned,
+        deletedAt,
+      ]),
+    ).toEqual([
+      [groupId, null, null],
+      [studioId, null, null],
+      [legacyHubId, null, null],
+      [chatId, null, null],
+    ]);
+
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          command: {
+            type: "project.meta.update",
+            commandId: CommandId.makeUnsafe("cmd-assign-chat-hub-space"),
+            projectId: chatId,
+            spaceId,
+          },
+          readModel,
+        }),
+      ),
+    ).rejects.toThrow(/ordinary projects and Hub workspaces/i);
   });
 
   it("re-files deleted projects out of a space when the space is deleted", async () => {

@@ -11,6 +11,7 @@ import ContextV1Migration from "../../persistence/Migrations/111_ContextV1.ts";
 import * as NodeSqliteClient from "../../persistence/NodeSqliteClient.ts";
 import { adoptLegacyExpertMigrations } from "./LegacyExpertMigrationAdoption.ts";
 import {
+  LEGACY_EXPERT_OFFICIAL_MIGRATIONS,
   allWorkbenchMigrationEntries,
   contextWorkbenchMigrationEntries,
   ensureWorkbenchTracker,
@@ -25,9 +26,18 @@ const insertModuleHistory = (moduleId: "expert" | "context") =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* ensureWorkbenchTracker;
-    for (const migration of allWorkbenchMigrationEntries.filter(
-      (row) => row.moduleId === moduleId,
-    )) {
+    const history = allWorkbenchMigrationEntries.filter((row) => {
+      if (row.moduleId !== moduleId) return false;
+      // This fixture represents a pre-extension database. Its expert tracker
+      // contains only the original two migrations split from legacy 109/110.
+      if (moduleId === "expert") {
+        return LEGACY_EXPERT_OFFICIAL_MIGRATIONS.some(
+          ({ workbenchId }) => workbenchId === row.migrationId,
+        );
+      }
+      return true;
+    });
+    for (const migration of history) {
       yield* sql`
         INSERT INTO workbench_sql_migrations (module_id, migration_id, name, checksum, applied_at)
         VALUES (${migration.moduleId}, ${migration.migrationId}, ${migration.name},
@@ -122,7 +132,16 @@ it("keeps legacy Context 111 byte-for-byte frozen and uses its checksum for cont
     "sha256:b7dbd84911484156f3f38093973338ca005dce9e8ba4b38b8972d9dfe79a4911",
   );
   assert.strictEqual(contextWorkbenchMigrationEntries[0]?.checksum, checksum);
-  assert.strictEqual(workbenchMigrationEntries.length, 2);
+  assert.deepStrictEqual(
+    workbenchMigrationEntries.map(({ migrationId, name }) => [migrationId, name]),
+    [
+      [1, "ProjectionThreadsExpertBinding"],
+      [2, "ExpertAppliedRuntimeRecords"],
+      [3, "HubProjectOrigin"],
+      [4, "HubExpertDeliverables"],
+      [5, "HubExpertParticipants"],
+    ],
+  );
 });
 
 for (const mode of ["legacy-expert", "split-expert"] as const) {
@@ -143,7 +162,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
           plan.workbench.adoptedMigrationIds,
           mode === "legacy-expert" ? [1, 2] : [],
         );
-        assert.isFalse(plan.workbench.hasPendingMigrations);
+        assert.isTrue(plan.workbench.hasPendingMigrations);
         assert.isTrue(plan.requiresBackup);
         const first = yield* finishUpgrade;
         assert.deepStrictEqual(first.adoption.adoptedContextMigrationIds, [1]);
@@ -161,7 +180,14 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
         ]);
         const allAudit =
           yield* sql`SELECT * FROM workbench_legacy_migration_adoptions ORDER BY module_id, migration_id`;
-        assert.deepStrictEqual(first.migration.executed, []);
+        assert.deepStrictEqual(
+          first.migration.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
+          [
+            ["expert", 3],
+            ["expert", 4],
+            ["expert", 5],
+          ],
+        );
         assert.deepStrictEqual(yield* readPreservedData, before);
         const official = yield* sql<{ readonly migration_id: number; readonly name: string }>`
         SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id`;
@@ -176,6 +202,9 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
             ["context", 1],
             ["expert", 1],
             ["expert", 2],
+            ["expert", 3],
+            ["expert", 4],
+            ["expert", 5],
           ],
         );
         const repeated = yield* finishUpgrade;
@@ -194,7 +223,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
         assert.strictEqual(settled.kind, "ready");
         if (settled.kind === "ready") {
           assert.deepStrictEqual(settled.workbench.modules, {
-            expert: { sourceVersion: 2, targetVersion: 2 },
+            expert: { sourceVersion: 5, targetVersion: 5 },
             context: { sourceVersion: 1, targetVersion: 1 },
           });
           assert.isFalse(settled.requiresBackup);
@@ -216,6 +245,9 @@ it.effect(
         [
           ["expert", 1],
           ["expert", 2],
+          ["expert", 3],
+          ["expert", 4],
+          ["expert", 5],
           ["context", 1],
         ],
       );
@@ -247,9 +279,17 @@ for (const through of [109, 110] as const) {
         through === 109
           ? [
               ["expert", 2],
+              ["expert", 3],
+              ["expert", 4],
+              ["expert", 5],
               ["context", 1],
             ]
-          : [["context", 1]],
+          : [
+              ["expert", 3],
+              ["expert", 4],
+              ["expert", 5],
+              ["context", 1],
+            ],
       );
     }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
   );

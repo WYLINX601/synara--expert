@@ -1,4 +1,5 @@
 import { OrchestrationProposedPlanId, ProjectId, ThreadId } from "@synara/contracts";
+import { buildHubDeliverableReferenceUri } from "@synara/shared/hubReferences";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { partializeComposerDraftStoreState, useComposerDraftStore } from "./composerDraftStore";
 import {
@@ -425,6 +426,39 @@ describe("composerDraftStore provider references", () => {
 
     expect(mergedState.draftsByThreadId[threadId]?.skills).toEqual([selectedSkill]);
     expect(mergedState.draftsByThreadId[threadId]?.mentions).toEqual([selectedMention]);
+  });
+
+  it("round-trips equal-name Hub references as distinct published versions", () => {
+    const v1 = {
+      name: "brief.md",
+      path: buildHubDeliverableReferenceUri({
+        hubId: "design-hub",
+        workerThreadId: "worker-1",
+        path: "brief.md",
+        revision: 1,
+      }),
+    };
+    const v2 = {
+      ...v1,
+      path: buildHubDeliverableReferenceUri({
+        hubId: "design-hub",
+        workerThreadId: "worker-1",
+        path: "brief.md",
+        revision: 2,
+      }),
+    };
+
+    useComposerDraftStore.getState().setPrompt(threadId, "Compare both published briefs");
+    useComposerDraftStore.getState().setMentions(threadId, [v1, v2]);
+
+    const persisted = normalizeCurrentPersistedComposerDraftStoreState(
+      JSON.parse(
+        JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+      ),
+    );
+    const restored = toHydratedThreadDraft(threadId, persisted.draftsByThreadId[threadId]!);
+
+    expect(restored.mentions).toEqual([v1, v2]);
   });
 });
 

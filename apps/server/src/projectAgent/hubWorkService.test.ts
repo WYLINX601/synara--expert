@@ -8,6 +8,10 @@ import {
   type OrchestrationThreadShell,
 } from "@synara/contracts";
 import { Effect, Exit, Layer, Option } from "effect";
+import {
+  buildHubDeliverableReferenceUri,
+  buildHubExpertReferenceUri,
+} from "@synara/shared/hubReferences";
 
 import { OrchestrationCommandReceiptRepositoryLive } from "../persistence/Layers/OrchestrationCommandReceipts";
 import { ProjectionThreadMessageRepositoryLive } from "../persistence/Layers/ProjectionThreadMessages";
@@ -118,6 +122,8 @@ function harness(name: string) {
     };
     return {
       service,
+      dependencies,
+      projectAgentRepository,
       repository,
       projectId,
       coordinator,
@@ -139,6 +145,112 @@ function harness(name: string) {
 }
 
 tests("Hub work provenance, ownership and lifecycle", (it) => {
+  it.effect("blocks unselected Expert IDs before preflight while allowing an ordinary Worker", () =>
+    Effect.gen(function* () {
+      const h = yield* harness("empty-roster");
+      let preflightCalls = 0;
+      const service = makeHubWorkService({
+        ...h.dependencies,
+        resolveCreationSpec: ({ spec }) => {
+          preflightCalls += 1;
+          return Effect.succeed({ ...spec, target: { provider: "codex", model: "fixture" } });
+        },
+      });
+      const rejected = yield* Effect.exit(
+        service.submit({
+          ...h.input,
+          tasks: [{ spec: { prompt: "Forged", expertId: "unselected" } }],
+        }),
+      );
+      assert.equal(Exit.isFailure(rejected), true);
+      assert.equal(preflightCalls, 0);
+      assert.equal((yield* h.repository.list(h.projectId)).length, 0);
+      const accepted = yield* service.submit(h.input);
+      assert.equal(accepted.items.length, 2);
+      assert.equal(preflightCalls, 2);
+    }),
+  );
+  it.effect(
+    "rejects a settings race atomically after preflight and preserves accepted replay",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness("settings-admission-race");
+        let changed = false;
+        const service = makeHubWorkService({
+          ...h.dependencies,
+          resolveCreationSpec: ({ spec }) =>
+            Effect.gen(function* () {
+              if (!changed) {
+                changed = true;
+                const config = yield* h.projectAgentRepository.getConfig(h.projectId);
+                if (Option.isSome(config))
+                  yield* h.projectAgentRepository.saveConfig({ ...config.value, revision: 2 }, 1);
+              }
+              return { ...spec, target: { provider: "codex" as const, model: "fixture" } };
+            }),
+        });
+        const rejected = yield* Effect.exit(service.submit(h.input));
+        assert.equal(Exit.isFailure(rejected), true);
+        assert.equal((yield* h.repository.list(h.projectId)).length, 0);
+        const accepted = yield* h.service.submit(h.input);
+        const config = yield* h.projectAgentRepository.getConfig(h.projectId);
+        if (Option.isSome(config))
+          yield* h.projectAgentRepository.saveConfig(
+            { ...config.value, expertIds: [], revision: 3 },
+            2,
+          );
+        const replay = yield* service.submit(h.input);
+        assert.equal(replay.replayed, true);
+        assert.deepEqual(replay.items, accepted.items);
+      }),
+  );
+
+  it.effect("freezes server-resolved app references into accepted source messages", () =>
+    Effect.gen(function* () {
+      const h = yield* harness("reference-provenance");
+      const references = [
+        { name: "Writer", path: buildHubExpertReferenceUri("writer") },
+        {
+          name: "Exact index",
+          path: buildHubDeliverableReferenceUri({
+            hubId: h.projectId,
+            workerThreadId: h.workerId,
+            path: "index.md",
+            revision: 2,
+          }),
+        },
+      ];
+      const sourceMessages = h.input.sourceMessages.map((source, index) =>
+        index === 0 ? { ...source, references } : source,
+      );
+      const accepted = yield* h.service.submit({ ...h.input, sourceMessages });
+      assert.deepEqual(accepted.items[0]?.sourceMessages[0]?.references, references);
+
+      const crossHub = yield* Effect.exit(
+        h.service.submit({
+          ...h.input,
+          sourceMessages: [
+            {
+              ...h.input.sourceMessages[0]!,
+              references: [
+                {
+                  name: "Other Hub",
+                  path: buildHubDeliverableReferenceUri({
+                    hubId: "another-hub",
+                    workerThreadId: h.workerId,
+                    path: "index.md",
+                    revision: 1,
+                  }),
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      assert.equal(Exit.isFailure(crossHub), true);
+    }),
+  );
+
   it.effect(
     "freezes the original per-task messages and rejects changed plans and foreign progress writers",
     () =>

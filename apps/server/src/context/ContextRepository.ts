@@ -6,8 +6,10 @@ import {
   ContextMigrationRecord,
   ContextMode,
   ContextPreview,
+  ContextNonePreviewV2,
   ContextSession,
   ContextSnapshot,
+  ContextSpacePreviewV2,
   CommandId,
   ProjectContextSettings,
   SpaceIconName,
@@ -15,8 +17,8 @@ import {
   SpaceContextSettings,
   ThreadContextDetails,
   type OrchestrationEvent,
-  type ProjectId,
-  type SpaceId,
+  ProjectId,
+  SpaceId,
   type ThreadId,
 } from "@synara/contracts";
 import { Effect, Layer, Schema, ServiceMap } from "effect";
@@ -28,7 +30,26 @@ import {
   toPersistenceSqlError,
 } from "../persistence/Errors.ts";
 
+export class ContextSourceUnavailableError extends Schema.TaggedErrorClass<ContextSourceUnavailableError>()(
+  "ContextSourceUnavailableError",
+  {
+    source: Schema.Literals(["hub-source-project", "hub-space", "project-workspace"]),
+  },
+) {
+  override get message(): string {
+    switch (this.source) {
+      case "hub-source-project":
+        return "This Hub's source Project is unavailable.";
+      case "hub-space":
+        return "This Hub's assigned Space is unavailable.";
+      case "project-workspace":
+        return "This thread's Project workspace is unavailable.";
+    }
+  }
+}
+
 export type ContextRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type ContextResolutionError = ContextRepositoryError | ContextSourceUnavailableError;
 
 export interface ThreadContextBinding {
   readonly mode: ContextMode;
@@ -57,6 +78,15 @@ type BindRequestedEvent = Omit<
 >;
 
 export interface ContextRepositoryShape {
+  readonly getThreadContext?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<
+    { readonly project: ProjectContextSettings | null; readonly preview: ContextPreview },
+    ContextResolutionError
+  >;
+  readonly resolveContextProjectId?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProjectId, ContextResolutionError>;
   readonly getSpace: (
     spaceId: SpaceId,
   ) => Effect.Effect<SpaceContextSettings, ContextRepositoryError>;
@@ -88,7 +118,7 @@ export interface ContextRepositoryShape {
     threadId: ThreadId,
     snapshotId: string,
     createdAt: string,
-  ) => Effect.Effect<ContextSnapshot, ContextRepositoryError>;
+  ) => Effect.Effect<ContextSnapshot, ContextResolutionError>;
   /** Resolve the original CAS once and embed its exact receipt in the journal event. */
   readonly prepareSpaceSave: (
     event: SpaceSaveEvent,
@@ -106,7 +136,7 @@ export interface ContextRepositoryShape {
   /** Freeze the admitted context in the bind event; replay consumes only these bytes. */
   readonly prepareBinding: (
     event: BindRequestedEvent,
-  ) => Effect.Effect<BindRequestedEvent, ContextRepositoryError>;
+  ) => Effect.Effect<BindRequestedEvent, ContextResolutionError>;
   /** Apply a replayable context event while the orchestration transaction is open. */
   readonly applyEvent: (event: OrchestrationEvent) => Effect.Effect<void, ContextRepositoryError>;
 }
@@ -185,16 +215,24 @@ const makeContextText = (input: {
     .join("\n\n");
 };
 
-const snapshotHash = (preview: Omit<ContextPreview, "snapshotHash">): string =>
+const snapshotHash = (preview: object): string =>
   createHash("sha256").update(JSON.stringify(preview), "utf8").digest("hex");
 
 const hasNewContextVersion = (snapshot: ContextSnapshot, preview: ContextPreview): boolean => {
-  if (
-    snapshot.project.projectId !== preview.project.projectId ||
-    snapshot.project.revision !== preview.project.revision ||
-    snapshot.project.projectGoal !== preview.project.projectGoal ||
-    snapshot.project.projectInstructions !== preview.project.projectInstructions
-  ) {
+  if (snapshot.schemaVersion !== preview.schemaVersion) return true;
+  if (snapshot.schemaVersion === 1 && preview.schemaVersion === 1) {
+    if (
+      snapshot.project.projectId !== preview.project.projectId ||
+      snapshot.project.revision !== preview.project.revision ||
+      snapshot.project.projectGoal !== preview.project.projectGoal ||
+      snapshot.project.projectInstructions !== preview.project.projectInstructions
+    ) {
+      return true;
+    }
+  } else if (snapshot.schemaVersion === 2 && preview.schemaVersion === 2) {
+    if (snapshot.source !== preview.source) return true;
+    if (snapshot.source === "none" || preview.source === "none") return false;
+  } else {
     return true;
   }
   if ((snapshot.space?.spaceId ?? null) !== (preview.space?.spaceId ?? null)) return true;
@@ -275,6 +313,29 @@ const makeContextRepository = Effect.gen(function* () {
         SpaceContextSettings,
         row,
         "ContextRepository.getSpace:decode",
+      );
+    });
+
+  const getSpaceForContextSource = (spaceId: SpaceId) =>
+    Effect.gen(function* () {
+      const rows = yield* sql<ContextSpaceRow>`
+        SELECT m.data_instance_id AS "dataInstanceId", s.space_id AS "spaceId",
+          s.name, s.icon, COALESCE(c.direction_goal, '') AS "directionGoal",
+          COALESCE(c.shared_instructions, '') AS "sharedInstructions",
+          COALESCE(c.revision, 0) AS revision
+        FROM projection_spaces s
+        CROSS JOIN context_meta m
+        LEFT JOIN context_spaces c ON c.space_id = s.space_id
+        WHERE m.singleton = 1 AND s.space_id = ${spaceId} AND s.deleted_at IS NULL
+      `.pipe(Effect.mapError(toPersistenceSqlError("ContextRepository.getSpaceForContextSource")));
+      const row = rows[0];
+      if (!row) {
+        return yield* new ContextSourceUnavailableError({ source: "hub-space" });
+      }
+      return yield* decodeValue<SpaceContextSettings>(
+        SpaceContextSettings,
+        row,
+        "ContextRepository.getSpaceForContextSource:decode",
       );
     });
 
@@ -436,21 +497,125 @@ const makeContextRepository = Effect.gen(function* () {
       );
     });
 
-  const buildBindingSnapshot = (threadId: ThreadId, snapshotId: string, createdAt: string) =>
+  const getSpaceOnlyPreview = (spaceId: SpaceId) =>
     Effect.gen(function* () {
-      const rows = yield* sql<{ readonly projectId: string }>`
-        SELECT project_id AS "projectId" FROM projection_threads WHERE thread_id = ${threadId}
-      `.pipe(
-        Effect.mapError(toPersistenceSqlError("ContextRepository.buildBindingSnapshot:thread")),
+      const space = yield* getSpaceForContextSource(spaceId);
+      const text = makeContextText({
+        directionGoal: space.directionGoal,
+        sharedInstructions: space.sharedInstructions,
+        projectGoal: "",
+        projectInstructions: "",
+      });
+      const withoutHash = {
+        schemaVersion: 2 as const,
+        rendererVersion: 1 as const,
+        source: "space" as const,
+        space: {
+          spaceId: space.spaceId,
+          name: space.name,
+          revision: space.revision,
+          directionGoal: space.directionGoal,
+          sharedInstructions: space.sharedInstructions,
+        },
+        text,
+        hasContent: text.length > 0,
+      };
+      return yield* decodeValue<ContextPreview>(
+        ContextSpacePreviewV2,
+        { ...withoutHash, snapshotHash: snapshotHash(withoutHash) },
+        "ContextRepository.getSpaceOnlyPreview:decode",
       );
-      const projectId = rows[0]?.projectId;
-      if (!projectId) {
+    });
+
+  const getNoContextPreview = () => {
+    const withoutHash = {
+      schemaVersion: 2 as const,
+      rendererVersion: 1 as const,
+      source: "none" as const,
+      space: null,
+      text: "",
+      hasContent: false,
+    };
+    return decodeValue<ContextPreview>(
+      ContextNonePreviewV2,
+      { ...withoutHash, snapshotHash: snapshotHash(withoutHash) },
+      "ContextRepository.getNoContextPreview:decode",
+    );
+  };
+
+  const resolveThreadContext = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const rows = yield* sql<{
+        readonly projectId: string;
+        readonly projectKind: string | null;
+        readonly spaceId: string | null;
+        readonly sourceProjectId: string | null;
+        readonly liveSourceProjectId: string | null;
+        readonly liveProjectId: string | null;
+      }>`
+        SELECT t.project_id AS "projectId", p.kind AS "projectKind", p.space_id AS "spaceId",
+          o.source_project_id AS "sourceProjectId",
+          CASE WHEN source.deleted_at IS NULL THEN source.project_id ELSE NULL END AS "liveSourceProjectId",
+          CASE WHEN p.deleted_at IS NULL THEN p.project_id ELSE NULL END AS "liveProjectId"
+        FROM projection_threads t
+        LEFT JOIN projection_projects p ON p.project_id = t.project_id
+        LEFT JOIN project_agent_configs c
+          ON c.coordinator_thread_id = t.thread_id AND c.project_id = t.project_id
+        LEFT JOIN hub_project_origins o ON o.hub_id = c.project_id
+        LEFT JOIN projection_projects source ON source.project_id = o.source_project_id
+        WHERE t.thread_id = ${threadId}
+      `.pipe(Effect.mapError(toPersistenceSqlError("ContextRepository.resolveThreadContext")));
+      const row = rows[0];
+      if (!row || !row.projectId) {
         return yield* new PersistenceDecodeError({
-          operation: "ContextRepository.buildBindingSnapshot",
-          issue: `Thread '${threadId}' does not exist.`,
+          operation: "ContextRepository.resolveThreadContext",
+          issue: `Thread '${threadId}' does not exist or has no Project workspace.`,
         });
       }
-      const preview = yield* getPreview(projectId as ProjectId);
+
+      if (row.sourceProjectId !== null) {
+        if (row.liveSourceProjectId === null) {
+          return yield* new ContextSourceUnavailableError({ source: "hub-source-project" });
+        }
+        const project = yield* getProject(ProjectId.makeUnsafe(row.sourceProjectId));
+        return { project, preview: yield* getPreview(project.projectId) };
+      }
+
+      if (row.liveProjectId === null) {
+        return yield* new ContextSourceUnavailableError({ source: "project-workspace" });
+      }
+
+      if (row.projectKind === "group" || row.projectKind === "studio") {
+        if (row.spaceId === null) {
+          return { project: null, preview: yield* getNoContextPreview() };
+        }
+        return {
+          project: null,
+          preview: yield* getSpaceOnlyPreview(SpaceId.makeUnsafe(row.spaceId)),
+        };
+      }
+
+      const project = yield* getProject(ProjectId.makeUnsafe(row.projectId));
+      return { project, preview: yield* getPreview(project.projectId) };
+    });
+
+  const getThreadContext = (threadId: ThreadId) => resolveThreadContext(threadId);
+
+  const resolveContextProjectId = (threadId: ThreadId) =>
+    Effect.flatMap(resolveThreadContext(threadId), (context) =>
+      context.project !== null
+        ? Effect.succeed(context.project.projectId)
+        : Effect.fail(
+            new PersistenceDecodeError({
+              operation: "ContextRepository.resolveContextProjectId",
+              issue: "This Hub has no Project Context source; its Context is Space-only or empty.",
+            }),
+          ),
+    );
+
+  const buildBindingSnapshot = (threadId: ThreadId, snapshotId: string, createdAt: string) =>
+    Effect.gen(function* () {
+      const { preview } = yield* resolveThreadContext(threadId);
       return yield* decodeValue<ContextSnapshot>(
         ContextSnapshot,
         { ...preview, snapshotId, createdAt },
@@ -472,7 +637,9 @@ const makeContextRepository = Effect.gen(function* () {
       }
       const dataInstanceId = yield* getDataInstanceId;
       const binding = yield* getThreadBinding(threadId);
-      const latestPreviewResult = yield* Effect.result(getPreview(projectId as ProjectId));
+      const latestPreviewResult = yield* Effect.result(
+        getThreadContext(threadId).pipe(Effect.map((context) => context.preview)),
+      );
       const preview = latestPreviewResult._tag === "Success" ? latestPreviewResult.success : null;
       const applied = yield* getApplied(threadId);
       const runtimeRows = yield* sql<{
@@ -526,7 +693,7 @@ const makeContextRepository = Effect.gen(function* () {
               : preview === null && isBound
                 ? "The immutable Context snapshot is preserved, but the current source could not be compared."
                 : preview === null && binding?.mode === "unbound"
-                  ? "The current Project Context could not be loaded."
+                  ? "The current Context source could not be loaded."
                   : null,
         },
         "ContextRepository.getThreadDetails:decode",
@@ -1065,14 +1232,24 @@ const makeContextRepository = Effect.gen(function* () {
         frozenSnapshot,
         "ContextRepository.bindThread:snapshot",
       );
-      const expectedHash = snapshotHash({
-        schemaVersion: snapshot.schemaVersion,
-        rendererVersion: snapshot.rendererVersion,
-        space: snapshot.space,
-        project: snapshot.project,
-        text: snapshot.text,
-        hasContent: snapshot.hasContent,
-      });
+      const expectedHash =
+        snapshot.schemaVersion === 1
+          ? snapshotHash({
+              schemaVersion: snapshot.schemaVersion,
+              rendererVersion: snapshot.rendererVersion,
+              space: snapshot.space,
+              project: snapshot.project,
+              text: snapshot.text,
+              hasContent: snapshot.hasContent,
+            })
+          : snapshotHash({
+              schemaVersion: snapshot.schemaVersion,
+              rendererVersion: snapshot.rendererVersion,
+              source: snapshot.source,
+              space: snapshot.space,
+              text: snapshot.text,
+              hasContent: snapshot.hasContent,
+            });
       if (
         snapshot.snapshotId !== event.eventId ||
         snapshot.createdAt !== event.payload.createdAt ||
@@ -1122,6 +1299,7 @@ const makeContextRepository = Effect.gen(function* () {
   const getThreadDetailsService = (threadId: ThreadId) => getThreadDetails(threadId);
 
   return {
+    getThreadContext,
     getSpace,
     getProject,
     getThreadBinding,
@@ -1131,6 +1309,7 @@ const makeContextRepository = Effect.gen(function* () {
     getThreadDetails: getThreadDetailsService,
     getCommandResult,
     getPreview,
+    resolveContextProjectId,
     buildBindingSnapshot,
     prepareSpaceSave,
     prepareProjectSave,

@@ -8,7 +8,12 @@
 // Layer: Chat UI component
 
 import { SidePanelOverlay } from "~/components/chat/SidePanelOverlay";
-import type { LibraryCommit, LibraryEntry, ProjectId } from "@synara/contracts";
+import type {
+  HubDeliverableReadResult,
+  LibraryCommit,
+  LibraryEntry,
+  ProjectId,
+} from "@synara/contracts";
 import { formatBytes } from "@synara/shared/formatBytes";
 import {
   type MouseEvent as ReactMouseEvent,
@@ -40,6 +45,7 @@ import {
 import { SettingsSegmentedControl } from "~/components/settings/SettingControls";
 import { DisclosureChevron } from "~/components/ui/DisclosureChevron";
 import { Button } from "~/components/ui/button";
+import { Checkbox } from "~/components/ui/checkbox";
 import { Input } from "~/components/ui/input";
 import { toastManager } from "~/components/ui/toast";
 import { EnvironmentPanelTitle } from "~/components/chat/environment/EnvironmentRow";
@@ -68,6 +74,8 @@ import {
   DEFAULT_EXPANDED_DIRECTORIES,
   DEFAULT_LIBRARY_SORT,
   flattenLibraryRows,
+  indexLibraryKeyDeliverables,
+  type LibraryKeyDeliverable,
   type LibraryRow,
   type LibrarySortKey,
   type LibrarySortState,
@@ -76,6 +84,7 @@ import {
   nextLibrarySort,
   toggleLibraryDirectory,
 } from "./libraryPanel.logic";
+import { buildHubDeliverableGroups } from "./hubDeliverablePresentation";
 import { useGroupLibrary } from "./useGroupLibrary";
 
 export interface LibraryPanelProps {
@@ -83,6 +92,7 @@ export interface LibraryPanelProps {
   variant: "docked" | "floating";
   projectId: ProjectId | null;
   onClose: () => void;
+  onReferenceDeliverable?: (selection: LibraryKeyDeliverable) => void;
 }
 
 const TYPE_FILTER_OPTIONS: ReadonlyArray<{
@@ -101,23 +111,59 @@ const VIEW_MODE_OPTIONS = [
   { value: "grid" as const, label: "Grid" },
 ];
 
+type PinnedPreviewState =
+  | { readonly selection: LibraryKeyDeliverable; readonly state: "loading" }
+  | { readonly selection: LibraryKeyDeliverable; readonly state: "error"; readonly message: string }
+  | {
+      readonly selection: LibraryKeyDeliverable;
+      readonly state: "ready";
+      readonly result: HubDeliverableReadResult;
+    };
+
 // The server names delete commits "Delete <relativePath>" (wsRpc.ts) — the only
 // whole-library commit kind the row-level Restore button can act on.
 function deletedPathFromCommitMessage(message: string): string | null {
   return message.startsWith("Delete ") ? message.slice("Delete ".length) : null;
 }
 
-export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanelProps) {
+function publishedReadMatchesSelection(
+  selection: LibraryKeyDeliverable,
+  result: HubDeliverableReadResult,
+): boolean {
+  return (
+    result.hubId === selection.collection.hubId &&
+    result.workerThreadId === selection.collection.workerThreadId &&
+    result.revision === selection.collection.revision &&
+    result.file.path === selection.file.path &&
+    (selection.collection.commitSha === null || result.commitSha === selection.collection.commitSha)
+  );
+}
+
+function publishedReadErrorMessage(cause: unknown): string {
+  if (cause instanceof Error) return cause.message;
+  return "Could not read the published file.";
+}
+
+export function LibraryPanel({
+  open,
+  variant,
+  projectId,
+  onClose,
+  onReferenceDeliverable,
+}: LibraryPanelProps) {
   const library = useGroupLibrary({ projectId, enabled: open && projectId !== null });
   const [query, setQuery] = useState("");
+  const [libraryTab, setLibraryTab] = useState<"key" | "all">("key");
   const [typeFilter, setTypeFilter] = useState<LibraryTypeFilter>("all");
   const [viewMode, setViewMode] = useState<LibraryViewMode>("list");
   const [sort, setSort] = useState<LibrarySortState>(DEFAULT_LIBRARY_SORT);
+  const [onlyKeyDeliverables, setOnlyKeyDeliverables] = useState(false);
   const [expandedDirectories, setExpandedDirectories] = useState<ReadonlySet<string>>(
     DEFAULT_EXPANDED_DIRECTORIES,
   );
   const [fullHeight, setFullHeight] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
+  const [pinnedPreview, setPinnedPreview] = useState<PinnedPreviewState | null>(null);
   const [historyPath, setHistoryPath] = useState<string | null>(null);
   const [historyCommits, setHistoryCommits] = useState<readonly LibraryCommit[] | null>(null);
   // Empty string = the whole-library log (delete/rename commits included); any other
@@ -132,6 +178,49 @@ export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanel
   const uploadDirectoryRef = useRef<string | undefined>(undefined);
   // Latest history request wins — a slow response must not clobber a newer view.
   const historyGenerationRef = useRef(0);
+  const pinnedReadGenerationRef = useRef(0);
+  const visiblePinnedPreview =
+    pinnedPreview?.selection.collection.hubId === projectId ? pinnedPreview : null;
+
+  useEffect(() => {
+    pinnedReadGenerationRef.current += 1;
+    setPinnedPreview(null);
+    setPreviewPath(null);
+  }, [projectId]);
+
+  const keyDeliverablesByPath = useMemo(
+    () => indexLibraryKeyDeliverables(library.deliverables),
+    [library.deliverables],
+  );
+  const keyDeliverablePaths = useMemo(
+    () => new Set(keyDeliverablesByPath.keys()),
+    [keyDeliverablesByPath],
+  );
+  const keyDeliverableGroups = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    return buildHubDeliverableGroups(library.deliverables)
+      .map((expert) => ({
+        ...expert,
+        works: expert.works
+          .map((work) => ({
+            ...work,
+            items: work.items.filter((item) => {
+              if (!normalizedQuery) return true;
+              const searchable = [
+                expert.name,
+                work.title,
+                item.file.name,
+                item.file.description ?? "",
+              ]
+                .join(" ")
+                .toLocaleLowerCase();
+              return searchable.includes(normalizedQuery);
+            }),
+          }))
+          .filter((work) => work.items.length > 0),
+      }))
+      .filter((expert) => expert.works.length > 0);
+  }, [library.deliverables, query]);
 
   const rows = useMemo(
     () =>
@@ -141,13 +230,77 @@ export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanel
         sort,
         typeFilter,
         query,
+        onlyKeyDeliverables,
+        keyDeliverablePaths,
       }),
-    [library.entriesByDir, expandedDirectories, sort, typeFilter, query],
+    [
+      library.entriesByDir,
+      expandedDirectories,
+      sort,
+      typeFilter,
+      query,
+      onlyKeyDeliverables,
+      keyDeliverablePaths,
+    ],
   );
 
-  const openFile = useCallback((entry: LibraryEntry) => {
-    setPreviewPath(entry.relativePath);
+  const openPinnedDeliverable = useCallback(
+    async (keyDeliverable: LibraryKeyDeliverable) => {
+      const generation = ++pinnedReadGenerationRef.current;
+      setPreviewPath(null);
+      setPinnedPreview({ selection: keyDeliverable, state: "loading" });
+      let result: HubDeliverableReadResult | null;
+      try {
+        result = await library.readDeliverable({
+          ownerThreadId: keyDeliverable.collection.workerThreadId,
+          path: keyDeliverable.file.path,
+          revision: keyDeliverable.collection.revision,
+        });
+      } catch (cause) {
+        if (pinnedReadGenerationRef.current !== generation) return;
+        setPinnedPreview({
+          selection: keyDeliverable,
+          state: "error",
+          message: publishedReadErrorMessage(cause),
+        });
+        return;
+      }
+      if (pinnedReadGenerationRef.current !== generation || result === null) return;
+      if (!publishedReadMatchesSelection(keyDeliverable, result)) {
+        setPinnedPreview({
+          selection: keyDeliverable,
+          state: "error",
+          message: "The published file response did not match the selected version.",
+        });
+        return;
+      }
+      setPinnedPreview({ selection: keyDeliverable, state: "ready", result });
+    },
+    [library],
+  );
+
+  const switchLibraryTab = useCallback((next: "key" | "all") => {
+    setLibraryTab(next);
+    pinnedReadGenerationRef.current += 1;
+    setPinnedPreview(null);
+    setPreviewPath(null);
+    setHistoryPath(null);
+    setHistoryCommits(null);
   }, []);
+
+  const openFile = useCallback(
+    (entry: LibraryEntry) => {
+      const keyDeliverable = keyDeliverablesByPath.get(entry.relativePath);
+      if (keyDeliverable) {
+        void openPinnedDeliverable(keyDeliverable);
+        return;
+      }
+      pinnedReadGenerationRef.current += 1;
+      setPinnedPreview(null);
+      setPreviewPath(entry.relativePath);
+    },
+    [keyDeliverablesByPath, openPinnedDeliverable],
+  );
 
   const toggleDirectory = useCallback(
     (entry: LibraryEntry) => {
@@ -264,7 +417,11 @@ export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanel
     if (!target) return;
     const deleted = await library.deleteEntry(target.relativePath);
     if (deleted && previewPath === target.relativePath) setPreviewPath(null);
-  }, [deleteTarget, library, previewPath]);
+    if (deleted && pinnedPreview?.selection.libraryPath === target.relativePath) {
+      pinnedReadGenerationRef.current += 1;
+      setPinnedPreview(null);
+    }
+  }, [deleteTarget, library, previewPath, pinnedPreview]);
 
   const commitRename = useCallback(async () => {
     const target = renameTarget;
@@ -295,6 +452,14 @@ export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanel
     },
     [library],
   );
+
+  const { loadKeyDeliverableDirectories } = library;
+
+  useEffect(() => {
+    if (open && projectId && onlyKeyDeliverables) {
+      void loadKeyDeliverableDirectories();
+    }
+  }, [open, projectId, onlyKeyDeliverables, loadKeyDeliverableDirectories]);
 
   // The coordinator and its threads write into the library on their own — refetch
   // the loaded listing when the window regains focus and whenever a group thread's
@@ -374,50 +539,73 @@ export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanel
         <SearchInput
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search library..."
+          placeholder={libraryTab === "key" ? "Search key deliverables..." : "Search library..."}
           aria-label="Search library"
         />
       </div>
 
       <div className="flex items-center gap-1.5 px-2 pb-1.5">
-        {/* Ghost select, like the panel's other pickers: the filter reads as a
-            label until it is used, instead of a boxed native control. */}
-        <Select
-          value={typeFilter}
-          onValueChange={(next) => {
-            if (next !== null) setTypeFilter(next as LibraryTypeFilter);
-          }}
-        >
-          <SelectTrigger variant="ghost" size="xs" className="w-auto min-w-0" aria-label="Type">
-            <SelectValue>
-              {TYPE_FILTER_OPTIONS.find((option) => option.value === typeFilter)?.label}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectPopup surface="composer">
-            {TYPE_FILTER_OPTIONS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectPopup>
-        </Select>
-        <div className="ml-auto">
-          <SettingsSegmentedControl
-            value={viewMode}
-            onValueChange={setViewMode}
-            options={VIEW_MODE_OPTIONS}
-            ariaLabel="View mode"
-          />
-        </div>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          className="hidden"
-          aria-label="Upload files to the library"
-          onChange={(event) => void handleUploadChange(event.target.files)}
+        <SettingsSegmentedControl
+          value={libraryTab}
+          onValueChange={switchLibraryTab}
+          options={[
+            { value: "key", label: "Key deliverables" },
+            { value: "all", label: "All files" },
+          ]}
+          ariaLabel="Library view"
         />
       </div>
+
+      {libraryTab === "all" ? (
+        <div className="flex items-center gap-1.5 px-2 pb-1.5">
+          {/* Ghost select, like the panel's other pickers: the filter reads as a
+            label until it is used, instead of a boxed native control. */}
+          <Select
+            value={typeFilter}
+            onValueChange={(next) => {
+              if (next !== null) setTypeFilter(next as LibraryTypeFilter);
+            }}
+          >
+            <SelectTrigger variant="ghost" size="xs" className="w-auto min-w-0" aria-label="Type">
+              <SelectValue>
+                {TYPE_FILTER_OPTIONS.find((option) => option.value === typeFilter)?.label}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup surface="composer">
+              {TYPE_FILTER_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+          <label className="flex shrink-0 cursor-pointer select-none items-center gap-1 text-ui-xs text-muted-foreground">
+            <Checkbox
+              checked={onlyKeyDeliverables}
+              aria-label="仅看关键产物"
+              onCheckedChange={(checked) => setOnlyKeyDeliverables(checked === true)}
+              className="size-3.5"
+            />
+            <span>仅看关键产物</span>
+          </label>
+          <div className="ml-auto">
+            <SettingsSegmentedControl
+              value={viewMode}
+              onValueChange={setViewMode}
+              options={VIEW_MODE_OPTIONS}
+              ariaLabel="View mode"
+            />
+          </div>
+        </div>
+      ) : null}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        aria-label="Upload files to the library"
+        onChange={(event) => void handleUploadChange(event.target.files)}
+      />
 
       {remoteStatus?.remoteConfigured ? (
         <div className="flex items-center gap-1.5 px-2 pb-1.5">
@@ -445,8 +633,84 @@ export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanel
           {library.error}
         </p>
       ) : null}
+      {library.deliverablesError ? (
+        <p className="px-2 pb-1 text-ui-sm text-destructive" role="alert">
+          {library.deliverablesError}
+        </p>
+      ) : null}
 
-      {previewPath !== null && library.root ? (
+      {visiblePinnedPreview !== null ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex flex-col px-2 pb-1">
+            <button
+              type="button"
+              aria-label={`Back to library from ${visiblePinnedPreview.selection.file.name}`}
+              title="Back to library"
+              className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-left text-ui-sm text-muted-foreground transition-colors hover:bg-[var(--color-background-button-secondary-hover)] hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={() => {
+                pinnedReadGenerationRef.current += 1;
+                setPinnedPreview(null);
+              }}
+            >
+              <ArrowLeftIcon className="size-3.5 shrink-0" />
+              <span className="min-w-0 truncate" title={visiblePinnedPreview.selection.file.name}>
+                {visiblePinnedPreview.selection.file.name}
+              </span>
+            </button>
+            <div className="flex min-w-0 items-center gap-1 pl-6">
+              <div
+                className="min-w-0 flex-1 truncate text-ui-xs text-muted-foreground"
+                title={`${visiblePinnedPreview.selection.collection.expertBinding?.displayName ?? "Expert"} · ${visiblePinnedPreview.selection.collection.sourceWorkTitle ?? "Untitled work item"}`}
+              >
+                {visiblePinnedPreview.selection.collection.expertBinding?.displayName ?? "Expert"}
+                {visiblePinnedPreview.selection.collection.sourceWorkTitle
+                  ? ` · ${visiblePinnedPreview.selection.collection.sourceWorkTitle}`
+                  : ""}
+                {visiblePinnedPreview.selection.collection.provenance?.publishedAt
+                  ? ` · ${formatRelativeTime(visiblePinnedPreview.selection.collection.provenance.publishedAt)}`
+                  : ""}
+                {visiblePinnedPreview.selection.file.libraryState === "missing"
+                  ? " · Missing from Library"
+                  : ""}
+                {` · revision ${visiblePinnedPreview.selection.collection.revision}`}
+              </div>
+              {onReferenceDeliverable !== undefined && visiblePinnedPreview.state === "ready" ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => onReferenceDeliverable(visiblePinnedPreview.selection)}
+                >
+                  Reference in chat
+                </Button>
+              ) : null}
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {visiblePinnedPreview.state === "loading" ? (
+              <PanelStateMessage density="compact" fill="flex">
+                <p>Loading published version…</p>
+              </PanelStateMessage>
+            ) : visiblePinnedPreview.state === "error" ? (
+              <PanelStateMessage density="compact" fill="flex" className="text-destructive">
+                <p>{visiblePinnedPreview.message}</p>
+              </PanelStateMessage>
+            ) : (
+              <WorkspaceFilePreview
+                key={`${visiblePinnedPreview.result.hubId}:${visiblePinnedPreview.result.workerThreadId}:${visiblePinnedPreview.result.revision}:${visiblePinnedPreview.result.commitSha}`}
+                workspaceRoot={null}
+                filePath={visiblePinnedPreview.result.file.path}
+                markdownPreviewDefault
+                editable={false}
+                pinnedContent={visiblePinnedPreview.result.content}
+                pinnedMediaType={visiblePinnedPreview.result.file.mediaType}
+                pinnedVersionKey={`${visiblePinnedPreview.result.hubId}:${visiblePinnedPreview.result.workerThreadId}:${visiblePinnedPreview.result.revision}:${visiblePinnedPreview.result.commitSha}`}
+              />
+            )}
+          </div>
+        </div>
+      ) : previewPath !== null && library.root ? (
         <div className="flex min-h-0 flex-1 flex-col">
           <div className="flex items-center px-2 pb-1">
             <button
@@ -552,6 +816,72 @@ export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanel
             )}
           </div>
         </div>
+      ) : libraryTab === "key" ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2" data-library-view="key">
+          {library.deliverablesLoading && keyDeliverableGroups.length === 0 ? (
+            <PanelStateMessage density="compact" fill="flex">
+              <p>Loading key deliverables…</p>
+            </PanelStateMessage>
+          ) : keyDeliverableGroups.length === 0 ? (
+            <PanelStateMessage density="compact" fill="flex">
+              <p>
+                {query.trim()
+                  ? "No key deliverables match."
+                  : "No key deliverables are available in this library."}
+              </p>
+            </PanelStateMessage>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {keyDeliverableGroups.map((expert) => (
+                <section key={expert.key} aria-label={expert.name}>
+                  <h3 className="px-1 pb-1 text-ui-sm font-medium text-muted-foreground">
+                    {expert.name}
+                  </h3>
+                  <div className="flex flex-col gap-2">
+                    {expert.works.map((work) => (
+                      <div key={work.key} className="flex flex-col gap-0.5">
+                        <h4 className="px-1 text-ui-xs text-muted-foreground">{work.title}</h4>
+                        {work.items.map((selection) => {
+                          const missing = selection.file.libraryState === "missing";
+                          return (
+                            <button
+                              key={`${selection.collection.workerThreadId}:${selection.file.path}`}
+                              type="button"
+                              aria-label={`${selection.file.name}${missing ? ", missing from Library" : ""}`}
+                              className={fileRowClassName(false, "min-h-9 px-2 py-1")}
+                              onClick={() => void openPinnedDeliverable(selection)}
+                            >
+                              <FileEntryIcon
+                                pathValue={selection.file.name}
+                                kind="file"
+                                className="size-3.5 shrink-0 opacity-75"
+                              />
+                              <span className="flex min-w-0 flex-1 flex-col items-start overflow-hidden">
+                                <span className="w-full truncate text-left font-medium">
+                                  {selection.file.name}
+                                </span>
+                                {selection.file.description ? (
+                                  <span className="w-full truncate text-left text-ui-xs text-muted-foreground">
+                                    {selection.file.description}
+                                  </span>
+                                ) : null}
+                              </span>
+                              {missing ? (
+                                <span className="shrink-0 rounded bg-destructive/10 px-1 py-0.5 text-ui-xs text-destructive">
+                                  Missing from Library
+                                </span>
+                              ) : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+        </div>
       ) : (
         <>
           {viewMode === "list" ? (
@@ -586,7 +916,9 @@ export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanel
           <div className="min-h-0 flex-1 overflow-y-auto p-1" data-library-view={viewMode}>
             {emptyLibrary ? (
               <PanelStateMessage density="compact" fill="flex">
-                {query || typeFilter !== "all" ? (
+                {onlyKeyDeliverables ? (
+                  <p>No key deliverables are available in this library.</p>
+                ) : query || typeFilter !== "all" ? (
                   <p>No files match.</p>
                 ) : (
                   <p>No files yet. Add documents or artifacts for this hub.</p>
@@ -599,6 +931,7 @@ export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanel
                     key={row.entry.relativePath}
                     row={row}
                     renaming={renameTarget === row.entry.relativePath}
+                    keyDeliverable={keyDeliverablePaths.has(row.entry.relativePath)}
                     renameDraft={renameDraft}
                     onRenameDraftChange={setRenameDraft}
                     onRenameCommit={() => void commitRename()}
@@ -616,6 +949,7 @@ export function LibraryPanel({ open, variant, projectId, onClose }: LibraryPanel
                     row={row}
                     expanded={expandedDirectories.has(row.entry.relativePath)}
                     renaming={renameTarget === row.entry.relativePath}
+                    keyDeliverable={keyDeliverablePaths.has(row.entry.relativePath)}
                     renameDraft={renameDraft}
                     onRenameDraftChange={setRenameDraft}
                     onRenameCommit={() => void commitRename()}
@@ -689,6 +1023,7 @@ function LibraryListRow(props: {
   row: LibraryRow;
   expanded: boolean;
   renaming: boolean;
+  keyDeliverable: boolean;
   renameDraft: string;
   onRenameDraftChange: (value: string) => void;
   onRenameCommit: () => void;
@@ -735,6 +1070,11 @@ function LibraryListRow(props: {
             className="size-3.5 shrink-0 opacity-75"
           />
           <span className="min-w-0 truncate font-medium">{entry.name}</span>
+          {props.keyDeliverable ? (
+            <span className="shrink-0 rounded bg-primary/10 px-1 py-0.5 text-ui-xs text-primary">
+              Key
+            </span>
+          ) : null}
         </button>
       )}
       <span className="pr-1 text-ui-xs text-muted-foreground/80">
@@ -749,6 +1089,7 @@ function LibraryListRow(props: {
 function LibraryGridTile(props: {
   row: LibraryRow;
   renaming: boolean;
+  keyDeliverable: boolean;
   renameDraft: string;
   onRenameDraftChange: (value: string) => void;
   onRenameCommit: () => void;
@@ -789,7 +1130,14 @@ function LibraryGridTile(props: {
         className="size-4 shrink-0 opacity-80"
       />
       <span className="flex min-w-0 flex-1 flex-col items-start overflow-hidden">
-        <span className="w-full truncate font-medium">{entry.name}</span>
+        <span className="flex w-full min-w-0 items-center gap-1">
+          <span className="min-w-0 flex-1 truncate font-medium">{entry.name}</span>
+          {props.keyDeliverable ? (
+            <span className="shrink-0 rounded bg-primary/10 px-1 py-0.5 text-ui-xs text-primary">
+              Key
+            </span>
+          ) : null}
+        </span>
         {depth > 0 ? (
           <span className="w-full truncate text-ui-xs text-muted-foreground/70">
             {entry.relativePath}

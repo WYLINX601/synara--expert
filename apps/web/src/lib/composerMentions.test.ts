@@ -3,6 +3,10 @@
 // Layer: Web composer helper tests
 
 import { describe, expect, it } from "vitest";
+import {
+  buildHubDeliverableReferenceUri,
+  buildHubExpertReferenceUri,
+} from "@synara/shared/hubReferences";
 
 import {
   createComposerMentionTokenRegex,
@@ -81,6 +85,54 @@ describe("composer mention reference filtering", () => {
     ]);
     expect(filterPromptProviderMentionReferences("Compare the plan please", [mention])).toEqual([]);
     expect(resolveMentionChipKind(mention.name, { mentionReferences: [mention] })).toBe("thread");
+  });
+
+  it("matches Hub references by exact canonical URI when display names are identical", () => {
+    const v1 = {
+      name: "brief.md",
+      path: buildHubDeliverableReferenceUri({
+        hubId: "design-hub",
+        workerThreadId: "worker-1",
+        path: "brief.md",
+        revision: 1,
+      }),
+    };
+    const v2 = {
+      ...v1,
+      path: buildHubDeliverableReferenceUri({
+        hubId: "design-hub",
+        workerThreadId: "worker-1",
+        path: "brief.md",
+        revision: 2,
+      }),
+    };
+    const v1Token = formatComposerMentionToken(v1.path);
+    const v2Token = formatComposerMentionToken(v2.path);
+
+    expect(
+      filterPromptProviderMentionReferences(`Use ${v1Token} and ${v2Token}`, [v1, v2]),
+    ).toEqual([v1, v2]);
+    expect(filterPromptProviderMentionReferences(`Use ${v1Token}`, [v1, v2])).toEqual([v1]);
+    expect(
+      filterPromptProviderMentionReferences(
+        `Use ${formatComposerMentionToken(v1.path.toUpperCase())}`,
+        [v1],
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps expert chip kind and name separate from its canonical URI", () => {
+    const expert = {
+      name: "Research Expert",
+      path: buildHubExpertReferenceUri("research-expert"),
+    };
+
+    expect(resolveMentionChipKind(expert.path)).toBe("expert");
+    expect(
+      filterPromptProviderMentionReferences(`Ask ${formatComposerMentionToken(expert.path)}`, [
+        expert,
+      ]),
+    ).toEqual([expert]);
   });
 
   it("keeps selected slash and dollar skills only when their prompt token remains", () => {

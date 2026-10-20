@@ -21,13 +21,14 @@ import {
   type ServerSettings,
 } from "@synara/contracts";
 import { MEMORY_AUTO_DOCUMENT_PATH, memoryThreadDocumentPath } from "@synara/shared/projectAgent";
-import { Cause, Deferred, Effect, Fiber, Layer, Option, Stream } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { AgentGatewayOperationRepository } from "../../agentGateway/Services/AgentGatewayOperationRepository.ts";
 import { AgentGatewayOperationRepositoryLive } from "../../agentGateway/Layers/AgentGatewayOperationRepository.ts";
 
 import { ServerConfig } from "../../config.ts";
+import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { TextGeneration } from "../../git/Services/TextGeneration.ts";
 import { GitCore } from "../../git/Services/GitCore.ts";
 import { AutomationService } from "../../automation/Services/AutomationService.ts";
@@ -485,6 +486,103 @@ const leftoverConfig = {
   updatedAt: now,
   disabledAt: null,
 };
+
+it.effect(
+  "defaults to no participants, preserves unavailable selections on other saves, and clears explicitly",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO projection_projects (project_id, kind, title, workspace_root, scripts_json, created_at, updated_at)
+      VALUES (${groupId}, 'group', 'Hub', '/tmp/participants-hub', '[]', ${now}, ${now})`;
+      const config = yield* ServerConfig;
+      const store = createExpertStore(config.stateDir);
+      const expert = yield* Effect.promise(() =>
+        store.save({
+          name: "Participant",
+          description: "",
+          useCases: "",
+          persona: "Review",
+          outputRequirements: "",
+          skills: [],
+          references: [],
+          connections: [],
+        }),
+      );
+      const base = { projectId: groupId, coordinatorModelSelection: modelSelection };
+      const empty = yield* service.configure(
+        { ...base, requestId: "participants-empty" },
+        { kind: "user" },
+      );
+      assert.deepEqual(empty.config?.expertIds, []);
+      const selected = yield* service.configure(
+        {
+          ...base,
+          requestId: "participants-select",
+          expectedRevision: empty.config!.revision,
+          expertIds: [expert.id, expert.id],
+        },
+        { kind: "user" },
+      );
+      assert.deepEqual(selected.config?.expertIds, [expert.id]);
+      const principal = {
+        kind: "coordinator" as const,
+        projectId: groupId,
+        threadId: selected.config!.coordinatorThreadId,
+      };
+      assert.equal(
+        (yield* service.resolveParticipatingExpert!(
+          { projectId: groupId, expertId: expert.id },
+          principal,
+        )).displayName,
+        "Participant",
+      );
+      yield* Effect.promise(() => store.archive(expert.id, expert.revision));
+      const unavailable = yield* Effect.exit(
+        service.resolveParticipatingExpert!({ projectId: groupId, expertId: expert.id }, principal),
+      );
+      assert.equal(Exit.isFailure(unavailable), true);
+      const kept = yield* service.configure(
+        { ...base, requestId: "participants-keep", goal: "Other setting" },
+        { kind: "user" },
+      );
+      assert.deepEqual(kept.config?.expertIds, [expert.id]);
+      const wrongReplay = yield* Effect.exit(
+        service.configure(
+          { ...base, requestId: "participants-select", expertIds: [] },
+          { kind: "user" },
+        ),
+      );
+      assert.equal(Exit.isFailure(wrongReplay), true);
+      yield* Effect.promise(() => store.remove(expert.id, expert.revision + 1));
+      const deletedKept = yield* service.configure(
+        { ...base, requestId: "participants-deleted-keep" },
+        { kind: "user" },
+      );
+      assert.deepEqual(deletedKept.config?.expertIds, [expert.id]);
+      const cleared = yield* service.configure(
+        { ...base, requestId: "participants-clear", expertIds: [] },
+        { kind: "user" },
+      );
+      assert.deepEqual(cleared.config?.expertIds, []);
+      const unknown = yield* Effect.exit(
+        service.configure(
+          { ...base, requestId: "participants-forged", expertIds: ["missing"] },
+          { kind: "user" },
+        ),
+      );
+      assert.equal(Exit.isFailure(unknown), true);
+      const stale = yield* Effect.exit(
+        service.configure(
+          { ...base, requestId: "participants-stale", expertIds: [], expectedRevision: 1 },
+          { kind: "user" },
+        ),
+      );
+      assert.equal(Exit.isFailure(stale), true);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
 
 it.effect("configures a hub and imports exactly one greeting", () => {
   const harness = makeTestLayer();
@@ -970,20 +1068,30 @@ it.effect("surfaces linked projects in the overview before the hub is configured
   const harness = makeTestLayer();
   return Effect.gen(function* () {
     const service = yield* ProjectAgentService;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO projection_projects (project_id, kind, title, workspace_root, scripts_json, created_at, updated_at)
+      VALUES (${groupId}, 'group', 'Hub', '/tmp/hub', '[]', ${now}, ${now})`;
     const linked = yield* service.linkProject(
       {
         requestId: "req-link-preconfig",
         projectId: groupId,
         linkedProjectId: ordinaryId,
+        contextSource: true,
       },
       { kind: "user" },
     );
     assert.equal(linked.config, null);
     assert.equal(linked.configured, false);
+    assert.equal(linked.sourceProjectId, ordinaryId);
     assert.deepEqual(linked.linkedProjectIds, [ordinaryId]);
     const overview = yield* service.getOverview({ projectId: groupId }, { kind: "user" });
     assert.equal(overview.config, null);
+    assert.equal(overview.sourceProjectId, ordinaryId);
     assert.deepEqual(overview.linkedProjectIds, [ordinaryId]);
+    const summaries = yield* service.listSummaries({}, { kind: "user" });
+    const pending = summaries.summaries.find((item) => item.projectId === groupId);
+    assert.equal(pending?.configured, false);
+    assert.deepEqual(pending?.linkedProjectIds, [ordinaryId]);
     const configured = yield* service.configure(
       {
         requestId: "req-link-preconfig-configure",
@@ -994,6 +1102,23 @@ it.effect("surfaces linked projects in the overview before the hub is configured
     );
     assert.deepEqual(configured.linkedProjectIds, [ordinaryId]);
     assert.deepEqual(configured.config?.linkedProjectIds, [ordinaryId]);
+    assert.equal(configured.config?.sourceProjectId, ordinaryId);
+    assert.equal(
+      (yield* service.getOverview({ projectId: groupId }, { kind: "user" })).config
+        ?.sourceProjectId,
+      ordinaryId,
+    );
+    const unlinkSource = yield* Effect.result(
+      service.unlinkProject(
+        {
+          requestId: "req-source-unlink",
+          projectId: groupId,
+          linkedProjectId: ordinaryId,
+        },
+        { kind: "user" },
+      ),
+    );
+    assert.equal(unlinkSource._tag, "Failure");
   }).pipe(Effect.provide(harness.layer));
 });
 
@@ -3354,6 +3479,21 @@ it.effect("delete removes hub data, keeps custom libraries and linked repos", ()
       ))._tag,
       "Failure",
     );
+    const sql = yield* SqlClient.SqlClient;
+    for (const hubId of [groupId, groupId2]) {
+      yield* sql`
+        INSERT INTO hub_expert_deliverable_collections
+          (hub_id, worker_thread_id, revision, state, files_json, updated_at)
+        VALUES (${hubId}, 'worker-history', 2, 'withdrawn', '[]', ${now})
+      `;
+      yield* sql`
+        INSERT INTO hub_expert_deliverable_requests
+          (hub_id, worker_thread_id, request_id, operation, expected_revision, fingerprint,
+           status, request_json, files_json, created_at, updated_at)
+        VALUES (${hubId}, 'worker-history', 'unfinished-request', 'publish', 2, 'fingerprint',
+                'prepared', '{}', '[]', ${now}, ${now})
+      `;
+    }
     const result = yield* service.deleteGroup(
       { requestId: "req-del-1", projectId: groupId, confirmName: "Alpha" },
       { kind: "user" },
@@ -3363,6 +3503,15 @@ it.effect("delete removes hub data, keeps custom libraries and linked repos", ()
     // The group's coordinator data is gone; linked repos are untouched.
     const config = yield* repository.getConfig(groupId);
     assert.equal(Option.isNone(config), true);
+    for (const table of ["hub_expert_deliverable_collections", "hub_expert_deliverable_requests"]) {
+      const rows = yield* sql.unsafe<{ hubId: string }>(
+        `SELECT hub_id AS hubId FROM ${table} ORDER BY hub_id`,
+      );
+      assert.deepEqual(
+        rows.map((row) => row.hubId),
+        [groupId2],
+      );
+    }
     // project.delete only accepts threadless projects: every group thread
     // (coordinator + members) is deleted first — but never a linked-repo
     // worker thread.

@@ -1,4 +1,12 @@
 import { Schema } from "effect";
+import {
+  ProjectAgentDeliverablesListInput,
+  ProjectAgentDeliverablesReadInput,
+  ProjectAgentDeliverablesWithdrawInput,
+  HubDeliverableListResult,
+  HubDeliverableReadResult,
+  HubDeliverableMutationResult,
+} from "./hubDeliverables";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 
@@ -37,6 +45,8 @@ import {
   ProjectAgentExportDocumentsInput,
   ProjectAgentExportDocumentsResult,
   ProjectAgentGetOverviewInput,
+  ProjectAgentListExpertsInput,
+  ProjectAgentListExpertsResult,
   ProjectAgentListSummariesInput,
   ProjectAgentListSummariesResult,
   ProjectAgentGoalControlInput,
@@ -1953,6 +1963,12 @@ export const WsSubscribeTodoEventsRpc = Rpc.make(WS_METHODS.subscribeTodoEvents,
   stream: true,
 });
 
+export const WsProjectAgentListExpertsRpc = Rpc.make(WS_METHODS.projectAgentListExperts, {
+  payload: ProjectAgentListExpertsInput,
+  success: ProjectAgentListExpertsResult,
+  error: WsRpcError,
+});
+
 export const WsProjectAgentGetOverviewRpc = Rpc.make(WS_METHODS.projectAgentGetOverview, {
   payload: ProjectAgentGetOverviewInput,
   success: ProjectAgentOverview,
@@ -2109,6 +2125,24 @@ export const WsProjectAgentLibraryListRpc = Rpc.make(WS_METHODS.projectAgentLibr
   success: ProjectAgentLibraryListResult,
   error: WsRpcError,
 });
+export const WsProjectAgentDeliverablesListRpc = Rpc.make(WS_METHODS.projectAgentDeliverablesList, {
+  payload: ProjectAgentDeliverablesListInput,
+  success: HubDeliverableListResult,
+  error: WsRpcError,
+});
+export const WsProjectAgentDeliverablesReadRpc = Rpc.make(WS_METHODS.projectAgentDeliverablesRead, {
+  payload: ProjectAgentDeliverablesReadInput,
+  success: HubDeliverableReadResult,
+  error: WsRpcError,
+});
+export const WsProjectAgentDeliverablesWithdrawRpc = Rpc.make(
+  WS_METHODS.projectAgentDeliverablesWithdraw,
+  {
+    payload: ProjectAgentDeliverablesWithdrawInput,
+    success: HubDeliverableMutationResult,
+    error: WsRpcError,
+  },
+);
 export const WsProjectAgentLibraryMkdirRpc = Rpc.make(WS_METHODS.projectAgentLibraryMkdir, {
   payload: ProjectAgentLibraryMkdirInput,
   success: ProjectAgentLibraryMutationResult,
@@ -2359,6 +2393,7 @@ export const WsFeatureRpcGroup: RpcGroup.RpcGroup<WsFeatureRpc> = WS_FEATURE_RPC
 // WsFeatureRpcGroup pushes its inferred type past the declaration emit limit.
 export const WsProjectAgentRpcGroup = RpcGroup.make(
   WsProjectAgentGetOverviewRpc,
+  WsProjectAgentListExpertsRpc,
   WsProjectAgentListSummariesRpc,
   WsProjectAgentConfigureRpc,
   WsProjectAgentLinkProjectRpc,
@@ -2388,6 +2423,9 @@ export const WsProjectAgentRpcGroup = RpcGroup.make(
   WsProjectAgentExportDocumentsRpc,
   WsProjectAgentRefreshDigestRpc,
   WsProjectAgentLibraryListRpc,
+  WsProjectAgentDeliverablesListRpc,
+  WsProjectAgentDeliverablesReadRpc,
+  WsProjectAgentDeliverablesWithdrawRpc,
   WsProjectAgentLibraryMkdirRpc,
   WsProjectAgentLibraryRenameRpc,
   WsProjectAgentLibraryDeleteRpc,

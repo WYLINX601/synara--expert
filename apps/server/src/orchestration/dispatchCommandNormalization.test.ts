@@ -238,6 +238,34 @@ describe("makeDispatchCommandNormalizer", () => {
     expect(preparedRoots).toEqual(["/Users/tester/Documents/Synara/Groups/alpha-bot"]);
   });
 
+  it("keeps distinct creation-identity folders for concurrent same-title Hubs and retries", async () => {
+    const root = "/Users/tester/Documents/Synara/Groups";
+    const normalizer = makeDispatchCommandNormalizer<Error>({
+      attachmentsDir: "/tmp/attachments",
+      groupsWorkspaceRoot: root,
+      fileSystem: {} as FileSystem.FileSystem,
+      path: path as unknown as Path.Path,
+      canonicalizeProjectWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
+    });
+    const create = (id: string) =>
+      normalizer({
+        command: projectCreateCommand({
+          kind: "group",
+          title: "Alpha Bot",
+          projectId: ProjectId.makeUnsafe(id),
+          workspaceRoot: `${root}/alpha-bot-${id}`,
+        }),
+      });
+    const [first, second, retry] = await Promise.all([
+      Effect.runPromise(create("request-a")),
+      Effect.runPromise(create("request-b")),
+      Effect.runPromise(create("request-a")),
+    ]);
+    expect(first.command).toMatchObject({ workspaceRoot: `${root}/alpha-bot-request-a` });
+    expect(second.command).toMatchObject({ workspaceRoot: `${root}/alpha-bot-request-b` });
+    expect(retry.command).toMatchObject({ workspaceRoot: `${root}/alpha-bot-request-a` });
+  });
+
   it("allocates a unique group folder when the slug is already taken", async () => {
     const groupsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "synara-groups-"));
     const takenDir = path.join(groupsRoot, "alpha-bot");

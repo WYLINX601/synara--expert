@@ -5,7 +5,12 @@
 // Layer: Web chat presentation component
 // Exports: WorkspaceFilePreview, isMarkdownPreviewablePath
 
-import type { ProjectFileChangeEvent, ProjectReadFileResult } from "@synara/contracts";
+import type {
+  HubDeliverableMediaType,
+  HubDeliverableReadContent,
+  ProjectFileChangeEvent,
+  ProjectReadFileResult,
+} from "@synara/contracts";
 import type { FileContents as PierreFileContents } from "@pierre/diffs";
 import {
   Editor as PierreEditor,
@@ -555,6 +560,12 @@ export interface WorkspaceFilePreviewProps {
   onAskWhyInChat?: ((reference: ChatFileReference) => void) | undefined;
   onCommentInChat?: ((comment: FileCommentSelection) => void) | undefined;
   onEditFile?: ((filePath: string) => void) | undefined;
+  /** Exact server-read content for an immutable published revision. */
+  pinnedContent?: HubDeliverableReadContent | undefined;
+  /** Server-declared type paired with pinnedContent. */
+  pinnedMediaType?: HubDeliverableMediaType | undefined;
+  /** Changes when the publication revision changes, to isolate preview state. */
+  pinnedVersionKey?: string | undefined;
 }
 
 export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
@@ -565,13 +576,7 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
   const taskWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
   const latestTaskWriteVersionRef = useRef({ next: 0, byFile: new Map<string, number>() });
   const taskFileDiskVersionRef = useRef(new Map<string, string>());
-  const {
-    filePath: requestedFilePath,
-    onAskWhyInChat,
-    onCommentInChat,
-    onReferenceInChat,
-    workspaceRoot,
-  } = props;
+  const { filePath: requestedFilePath, workspaceRoot } = props;
   const queryClient = useQueryClient();
   // A workspace-relative reference that fails to read may actually live under
   // an ancestor of the workspace root (agents sometimes emit paths relative to
@@ -585,6 +590,11 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
     fullPath: string;
   } | null>(null);
   const relocationRequestKey = `${workspaceRoot ?? ""}\0${requestedFilePath ?? ""}`;
+  const isPinnedContent = props.pinnedContent !== undefined;
+  const onAskWhyInChat = isPinnedContent ? undefined : props.onAskWhyInChat;
+  const onCommentInChat = isPinnedContent ? undefined : props.onCommentInChat;
+  const onReferenceInChat = isPinnedContent ? undefined : props.onReferenceInChat;
+  const pinnedVersionKey = isPinnedContent ? (props.pinnedVersionKey ?? "pinned") : "";
   const relocatedFullPath =
     relocation?.requestedKey === relocationRequestKey ? relocation.fullPath : null;
   const [binaryPreviewErrorKey, setBinaryPreviewErrorKey] = useState<string | null>(null);
@@ -609,7 +619,7 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
   const [markdownPreviewOverrides, setMarkdownPreviewOverrides] = useState<
     ReadonlyMap<string, boolean>
   >(() => new Map());
-  const markdownPreviewKey = `${workspaceRoot ?? ""}\0${filePath ?? ""}`;
+  const markdownPreviewKey = `${workspaceRoot ?? ""}\0${filePath ?? ""}\0${pinnedVersionKey}`;
   const markdownPreviewEnabled =
     props.markdownPreviewEnabled ??
     markdownPreviewOverrides.get(markdownPreviewKey) ??
@@ -617,14 +627,14 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
   const localPreviewGrantQuery = useQuery(
     projectLocalPreviewGrantQueryOptions({
       path: filePath,
-      enabled: fileNeedsLocalPreviewGrant,
+      enabled: !isPinnedContent && fileNeedsLocalPreviewGrant,
     }),
   );
   const localPreviewGrant =
     fileNeedsLocalPreviewGrant && isLocalPreviewGrantUsable(localPreviewGrantQuery.data)
       ? (localPreviewGrantQuery.data?.grant ?? null)
       : null;
-  const binaryPreviewKey = `${props.workspaceRoot ?? ""}\0${filePath ?? ""}\0${localPreviewGrant ?? ""}\0${binaryPreviewRevision}`;
+  const binaryPreviewKey = `${props.workspaceRoot ?? ""}\0${filePath ?? ""}\0${localPreviewGrant ?? ""}\0${pinnedVersionKey}\0${binaryPreviewRevision}`;
   const fileQuery = useQuery(
     projectReadFileQueryOptions({
       cwd: props.workspaceRoot,
@@ -633,6 +643,7 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
       // Images and PDFs are binary: they stream through the local-image HTTP
       // route instead of the text file-read RPC.
       enabled:
+        !isPinnedContent &&
         liveRevalidationEnabled &&
         filePath !== null &&
         !fileIsImage &&
@@ -641,7 +652,7 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
     }),
   );
   const resolvedWorkspaceRelativePath =
-    fileQuery.data && isWorkspaceRelativePathSafe(fileQuery.data.relativePath)
+    !isPinnedContent && fileQuery.data && isWorkspaceRelativePathSafe(fileQuery.data.relativePath)
       ? fileQuery.data.relativePath
       : null;
   const watchedWorkspaceRelativePath =
@@ -689,7 +700,7 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
   useProjectFileChangeSubscription({
     cwd: workspaceRoot,
     relativePath: watchedWorkspaceRelativePath,
-    enabled: liveRevalidationEnabled && watchedWorkspaceRelativePath !== null,
+    enabled: !isPinnedContent && liveRevalidationEnabled && watchedWorkspaceRelativePath !== null,
     onChange: handleWatchedFileChange,
   });
 
@@ -701,10 +712,12 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
   // created later.
   const binaryPreviewFailed = binaryPreviewErrorKey === relocationRequestKey;
   const fileReadFailedWithoutContents =
+    !isPinnedContent &&
     fileQuery.isError &&
     fileQuery.data === undefined &&
     !isRpcCapacityExceededError(fileQuery.error);
   const outOfRootResolutionEnabled =
+    !isPinnedContent &&
     workspaceRoot !== null &&
     requestedFilePath !== null &&
     isWorkspaceRelativePathSafe(requestedFilePath) &&
@@ -750,21 +763,40 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
     setBinaryPreviewErrorKey(relocationRequestKey);
   }, [relocationRequestKey]);
 
-  const fileContents = fileQuery.data?.contents ?? "";
+  const pinnedTextContents =
+    props.pinnedContent?.encoding === "utf-8" ? props.pinnedContent.text : null;
+  const pinnedTextFile: ProjectReadFileResult | undefined =
+    isPinnedContent && pinnedTextContents !== null && filePath !== null
+      ? {
+          relativePath: filePath,
+          contents: pinnedTextContents,
+          truncated: false,
+          version: pinnedVersionKey,
+          encoding: "utf8",
+          lineEnding: "lf",
+        }
+      : undefined;
+  const previewFileData = isPinnedContent ? pinnedTextFile : fileQuery.data;
+  const fileContents = previewFileData?.contents ?? "";
+  const pinnedBinaryUrl =
+    props.pinnedContent?.encoding === "base64"
+      ? `data:${props.pinnedMediaType ?? "application/octet-stream"};base64,${props.pinnedContent.data}`
+      : null;
   const showMarkdownPreview = fileIsMarkdown && markdownPreviewEnabled;
   const editor = useWorkspaceFileEditorBuffer({
     cwd: workspaceRoot,
     filePath,
-    enabled: Boolean(props.editable && fileIsWorkspaceRelative),
-    file: fileQuery.data,
+    enabled: Boolean(props.editable && !isPinnedContent && fileIsWorkspaceRelative),
+    file: previewFileData,
   });
   const editableDocument =
     props.editable &&
+    !isPinnedContent &&
     fileIsWorkspaceRelative &&
     workspaceRoot &&
-    fileQuery.data &&
+    previewFileData &&
     editor.readOnlyReason === null
-      ? fileQuery.data
+      ? previewFileData
       : null;
   const activeEditBuffer =
     editableDocument && editor.canEdit
@@ -784,7 +816,7 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
   const lineCount =
     displayedFileContents.length === 0 ? 0 : displayedFileContents.split("\n").length;
   const readOnlyReason =
-    !props.editable || showMarkdownPreview || fileQuery.data === undefined
+    !props.editable || showMarkdownPreview || previewFileData === undefined
       ? null
       : !fileIsWorkspaceRelative
         ? "Only files inside the project can be edited."
@@ -793,7 +825,7 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
   const handleEditBufferSave = editor.save;
 
   const handleFileReload = useCallback(() => {
-    if (!filePath) return;
+    if (isPinnedContent || !filePath) return;
     if (fileIsImage || fileIsPdf) {
       setBinaryPreviewReloading(true);
       setBinaryPreviewRevision((current) => current + 1);
@@ -803,16 +835,17 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
       cwd: workspaceRoot,
       relativePath: filePath,
     });
-  }, [fileIsImage, fileIsPdf, filePath, queryClient, workspaceRoot]);
+  }, [fileIsImage, fileIsPdf, filePath, isPinnedContent, queryClient, workspaceRoot]);
 
   const handleEditBufferReload = editor.reloadFromDisk;
   // Wait for the file read before asking for the working-tree diff: while the
   // read is pending the editable document is still unresolved, and an editor
   // that turns out to be editable never needs the read-only gutter.
   const changeGutterEnabled =
+    !isPinnedContent &&
     props.workspaceRoot !== null &&
     resolvedWorkspaceRelativePath !== null &&
-    fileQuery.data !== undefined &&
+    previewFileData !== undefined &&
     !fileIsImage &&
     !fileIsPdf &&
     !showMarkdownPreview &&
@@ -971,30 +1004,37 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
   // Toggling a task rewrites the file, so only enable it when the preview
   // holds the complete contents (writing a truncated read would corrupt it).
   const canToggleTasks =
+    !isPinnedContent &&
     props.workspaceRoot !== null &&
     fileIsWorkspaceRelative &&
-    fileQuery.data !== undefined &&
-    !fileQuery.data.truncated &&
-    fileQuery.data.version !== null &&
-    fileQuery.data.encoding !== null &&
-    fileQuery.data.lineEnding !== null &&
-    fileQuery.data.lineEnding !== "mixed" &&
+    previewFileData !== undefined &&
+    !previewFileData.truncated &&
+    previewFileData.version !== null &&
+    previewFileData.encoding !== null &&
+    previewFileData.lineEnding !== null &&
+    previewFileData.lineEnding !== "mixed" &&
     (!editBufferDirty || (editor.canEdit && !editor.state.saveError && !editor.state.conflict));
   const { onEditFile } = props;
   // The editor writes the path back in place, so it is offered only for
   // sources the shared editor rules consider writable (symlinks included).
   const editFile =
     onEditFile &&
+    !isPinnedContent &&
     canToggleTasks &&
     !fileIsImage &&
     !fileIsPdf &&
     filePath !== null &&
-    fileQuery.data !== undefined &&
-    resolveWorkspaceFileEditorReadOnlyReason(fileQuery.data) === null
+    previewFileData !== undefined &&
+    resolveWorkspaceFileEditorReadOnlyReason(previewFileData) === null
       ? () => onEditFile(filePath)
       : undefined;
 
-  if (!props.workspaceRoot && !fileIsLocalAbsolute && !fileIsScratchBinaryPreview) {
+  if (
+    !isPinnedContent &&
+    !props.workspaceRoot &&
+    !fileIsLocalAbsolute &&
+    !fileIsScratchBinaryPreview
+  ) {
     return (
       <PanelStateMessage density="compact" fill="flex">
         <p>No workspace is attached to this chat.</p>
@@ -1011,7 +1051,7 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
       )
     );
   }
-  if (fileNeedsLocalPreviewGrant && !localPreviewGrant) {
+  if (!isPinnedContent && fileNeedsLocalPreviewGrant && !localPreviewGrant) {
     if (localPreviewGrantQuery.error) {
       return (
         <PanelStateMessage density="compact" fill="flex" className="items-start justify-start p-3">
@@ -1028,6 +1068,25 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
 
   if (fileIsPdf && locatingOutOfRootFile) {
     return <FilePreviewLoadingState />;
+  }
+
+  if (fileIsPdf && isPinnedContent) {
+    return pinnedBinaryUrl ? (
+      <PdfFilePreview
+        key={binaryPreviewKey}
+        filePath={filePath}
+        cwd={null}
+        immutableSourceUrl={pinnedBinaryUrl}
+        cacheKey={pinnedVersionKey}
+        openInTarget={null}
+      />
+    ) : (
+      <PanelStateMessage density="compact" fill="flex">
+        <p className="text-ui-sm text-muted-foreground">
+          The published PDF content is unavailable.
+        </p>
+      </PanelStateMessage>
+    );
   }
 
   // PDFs own their full surface — toolbar (file name, page nav, zoom, Open) plus
@@ -1054,8 +1113,8 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
 
   const hoveredCommentLine = lineCommenting.hoveredLine;
   const activeCommentLine = lineCommenting.activeLine;
-  const hasFileContents = fileQuery.data !== undefined;
-  const fileReadError = fileQuery.error;
+  const hasFileContents = previewFileData !== undefined;
+  const fileReadError = isPinnedContent ? null : fileQuery.error;
   const fileReadCapacityError = isRpcCapacityExceededError(fileReadError);
   const showFileReadErrorIndicator =
     hasFileContents && fileReadError !== null && !activeEditBuffer?.error;
@@ -1065,13 +1124,16 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
       <WorkspaceFilePreviewHeader
         workspaceRoot={props.workspaceRoot}
         filePath={filePath}
+        pinnedSnapshot={isPinnedContent}
         isMarkdown={fileIsMarkdown}
         markdownPreviewEnabled={showMarkdownPreview}
         onMarkdownPreviewChange={handleMarkdownPreviewChange}
         onReferenceInChat={onReferenceInChat}
         onAskWhyInChat={onAskWhyInChat}
-        contentsForCopy={fileIsImage || fileQuery.data === undefined ? null : displayedFileContents}
-        truncated={fileQuery.data?.truncated ?? false}
+        contentsForCopy={
+          fileIsImage || previewFileData === undefined ? null : displayedFileContents
+        }
+        truncated={previewFileData?.truncated ?? false}
         onEditFile={editFile}
         dirty={editBufferDirty}
         saveState={
@@ -1087,8 +1149,14 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
         }
         onSave={activeEditBuffer ? editor.save : undefined}
         readOnlyReason={readOnlyReason}
-        reloading={fileIsImage || fileIsPdf ? binaryPreviewReloading : fileQuery.isFetching}
-        onReload={workspaceRoot && filePath ? handleFileReload : undefined}
+        reloading={
+          isPinnedContent
+            ? false
+            : fileIsImage || fileIsPdf
+              ? binaryPreviewReloading
+              : fileQuery.isFetching
+        }
+        onReload={!isPinnedContent && workspaceRoot && filePath ? handleFileReload : undefined}
       />
       {activeEditBuffer?.error ? (
         <div
@@ -1151,20 +1219,28 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
           className="editor-file-viewer min-h-0 flex-1 overflow-auto"
           onContextMenu={handleContentsContextMenu}
         >
-          <LocalImagePreview
-            key={binaryPreviewKey}
-            src={filePath}
-            cwd={props.workspaceRoot}
-            previewGrant={localPreviewGrant}
-            cacheKey={binaryPreviewRevision}
-            alt={basenameOfPath(filePath)}
-            className="min-h-full"
-            imageClassName="max-h-[calc(100vh-13rem)]"
-            onPreviewReady={handleBinaryPreviewReady}
-            onPreviewError={handleBinaryPreviewError}
-          />
+          {isPinnedContent ? (
+            <img
+              src={pinnedBinaryUrl ?? undefined}
+              alt={basenameOfPath(filePath)}
+              className="mx-auto block max-h-[calc(100vh-13rem)] max-w-full object-contain"
+            />
+          ) : (
+            <LocalImagePreview
+              key={binaryPreviewKey}
+              src={filePath}
+              cwd={props.workspaceRoot}
+              previewGrant={localPreviewGrant}
+              cacheKey={binaryPreviewRevision}
+              alt={basenameOfPath(filePath)}
+              className="min-h-full"
+              imageClassName="max-h-[calc(100vh-13rem)]"
+              onPreviewReady={handleBinaryPreviewReady}
+              onPreviewError={handleBinaryPreviewError}
+            />
+          )}
         </div>
-      ) : fileQuery.isLoading ? (
+      ) : !isPinnedContent && fileQuery.isLoading ? (
         <FilePreviewLoadingState />
       ) : !hasFileContents && fileReadError ? (
         <PanelStateMessage density="compact" fill="flex" className="items-start justify-start p-3">
@@ -1172,6 +1248,16 @@ export function WorkspaceFilePreview(props: WorkspaceFilePreviewProps) {
             {fileReadError instanceof Error ? fileReadError.message : "Could not read file."}
           </p>
         </PanelStateMessage>
+      ) : !hasFileContents && pinnedBinaryUrl ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center p-3">
+          <a
+            href={pinnedBinaryUrl}
+            download={basenameOfPath(filePath)}
+            className="rounded-md px-2 py-1 text-ui-sm text-primary underline-offset-2 hover:underline"
+          >
+            Download published file
+          </a>
+        </div>
       ) : !hasFileContents ? (
         <FilePreviewLoadingState />
       ) : (

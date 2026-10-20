@@ -42,6 +42,8 @@ import {
 interface WorkspaceFilePreviewHeaderProps {
   workspaceRoot: string | null;
   filePath: string;
+  /** Pinned publication content has no live workspace path to open or share. */
+  pinnedSnapshot?: boolean | undefined;
   /** Markdown files get an inline Source/Preview segmented switcher. */
   isMarkdown: boolean;
   /** True while the rendered preview is shown; false for the source view. */
@@ -278,8 +280,9 @@ export const WorkspaceFilePreviewHeader = function WorkspaceFilePreviewHeader(
   const copyPathToClipboard = useCopyPathToClipboard();
 
   const canCopyContents = contentsForCopy != null;
-  const openInTarget =
-    fileIsOutsideWorkspace || !workspaceRoot
+  const openInTarget = props.pinnedSnapshot
+    ? null
+    : fileIsOutsideWorkspace || !workspaceRoot
       ? filePath
       : joinWorkspaceRelativePath(workspaceRoot, filePath);
 
@@ -388,10 +391,12 @@ export const WorkspaceFilePreviewHeader = function WorkspaceFilePreviewHeader(
             <EllipsisIcon aria-hidden="true" className="size-3.5" />
           </MenuTrigger>
           <ComposerPickerMenuPopup align="end" side="bottom" className="w-52 min-w-52">
-            <MenuItem onClick={() => copyPathToClipboard(openInTarget)}>
-              <CopyIcon className="size-3.5 shrink-0 text-muted-foreground" />
-              <span>Copy path</span>
-            </MenuItem>
+            {!props.pinnedSnapshot && openInTarget !== null ? (
+              <MenuItem onClick={() => copyPathToClipboard(openInTarget)}>
+                <CopyIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                <span>Copy path</span>
+              </MenuItem>
+            ) : null}
             {canCopyContents ? (
               <MenuItem
                 onClick={() =>
@@ -403,10 +408,10 @@ export const WorkspaceFilePreviewHeader = function WorkspaceFilePreviewHeader(
                 Copy contents
               </MenuItem>
             ) : null}
-            {onReferenceInChat ? (
+            {!props.pinnedSnapshot && onReferenceInChat ? (
               <MenuItem onClick={referenceWholeFile}>Reference in chat</MenuItem>
             ) : null}
-            {onAskWhyInChat ? (
+            {!props.pinnedSnapshot && onAskWhyInChat ? (
               <MenuItem onClick={askWhyWholeFile}>Ask why this changed</MenuItem>
             ) : null}
           </ComposerPickerMenuPopup>
@@ -415,7 +420,7 @@ export const WorkspaceFilePreviewHeader = function WorkspaceFilePreviewHeader(
         {/* Responsive (default) mode: the "Open" label rides the same
             `header-actions` container declared on this header, so it shows on a
             wide pane and collapses to the editor icon when the pane is narrow. */}
-        <OpenInPicker openInTarget={openInTarget} />
+        {!props.pinnedSnapshot ? <OpenInPicker openInTarget={openInTarget} /> : null}
       </div>
     </div>
   );

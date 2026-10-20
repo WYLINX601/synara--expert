@@ -11,6 +11,7 @@
  * @module OrchestrationEngineService
  */
 import type {
+  ExpertBinding,
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationReadModel,
@@ -31,6 +32,8 @@ export interface OrchestrationDispatchContext {
   readonly contextOrigin?: "historical" | "provider_native";
   /** Resolve an uncertain turn start, durably rejecting it if it has not committed. Never execute it. */
   readonly settleOnly?: boolean;
+  /** Server-only Hub creation capability carrying an acceptance-frozen Expert binding. */
+  readonly hubExpertBinding?: ExpertBinding;
 }
 
 export interface OrchestrationProjectionCatchUpStatus {

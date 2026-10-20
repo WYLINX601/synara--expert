@@ -57,6 +57,14 @@ export function HubWorkItemCard({
         ) : (
           <p className="min-w-0 flex-1 truncate text-ui font-medium">{item.title}</p>
         )}
+        {item.expertBinding ? (
+          <span
+            className="max-w-28 truncate text-ui-xs text-muted-foreground"
+            title={`${item.expertBinding.displayName} · v${item.expertBinding.revision}`}
+          >
+            {item.expertBinding.displayName}
+          </span>
+        ) : null}
         <span className="shrink-0 text-ui-xs text-muted-foreground">
           {STATE_LABELS[item.state]}
         </span>

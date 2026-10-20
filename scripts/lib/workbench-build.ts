@@ -359,13 +359,35 @@ export function parseSchemaVersions(
   });
   const workbenchEntries = workbenchFields.map((fields) => {
     const isContextEffect = contextFields.includes(fields);
+    const hasStatementEffect = !isContextEffect && fields.has("effect");
     requireFields(fields, [
       "moduleId",
       "migrationId",
       "name",
       "checksum",
       isContextEffect ? "effect" : "statement",
+      ...(hasStatementEffect ? ["effect"] : []),
     ]);
+    // SQL migrations may provide an imported effect to execute a batch one
+    // statement at a time. Inspect only its static binding, never execute it
+    // while constructing a build manifest.
+    if (hasStatementEffect) {
+      const effect = fields.get("effect");
+      const importedEffect =
+        effect &&
+        ts.isIdentifier(effect) &&
+        workbenchSource.statements.some(
+          (statement) =>
+            ts.isImportDeclaration(statement) &&
+            ts.isStringLiteral(statement.moduleSpecifier) &&
+            statement.importClause?.namedBindings &&
+            ts.isNamedImports(statement.importClause.namedBindings) &&
+            statement.importClause.namedBindings.elements.some(
+              (binding) => binding.name.text === effect.text,
+            ),
+        );
+      if (!importedEffect) throw new Error("workbench-schema-catalog-is-invalid");
+    }
     const moduleExpression = fields.get("moduleId");
     const moduleId =
       stringLiteral(moduleExpression) ??

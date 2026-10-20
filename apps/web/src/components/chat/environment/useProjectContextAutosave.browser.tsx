@@ -615,6 +615,9 @@ for (const replaceApi of [false, true]) {
     function SpaceHarness() {
       const spaces = useSpacesController({
         ordinarySpaceProjects: [],
+        hubProjects: [],
+        summariesByProjectId: new Map(),
+        routeSpaceProject: null,
         projectById: new Map(),
         sidebarThreads: [],
         sidebarThreadSortOrder: "updated_at",
@@ -711,6 +714,9 @@ it("guards the next Space draft after saving and continuing through the leave gu
   function SpaceHarness() {
     const spaces = useSpacesController({
       ordinarySpaceProjects: [],
+      hubProjects: [],
+      summariesByProjectId: new Map(),
+      routeSpaceProject: null,
       projectById: new Map(),
       sidebarThreads: [],
       sidebarThreadSortOrder: "updated_at",

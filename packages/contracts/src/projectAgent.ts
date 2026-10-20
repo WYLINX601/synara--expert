@@ -20,6 +20,7 @@ import {
 } from "./baseSchemas";
 import { ModelSelection, ProviderStartOptions } from "./orchestration";
 import { HubWorkItem } from "./hubWork";
+import { ExpertProviderKind } from "./expert";
 
 export const PROJECT_AGENT_DOCUMENT_MAX_BYTES = 256 * 1024;
 export const PROJECT_AGENT_CONTEXT_BUDGET_CHARS = 32_000;
@@ -88,6 +89,10 @@ export const ProjectAgentConfig = Schema.Struct({
   coordinatorColor: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(32))),
   autoMemoryEnabled: Schema.optional(Schema.Boolean),
   linkedProjectIds: Schema.optional(Schema.Array(ProjectId)),
+  /** Selected expert roster; omitted on internal lifecycle writes to preserve it. */
+  expertIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  /** Explicit Context source; absent on hubs created before Hub × Expert V1. */
+  sourceProjectId: Schema.optional(ProjectId),
   libraryPath: Schema.optional(TrimmedNonEmptyString),
   libraryRemoteUrl: Schema.optional(LibraryRemoteUrl),
   libraryPushOnChange: Schema.optional(Schema.Boolean),
@@ -422,6 +427,8 @@ export type ProjectAgentBlocker = typeof ProjectAgentBlocker.Type;
 
 export const ProjectAgentOverview = Schema.Struct({
   projectId: ProjectId,
+  /** Explicit creation origin also survives unfinished onboarding. */
+  sourceProjectId: Schema.optional(ProjectId),
   configured: Schema.Boolean,
   config: Schema.NullOr(ProjectAgentConfig),
   // Linked projects are a project-level relation that exists before the group is
@@ -468,6 +475,20 @@ export const ProjectAgentGetOverviewInput = Schema.Struct({
 });
 export type ProjectAgentGetOverviewInput = typeof ProjectAgentGetOverviewInput.Type;
 
+export const ProjectAgentListExpertsInput = Schema.Struct({ projectId: ProjectId });
+export type ProjectAgentListExpertsInput = typeof ProjectAgentListExpertsInput.Type;
+export const HubExpertSummary = Schema.Struct({
+  expertId: TrimmedNonEmptyString,
+  displayName: TrimmedNonEmptyString,
+  description: Schema.String,
+  useCases: Schema.String,
+  preferredProvider: Schema.NullOr(ExpertProviderKind),
+  available: Schema.Boolean,
+});
+export type HubExpertSummary = typeof HubExpertSummary.Type;
+export const ProjectAgentListExpertsResult = Schema.Array(HubExpertSummary);
+export type ProjectAgentListExpertsResult = typeof ProjectAgentListExpertsResult.Type;
+
 export const ProjectAgentSummary = Schema.Struct({
   projectId: ProjectId,
   configured: Schema.Boolean,
@@ -503,6 +524,7 @@ export type ProjectAgentListSummariesResult = typeof ProjectAgentListSummariesRe
 export const ProjectAgentConfigureInput = Schema.Struct({
   requestId: ProjectAgentRequestId,
   projectId: ProjectId,
+  sourceProjectId: Schema.optional(ProjectId),
   coordinatorName: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(160))),
   coordinatorModelSelection: ModelSelection,
   coordinatorProviderOptions: Schema.optional(ProviderStartOptions),
@@ -524,6 +546,8 @@ export const ProjectAgentConfigureInput = Schema.Struct({
     Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(32))),
   ),
   autoMemoryEnabled: Schema.optional(Schema.Boolean),
+  /** Omitted means preserve the stored roster; an empty list clears it. */
+  expertIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   userDisplayName: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(120))),
   libraryPath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   libraryRemoteUrl: Schema.optional(Schema.NullOr(LibraryRemoteUrl)),
@@ -535,6 +559,8 @@ export const ProjectAgentLinkProjectInput = Schema.Struct({
   requestId: ProjectAgentRequestId,
   projectId: ProjectId,
   linkedProjectId: ProjectId,
+  /** User-created Project Hub origin; never inferred from ordinary links. */
+  contextSource: Schema.optional(Schema.Literal(true)),
 });
 export type ProjectAgentLinkProjectInput = typeof ProjectAgentLinkProjectInput.Type;
 

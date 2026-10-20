@@ -1,4 +1,9 @@
-import { DEFAULT_PROJECT_AGENT_LIMITS, type ModelSelection } from "@synara/contracts";
+import {
+  DEFAULT_PROJECT_AGENT_LIMITS,
+  SpaceId,
+  type ModelSelection,
+  type SpaceId as SpaceIdType,
+} from "@synara/contracts";
 
 import { Input } from "~/components/ui/input";
 import {
@@ -10,6 +15,9 @@ import { SettingsSelectControl } from "~/components/settings/SettingControls";
 import { SelectItem } from "~/components/ui/select";
 import { dialogFieldLabelClassName } from "~/components/ui/dialog";
 import { cn } from "~/lib/utils";
+import { VOID_SPACE_KEY } from "~/lib/spaceGrouping";
+import type { Space } from "~/types";
+import type { VoidSpacePresentation } from "~/lib/spaceGrouping";
 
 import { CharacterCountTextarea } from "./CharacterCountTextarea";
 import { COORDINATOR_COLOR_OPTIONS, COORDINATOR_ICON_OPTIONS } from "./coordinatorAppearance";
@@ -38,6 +46,10 @@ export function GroupGeneralSection(props: {
   readonly draft: GroupSettingsDraft;
   readonly defaultModelSelection: ModelSelection | null;
   readonly projectCwd: string;
+  readonly spaceId: SpaceIdType | null;
+  readonly spaces: readonly Space[];
+  readonly voidSpace: VoidSpacePresentation;
+  readonly onSpaceChange: (spaceId: SpaceIdType | null) => void;
   readonly onChange: (patch: Partial<GroupSettingsDraft>) => void;
 }) {
   const { draft, onChange } = props;
@@ -128,6 +140,37 @@ export function GroupGeneralSection(props: {
               onChange={(event) => onChange({ goal: event.target.value })}
             />
           </div>
+        </SettingsCard>
+      </SettingsSectionShell>
+
+      <SettingsSectionShell title="Space">
+        <SettingsCard>
+          <SettingsRow
+            title="Hub Space"
+            description="Organize this Hub independently from its linked Projects."
+            control={
+              <SettingsSelectControl
+                value={props.spaceId ?? VOID_SPACE_KEY}
+                valueContent={
+                  props.spaceId === null
+                    ? props.voidSpace.name
+                    : (props.spaces.find((space) => space.id === props.spaceId)?.name ??
+                      "Unavailable Space")
+                }
+                ariaLabel="Hub Space"
+                onValueChange={(value) =>
+                  props.onSpaceChange(value === VOID_SPACE_KEY ? null : SpaceId.makeUnsafe(value))
+                }
+              >
+                <SelectItem value={VOID_SPACE_KEY}>{props.voidSpace.name}</SelectItem>
+                {props.spaces.map((space) => (
+                  <SelectItem key={space.id} value={space.id}>
+                    {space.name}
+                  </SelectItem>
+                ))}
+              </SettingsSelectControl>
+            }
+          />
         </SettingsCard>
       </SettingsSectionShell>
 

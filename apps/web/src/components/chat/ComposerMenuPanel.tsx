@@ -4,7 +4,7 @@
 // Layer: Chat composer presentation
 // Depends on: Command primitives and the shared composer picker style tokens.
 
-import { memo, useEffect, useRef, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useRef, type ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
 import {
@@ -62,7 +62,11 @@ export function ComposerMenuPanel(props: {
   listClassName?: string;
   surfaceClassName?: string;
 }) {
-  const rowRefs = useRef<Record<string, HTMLElement | null>>({});
+  const rowRefs = useRef<Record<string, HTMLElement>>({});
+  const setRowRef = useCallback((rowId: string, node: HTMLElement | null) => {
+    if (node) rowRefs.current[rowId] = node;
+    else delete rowRefs.current[rowId];
+  }, []);
   const hasRows = props.groups.some((group) => group.rows.length > 0);
   const activeRowId = props.activeRowId;
 
@@ -97,11 +101,10 @@ export function ComposerMenuPanel(props: {
                   {group.rows.map((row) => (
                     <ComposerMenuPanelItem
                       key={row.id}
+                      rowId={row.id}
                       row={row}
                       isActive={props.activeRowId === row.id}
-                      rowRef={(node) => {
-                        rowRefs.current[row.id] = node;
-                      }}
+                      rowRef={setRowRef}
                       onHighlight={props.onHighlightRow}
                       onSelect={props.onSelectRow}
                     />
@@ -124,21 +127,28 @@ export function ComposerMenuPanel(props: {
 // and the component bails out of compilation entirely. Separate bindings keep the verdict on
 // `rowRef` alone. Do not collapse these back into a `props` parameter.
 const ComposerMenuPanelItem = memo(function ComposerMenuPanelItem({
+  rowId,
   row,
   isActive,
   rowRef,
   onHighlight,
   onSelect,
 }: {
+  rowId: string;
   row: ComposerMenuPanelRow;
   isActive: boolean;
-  rowRef: (node: HTMLElement | null) => void;
+  rowRef: (rowId: string, node: HTMLElement | null) => void;
   onHighlight: (rowId: string | null) => void;
   onSelect: (rowId: string) => void;
 }) {
+  const registerRowRef = useCallback(
+    (node: HTMLElement | null) => rowRef(rowId, node),
+    [rowId, rowRef],
+  );
+
   return (
     <CommandItem
-      ref={rowRef}
+      ref={registerRowRef}
       value={row.id}
       disabled={row.disabled ?? false}
       className={cn(

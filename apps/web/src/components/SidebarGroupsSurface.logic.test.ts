@@ -7,7 +7,10 @@ import {
 } from "../lib/groupCoordinatorName";
 import {
   activateThreadWhenHydrated,
+  filterHubMemberThreadsFromProjectBuckets,
   isGroupThreadRoute,
+  persistHubSectionExpanded,
+  readHubSectionExpanded,
   resolveGroupChatTargetProjectId,
   resolveGroupCoordinatorRowLabel,
   resolveGroupsListEmptyState,
@@ -51,6 +54,50 @@ describe("isGroupThreadRoute", () => {
         summariesByProjectId: new Map([[ORDINARY, { memberThreadIds: [memberId] }]]),
       }),
     ).toBe(false);
+  });
+});
+
+describe("filterHubMemberThreadsFromProjectBuckets", () => {
+  const threadA = { id: ThreadId.makeUnsafe("hub-worker") };
+  const unrelated = { id: ThreadId.makeUnsafe("ordinary-thread") };
+  const buckets = new Map([[ORDINARY, [threadA, unrelated]]]);
+
+  it("hides only workers confirmed by a server Hub member index", () => {
+    const filtered = filterHubMemberThreadsFromProjectBuckets({
+      sortedSidebarThreadsByProjectId: buckets,
+      memberThreadIdsByProjectId: new Map([[GROUP_A, new Set([threadA.id])]]),
+    });
+    expect(filtered.get(ORDINARY)).toEqual([unrelated]);
+  });
+
+  it("preserves ordinary rows when membership has not loaded or is empty", () => {
+    expect(
+      filterHubMemberThreadsFromProjectBuckets({
+        sortedSidebarThreadsByProjectId: buckets,
+        memberThreadIdsByProjectId: new Map(),
+      }),
+    ).toBe(buckets);
+    expect(
+      filterHubMemberThreadsFromProjectBuckets({
+        sortedSidebarThreadsByProjectId: buckets,
+        memberThreadIdsByProjectId: new Map([[GROUP_A, new Set()]]),
+      }),
+    ).toBe(buckets);
+  });
+});
+
+describe("Hub section collapsed state", () => {
+  it("defaults open and persists the user's latest choice", () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => void values.set(key, value),
+    };
+    expect(readHubSectionExpanded(storage)).toBe(true);
+    persistHubSectionExpanded(false, storage);
+    expect(readHubSectionExpanded(storage)).toBe(false);
+    persistHubSectionExpanded(true, storage);
+    expect(readHubSectionExpanded(storage)).toBe(true);
   });
 });
 

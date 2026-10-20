@@ -13,6 +13,8 @@ export class HubWorkRepositoryError extends Schema.TaggedErrorClass<HubWorkRepos
 export interface HubWorkRepositoryShape {
   readonly submit: (
     records: readonly HubWorkRecord[],
+    /** Trusted admission guard, applied only to new work after replay lookup. */
+    admission?: { readonly expectedConfigRevision: number },
   ) => Effect.Effect<
     { readonly items: readonly HubWorkRecord[]; readonly replayed: boolean },
     HubWorkRepositoryError

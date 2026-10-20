@@ -35,14 +35,11 @@ import {
   type ModelSelection,
   type OrchestrationCommand,
   type ProviderApprovalDecision,
-  type ProviderKind,
   type RuntimeMode,
-  type ServerProviderStatus,
   type TurnDispatchMode,
 } from "@synara/contracts";
 import { runtimeModeEscalatesPrivilege } from "@synara/shared/runtimeMode";
 import { INLINE_VISUALS_BETA_FEATURE } from "@synara/shared/betaFeatures";
-import { deriveProviderInstances, isProviderKind } from "@synara/shared/providerInstances";
 import { Effect, Layer, Option } from "effect";
 
 import { GitCore } from "../../git/Services/GitCore.ts";
@@ -67,8 +64,6 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   AGENT_GATEWAY_TARGET_OPTIONS_DESCRIPTION,
   resolveAgentGatewayTarget,
-  type AgentGatewayProviderAvailability,
-  type AgentGatewayProviderInstanceAvailability,
 } from "../targetResolver.ts";
 import { mcpToolResultError, mcpToolResultJson } from "../protocol.ts";
 import { gatewayIsoNow as isoNow, stableGatewayDigest } from "../creationUtils.ts";
@@ -118,6 +113,7 @@ import { BrowserAutomationHost } from "../../browserAutomation/Services/BrowserA
 import { makeBrowserAutomationHost } from "../../browserAutomation/Layers/BrowserAutomationHost.ts";
 import { makeProjectAgentTools } from "../projectAgentTools.ts";
 import { isServerGroupsEnabled } from "../../projectAgent/groupsBetaGate.ts";
+import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { makeThreadReadTools } from "../threadReadTools.ts";
 import { makeThreadDiagnosticTools } from "../threadDiagnosticTools.ts";
 import { makeAgentGatewayKanbanTools } from "../kanbanTools.ts";
@@ -129,24 +125,7 @@ import { pruneProjectedArchivedManagedWorktrees } from "../../managedWorktrees.t
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { makeExpertGatewayToolResolver } from "../../experts/ExpertGatewayTools.ts";
 
-const providerInstanceAvailability = (
-  instance: ReturnType<typeof deriveProviderInstances>[number],
-  status: ServerProviderStatus | undefined,
-): AgentGatewayProviderInstanceAvailability => {
-  const result = {
-    instanceId: instance.instanceId,
-    displayName: instance.displayName,
-    isDefault: instance.isDefault,
-    enabled: instance.enabled,
-  };
-  return status === undefined
-    ? result
-    : {
-        ...result,
-        available: status.available,
-        authStatus: status.authStatus,
-      };
-};
+import { buildAgentGatewayProviderAvailabilities } from "../providerAvailability";
 
 // Providers already receive the versioned host policy exactly once in their
 // private prompt. MCP clients prepend initialize.instructions to every exposed
@@ -194,7 +173,9 @@ export const makeAgentGateway = Effect.gen(function* () {
   const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
   const diagnostics = yield* ThreadDiagnosticsQuery;
   const serverConfig = yield* ServerConfig;
-  const expertTools = makeExpertGatewayToolResolver({ stateDir: serverConfig.stateDir });
+  const expertTools = makeExpertGatewayToolResolver({
+    stateDir: serverConfig.stateDir,
+  });
   yield* Effect.addFinalizer(() => Effect.promise(() => expertTools.closeAll()));
   credentials.onSessionRevoked?.((sessionKey) => expertTools.closeSession(sessionKey));
   const browserAutomationHost = Option.getOrElse(
@@ -211,43 +192,7 @@ export const makeAgentGateway = Effect.gen(function* () {
       serverSettings.getSettings,
       providerHealth.getStatuses,
     ]);
-    const statusByInstance = new Map<string, ServerProviderStatus>();
-    for (const status of statuses) {
-      if (isProviderKind(status.driver)) {
-        const instanceId = status.instanceId ?? status.provider;
-        statusByInstance.set(`${status.driver}\u0000${instanceId}`, status);
-      }
-    }
-    const instancesByProvider = new Map<ProviderKind, ReturnType<typeof deriveProviderInstances>>();
-    for (const instance of deriveProviderInstances(settings)) {
-      const instances = instancesByProvider.get(instance.driver) ?? [];
-      instancesByProvider.set(instance.driver, [...instances, instance]);
-    }
-    return new Map<ProviderKind, AgentGatewayProviderAvailability>(
-      PROVIDER_KINDS.map((provider) => {
-        const status = statusByInstance.get(`${provider}\u0000${provider}`);
-        const instances = instancesByProvider.get(provider) ?? [];
-        return [
-          provider,
-          {
-            enabled: settings.providers[provider].enabled,
-            instances: instances.map((instance) =>
-              providerInstanceAvailability(
-                instance,
-                statusByInstance.get(`${instance.driver}\u0000${instance.instanceId}`),
-              ),
-            ),
-            ...(status
-              ? {
-                  available: status.available,
-                  authStatus: status.authStatus,
-                  ...(status.message ? { message: status.message } : {}),
-                }
-              : {}),
-          },
-        ];
-      }),
-    );
+    return buildAgentGatewayProviderAvailabilities(settings, statuses);
   });
 
   yield* recoverInterruptedAgentGatewayOperations({
@@ -427,6 +372,9 @@ export const makeAgentGateway = Effect.gen(function* () {
           ...(queuedTurnPromotions ? { queuedTurnPromotions } : {}),
           attachments: attachmentRepository,
           serverConfig,
+          expertStore: createExpertStore(serverConfig.stateDir),
+          providerDiscovery,
+          loadProviderAvailabilities,
           createThreads: runCreateThreads,
         })
       : null;
@@ -469,7 +417,7 @@ export const makeAgentGateway = Effect.gen(function* () {
     definition: {
       name: "synara_create_threads",
       description:
-        "Create an exact batch of 1–20 standalone Synara threads. Hub coordinators instead submit durable workItems to the Hub queue: accepted does not mean started, and workerThreadId is available after admission. Worktree threads start on a Synara-managed temporary branch pinned at baseRef (or the selected checkout's HEAD) and copy local checkout changes plus .worktreeinclude files when the ref is that checkout's HEAD; on the first turn Synara may rename the branch after the prompt and publish it. Validation/preflight failures create nothing and may be corrected with the same requestId; durable retries replay the exact operation. Each created thread's result includes a ready-to-use link (`thread://<threadId>`); when you mention a thread in a message to the user, write it as a markdown link like [title](thread://<threadId>).",
+        "Create an exact batch of 1–20 standalone Synara threads for work the user has authorized to execute. Discussing a plan or recommending Experts does not authorize starting workers; model judgment does not create permission. Existing capability and approval checks still apply. Hub coordinators instead submit durable workItems to the Hub queue: accepted does not mean started, and workerThreadId is available after admission. Worktree threads start on a Synara-managed temporary branch pinned at baseRef (or the selected checkout's HEAD) and copy local checkout changes plus .worktreeinclude files when the ref is that checkout's HEAD; on the first turn Synara may rename the branch after the prompt and publish it. Validation/preflight failures create nothing and may be corrected with the same requestId; durable retries replay the exact operation. Each created thread's result includes a ready-to-use link (`thread://<threadId>`); when you mention a thread in a message to the user, write it as a markdown link like [title](thread://<threadId>).",
       inputSchema: {
         type: "object",
         properties: {
@@ -485,6 +433,11 @@ export const makeAgentGateway = Effect.gen(function* () {
             items: {
               type: "object",
               properties: {
+                expertId: {
+                  type: "string",
+                  description:
+                    "Hub Experts are pinned to an immutable snapshot when the coordinator accepts this task.",
+                },
                 notifyCreatorOnComplete: {
                   type: "boolean",
                   description:
@@ -510,7 +463,7 @@ export const makeAgentGateway = Effect.gen(function* () {
                     "Omit to inherit the creating Hub coordinator's approval mode, including Approve for me. An explicit mode takes precedence.",
                 },
               },
-              required: ["prompt", "target"],
+              required: ["prompt"],
               additionalProperties: false,
             },
           },
@@ -535,7 +488,7 @@ export const makeAgentGateway = Effect.gen(function* () {
     definition: {
       name: "synara_create_thread",
       description:
-        "Create exactly one standalone Synara thread. Hub coordinators receive a durable workItems entry that can remain queued until a worker slot is available. Worktree threads start on a Synara-managed temporary branch pinned at baseRef; on the first turn Synara may rename the branch after the prompt and publish it. For two or more threads use one synara_create_threads call instead. The result includes a ready-to-use link (`thread://<threadId>`); when you mention the thread in a message to the user, write it as a markdown link like [title](thread://<threadId>).",
+        "Create exactly one standalone Synara thread for work the user has authorized to execute. Discussing a plan or recommending an Expert does not authorize starting a worker; model judgment does not create permission. Existing capability and approval checks still apply. Hub coordinators receive a durable workItems entry that can remain queued until a worker slot is available. Worktree threads start on a Synara-managed temporary branch pinned at baseRef; on the first turn Synara may rename the branch after the prompt and publish it. For two or more threads use one synara_create_threads call instead. The result includes a ready-to-use link (`thread://<threadId>`); when you mention the thread in a message to the user, write it as a markdown link like [title](thread://<threadId>).",
       inputSchema: {
         type: "object",
         properties: {
@@ -548,6 +501,11 @@ export const makeAgentGateway = Effect.gen(function* () {
           contextMessageIds: contextMessageIdsSchema,
           prompt: { type: "string" },
           title: { type: "string" },
+          expertId: {
+            type: "string",
+            description:
+              "Hub Experts are pinned to an immutable snapshot when the coordinator accepts this task.",
+          },
           target: {
             ...MODEL_SELECTION_INPUT_SCHEMA,
           },
@@ -585,10 +543,14 @@ export const makeAgentGateway = Effect.gen(function* () {
     handler: (args, context) =>
       Effect.suspend(() => {
         const explicitTarget = readRecordArg(args, "target");
-        let target: Record<string, unknown>;
+        let target: Record<string, unknown> | undefined;
         if (explicitTarget) {
           target = explicitTarget;
-        } else {
+        } else if (
+          args.provider !== undefined ||
+          args.model !== undefined ||
+          args.options !== undefined
+        ) {
           const provider = parseProviderKind(readStringArg(args, "provider", { required: true })!);
           const modelSelection = buildModelSelection(provider, readStringArg(args, "model"));
           const options = readRecordArg(args, "options");
@@ -596,9 +558,10 @@ export const makeAgentGateway = Effect.gen(function* () {
         }
         const spec: Record<string, unknown> = {
           prompt: readStringArg(args, "prompt", { required: true })!,
-          target,
         };
+        if (target !== undefined) spec.target = target;
         for (const key of [
+          "expertId",
           "title",
           "contextMessageIds",
           "projectId",
@@ -652,12 +615,19 @@ export const makeAgentGateway = Effect.gen(function* () {
           threadId: { type: "string", description: "Target thread." },
           message: { type: "string", description: "Message text." },
           contextMessageIds: contextMessageIdsSchema,
-          mode: { type: "string", enum: ["queue", "steer"], description: "Dispatch mode." },
+          mode: {
+            type: "string",
+            enum: ["queue", "steer"],
+            description: "Dispatch mode.",
+          },
         },
         required: ["threadId", "message"],
         additionalProperties: false,
       },
-      annotations: { title: "Send a Synara message", ...WRITE_TOOL_ANNOTATIONS },
+      annotations: {
+        title: "Send a Synara message",
+        ...WRITE_TOOL_ANNOTATIONS,
+      },
     },
     handler: (args, context) =>
       Effect.gen(function* () {
@@ -705,7 +675,12 @@ export const makeAgentGateway = Effect.gen(function* () {
             : [];
         const suffix = sourceMessages.length
           ? stableGatewayDigest(
-              { sourceMessages, targetThreadId: target.id, message, dispatchMode },
+              {
+                sourceMessages,
+                targetThreadId: target.id,
+                message,
+                dispatchMode,
+              },
               40,
             )
           : randomUUID();
@@ -805,7 +780,10 @@ export const makeAgentGateway = Effect.gen(function* () {
           ),
           Effect.mapError((error) => new ToolInputError(errorText(error))),
         );
-        return mcpToolResultJson({ threadId: target.id, dispatched: dispatchMode });
+        return mcpToolResultJson({
+          threadId: target.id,
+          dispatched: dispatchMode,
+        });
       }).pipe(Effect.catch((error) => Effect.succeed(mcpToolResultError(errorText(error))))),
   };
 
@@ -818,12 +796,18 @@ export const makeAgentGateway = Effect.gen(function* () {
       inputSchema: {
         type: "object",
         properties: {
-          threadId: { type: "string", description: "Thread whose turn should be interrupted." },
+          threadId: {
+            type: "string",
+            description: "Thread whose turn should be interrupted.",
+          },
         },
         required: ["threadId"],
         additionalProperties: false,
       },
-      annotations: { title: "Interrupt a Synara thread", ...WRITE_TOOL_ANNOTATIONS },
+      annotations: {
+        title: "Interrupt a Synara thread",
+        ...WRITE_TOOL_ANNOTATIONS,
+      },
     },
     handler: (args, context) =>
       Effect.gen(function* () {
@@ -870,7 +854,10 @@ export const makeAgentGateway = Effect.gen(function* () {
         required: ["threadId", "title"],
         additionalProperties: false,
       },
-      annotations: { title: "Rename a Synara thread", ...WRITE_TOOL_ANNOTATIONS },
+      annotations: {
+        title: "Rename a Synara thread",
+        ...WRITE_TOOL_ANNOTATIONS,
+      },
     },
     handler: (args, context) =>
       Effect.gen(function* () {
@@ -913,7 +900,10 @@ export const makeAgentGateway = Effect.gen(function* () {
         required: ["reference"],
         additionalProperties: false,
       },
-      annotations: { title: "Associate a pull request", ...WRITE_TOOL_ANNOTATIONS },
+      annotations: {
+        title: "Associate a pull request",
+        ...WRITE_TOOL_ANNOTATIONS,
+      },
     },
     handler: (args, context) =>
       Effect.gen(function* () {
@@ -933,7 +923,10 @@ export const makeAgentGateway = Effect.gen(function* () {
             new ToolInputError(`Project for thread "${threadId}" was not found.`),
           );
         }
-        const cwd = resolveThreadWorkspaceCwd({ thread: target, projects: [project] });
+        const cwd = resolveThreadWorkspaceCwd({
+          thread: target,
+          projects: [project],
+        });
         if (!cwd) {
           return yield* Effect.fail(
             new ToolInputError(`Git workspace for thread "${threadId}" is unavailable.`),
@@ -965,13 +958,22 @@ export const makeAgentGateway = Effect.gen(function* () {
       inputSchema: {
         type: "object",
         properties: {
-          threadId: { type: "string", description: "Thread to archive/unarchive." },
-          archived: { type: "boolean", description: "true to archive, false to unarchive." },
+          threadId: {
+            type: "string",
+            description: "Thread to archive/unarchive.",
+          },
+          archived: {
+            type: "boolean",
+            description: "true to archive, false to unarchive.",
+          },
         },
         required: ["archived"],
         additionalProperties: false,
       },
-      annotations: { title: "Update a Synara thread", ...WRITE_TOOL_ANNOTATIONS },
+      annotations: {
+        title: "Update a Synara thread",
+        ...WRITE_TOOL_ANNOTATIONS,
+      },
     },
     handler: (args, context) =>
       Effect.gen(function* () {
@@ -1044,7 +1046,10 @@ export const makeAgentGateway = Effect.gen(function* () {
         required: [],
         additionalProperties: false,
       },
-      annotations: { title: "Set a Synara thread goal", ...WRITE_TOOL_ANNOTATIONS },
+      annotations: {
+        title: "Set a Synara thread goal",
+        ...WRITE_TOOL_ANNOTATIONS,
+      },
     },
     handler: (args, context) =>
       Effect.gen(function* () {
@@ -1085,7 +1090,12 @@ export const makeAgentGateway = Effect.gen(function* () {
           achieved
             ? { threadId: target.id, goal: null, achieved: true }
             : blocked
-              ? { threadId: target.id, goal: target.goal, blocked: true, paused: true }
+              ? {
+                  threadId: target.id,
+                  goal: target.goal,
+                  blocked: true,
+                  paused: true,
+                }
               : { threadId: target.id, goal: goal || null },
         );
       }).pipe(Effect.catch((error) => Effect.succeed(mcpToolResultError(errorText(error))))),
@@ -1515,7 +1525,9 @@ export const makeAgentGateway = Effect.gen(function* () {
             createdAt: isoNow(),
           })
           .pipe(
-            Effect.map((eventSequence) => ({ sequence: eventSequence.sequence })),
+            Effect.map((eventSequence) => ({
+              sequence: eventSequence.sequence,
+            })),
             Effect.mapError((error) => new ToolInputError(errorText(error))),
           );
       },
@@ -1702,9 +1714,10 @@ export const makeAgentGateway = Effect.gen(function* () {
             }),
           ),
           Effect.catch((error) =>
-            Effect.logWarning("expert gateway thread lookup failed", { error, threadId }).pipe(
-              Effect.as<ReadonlyArray<ToolEntry>>([]),
-            ),
+            Effect.logWarning("expert gateway thread lookup failed", {
+              error,
+              threadId,
+            }).pipe(Effect.as<ReadonlyArray<ToolEntry>>([])),
           ),
         ),
       onCapabilityDenied: surfaceCapabilityDenial,

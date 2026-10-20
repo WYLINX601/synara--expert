@@ -13,11 +13,18 @@ import { MEMORY_NOTES_DOCUMENT_PREFIX } from "@synara/shared/projectAgent";
 
 import { isDefaultGroupCoordinatorName } from "../../../lib/groupCoordinatorName";
 
-export const GROUP_SETTINGS_SECTIONS = ["general", "memory", "environment", "plugins"] as const;
+export const GROUP_SETTINGS_SECTIONS = [
+  "general",
+  "experts",
+  "memory",
+  "environment",
+  "plugins",
+] as const;
 export type GroupSettingsSection = (typeof GROUP_SETTINGS_SECTIONS)[number];
 
 export const GROUP_SETTINGS_SECTION_LABELS: Record<GroupSettingsSection, string> = {
   general: "General",
+  experts: "Experts",
   memory: "Memory",
   environment: "Environment",
   plugins: "Plugins",
@@ -53,6 +60,7 @@ export interface GroupSettingsDraft {
   readonly name: string;
   readonly icon: string;
   readonly goal: string;
+  readonly expertIds: ReadonlyArray<string>;
   readonly coordinatorIcon: string;
   readonly coordinatorColor: string;
   readonly coordinatorModelSelection: ModelSelection;
@@ -109,6 +117,7 @@ export function buildGroupSettingsDraft(input: {
     name: input.projectName,
     icon: config?.icon ?? "",
     goal: config?.goal ?? "",
+    expertIds: [...new Set(config?.expertIds ?? [])],
     coordinatorIcon: config?.coordinatorIcon ?? "",
     coordinatorColor: config?.coordinatorColor ?? "",
     coordinatorModelSelection: config?.coordinatorModelSelection ?? fallbackSelection,
@@ -163,6 +172,9 @@ export function groupSettingsDirtySections(
   ) {
     dirty.add("general");
   }
+  if (!stringSetsEqual(draft.expertIds, baseline.expertIds)) {
+    dirty.add("experts");
+  }
   if (draft.autoMemoryEnabled !== baseline.autoMemoryEnabled) {
     dirty.add("memory");
   }
@@ -177,8 +189,15 @@ export function groupSettingsDirtySections(
   return dirty;
 }
 
+function stringSetsEqual(left: ReadonlyArray<string>, right: ReadonlyArray<string>): boolean {
+  const leftSet = new Set(left);
+  const rightSet = new Set(right);
+  return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
+}
+
 export function buildGroupConfigureInput(input: {
   readonly projectId: ProjectId;
+  readonly sourceProjectId?: ProjectId | undefined;
   readonly requestId: string;
   readonly mode: "onboarding" | "edit";
   readonly draft: GroupSettingsDraft;
@@ -225,6 +244,8 @@ export function buildGroupConfigureInput(input: {
   return {
     requestId: input.requestId,
     projectId: input.projectId,
+    expertIds: [...new Set(draft.expertIds)],
+    ...(input.sourceProjectId ? { sourceProjectId: input.sourceProjectId } : {}),
     coordinatorModelSelection: draft.coordinatorModelSelection,
     workerRouting,
     ...(sendCoordinatorName
@@ -285,16 +306,22 @@ export function saveAttemptFingerprint(input: {
   readonly mode: "onboarding" | "edit";
   readonly draft: GroupSettingsDraft;
   readonly importedInstructions: string | undefined;
+  readonly sourceProjectId?: ProjectId | undefined;
 }): string {
   return JSON.stringify({
     ...input.draft,
+    expertIds: [...new Set(input.draft.expertIds)].sort(),
     mode: input.mode,
     importedInstructions: input.importedInstructions ?? null,
+    sourceProjectId: input.sourceProjectId ?? null,
   });
 }
 
 export function resolveSaveAttemptRequestId(input: {
-  readonly failed: { readonly requestId: string; readonly fingerprint: string } | null;
+  readonly failed: {
+    readonly requestId: string;
+    readonly fingerprint: string;
+  } | null;
   readonly fingerprint: string;
   readonly generateRequestId?: () => string;
 }): string {
@@ -310,6 +337,7 @@ export type SaveGroupSettingsResult =
 
 export async function saveGroupSettings(input: {
   readonly projectId: ProjectId;
+  readonly sourceProjectId?: ProjectId | undefined;
   readonly requestId: string;
   readonly mode: "onboarding" | "edit";
   readonly draft: GroupSettingsDraft;
@@ -333,6 +361,7 @@ export async function saveGroupSettings(input: {
     const overview = await input.configure(
       buildGroupConfigureInput({
         projectId: input.projectId,
+        sourceProjectId: input.sourceProjectId,
         requestId: input.requestId,
         mode: input.mode,
         draft: input.draft,

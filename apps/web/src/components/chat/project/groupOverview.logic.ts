@@ -5,7 +5,13 @@
 //          thread needs the user's attention (drives the header + sidebar dot).
 // Layer: Group overview logic
 
-import type { AutomationDefinition, ProjectId, ProjectTask, ThreadId } from "@synara/contracts";
+import type {
+  AutomationDefinition,
+  HubWorkItem,
+  ProjectId,
+  ProjectTask,
+  ThreadId,
+} from "@synara/contracts";
 
 import type { AppState } from "../../../storeState";
 import type { ThreadPullRequest } from "../../../hooks/useThreadPullRequests";
@@ -97,6 +103,8 @@ export function collectGroupThreadSummaries(input: {
 
 export interface GroupThreadRow {
   readonly thread: SidebarThreadSummary;
+  /** Identity from the accepted work item, independent of the current Expert template. */
+  readonly expertName?: string;
   /** The group task this thread executes, when the task index points at it. */
   readonly task: ProjectTask | null;
   readonly state: GroupThreadSectionId;
@@ -123,8 +131,16 @@ export function buildGroupThreadRows(input: {
   readonly groupProjectName: string;
   /** Managed workers the recovery ladder flagged "Waiting on you". */
   readonly needsYouThreadIds?: ReadonlySet<ThreadId>;
+  readonly workItems?: readonly HubWorkItem[] | undefined;
 }): GroupThreadRow[] {
   const rows: GroupThreadRow[] = [];
+  const expertNames = new Map(
+    (input.workItems ?? []).flatMap((item) =>
+      item.workerThreadId && item.expertBinding
+        ? [[item.workerThreadId, item.expertBinding.displayName] as const]
+        : [],
+    ),
+  );
   for (const thread of input.threads) {
     const task = input.taskByThreadId.get(thread.id) ?? null;
     const pullRequest = input.pullRequests.get(thread.id) ?? null;
@@ -143,6 +159,7 @@ export function buildGroupThreadRows(input: {
         : null;
     rows.push({
       thread,
+      ...(expertNames.has(thread.id) ? { expertName: expertNames.get(thread.id)! } : {}),
       task,
       state,
       pullRequest,

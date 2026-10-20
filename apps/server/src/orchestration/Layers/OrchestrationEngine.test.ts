@@ -5,6 +5,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  SpaceId,
   THREAD_GOAL_INLINE_MAX_CHARS,
   ThreadId,
   TurnId,
@@ -46,6 +47,7 @@ import { ServerConfig } from "../../config.ts";
 import { ORCHESTRATION_EVENT_PUBSUB_CAPACITY } from "../orchestrationAdmission.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { createExpertStore } from "../../experts/ExpertStore.ts";
 
 const OrchestrationProjectionSnapshotQueryLive = OrchestrationProjectionSnapshotQueryBase.pipe(
   Layer.provide(ServerSettingsService.layerTest()),
@@ -204,6 +206,88 @@ async function createOrchestrationSystem(pipeline?: OrchestrationProjectionPipel
 function now() {
   return new Date().toISOString();
 }
+
+describe("acceptance-frozen Hub Expert creation", () => {
+  it("uses the original immutable snapshot after template editing and archiving, and rejects a mismatched binding", async () => {
+    const system = await createOrchestrationSystem();
+    try {
+      const experts = createExpertStore(system.stateDir);
+      const definition = await experts.save({
+        id: "hub-pinned",
+        name: "Original Expert",
+        description: "",
+        useCases: "",
+        persona: "Original persona",
+        outputRequirements: "Original output",
+        skills: [],
+        references: [],
+        connections: [],
+      });
+      const binding = await experts.prepareSnapshot(definition.id);
+      const edited = await experts.save({
+        ...definition,
+        name: "Edited Expert",
+        persona: "Edited persona",
+        expectedRevision: definition.revision,
+      });
+      await experts.archive(edited.id, edited.revision);
+      const projectId = asProjectId("hub-expert-project");
+      const createdAt = now();
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.makeUnsafe("hub-expert-project-create"),
+          projectId,
+          title: "Hub Expert",
+          workspaceRoot: system.stateDir,
+          createdAt,
+        }),
+      );
+      const create = {
+        type: "thread.create" as const,
+        commandId: CommandId.makeUnsafe("hub-expert-thread-create"),
+        projectId,
+        threadId: ThreadId.makeUnsafe("hub-expert-thread"),
+        title: "Expert work",
+        modelSelection: { provider: "codex" as const, model: "gpt-5-codex" },
+        interactionMode: "default" as const,
+        runtimeMode: "approval-required" as const,
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      };
+      await system.run(system.engine.dispatch(create, { hubExpertBinding: binding }));
+      const model = await system.run(system.engine.getReadModel());
+      expect(model.threads.find((thread) => thread.id === create.threadId)?.expertBinding).toEqual(
+        binding,
+      );
+      await expect(
+        system.run(
+          system.engine.dispatch(
+            {
+              ...create,
+              commandId: CommandId.makeUnsafe("hub-expert-forged-create"),
+              threadId: ThreadId.makeUnsafe("hub-expert-forged"),
+            },
+            { hubExpertBinding: { ...binding, displayName: "Forged Expert" } },
+          ),
+        ),
+      ).rejects.toThrow("does not match");
+    } finally {
+      // Immutable Expert resources are read-only; unlock only this temporary fixture for scoped cleanup.
+      const unlockFixture = async (entry: string): Promise<void> => {
+        const stat = await fs.lstat(entry).catch(() => null);
+        if (!stat || stat.isSymbolicLink()) return;
+        await fs.chmod(entry, stat.isDirectory() ? 0o700 : 0o600);
+        if (stat.isDirectory()) {
+          for (const name of await fs.readdir(entry)) await unlockFixture(path.join(entry, name));
+        }
+      };
+      await unlockFixture(path.join(system.stateDir, "experts", "snapshots"));
+      await system.dispose();
+    }
+  });
+});
 
 describe("OrchestrationEngine", () => {
   it("inherits Context from a sidechat root when a created event has no fork or handoff source", () => {
@@ -3870,7 +3954,9 @@ describe("OrchestrationEngine", () => {
         }),
       );
       const binding = await system.run(context.getThreadBinding(threadId));
-      expect(binding?.snapshot?.project.projectGoal).toBe("Frozen goal");
+      expect(
+        binding?.snapshot?.schemaVersion === 1 ? binding.snapshot.project.projectGoal : null,
+      ).toBe("Frozen goal");
       const events = Array.from(
         await system.run(
           Stream.runCollect(engine.readThreadEventsThrough(threadId, 0, Number.MAX_SAFE_INTEGER)),
@@ -4042,12 +4128,14 @@ describe("OrchestrationEngine", () => {
       await system.run(startTurn("accepted-omp", "omp"));
       const binding = await system.run(context.getThreadBinding(threadId));
       expect(binding?.mode).toBe("bound");
-      expect(binding?.snapshot?.project.projectGoal).toBe(
-        "Preserve the user's committed raw goal.",
-      );
-      expect(binding?.snapshot?.project.projectInstructions).toBe(
-        "Apply these exact project instructions.",
-      );
+      expect(
+        binding?.snapshot?.schemaVersion === 1 ? binding.snapshot.project.projectGoal : null,
+      ).toBe("Preserve the user's committed raw goal.");
+      expect(
+        binding?.snapshot?.schemaVersion === 1
+          ? binding.snapshot.project.projectInstructions
+          : null,
+      ).toBe("Apply these exact project instructions.");
       expect((await system.run(context.getContextSession(threadId)))?.hasContent).toBe(true);
 
       const eventRows = Array.from(
@@ -4068,6 +4156,136 @@ describe("OrchestrationEngine", () => {
       }
       expect(bindRow!.sequence).toBeLessThan(turnRow!.sequence);
       expect(bindRow!.commandId).toBe(turnRow!.commandId);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("binds Hub Space Context on first execution and rejects unavailable first-run sources clearly", async () => {
+    const system = await createOrchestrationSystem();
+    const { engine, contextRepository: context, sql } = system;
+    const createdAt = now();
+    const spaceId = SpaceId.makeUnsafe("context-engine-hub-space");
+    const hubId = asProjectId("context-engine-hub");
+    const hubThreadId = ThreadId.makeUnsafe("context-engine-hub-first-thread");
+    const missingSpaceThreadId = ThreadId.makeUnsafe("context-engine-hub-missing-space-thread");
+    const sourceProjectId = asProjectId("context-engine-hub-source");
+    const sourceHubId = asProjectId("context-engine-source-hub");
+    const sourceHubThreadId = ThreadId.makeUnsafe("context-engine-source-hub-thread");
+
+    const createProject = (projectId: ProjectId, title: string, kind: "project" | "group") =>
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.makeUnsafe(`${projectId}-create`),
+        projectId,
+        kind,
+        title,
+        workspaceRoot: `/tmp/${projectId}`,
+        defaultModelSelection: { provider: "codex", model: "gpt-5-codex" },
+        ...(projectId === hubId ? { spaceId } : {}),
+        createdAt,
+      });
+    const createThread = (threadId: ThreadId, projectId: ProjectId) =>
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe(`${threadId}-create`),
+        threadId,
+        projectId,
+        title: "Hub coordinator",
+        modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      });
+    const startThread = (threadId: ThreadId, commandId: string) =>
+      engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe(commandId),
+        threadId,
+        message: {
+          messageId: asMessageId(`${commandId}-message`),
+          role: "user",
+          text: "Start with this Hub's Context.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      });
+
+    try {
+      await system.run(
+        engine.dispatch({
+          type: "space.create",
+          commandId: CommandId.makeUnsafe("context-engine-hub-space-create"),
+          spaceId,
+          name: "Hub Space",
+          icon: "book",
+          createdAt,
+        }),
+      );
+      await system.run(createProject(hubId, "Context Hub", "group"));
+      await system.run(createThread(hubThreadId, hubId));
+      await system.run(startThread(hubThreadId, "context-engine-hub-first-turn"));
+
+      const boundSpaceSnapshot = (await system.run(context.getThreadBinding(hubThreadId)))
+        ?.snapshot;
+      expect(boundSpaceSnapshot?.schemaVersion).toBe(2);
+      if (
+        boundSpaceSnapshot?.schemaVersion === 2 &&
+        boundSpaceSnapshot.source === "space" &&
+        boundSpaceSnapshot.space !== null
+      ) {
+        expect(boundSpaceSnapshot.source).toBe("space");
+        expect(boundSpaceSnapshot.space.spaceId).toBe(spaceId);
+      }
+
+      // Model a stale Space assignment so first binding exercises the source race path.
+      // Space deletion normally clears all Hub assignments in the projector.
+      await system.run(
+        sql`UPDATE projection_spaces SET deleted_at = ${createdAt} WHERE space_id = ${spaceId}`,
+      );
+      await system.run(createThread(missingSpaceThreadId, hubId));
+      await expect(
+        system.run(startThread(missingSpaceThreadId, "context-engine-hub-missing-space-turn")),
+      ).rejects.toThrow("assign an active Space before first execution");
+      expect(await system.run(context.getThreadBinding(missingSpaceThreadId))).toEqual({
+        mode: "unbound",
+      });
+
+      await system.run(createProject(sourceProjectId, "Source Project", "project"));
+      await system.run(createProject(sourceHubId, "Source Hub", "group"));
+      await system.run(createThread(sourceHubThreadId, sourceHubId));
+      await system.run(
+        sql`
+          INSERT INTO project_agent_configs (
+            project_id, coordinator_thread_id, coordinator_name,
+            coordinator_model_selection_json, coordinator_provider_options_json,
+            worker_routing_json, limits_json, capture_enabled, enabled, automation_id,
+            revision, created_at, updated_at, disabled_at
+          ) VALUES (
+            ${sourceHubId}, ${sourceHubThreadId}, 'Coordinator',
+            '{"provider":"codex","model":"gpt-5-codex"}', NULL,
+            NULL, '{}', 1, 1, NULL, 1, ${createdAt}, ${createdAt}, NULL
+          )
+        `,
+      );
+      await system.run(
+        sql`INSERT INTO hub_project_origins (hub_id, source_project_id)
+          VALUES (${sourceHubId}, ${sourceProjectId})`,
+      );
+      await system.run(
+        sql`UPDATE projection_projects SET deleted_at = ${createdAt}
+          WHERE project_id = ${sourceProjectId}`,
+      );
+      await expect(
+        system.run(startThread(sourceHubThreadId, "context-engine-hub-source-missing-turn")),
+      ).rejects.toThrow("restore or select an active source Project before first execution");
+      expect(await system.run(context.getThreadBinding(sourceHubThreadId))).toEqual({
+        mode: "unbound",
+      });
     } finally {
       await system.dispose();
     }

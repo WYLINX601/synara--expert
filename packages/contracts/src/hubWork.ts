@@ -1,16 +1,18 @@
 import { Schema } from "effect";
 
-import { SynaraCreateThreadSpec } from "./agentGateway";
+import { SynaraResolvedCreateThreadSpec } from "./agentGateway";
 import {
   IsoDateTime,
   MessageId,
   NonNegativeInt,
+  PositiveInt,
   ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnId,
 } from "./baseSchemas";
 import { ChatAttachment, RuntimeMode } from "./orchestration";
+import { ProviderMentionReference } from "./providerDiscovery";
 
 export const NEW_HUB_MAX_CONCURRENT_WORKERS = 3;
 
@@ -40,6 +42,13 @@ export const HubWorkProgress = Schema.Struct({
 });
 export type HubWorkProgress = typeof HubWorkProgress.Type;
 
+export const HubWorkExpertBindingSummary = Schema.Struct({
+  expertId: TrimmedNonEmptyString,
+  displayName: TrimmedNonEmptyString,
+  revision: PositiveInt,
+});
+export type HubWorkExpertBindingSummary = typeof HubWorkExpertBindingSummary.Type;
+
 export const HubWorkItem = Schema.Struct({
   id: TrimmedNonEmptyString,
   sourceThreadId: ThreadId,
@@ -50,6 +59,7 @@ export const HubWorkItem = Schema.Struct({
   queueReason: Schema.NullOr(Schema.String),
   resultSummary: Schema.NullOr(Schema.String.check(Schema.isMaxLength(4_000))),
   progress: Schema.NullOr(HubWorkProgress),
+  expertBinding: Schema.optional(HubWorkExpertBindingSummary),
   revision: NonNegativeInt,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -62,6 +72,8 @@ export const HubWorkSourceMessage = Schema.Struct({
   turnId: Schema.NullOr(TurnId),
   text: Schema.String,
   attachments: Schema.Array(ChatAttachment),
+  /** Original Hub app references, copied only from an authenticated user message. */
+  references: Schema.optional(Schema.Array(ProviderMentionReference).check(Schema.isMaxLength(16))),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -77,7 +89,7 @@ export const HubWorkRecord = Schema.Struct({
   fingerprint: TrimmedNonEmptyString,
   taskIndex: NonNegativeInt,
   creationSpec: Schema.Struct({
-    ...SynaraCreateThreadSpec.fields,
+    ...SynaraResolvedCreateThreadSpec.fields,
     // Snapshot the coordinator mode at submission, including Auto, without
     // exposing additional explicit modes on the MCP creation input.
     inheritedRuntimeMode: Schema.optional(RuntimeMode),
@@ -106,6 +118,15 @@ export function hubWorkItem(record: HubWorkRecord): HubWorkItem {
     queueReason: record.queueReason,
     resultSummary: record.resultSummary,
     progress: record.progress,
+    ...(record.creationSpec.expertBinding
+      ? {
+          expertBinding: {
+            expertId: record.creationSpec.expertBinding.expertId,
+            displayName: record.creationSpec.expertBinding.displayName,
+            revision: record.creationSpec.expertBinding.revision,
+          },
+        }
+      : {}),
     revision: record.revision,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,

@@ -19,6 +19,7 @@ import { Textarea } from "~/components/ui/textarea";
 import { ENVIRONMENT_PANEL_RECAP_MARKDOWN_CLASS_NAME } from "~/components/chat/environment/environmentPanelStyles";
 import { useThreadPullRequests } from "~/hooks/useThreadPullRequests";
 import { resolveGroupCoordinatorDisplayName } from "~/lib/groupCoordinatorName";
+import { isGroupContainerProject } from "~/lib/groupProjects";
 import { useThreadFastModeNotice } from "~/hooks/useThreadFastModeNotice";
 import { BotIcon, PauseIcon, PlayIcon, SettingsIcon, XIcon } from "~/lib/icons";
 import { FastModeBadgeIcon } from "../FastModeBadgeIcon";
@@ -26,6 +27,7 @@ import { formatThreadModelSummaryLabel, resolveThreadModelSummary } from "~/lib/
 import { cn } from "~/lib/utils";
 import { useAutomations } from "~/routes/-automations.shared";
 import { useStore } from "~/store";
+import { useWorkspacePathsStore } from "~/workspacePathsStore";
 import { SOFT_SURFACE_FILL_CLASS_NAME } from "~/surfaceStyles";
 import { createSidebarThreadSummariesSelector } from "~/storeSelectors";
 import type { SidebarThreadSummary } from "~/types";
@@ -128,6 +130,29 @@ export function ProjectPanel({
   const selectSidebarThreads = useMemo(() => createSidebarThreadSummariesSelector(), []);
   const sidebarThreads = useStore(selectSidebarThreads);
   const allProjects = useStore((state) => state.projects);
+  const homeDir = useWorkspacePathsStore((state) => state.homeDir);
+  const chatWorkspaceRoot = useWorkspacePathsStore((state) => state.chatWorkspaceRoot);
+  const studioWorkspaceRoot = useWorkspacePathsStore((state) => state.studioWorkspaceRoot);
+  const groupsWorkspaceRoot = useWorkspacePathsStore((state) => state.groupsWorkspaceRoot);
+  const workspacePaths = useMemo(
+    () => ({ homeDir, chatWorkspaceRoot, studioWorkspaceRoot, groupsWorkspaceRoot }),
+    [homeDir, chatWorkspaceRoot, studioWorkspaceRoot, groupsWorkspaceRoot],
+  );
+  const hubProjects = useMemo(
+    () => allProjects.filter((project) => isGroupContainerProject(project, workspacePaths)),
+    [allProjects, workspacePaths],
+  );
+  const sourceHubNameByThreadId = useMemo(() => {
+    const namesByThreadId = new Map<ThreadId, string>();
+    for (const hub of hubProjects) {
+      for (const threadId of summariesByProjectId.get(hub.id)?.memberThreadIds ?? []) {
+        if (!namesByThreadId.has(threadId)) namesByThreadId.set(threadId, hub.name);
+      }
+    }
+    return namesByThreadId;
+  }, [hubProjects, summariesByProjectId]);
+  const activeProjectIsHub =
+    projectId !== null && hubProjects.some((project) => project.id === projectId);
   const projectNameById = useMemo(
     () => new Map(allProjects.map((project) => [project.id, project.name] as const)),
     [allProjects],
@@ -261,31 +286,40 @@ export function ProjectPanel({
     [agent.overview?.workers, summaryNeedsYouThreadIds],
   );
 
-  const threadRows = useMemo(
-    () =>
-      projectId === null
-        ? EMPTY_GROUP_THREAD_ROWS
-        : buildGroupThreadRows({
-            threads: groupThreads,
-            taskByThreadId,
-            indexArchivedThreadIds,
-            pullRequests: pullRequestsByThreadId,
-            projectNameById,
-            groupProjectId: projectId,
-            groupProjectName: projectName,
-            needsYouThreadIds,
-          }),
-    [
-      projectId,
-      groupThreads,
+  const threadRows = useMemo(() => {
+    if (projectId === null) return EMPTY_GROUP_THREAD_ROWS;
+    const rows = buildGroupThreadRows({
+      threads: groupThreads,
       taskByThreadId,
       indexArchivedThreadIds,
-      pullRequestsByThreadId,
+      pullRequests: pullRequestsByThreadId,
       projectNameById,
-      projectName,
+      groupProjectId: projectId,
+      groupProjectName: projectName,
       needsYouThreadIds,
-    ],
-  );
+      workItems: agent.overview?.hubWorkItems,
+    });
+    // An ordinary Project overview can contain a Hub worker that executes in this
+    // Project. Show its collaboration owner in the existing metadata slot. The Hub
+    // overview keeps the execution Project label produced above.
+    if (activeProjectIsHub) return rows;
+    return rows.map((row) => {
+      const hubName = sourceHubNameByThreadId.get(row.thread.id);
+      return hubName ? { ...row, projectName: `Hub · ${hubName}` } : row;
+    });
+  }, [
+    projectId,
+    groupThreads,
+    taskByThreadId,
+    indexArchivedThreadIds,
+    pullRequestsByThreadId,
+    projectNameById,
+    projectName,
+    needsYouThreadIds,
+    agent.overview?.hubWorkItems,
+    activeProjectIsHub,
+    sourceHubNameByThreadId,
+  ]);
   const threadSections = useMemo(() => partitionGroupThreadRows(threadRows), [threadRows]);
   const pullRequestRows = useMemo(
     () =>

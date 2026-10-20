@@ -1,4 +1,6 @@
 import {
+  type ExpertBinding,
+  type ExpertPreview,
   type ProjectEntry,
   type ProviderInstanceId,
   type ProviderKind,
@@ -12,6 +14,7 @@ import {
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
+import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { isLocalFolderMentionQuery } from "~/lib/localFolderMentions";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import {
@@ -42,6 +45,12 @@ const EMPTY_COMPOSER_PLUGIN_SUGGESTIONS: ComposerPluginSuggestion[] = [];
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
 interface ComposerDiscoveryInput {
   threadId: ThreadId;
+  expertBinding?: ExpertBinding | null;
+  draftExpert?: {
+    readonly preview: ExpertPreview | undefined;
+    readonly isFetching: boolean;
+    readonly isError: boolean;
+  } | null;
   selectedProvider: ProviderKind;
   selectedProviderInstanceId: ProviderInstanceId;
   composerTrigger: ComposerTrigger | null;
@@ -56,6 +65,8 @@ interface ComposerDiscoveryInput {
 
 export function useComposerDiscovery({
   threadId,
+  expertBinding,
+  draftExpert,
   selectedProvider,
   selectedProviderInstanceId,
   composerTrigger,
@@ -124,6 +135,18 @@ export function useComposerDiscovery({
     selectedProvider === "pi" ||
     selectedProvider === "omp" ||
     supportsSkillDiscovery(providerComposerCapabilitiesQuery.data);
+  const hasExpertSkillSource = Boolean(expertBinding || draftExpert);
+  // Expert threads use the accepted snapshot, never the mutable template or the
+  // harness-wide catalog. Load outside the picker too, so restored skill chips
+  // keep resolving to the exact snapshot paths after refresh/provider changes.
+  const expertSnapshotQuery = useQuery({
+    queryKey: ["server", "expertSnapshot", expertBinding?.snapshotId],
+    enabled: !!expertBinding,
+    queryFn: () => {
+      if (!expertBinding) throw new Error("This thread has no Expert binding.");
+      return ensureExpertClient().readExpertSnapshot({ snapshotId: expertBinding.snapshotId });
+    },
+  });
   const providerSkillsQuery = useQuery(
     providerSkillsQueryOptions({
       provider: selectedProvider,
@@ -137,6 +160,7 @@ export function useComposerDiscovery({
             ? ompAgentDir || null
             : null,
       enabled:
+        !hasExpertSkillSource &&
         (isSkillTrigger ||
           composerTriggerKind === "slash-command" ||
           selectedProvider === "pi" ||
@@ -204,7 +228,37 @@ export function useComposerDiscovery({
     () => providerSupportsTextNativeReviewCommand(selectedProvider, providerNativeCommands),
     [providerNativeCommands, selectedProvider],
   );
-  const providerSkills = providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS;
+  // Unsent drafts reuse the existing preview; accepted bindings always take precedence.
+  const expertSkills = expertBinding
+    ? expertSnapshotQuery.isError
+      ? undefined
+      : expertSnapshotQuery.data?.skills
+    : draftExpert?.isError
+      ? undefined
+      : draftExpert?.preview?.definition.skills;
+  const providerSkills = useMemo(
+    () =>
+      hasExpertSkillSource
+        ? (expertSkills?.map((skill) => ({
+            ...skill,
+            enabled: true,
+            scope: "expert",
+          })) ?? EMPTY_PROVIDER_SKILLS)
+        : (providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS),
+    [hasExpertSkillSource, expertSkills, providerSkillsQuery.data],
+  );
+  const skillsLoading = expertBinding
+    ? expertSnapshotQuery.isLoading || expertSnapshotQuery.isFetching
+    : draftExpert
+      ? draftExpert.isFetching
+      : providerSkillsQuery.isLoading || providerSkillsQuery.isFetching;
+  const composerDiscoveryError =
+    (isSkillTrigger || composerTriggerKind === "slash-command") &&
+    (expertBinding ? expertSnapshotQuery.isError : draftExpert?.isError)
+      ? expertBinding
+        ? "无法读取此对话绑定的专家技能，请重试。"
+        : "无法读取所选专家的技能，请重试。"
+      : null;
 
   const isComposerMenuLoading =
     (composerTriggerKind === "mention" &&
@@ -214,15 +268,11 @@ export function useComposerDiscovery({
         providerPluginsQuery.isLoading ||
         providerPluginsQuery.isFetching)) ||
     (composerTriggerKind === "slash-command" &&
-      (providerCommandsQuery.isLoading ||
-        providerCommandsQuery.isFetching ||
-        providerSkillsQuery.isLoading ||
-        providerSkillsQuery.isFetching)) ||
+      (providerCommandsQuery.isLoading || providerCommandsQuery.isFetching || skillsLoading)) ||
     (composerTriggerKind === "skill" &&
       (providerComposerCapabilitiesQuery.isLoading ||
         providerComposerCapabilitiesQuery.isFetching ||
-        providerSkillsQuery.isLoading ||
-        providerSkillsQuery.isFetching));
+        skillsLoading));
   return {
     mentionTriggerQuery,
     isLocalFolderBrowserOpen,
@@ -235,6 +285,7 @@ export function useComposerDiscovery({
     effectiveComposerTriggerKind,
     supportsTextNativeReviewCommand,
     isComposerMenuLoading,
+    composerDiscoveryError,
     canCompactThread: supportsThreadCompaction(providerComposerCapabilitiesQuery.data),
     isNativeCommandDiscoveryPending:
       providerComposerCapabilitiesQuery.isPending ||

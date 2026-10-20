@@ -9,6 +9,7 @@
 import {
   type ContextApi,
   type ContextCommandResult,
+  type ProjectAgentSummary,
   type ProjectId,
   type SpaceContextSaveInput,
   type SpaceContextSettings,
@@ -79,6 +80,14 @@ function spaceOrderMatches(
 export function useSpacesController(input: {
   /** Ordinary (space-assignable) projects; computed by Sidebar because its own memos need it too. */
   ordinarySpaceProjects: readonly Project[];
+  /** Hub containers are independently filed in Spaces, while their workers run in Projects. */
+  hubProjects: readonly Project[];
+  summariesByProjectId: ReadonlyMap<
+    ProjectId,
+    Pick<ProjectAgentSummary, "coordinatorThreadId" | "memberThreadIds">
+  >;
+  /** The collaboration owner for the routed thread, which can differ from its execution Project. */
+  routeSpaceProject: Project | null;
   projectById: ReadonlyMap<ProjectId, Project>;
   sidebarThreads: readonly SidebarThreadSummary[];
   sidebarThreadSortOrder: SidebarThreadSortOrder;
@@ -105,6 +114,9 @@ export function useSpacesController(input: {
     sidebarThreadAttentionFirst,
     sidebarThreadSortOrder,
     sidebarThreads,
+    hubProjects,
+    summariesByProjectId,
+    routeSpaceProject: activeRouteSpaceProject,
   } = input;
 
   const navigate = useNavigate();
@@ -143,10 +155,18 @@ export function useSpacesController(input: {
   );
 
   const routeSpaceProject =
-    isOnKanban && routeProjectId ? (projectById.get(routeProjectId) ?? null) : activeRouteProject;
-  const routeSpaceContext = isOrdinarySpaceProject(routeSpaceProject, workspacePaths)
-    ? { projectId: routeSpaceProject.id, spaceId: routeSpaceProject.spaceId ?? null }
-    : null;
+    isOnKanban && routeProjectId
+      ? (projectById.get(routeProjectId) ?? null)
+      : activeRouteSpaceProject;
+  const routeSpaceProjectIdCandidate = routeSpaceProject?.id ?? null;
+  const routeSpaceProjectBelongsToSpace =
+    routeSpaceProjectIdCandidate !== null &&
+    (ordinarySpaceProjects.some((project) => project.id === routeSpaceProjectIdCandidate) ||
+      hubProjects.some((project) => project.id === routeSpaceProjectIdCandidate));
+  const routeSpaceContext =
+    routeSpaceProject && routeSpaceProjectBelongsToSpace
+      ? { projectId: routeSpaceProject.id, spaceId: routeSpaceProject.spaceId ?? null }
+      : null;
   const routeSpaceProjectId = routeSpaceContext?.projectId ?? null;
   const routeSpaceId = routeSpaceContext ? routeSpaceContext.spaceId : undefined;
 
@@ -320,15 +340,29 @@ export function useSpacesController(input: {
   // Bookmark the context being left so returning to that space restores it.
   const rememberDepartingSpaceContext = useCallback(() => {
     const currentRouteSpaceProject =
-      isOnKanban && routeProjectId ? (projectById.get(routeProjectId) ?? null) : activeRouteProject;
-    if (routeThreadId && isOrdinarySpaceProject(currentRouteSpaceProject, workspacePaths)) {
+      isOnKanban && routeProjectId
+        ? (projectById.get(routeProjectId) ?? null)
+        : activeRouteSpaceProject;
+    const currentRouteSpaceProjectId = currentRouteSpaceProject?.id ?? null;
+    const currentRouteProjectBelongsToSpace =
+      currentRouteSpaceProjectId !== null &&
+      (ordinarySpaceProjects.some((project) => project.id === currentRouteSpaceProjectId) ||
+        hubProjects.some((project) => project.id === currentRouteSpaceProjectId));
+    if (routeThreadId && currentRouteSpaceProject && currentRouteProjectBelongsToSpace) {
       rememberSpaceThread(currentRouteSpaceProject.spaceId ?? null, routeThreadId);
-    } else if (isOnKanban && isOrdinarySpaceProject(currentRouteSpaceProject, workspacePaths)) {
+    } else if (
+      isOnKanban &&
+      currentRouteSpaceProject &&
+      ordinarySpaceProjects.some((project) => project.id === currentRouteSpaceProject.id)
+    ) {
       rememberSpaceProject(currentRouteSpaceProject.spaceId ?? null, currentRouteSpaceProject.id);
     }
   }, [
     activeRouteProject,
+    activeRouteSpaceProject,
+    hubProjects,
     isOnKanban,
+    ordinarySpaceProjects,
     projectById,
     rememberSpaceProject,
     rememberSpaceThread,
@@ -364,6 +398,8 @@ export function useSpacesController(input: {
       const target = resolveSpaceSelectionTarget({
         spaceId,
         projects: ordinarySpaceProjects,
+        hubProjects,
+        summariesByProjectId,
         projectById,
         threads: sidebarThreads,
         rememberedThreadId: getLastSpaceThreadId(spaceId),
@@ -642,7 +678,11 @@ export function useSpacesController(input: {
           return;
         }
 
-        if (activeRouteProjectId === projectId || (isOnKanban && routeProjectId === projectId)) {
+        if (
+          activeRouteProjectId === projectId ||
+          activeRouteSpaceProject?.id === projectId ||
+          (isOnKanban && routeProjectId === projectId)
+        ) {
           selectSpaceForNavigation(spaceId);
           setOptimisticActiveSpaceId(spaceId, sequence);
         }
@@ -655,6 +695,8 @@ export function useSpacesController(input: {
     },
     [
       activeRouteProjectId,
+      activeRouteSpaceProject,
+      hubProjects,
       handleSelectSpace,
       isOnKanban,
       routeProjectId,
@@ -805,7 +847,9 @@ export function useSpacesController(input: {
       // Evaluated before the `try` (see `spaceOrderMatches`); none of these inputs can change
       // across the await anyway.
       const movesTheRoutedProject =
-        activeRouteProjectId === projectId || (isOnKanban && routeProjectId === projectId);
+        activeRouteProjectId === projectId ||
+        activeRouteSpaceProject?.id === projectId ||
+        (isOnKanban && routeProjectId === projectId);
       try {
         await moveProjectToSpace({ api: api.orchestration, projectId, spaceId });
         if (movesTheRoutedProject) {
@@ -821,6 +865,7 @@ export function useSpacesController(input: {
     },
     [
       activeRouteProjectId,
+      activeRouteSpaceProject,
       isOnKanban,
       onCloseProjectContextMenu,
       projectById,

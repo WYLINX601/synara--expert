@@ -68,7 +68,7 @@ export const ContextProjectSource = Schema.Struct({
   projectGoal: ContextGoal,
   projectInstructions: ContextInstructions,
 });
-const ContextSnapshotFields = {
+const ContextSnapshotV1Fields = {
   schemaVersion: Schema.Literal(1),
   rendererVersion: Schema.Literal(1),
   space: Schema.NullOr(ContextSpaceSource),
@@ -77,13 +77,53 @@ const ContextSnapshotFields = {
   snapshotHash: Schema.String,
   hasContent: Schema.Boolean,
 };
-export const ContextPreview = Schema.Struct(ContextSnapshotFields);
+const ContextSpacePreviewV2Fields = {
+  schemaVersion: Schema.Literal(2),
+  rendererVersion: Schema.Literal(1),
+  source: Schema.Literal("space"),
+  space: ContextSpaceSource,
+  text: Schema.String,
+  snapshotHash: Schema.String,
+  hasContent: Schema.Boolean,
+};
+const ContextNonePreviewV2Fields = {
+  schemaVersion: Schema.Literal(2),
+  rendererVersion: Schema.Literal(1),
+  source: Schema.Literal("none"),
+  space: Schema.Null,
+  text: Schema.String,
+  snapshotHash: Schema.String,
+  hasContent: Schema.Boolean,
+};
+export const ContextPreviewV1 = Schema.Struct(ContextSnapshotV1Fields);
+export const ContextSpacePreviewV2 = Schema.Struct(ContextSpacePreviewV2Fields);
+export const ContextNonePreviewV2 = Schema.Struct(ContextNonePreviewV2Fields);
+export const ContextPreview = Schema.Union([
+  ContextPreviewV1,
+  ContextSpacePreviewV2,
+  ContextNonePreviewV2,
+]);
 export type ContextPreview = typeof ContextPreview.Type;
-export const ContextSnapshot = Schema.Struct({
-  ...ContextSnapshotFields,
+export const ContextSnapshotV1 = Schema.Struct({
+  ...ContextSnapshotV1Fields,
   snapshotId: Schema.String,
   createdAt: IsoDateTime,
 });
+export const ContextSpaceSnapshotV2 = Schema.Struct({
+  ...ContextSpacePreviewV2Fields,
+  snapshotId: Schema.String,
+  createdAt: IsoDateTime,
+});
+export const ContextNoneSnapshotV2 = Schema.Struct({
+  ...ContextNonePreviewV2Fields,
+  snapshotId: Schema.String,
+  createdAt: IsoDateTime,
+});
+export const ContextSnapshot = Schema.Union([
+  ContextSnapshotV1,
+  ContextSpaceSnapshotV2,
+  ContextNoneSnapshotV2,
+]);
 export type ContextSnapshot = typeof ContextSnapshot.Type;
 
 /** Frozen application Context, independently carried alongside the Expert session. */

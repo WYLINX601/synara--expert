@@ -6,10 +6,13 @@ import {
 import {
   createComposerMentionTokenRegex,
   extractComposerMentionPath,
+  findHubReferenceMentionForToken,
   findConnectorProviderMentionReferenceForToken,
   findThreadProviderMentionReferenceForToken,
+  hubReferenceMentionLabel,
   isPluginProviderMentionReference,
   providerMentionMatchesToken,
+  resolveMentionChipKind,
 } from "./lib/composerMentions";
 import {
   LINK_TOKEN_SOURCE,
@@ -28,7 +31,9 @@ export type ComposerPromptSegment =
   | {
       type: "mention";
       path: string;
-      kind?: "path" | "plugin" | "thread" | "connector";
+      kind?: "path" | "plugin" | "thread" | "connector" | "expert" | "deliverable";
+      /** User-facing label for an app-owned reference whose token is its canonical URI. */
+      label?: string;
       threadId?: string;
       /**
        * Raw token length in the source text (`@name` vs `@"name with spaces"`).
@@ -329,6 +334,26 @@ function splitTextIntoPromptSegments(
         color: match.color,
       });
     } else if (match.kind === "mention") {
+      const hubReferenceMention = findHubReferenceMentionForToken(
+        match.value,
+        options.mentionReferences,
+      );
+      const hubReferenceKind =
+        hubReferenceMention?.reference.kind ?? resolveMentionChipKind(match.value);
+      if (hubReferenceKind === "expert" || hubReferenceKind === "deliverable") {
+        segments.push({
+          type: "mention",
+          path: match.value,
+          kind: hubReferenceKind,
+          label:
+            hubReferenceMention?.mention.name ??
+            hubReferenceMentionLabel(match.value, options.mentionReferences) ??
+            "Reference",
+          tokenLength: match.end - match.start,
+        });
+        cursor = match.end;
+        continue;
+      }
       const threadMention = findThreadProviderMentionReferenceForToken(
         match.value,
         options.mentionReferences,

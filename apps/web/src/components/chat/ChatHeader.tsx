@@ -105,6 +105,7 @@ interface ChatHeaderProps {
   availableEditors: ReadonlyArray<EditorId>;
   diffToggleShortcutLabel: string | null;
   expertControl?: React.ReactNode;
+  hubLocationControl?: React.ReactNode;
   handoffActionLabel: string;
   handoffDisabled: boolean;
   handoffActionTargets: ReadonlyArray<ThreadHandoffTarget>;
@@ -435,6 +436,7 @@ export function ChatHeader({
   availableEditors,
   diffToggleShortcutLabel,
   expertControl,
+  hubLocationControl,
   handoffActionLabel,
   handoffDisabled,
   handoffActionTargets,
@@ -720,6 +722,7 @@ export function ChatHeader({
         )}
       </div>
       <div className="flex shrink-0 items-center gap-2 [-webkit-app-region:no-drag]">
+        {!minimalChrome && hubLocationControl}
         {!minimalChrome && expertControl}
         {!minimalChrome && !hideHandoffControls && !environment ? (
           <ProviderUsageMenuControl provider={activeProvider} />

@@ -61,6 +61,8 @@ import { useStableCallback } from "~/hooks/useStableCallback";
 import { useThreadRecap } from "~/hooks/useThreadRecap";
 import { SINGLE_CHAT_PANE_SCOPE_ID } from "~/lib/chatPaneScope";
 import { formatComposerMentionToken } from "~/lib/composerMentions";
+import { buildHubDeliverableReferenceUri } from "@synara/shared/hubReferences";
+import { resolveOwningHubProject } from "~/lib/spaceNavigation";
 import {
   GIT_WORKING_TREE_DIFF_LIVE_REFETCH_INTERVAL_MS,
   gitBranchesQueryOptions,
@@ -400,6 +402,7 @@ import {
 } from "./chat/project/coordinatorSuggestions.logic";
 import { ProjectPanel } from "./chat/project/ProjectPanel";
 import { LibraryPanel } from "./chat/group/LibraryPanel";
+import { useHubComposerReferences } from "./chat/group/useHubComposerReferences";
 import { useHubWorkItems } from "./chat/project/useHubWorkItems";
 import { hubWorkItemsBySourceMessage } from "./chat/project/hubWorkItems";
 import { useProjectAgentSummaries } from "./chat/project/useProjectAgentSummaries";
@@ -1476,6 +1479,33 @@ export default function ChatView({
   const isCoordinatorConversation = Boolean(
     activeThread && coordinatorThreadIds.has(activeThread.id),
   );
+  const activeHubProject = useMemo(
+    () =>
+      resolveOwningHubProject({
+        threadId,
+        projectId: activeProjectId,
+        hubProjects: composerThreadProjects.filter((project) =>
+          isGroupContainerProject(project, {
+            homeDir,
+            chatWorkspaceRoot,
+            studioWorkspaceRoot,
+            groupsWorkspaceRoot,
+          }),
+        ),
+        summariesByProjectId,
+      }),
+    [
+      threadId,
+      activeProjectId,
+      composerThreadProjects,
+      summariesByProjectId,
+      homeDir,
+      chatWorkspaceRoot,
+      studioWorkspaceRoot,
+      groupsWorkspaceRoot,
+    ],
+  );
+  const activeHubId = activeHubProject?.id ?? null;
   const {
     hasThreadStarted,
     lockedProvider,
@@ -2362,6 +2392,14 @@ export default function ChatView({
     isMacNavigatorPlatform(),
   );
   const [isContextWindowMeterOpen, setIsContextWindowMeterOpen] = useState(false);
+  const composerExpertId = isLocalDraftThread ? draftThread?.expertId : undefined;
+  const composerExpertPreview = useExpertComposerPreview(
+    composerExpertId,
+    selectedProvider,
+    selectedModelSelection.instanceId,
+    threadWorkspaceCwd,
+    isLocalDraftThread && Boolean(composerExpertId),
+  );
   const {
     mentionTriggerQuery,
     isLocalFolderBrowserOpen,
@@ -2374,10 +2412,13 @@ export default function ChatView({
     effectiveComposerTriggerKind,
     supportsTextNativeReviewCommand,
     isComposerMenuLoading,
+    composerDiscoveryError,
     canCompactThread,
     isNativeCommandDiscoveryPending,
   } = useComposerDiscovery({
     threadId,
+    expertBinding: activeThread?.expertBinding ?? null,
+    draftExpert: composerExpertId ? composerExpertPreview : null,
     selectedProvider,
     selectedProviderInstanceId,
     composerTrigger,
@@ -2589,6 +2630,17 @@ export default function ChatView({
     },
     connectors: mentionableConnectors,
   });
+  const hubMentions = useHubComposerReferences({
+    hubId: activeHubId,
+    isCoordinator: isCoordinatorConversation,
+    enabled: effectiveComposerTriggerKind === "mention" && composerCommandPicker === null,
+    query: mentionTriggerQuery,
+    nativeItems: normalComposerMenuItems,
+  });
+  const showHubMentions =
+    activeHubId !== null &&
+    effectiveComposerTriggerKind === "mention" &&
+    composerCommandPicker === null;
   const composerMenuItems = useMemo(() => {
     if (composerCommandPicker === "fork-target") {
       return [
@@ -2630,12 +2682,14 @@ export default function ChatView({
       ];
     }
 
-    return normalComposerMenuItems;
+    return showHubMentions ? hubMentions.items : normalComposerMenuItems;
   }, [
     activeThread?.envMode,
     activeThread?.worktreePath,
     composerCommandPicker,
     normalComposerMenuItems,
+    showHubMentions,
+    hubMentions.items,
   ]);
   const composerMenuOpen = Boolean(composerTrigger || composerCommandPicker);
   // The `+` panel yields the floating slot to the slash/mention menu as soon as a
@@ -2644,8 +2698,10 @@ export default function ChatView({
   const composerOverlayOpen = composerMenuOpen || composerExtrasPanelOpen;
   const activeComposerMenuItem = useMemo(
     () =>
-      composerMenuItems.find((item) => item.id === composerHighlightedItemId) ??
-      composerMenuItems[0] ??
+      composerMenuItems.find(
+        (item) => item.id === composerHighlightedItemId && !("disabled" in item && item.disabled),
+      ) ??
+      composerMenuItems.find((item) => !("disabled" in item && item.disabled)) ??
       null,
     [composerHighlightedItemId, composerMenuItems],
   );
@@ -3303,14 +3359,14 @@ export default function ChatView({
   });
   const projectPanelEnabled = resolveProjectPanelEnabled({
     environmentEnabled,
-    isGroupContainer,
+    isGroupContainer: activeHubId !== null,
   });
   // Group chats default to the Groups panel — a newly created group's
   // coordinator chat opens with Focus/sections visible. An explicit toggle wins
   // while its project stays active; closing the panel persists per group so the
   // default never overrides a deliberate close.
   const { auxiliarySurface, chooseAuxiliarySurface, setGroupPanelClosed } = useAuxiliarySurface({
-    projectId: activeProjectId,
+    projectId: activeHubId ?? activeProjectId,
     projectPanelEnabled,
     environmentPanelVisible,
   });
@@ -4981,14 +5037,6 @@ export default function ChatView({
       handleModelPickerOpenChange,
     ],
   );
-  const composerExpertId = isLocalDraftThread ? draftThread?.expertId : undefined;
-  const composerExpertPreview = useExpertComposerPreview(
-    composerExpertId,
-    selectedProvider,
-    selectedModelSelection.instanceId,
-    threadWorkspaceCwd,
-    isLocalDraftThread && Boolean(composerExpertId),
-  );
   const composerExpertSendBlocked =
     Boolean(composerExpertId) &&
     (composerExpertPreview.unsupportedProvider ||
@@ -5638,10 +5686,10 @@ export default function ChatView({
   // needs-attention selector has no consumer and stays empty. No manual
   // useMemo: the compiler owns this scope (see chatHotPath.compiler.test.ts).
   const projectPanelAttentionGroups = new Map<ProjectId, GroupNeedsAttentionGroup>();
-  if (projectPanelEnabled && activeProject) {
-    const summary = summariesByProjectId.get(activeProject.id);
-    projectPanelAttentionGroups.set(activeProject.id, {
-      projectId: activeProject.id,
+  if (projectPanelEnabled && activeHubProject) {
+    const summary = summariesByProjectId.get(activeHubProject.id);
+    projectPanelAttentionGroups.set(activeHubProject.id, {
+      projectId: activeHubProject.id,
       coordinatorThreadId: summary?.coordinatorThreadId ?? null,
       memberThreadIds: new Set(summary?.memberThreadIds ?? []),
       needsYouThreadIds: new Set(summary?.needsYouThreadIds ?? []),
@@ -5657,10 +5705,10 @@ export default function ChatView({
   const groupPanelDefaultModelSelection = useMemo<ModelSelection>(
     () =>
       resolveDraftFallbackModelSelection({
-        projectDefault: activeProject?.defaultModelSelection,
+        projectDefault: activeHubProject?.defaultModelSelection,
         settingsDefaultProvider: settings.defaultProvider,
       }),
-    [activeProject?.defaultModelSelection, settings.defaultProvider],
+    [activeHubProject?.defaultModelSelection, settings.defaultProvider],
   );
 
   const handlePromptChange = useStableCallback(onPromptChange);
@@ -6635,7 +6683,7 @@ export default function ChatView({
                         onToggleFastMode={toggleFastMode}
                         onInteractionModeChange={handleInteractionModeChange}
                         onInsertGoal={insertGoalSlashCommandInComposer}
-                        {...(projectContext.ownsContext
+                        {...(projectContext.ownsContext || activeHubId !== null
                           ? { onViewContext: () => setIsContextDetailsOpen(true) }
                           : {})}
                         onClose={() => {
@@ -6658,7 +6706,17 @@ export default function ChatView({
                       <ComposerCommandMenu
                         items={composerMenuItems}
                         resolvedTheme={resolvedTheme}
-                        isLoading={isComposerMenuLoading}
+                        isLoading={
+                          isComposerMenuLoading || (showHubMentions && hubMentions.loading)
+                        }
+                        {...(showHubMentions
+                          ? {
+                              emptyStateText: "No matching references.",
+                            }
+                          : {})}
+                        statusText={
+                          (showHubMentions ? hubMentions.error : null) ?? composerDiscoveryError
+                        }
                         triggerKind={
                           composerCommandPicker !== null
                             ? "slash-command"
@@ -6873,6 +6931,40 @@ export default function ChatView({
           activeThreadEntryPoint={terminalState.entryPoint}
           activeProvider={activeThread.session?.provider ?? activeThread.modelSelection.provider}
           activeProjectName={isEditorRail ? undefined : activeProjectDisplayName}
+          hubLocationControl={
+            activeHubProject && !isCoordinatorConversation ? (
+              <div className="flex min-w-0 items-center gap-1 text-ui-sm">
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  className="max-w-40 truncate"
+                  title={`所属 Hub · ${activeHubProject.name}`}
+                  onClick={() => {
+                    const coordinatorId = summariesByProjectId.get(
+                      activeHubProject.id,
+                    )?.coordinatorThreadId;
+                    if (coordinatorId) void onNavigateToThread(coordinatorId);
+                  }}
+                >
+                  Hub · {activeHubProject.name}
+                </Button>
+                {activeProject && activeProject.id !== activeHubProject.id ? (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="max-w-40 truncate"
+                    title={`执行 Project · ${activeProject.name}`}
+                    onClick={() => {
+                      useSpacesUiStore.getState().setActiveSpaceId(activeProject.spaceId ?? null);
+                      void handleNewThread(activeProject.id, { entryPoint: "chat" });
+                    }}
+                  >
+                    Project · {activeProject.name}
+                  </Button>
+                ) : null}
+              </div>
+            ) : undefined
+          }
           threadBreadcrumbs={threadBreadcrumbs}
           {...(isEditorRail
             ? { className: cn(CHAT_SURFACE_HEADER_PADDING_X_CLASS, "h-full") }
@@ -7394,12 +7486,12 @@ export default function ChatView({
 
           {projectContextGuard.dialog}
           {migrationDialog}
-          {projectContext.ownsContext ? (
+          {projectContext.ownsContext || activeHubId !== null ? (
             <ContextDetailsDialog
               open={isContextDetailsOpen}
               onOpenChange={setIsContextDetailsOpen}
               threadId={activeThread.id}
-              projectId={activeProjectId}
+              projectId={projectContext.ownsContext ? activeProjectId : null}
               isLocalDraft={isLocalDraftThread}
               onNewThread={handleNewThreadWithLatestContext}
             />
@@ -7428,9 +7520,9 @@ export default function ChatView({
             <ProjectPanel
               open={projectPanelVisible}
               variant={environmentOverlayVariant}
-              projectId={activeProjectId}
-              projectName={activeProjectDisplayName ?? activeProject?.name ?? "Project"}
-              workspacePath={activeProject?.cwd ?? ""}
+              projectId={activeHubId}
+              projectName={activeHubProject?.name ?? "Hub"}
+              workspacePath={activeHubProject?.cwd ?? ""}
               // "Use default" must mean the app's default model, not whatever the
               // active thread happens to run (W14).
               defaultModelSelection={groupPanelDefaultModelSelection}
@@ -7452,7 +7544,25 @@ export default function ChatView({
             <LibraryPanel
               open={libraryPanelVisible}
               variant={environmentOverlayVariant}
-              projectId={activeProjectId}
+              projectId={activeHubId}
+              onReferenceDeliverable={({ collection, file }) => {
+                const mention = {
+                  name: file.name,
+                  path: buildHubDeliverableReferenceUri({
+                    hubId: collection.hubId,
+                    workerThreadId: collection.workerThreadId,
+                    path: file.path,
+                    revision: collection.revision,
+                  }),
+                };
+                appendComposerPromptText(threadId, `${formatComposerMentionToken(mention.path)} `);
+                updateSelectedComposerMentions((existing) => [
+                  ...existing.filter((item) => item.path !== mention.path),
+                  mention,
+                ]);
+                setLibraryFromAuxiliary(false);
+                scheduleComposerFocus();
+              }}
               onClose={() => setLibraryFromAuxiliary(false)}
             />
           ) : null}

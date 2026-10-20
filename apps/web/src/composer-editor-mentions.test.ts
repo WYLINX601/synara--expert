@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import {
+  buildHubDeliverableReferenceUri,
+  buildHubExpertReferenceUri,
+} from "@synara/shared/hubReferences";
 
 import {
   matchComposerLinkToken,
@@ -7,6 +11,7 @@ import {
   splitPromptIntoDisplaySegments,
 } from "./composer-editor-mentions";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
+import { formatComposerMentionToken } from "./lib/composerMentions";
 
 describe("matchComposerLinkToken", () => {
   it("matches a URL only once a delimiter follows it while typing", () => {
@@ -118,6 +123,77 @@ describe("splitPromptIntoComposerSegments", () => {
       },
       { type: "text", text: " now" },
     ]);
+  });
+
+  it("renders Hub tokens with canonical identity and human-readable labels", () => {
+    const v1 = {
+      name: "brief.md",
+      path: buildHubDeliverableReferenceUri({
+        hubId: "design-hub",
+        workerThreadId: "worker-1",
+        path: "brief.md",
+        revision: 1,
+      }),
+    };
+    const v2 = {
+      ...v1,
+      path: buildHubDeliverableReferenceUri({
+        hubId: "design-hub",
+        workerThreadId: "worker-1",
+        path: "brief.md",
+        revision: 2,
+      }),
+    };
+    const v1Token = formatComposerMentionToken(v1.path);
+    const v2Token = formatComposerMentionToken(v2.path);
+    const prompt = `Use ${v1Token} and ${v2Token} now`;
+
+    expect(splitPromptIntoComposerSegments(prompt, [], [v1, v2])).toEqual([
+      { type: "text", text: "Use " },
+      {
+        type: "mention",
+        path: v1.path,
+        kind: "deliverable",
+        label: "brief.md",
+        tokenLength: v1Token.length,
+      },
+      { type: "text", text: " and " },
+      {
+        type: "mention",
+        path: v2.path,
+        kind: "deliverable",
+        label: "brief.md",
+        tokenLength: v2Token.length,
+      },
+      { type: "text", text: " now" },
+    ]);
+    expect(splitPromptIntoDisplaySegments(prompt, [v1, v2])[1]).toMatchObject({
+      type: "mention",
+      path: v1.path,
+      kind: "deliverable",
+      label: "brief.md",
+    });
+  });
+
+  it("renders an expert reference with its display name", () => {
+    const expert = {
+      name: "Research Expert",
+      path: buildHubExpertReferenceUri("research-expert"),
+    };
+
+    expect(
+      splitPromptIntoComposerSegments(
+        `Ask ${formatComposerMentionToken(expert.path)} please`,
+        [],
+        [expert],
+      ),
+    ).toContainEqual({
+      type: "mention",
+      path: expert.path,
+      kind: "expert",
+      label: "Research Expert",
+      tokenLength: formatComposerMentionToken(expert.path).length,
+    });
   });
 
   it("does not convert an incomplete trailing mention token", () => {

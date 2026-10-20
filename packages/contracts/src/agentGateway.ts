@@ -12,6 +12,7 @@ import { ModelSelection, ProviderKind, RuntimeMode } from "./orchestration";
 import { ProviderModelDescriptor } from "./providerDiscovery";
 import { ProviderInstanceId } from "./providerInstance";
 import { ServerProviderAuthStatus } from "./server";
+import { ExpertBinding } from "./expert";
 
 export const SYNARA_GATEWAY_MAX_THREADS_PER_OPERATION = 20;
 export const SYNARA_GATEWAY_MAX_REQUEST_ID_LENGTH = 256;
@@ -72,7 +73,11 @@ export const SynaraCreateThreadSpec = Schema.Struct({
   ),
   notifyCreatorOnComplete: Schema.optional(Schema.Boolean),
   title: Schema.optional(Schema.String.check(Schema.isNonEmpty())),
-  target: ModelSelection,
+  // Hub coordinators may select an Expert and let Synara resolve its pinned
+  // provider/model. Plain worker requests are checked at the gateway boundary
+  // and still require an explicit target.
+  expertId: Schema.optional(Schema.String.check(Schema.isNonEmpty())),
+  target: Schema.optional(ModelSelection),
   projectId: Schema.optional(ProjectId),
   environment: Schema.optional(Schema.Literals(["local", "worktree"])),
   baseRef: Schema.optional(Schema.String.check(Schema.isNonEmpty())),
@@ -86,6 +91,14 @@ export const SynaraCreateThreadSpec = Schema.Struct({
   enableComputerControl: Schema.optional(Schema.Boolean),
 });
 export type SynaraCreateThreadSpec = typeof SynaraCreateThreadSpec.Type;
+
+/** A server-resolved spec safe to persist and replay from the Hub queue. */
+export const SynaraResolvedCreateThreadSpec = Schema.Struct({
+  ...SynaraCreateThreadSpec.fields,
+  target: ModelSelection,
+  expertBinding: Schema.optional(ExpertBinding),
+});
+export type SynaraResolvedCreateThreadSpec = typeof SynaraResolvedCreateThreadSpec.Type;
 
 const SynaraGatewayRequestId = Schema.String.check(Schema.isNonEmpty()).check(
   Schema.isMaxLength(SYNARA_GATEWAY_MAX_REQUEST_ID_LENGTH),

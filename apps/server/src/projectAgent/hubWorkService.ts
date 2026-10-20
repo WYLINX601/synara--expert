@@ -3,6 +3,8 @@ import {
   DEFAULT_PROJECT_AGENT_LIMITS,
   HubWorkProgress,
   HubWorkRecord,
+  SynaraCreateThreadSpec,
+  SynaraResolvedCreateThreadSpec,
   hubWorkItem,
   type HubWorkItem,
   type HubWorkProgressStep,
@@ -15,6 +17,7 @@ import {
 import { Effect, Option, Schema } from "effect";
 
 import { stableGatewayDigest } from "../agentGateway/creationUtils";
+import { parseHubReferenceUri } from "@synara/shared/hubReferences";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery";
 import type { OrchestrationCommandReceiptRepositoryShape } from "../persistence/Services/OrchestrationCommandReceipts";
 import type { ProjectionThreadMessageRepositoryShape } from "../persistence/Services/ProjectionThreadMessages";
@@ -40,6 +43,11 @@ type HubWorkDependencies = {
   readonly messages?: Pick<ProjectionThreadMessageRepositoryShape, "getByThreadAndMessageId">;
   readonly commandReceipts?: Pick<OrchestrationCommandReceiptRepositoryShape, "getByCommandId">;
   readonly snapshotQuery?: Pick<ProjectionSnapshotQueryShape, "getThreadShellsByIds">;
+  readonly resolveCreationSpec?: (input: {
+    readonly callerThreadId: ThreadId;
+    readonly targetProjectId: ProjectId;
+    readonly spec: SynaraCreateThreadSpec;
+  }) => Effect.Effect<SynaraResolvedCreateThreadSpec, unknown>;
   readonly queuedTurnPromotions?: Pick<QueuedTurnPromotionRepositoryShape, "listPendingThreadIds">;
 };
 
@@ -49,7 +57,7 @@ export interface HubWorkSubmitInput {
   readonly requestId: string;
   readonly sourceMessages: readonly HubWorkSourceMessage[];
   readonly tasks: readonly {
-    readonly spec: HubWorkRecord["creationSpec"];
+    readonly spec: SynaraCreateThreadSpec;
     readonly title?: string;
   }[];
 }
@@ -200,6 +208,21 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
         );
         if (principal.kind !== "coordinator")
           return yield* Effect.fail(fail("Only the hub coordinator can submit work."));
+        for (const source of input.sourceMessages) {
+          for (const mention of source.references ?? []) {
+            const reference = parseHubReferenceUri(mention.path);
+            if (!reference) {
+              return yield* Effect.fail(
+                fail("A selected Hub reference is malformed or unsupported.", "invalid"),
+              );
+            }
+            if (reference.kind === "deliverable" && reference.hubId !== principal.projectId) {
+              return yield* Effect.fail(
+                fail("Hub work cannot carry a deliverable reference from another Hub."),
+              );
+            }
+          }
+        }
         const config = yield* requireConfig(principal.projectId);
         if (!config.enabled || config.pausedAt !== null || config.archivedAt !== null)
           return yield* Effect.fail(fail("Resume this hub before starting work.", "conflict"));
@@ -232,6 +255,51 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
           { sourceMessages: input.sourceMessages, tasks: input.tasks },
           64,
         );
+        // Replay lookup precedes Expert reads and model discovery. Once accepted,
+        // template edits and archiving must not change or invalidate the frozen
+        // target/binding returned for the same source request.
+        const existingRecords = yield* repository
+          .list(principal.projectId)
+          .pipe(Effect.mapError(serviceError));
+        const sameRequest = existingRecords.filter(
+          (record) => record.requestId === input.requestId,
+        );
+        const sameScope = existingRecords.filter((record) => record.scopeKey === scopeKey);
+        const replay = sameRequest.length > 0 ? sameRequest : sameScope;
+        if (replay.length > 0) {
+          if (
+            replay.length !== input.tasks.length ||
+            replay.some(
+              (record) => record.scopeKey !== scopeKey || record.fingerprint !== fingerprint,
+            )
+          ) {
+            return yield* Effect.fail(
+              fail("This request already has a different hub work plan.", "conflict"),
+            );
+          }
+          // Keep the repository's request-ID conflict ledger in sync when a
+          // semantically identical source request arrives with a new wake ID.
+          const result = yield* repository
+            .submit(
+              replay.map((record) => ({
+                ...record,
+                requestId: input.requestId,
+              })),
+            )
+            .pipe(Effect.mapError(serviceError));
+          yield* Effect.forEach(result.items, notify, { discard: true });
+          return result;
+        }
+        for (const task of input.tasks) {
+          if (
+            task.spec.expertId !== undefined &&
+            !(config.expertIds ?? []).includes(task.spec.expertId)
+          ) {
+            return yield* Effect.fail(
+              fail("This Expert does not participate in the current Hub.", "forbidden"),
+            );
+          }
+        }
         const now = new Date().toISOString();
         const records: HubWorkRecord[] = [];
         const sourceById = new Map<string, HubWorkSourceMessage>(
@@ -254,11 +322,33 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
             return yield* Effect.fail(
               fail("Task context references must belong to this frozen source request.", "invalid"),
             );
-          const targetProjectId = task.spec.projectId ?? principal.projectId;
+          const targetProjectId =
+            task.spec.projectId ?? config.sourceProjectId ?? principal.projectId;
           yield* projectAgentService.assertCallerMayCreateThreadInProject({
             callerThreadId: input.callerThreadId,
             targetProjectId,
           });
+          const creationSpec = dependencies.resolveCreationSpec
+            ? yield* dependencies
+                .resolveCreationSpec({
+                  callerThreadId: input.callerThreadId,
+                  targetProjectId,
+                  spec: task.spec,
+                })
+                .pipe(Effect.mapError(serviceError))
+            : task.spec.expertId !== undefined || task.spec.target === undefined
+              ? yield* Effect.fail(
+                  fail(
+                    task.spec.expertId
+                      ? "Hub Expert dispatch is unavailable."
+                      : "A target is required for a plain worker.",
+                    "invalid",
+                  ),
+                )
+              : yield* Schema.decodeUnknownEffect(SynaraResolvedCreateThreadSpec)({
+                  ...task.spec,
+                  target: task.spec.target,
+                }).pipe(Effect.mapError(serviceError));
           const record = yield* Schema.decodeUnknownEffect(HubWorkRecord)({
             id: `hub-work:${stableGatewayDigest({ projectId: principal.projectId, scopeKey, taskIndex }, 40)}`,
             projectId: principal.projectId,
@@ -271,7 +361,7 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
             sourceThreadId: config.coordinatorThreadId,
             sourceMessageId: taskSources[0]!.messageId,
             sourceMessages: taskSources,
-            creationSpec: task.spec,
+            creationSpec,
             title:
               (task.title ?? task.spec.title ?? task.spec.prompt.split("\n")[0] ?? "Task")
                 .trim()
@@ -293,7 +383,9 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
           }).pipe(Effect.mapError(serviceError));
           records.push(record);
         }
-        const result = yield* repository.submit(records).pipe(Effect.mapError(serviceError));
+        const result = yield* repository
+          .submit(records, { expectedConfigRevision: config.revision })
+          .pipe(Effect.mapError(serviceError));
         yield* Effect.forEach(result.items, notify, { discard: true });
         return result;
       }),
@@ -346,7 +438,9 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
           return;
         if (dependencies.commandReceipts) {
           const receipt = yield* dependencies.commandReceipts
-            .getByCommandId({ commandId: CommandId.makeUnsafe(input.commandId) })
+            .getByCommandId({
+              commandId: CommandId.makeUnsafe(input.commandId),
+            })
             .pipe(Effect.mapError(serviceError));
           if (Option.isSome(receipt) && receipt.value.status === "accepted") return;
         }
@@ -362,7 +456,9 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
           if (record.state !== "starting" || !record.workerThreadId || !record.admissionCommandId)
             continue;
           const receipt = yield* dependencies.commandReceipts
-            .getByCommandId({ commandId: CommandId.makeUnsafe(record.admissionCommandId) })
+            .getByCommandId({
+              commandId: CommandId.makeUnsafe(record.admissionCommandId),
+            })
             .pipe(Effect.mapError(serviceError));
           if (Option.isNone(receipt) || receipt.value.status === "rejected") {
             yield* restoreFollowupAdmission(record);
@@ -421,7 +517,9 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
             dependencies.commandReceipts
           ) {
             const receipt = yield* dependencies.commandReceipts
-              .getByCommandId({ commandId: CommandId.makeUnsafe(record.admissionCommandId) })
+              .getByCommandId({
+                commandId: CommandId.makeUnsafe(record.admissionCommandId),
+              })
               .pipe(Effect.mapError(serviceError));
             if (Option.isNone(receipt)) continue;
             if (receipt.value.status === "rejected") {
@@ -526,7 +624,11 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
           return yield* Effect.fail(
             fail("Stop the active worker before cancelling this task.", "conflict"),
           );
-        return yield* save(record, { state: "cancelled", slotHeld: false, queueReason: null });
+        return yield* save(record, {
+          state: "cancelled",
+          slotHeld: false,
+          queueReason: null,
+        });
       }),
 
     list: (projectId, principal) =>

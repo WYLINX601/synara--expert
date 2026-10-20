@@ -1,5 +1,13 @@
 import type {
   ProjectActivity,
+  HubDeliverablePublishInput,
+  HubDeliverableListInput,
+  HubDeliverableListResult,
+  HubDeliverableReadInput,
+  HubDeliverableReadResult,
+  HubDeliverableWithdrawInput,
+  HubDeliverableMutationResult,
+  HubDeliverableReferenceMetadata,
   ProjectAgentBackfillInput,
   ProjectAgentConfigureInput,
   ProjectAgentDeleteGroupInput,
@@ -62,8 +70,48 @@ import type { Effect, Stream } from "effect";
 
 import type { ProjectAgentServiceError } from "../Errors.ts";
 import type { ProjectAgentPrincipal } from "../principal.ts";
+import type {
+  HubDeliverableReferenceInput,
+  HubDeliverablesLibraryChange,
+} from "../hubDeliverables.ts";
 
 export interface ProjectAgentServiceShape {
+  /** Host-only validation for new mentions; never an Agent configuration tool. */
+  readonly resolveParticipatingExpert?: (
+    input: { readonly projectId: ProjectId; readonly expertId: string },
+    principal: ProjectAgentPrincipal,
+  ) => Effect.Effect<
+    { readonly expertId: string; readonly displayName: string },
+    ProjectAgentServiceError
+  >;
+  readonly deliverables?: {
+    readonly publish: (
+      input: HubDeliverablePublishInput & { readonly projectId: ProjectId },
+      principal: ProjectAgentPrincipal,
+    ) => Effect.Effect<HubDeliverableMutationResult, ProjectAgentServiceError>;
+    readonly list: (
+      input: HubDeliverableListInput & { readonly projectId: ProjectId },
+      principal: ProjectAgentPrincipal,
+    ) => Effect.Effect<HubDeliverableListResult, ProjectAgentServiceError>;
+    readonly read: (
+      input: HubDeliverableReadInput & { readonly projectId: ProjectId },
+      principal: ProjectAgentPrincipal,
+    ) => Effect.Effect<HubDeliverableReadResult, ProjectAgentServiceError>;
+    readonly resolveReference: (
+      input: HubDeliverableReferenceInput & { readonly projectId: ProjectId },
+      principal: ProjectAgentPrincipal,
+    ) => Effect.Effect<HubDeliverableReferenceMetadata, ProjectAgentServiceError>;
+    readonly withdraw: (
+      input: HubDeliverableWithdrawInput & { readonly projectId: ProjectId },
+      principal: ProjectAgentPrincipal,
+    ) => Effect.Effect<HubDeliverableMutationResult, ProjectAgentServiceError>;
+    /** Server-only hook. The caller holds the Hub root and Library queue locks. */
+    readonly maintainLibraryPaths: (input: {
+      readonly projectId: ProjectId;
+      readonly root: string;
+      readonly change: HubDeliverablesLibraryChange;
+    }) => Effect.Effect<void, ProjectAgentServiceError>;
+  };
   readonly notifyWorkItemChanged?: (input: {
     readonly projectId: ProjectId;
     readonly workItemId: string;

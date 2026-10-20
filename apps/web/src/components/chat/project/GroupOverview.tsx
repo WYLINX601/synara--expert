@@ -211,7 +211,7 @@ export function GroupThreadRow({
   const updatedLabel = formatRelativeTime(row.thread.updatedAt ?? row.thread.createdAt);
   // One line per thread: state dot, title, and a quiet trailing meta that gives
   // way to the actions button on hover. The task line rides in the tooltip.
-  const meta = row.projectName ? `${row.projectName} · ${updatedLabel}` : updatedLabel;
+  const meta = [row.expertName, row.projectName, updatedLabel].filter(Boolean).join(" · ");
   return (
     <div
       className="group/grouprow flex h-7 items-center gap-2 rounded-lg px-2 transition-colors hover:bg-[var(--color-background-elevated-secondary)]"
@@ -234,7 +234,10 @@ export function GroupThreadRow({
         <span className={GROUP_OVERVIEW_ROW_TITLE_CLASS_NAME}>{threadTitle}</span>
         {row.pullRequest ? <PrStateChip pr={row.pullRequest} /> : null}
       </button>
-      <span className="max-w-24 shrink-0 truncate text-ui-xs text-muted-foreground group-focus-within/grouprow:hidden group-hover/grouprow:hidden">
+      <span
+        className="max-w-32 shrink-0 truncate text-ui-xs text-muted-foreground group-focus-within/grouprow:hidden group-hover/grouprow:hidden"
+        title={meta}
+      >
         {meta}
       </span>
       <IconButton

@@ -4,6 +4,11 @@
 // Exports: mention token formatters plus regex helpers used by composer parsing and prompt sync.
 
 import type { ProviderMentionReference, ProviderSkillReference } from "@synara/contracts";
+import {
+  isHubReferenceUri,
+  parseHubReferenceUri,
+  type HubReference,
+} from "@synara/shared/hubReferences";
 import { isMcpConnectorMentionPath } from "@synara/shared/mcpConnectors";
 import { isThreadMentionPath, threadIdFromThreadMentionPath } from "@synara/shared/threadMentions";
 
@@ -114,6 +119,13 @@ function normalizeMentionNameKey(name: string): string {
 
 function collectProviderMentionTokenKeys(mention: ProviderMentionReference): Set<string> {
   const keys = new Set<string>();
+  // Workbench references are identities, not aliases. Their canonical URI is
+  // the only token that can select a published revision or expert.
+  if (isHubReferenceUri(mention.path)) {
+    keys.add(mention.path);
+    return keys;
+  }
+
   const normalizedName = normalizeMentionNameKey(mention.name);
   if (normalizedName.length > 0) {
     keys.add(normalizedName);
@@ -142,13 +154,36 @@ export function providerMentionMatchesToken(
   mention: ProviderMentionReference,
   token: string,
 ): boolean {
+  if (isHubReferenceUri(mention.path)) {
+    return mention.path === token;
+  }
   const normalizedToken = normalizeMentionNameKey(token);
   return (
     normalizedToken.length > 0 && collectProviderMentionTokenKeys(mention).has(normalizedToken)
   );
 }
 
-export type MentionChipKind = "path" | "plugin" | "thread" | "connector";
+export type MentionChipKind = "path" | "plugin" | "thread" | "connector" | "expert" | "deliverable";
+
+export function findHubReferenceMentionForToken(
+  token: string,
+  mentions: ReadonlyArray<ProviderMentionReference> | undefined,
+): { mention: ProviderMentionReference; reference: HubReference } | undefined {
+  const mention = mentions?.find((candidate) => candidate.path === token);
+  if (!mention || !isHubReferenceUri(mention.path)) return undefined;
+  const reference = parseHubReferenceUri(mention.path);
+  return reference ? { mention, reference } : undefined;
+}
+
+/** Returns a safe user-facing label for reserved Hub URIs, including stale references. */
+export function hubReferenceMentionLabel(
+  path: string,
+  mentions: ReadonlyArray<ProviderMentionReference> | undefined,
+): string | null {
+  if (!isHubReferenceUri(path)) return null;
+  const mention = mentions?.find((candidate) => candidate.path === path);
+  return mention?.name.trim() || "Reference";
+}
 
 export function isPluginProviderMentionReference(mention: ProviderMentionReference): boolean {
   return mention.path.startsWith("plugin://");
@@ -195,6 +230,11 @@ export function resolveMentionChipKind(
     mentionReferences?: ReadonlyArray<ProviderMentionReference>;
   },
 ): MentionChipKind {
+  const hubReference = parseHubReferenceUri(path);
+  if (hubReference) return hubReference.kind;
+  // Keep malformed or stale values in Synara's reserved namespace inert as
+  // app references instead of letting them fall through to filesystem logic.
+  if (isHubReferenceUri(path)) return "deliverable";
   if (options?.kind === "thread" || isThreadMentionPath(path)) {
     return "thread";
   }
@@ -236,18 +276,35 @@ function collectPromptMentionNameKeys(prompt: string): Set<string> {
   return names;
 }
 
+function collectPromptMentionTokens(prompt: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const match of prompt.matchAll(PROMPT_MENTION_NAME_REGEX)) {
+    const token = extractComposerMentionPath(match);
+    if (token.length > 0) tokens.add(token);
+  }
+  return tokens;
+}
+
 export function filterPromptProviderMentionReferences(
   prompt: string,
   mentions: ReadonlyArray<ProviderMentionReference>,
 ): ProviderMentionReference[] {
   const promptMentionNames = collectPromptMentionNameKeys(prompt);
-  if (promptMentionNames.size === 0) {
+  const promptMentionTokens = collectPromptMentionTokens(prompt);
+  if (promptMentionNames.size === 0 && promptMentionTokens.size === 0) {
     return [];
   }
 
   const seenPaths = new Set<string>();
   const matchedMentions: ProviderMentionReference[] = [];
   for (const mention of mentions) {
+    if (isHubReferenceUri(mention.path)) {
+      if (!promptMentionTokens.has(mention.path) || seenPaths.has(mention.path)) continue;
+      seenPaths.add(mention.path);
+      matchedMentions.push(mention);
+      continue;
+    }
+
     const mentionKeys = collectProviderMentionTokenKeys(mention);
     if (!Array.from(mentionKeys).some((key) => promptMentionNames.has(key))) {
       continue;

@@ -5,7 +5,7 @@
 
 import "../index.css";
 
-import { ProjectId, ThreadId, type ProjectAgentSummary } from "@synara/contracts";
+import { ProjectId, SpaceId, ThreadId, type ProjectAgentSummary } from "@synara/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { page, userEvent } from "vitest/browser";
@@ -61,6 +61,8 @@ const GROUP_A_ID = ProjectId.makeUnsafe("group-a");
 const GROUP_B_ID = ProjectId.makeUnsafe("group-b");
 const STUDIO_ID = ProjectId.makeUnsafe("studio-legacy");
 const THREAD_A = ThreadId.makeUnsafe("thread-a");
+const SPACE_A_ID = SpaceId.makeUnsafe("space-a");
+const SPACE_B_ID = SpaceId.makeUnsafe("space-b");
 
 function makeGroupProject(input: {
   id: ProjectId;
@@ -68,6 +70,7 @@ function makeGroupProject(input: {
   name: string;
   cwd: string;
   expanded?: boolean;
+  spaceId?: Project["spaceId"];
 }): Project {
   return {
     id: input.id,
@@ -79,6 +82,7 @@ function makeGroupProject(input: {
     cwd: input.cwd,
     defaultModelSelection: null,
     expanded: input.expanded ?? false,
+    spaceId: input.spaceId ?? null,
     scripts: [],
   };
 }
@@ -136,13 +140,18 @@ const PATHS = {
   groupsWorkspaceRoot: GROUPS_ROOT,
 };
 
-function Harness(props: { threadsHydrated: boolean; callbacks: Callbacks }) {
+function Harness(props: {
+  threadsHydrated: boolean;
+  callbacks: Callbacks;
+  activeSpaceId: Project["spaceId"];
+}) {
   const projects = useStore((state) => state.projects);
   const groupProjects = projects.filter((project) => isGroupContainerProject(project, PATHS));
   return (
     <SidebarProvider>
       <SidebarGroupsSurface
         groupProjects={groupProjects}
+        activeSpaceId={props.activeSpaceId ?? null}
         projectSidebarDataById={props.callbacks.dataById}
         threadsHydrated={props.threadsHydrated}
         visualActiveThreadId={null}
@@ -157,8 +166,6 @@ function Harness(props: { threadsHydrated: boolean; callbacks: Callbacks }) {
             {thread.title}
           </li>
         )}
-        renderListSectionHeader={(label) => <div data-testid="section-header">{label}</div>}
-        renderPinnedThreadsSection={() => null}
         onOpenThread={props.callbacks.onOpenThread}
         onOpenGroupSettings={props.callbacks.onOpenGroupSettings}
         onProjectContextMenu={props.callbacks.onProjectContextMenu}
@@ -204,6 +211,7 @@ async function mount(props: {
   projects: Project[];
   threadsHydrated: boolean;
   dataById?: ReadonlyMap<ProjectId, SidebarDerivedProjectData>;
+  activeSpaceId?: Project["spaceId"];
 }) {
   const callbacks = makeCallbacks(
     props.dataById ??
@@ -222,7 +230,11 @@ async function mount(props: {
     mountedRoot = null;
   }
   mountedRoot = await render(
-    <Harness threadsHydrated={props.threadsHydrated} callbacks={callbacks} />,
+    <Harness
+      threadsHydrated={props.threadsHydrated}
+      activeSpaceId={props.activeSpaceId ?? null}
+      callbacks={callbacks}
+    />,
   );
   return { mounted: mountedRoot, callbacks };
 }
@@ -254,6 +266,50 @@ describe("SidebarGroupsSurface", () => {
 
     await mount({ projects: [], threadsHydrated: true });
     await waitForText("No hubs yet");
+  });
+
+  it("shows only Hubs assigned to the active Space", async () => {
+    const activeHub = makeGroupProject({
+      id: GROUP_A_ID,
+      kind: "group",
+      name: "Active Hub",
+      cwd: `${GROUPS_ROOT}/active`,
+      spaceId: SPACE_A_ID,
+    });
+    const otherHub = makeGroupProject({
+      id: GROUP_B_ID,
+      kind: "group",
+      name: "Other Hub",
+      cwd: `${GROUPS_ROOT}/other`,
+      spaceId: SPACE_B_ID,
+    });
+    await mount({
+      projects: [activeHub, otherHub],
+      threadsHydrated: true,
+      activeSpaceId: SPACE_A_ID,
+    });
+
+    await waitForText("Active Hub");
+    expect(document.body.textContent).not.toContain("Other Hub");
+  });
+
+  it("keeps the Hubs disclosure chevron immediately after its label", async () => {
+    await mount({
+      projects: [
+        makeGroupProject({
+          id: GROUP_A_ID,
+          kind: "group",
+          name: "Team Alpha",
+          cwd: `${GROUPS_ROOT}/team-alpha`,
+        }),
+      ],
+      threadsHydrated: true,
+    });
+
+    const label = await waitForText("Hubs");
+    const chevron = label.parentElement?.querySelector("svg");
+    expect(label.parentElement?.className).toContain("gap-1");
+    expect(label.nextElementSibling).toBe(chevron);
   });
 
   it("shows the coordinator as the hub row and expands its chats from the chevron", async () => {

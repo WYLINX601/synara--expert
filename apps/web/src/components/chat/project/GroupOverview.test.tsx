@@ -6,14 +6,15 @@
 // Depends on: GroupThreadsSection with a stubbed project agent.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ProjectId, ThreadId } from "@synara/contracts";
+import { type HubWorkItem, ProjectId, ThreadId } from "@synara/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { SidebarThreadSummary } from "../../../types";
+import { HubWorkItemCard } from "../group/HubWorkItemCard";
 
 import { GroupThreadsSection } from "./GroupOverview";
-import { partitionGroupThreadRows } from "./groupOverview.logic";
+import { buildGroupThreadRows, partitionGroupThreadRows } from "./groupOverview.logic";
 import type { useProjectAgent } from "./useProjectAgent";
 
 type ProjectAgent = ReturnType<typeof useProjectAgent>;
@@ -45,16 +46,21 @@ function makeThread(overrides: Partial<SidebarThreadSummary> = {}): SidebarThrea
 
 const agent = { tasks: [], threads: [] } as unknown as ProjectAgent;
 
-function renderThreadsSection(threads: readonly SidebarThreadSummary[]): string {
+function renderThreadsSection(
+  threads: readonly SidebarThreadSummary[],
+  workItems: readonly HubWorkItem[] = [],
+): string {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const rows = threads.map((thread) => ({
-    thread,
-    task: null,
-    state: "idle" as const,
-    pullRequest: null,
-    projectName: null,
-    taskLine: null,
-  }));
+  const rows = buildGroupThreadRows({
+    threads,
+    workItems,
+    taskByThreadId: new Map(),
+    indexArchivedThreadIds: new Set(),
+    pullRequests: new Map(),
+    projectNameById: new Map(),
+    groupProjectId: GROUP_ID,
+    groupProjectName: "Hub",
+  });
   return renderToStaticMarkup(
     <QueryClientProvider client={queryClient}>
       <GroupThreadsSection
@@ -75,5 +81,40 @@ describe("GroupThreadsSection", () => {
     // titles track the Settings font size instead of the ambient default.
     expect(markup).toContain('class="min-w-0 truncate text-ui font-normal text-foreground"');
     expect(markup).toContain("Mars recruitment web");
+  });
+
+  it("shows the accepted Expert identity before and after the worker thread exists", () => {
+    const binding = {
+      expertId: "expert-original",
+      snapshotId: "snapshot-original",
+      displayName: "Original product expert",
+      revision: 2,
+    };
+    const item: HubWorkItem = {
+      id: "work-1",
+      sourceThreadId: ThreadId.makeUnsafe("coordinator"),
+      sourceMessageId: null,
+      title: "Review requirements",
+      workerThreadId: null,
+      state: "queued",
+      queueReason: "Worker limit reached",
+      resultSummary: null,
+      progress: null,
+      expertBinding: binding,
+      revision: 0,
+      createdAt: "2026-10-19T08:00:00.000Z",
+      updatedAt: "2026-10-19T08:00:00.000Z",
+    };
+    const queued = renderToStaticMarkup(<HubWorkItemCard item={item} />);
+    const worker = renderThreadsSection(
+      [makeThread()],
+      [{ ...item, workerThreadId: ThreadId.makeUnsafe("thread-1"), state: "working" }],
+    );
+    expect(queued).toContain("Original product expert");
+    expect(queued).toContain("Worker limit reached");
+    expect(queued).toContain("v2");
+    expect(worker).toContain("Original product expert");
+    expect(worker).toContain("Mars recruitment web");
+    expect(renderThreadsSection([makeThread()])).not.toContain("Original product expert");
   });
 });

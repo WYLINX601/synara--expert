@@ -196,7 +196,7 @@ function ThreadDetails({
       ) : null}
       {details.preview ? (
         <section className="space-y-2">
-          <h3 className="text-ui-lg font-medium">Current project preview</h3>
+          <h3 className="text-ui-lg font-medium">Current Context preview</h3>
           <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[color:var(--color-border-light)] p-3 text-ui-sm">
             {details.preview.text || "No Context content"}
           </pre>
@@ -206,8 +206,9 @@ function ThreadDetails({
         <section className="space-y-2">
           <h3 className="text-ui-lg font-medium">Bound snapshot</h3>
           <p className="text-ui-sm text-muted-foreground">
-            {details.snapshot.space ? `${details.snapshot.space.name} → ` : ""}
-            {details.snapshot.project.title}
+            {details.snapshot.schemaVersion === 1
+              ? `${details.snapshot.space ? `${details.snapshot.space.name} → ` : ""}${details.snapshot.project.title}`
+              : (details.snapshot.space?.name ?? "Hub background only")}
           </p>
           <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-[color:var(--color-border-light)] p-3 text-ui-sm">
             {details.snapshot.text || "No Context content"}
@@ -236,7 +237,12 @@ function ThreadDetails({
               {details.snapshot.space ? (
                 <Detail label="Space revision" value={String(details.snapshot.space.revision)} />
               ) : null}
-              <Detail label="Project revision" value={String(details.snapshot.project.revision)} />
+              {details.snapshot.schemaVersion === 1 ? (
+                <Detail
+                  label="Project revision"
+                  value={String(details.snapshot.project.revision)}
+                />
+              ) : null}
             </>
           ) : null}
           {details.preview ? (

@@ -6,9 +6,11 @@
 //      "/" restore landing both make that judgement, and spelling it out separately is exactly
 //      how selecting an empty Space ended up restoring another Space's thread.
 
-import type { ProjectId, SpaceId, ThreadId } from "@synara/contracts";
+import type { ProjectAgentSummary, ProjectId, SpaceId, ThreadId } from "@synara/contracts";
 
 import type { ServerWorkspacePaths } from "~/lib/serverWorkspacePaths";
+import { isHomeChatContainerProject } from "~/lib/chatProjects";
+import { isGroupContainerProject } from "~/lib/groupProjects";
 import { isOrdinarySpaceProject } from "~/lib/spaces";
 import type { Project, SidebarThreadSummary } from "~/types";
 import { isSidechatThread } from "@synara/shared/sidechatThread";
@@ -22,11 +24,37 @@ export function isProjectInSpace(
   return isOrdinarySpaceProject(project, paths) && (project.spaceId ?? null) === spaceId;
 }
 
+/** Resolve a thread's collaboration owner from the Hub container and server summary. */
+export function resolveOwningHubProject(input: {
+  readonly threadId: ThreadId | null;
+  readonly projectId: ProjectId | null;
+  readonly hubProjects: readonly Project[];
+  readonly summariesByProjectId: ReadonlyMap<
+    ProjectId,
+    Pick<ProjectAgentSummary, "coordinatorThreadId" | "memberThreadIds">
+  >;
+}): Project | null {
+  if (input.projectId !== null) {
+    const directHub = input.hubProjects.find((project) => project.id === input.projectId);
+    if (directHub) return directHub;
+  }
+  if (input.threadId === null) return null;
+  for (const project of input.hubProjects) {
+    const summary = input.summariesByProjectId.get(project.id);
+    if (
+      summary?.coordinatorThreadId === input.threadId ||
+      summary?.memberThreadIds?.includes(input.threadId)
+    ) {
+      return project;
+    }
+  }
+  return null;
+}
+
 /**
- * Whether a Space may land on a thread in this project. The Chats and Groups containers belong
- * to no Space and are reachable from every one of them; any other thread belongs to exactly its
- * project's Space. Fails closed on a project we cannot resolve — a thread we cannot classify is
- * not a safe landing, and a fresh chat beats silently reverting the user's Space selection.
+ * Whether a Space may land on a thread in this project. Chats remain global; Hubs and ordinary
+ * Projects belong to their assigned Space. Fails closed on a project we cannot resolve — a thread
+ * we cannot classify is not a safe landing, and a fresh chat beats silently reverting selection.
  */
 export function isThreadReachableFromSpace(input: {
   project: Project | null | undefined;
@@ -35,7 +63,9 @@ export function isThreadReachableFromSpace(input: {
 }): boolean {
   const { paths, project, spaceId } = input;
   if (!project) return false;
-  if (!isOrdinarySpaceProject(project, paths)) return true;
+  if (isGroupContainerProject(project, paths)) return (project.spaceId ?? null) === spaceId;
+  if (isHomeChatContainerProject(project, paths)) return true;
+  if (!isOrdinarySpaceProject(project, paths)) return false;
   return (project.spaceId ?? null) === spaceId;
 }
 
@@ -57,6 +87,11 @@ export function resolveSpaceSelectionTarget(input: {
   spaceId: SpaceId | null;
   /** Space-assignable projects only; the containers are filtered out by `isProjectInSpace`. */
   projects: readonly Project[];
+  /** Hub containers have their own Space assignment despite not being ordinary Projects. */
+  hubProjects?: readonly Project[] | undefined;
+  summariesByProjectId?:
+    | ReadonlyMap<ProjectId, Pick<ProjectAgentSummary, "coordinatorThreadId" | "memberThreadIds">>
+    | undefined;
   projectById: ReadonlyMap<ProjectId, Project>;
   threads: readonly SidebarThreadSummary[];
   rememberedThreadId: ThreadId | null;
@@ -66,13 +101,21 @@ export function resolveSpaceSelectionTarget(input: {
   sortThreads: (threads: readonly SidebarThreadSummary[]) => readonly SidebarThreadSummary[];
 }): SpaceSelectionTarget {
   const { paths, projectById, projects, rememberedProjectId, rememberedThreadId, spaceId } = input;
+  const hubProjects = input.hubProjects ?? [];
+  const summariesByProjectId = input.summariesByProjectId ?? new Map();
 
-  const availableThreads = input.threads.filter(
-    (thread) =>
-      thread.archivedAt == null &&
-      !isSidechatThread(thread) &&
-      isProjectInSpace(projectById.get(thread.projectId), spaceId, paths),
-  );
+  const availableThreads = input.threads.filter((thread) => {
+    if (thread.archivedAt != null || isSidechatThread(thread)) return false;
+    const hubProject = resolveOwningHubProject({
+      threadId: thread.id,
+      projectId: thread.projectId,
+      hubProjects,
+      summariesByProjectId,
+    });
+    return hubProject
+      ? (hubProject.spaceId ?? null) === spaceId
+      : isProjectInSpace(projectById.get(thread.projectId), spaceId, paths);
+  });
 
   const rememberedThread = rememberedThreadId
     ? availableThreads.find((thread) => thread.id === rememberedThreadId)

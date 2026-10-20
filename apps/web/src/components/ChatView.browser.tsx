@@ -15,7 +15,10 @@ import {
   DEFAULT_AUTOMATION_STOP_AFTER_CONSECUTIVE_FAILURES,
   DEFAULT_MODEL_BY_PROVIDER,
   EventId,
+  type ExpertBinding,
   type ExpertDefinition,
+  type ExpertPreview,
+  type ExpertSnapshot,
   MessageId,
   DEVICE_WS_METHODS,
   COMPUTER_WS_METHODS,
@@ -25,6 +28,9 @@ import {
   type ProjectId,
   type ProjectAgentOverview,
   type ServerConfig,
+  type ResolvedExpertSkillEntry,
+  type SkillEntryPath,
+  type SkillPackageId,
   SpaceId,
   ThreadId,
   TurnId,
@@ -172,6 +178,8 @@ interface TestFixture {
   gitBranchByCwd: Record<string, string>;
   projectAgentOverviews: Record<string, unknown>;
   experts: ExpertDefinition[];
+  packageExpertPreview?: ExpertPreview;
+  acceptedExpertSnapshot?: ExpertSnapshot;
 }
 
 let fixture: TestFixture;
@@ -1242,6 +1250,10 @@ function resolveWsRpc(body: WsRequestEnvelope["body"]): unknown {
   if (tag === ORCHESTRATION_WS_METHODS.getSnapshot) {
     return fixture.snapshot;
   }
+  if (tag === ORCHESTRATION_WS_METHODS.getThreadDetailSnapshot) {
+    const thread = findThreadDetailFromFixtureSnapshot(body.threadId as ThreadId);
+    return thread ? { snapshotSequence: fixture.snapshot.snapshotSequence, thread } : null;
+  }
   if (tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
     if (recordProjectCreateCommand(body.command)) {
       return { sequence: fixture.snapshot.snapshotSequence };
@@ -1263,7 +1275,13 @@ function resolveWsRpc(body: WsRequestEnvelope["body"]): unknown {
   if (tag === WS_METHODS.serverPreviewExpert) {
     const definition = fixture.experts.find((expert) => expert.id === body.expertId);
     if (!definition) throw new Error("Missing expert preview fixture");
+    if (fixture.packageExpertPreview) return fixture.packageExpertPreview;
     return { definition, status: "available", issues: [] };
+  }
+  if (tag === WS_METHODS.serverReadExpertSnapshot) {
+    if (body.snapshotId !== fixture.acceptedExpertSnapshot?.snapshotId)
+      throw new Error("Missing accepted Expert snapshot fixture");
+    return fixture.acceptedExpertSnapshot;
   }
   if (tag === WS_METHODS.contextGetProject) {
     const project = fixture.snapshot.projects.find((entry) => entry.id === body.projectId);
@@ -1421,6 +1439,7 @@ function installDeterministicSendNativeApi(options?: {
   beforeWorktreeCreation?: () => Promise<void>;
   beforeTurnStart?: () => Promise<void>;
   projectThreadCommands?: boolean;
+  expertBindingForCreate?: ExpertBinding;
 }): () => void {
   const previousNativeApi = window.nativeApi;
   const wsNativeApi = readNativeApi();
@@ -1484,7 +1503,16 @@ function installDeterministicSendNativeApi(options?: {
               ...snapshot,
               threads: snapshot.threads.map((thread) =>
                 thread.id === command.threadId
-                  ? { ...thread, ...command, id: command.threadId, session: null }
+                  ? {
+                      ...thread,
+                      ...command,
+                      id: command.threadId,
+                      session: null,
+                      ...(options?.expertBindingForCreate &&
+                      command.expertId === options.expertBindingForCreate.expertId
+                        ? { expertBinding: options.expertBindingForCreate }
+                        : {}),
+                    }
                   : thread,
               ),
             };
@@ -7739,6 +7767,172 @@ describe("ChatView transcript geometry (full app)", () => {
       expect(editor.textContent).toBe("");
     } finally {
       await mounted.cleanup();
+    }
+  });
+
+  it("binds a draft Expert package skill to the accepted snapshot on first send", async () => {
+    const packageId = `pkg_${"a".repeat(64)}` as SkillPackageId;
+    const entryPath = "workflow/SKILL.md" as SkillEntryPath;
+    const selection = { packageId, entryPath, activation: "on-demand" as const };
+    const entry: ResolvedExpertSkillEntry = {
+      ...selection,
+      name: "draft-workflow",
+      description: "Use the selected workflow.",
+      path: `synara-expert-skill:${packageId}#${entryPath}`,
+      userInvocable: true,
+    };
+    const binding: ExpertBinding = {
+      expertId: "planner",
+      snapshotId: "accepted-planner-snapshot",
+      displayName: "规划专家",
+      revision: 1,
+    };
+    const definition: ExpertDefinition = {
+      id: binding.expertId,
+      name: binding.displayName,
+      description: "Draft package-backed Expert.",
+      useCases: "",
+      persona: "",
+      outputRequirements: "",
+      skills: [],
+      skillSelections: [selection],
+      references: [],
+      connections: [],
+      revision: binding.revision,
+      archived: false,
+      updatedAt: NOW_ISO,
+    };
+    const acceptedSnapshot: ExpertSnapshot = {
+      snapshotId: binding.snapshotId,
+      schemaVersion: 2,
+      expertId: definition.id,
+      displayName: definition.name,
+      revision: definition.revision,
+      description: definition.description,
+      useCases: definition.useCases,
+      persona: definition.persona,
+      outputRequirements: definition.outputRequirements,
+      skills: [],
+      skillSelections: [selection],
+      skillEntries: [entry],
+      skillsRoot: `synara-expert-snapshot:${binding.snapshotId}/skills`,
+      references: [],
+      connections: [],
+      createdAt: NOW_ISO,
+    };
+    useComposerDraftStore.setState({
+      draftThreadsByThreadId: {
+        [THREAD_ID]: {
+          projectId: PROJECT_ID,
+          createdAt: NOW_ISO,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          entryPoint: "chat",
+          expertId: "planner",
+          branch: "main",
+          worktreePath: null,
+          envMode: "local",
+        },
+      },
+      projectDraftThreadIdByProjectId: { [PROJECT_ID]: THREAD_ID },
+    });
+    const restoreNativeApi = installDeterministicSendNativeApi({
+      projectThreadCommands: true,
+      expertBindingForCreate: binding,
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+      configureFixture: (state) => {
+        state.experts = [definition];
+        state.packageExpertPreview = {
+          definition,
+          skillEntries: [entry],
+          status: "available",
+          issues: [],
+        };
+        state.acceptedExpertSnapshot = acceptedSnapshot;
+      },
+    });
+    try {
+      const editor = await waitForComposerEditor();
+      await vi.waitFor(
+        () =>
+          expect(
+            wsRequests.some((request) => request._tag === WS_METHODS.serverPreviewExpert),
+          ).toBe(true),
+        { timeout: 8_000, interval: 16 },
+      );
+
+      await userEvent.type(editor, "$");
+      const skillOption = page.getByRole("option", { name: /draft-workflow/ });
+      await vi.waitFor(
+        () => {
+          const option = [...document.querySelectorAll('[role="option"]')].find((candidate) =>
+            candidate.textContent?.includes("draft-workflow"),
+          );
+          expect(option).toBeDefined();
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      await skillOption.click();
+      await vi.waitFor(() => {
+        expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.skills).toContainEqual(
+          {
+            name: entry.name,
+            path: entry.path,
+            expert: {
+              snapshotId: "pending",
+              packageId,
+              entryPath,
+            },
+          },
+        );
+      });
+      await userEvent.type(editor, "Use this workflow");
+      wsRequests.length = 0;
+      const sendButton = await waitForSendButton();
+      await vi.waitFor(() => expect(sendButton.disabled).toBe(false));
+      sendButton.click();
+
+      await vi.waitFor(
+        () => {
+          const turn = wsRequests
+            .map(readDispatchedCommand)
+            .find((command) => command?.type === "thread.turn.start");
+          expect(turn).toBeDefined();
+          expect(turn?.message).toMatchObject({
+            skills: [
+              {
+                name: entry.name,
+                path: entry.path,
+                expert: {
+                  snapshotId: binding.snapshotId,
+                  packageId,
+                  entryPath,
+                },
+              },
+            ],
+          });
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      const detailIndex = wsRequests.findLastIndex(
+        (request) => request._tag === ORCHESTRATION_WS_METHODS.getThreadDetailSnapshot,
+      );
+      const snapshotReadIndex = wsRequests.findIndex(
+        (request, index) =>
+          index > detailIndex && request._tag === WS_METHODS.serverReadExpertSnapshot,
+      );
+      const turnIndex = wsRequests.findIndex(
+        (request) => readDispatchedCommand(request)?.type === "thread.turn.start",
+      );
+      expect(detailIndex).toBeGreaterThanOrEqual(0);
+      expect(snapshotReadIndex).toBeGreaterThan(detailIndex);
+      expect(turnIndex).toBeGreaterThan(snapshotReadIndex);
+    } finally {
+      await mounted.cleanup();
+      restoreNativeApi();
     }
   });
 

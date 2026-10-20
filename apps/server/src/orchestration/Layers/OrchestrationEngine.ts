@@ -1458,8 +1458,32 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 detail: `Experts do not support '${provider}'.`,
               });
             }
+            const projectShell = yield* projectionSnapshotQuery
+              .getProjectShellById(command.projectId)
+              .pipe(
+                Effect.map(Option.getOrUndefined),
+                Effect.catch((cause) =>
+                  Effect.fail(
+                    new OrchestrationCommandInvariantError({
+                      commandType: command.type,
+                      detail: `Could not resolve the workspace for expert '${requestedExpert}': ${String(cause)}`,
+                    }),
+                  ),
+                ),
+              );
+            if (!projectShell?.workspaceRoot) {
+              return yield* new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: `Could not check expert '${requestedExpert}': the project workspace is unavailable.`,
+              });
+            }
             const preview = yield* Effect.tryPromise({
-              try: () => expertStore.preview({ expertId: requestedExpert, provider }),
+              try: () =>
+                expertStore.preview({
+                  expertId: requestedExpert,
+                  provider,
+                  cwd: command.worktreePath ?? projectShell.workspaceRoot,
+                }),
               catch: (error) =>
                 new OrchestrationCommandInvariantError({
                   commandType: command.type,

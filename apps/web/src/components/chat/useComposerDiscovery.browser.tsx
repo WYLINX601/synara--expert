@@ -164,6 +164,81 @@ describe("useComposerDiscovery Expert snapshot Skills", () => {
       );
   });
 
+  it("uses V2 entry identities and hides entries that disallow explicit invocation", async () => {
+    const packageId = `pkg_${"a".repeat(64)}`;
+    const entries = [
+      {
+        packageId,
+        entryPath: "workflow/SKILL.md",
+        activation: "on-demand" as const,
+        name: "explicit-only",
+        description: "Workflow",
+        path: "/fixed/workflow/SKILL.md",
+        disableModelInvocation: true,
+      },
+      {
+        packageId,
+        entryPath: "private/SKILL.md",
+        activation: "on-demand" as const,
+        name: "private",
+        description: "Internal",
+        path: "/fixed/private/SKILL.md",
+        userInvocable: false,
+      },
+    ];
+    harness.readExpertSnapshot.mockResolvedValue({
+      ...snapshot("accepted-v2", []),
+      schemaVersion: 2,
+      skillEntries: entries,
+    });
+    const hook = await mount(baseInput({ expertBinding: binding("accepted-v2") }));
+    try {
+      await vi.waitFor(() => expect(hook.result.current.providerSkills).toHaveLength(1));
+      expect(hook.result.current.providerSkills[0]).toMatchObject({
+        name: "explicit-only",
+        path: `synara-expert-skill:${packageId}#workflow/SKILL.md`,
+        expert: { snapshotId: "accepted-v2", packageId, entryPath: "workflow/SKILL.md" },
+      });
+      expect(harness.provider.listSkills).not.toHaveBeenCalled();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  it("carries draft V2 entry identity until an accepted snapshot replaces it", async () => {
+    const packageId = `pkg_${"b".repeat(64)}`;
+    const entry = {
+      packageId,
+      entryPath: "workflow/SKILL.md",
+      activation: "on-demand" as const,
+      name: "draft-workflow",
+      description: "Workflow",
+      path: "/fixed/workflow/SKILL.md",
+    };
+    const preview = { ...expertPreview([]), skillEntries: [entry] };
+    const input = baseInput({ draftExpert: { preview, isFetching: false, isError: false } });
+    const hook = await mount(input);
+    try {
+      await vi.waitFor(() => expect(hook.result.current.providerSkills).toHaveLength(1));
+      expect(hook.result.current.providerSkills[0]?.expert).toEqual({
+        snapshotId: "pending",
+        packageId,
+        entryPath: entry.entryPath,
+      });
+      harness.readExpertSnapshot.mockResolvedValue({
+        ...snapshot("accepted-v2", []),
+        schemaVersion: 2,
+        skillEntries: [entry],
+      });
+      await hook.rerender({ ...input, expertBinding: binding("accepted-v2") });
+      await vi.waitFor(() =>
+        expect(hook.result.current.providerSkills[0]?.expert?.snapshotId).toBe("accepted-v2"),
+      );
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   it("uses the bound old snapshot and preserves native slash commands", async () => {
     const threadId = ThreadId.makeUnsafe("expert-old-thread");
     harness.readExpertSnapshot.mockResolvedValue(

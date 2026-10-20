@@ -108,6 +108,9 @@ import {
 } from "../../context/ContextRepository.ts";
 import { PersistenceDecodeError } from "../../persistence/Errors.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { createExpertStore } from "../../experts/ExpertStore.ts";
+import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
+import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
 
 // The fake adapter never prepares Codex storage. Give lifecycle tests real
 // continuation metadata without reading or writing the developer's Codex home.
@@ -126,12 +129,13 @@ beforeAll(async () => {
   process.env.CODEX_HOME = codexHome;
   process.env.SYNARA_HOME = synaraHome;
 });
-afterAll(() => {
+afterAll(async () => {
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
   if (previousSynaraHome === undefined) delete process.env.SYNARA_HOME;
   else process.env.SYNARA_HOME = previousSynaraHome;
   if (defaultCodexFixtureRoot) fs.rmSync(defaultCodexFixtureRoot, { recursive: true, force: true });
+  await removeExpertSkillFixtures();
 });
 
 const asRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.makeUnsafe(value);
@@ -233,6 +237,119 @@ const makeProviderServiceLive = (options?: Parameters<typeof makeProviderService
     Layer.provide(ProviderServiceTestSecretStoreLayer),
   );
 
+type ExpertSkillPackageFixture = {
+  readonly root: string;
+  readonly stateDir: string;
+  readonly packageId: string;
+  readonly entries: Awaited<
+    ReturnType<ReturnType<typeof createSkillPackageStore>["resolveSelections"]>
+  >;
+  readonly session: NonNullable<ProviderSessionStartInput["expertSession"]>;
+};
+
+const expertSkillFixtureRoots: string[] = [];
+async function makeExpertSkillPackageFixture(
+  root = fs.mkdtempSync(path.join(os.tmpdir(), "synara-provider-expert-skills-")),
+): Promise<ExpertSkillPackageFixture> {
+  expertSkillFixtureRoots.push(root);
+  const stateDir = path.join(root, "state");
+  const source = path.join(root, "sample-skills");
+  for (const name of ["review", "plan", "unselected"]) {
+    const directory = path.join(source, "skills", name);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      path.join(directory, "SKILL.md"),
+      `---\nname: ${name}\ndescription: ${name} workflow\n---\n${name.toUpperCase()} BODY\n`,
+      "utf8",
+    );
+  }
+  const store = createSkillPackageStore(stateDir);
+  const preview = await store.preview({ path: source });
+  const imported = await store.import({ previewId: preview.previewId });
+  const selections = await store.resolveSelections([
+    {
+      packageId: imported.package.packageId,
+      entryPath: "skills/review/SKILL.md",
+      activation: "startup",
+    },
+    {
+      packageId: imported.package.packageId,
+      entryPath: "skills/plan/SKILL.md",
+      activation: "on-demand",
+    },
+  ]);
+  const experts = createExpertStore(stateDir);
+  const definition = await experts.save({
+    id: "provider-v2-fixture",
+    name: "Provider V2 Fixture",
+    description: "V2 fixture for provider snapshot verification.",
+    useCases: "Exercise a pinned V2 skill catalog.",
+    persona: "Act as the selected reviewer.",
+    outputRequirements: "Keep the review concise.",
+    skills: [],
+    skillSelections: [
+      {
+        packageId: imported.package.packageId,
+        entryPath: "skills/review/SKILL.md",
+        activation: "startup",
+      },
+      {
+        packageId: imported.package.packageId,
+        entryPath: "skills/plan/SKILL.md",
+        activation: "on-demand",
+      },
+    ],
+    references: [],
+    connections: [],
+    preferredProvider: "codex",
+  });
+  const binding = await experts.prepareSnapshot(definition.id);
+  const snapshot = await experts.readSnapshot(binding.snapshotId);
+  return {
+    root,
+    stateDir,
+    packageId: imported.package.packageId,
+    entries: selections,
+    session: {
+      snapshotId: snapshot.snapshotId,
+      expertId: snapshot.expertId,
+      revision: snapshot.revision,
+      displayName: snapshot.displayName,
+      persona: [
+        `Expert: ${snapshot.displayName}`,
+        snapshot.persona,
+        snapshot.outputRequirements ? `Output requirements:\n${snapshot.outputRequirements}` : "",
+        snapshot.references.length > 0
+          ? `Reference files:\n${snapshot.references.map((reference) => `- ${reference}`).join("\n")}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
+      skillsRoot: snapshot.skillsRoot,
+      skills: snapshot.skills,
+      skillLoading: "index",
+      skillEntries: snapshot.skillEntries ?? [],
+      references: snapshot.references,
+    },
+  };
+}
+
+function makeExpertSkillTreeWritable(entry: string): void {
+  const stat = fs.lstatSync(entry);
+  if (stat.isSymbolicLink()) return;
+  fs.chmodSync(entry, stat.isDirectory() ? 0o700 : 0o600);
+  if (stat.isDirectory()) {
+    for (const child of fs.readdirSync(entry)) makeExpertSkillTreeWritable(path.join(entry, child));
+  }
+}
+
+async function removeExpertSkillFixtures(): Promise<void> {
+  for (const root of expertSkillFixtureRoots.splice(0)) {
+    if (fs.existsSync(root)) makeExpertSkillTreeWritable(root);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
   readonly eventId: EventId;
@@ -325,6 +442,7 @@ function makeFakeCodexAdapter(
   provider: ProviderKind = "codex",
   options?: {
     readonly confirmExpertApplication?: boolean;
+    readonly confirmSkillApplication?: boolean;
     readonly conversationRollback?: "native" | "restart-session";
     readonly runtimeEventDelivery?: "fresh-ids-once";
     readonly didResumeSession?: NonNullable<
@@ -364,6 +482,23 @@ function makeFakeCodexAdapter(
                     )
                     .digest("hex"),
                 },
+              }
+            : {}),
+          ...(options?.confirmSkillApplication &&
+          input.expertSession?.skillLoading === "index" &&
+          input.lifecycleGeneration
+            ? {
+                skillApplication: createExpertSkillApplication({
+                  session: input.expertSession,
+                  instructions:
+                    composeProviderBaseInstructions({
+                      expertPersona: input.expertSession.persona,
+                      contextInstructions: input.contextSession?.hasContent
+                        ? input.contextSession.text
+                        : undefined,
+                    }) ?? "",
+                  lifecycleGeneration: input.lifecycleGeneration,
+                }),
               }
             : {}),
           ...(options?.confirmExpertApplication && input.contextSession
@@ -638,6 +773,7 @@ function makeProviderServiceLayer(
     readonly includePi?: boolean;
     readonly includeOmp?: boolean;
     readonly confirmExpertApplication?: boolean;
+    readonly confirmSkillApplication?: boolean;
     readonly contextRepository?: ContextRepositoryShape;
     readonly codexDidResumeSession?: NonNullable<
       ProviderAdapterShape<ProviderAdapterError>["didResumeSession"]
@@ -652,6 +788,7 @@ function makeProviderServiceLayer(
   },
 ) {
   const codex = makeFakeCodexAdapter("codex", {
+    ...(providers?.confirmSkillApplication ? { confirmSkillApplication: true } : {}),
     ...(providers?.freshRuntimeEventDelivery
       ? { runtimeEventDelivery: "fresh-ids-once" as const }
       : {}),
@@ -11103,6 +11240,263 @@ for (const providerKind of ["claudeAgent", "omp"] as const) {
           yield* (providerKind === "omp" ? unverified.omp : unverified.claude).hasSession(threadId),
           false,
         );
+      }),
+    );
+  });
+}
+
+const expertV2RuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "synara-provider-expert-v2-"));
+const expertV2FixturePromise = makeExpertSkillPackageFixture(expertV2RuntimeRoot);
+const expertV2AppliedWrites: ExpertAppliedRuntimeRecord[] = [];
+const expertV2Runtime = makeProviderServiceLayer(
+  {
+    stateDir: path.join(expertV2RuntimeRoot, "state"),
+    persistExpertAppliedRuntime: (record) =>
+      Effect.sync(() => {
+        expertV2AppliedWrites.push(record);
+      }),
+  },
+  { confirmSkillApplication: true },
+);
+
+expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
+  it.effect(
+    "submits selected startup catalog, resolves explicit entries, isolates selection, and recovers from pinned bytes",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => expertV2FixturePromise);
+        const service = yield* ProviderService;
+        const legacySkillThread = asThreadId("expert-v2-legacy-skill-blocked");
+        const legacySkillResult = yield* Effect.exit(
+          service.startSession(legacySkillThread, {
+            provider: "codex",
+            threadId: legacySkillThread,
+            runtimeMode: "full-access",
+            expertSession: {
+              snapshotId: "legacy-skill-snapshot",
+              persona: "Legacy persisted Expert.",
+              skillsRoot: "/untrusted/legacy/skills",
+              skills: [{ name: "legacy", path: "/untrusted/legacy/skills/SKILL.md" }],
+              references: [],
+            },
+          }),
+        );
+        assert.isTrue(Exit.isFailure(legacySkillResult));
+        assert.equal(expertV2Runtime.codex.startSession.mock.calls.length, 0);
+
+        const threadId = asThreadId("expert-v2-catalog-lifecycle");
+        const initial = yield* service.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          runtimeMode: "full-access",
+          expertSession: fixture.session,
+        });
+        const firstAdapterInput = expertV2Runtime.codex.startSession.mock.calls.at(-1)?.[0];
+        assert.equal(firstAdapterInput?.expertSession?.skillLoading, "index");
+        assert.deepEqual(
+          firstAdapterInput?.expertSession?.skillEntries?.map(({ entryPath }) => entryPath),
+          ["skills/review/SKILL.md", "skills/plan/SKILL.md"],
+        );
+        assert.ok(firstAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(!firstAdapterInput?.expertSession?.persona.includes("PLAN BODY"));
+        assert.ok(!firstAdapterInput?.expertSession?.persona.includes("UNSELECTED BODY"));
+        assert.equal(initial.expertApplication, undefined);
+        assert.equal(initial.skillApplication?.mode, "catalog");
+        assert.deepEqual(expertV2AppliedWrites.at(-1)?.skillApplication, initial.skillApplication);
+
+        const planEntry = fixture.entries.find((entry) => entry.name === "plan")!;
+        yield* service.sendTurn({
+          threadId,
+          input: "Please follow the planning workflow.",
+          attachments: [],
+          skills: [
+            {
+              name: planEntry.name,
+              path: "/untrusted/client/path/SKILL.md",
+              expert: {
+                snapshotId: fixture.session.snapshotId,
+                packageId: planEntry.packageId,
+                entryPath: planEntry.entryPath,
+              },
+            },
+          ],
+        });
+        const submittedTurn = expertV2Runtime.codex.sendTurn.mock.calls.at(-1)?.[0];
+        assert.deepEqual(submittedTurn?.skills, []);
+        assert.ok(submittedTurn?.input?.includes("PLAN BODY"));
+        assert.ok(submittedTurn?.input?.includes(planEntry.path));
+        assert.ok(!submittedTurn?.input?.includes("/untrusted/client/path"));
+
+        const sendCallsBeforeRejectedMention = expertV2Runtime.codex.sendTurn.mock.calls.length;
+        const unselectedMention = yield* Effect.exit(
+          service.sendTurn({
+            threadId,
+            input: "Use the hidden skill.",
+            attachments: [],
+            skills: [
+              {
+                name: "unselected",
+                path: "/untrusted/path/SKILL.md",
+                expert: {
+                  snapshotId: fixture.session.snapshotId,
+                  packageId: fixture.packageId,
+                  entryPath: "skills/unselected/SKILL.md",
+                },
+              },
+            ],
+          }),
+        );
+        assert.isTrue(Exit.isFailure(unselectedMention));
+        assert.equal(
+          expertV2Runtime.codex.sendTurn.mock.calls.length,
+          sendCallsBeforeRejectedMention,
+        );
+
+        const firstGeneration = initial.skillApplication?.lifecycleGeneration;
+        yield* expertV2Runtime.codex.stopAll();
+        yield* service.sendTurn({
+          threadId,
+          input: "Continue after runtime loss.",
+          attachments: [],
+        });
+        assert.equal(expertV2Runtime.codex.startSession.mock.calls.length, 2);
+        assert.notEqual(expertV2AppliedWrites.at(-1)?.lifecycleGeneration, firstGeneration);
+        assert.equal(
+          expertV2AppliedWrites.at(-1)?.skillApplication?.snapshotId,
+          fixture.session.snapshotId,
+        );
+        yield* service.stopSession({ threadId });
+
+        const forgedPathThread = asThreadId("expert-v2-forged-entry-path");
+        const forgedPath = {
+          ...fixture.session,
+          skillEntries: fixture.session.skillEntries?.map((entry) => ({
+            ...entry,
+            path: "/untrusted/serialized/path/SKILL.md",
+          })),
+        };
+        const forgedPathResult = yield* Effect.exit(
+          service.startSession(forgedPathThread, {
+            provider: "codex",
+            threadId: forgedPathThread,
+            runtimeMode: "full-access",
+            expertSession: forgedPath,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(forgedPathResult));
+
+        const replacementSource = path.join(fixture.root, "replacement-skills");
+        for (const name of ["review", "plan"]) {
+          const directory = path.join(replacementSource, "skills", name);
+          fs.mkdirSync(directory, { recursive: true });
+          fs.writeFileSync(
+            path.join(directory, "SKILL.md"),
+            `---\nname: ${name}\ndescription: replacement ${name} workflow\n---\nREPLACEMENT ${name.toUpperCase()} BODY\n`,
+            "utf8",
+          );
+        }
+        const packageStore = createSkillPackageStore(fixture.stateDir);
+        const replacementPreview = yield* Effect.promise(() =>
+          packageStore.preview({ path: replacementSource }),
+        );
+        const replacementPackage = yield* Effect.promise(() =>
+          packageStore.import({ previewId: replacementPreview.previewId }),
+        );
+        const replacementEntries = yield* Effect.promise(() =>
+          packageStore.resolveSelections([
+            {
+              packageId: replacementPackage.package.packageId,
+              entryPath: "skills/review/SKILL.md",
+              activation: "startup",
+            },
+            {
+              packageId: replacementPackage.package.packageId,
+              entryPath: "skills/plan/SKILL.md",
+              activation: "on-demand",
+            },
+          ]),
+        );
+        const startsBeforeSubstitution = expertV2Runtime.codex.startSession.mock.calls.length;
+        const substitutedSession = {
+          ...fixture.session,
+          skills: replacementEntries.map(({ name, path: skillPath }) => ({
+            name,
+            path: skillPath,
+          })),
+          skillEntries: replacementEntries,
+        };
+        const substitutedResult = yield* Effect.exit(
+          service.startSession(asThreadId("expert-v2-substituted-package"), {
+            provider: "codex",
+            threadId: asThreadId("expert-v2-substituted-package"),
+            runtimeMode: "full-access",
+            expertSession: substitutedSession,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(substitutedResult));
+        const forgedPersonaResult = yield* Effect.exit(
+          service.startSession(asThreadId("expert-v2-forged-persona"), {
+            provider: "codex",
+            threadId: asThreadId("expert-v2-forged-persona"),
+            runtimeMode: "full-access",
+            expertSession: {
+              ...fixture.session,
+              persona: "A forged replacement persona.",
+            },
+          }),
+        );
+        assert.isTrue(Exit.isFailure(forgedPersonaResult));
+        assert.equal(
+          expertV2Runtime.codex.startSession.mock.calls.length,
+          startsBeforeSubstitution,
+        );
+      }),
+  );
+});
+
+for (const failureMode of ["missing", "corrupt", "missing-snapshot"] as const) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `synara-provider-expert-v2-${failureMode}-`));
+  const fixturePromise = makeExpertSkillPackageFixture(root);
+  const runtime = makeProviderServiceLayer({ stateDir: path.join(root, "state") });
+  runtime.layer(`ProviderService Expert V2 ${failureMode} package`, (it) => {
+    it.effect("blocks startup before the provider adapter sees an unverified package", () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => fixturePromise);
+        const packageDirectory = path.join(
+          fixture.stateDir,
+          "experts",
+          "skill-packages",
+          fixture.packageId,
+        );
+        if (failureMode === "missing-snapshot") {
+          const snapshotDirectory = path.join(
+            fixture.stateDir,
+            "experts",
+            "snapshots",
+            fixture.session.snapshotId,
+          );
+          makeExpertSkillTreeWritable(snapshotDirectory);
+          fs.rmSync(snapshotDirectory, { recursive: true, force: true });
+        } else if (failureMode === "missing") {
+          makeExpertSkillTreeWritable(packageDirectory);
+          fs.rmSync(packageDirectory, { recursive: true, force: true });
+        } else {
+          const entryPath = fixture.entries[0]!.path;
+          fs.chmodSync(entryPath, 0o600);
+          fs.writeFileSync(entryPath, "tampered package bytes\n", "utf8");
+        }
+        const service = yield* ProviderService;
+        const threadId = asThreadId(`expert-v2-${failureMode}-package`);
+        const result = yield* Effect.exit(
+          service.startSession(threadId, {
+            provider: "codex",
+            threadId,
+            runtimeMode: "full-access",
+            expertSession: fixture.session,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(result));
+        assert.equal(runtime.codex.startSession.mock.calls.length, 0);
       }),
     );
   });

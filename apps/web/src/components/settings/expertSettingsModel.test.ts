@@ -127,4 +127,45 @@ describe("expertSettingsModel", () => {
       }),
     ).toBe(false);
   });
+
+  it("keeps legacy skill drafts visible until package mode is explicitly enabled", () => {
+    const legacy = {
+      ...definition,
+      skills: [{ name: "old skill", path: "/skills/old/SKILL.md" }],
+    };
+    const draft = expertDraftFromDefinition(legacy);
+    expect(draft.skills).toEqual(legacy.skills);
+    expect(draft).not.toHaveProperty("skillSelections");
+    expect(expertSaveInputForDraft(draft, legacy)).toMatchObject({ skills: legacy.skills });
+
+    const packageDraft = { ...draft, skills: [], skillSelections: [] };
+    expect(expertSaveInputForDraft(packageDraft, legacy)).toMatchObject({
+      skills: [],
+      skillSelections: [],
+    });
+    expect(expertDraftsEqual(draft, packageDraft)).toBe(false);
+  });
+
+  it("round-trips fixed package selections through Expert drafts and clones", () => {
+    const expert = {
+      ...definition,
+      skillSelections: [
+        {
+          packageId: `pkg_${"a".repeat(64)}`,
+          entryPath: "skills/planner/SKILL.md",
+          activation: "startup" as const,
+        },
+      ],
+    };
+    const draft = expertDraftFromDefinition(expert);
+
+    expect(expertDraftFromDefinition(expert).skillSelections).toEqual(expert.skillSelections);
+    expect(expertDraftsEqual(draft, { ...draft, skillSelections: [] })).toBe(false);
+    expect(expertSaveInputForDraft(draft, expert)).toMatchObject({
+      skills: [],
+      skillSelections: expert.skillSelections,
+      id: expert.id,
+      expectedRevision: expert.revision,
+    });
+  });
 });

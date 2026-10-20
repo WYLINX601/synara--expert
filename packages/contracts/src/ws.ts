@@ -28,6 +28,18 @@ import {
   McpDiscoveryRequestSchema,
   McpImportRequestSchema,
 } from "./mcp";
+import {
+  SkillPackageImportInput,
+  SkillPackagePreviewInput,
+  SkillPackageReadInput,
+  SkillPackageRemoveInput,
+  SkillPackageUpdatePreviewInput,
+} from "./skillPackage";
+import {
+  SkillPackageSwitchApplyInput,
+  SkillPackageSwitchInput,
+  SkillPackageSwitchProgressReadInput,
+} from "./skillPackageSwitch";
 import { NonNegativeInt, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
 import {
   ContextCommandReadInput,
@@ -353,6 +365,17 @@ export const WS_METHODS = {
   serverRestoreExpert: "server.restoreExpert",
   serverDeleteExpert: "server.deleteExpert",
   serverPreviewExpert: "server.previewExpert",
+  serverListSkillPackages: "server.listSkillPackages",
+  serverListSkillPackageSources: "server.listSkillPackageSources",
+  serverReadSkillPackage: "server.readSkillPackage",
+  serverPreviewSkillPackage: "server.previewSkillPackage",
+  serverPreviewSkillPackageUpdate: "server.previewSkillPackageUpdate",
+  serverPreviewSkillPackageRemoval: "server.previewSkillPackageRemoval",
+  serverImportSkillPackage: "server.importSkillPackage",
+  serverRemoveSkillPackage: "server.removeSkillPackage",
+  serverPreviewSkillPackageSwitch: "server.previewSkillPackageSwitch",
+  serverApplySkillPackageSwitch: "server.applySkillPackageSwitch",
+  serverReadSkillPackageSwitchProgress: "server.readSkillPackageSwitchProgress",
   serverReadExpertSnapshot: "server.readExpertSnapshot",
   serverReadExpertAppliedRuntime: "server.readExpertAppliedRuntime",
   serverListExpertConnections: "server.listExpertConnections",
@@ -673,6 +696,20 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverRestoreExpert, ExpertRestoreInput),
   tagRequestBody(WS_METHODS.serverDeleteExpert, ExpertDeleteInput),
   tagRequestBody(WS_METHODS.serverPreviewExpert, ExpertPreviewInput),
+  tagRequestBody(WS_METHODS.serverListSkillPackages, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverListSkillPackageSources, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverReadSkillPackage, SkillPackageReadInput),
+  tagRequestBody(WS_METHODS.serverPreviewSkillPackage, SkillPackagePreviewInput),
+  tagRequestBody(WS_METHODS.serverPreviewSkillPackageUpdate, SkillPackageUpdatePreviewInput),
+  tagRequestBody(WS_METHODS.serverPreviewSkillPackageRemoval, SkillPackageReadInput),
+  tagRequestBody(WS_METHODS.serverImportSkillPackage, SkillPackageImportInput),
+  tagRequestBody(WS_METHODS.serverRemoveSkillPackage, SkillPackageRemoveInput),
+  tagRequestBody(WS_METHODS.serverPreviewSkillPackageSwitch, SkillPackageSwitchInput),
+  tagRequestBody(WS_METHODS.serverApplySkillPackageSwitch, SkillPackageSwitchApplyInput),
+  tagRequestBody(
+    WS_METHODS.serverReadSkillPackageSwitchProgress,
+    SkillPackageSwitchProgressReadInput,
+  ),
   tagRequestBody(WS_METHODS.serverReadExpertSnapshot, ExpertSnapshotReadInput),
   tagRequestBody(WS_METHODS.serverReadExpertAppliedRuntime, ExpertAppliedRuntimeReadInput),
   tagRequestBody(WS_METHODS.serverListExpertConnections, Schema.Struct({})),

@@ -20,6 +20,7 @@ import { getDefaultModel } from "@synara/shared/model";
 import { providerSupportsNativeTurnSteering } from "@synara/shared/providerMetadata";
 import { useCallback } from "react";
 import { promoteThreadCreate } from "~/lib/threadCreatePromotion";
+import { bindDraftExpertSkillInvocations } from "~/lib/expertSkillInvocation";
 import { waitForDraftThreadDispatchToSettle } from "~/lib/draftThreadDispatch";
 import { runComposerSendOnce } from "~/lib/composerSendOwnership";
 import { ProviderHandoffBackgroundTasksError } from "~/lib/threadHandoff";
@@ -660,6 +661,11 @@ export function useChatTurnExecution({
           providerOptions: dispatchSettings.providerOptions,
         });
         await stagedTurnAttachments.runWithDispatch(async (turnAttachments) => {
+          const fixedSkills = await bindDraftExpertSkillInvocations(
+            api,
+            threadIdForSend,
+            mentionedSkillsForSend,
+          );
           if (getThreadFromState(useStore.getState(), threadIdForSend)?.claudeCacheReview != null) {
             throw new Error(
               "Choose how to resume the held message before sending another message.",
@@ -675,7 +681,7 @@ export function useChatTurnExecution({
                 role: "user",
                 text: outgoingMessageText,
                 attachments: turnAttachments,
-                ...(mentionedSkillsForSend.length > 0 ? { skills: mentionedSkillsForSend } : {}),
+                ...(fixedSkills.length > 0 ? { skills: fixedSkills } : {}),
                 ...(mentionedPluginMentionsForSend.length > 0
                   ? { mentions: mentionedPluginMentionsForSend }
                   : {}),

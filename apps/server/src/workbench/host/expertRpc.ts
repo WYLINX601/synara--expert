@@ -14,14 +14,27 @@ import {
   type ExpertRestoreInput,
   type ExpertSaveInput,
   type ExpertSnapshotReadInput,
+  type SkillPackageImportInput,
+  type SkillPackagePreviewInput,
+  type SkillPackageReadInput,
+  type SkillPackageRemoveInput,
+  type SkillPackageUpdatePreviewInput,
+  type SkillPackageSwitchApplyInput,
+  type SkillPackageSwitchInput,
+  type SkillPackageSwitchProgressReadInput,
   type McpConnectionSetStateInput,
   type McpDiscoveryRequest,
   type McpImportRequest,
   type OrchestrationThread,
 } from "@synara/contracts";
 import { Effect, Option } from "effect";
+import {
+  CurrentManagedAttachmentPrincipal,
+  type ManagedAttachmentPrincipal,
+} from "../../managedAttachmentPrincipal.ts";
 
 import type { createWorkbenchExpertRuntime } from "../runtimeLayer.ts";
+import type { SkillPackageSwitchHost } from "../../experts/SkillPackageSwitch.ts";
 
 type WorkbenchExpertRuntime = ReturnType<typeof createWorkbenchExpertRuntime>;
 type RpcEffect = <A, E, R>(
@@ -54,8 +67,29 @@ export function makeWorkbenchExpertRpcHandlers<R>(input: {
     ReadonlyArray<ExpertReferenceThread>,
     unknown
   >;
+  readonly createSkillPackageSwitchHost?: (
+    principal: ManagedAttachmentPrincipal,
+  ) => SkillPackageSwitchHost;
 }) {
   const { runtime, requireOwner, rpcEffect, expertRpcEffect, loadProjectionThreads } = input;
+  const withSkillPackageSwitch = <A>(
+    operation: (service: ReturnType<typeof runtime.createSkillPackageSwitchService>) => Promise<A>,
+    fallbackMessage: string,
+  ) =>
+    rpcEffect(
+      Effect.gen(function* () {
+        yield* requireOwner;
+        const principal = yield* CurrentManagedAttachmentPrincipal;
+        if (!input.createSkillPackageSwitchHost) {
+          return yield* Effect.fail(new Error("Skill package switch host is unavailable."));
+        }
+        const service = runtime.createSkillPackageSwitchService(
+          input.createSkillPackageSwitchHost(principal),
+        );
+        return yield* Effect.tryPromise({ try: () => operation(service), catch: (cause) => cause });
+      }),
+      fallbackMessage,
+    );
 
   return {
     [WS_METHODS.serverListExperts]: () =>
@@ -106,6 +140,71 @@ export function makeWorkbenchExpertRpcHandlers<R>(input: {
             ),
           );
         }),
+      ),
+    [WS_METHODS.serverListSkillPackages]: () =>
+      expertRpcEffect(
+        requireOwner,
+        () => runtime.skillPackages.list(),
+        "Failed to list skill packages",
+      ),
+    [WS_METHODS.serverListSkillPackageSources]: () =>
+      expertRpcEffect(
+        requireOwner,
+        () => runtime.skillPackages.listSources(),
+        "Failed to list skill package sources",
+      ),
+    [WS_METHODS.serverReadSkillPackage]: (request: SkillPackageReadInput) =>
+      expertRpcEffect(
+        requireOwner,
+        () => runtime.skillPackages.read(request.packageId),
+        "Failed to read skill package",
+      ),
+    [WS_METHODS.serverPreviewSkillPackage]: (request: SkillPackagePreviewInput) =>
+      expertRpcEffect(
+        requireOwner,
+        () => runtime.skillPackages.preview(request),
+        "Failed to preview skill package",
+      ),
+    [WS_METHODS.serverPreviewSkillPackageUpdate]: (request: SkillPackageUpdatePreviewInput) =>
+      expertRpcEffect(
+        requireOwner,
+        () => runtime.skillPackages.previewUpdate(request),
+        "Failed to preview skill package update",
+      ),
+    [WS_METHODS.serverPreviewSkillPackageRemoval]: (request: SkillPackageReadInput) =>
+      expertRpcEffect(
+        requireOwner,
+        () => runtime.skillPackages.previewRemoval(request.packageId),
+        "Failed to preview skill package removal",
+      ),
+    [WS_METHODS.serverImportSkillPackage]: (request: SkillPackageImportInput) =>
+      expertRpcEffect(
+        requireOwner,
+        () => runtime.skillPackages.import(request),
+        "Failed to import skill package",
+      ),
+    [WS_METHODS.serverRemoveSkillPackage]: (request: SkillPackageRemoveInput) =>
+      expertRpcEffect(
+        requireOwner,
+        () => runtime.removeSkillPackage(request.packageId),
+        "Failed to remove skill package",
+      ),
+    [WS_METHODS.serverPreviewSkillPackageSwitch]: (request: SkillPackageSwitchInput) =>
+      withSkillPackageSwitch(
+        (service) => service.preview(request),
+        "Failed to preview the Expert skill package switch",
+      ),
+    [WS_METHODS.serverApplySkillPackageSwitch]: (request: SkillPackageSwitchApplyInput) =>
+      withSkillPackageSwitch(async (service) => {
+        await service.apply(request);
+        return { completed: true as const };
+      }, "Failed to apply the Expert skill package switch"),
+    [WS_METHODS.serverReadSkillPackageSwitchProgress]: (
+      request: SkillPackageSwitchProgressReadInput,
+    ) =>
+      withSkillPackageSwitch(
+        async (service) => ({ progress: await service.readProgress(request.switchId) }),
+        "Failed to read the Expert skill package switch progress",
       ),
     [WS_METHODS.serverReadExpertSnapshot]: (input: ExpertSnapshotReadInput) =>
       expertRpcEffect(

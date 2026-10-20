@@ -52,6 +52,7 @@ import {
 import { decodeSubagentReceiverThreadIds } from "@synara/shared/subagents";
 import { spawnProcess } from "@synara/shared/processRuntime";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
+import { createExpertSkillApplication } from "./provider/expertSkillCatalog.ts";
 import { Effect, Semaphore, ServiceMap } from "effect";
 
 import {
@@ -1420,9 +1421,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   ): Promise<void> {
     const roots = [
       ...new Set(
-        [this.synaraSkillsDir, expertSession?.skillsRoot].filter(
-          (root): root is string => root !== undefined,
-        ),
+        [
+          this.synaraSkillsDir,
+          expertSession?.skillLoading === "index" ? undefined : expertSession?.skillsRoot,
+        ].filter((root): root is string => root !== undefined),
       ),
     ];
     if (roots.length === 0) {
@@ -1433,12 +1435,16 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         extraRoots: roots,
       });
     } catch (error) {
-      if (!this.isContextRoutable(context) || expertSession?.skills.length) throw error;
+      if (
+        !this.isContextRoutable(context) ||
+        (expertSession?.skillLoading !== "index" && expertSession?.skills.length)
+      )
+        throw error;
       // Older codex builds (< extra-roots support) keep working; Synara-only
       // skills simply stay invisible to codex on those versions.
       log.warn("skills/extraRoots/set unavailable", { error });
     }
-    if (expertSession?.skills.length) {
+    if (expertSession?.skillLoading !== "index" && expertSession?.skills.length) {
       const cwd = context.session.cwd ?? process.cwd();
       let response: Record<string, unknown>;
       try {
@@ -1474,7 +1480,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         "Codex session start requires an explicit agentGatewayCapabilityInput. Pass AGENT_GATEWAY_NO_CAPABILITIES when the session leases no gateway capabilities.",
       );
     }
-    if (input.expertSession?.skills.length) {
+    if (input.expertSession?.skillLoading !== "index" && input.expertSession?.skills.length) {
       if (!input.expertSession.skillsRoot) {
         throw new Error("Codex Expert skills require a snapshot skills root.");
       }
@@ -1578,6 +1584,19 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
           ? input.contextSession.text
           : undefined,
       });
+      if (input.expertSession?.skillLoading === "index") {
+        if (!input.lifecycleGeneration) {
+          throw new Error("Expert catalog submission requires a provider lifecycle generation.");
+        }
+        session = {
+          ...session,
+          skillApplication: createExpertSkillApplication({
+            session: input.expertSession,
+            instructions: baseDeveloperInstructions ?? "",
+            lifecycleGeneration: input.lifecycleGeneration,
+          }),
+        };
+      }
       const processLaunch = await this.buildSessionProcessEnv(
         normalizedCodexOptions,
         input.expectedCodexContinuationGeneration,
@@ -2594,6 +2613,19 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         createdAt: now,
         updatedAt: now,
       };
+      if (input.expertSession?.skillLoading === "index") {
+        if (!input.lifecycleGeneration) {
+          throw new Error("Expert catalog submission requires a provider lifecycle generation.");
+        }
+        session = {
+          ...session,
+          skillApplication: createExpertSkillApplication({
+            session: input.expertSession,
+            instructions: baseDeveloperInstructions ?? "",
+            lifecycleGeneration: input.lifecycleGeneration,
+          }),
+        };
+      }
 
       const codexOptions = readCodexProviderOptions(
         input.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {},

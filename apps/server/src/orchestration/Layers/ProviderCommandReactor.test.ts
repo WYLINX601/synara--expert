@@ -75,6 +75,7 @@ import {
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { createExpertConnectionStore } from "../../experts/ExpertConnectionStore.ts";
+import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
 import { startWorkbenchRuntimeMcpFixture } from "../../../../../scripts/lib/workbench-runtime-mcp-fixture.ts";
 import { ContextRepository } from "../../context/ContextRepository.ts";
 import { GitCommandError, TextGenerationError } from "../../git/Errors.ts";
@@ -319,7 +320,7 @@ describe("ProviderCommandReactor", () => {
     }
     runtimes.clear();
     for (const stateDir of createdStateDirs) {
-      const snapshotsDir = path.join(stateDir, "experts", "snapshots");
+      const expertResourcesDir = path.join(stateDir, "experts");
       const makeWritable = (entry: string): void => {
         if (!fs.existsSync(entry)) return;
         const stat = fs.lstatSync(entry);
@@ -330,7 +331,7 @@ describe("ProviderCommandReactor", () => {
           fs.chmodSync(entry, 0o600);
         }
       };
-      makeWritable(snapshotsDir);
+      makeWritable(expertResourcesDir);
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
     createdStateDirs.clear();
@@ -13362,9 +13363,13 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const threadId = ThreadId.makeUnsafe("thread-expert-binding");
     const expertId = "bound-reviewer";
-    const skillPath = path.join(harness.stateDir, "expert-fixtures", "review-skill", "SKILL.md");
+    const skillRoot = path.join(harness.stateDir, "expert-fixtures", "review-package");
+    const skillPath = path.join(skillRoot, "skills", "reviewer", "SKILL.md");
     fs.mkdirSync(path.dirname(skillPath), { recursive: true });
     fs.writeFileSync(skillPath, "---\nname: reviewer\ndescription: review\n---\nReview.\n");
+    const packageStore = createSkillPackageStore(harness.stateDir);
+    const packagePreview = await packageStore.preview({ path: skillRoot });
+    const importedPackage = await packageStore.import({ previewId: packagePreview.previewId });
     const expertStore = createExpertStore(harness.stateDir);
     const expertDefinition = {
       id: expertId,
@@ -13373,7 +13378,14 @@ describe("ProviderCommandReactor", () => {
       useCases: "Review a change",
       persona: "Separate facts from assumptions.",
       outputRequirements: "Give a conclusion and evidence.",
-      skills: [{ name: "reviewer", path: skillPath }],
+      skills: [],
+      skillSelections: [
+        {
+          packageId: importedPackage.package.packageId,
+          entryPath: "skills/reviewer/SKILL.md",
+          activation: "startup" as const,
+        },
+      ],
       references: [],
       connections: [],
       preferredProvider: "codex" as const,
@@ -13431,6 +13443,9 @@ describe("ProviderCommandReactor", () => {
 
     const expectedExpertSession = {
       snapshotId: binding.snapshotId,
+      expertId: snapshot.expertId,
+      revision: snapshot.revision,
+      displayName: snapshot.displayName,
       persona: [
         `Expert: ${snapshot.displayName}`,
         snapshot.persona,
@@ -13438,6 +13453,8 @@ describe("ProviderCommandReactor", () => {
       ].join("\n\n"),
       skillsRoot: snapshot.skillsRoot,
       skills: snapshot.skills,
+      skillLoading: "index",
+      skillEntries: snapshot.skillEntries ?? [],
       references: snapshot.references,
     };
     expect(harness.startSession.mock.calls[0]?.[1].expertSession).toEqual(expectedExpertSession);
@@ -13588,9 +13605,6 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const threadId = ThreadId.makeUnsafe("thread-expert-snapshot-missing");
     const expertId = "missing-snapshot-reviewer";
-    const skillPath = path.join(harness.stateDir, "expert-fixtures", "missing-skill", "SKILL.md");
-    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
-    fs.writeFileSync(skillPath, "---\nname: reviewer\ndescription: review\n---\nReview.\n");
     const expertStore = createExpertStore(harness.stateDir);
     await expertStore.save({
       id: expertId,
@@ -13599,7 +13613,7 @@ describe("ProviderCommandReactor", () => {
       useCases: "Review a change",
       persona: "Use the pinned review principles.",
       outputRequirements: "Give evidence.",
-      skills: [{ name: "reviewer", path: skillPath }],
+      skills: [],
       references: [],
       connections: [],
       preferredProvider: "codex",

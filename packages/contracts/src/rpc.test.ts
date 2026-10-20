@@ -47,6 +47,21 @@ describe("WS RPC contracts", () => {
     expect(WsFeatureRpcGroup.requests.has(WS_METHODS.serverImportMcpConnections)).toBe(true);
   });
 
+  it("registers owner skill package lifecycle RPCs", () => {
+    for (const method of [
+      WS_METHODS.serverListSkillPackages,
+      WS_METHODS.serverListSkillPackageSources,
+      WS_METHODS.serverReadSkillPackage,
+      WS_METHODS.serverPreviewSkillPackage,
+      WS_METHODS.serverPreviewSkillPackageUpdate,
+      WS_METHODS.serverPreviewSkillPackageRemoval,
+      WS_METHODS.serverImportSkillPackage,
+      WS_METHODS.serverRemoveSkillPackage,
+    ]) {
+      expect(WsFeatureRpcGroup.requests.has(method)).toBe(true);
+    }
+  });
+
   it("exports project-agent RPCs in a satellite group", () => {
     expect(WsProjectAgentRpcGroup.requests.has("projectAgent.linkProject")).toBe(true);
     expect(WsProjectAgentRpcGroup.requests.has("projectAgent.unlinkProject")).toBe(true);

@@ -58,6 +58,7 @@ import {
   type AgentGatewaySessionLease,
 } from "../../agentGateway/sessionLease.ts";
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
+import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
 import { loadProviderPromptImageBlocks } from "../promptAttachments.ts";
 import { settleConcurrentTeardowns } from "../settleConcurrentTeardowns.ts";
@@ -929,6 +930,13 @@ export function makeOmpAdapter(
           const providerInstanceId = resolveProviderSessionInstanceId(input);
           const effectiveSettings = effectiveOmpSettings(input.providerOptions, providerInstanceId);
 
+          if (input.expertSession?.skillLoading === "index" && !input.lifecycleGeneration) {
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/start",
+              detail: "Expert catalog submission requires a provider lifecycle generation.",
+            });
+          }
           const expertPreparation =
             input.expertSession || input.contextSession?.hasContent
               ? yield* prepareExpertProjection({
@@ -1175,14 +1183,22 @@ export function makeOmpAdapter(
             createdAt: now,
             updatedAt: now,
             ...(input.expertSession && expertPreparation
-              ? {
-                  expertApplication: {
-                    snapshotId: input.expertSession.snapshotId,
-                    projectionVersion: OMP_EXPERT_PROJECTION_VERSION,
-                    instructionsHash: expertPreparation.instructionsHash,
-                    skills: expertPreparation.loadedSkills,
-                  },
-                }
+              ? input.expertSession.skillLoading === "index"
+                ? {
+                    skillApplication: createExpertSkillApplication({
+                      session: input.expertSession,
+                      instructionsHash: expertPreparation.instructionsHash,
+                      lifecycleGeneration: input.lifecycleGeneration!,
+                    }),
+                  }
+                : {
+                    expertApplication: {
+                      snapshotId: input.expertSession.snapshotId,
+                      projectionVersion: OMP_EXPERT_PROJECTION_VERSION,
+                      instructionsHash: expertPreparation.instructionsHash,
+                      skills: expertPreparation.loadedSkills,
+                    },
+                  }
               : {}),
             ...(input.contextSession
               ? { contextAppliedSnapshotId: input.contextSession.snapshotId }

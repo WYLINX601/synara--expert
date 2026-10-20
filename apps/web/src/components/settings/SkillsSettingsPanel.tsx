@@ -24,6 +24,7 @@ import {
   providerDisplayName,
   settingsSkillNameKey,
 } from "./skillsSettingsModel";
+import { SkillPackagesSettingsPanel } from "./SkillPackagesSettingsPanel";
 
 function SkillProviderStack({ providers }: { providers: ReadonlyArray<ProviderKind> }) {
   if (providers.length === 0) {
@@ -104,6 +105,8 @@ export function SkillsSettingsPanel() {
 
   return (
     <div className="space-y-8">
+      <SkillPackagesSettingsPanel />
+
       <SettingsSection title="Portable skills">
         <SettingsRow
           title="Synara skills folder"

@@ -1,6 +1,7 @@
 import {
   ExpertAppliedRuntimeReadInput,
   ExpertAppliedRuntimeRecord,
+  ExpertSkillApplication,
   ThreadId,
   type ExpertAppliedRuntimeRecord as ExpertAppliedRuntimeRecordType,
 } from "@synara/contracts";
@@ -19,6 +20,11 @@ export interface ExpertAppliedRuntimeRepositoryShape {
     input: typeof ExpertAppliedRuntimeReadInput.Type,
   ) => Effect.Effect<
     Option.Option<ExpertAppliedRuntimeRecordType>,
+    ExpertAppliedRuntimeRepositoryError
+  >;
+  /** Full owner-only inventory used to find immutable snapshot references. */
+  readonly listAll: () => Effect.Effect<
+    ReadonlyArray<ExpertAppliedRuntimeRecordType>,
     ExpertAppliedRuntimeRepositoryError
   >;
   readonly deleteByThreadId: (
@@ -40,6 +46,7 @@ export const ExpertAppliedRuntimeDbRow = Schema.Struct({
   runtimeVersion: Schema.NullOr(Schema.String),
   lifecycleGeneration: Schema.String,
   appliedAt: Schema.String,
+  skillApplicationJson: Schema.NullOr(Schema.fromJsonString(ExpertSkillApplication)),
 });
 export type ExpertAppliedRuntimeDbRow = typeof ExpertAppliedRuntimeDbRow.Type;
 
@@ -55,5 +62,10 @@ export function expertAppliedRuntimeRecordFromDbRow(
     ...(row.runtimeVersion !== null ? { runtimeVersion: row.runtimeVersion } : {}),
     lifecycleGeneration: row.lifecycleGeneration,
     appliedAt: row.appliedAt,
+    ...(row.skillApplicationJson !== null
+      ? {
+          skillApplication: row.skillApplicationJson,
+        }
+      : {}),
   });
 }

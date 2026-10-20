@@ -12,7 +12,6 @@ import {
   writeFile,
 } from "node:fs/promises";
 import nodeFs from "node:fs";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -22,6 +21,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createExpertStore, readVerifiedStoredExpertSnapshot } from "./ExpertStore.ts";
 import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
+import { createSkillPackageStore } from "./SkillPackageStore.ts";
 
 vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
@@ -68,6 +68,26 @@ function definitionInput(name: string, extra: Partial<ExpertSaveInput> = {}): Ex
     preferredProvider: "codex" as const,
     ...extra,
   };
+}
+
+async function importSkillPackage(stateDir: string, sourceRoot: string) {
+  const store = createSkillPackageStore(stateDir);
+  const preview = await store.preview({ path: sourceRoot });
+  return (await store.import({ previewId: preview.previewId })).package;
+}
+
+async function writeSkill(
+  root: string,
+  relativePath: string,
+  name: string,
+  text = `Instructions for ${name}.`,
+): Promise<void> {
+  const skillFile = path.join(root, relativePath);
+  await mkdir(path.dirname(skillFile), { recursive: true });
+  await writeFile(
+    skillFile,
+    `---\nname: ${name}\ndescription: Description for ${name}.\n---\n${text}\n`,
+  );
 }
 
 describe("ExpertStore", () => {
@@ -340,6 +360,9 @@ describe("ExpertStore", () => {
         persona: string;
         outputRequirements: string;
         skills: Array<{ name: string; path: string }>;
+        schemaVersion?: number;
+        skillSelections?: unknown[];
+        skillEntries?: unknown[];
         skillsRoot: string;
         references: string[];
         connections: ExpertSaveInput["connections"];
@@ -355,6 +378,9 @@ describe("ExpertStore", () => {
         executable?: boolean;
       }>;
     };
+    delete stored.snapshot.schemaVersion;
+    delete stored.snapshot.skillSelections;
+    delete stored.snapshot.skillEntries;
     delete stored.snapshot.mcpBinding;
     for (const resource of stored.resources) delete resource.executable;
     const payload = {
@@ -406,72 +432,37 @@ describe("ExpertStore", () => {
     expect(restored.mcpBinding).toBeUndefined();
   });
 
-  it.skipIf(process.platform === "win32")(
-    "preserves executable skill files and validates execute-bit integrity",
-    async () => {
-      const root = await makeTempRoot();
-      const stateDir = path.join(root, "state");
-      const skill = path.join(root, "skills", "print.sh");
-      await mkdir(path.dirname(skill), { recursive: true });
-      await writeFile(skill, "#!/bin/sh\nprintf snapshot-executable\n", { mode: 0o700 });
-      await chmod(skill, 0o700);
+  it("requires legacy local skill paths to be converted before Expert use", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const skill = path.join(root, "missing", "legacy", "SKILL.md");
 
-      const store = createExpertStore(stateDir);
-      const expert = await store.save(
-        definitionInput("Executable skill", {
-          skills: [{ name: "Executable skill", path: skill }],
-        }),
-      );
-      const binding = await store.prepareSnapshot(expert.id);
-      const snapshot = await store.readSnapshot(binding.snapshotId);
-      const copiedSkill = snapshot.skills[0]!.path;
-      expect((await stat(copiedSkill)).mode & 0o777).toBe(0o500);
-      expect(spawnSync(copiedSkill, { encoding: "utf8" })).toMatchObject({
-        status: 0,
-        stdout: "snapshot-executable",
-      });
-
-      const manifestPath = path.join(
-        stateDir,
-        "experts",
-        "snapshots",
-        binding.snapshotId,
-        "snapshot.json",
-      );
-      const stored = JSON.parse(await readFile(manifestPath, "utf8")) as {
-        resources: Array<{ path: string; executable?: boolean }>;
-      };
-      const relativeSkillPath = snapshot.skills[0]!.path.replace(
-        `${snapshot.skillsRoot}/`,
-        "skills/",
-      );
-      expect(
-        stored.resources.find((resource) => resource.path === relativeSkillPath)?.executable,
-      ).toBe(true);
-
-      await chmod(copiedSkill, 0o400);
-      await expect(store.readSnapshot(binding.snapshotId)).rejects.toMatchObject({
-        code: "snapshot_corrupt",
-      });
-    },
-  );
+    const store = createExpertStore(stateDir);
+    const expert = await store.save(
+      definitionInput("Legacy skill path", {
+        skills: [{ name: "Legacy", path: skill }],
+      }),
+    );
+    const preview = await store.preview({ expertId: expert.id, provider: "codex" });
+    expect(preview.status).toBe("incompatible");
+    expect(preview.issues).toEqual(["此专家仍使用旧式本机技能路径；转换为共享技能包后才能启动。"]);
+    await expect(store.prepareSnapshot(expert.id)).rejects.toMatchObject({
+      code: "invalid_resource",
+      message: expect.stringContaining("convert its skills to shared packages"),
+    });
+  });
 
   it.skipIf(process.platform === "win32")(
     "publishes durable resource modes before locking the snapshot root",
     async () => {
       const root = await makeTempRoot();
       const stateDir = path.join(root, "state");
-      const skill = path.join(root, "skills", "publish.sh");
       const reference = path.join(root, "reference.md");
-      await mkdir(path.dirname(skill), { recursive: true });
-      await writeFile(skill, "#!/bin/sh\nprintf published\n", { mode: 0o700 });
-      await chmod(skill, 0o700);
       await writeFile(reference, "read-only reference", { mode: 0o600 });
 
       const store = createExpertStore(stateDir);
       const expert = await store.save(
         definitionInput("Snapshot publish boundary", {
-          skills: [{ name: "Publish script", path: skill }],
           references: [reference],
         }),
       );
@@ -493,7 +484,9 @@ describe("ExpertStore", () => {
           };
           expect((await stat(stagePath)).mode & 0o777).toBe(0o700);
           expect((await stat(path.join(stagePath, "snapshot.json"))).mode & 0o777).toBe(0o400);
-          expect((await stat(path.join(stagePath, "skills"))).mode & 0o777).toBe(0o500);
+          await expect(lstat(path.join(stagePath, "skills"))).rejects.toMatchObject({
+            code: "ENOENT",
+          });
           expect((await stat(path.join(stagePath, "references"))).mode & 0o777).toBe(0o500);
           for (const resource of stored.resources) {
             const resourcePath = path.join(stagePath, ...resource.path.split("/"));
@@ -519,80 +512,53 @@ describe("ExpertStore", () => {
         const binding = await store.prepareSnapshot(expert.id);
         expect(sawStagingRename).toBe(true);
         const snapshot = await store.readSnapshot(binding.snapshotId);
-        expect(await readFile(snapshot.skills[0]!.path, "utf8")).toContain("published");
-        expect((await stat(snapshot.skills[0]!.path)).mode & 0o777).toBe(0o500);
-        expect((await stat(path.dirname(snapshot.skillsRoot))).mode & 0o777).toBe(0o500);
+        expect(snapshot.skills).toEqual([]);
+        expect(await readFile(snapshot.references[0]!, "utf8")).toBe("read-only reference");
+        expect((await stat(snapshot.references[0]!)).mode & 0o777).toBe(0o400);
       } finally {
         renameMock.mockImplementation(realRename);
       }
     },
   );
 
-  it.skipIf(process.platform === "win32")(
-    "uses manifest execute metadata when reading snapshots with Windows semantics",
-    async () => {
-      const root = await makeTempRoot();
-      const stateDir = path.join(root, "state");
-      const skill = path.join(root, "skills", "print.sh");
-      await mkdir(path.dirname(skill), { recursive: true });
-      await writeFile(skill, "#!/bin/sh\nprintf snapshot-executable\n", { mode: 0o700 });
-      await chmod(skill, 0o700);
-      const store = createExpertStore(stateDir);
-      const expert = await store.save(
-        definitionInput("Windows-compatible skill", {
-          skills: [{ name: "Executable skill", path: skill }],
-        }),
-      );
-      const binding = await store.prepareSnapshot(expert.id);
-      const snapshot = await store.readSnapshot(binding.snapshotId);
-      await chmod(snapshot.skills[0]!.path, 0o400);
-
-      const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
-      Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
-      try {
-        await expect(store.readSnapshot(binding.snapshotId)).resolves.toMatchObject({
-          snapshotId: binding.snapshotId,
-        });
-      } finally {
-        Object.defineProperty(process, "platform", platformDescriptor);
-      }
-    },
-  );
-
-  it("copies resources into a reusable immutable snapshot", async () => {
+  it("keeps package files shared and copies references into a reusable immutable snapshot", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
     const skillRoot = path.join(root, "skills", "write-prd");
     const references = path.join(root, "prd-template.md");
-    await mkdir(skillRoot, { recursive: true });
-    await writeFile(path.join(skillRoot, "SKILL.md"), "Original skill text");
+    await writeSkill(skillRoot, "SKILL.md", "Write PRD", "Original skill text");
     await writeFile(path.join(skillRoot, "example.md"), "Skill companion file");
     await writeFile(references, "Original reference text");
+    const manifest = await importSkillPackage(stateDir, skillRoot);
 
     const store = createExpertStore(stateDir);
     const definition = await store.save(
       definitionInput("Writer", {
-        skills: [{ name: "Write PRD", path: path.join(skillRoot, "SKILL.md") }],
+        skillSelections: [
+          {
+            packageId: manifest.packageId,
+            entryPath: manifest.entries[0]!.entryPath,
+            activation: "startup",
+          },
+        ],
         references: [references],
       }),
     );
     const binding = await store.prepareSnapshot(definition.id);
     expect(await store.prepareSnapshot(definition.id)).toEqual(binding);
     const snapshot = await store.readSnapshot(binding.snapshotId);
-    expect(snapshot.skillsRoot).toBe(
-      path.join(stateDir, "experts", "snapshots", binding.snapshotId, "skills"),
-    );
-    expect(await readFile(snapshot.skills[0]!.path, "utf8")).toBe("Original skill text");
+    expect(snapshot.skillsRoot).toBe(path.join(stateDir, "experts", "skill-packages"));
+    expect(await readFile(snapshot.skills[0]!.path, "utf8")).toContain("Original skill text");
     expect(
       await readFile(path.join(path.dirname(snapshot.skills[0]!.path), "example.md"), "utf8"),
     ).toBe("Skill companion file");
     expect(await readFile(snapshot.references[0]!, "utf8")).toBe("Original reference text");
 
-    await writeFile(path.join(skillRoot, "SKILL.md"), "Changed source skill");
+    await writeSkill(skillRoot, "SKILL.md", "Write PRD", "Changed source skill");
     await writeFile(references, "Changed source reference");
     expect(
       await readFile((await store.readSnapshot(binding.snapshotId)).skills[0]!.path, "utf8"),
-    ).toBe("Original skill text");
+    ).toContain("Original skill text");
     await chmod(snapshot.skills[0]!.path, 0o600);
     await writeFile(snapshot.skills[0]!.path, "Tampered snapshot");
     await expect(store.readSnapshot(binding.snapshotId)).rejects.toMatchObject({
@@ -642,21 +608,19 @@ describe("ExpertStore", () => {
   });
 
   it.skipIf(process.platform === "win32")(
-    "rejects symlink escapes inside selected resources",
+    "rejects symlink escapes inside selected references",
     async () => {
       const root = await makeTempRoot();
-      const skillRoot = path.join(root, "skills", "unsafe");
+      const referenceRoot = path.join(root, "references", "unsafe");
       const outside = path.join(root, "outside.txt");
-      await mkdir(skillRoot, { recursive: true });
-      await writeFile(path.join(skillRoot, "SKILL.md"), "Skill instructions");
+      await mkdir(referenceRoot, { recursive: true });
+      await writeFile(path.join(referenceRoot, "reference.md"), "Reference content");
       await writeFile(outside, "outside secret");
-      await symlink(outside, path.join(skillRoot, "linked.txt"));
+      await symlink(outside, path.join(referenceRoot, "linked.txt"));
 
       const store = createExpertStore(path.join(root, "state"));
       const definition = await store.save(
-        definitionInput("Unsafe", {
-          skills: [{ name: "Unsafe skill", path: path.join(skillRoot, "SKILL.md") }],
-        }),
+        definitionInput("Unsafe reference", { references: [referenceRoot] }),
       );
       expect((await store.preview({ expertId: definition.id, provider: "pi" })).status).toBe(
         "incompatible",
@@ -666,4 +630,286 @@ describe("ExpertStore", () => {
       });
     },
   );
+
+  it("pins package selections in V2 snapshots without copying skills", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const sourceRoot = path.join(root, "source", "writer");
+    await writeSkill(sourceRoot, "SKILL.md", "Writer", "Original package version");
+    const firstPackage = await importSkillPackage(stateDir, sourceRoot);
+
+    await writeSkill(sourceRoot, "SKILL.md", "Writer", "Updated source version");
+    const secondPackage = await importSkillPackage(stateDir, sourceRoot);
+    expect(secondPackage.packageId).not.toBe(firstPackage.packageId);
+
+    const reference = path.join(root, "reference.md");
+    await writeFile(reference, "Pinned reference body");
+    const store = createExpertStore(stateDir);
+    const definition = await store.save(
+      definitionInput("Package based writer", {
+        skillSelections: [
+          {
+            packageId: firstPackage.packageId,
+            entryPath: firstPackage.entries[0]!.entryPath,
+            activation: "startup",
+          },
+        ],
+        references: [reference],
+      }),
+    );
+    const binding = await store.prepareSnapshot(definition.id);
+
+    await rm(sourceRoot, { recursive: true, force: true });
+    const snapshot = await store.readSnapshot(binding.snapshotId);
+    const expectedSkillPath = path.join(
+      stateDir,
+      "experts",
+      "skill-packages",
+      firstPackage.packageId,
+      "content",
+      ...firstPackage.entries[0]!.entryPath.split("/"),
+    );
+    const preview = await store.preview({ expertId: definition.id, provider: "codex" });
+    expect(preview.skillEntries).toEqual([
+      {
+        packageId: firstPackage.packageId,
+        entryPath: firstPackage.entries[0]!.entryPath,
+        activation: "startup",
+        name: "Writer",
+        description: "Description for Writer.",
+        path: expectedSkillPath,
+      },
+    ]);
+    expect(snapshot).toMatchObject({
+      schemaVersion: 2,
+      skillSelections: [
+        {
+          packageId: firstPackage.packageId,
+          entryPath: firstPackage.entries[0]!.entryPath,
+          activation: "startup",
+        },
+      ],
+      skills: [{ name: "Writer", path: expectedSkillPath }],
+      skillEntries: [
+        {
+          packageId: firstPackage.packageId,
+          entryPath: firstPackage.entries[0]!.entryPath,
+          activation: "startup",
+          name: "Writer",
+          description: "Description for Writer.",
+          path: expectedSkillPath,
+        },
+      ],
+    });
+    expect(await readFile(expectedSkillPath, "utf8")).toContain("Original package version");
+    expect(await readFile(snapshot.references[0]!, "utf8")).toBe("Pinned reference body");
+
+    const stored = JSON.parse(
+      await readFile(
+        path.join(stateDir, "experts", "snapshots", binding.snapshotId, "snapshot.json"),
+        "utf8",
+      ),
+    ) as {
+      snapshot: { schemaVersion: number; skills: unknown[]; skillSelections?: unknown[] };
+      resources: Array<{ path: string }>;
+    };
+    expect(stored.snapshot).toMatchObject({
+      schemaVersion: 2,
+      skills: [],
+      skillSelections: snapshot.skillSelections,
+    });
+    expect("skillEntries" in stored.snapshot).toBe(false);
+    expect(
+      stored.resources.every(({ path: resourcePath }) => resourcePath.startsWith("references/")),
+    ).toBe(true);
+    await expect(
+      lstat(path.join(stateDir, "experts", "snapshots", binding.snapshotId, "skills")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    const manifestPath = path.join(
+      stateDir,
+      "experts",
+      "snapshots",
+      binding.snapshotId,
+      "snapshot.json",
+    );
+    await chmod(manifestPath, 0o600);
+    stored.snapshot.skillSelections = [];
+    await writeFile(manifestPath, `${JSON.stringify(stored, null, 2)}\n`);
+    await expect(store.readSnapshot(binding.snapshotId)).rejects.toMatchObject({
+      code: "snapshot_corrupt",
+      message: expect.stringContaining("hash"),
+    });
+    delete stored.snapshot.skillSelections;
+    await writeFile(manifestPath, `${JSON.stringify(stored, null, 2)}\n`);
+    await expect(store.readSnapshot(binding.snapshotId)).rejects.toMatchObject({
+      code: "snapshot_corrupt",
+    });
+  });
+
+  it("blocks BMad startup entries when the workspace is not configured", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const sourceRoot = path.join(root, "source", "bmad-role");
+    await writeSkill(sourceRoot, "SKILL.md", "bmad-agent-analyst");
+    const manifest = await importSkillPackage(stateDir, sourceRoot);
+    const store = createExpertStore(stateDir);
+    const expert = await store.save(
+      definitionInput("BMad analyst", {
+        skillSelections: [
+          {
+            packageId: manifest.packageId,
+            entryPath: manifest.entries[0]!.entryPath,
+            activation: "startup",
+          },
+        ],
+      }),
+    );
+
+    const preview = await store.preview({ expertId: expert.id, provider: "codex", cwd: root });
+    expect(preview.status).toBe("blocked");
+    expect(preview.issues.some((issue) => issue.startsWith("BMad workspace:"))).toBe(true);
+  });
+
+  it("rejects invalid package selections and detects missing or corrupted packages", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const sourceRoot = path.join(root, "source", "reviewer");
+    await writeSkill(sourceRoot, "one/SKILL.md", "Same name");
+    await writeSkill(sourceRoot, "two/SKILL.md", "Same name");
+    const manifest = await importSkillPackage(stateDir, sourceRoot);
+    const store = createExpertStore(stateDir);
+    const selections = manifest.entries.map((entry, index) => ({
+      packageId: manifest.packageId,
+      entryPath: entry.entryPath,
+      activation: index === 0 ? ("startup" as const) : ("on-demand" as const),
+    }));
+
+    await expect(
+      store.save(definitionInput("Duplicate selected skill", { skillSelections: selections })),
+    ).rejects.toMatchObject({ code: "invalid_resource" });
+    await expect(
+      store.save(
+        definitionInput("Missing package", {
+          skillSelections: [
+            {
+              packageId: `pkg_${"f".repeat(64)}`,
+              entryPath: "one/SKILL.md",
+              activation: "startup",
+            },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "invalid_resource" });
+    await expect(
+      store.save(
+        definitionInput("Mixed skill sources", {
+          skills: [{ name: "Legacy", path: "/missing/SKILL.md" }],
+          skillSelections: [selections[0]!],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+
+    await expect(
+      store.save(
+        definitionInput("Multiple startup skills", {
+          skillSelections: [
+            { ...selections[0]!, activation: "startup" },
+            { ...selections[1]!, activation: "startup" },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "invalid_resource" });
+
+    const validPackage = await importSkillPackage(
+      stateDir,
+      await (async () => {
+        const validRoot = path.join(root, "source", "valid");
+        await writeSkill(validRoot, "SKILL.md", "Valid");
+        return validRoot;
+      })(),
+    );
+    const expert = await store.save(
+      definitionInput("Corrupt package", {
+        skillSelections: [
+          {
+            packageId: validPackage.packageId,
+            entryPath: validPackage.entries[0]!.entryPath,
+            activation: "startup",
+          },
+        ],
+      }),
+    );
+    const binding = await store.prepareSnapshot(expert.id);
+    const packageSkill = path.join(
+      stateDir,
+      "experts",
+      "skill-packages",
+      validPackage.packageId,
+      "content",
+      ...validPackage.entries[0]!.entryPath.split("/"),
+    );
+    await chmod(packageSkill, 0o600);
+    await writeFile(packageSkill, "Corrupt package content");
+    expect((await store.preview({ expertId: expert.id, provider: "codex" })).status).toBe(
+      "incompatible",
+    );
+    await expect(store.readSnapshot(binding.snapshotId)).rejects.toMatchObject({
+      code: "snapshot_corrupt",
+    });
+  });
+
+  it("retains every previous definition revision before changing or deleting it", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const firstRoot = path.join(root, "source", "first");
+    const secondRoot = path.join(root, "source", "second");
+    await writeSkill(firstRoot, "SKILL.md", "First");
+    await writeSkill(secondRoot, "SKILL.md", "Second");
+    const firstPackage = await importSkillPackage(stateDir, firstRoot);
+    const secondPackage = await importSkillPackage(stateDir, secondRoot);
+    const store = createExpertStore(stateDir);
+    const expert = await store.save(
+      definitionInput("Revision history", {
+        skillSelections: [
+          {
+            packageId: firstPackage.packageId,
+            entryPath: firstPackage.entries[0]!.entryPath,
+            activation: "startup",
+          },
+        ],
+      }),
+    );
+    const updated = await store.save({
+      ...definitionInput("Revision history", {
+        skillSelections: [
+          {
+            packageId: secondPackage.packageId,
+            entryPath: secondPackage.entries[0]!.entryPath,
+            activation: "startup",
+          },
+        ],
+      }),
+      id: expert.id,
+      expectedRevision: expert.revision,
+    });
+    const revisionsDir = path.join(stateDir, "experts", "revisions", expert.id);
+    const readRevision = async (revision: number) =>
+      JSON.parse(await readFile(path.join(revisionsDir, `${revision}.json`), "utf8")) as {
+        revision: number;
+        skillSelections?: Array<{ packageId: string }>;
+      };
+    expect(await readRevision(1)).toMatchObject({
+      revision: 1,
+      skillSelections: [{ packageId: firstPackage.packageId }],
+    });
+
+    const archived = await store.archive(updated.id, updated.revision);
+    expect(await readRevision(2)).toMatchObject({ revision: 2, archived: false });
+    const restored = await store.restore(archived.id, archived.revision);
+    expect(await readRevision(3)).toMatchObject({ revision: 3, archived: true });
+    await store.remove(restored.id, restored.revision);
+    expect(await readRevision(4)).toMatchObject({ revision: 4, archived: false });
+    expect(await store.read(expert.id)).toBeNull();
+  });
 });

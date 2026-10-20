@@ -33,6 +33,7 @@ import {
 } from "./terminalContext";
 import { runComposerSendOnce } from "./composerSendOwnership";
 import { waitForDraftThreadDispatchToSettle } from "./draftThreadDispatch";
+import { bindDraftExpertSkillInvocations } from "./expertSkillInvocation";
 import { newCommandId, newMessageId } from "./utils";
 
 export async function dispatchQueuedComposerTurnHeadless(input: {
@@ -187,6 +188,7 @@ async function dispatchQueuedComposerTurnOnce(
       queuedTurn,
       createdAt,
     });
+    const boundSkills = await bindDraftExpertSkillInvocations(api, input.threadId, mentionedSkills);
     const stagedTurnAttachments = await turnAttachmentsPromise;
     await stagedTurnAttachments.runWithDispatch((turnAttachments) =>
       api.orchestration
@@ -199,7 +201,7 @@ async function dispatchQueuedComposerTurnOnce(
             role: "user",
             text: outgoingMessageText,
             attachments: turnAttachments,
-            ...(mentionedSkills.length > 0 ? { skills: mentionedSkills } : {}),
+            ...(boundSkills.length > 0 ? { skills: boundSkills } : {}),
             ...(mentionedMentions.length > 0 ? { mentions: mentionedMentions } : {}),
           },
           modelSelection: queuedTurn.modelSelection,

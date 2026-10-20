@@ -4,6 +4,11 @@ import { IsoDateTime, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./bas
 import { ExpertMcpBindingSchema, McpConfigSourceReferenceSchema, McpConnectionId } from "./mcp";
 import { ProviderSkillReference } from "./providerDiscovery";
 import { ProviderInstanceId } from "./providerInstance";
+import {
+  ExpertSkillApplication,
+  ExpertSkillSelection,
+  ResolvedExpertSkillEntry,
+} from "./skillPackage";
 
 export const EXPERT_PROVIDER_KINDS = ["codex", "pi", "claudeAgent", "omp"] as const;
 export const ExpertProviderKind = Schema.Literals(EXPERT_PROVIDER_KINDS);
@@ -142,6 +147,9 @@ export const ExpertDefinition = Schema.Struct({
   persona: Schema.String,
   outputRequirements: Schema.String,
   skills: Schema.Array(ProviderSkillReference),
+  skillSelections: Schema.optional(
+    Schema.Array(ExpertSkillSelection).check(Schema.isMaxLength(100)),
+  ),
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
   preferredProvider: Schema.optional(ExpertProviderKind),
@@ -160,6 +168,9 @@ export const ExpertSaveInput = Schema.Struct({
   persona: Schema.String,
   outputRequirements: Schema.String,
   skills: Schema.Array(ProviderSkillReference),
+  skillSelections: Schema.optional(
+    Schema.Array(ExpertSkillSelection).check(Schema.isMaxLength(100)),
+  ),
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
   preferredProvider: Schema.optional(ExpertProviderKind),
@@ -197,6 +208,7 @@ export type ExpertPreviewInput = typeof ExpertPreviewInput.Type;
 
 export const ExpertPreview = Schema.Struct({
   definition: ExpertDefinition,
+  skillEntries: Schema.optional(Schema.Array(ResolvedExpertSkillEntry)),
   status: Schema.Literals(["available", "partial", "blocked", "incompatible"]),
   issues: Schema.Array(Schema.String),
 });
@@ -204,6 +216,7 @@ export type ExpertPreview = typeof ExpertPreview.Type;
 
 export const ExpertSnapshot = Schema.Struct({
   snapshotId: TrimmedNonEmptyString,
+  schemaVersion: Schema.optional(Schema.Literal(2)),
   expertId: TrimmedNonEmptyString,
   displayName: TrimmedNonEmptyString,
   revision: PositiveInt,
@@ -212,6 +225,10 @@ export const ExpertSnapshot = Schema.Struct({
   persona: Schema.String,
   outputRequirements: Schema.String,
   skills: Schema.Array(ProviderSkillReference),
+  skillSelections: Schema.optional(
+    Schema.Array(ExpertSkillSelection).check(Schema.isMaxLength(100)),
+  ),
+  skillEntries: Schema.optional(Schema.Array(ResolvedExpertSkillEntry)),
   skillsRoot: TrimmedNonEmptyString,
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
@@ -241,6 +258,7 @@ export const ExpertAppliedRuntimeRecord = Schema.Struct({
   runtimeComponent: Schema.optional(TrimmedNonEmptyString),
   runtimeVersion: Schema.optional(TrimmedNonEmptyString),
   lifecycleGeneration: TrimmedNonEmptyString,
+  skillApplication: Schema.optional(ExpertSkillApplication),
   appliedAt: IsoDateTime,
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type ExpertAppliedRuntimeRecord = typeof ExpertAppliedRuntimeRecord.Type;

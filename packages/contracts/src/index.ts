@@ -18,6 +18,8 @@ export * from "./terminal";
 export * from "./provider";
 export * from "./providerDiscovery";
 export * from "./expert";
+export * from "./skillPackage";
+export * from "./skillPackageSwitch";
 export * from "./context";
 export * from "./mcp";
 export * from "./providerInstance";

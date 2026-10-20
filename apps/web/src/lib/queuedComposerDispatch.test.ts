@@ -11,12 +11,16 @@ import * as composerSend from "./composerSend";
 
 const nativeApiMocks = vi.hoisted(() => ({
   dispatchCommand: vi.fn(async () => undefined),
+  getThreadDetailSnapshot: vi.fn(),
+  readExpertSnapshot: vi.fn(),
 }));
 
 vi.mock("../nativeApi", () => ({
   readNativeApi: () => ({
+    server: { readExpertSnapshot: nativeApiMocks.readExpertSnapshot },
     orchestration: {
       dispatchCommand: nativeApiMocks.dispatchCommand,
+      getThreadDetailSnapshot: nativeApiMocks.getThreadDetailSnapshot,
     },
   }),
 }));
@@ -145,6 +149,51 @@ describe("dispatchQueuedComposerTurnHeadless", () => {
           messageId,
           role: "user",
           text: "follow up after the turn",
+        }),
+      }),
+    );
+  });
+
+  it("binds a queued draft skill to the accepted snapshot before dispatch", async () => {
+    const packageId = `pkg_${"a".repeat(64)}`;
+    const queuedTurn = makeQueuedChatTurn();
+    if (queuedTurn.kind !== "chat") throw new Error("chat fixture required");
+    queuedTurn.prompt = "$workflow run the selected workflow";
+    queuedTurn.skills = [
+      {
+        name: "workflow",
+        path: "ignored",
+        expert: {
+          snapshotId: "pending",
+          packageId,
+          entryPath: "workflow/SKILL.md",
+        },
+      },
+    ];
+    nativeApiMocks.getThreadDetailSnapshot.mockResolvedValue({
+      thread: { expertBinding: { snapshotId: "accepted" } },
+    });
+    nativeApiMocks.readExpertSnapshot.mockResolvedValue({
+      snapshotId: "accepted",
+      skillEntries: [{ name: "workflow", packageId, entryPath: "workflow/SKILL.md" }],
+    });
+    expect(
+      await dispatchQueuedComposerTurnHeadless({
+        threadId: THREAD_ID,
+        queuedTurn,
+        dispatchMode: "queue",
+        assistantDeliveryMode: "streaming",
+      }),
+    ).toBe(true);
+    expect(nativeApiMocks.dispatchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "thread.turn.start",
+        message: expect.objectContaining({
+          skills: [
+            expect.objectContaining({
+              expert: { snapshotId: "accepted", packageId, entryPath: "workflow/SKILL.md" },
+            }),
+          ],
         }),
       }),
     );

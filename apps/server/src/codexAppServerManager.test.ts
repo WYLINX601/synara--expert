@@ -2354,6 +2354,72 @@ describe("resolveCodexModelForAccount", () => {
 });
 
 describe("startSession", () => {
+  it("submits Expert V2 catalog instructions without registering a native skill root", async () => {
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "synara-codex-expert-v2-cwd-"));
+    const fixedEntryPath = path.join(
+      cwd,
+      "..",
+      "skill-packages",
+      "pkg_fixed",
+      "content",
+      "skills",
+      "reviewer",
+      "SKILL.md",
+    );
+    const catalogText = "Selected fixed Expert V2 catalog and startup body.";
+    const fake = createSyntheticCodexAppServer();
+    const { manager } = createSyntheticCodexManager(fake);
+    try {
+      const session = await manager.startSession({
+        threadId: asThreadId("thread-expert-v2-catalog"),
+        provider: "codex",
+        runtimeMode: "full-access",
+        cwd,
+        lifecycleGeneration: "generation-expert-v2",
+        expertSession: {
+          snapshotId: "snapshot-expert-v2",
+          persona: catalogText,
+          skillsRoot: path.join(cwd, "..", "skill-packages"),
+          skills: [{ name: "reviewer", path: fixedEntryPath }],
+          skillLoading: "index",
+          skillEntries: [
+            {
+              packageId: `pkg_${"a".repeat(64)}`,
+              entryPath: "skills/reviewer/SKILL.md",
+              activation: "startup",
+              name: "reviewer",
+              description: "Review safely.",
+              path: fixedEntryPath,
+            },
+          ],
+          references: [],
+        },
+        agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+      });
+
+      const startInstructions = fake.requests.find((request) => request.method === "thread/start")
+        ?.params?.developerInstructions as string | undefined;
+      expect(startInstructions).toContain(catalogText);
+      expect(fake.requests.some((request) => request.method === "skills/extraRoots/set")).toBe(
+        false,
+      );
+      expect(fake.requests.some((request) => request.method === "skills/list")).toBe(false);
+      expect(session.expertApplication).toBeUndefined();
+      expect(session.skillApplication).toMatchObject({
+        mode: "catalog",
+        snapshotId: "snapshot-expert-v2",
+        startupEntryIds: [`pkg_${"a".repeat(64)}#skills/reviewer/SKILL.md`],
+        lifecycleGeneration: "generation-expert-v2",
+        instructionsHash: createHash("sha256")
+          .update(startInstructions ?? "", "utf8")
+          .digest("hex"),
+      });
+    } finally {
+      await manager.stopAll();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("loads required Expert skills and keeps persona across Codex recovery", async () => {
     const skillRoot = mkdtempSync(path.join(os.tmpdir(), "synara-codex-expert-skills-"));
     const skillPath = path.join(skillRoot, "reviewer", "SKILL.md");

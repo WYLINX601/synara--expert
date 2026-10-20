@@ -26,6 +26,33 @@ const record = (input: {
 });
 
 layer("ExpertAppliedRuntimeRepository", (it) => {
+  it.effect("persists catalog submission evidence bound to its runtime generation", () =>
+    Effect.gen(function* () {
+      const repository = yield* ExpertAppliedRuntimeRepository;
+      const value = {
+        ...record({
+          snapshotId: "fixed",
+          lifecycleGeneration: "generation",
+          appliedAt: "2026-10-20T00:00:00.000Z",
+        }),
+        skillApplication: {
+          mode: "catalog" as const,
+          snapshotId: "fixed",
+          packageIds: [`pkg_${"a".repeat(64)}`],
+          catalogHash: "b".repeat(64),
+          instructionsHash: "c".repeat(64),
+          startupEntryIds: [`pkg_${"a".repeat(64)}#role/SKILL.md`],
+          lifecycleGeneration: "generation",
+        },
+      };
+      yield* repository.upsert(value);
+      assert.deepStrictEqual(
+        Option.getOrUndefined(yield* repository.getByThreadId({ threadId: value.threadId })),
+        value,
+      );
+      yield* repository.deleteByThreadId({ threadId: value.threadId });
+    }),
+  );
   it.effect("upserts one latest row per thread and supports read/delete", () =>
     Effect.gen(function* () {
       const repository = yield* ExpertAppliedRuntimeRepository;
@@ -65,6 +92,35 @@ layer("ExpertAppliedRuntimeRepository", (it) => {
       yield* repository.upsert(minimal);
       const stored = yield* repository.getByThreadId({ threadId: minimal.threadId });
       assert.deepStrictEqual(Option.getOrUndefined(stored), minimal);
+      yield* repository.deleteByThreadId({ threadId: minimal.threadId });
+    }),
+  );
+
+  it.effect("lists every applied snapshot reference for owner migration inventory", () =>
+    Effect.gen(function* () {
+      const repository = yield* ExpertAppliedRuntimeRepository;
+      const first = {
+        ...record({
+          snapshotId: "snapshot-inventory-first",
+          lifecycleGeneration: "generation-inventory-first",
+          appliedAt: "2026-09-28T00:03:00.000Z",
+        }),
+        threadId: ThreadId.makeUnsafe("thread-inventory-first"),
+      };
+      const second = {
+        ...record({
+          snapshotId: "snapshot-inventory-second",
+          lifecycleGeneration: "generation-inventory-second",
+          appliedAt: "2026-09-28T00:04:00.000Z",
+        }),
+        threadId: ThreadId.makeUnsafe("thread-inventory-second"),
+      };
+      yield* repository.upsert(first);
+      yield* repository.upsert(second);
+
+      assert.deepStrictEqual(yield* repository.listAll(), [first, second]);
+      yield* repository.deleteByThreadId({ threadId: first.threadId });
+      yield* repository.deleteByThreadId({ threadId: second.threadId });
     }),
   );
 });

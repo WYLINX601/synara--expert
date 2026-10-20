@@ -13,8 +13,10 @@ export const WS_PROTOCOL_EPOCH = 1;
 // Revision 5 extends Expert provider enums and native application receipts.
 // A revision-4 client cannot decode Claude/OMP Expert definitions or applied
 // records, so require the matching client/server pair rather than fail after RPC.
-export const WS_PROTOCOL_MIN_REVISION = 5;
-export const WS_PROTOCOL_MAX_REVISION = 5;
+// Revision 6 adds fixed package selections, explicit snapshot entry invocation
+// and catalog submission receipts. Client and server must switch together.
+export const WS_PROTOCOL_MIN_REVISION = 6;
+export const WS_PROTOCOL_MAX_REVISION = 6;
 export const WS_BOOTSTRAP_METHOD = "bootstrap.negotiate";
 export const WS_BOOTSTRAP_PATH = "/ws/bootstrap";
 export const WS_NEGOTIATE_HTTP_PATH = "/ws/negotiate";

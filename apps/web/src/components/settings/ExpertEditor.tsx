@@ -13,6 +13,7 @@ import { Textarea } from "../ui/textarea";
 import { ExpertConnectionPermissions } from "./ExpertConnectionPermissions";
 import { ExpertReferencesEditor } from "./ExpertReferencesEditor";
 import { ExpertSkillsEditor } from "./ExpertSkillsEditor";
+import { ExpertSkillPackagesEditor } from "./ExpertSkillPackagesEditor";
 import { SettingsCard, SettingsSectionShell, SettingsSelectPopup } from "./SettingsPanelPrimitives";
 
 export type ExpertEditorTab = "capabilities" | "settings";
@@ -279,14 +280,24 @@ export function ExpertEditor({
             </SettingsSectionShell>
           </SettingsCard>
           <SettingsCard className="px-4">
-            <ExpertSkillsEditor
-              skills={draft.skills}
-              issues={issues}
-              catalog={catalog}
-              catalogLoading={catalogLoading}
-              catalogError={catalogError}
+            {draft.skillSelections === undefined ? (
+              <ExpertSkillsEditor
+                skills={draft.skills}
+                issues={issues}
+                catalog={catalog}
+                catalogLoading={catalogLoading}
+                catalogError={catalogError}
+                disabled={readonly}
+                onChange={(skills) => onChange({ skills })}
+              />
+            ) : null}
+            <ExpertSkillPackagesEditor
+              selections={draft.skillSelections}
+              legacySkills={draft.skills}
               disabled={readonly}
-              onChange={(skills) => onChange({ skills })}
+              onChange={(skillSelections) => onChange({ skillSelections, skills: [] })}
+              onSwitchToPackages={() => onChange({ skillSelections: [], skills: [] })}
+              onSwitchToLegacy={() => onChange({ skillSelections: undefined, skills: [] })}
             />
             <ExpertReferencesEditor
               references={draft.references}

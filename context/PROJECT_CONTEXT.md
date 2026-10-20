@@ -1,6 +1,6 @@
 # Linx / Synara Expert 项目上下文
 
-更新日期：2026-10-19
+更新日期：2026-10-21
 
 范围：以 Linx V2.0 组织长期方向管理、专业任务执行与能力进化，并在现有 Synara Expert / MCP / 工作台适配层上增量推进。本文只负责项目路由、设计边界与当前状态；产品、技术和验收细节以链接的权威文档为准。
 
@@ -33,6 +33,12 @@
 - **维护续办**：Beta 两项已修复为隔离安装探测，聚焦 32 项通过，完整六包随后为 13,366 通过、0 失败、36 既有跳过，详见[维护验收](../docs/workbench-adaptation-acceptance.md#maintenance-followup-20261016)。远端 prepare 的固定 v1.0.1 有 30 项合并冲突、原本地快照有 46 项；该目标已被 v1.0.5 替代。旧 111 精确兼容授权和原由保留在[兼容方案](../docs/workbench-implementation-plan.md#v101-compatibility-proposal)，活动实现及验收见下节。
 - **远端自动保护未启用**：2026-10-16 只读 API 返回 main 未保护、rulesets 为空；按开发 SOP 人工执行相同门禁，不宣称已有强制保护。
 - **定时链路已触发但未成功验收**：查询返回 1 次 schedule，prepare 失败，verify/publish 跳过；下一维护任务先查该失败，再验收手动与定时路径。运行链接和范围仅维护在[远端核对](../workbench/WB-05-automation.md#2026-10-16-remote-read-only-audit)。本轮未改变仓库设置、触发 workflow、推送或发布。
+
+## 专家技能索引与共享版本包（候选验收）
+
+用户已确认并要求实施“共享不可变技能包＋专家入口索引＋任务版本清单＋四端统一目录加载”。隔离分支 `codex/feature-expert-skill-packages` 基于 `49ab5dc9cabcead1bb1b489b4b4aec7576c2232a`，已实现包存储、V2 固定清单、四端目录与显式调用、配置界面、更新/引用保护删除和集中切换工具。
+
+三端真实启动、调用、停止恢复、服务端重启和取消，以及 BMad 六角色/模板输出、12 位现有专家的隔离转换、原生删除与重复切换均已有证据。最终全仓 17,786 通过、40 跳过，受影响浏览器 38 项通过。Claude 现有认证仍返回 401；Linux/Windows 实机未验收。日用状态、main、安装和发布未变。最终检查与源码边界以[实施验收记录](../docs/expert-skill-package-implementation.md)为准，架构与完整范围见[确认方案](../docs/expert-skill-package-design.md)。
 
 ## Hub 与输入区 UI 合入安装（0.1.2）
 
@@ -84,7 +90,7 @@ Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的�
 - V2.0 描述产品目标与阶段规划；下面的 Expert、MCP 和适配层记录描述已有候选及历史证据。原有检查、失败与未发布状态不因归档而改变。
 - 既有 Expert 的快照、工具授权和 Provider Adapter 细节继续查阅[Expert 产品与技术方案](../docs/expert-product-technical-design.md)。其中“不另建 Agent Runtime”限定既有 Expert 首版；V2.0 的 Hermes 外部常驻服务是新增设计，不能据此声称已接入或修改 Expert Runtime 边界。
 - V2.0 的 Task、Run、Thread 是产品层对象划分，不能仅凭此文档认定现有数据模型已有对应独立实体。实施前需核对映射、数据关系及增量迁移需求。
-- 尚需核对当前 Hermes Fork 的 API / MCP、Profile 与记忆隔离、项目状态查询、授权与定时能力；AgentAssignment 字段、空间归属迁移及 Skill 版本存储仍需技术方案。原文中的“插件”定位不证明 Synara 已具备动态插件 SDK。
+- 尚需核对当前 Hermes Fork 的 API / MCP、Profile 与记忆隔离、项目状态查询、授权与定时能力；AgentAssignment 字段与空间归属迁移仍需技术方案；Skill 版本存储已有上方专项候选，不能据此认定 Hermes 集成已完成。原文中的“插件”定位不证明 Synara 已具备动态插件 SDK。
 - P0 验收以原文第 13 节为准：一个学术 Space 关联两个 Project，Owner 基于实际项目数据持续汇报；一次任务中的有效改进提炼为 Skill 并在另一任务复用。当前没有上述场景的实现或验收完成结论。
 
 ## 既有候选进度（2026-10-09 核对）

@@ -22,6 +22,8 @@ export interface HubWorkRepositoryShape {
   readonly list: (
     projectId: ProjectId,
   ) => Effect.Effect<readonly HubWorkRecord[], HubWorkRepositoryError>;
+  /** Complete durable inventory for owner-only migration/reference checks. */
+  readonly listAll: () => Effect.Effect<readonly HubWorkRecord[], HubWorkRepositoryError>;
   readonly get: (id: string) => Effect.Effect<HubWorkRecord | null, HubWorkRepositoryError>;
   readonly findByWorker: (
     threadId: ThreadId,

@@ -7,6 +7,7 @@ import { Schema } from "effect";
 import { ProcessEnvRecord, TrimmedNonEmptyString } from "./baseSchemas";
 import { ProviderOptionDescriptor } from "./model";
 import { ProviderInstanceId } from "./providerInstance";
+import { SkillEntryPath, SkillPackageId } from "./skillPackage";
 
 const ProviderDiscoveryKind = Schema.Literals([
   "codex",
@@ -27,6 +28,14 @@ export const ProviderSkillInterface = Schema.Struct({
 });
 export type ProviderSkillInterface = typeof ProviderSkillInterface.Type;
 
+/** Fixed Expert snapshot identity; `path` is display/legacy data, never authority. */
+export const ProviderSkillExpertIdentity = Schema.Struct({
+  snapshotId: TrimmedNonEmptyString,
+  packageId: SkillPackageId,
+  entryPath: SkillEntryPath,
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type ProviderSkillExpertIdentity = typeof ProviderSkillExpertIdentity.Type;
+
 export const ProviderSkillDescriptor = Schema.Struct({
   name: TrimmedNonEmptyString,
   description: Schema.optional(TrimmedNonEmptyString),
@@ -35,12 +44,15 @@ export const ProviderSkillDescriptor = Schema.Struct({
   scope: Schema.optional(TrimmedNonEmptyString),
   interface: Schema.optional(ProviderSkillInterface),
   dependencies: Schema.optional(Schema.Unknown),
+  expert: Schema.optional(ProviderSkillExpertIdentity),
 });
 export type ProviderSkillDescriptor = typeof ProviderSkillDescriptor.Type;
 
 export const ProviderSkillReference = Schema.Struct({
   name: TrimmedNonEmptyString,
   path: TrimmedNonEmptyString,
+  /** Fixed Expert snapshot identity. The server ignores `path` for this reference. */
+  expert: Schema.optional(ProviderSkillExpertIdentity),
 });
 export type ProviderSkillReference = typeof ProviderSkillReference.Type;
 

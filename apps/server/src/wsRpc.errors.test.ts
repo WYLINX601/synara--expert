@@ -28,6 +28,7 @@ const emptyExpertAppliedRuntimeRepository = (): ExpertAppliedRuntimeRepositorySh
   upsert: () => Effect.void,
   getByThreadId: () => Effect.succeed(Option.none()),
   deleteByThreadId: () => Effect.void,
+  listAll: () => Effect.succeed([]),
 });
 
 const mapRpcError = <A, E, R>(effect: Effect.Effect<A, E, R>, fallbackMessage: string) =>

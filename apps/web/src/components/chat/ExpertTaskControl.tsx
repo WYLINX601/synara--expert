@@ -210,6 +210,26 @@ export function ExpertTaskControl(props: {
                       <dt>资源</dt>
                       <dd>{snapshot.data.references.length} 份固定参考资料</dd>
                     </div>
+                    {snapshot.data.schemaVersion === 2 ? (
+                      <>
+                        <div className="flex flex-wrap gap-x-2">
+                          <dt>资源校验</dt>
+                          <dd>固定版本校验通过</dd>
+                        </div>
+                        {snapshot.data.skillEntries?.map((entry) => (
+                          <div
+                            key={`${entry.packageId}:${entry.entryPath}`}
+                            className="flex flex-wrap gap-x-2"
+                          >
+                            <dt>{entry.name}</dt>
+                            <dd>
+                              {entry.activation === "startup" ? "启动入口" : "按需技能"} ·{" "}
+                              {entry.packageId.slice(4, 16)}
+                            </dd>
+                          </div>
+                        ))}
+                      </>
+                    ) : null}
                   </dl>
                 </section>
                 <section className="space-y-2">
@@ -335,6 +355,17 @@ export function ExpertTaskControl(props: {
                 </p>
               ) : appliedRuntime.data ? (
                 <dl className="grid gap-1 text-muted-foreground">
+                  {appliedRuntime.data.skillApplication?.snapshotId === props.binding.snapshotId ? (
+                    <div className="flex flex-wrap gap-x-2">
+                      <dt>技能目录</dt>
+                      <dd>目录已提交（不代表技能已执行）</dd>
+                    </div>
+                  ) : snapshot.data?.schemaVersion === 2 ? (
+                    <div className="flex flex-wrap gap-x-2">
+                      <dt>技能目录</dt>
+                      <dd>尚无本版本的提交回执</dd>
+                    </div>
+                  ) : null}
                   <div className="flex flex-wrap gap-x-2">
                     <dt>运行组件</dt>
                     <dd>{appliedRuntime.data.runtimeComponent ?? "未识别"}</dd>

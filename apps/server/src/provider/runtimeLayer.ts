@@ -39,7 +39,7 @@ export function makeServerProviderLayer(
     const credentials = yield* ProviderCredentials;
     const serverSettings = yield* ServerSettingsService;
     const resolveProviderServerPassword = makeProviderServerPasswordResolver(credentials);
-    const { logProviderEvents, providerEventLogPath } = yield* ServerConfig;
+    const { logProviderEvents, providerEventLogPath, stateDir, cwd } = yield* ServerConfig;
     const nativeEventLogger = logProviderEvents
       ? yield* makeEventNdjsonLogger(providerEventLogPath, {
           stream: "native",
@@ -110,6 +110,8 @@ export function makeServerProviderLayer(
     );
     const providerServiceLayer = makeDurableProviderServiceLive({
       ...(canonicalEventLogger ? { canonicalEventLogger } : {}),
+      stateDir,
+      defaultCwd: cwd,
     }).pipe(
       Layer.provide(adapterRegistryLayer),
       Layer.provide(providerSessionDirectoryLayer),

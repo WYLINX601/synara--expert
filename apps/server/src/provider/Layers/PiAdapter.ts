@@ -27,6 +27,8 @@ import {
   type ProviderListCommandsResult,
   type ProviderListModelsResult,
   type ProviderListSkillsResult,
+  type ProviderExpertSession,
+  type ContextSession,
   ProviderItemId,
   type ProviderRuntimeEvent,
   type ProviderSession,
@@ -45,6 +47,7 @@ import {
 } from "@synara/shared/processRuntime";
 import { stripTerminalControlSequences } from "@synara/shared/text";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
+import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
 import { Effect, FileSystem, Layer, Option, Queue, Stream } from "effect";
 
 import {
@@ -214,6 +217,38 @@ type PiModelRegistry = Pick<ModelRegistry, "find" | "getAll" | "getAvailable">;
 type PiCodingAgentModule = typeof import("@earendil-works/pi-coding-agent");
 type PiAgentRuntime = Awaited<ReturnType<PiCodingAgentModule["createAgentSessionRuntime"]>>;
 type PiShellConfig = ReturnType<PiCodingAgentModule["getShellConfig"]>;
+
+export function piResourceLoaderOptionsForSession(input: {
+  readonly expertSession?: ProviderExpertSession;
+  readonly contextSession?: ContextSession;
+  readonly noExtensions?: boolean;
+}):
+  | NonNullable<
+      Parameters<PiCodingAgentModule["createAgentSessionServices"]>[0]["resourceLoaderOptions"]
+    >
+  | undefined {
+  if (!input.expertSession && !input.contextSession?.hasContent && !input.noExtensions) {
+    return undefined;
+  }
+  return {
+    ...(input.noExtensions ? { noExtensions: true } : {}),
+    ...(input.expertSession || input.contextSession?.hasContent
+      ? {
+          appendSystemPrompt: [
+            composeProviderBaseInstructions({
+              expertPersona: input.expertSession?.persona,
+              contextInstructions: input.contextSession?.hasContent
+                ? input.contextSession.text
+                : undefined,
+            }) ?? "",
+          ].filter(Boolean),
+          ...(input.expertSession?.skillLoading !== "index" && input.expertSession?.skillsRoot
+            ? { additionalSkillPaths: [input.expertSession.skillsRoot] }
+            : {}),
+        }
+      : {}),
+  };
+}
 
 interface PiActiveProcess {
   readonly child: ChildProcess;
@@ -3232,34 +3267,18 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
         sessionManager,
         sessionStartEvent,
       }) => {
+        const resourceLoaderOptions = piResourceLoaderOptionsForSession({
+          ...(input.expertSession ? { expertSession: input.expertSession } : {}),
+          ...(input.contextSession ? { contextSession: input.contextSession } : {}),
+          ...(input.noExtensions ? { noExtensions: true } : {}),
+        });
         const services = await input.sdk.createAgentSessionServices({
           cwd,
           agentDir,
           modelRuntime,
-          ...(input.expertSession || input.contextSession?.hasContent || input.noExtensions
-            ? {
-                resourceLoaderOptions: {
-                  ...(input.noExtensions ? { noExtensions: true } : {}),
-                  ...(input.expertSession || input.contextSession?.hasContent
-                    ? {
-                        appendSystemPrompt: [
-                          composeProviderBaseInstructions({
-                            expertPersona: input.expertSession?.persona,
-                            contextInstructions: input.contextSession?.hasContent
-                              ? input.contextSession.text
-                              : undefined,
-                          }) ?? "",
-                        ].filter(Boolean),
-                        ...(input.expertSession?.skillsRoot
-                          ? { additionalSkillPaths: [input.expertSession.skillsRoot] }
-                          : {}),
-                      }
-                    : {}),
-                },
-              }
-            : {}),
+          ...(resourceLoaderOptions ? { resourceLoaderOptions } : {}),
         });
-        if (input.expertSession?.skills.length) {
+        if (input.expertSession?.skillLoading !== "index" && input.expertSession?.skills.length) {
           const loadedSkills = services.resourceLoader.getSkills().skills;
           for (const required of input.expertSession.skills) {
             if (
@@ -3332,7 +3351,14 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       providerInstanceId: ProviderSession["providerInstanceId"],
     ) =>
       Effect.gen(function* () {
-        if (input.expertSession?.skills.length) {
+        if (input.expertSession?.skillLoading === "index" && !input.lifecycleGeneration) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/start",
+            detail: "Expert catalog submission requires a provider lifecycle generation.",
+          });
+        }
+        if (input.expertSession?.skillLoading !== "index" && input.expertSession?.skills.length) {
           if (!input.expertSession.skillsRoot) {
             return yield* new ProviderAdapterRequestError({
               provider: PROVIDER,
@@ -3520,6 +3546,21 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           runtimeVersion: piSdk.VERSION,
           ...(input.lifecycleGeneration !== undefined
             ? { lifecycleGeneration: input.lifecycleGeneration }
+            : {}),
+          ...(input.expertSession?.skillLoading === "index"
+            ? {
+                skillApplication: createExpertSkillApplication({
+                  session: input.expertSession,
+                  instructions:
+                    composeProviderBaseInstructions({
+                      expertPersona: input.expertSession.persona,
+                      contextInstructions: input.contextSession?.hasContent
+                        ? input.contextSession.text
+                        : undefined,
+                    }) ?? "",
+                  lifecycleGeneration: input.lifecycleGeneration!,
+                }),
+              }
             : {}),
           cwd,
           threadId: input.threadId,

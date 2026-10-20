@@ -78,6 +78,33 @@ const configure = (hubId = projectId) =>
   });
 
 layer("Hub work durable admission", (it) => {
+  it.effect("lists all retained Hub history across projects for complete reference scans", () =>
+    Effect.gen(function* () {
+      const repository = yield* HubWorkRepository;
+      const firstProject = ProjectId.makeUnsafe("inventory-hub-a");
+      const secondProject = ProjectId.makeUnsafe("inventory-hub-b");
+      const first = {
+        ...work("inventory-work-a", 0),
+        projectId: firstProject,
+        targetProjectId: firstProject,
+      };
+      const second = {
+        ...work("inventory-work-b", 0),
+        projectId: secondProject,
+        targetProjectId: secondProject,
+        state: "cancelled" as const,
+      };
+      yield* repository.submit([first]);
+      yield* repository.submit([second]);
+      const all = yield* repository.listAll();
+      assert.deepEqual(
+        all.filter((record) => record.id.startsWith("inventory-work-")).map((record) => record.id),
+        ["inventory-work-a", "inventory-work-b"],
+      );
+      assert.equal(all.find((record) => record.id === second.id)?.state, "cancelled");
+    }),
+  );
+
   it.effect(
     "enforces participant membership in the acceptance transaction and prioritizes replay",
     () =>

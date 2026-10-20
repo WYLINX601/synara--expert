@@ -145,6 +145,11 @@ export const makeHubWorkRepository = Effect.gen(function* () {
       WHERE project_id = ${projectId} ORDER BY sequence
     `.pipe(Effect.flatMap(decodeRows), Effect.mapError(storageError)),
 
+    listAll: () =>
+      sql<RecordRow>`
+      SELECT record_json AS "recordJson" FROM project_agent_work_items ORDER BY sequence
+    `.pipe(Effect.flatMap(decodeRows), Effect.mapError(storageError)),
+
     get: (id) =>
       sql<RecordRow>`
       SELECT record_json AS "recordJson" FROM project_agent_work_items WHERE work_item_id = ${id}

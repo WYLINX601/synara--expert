@@ -108,7 +108,12 @@ export function providerSkillReferencesEqual(
   return (
     left.length === right.length &&
     left.every(
-      (skill, index) => skill.name === right[index]?.name && skill.path === right[index]?.path,
+      (skill, index) =>
+        skill.name === right[index]?.name &&
+        skill.path === right[index]?.path &&
+        skill.expert?.snapshotId === right[index]?.expert?.snapshotId &&
+        skill.expert?.packageId === right[index]?.expert?.packageId &&
+        skill.expert?.entryPath === right[index]?.expert?.entryPath,
     )
   );
 }

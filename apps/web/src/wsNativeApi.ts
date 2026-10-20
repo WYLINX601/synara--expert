@@ -758,6 +758,23 @@ export function createWsNativeApi(): NativeApi {
       restoreExpert: (input) => transport.request(WS_METHODS.serverRestoreExpert, input),
       deleteExpert: (input) => transport.request(WS_METHODS.serverDeleteExpert, input),
       previewExpert: (input) => transport.request(WS_METHODS.serverPreviewExpert, input),
+      listSkillPackages: () => transport.request(WS_METHODS.serverListSkillPackages),
+      listSkillPackageSources: () => transport.request(WS_METHODS.serverListSkillPackageSources),
+      readSkillPackage: (input) => transport.request(WS_METHODS.serverReadSkillPackage, input),
+      previewSkillPackage: (input) =>
+        transport.request(WS_METHODS.serverPreviewSkillPackage, input),
+      previewSkillPackageUpdate: (input) =>
+        transport.request(WS_METHODS.serverPreviewSkillPackageUpdate, input),
+      previewSkillPackageRemoval: (input) =>
+        transport.request(WS_METHODS.serverPreviewSkillPackageRemoval, input),
+      importSkillPackage: (input) => transport.request(WS_METHODS.serverImportSkillPackage, input),
+      removeSkillPackage: (input) => transport.request(WS_METHODS.serverRemoveSkillPackage, input),
+      previewSkillPackageSwitch: (input) =>
+        transport.request(WS_METHODS.serverPreviewSkillPackageSwitch, input),
+      applySkillPackageSwitch: (input) =>
+        transport.request(WS_METHODS.serverApplySkillPackageSwitch, input),
+      readSkillPackageSwitchProgress: (input) =>
+        transport.request(WS_METHODS.serverReadSkillPackageSwitchProgress, input),
       readExpertSnapshot: (input) => transport.request(WS_METHODS.serverReadExpertSnapshot, input),
       readExpertAppliedRuntime: (input) =>
         transport.request(WS_METHODS.serverReadExpertAppliedRuntime, input),

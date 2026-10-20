@@ -44,6 +44,27 @@ import type {
   McpImportRequest,
   McpImportResult,
 } from "./mcp";
+import type {
+  SkillPackage,
+  SkillPackageImportInput,
+  SkillPackageImportResult,
+  SkillPackagePreview,
+  SkillPackagePreviewInput,
+  SkillPackageReadInput,
+  SkillPackageRemovalPreview,
+  SkillPackageRemoveInput,
+  SkillPackageSource,
+  SkillPackageUpdatePreview,
+  SkillPackageUpdatePreviewInput,
+} from "./skillPackage";
+import type {
+  SkillPackageSwitchApplyInput,
+  SkillPackageSwitchApplyResult,
+  SkillPackageSwitchInput,
+  SkillPackageSwitchPreview,
+  SkillPackageSwitchProgressReadInput,
+  SkillPackageSwitchProgressResult,
+} from "./skillPackageSwitch";
 import type { ContextApi } from "./context";
 
 import type {
@@ -1340,6 +1361,27 @@ export interface NativeApi {
     restoreExpert: (input: ExpertRestoreInput) => Promise<ExpertDefinition>;
     deleteExpert: (input: ExpertDeleteInput) => Promise<void>;
     previewExpert: (input: ExpertPreviewInput) => Promise<ExpertPreview>;
+    listSkillPackages: () => Promise<ReadonlyArray<SkillPackage>>;
+    listSkillPackageSources: () => Promise<ReadonlyArray<SkillPackageSource>>;
+    readSkillPackage: (input: SkillPackageReadInput) => Promise<SkillPackage>;
+    previewSkillPackage: (input: SkillPackagePreviewInput) => Promise<SkillPackagePreview>;
+    previewSkillPackageUpdate: (
+      input: SkillPackageUpdatePreviewInput,
+    ) => Promise<SkillPackageUpdatePreview>;
+    previewSkillPackageRemoval: (
+      input: SkillPackageReadInput,
+    ) => Promise<SkillPackageRemovalPreview>;
+    importSkillPackage: (input: SkillPackageImportInput) => Promise<SkillPackageImportResult>;
+    removeSkillPackage: (input: SkillPackageRemoveInput) => Promise<void>;
+    previewSkillPackageSwitch: (
+      input: SkillPackageSwitchInput,
+    ) => Promise<SkillPackageSwitchPreview>;
+    applySkillPackageSwitch: (
+      input: SkillPackageSwitchApplyInput,
+    ) => Promise<SkillPackageSwitchApplyResult>;
+    readSkillPackageSwitchProgress: (
+      input: SkillPackageSwitchProgressReadInput,
+    ) => Promise<SkillPackageSwitchProgressResult>;
     readExpertSnapshot: (input: ExpertSnapshotReadInput) => Promise<ExpertSnapshot>;
     readExpertAppliedRuntime: (
       input: ExpertAppliedRuntimeReadInput,

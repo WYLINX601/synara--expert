@@ -71,6 +71,10 @@ export const WORKBENCH_RETAINED_IMPORTS = [
   },
   { file: "apps/server/src/experts/McpConfigSource.ts", specifier: "../providerUsage/sqlite.ts" },
   {
+    file: "apps/server/src/experts/SkillPackageStore.ts",
+    specifier: "../provider/skillsCatalog.ts",
+  },
+  {
     file: "apps/web/src/components/settings/useExpertDraftGuard.tsx",
     specifier: "@tanstack/react-router",
   },

@@ -425,8 +425,13 @@ export function prepareOmpExpertSession(
     cleanup,
   });
 
-  const requestedSkills = input.expertSession?.skills ?? input.skills ?? [];
-  const configuredSkillsRoot = input.expertSession?.skillsRoot ?? input.skillsRoot;
+  const isIndexedExpert = input.expertSession?.skillLoading === "index";
+  const requestedSkills = isIndexedExpert
+    ? []
+    : (input.expertSession?.skills ?? input.skills ?? []);
+  const configuredSkillsRoot = isIndexedExpert
+    ? undefined
+    : (input.expertSession?.skillsRoot ?? input.skillsRoot);
   const baseInstructions =
     composeProviderBaseInstructions({
       expertPersona: input.expertSession?.persona,
@@ -498,7 +503,7 @@ export function prepareOmpExpertSession(
         resolveExpertSkills(
           requestedSkills,
           configuredSkillsRoot,
-          input.expertSession !== undefined,
+          input.expertSession !== undefined && !isIndexedExpert,
         ),
       catch: () => new Error("One or more required Expert skill files cannot be read safely."),
     }).pipe(Effect.result);

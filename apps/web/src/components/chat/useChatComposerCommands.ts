@@ -252,6 +252,7 @@ export function useChatComposerCommands({
               const nextSkill = {
                 name: item.skill.name,
                 path: item.skill.path,
+                ...(item.skill.expert ? { expert: item.skill.expert } : {}),
               } satisfies ProviderSkillReference;
               return existing.some(
                 (skill) => skill.name === nextSkill.name && skill.path === nextSkill.path,

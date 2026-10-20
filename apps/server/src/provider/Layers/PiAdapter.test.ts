@@ -12,7 +12,7 @@ import path from "node:path";
 
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SYNARA_COMPUTER_TOOL_NAMES } from "../../agentGateway/computerToolPermission.ts";
 import {
   applyPiRuntimeApiKeysFromEnvironment,
@@ -30,8 +30,18 @@ import {
   toPiProviderModelDescriptor,
   resolvePiStartInstanceId,
   resolvePiExtensionMode,
+  piResourceLoaderOptionsForSession,
 } from "./PiAdapter";
 import { makePiStoragePaths } from "../piStoragePaths.ts";
+
+async function withoutAmbientAnthropicAuthToken<T>(action: () => Promise<T>): Promise<T> {
+  vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
+  try {
+    return await action();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+}
 
 describe("makePiStoragePaths", () => {
   it("resolves modelSelection-only account identity before Pi storage setup", () => {
@@ -233,6 +243,57 @@ describe("Pi extension mode in-flight reservations", () => {
     });
     expect(replacement.noExtensions).toBe(false);
     replacement.release();
+  });
+});
+
+describe("Pi Expert resource loading", () => {
+  it("submits Expert V2 instructions without exposing the package parent to native discovery", () => {
+    const options = piResourceLoaderOptionsForSession({
+      expertSession: {
+        snapshotId: "expert-v2-pi",
+        persona: "Fixed selected catalog and startup body.",
+        skillsRoot: "/state/experts/skill-packages",
+        skills: [{ name: "reviewer", path: "/state/pkg/content/skills/reviewer/SKILL.md" }],
+        skillLoading: "index",
+        skillEntries: [
+          {
+            packageId: `pkg_${"d".repeat(64)}`,
+            entryPath: "skills/reviewer/SKILL.md",
+            activation: "startup",
+            name: "reviewer",
+            description: "Review safely.",
+            path: "/state/pkg/content/skills/reviewer/SKILL.md",
+          },
+        ],
+        references: [],
+      },
+      contextSession: {
+        snapshotId: "context-pi",
+        snapshotHash: "context-hash-pi",
+        text: "Use frozen project facts.",
+        hasContent: true,
+      },
+    });
+
+    expect(options?.appendSystemPrompt?.join("\n")).toContain(
+      "Fixed selected catalog and startup body.",
+    );
+    expect(options?.appendSystemPrompt?.join("\n")).toContain("Use frozen project facts.");
+    expect(options).not.toHaveProperty("additionalSkillPaths");
+  });
+
+  it("preserves native skill discovery for legacy Expert snapshots", () => {
+    expect(
+      piResourceLoaderOptionsForSession({
+        expertSession: {
+          snapshotId: "legacy-expert-pi",
+          persona: "Legacy persona.",
+          skillsRoot: "/snapshot/skills",
+          skills: [{ name: "reviewer", path: "/snapshot/skills/reviewer/SKILL.md" }],
+          references: [],
+        },
+      }),
+    ).toMatchObject({ additionalSkillPaths: ["/snapshot/skills"] });
   });
 });
 
@@ -935,19 +996,21 @@ describe("getPiDiscoverableModels", () => {
           local: { type: "api_key", key: "test-key" },
         }),
       );
-      const modelRuntime = await ModelRuntime.create({
-        authPath,
-        modelsPath,
-        allowModelNetwork: false,
+      await withoutAmbientAnthropicAuthToken(async () => {
+        const modelRuntime = await ModelRuntime.create({
+          authPath,
+          modelsPath,
+          allowModelNetwork: false,
+        });
+        const registry = new ModelRegistry(modelRuntime);
+
+        const models = getPiDiscoverableModels(registry);
+
+        expect(models.some((model) => model.provider === "local" && model.id === "glm-5.2")).toBe(
+          true,
+        );
+        expect(models.some((model) => model.provider === "anthropic")).toBe(false);
       });
-      const registry = new ModelRegistry(modelRuntime);
-
-      const models = getPiDiscoverableModels(registry);
-
-      expect(models.some((model) => model.provider === "local" && model.id === "glm-5.2")).toBe(
-        true,
-      );
-      expect(models.some((model) => model.provider === "anthropic")).toBe(false);
     } finally {
       rmSync(agentDir, { recursive: true, force: true });
     }

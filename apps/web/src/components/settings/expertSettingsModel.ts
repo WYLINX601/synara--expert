@@ -9,6 +9,7 @@ export type ExpertDraftField =
   | "outputRequirements"
   | "preferredProvider"
   | "skills"
+  | "skillSelections"
   | "references"
   | "connections";
 
@@ -59,6 +60,9 @@ export function expertDraftFromDefinition(expert?: ExpertDefinition): ExpertSave
     persona: expert?.persona ?? "",
     outputRequirements: expert?.outputRequirements ?? "",
     skills: expert?.skills.map((skill) => ({ ...skill })) ?? [],
+    ...(expert?.skillSelections === undefined
+      ? {}
+      : { skillSelections: expert.skillSelections.map((selection) => ({ ...selection })) }),
     references: expert?.references.map((reference) => reference) ?? [],
     connections:
       expert?.connections.map((connection) => ({ ...connection, tools: [...connection.tools] })) ??
@@ -77,7 +81,13 @@ export function expertSaveInputForDraft(
     useCases: draft.useCases.trim(),
     persona: draft.persona.trim(),
     outputRequirements: draft.outputRequirements.trim(),
-    skills: draft.skills.map((skill) => ({ name: skill.name.trim(), path: skill.path.trim() })),
+    skills:
+      draft.skillSelections === undefined
+        ? draft.skills.map((skill) => ({ name: skill.name.trim(), path: skill.path.trim() }))
+        : [],
+    ...(draft.skillSelections === undefined
+      ? {}
+      : { skillSelections: draft.skillSelections.map((selection) => ({ ...selection })) }),
     references: normalizeExpertReferences(draft.references),
     connections: draft.connections.map((connection) => ({
       ...connection,
@@ -98,6 +108,7 @@ export function expertDraftsEqual(a: ExpertSaveInput, b: ExpertSaveInput): boole
     a.outputRequirements === b.outputRequirements &&
     a.preferredProvider === b.preferredProvider &&
     JSON.stringify(a.skills) === JSON.stringify(b.skills) &&
+    JSON.stringify(a.skillSelections) === JSON.stringify(b.skillSelections) &&
     JSON.stringify(a.references) === JSON.stringify(b.references) &&
     JSON.stringify(a.connections) === JSON.stringify(b.connections)
   );
@@ -126,6 +137,37 @@ export function validateExpertDraft(draft: ExpertSaveInput): ExpertDraftIssue[] 
 
   if (draft.skills.length > 100) {
     issues.push({ field: "skills", code: "too_many", message: "最多可配置 100 项技能。" });
+  }
+  if (draft.skillSelections !== undefined) {
+    if (draft.skillSelections.length > 100) {
+      issues.push({
+        field: "skillSelections",
+        code: "too_many",
+        message: "最多可选择 100 个版本包技能入口。",
+      });
+    }
+    if (
+      draft.skillSelections.filter((selection) => selection.activation === "startup").length > 1
+    ) {
+      issues.push({
+        field: "skillSelections",
+        code: "invalid",
+        message: "最多只能设置一个启动技能。",
+      });
+    }
+    const selectionKeys = new Set<string>();
+    draft.skillSelections.forEach((selection, index) => {
+      const key = `${selection.packageId}\u0000${selection.entryPath}`;
+      if (selectionKeys.has(key)) {
+        issues.push({
+          field: "skillSelections",
+          code: "duplicate",
+          message: "该版本包入口已选择。",
+          index,
+        });
+      }
+      selectionKeys.add(key);
+    });
   }
   for (const skillIssue of validateExpertSkillReferences(draft.skills)) {
     issues.push({

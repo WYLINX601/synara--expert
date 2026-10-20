@@ -90,6 +90,7 @@ import { assessClaudeCache } from "@synara/shared/claudeCache";
 import { approvalSessionGrantWidensSessionPolicy } from "@synara/shared/approvalSessionGrant";
 import { approvalRequestKindFromRequestType } from "@synara/shared/threadSummary";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
+import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
 import { nonEmptyTrimmed } from "@synara/shared/text";
 import {
   claudeCacheContextTokens,
@@ -6934,6 +6935,13 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             issue: `Expected provider '${PROVIDER}' but received '${input.provider}'.`,
           });
         }
+        if (input.expertSession?.skillLoading === "index" && !input.lifecycleGeneration) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "Expert catalog submission requires a provider lifecycle generation.",
+          });
+        }
 
         const startedAt = yield* nowIso;
         // Ownership generations and native session IDs may be reused. This ID
@@ -7474,7 +7482,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           preflight ?? (yield* resolveClaudeStartPreflight(input));
         let expertProjection: ClaudeExpertProjection | undefined;
         let expertCliVersion: string | undefined;
-        if (input.expertSession?.skills.length) {
+        if (input.expertSession?.skillLoading !== "index" && input.expertSession?.skills.length) {
           const expertSession = input.expertSession;
           const skillsRoot = expertSession.skillsRoot;
           if (!skillsRoot) {
@@ -7759,17 +7767,25 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             },
             createdAt: startedAt,
             updatedAt: startedAt,
-            ...(input.expertSession
+            ...(input.expertSession?.skillLoading === "index"
               ? {
-                  expertApplication: {
-                    snapshotId: input.expertSession.snapshotId,
-                    projectionVersion:
-                      expertProjection?.projectionVersion ?? CLAUDE_EXPERT_PROJECTION_VERSION,
-                    instructionsHash: expertInstructionsHash,
-                    skills: expertProjection?.skills ?? [],
-                  },
+                  skillApplication: createExpertSkillApplication({
+                    session: input.expertSession,
+                    instructions: baseInstructions,
+                    lifecycleGeneration: input.lifecycleGeneration!,
+                  }),
                 }
-              : {}),
+              : input.expertSession
+                ? {
+                    expertApplication: {
+                      snapshotId: input.expertSession.snapshotId,
+                      projectionVersion:
+                        expertProjection?.projectionVersion ?? CLAUDE_EXPERT_PROJECTION_VERSION,
+                      instructionsHash: expertInstructionsHash,
+                      skills: expertProjection?.skills ?? [],
+                    },
+                  }
+                : {}),
             ...(input.contextSession?.hasContent
               ? { contextAppliedSnapshotId: input.contextSession.snapshotId }
               : {}),

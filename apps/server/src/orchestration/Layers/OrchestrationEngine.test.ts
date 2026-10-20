@@ -48,6 +48,7 @@ import { ORCHESTRATION_EVENT_PUBSUB_CAPACITY } from "../orchestrationAdmission.t
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
+import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
 
 const OrchestrationProjectionSnapshotQueryLive = OrchestrationProjectionSnapshotQueryBase.pipe(
   Layer.provide(ServerSettingsService.layerTest()),
@@ -285,6 +286,151 @@ describe("acceptance-frozen Hub Expert creation", () => {
       };
       await unlockFixture(path.join(system.stateDir, "experts", "snapshots"));
       await system.dispose();
+    }
+  });
+
+  it("preflights a BMad Expert against its projected project workspace", async () => {
+    const system = await createOrchestrationSystem();
+    const originalPath = process.env.PATH;
+    try {
+      const workspace = path.join(system.stateDir, "bmad-project-workspace");
+      const skillRoot = path.join(system.stateDir, "bmad-skill-source");
+      const skillFile = path.join(skillRoot, "bmad-agent-analyst", "SKILL.md");
+      const scripts = path.join(workspace, "_bmad", "scripts");
+      const fakeBin = path.join(system.stateDir, "fake-bin");
+      await fs.mkdir(path.dirname(skillFile), { recursive: true });
+      await fs.writeFile(
+        skillFile,
+        "---\nname: bmad-agent-analyst\ndescription: Business analyst role\n---\nActivate the pinned analyst role.\n",
+      );
+      const packageStore = createSkillPackageStore(system.stateDir);
+      const preview = await packageStore.preview({ path: skillRoot });
+      const imported = await packageStore.import({ previewId: preview.previewId });
+      await fs.mkdir(scripts, { recursive: true });
+      await fs.writeFile(
+        path.join(workspace, "_bmad", "config.toml"),
+        '[core]\noutput_folder = "{project-root}/_bmad-output"\n',
+      );
+      await fs.writeFile(path.join(scripts, "resolve_customization.py"), "# fixture\n");
+      await fs.writeFile(path.join(scripts, "resolve_config.py"), "# fixture\n");
+      await fs.mkdir(fakeBin, { recursive: true });
+      const fakeUv = path.join(fakeBin, process.platform === "win32" ? "uv.cmd" : "uv");
+      await fs.writeFile(
+        fakeUv,
+        process.platform === "win32" ? "@echo off\r\nexit /b 0\r\n" : "#!/bin/sh\nexit 0\n",
+      );
+      await fs.chmod(fakeUv, 0o755);
+      process.env.PATH = [fakeBin, originalPath].filter(Boolean).join(path.delimiter);
+
+      const expertStore = createExpertStore(system.stateDir);
+      const definition = await expertStore.save({
+        id: "bmad-project-bound",
+        name: "BMad project-bound fixture",
+        description: "",
+        useCases: "",
+        persona: "Use the pinned analyst role.",
+        outputRequirements: "Report the resolved setup.",
+        skills: [],
+        skillSelections: [
+          {
+            packageId: imported.package.packageId,
+            entryPath: "bmad-agent-analyst/SKILL.md",
+            activation: "startup",
+          },
+        ],
+        references: [],
+        connections: [],
+      });
+      const projectId = asProjectId("bmad-project-workspace-project");
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.makeUnsafe("bmad-project-workspace-project-create"),
+          projectId,
+          title: "BMad workspace",
+          workspaceRoot: workspace,
+          createdAt: now(),
+        }),
+      );
+      await system.run(system.engine.getReadModel());
+      const create = {
+        type: "thread.create" as const,
+        commandId: CommandId.makeUnsafe("bmad-project-workspace-thread-create"),
+        projectId,
+        expertId: definition.id,
+        threadId: ThreadId.makeUnsafe("bmad-project-workspace-thread"),
+        title: "BMad project-bound Expert",
+        modelSelection: { provider: "codex" as const, model: "gpt-5-codex" },
+        interactionMode: "default" as const,
+        runtimeMode: "approval-required" as const,
+        branch: null,
+        worktreePath: null,
+        createdAt: now(),
+      };
+      await system.run(system.engine.dispatch(create));
+      const model = await system.run(system.engine.getReadModel());
+      expect(
+        model.threads.find((thread) => thread.id === create.threadId)?.expertBinding?.expertId,
+      ).toBe(definition.id);
+
+      const projectWithoutBmad = path.join(system.stateDir, "bmad-project-without-config");
+      const configuredWorktree = path.join(system.stateDir, "bmad-configured-worktree");
+      await fs.mkdir(projectWithoutBmad, { recursive: true });
+      await fs.mkdir(configuredWorktree, { recursive: true });
+      await fs.cp(path.join(workspace, "_bmad"), path.join(configuredWorktree, "_bmad"), {
+        recursive: true,
+      });
+      const worktreeProjectId = asProjectId("bmad-worktree-project");
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.makeUnsafe("bmad-worktree-project-create"),
+          projectId: worktreeProjectId,
+          title: "BMad worktree project",
+          workspaceRoot: projectWithoutBmad,
+          createdAt: now(),
+        }),
+      );
+      await system.run(system.engine.getReadModel());
+      const worktreeCreate = {
+        ...create,
+        commandId: CommandId.makeUnsafe("bmad-worktree-thread-create"),
+        projectId: worktreeProjectId,
+        threadId: ThreadId.makeUnsafe("bmad-worktree-thread"),
+        title: "BMad worktree-bound Expert",
+        worktreePath: configuredWorktree,
+      };
+      await system.run(system.engine.dispatch(worktreeCreate));
+      const worktreeModel = await system.run(system.engine.getReadModel());
+      expect(
+        worktreeModel.threads.find((thread) => thread.id === worktreeCreate.threadId)?.expertBinding
+          ?.expertId,
+      ).toBe(definition.id);
+
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            ...create,
+            commandId: CommandId.makeUnsafe("bmad-missing-workspace-thread-create"),
+            projectId: asProjectId("bmad-missing-project"),
+            threadId: ThreadId.makeUnsafe("bmad-missing-workspace-thread"),
+          }),
+        ),
+      ).rejects.toThrow("the project workspace is unavailable");
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      const unlockFixture = async (entry: string): Promise<void> => {
+        const stat = await fs.lstat(entry).catch(() => null);
+        if (!stat || stat.isSymbolicLink()) return;
+        await fs.chmod(entry, stat.isDirectory() ? 0o700 : 0o600);
+        if (stat.isDirectory()) {
+          for (const name of await fs.readdir(entry)) await unlockFixture(path.join(entry, name));
+        }
+      };
+      await unlockFixture(system.stateDir);
+      await system.dispose();
+      await fs.rm(system.stateDir, { recursive: true, force: true });
     }
   });
 });

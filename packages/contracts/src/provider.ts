@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { TrimmedNonEmptyString } from "./baseSchemas";
+import { PositiveInt, TrimmedNonEmptyString } from "./baseSchemas";
 import {
   ApprovalRequestId,
   EventId,
@@ -25,6 +25,7 @@ import {
 } from "./orchestration";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance";
 import { ProviderMentionReference, ProviderSkillReference } from "./providerDiscovery";
+import { ExpertSkillApplication, ResolvedExpertSkillEntry } from "./skillPackage";
 import { ContextSession } from "./context";
 
 const ProviderSessionStatus = Schema.Literals([
@@ -35,7 +36,7 @@ const ProviderSessionStatus = Schema.Literals([
   "closed",
 ]);
 
-/** Resource projection verified by the provider adapter for this session. */
+/** Provider-native resource projection receipt retained for legacy snapshots. */
 export const ProviderExpertApplication = Schema.Struct({
   snapshotId: TrimmedNonEmptyString,
   projectionVersion: TrimmedNonEmptyString,
@@ -61,15 +62,22 @@ export const ProviderSession = Schema.Struct({
   updatedAt: IsoDateTime,
   lastError: Schema.optional(TrimmedNonEmptyString),
   expertApplication: Schema.optional(ProviderExpertApplication),
+  /** Catalog submission receipt; never evidence that a model executed a skill. */
+  skillApplication: Schema.optional(ExpertSkillApplication),
   contextAppliedSnapshotId: Schema.optional(TrimmedNonEmptyString),
 });
 export type ProviderSession = typeof ProviderSession.Type;
 
 export const ProviderExpertSession = Schema.Struct({
   snapshotId: TrimmedNonEmptyString,
+  expertId: Schema.optional(TrimmedNonEmptyString),
+  revision: Schema.optional(PositiveInt),
+  displayName: Schema.optional(TrimmedNonEmptyString),
   persona: TrimmedNonEmptyString,
   skillsRoot: Schema.optional(TrimmedNonEmptyString),
   skills: Schema.Array(ProviderSkillReference),
+  skillLoading: Schema.optional(Schema.Literal("index")),
+  skillEntries: Schema.optional(Schema.Array(ResolvedExpertSkillEntry)),
   references: Schema.Array(TrimmedNonEmptyString),
 });
 export type ProviderExpertSession = typeof ProviderExpertSession.Type;

@@ -108,8 +108,9 @@ const readPreservedData = Effect.gen(function* () {
     commands: yield* sql`SELECT * FROM context_command_results`,
     deliveries:
       yield* sql`SELECT * FROM orchestration_event_deliveries WHERE consumer_name = 'context-test-consumer'`,
-    expert:
-      yield* sql`SELECT * FROM expert_applied_runtime_records WHERE thread_id = 'thread-preserved'`,
+    expert: yield* sql`SELECT thread_id, snapshot_id, provider, model, runtime_component,
+        runtime_version, lifecycle_generation, applied_at
+        FROM expert_applied_runtime_records WHERE thread_id = 'thread-preserved'`,
     threads:
       yield* sql`SELECT thread_id, project_id, expert_binding_json FROM projection_threads WHERE thread_id = 'thread-preserved'`,
   };
@@ -140,6 +141,7 @@ it("keeps legacy Context 111 byte-for-byte frozen and uses its checksum for cont
       [3, "HubProjectOrigin"],
       [4, "HubExpertDeliverables"],
       [5, "HubExpertParticipants"],
+      [6, "ExpertSkillApplication"],
     ],
   );
 });
@@ -186,6 +188,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
             ["expert", 3],
             ["expert", 4],
             ["expert", 5],
+            ["expert", 6],
           ],
         );
         assert.deepStrictEqual(yield* readPreservedData, before);
@@ -205,6 +208,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
             ["expert", 3],
             ["expert", 4],
             ["expert", 5],
+            ["expert", 6],
           ],
         );
         const repeated = yield* finishUpgrade;
@@ -223,7 +227,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
         assert.strictEqual(settled.kind, "ready");
         if (settled.kind === "ready") {
           assert.deepStrictEqual(settled.workbench.modules, {
-            expert: { sourceVersion: 5, targetVersion: 5 },
+            expert: { sourceVersion: 6, targetVersion: 6 },
             context: { sourceVersion: 1, targetVersion: 1 },
           });
           assert.isFalse(settled.requiresBackup);
@@ -248,6 +252,7 @@ it.effect(
           ["expert", 3],
           ["expert", 4],
           ["expert", 5],
+          ["expert", 6],
           ["context", 1],
         ],
       );
@@ -282,12 +287,14 @@ for (const through of [109, 110] as const) {
               ["expert", 3],
               ["expert", 4],
               ["expert", 5],
+              ["expert", 6],
               ["context", 1],
             ]
           : [
               ["expert", 3],
               ["expert", 4],
               ["expert", 5],
+              ["expert", 6],
               ["context", 1],
             ],
       );

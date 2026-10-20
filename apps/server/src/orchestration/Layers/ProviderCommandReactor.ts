@@ -391,6 +391,7 @@ export function normalizeSkillMentionTextForProvider(input: {
 
   let nextText = input.messageText;
   for (const skill of input.skills) {
+    if (skill.expert) continue;
     const escapedName = escapeRegExp(skill.name);
     nextText = nextText.replace(
       new RegExp(`(^|\\s)/${escapedName}(?=\\s|$)`, "gi"),
@@ -2330,6 +2331,9 @@ const make = Effect.gen(function* () {
     const expertSession = expertSnapshot
       ? {
           snapshotId: expertSnapshot.snapshotId,
+          expertId: expertSnapshot.expertId,
+          revision: expertSnapshot.revision,
+          displayName: expertSnapshot.displayName,
           persona: [
             `Expert: ${expertSnapshot.displayName}`,
             expertSnapshot.persona,
@@ -2344,6 +2348,12 @@ const make = Effect.gen(function* () {
             .join("\n\n"),
           skillsRoot: expertSnapshot.skillsRoot,
           skills: expertSnapshot.skills,
+          ...(expertSnapshot.schemaVersion === 2
+            ? {
+                skillLoading: "index" as const,
+                skillEntries: expertSnapshot.skillEntries ?? [],
+              }
+            : {}),
           references: expertSnapshot.references,
         }
       : undefined;

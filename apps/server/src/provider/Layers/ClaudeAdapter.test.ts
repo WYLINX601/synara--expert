@@ -842,6 +842,75 @@ describe("Claude Synara harness policy", () => {
 
 describe("ClaudeAdapterLive", () => {
   it.effect(
+    "submits Expert V2 instructions without projecting package skills into Claude plugins",
+    () => {
+      const fixture = makeClaudeExpertFixture();
+      const expertSession = {
+        ...fixture.expertSession,
+        persona: `${fixture.expertSession.persona}\n\nFixed selected skill index and startup text.`,
+        skillLoading: "index" as const,
+        skillEntries: [
+          {
+            packageId: `pkg_${"b".repeat(64)}`,
+            entryPath: "skills/reviewer/SKILL.md",
+            activation: "startup" as const,
+            name: "reviewer",
+            description: "Review code changes for correctness and safety.",
+            path: fixture.skillPath,
+          },
+        ],
+      };
+      const harness = makeHarness({
+        cwd: fixture.cwd,
+        baseDir: path.join(fixture.root, "app-data"),
+        onCreate: () => setClaudeExpertInitialization(harness.query, { includeSkill: false }),
+      });
+
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: "claudeAgent",
+          cwd: fixture.cwd,
+          runtimeMode: "full-access",
+          lifecycleGeneration: "generation-expert-v2",
+          expertSession,
+        });
+        const queryOptions = harness.getLastCreateQueryInput()?.options;
+        const systemPrompt = queryOptions?.systemPrompt;
+        if (
+          !systemPrompt ||
+          typeof systemPrompt !== "object" ||
+          !("type" in systemPrompt) ||
+          systemPrompt.type !== "preset"
+        ) {
+          assert.fail("Expected Claude Code native preset prompt.");
+        }
+        const baseInstructions =
+          composeProviderBaseInstructions({
+            expertPersona: expertSession.persona,
+          }) ?? "";
+        assert.include(systemPrompt.append ?? "", baseInstructions);
+        assert.isFalse((queryOptions?.plugins ?? []).some((plugin) => plugin.type === "local"));
+        assert.isUndefined(session.expertApplication);
+        assert.deepInclude(session.skillApplication, {
+          mode: "catalog",
+          snapshotId: expertSession.snapshotId,
+          packageIds: [`pkg_${"b".repeat(64)}`],
+          startupEntryIds: [`pkg_${"b".repeat(64)}#skills/reviewer/SKILL.md`],
+          lifecycleGeneration: "generation-expert-v2",
+          instructionsHash: createHash("sha256").update(baseInstructions, "utf8").digest("hex"),
+        });
+        assert.match(session.skillApplication?.catalogHash ?? "", /^[a-f0-9]{64}$/u);
+        yield* adapter.stopSession(THREAD_ID);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect(
     "applies and verifies Expert skills plus context before returning a Claude session",
     () => {
       const fixture = makeClaudeExpertFixture();

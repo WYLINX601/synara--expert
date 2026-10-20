@@ -360,6 +360,8 @@ export function ExpertsSettingsPanel(props: {
           return issue.index === undefined
             ? "添加技能"
             : `技能 ${issue.index + 1} ${issue.subfield === "path" ? "路径" : "名称"}`;
+        case "skillSelections":
+          return issue.index === undefined ? "选择技能" : `选择技能 ${issue.index + 1}`;
         case "references":
           return issue.index === undefined ? "添加参考资料" : `参考资料路径 ${issue.index + 1}`;
         case "connections":

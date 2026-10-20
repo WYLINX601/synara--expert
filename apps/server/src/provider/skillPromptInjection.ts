@@ -75,8 +75,10 @@ export async function buildInlineSkillInstructions(input: {
   readonly skills: ReadonlyArray<ProviderSkillReference>;
   readonly maxChars: number;
 }): Promise<string> {
-  const inlineSkills = input.skills.filter((skill) =>
-    shouldInlineSkillForProvider(input.provider, skill.path),
+  // Fixed Expert references are resolved by ProviderService from the pinned
+  // snapshot. Never read the client-supplied display path in this fallback.
+  const inlineSkills = input.skills.filter(
+    (skill) => !skill.expert && shouldInlineSkillForProvider(input.provider, skill.path),
   );
   if (inlineSkills.length === 0 || input.maxChars <= 0) {
     return "";

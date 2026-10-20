@@ -349,6 +349,13 @@ export const workbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] 
     checksum: "sha256:47fed115ba3ae457e8c899ea3a4a49eb51c2ad83ab29b4948d90a3cc485523d4",
     statement: HUB_EXPERT_PARTICIPANTS_SQL,
   },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 6,
+    name: "ExpertSkillApplication",
+    checksum: "sha256:d5a205fd4bc04221ae9f4a16a8dde18b2b53a83b8b7eb068102eafb1cc626114",
+    statement: "ALTER TABLE expert_applied_runtime_records ADD COLUMN skill_application_json TEXT",
+  },
 ];
 
 /** The Context migration reuses the exact frozen native script from legacy 111. */
@@ -517,7 +524,15 @@ export const validateWorkbenchSchemaState = (
   if (runtimeRecordsApplied) {
     if (
       state.runtimeRecordColumns === null ||
-      !sameColumns(state.runtimeRecordColumns, EXPERT_RUNTIME_RECORD_COLUMNS)
+      !sameColumns(
+        state.runtimeRecordColumns,
+        appliedByModule.expert >= 6
+          ? [
+              ...EXPERT_RUNTIME_RECORD_COLUMNS,
+              { name: "skill_application_json", type: "TEXT", notnull: 0, dflt_value: null, pk: 0 },
+            ]
+          : EXPERT_RUNTIME_RECORD_COLUMNS,
+      )
     ) {
       return "expert_applied_runtime_records does not match the expert migration schema.";
     }

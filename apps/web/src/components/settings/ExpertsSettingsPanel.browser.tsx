@@ -30,8 +30,29 @@ const harness = vi.hoisted(() => {
     updatedAt: "2026-10-03T00:00:00.000Z",
     ...overrides,
   });
+  const makeSkillPackage = (version: string, entryPath: string, userInvocable?: boolean) => ({
+    schemaVersion: 1 as const,
+    packageId: `pkg_${version.repeat(64)}`,
+    rootName: "planner-skills",
+    resources: [],
+    entries: [
+      {
+        entryPath,
+        name: "Planner",
+        description: "Plan work in small steps.",
+        issues: [],
+        ...(userInvocable === undefined ? {} : { userInvocable }),
+      },
+    ],
+    fileCount: 1,
+    totalBytes: 100,
+  });
   const data = {
     experts: [makeExpert()],
+    skillPackages: [
+      makeSkillPackage("a", "planner/SKILL.md"),
+      makeSkillPackage("b", "planner/v2/SKILL.md", false),
+    ],
     connections: [
       {
         id: "linear",
@@ -67,6 +88,7 @@ const harness = vi.hoisted(() => {
   };
   const server = {
     listExperts: vi.fn(async () => data.experts),
+    listSkillPackages: vi.fn(async () => data.skillPackages),
     listExpertConnections: vi.fn(async () => data.connections),
     getExpertConnectionState: vi.fn(async ({ id }: { id: string }) => ({
       id,
@@ -112,10 +134,18 @@ const harness = vi.hoisted(() => {
     readExpertAppliedRuntime: vi.fn(async () => null),
     testExpertConnection: vi.fn(async () => ({ tools: [] as string[] })),
   };
-  return { data, makeExpert, server };
+  return { data, makeExpert, makeSkillPackage, server };
 });
 
 vi.mock("~/nativeApi", () => ({ ensureNativeApi: () => ({ server: harness.server }) }));
+vi.mock("~/hooks/useNativeApiServerCapability", () => ({
+  useNativeApiServerCapabilitySnapshot: () => ({
+    generation: "experts-settings-browser",
+    connected: true,
+    capability: "supported",
+    api: undefined,
+  }),
+}));
 vi.mock("~/lib/providerDiscoveryReactQuery", () => ({
   skillsCatalogQueryOptions: ({ enabled }: { enabled: boolean }) => ({
     queryKey: ["test", "skillsCatalog"],
@@ -182,6 +212,7 @@ beforeEach(() => {
   harness.data.experts = [harness.makeExpert()];
   for (const operation of Object.values(harness.server)) operation.mockReset();
   harness.server.listExperts.mockImplementation(async () => harness.data.experts);
+  harness.server.listSkillPackages.mockImplementation(async () => harness.data.skillPackages);
   harness.server.listExpertConnections.mockImplementation(async () => harness.data.connections);
   harness.data.connectionState = "active";
   harness.server.getExpertConnectionState.mockImplementation(async ({ id }: { id: string }) => ({
@@ -321,6 +352,52 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     expect(new Set(Array.from(range.getClientRects(), (rect) => Math.round(rect.top))).size).toBe(
       1,
     );
+    await close();
+  });
+
+  it("keeps legacy skills until confirmed, guards package draft changes, and switches a fixed version explicitly", async () => {
+    harness.data.experts = [
+      harness.makeExpert({
+        skills: [{ name: "旧路径技能", path: "/legacy/planner/SKILL.md" }],
+      }),
+    ];
+    const { close } = await mountPanel("/settings?expertId=planner");
+    await expect.element(page.getByText("旧路径技能", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "改用版本包", exact: true }).click();
+    await page.getByRole("button", { name: "取消", exact: true }).click();
+    await expect.element(page.getByText("旧路径技能", { exact: true })).toBeVisible();
+    expect(page.getByRole("checkbox").length).toBe(0);
+
+    await page.getByRole("button", { name: "改用版本包", exact: true }).click();
+    await page.getByRole("button", { name: "确认切换", exact: true }).click();
+    const oldVersionEntry = page.getByRole("checkbox").nth(0);
+    await oldVersionEntry.click();
+    await expect.element(oldVersionEntry).toBeChecked();
+
+    await page.getByRole("button", { name: "返回专家列表", exact: true }).click();
+    await expect.element(page.getByRole("button", { name: "放弃更改", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "取消", exact: true }).click();
+    await expect.element(oldVersionEntry).toBeChecked();
+
+    await page.getByRole("button", { name: "切换所选版本", exact: true }).click();
+    const selectedEntry = page.getByRole("checkbox").nth(1);
+    await expect.element(selectedEntry).toBeChecked();
+    await expect.element(page.getByText(/不用于 Composer 显式调用/u)).toBeVisible();
+    await page.getByRole("combobox", { name: "技能 Planner 加载时机" }).click();
+    await page.getByRole("option", { name: "启动时", exact: true }).click();
+
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
+    await expect.poll(() => harness.server.saveExpert.mock.calls.length).toBe(1);
+    expect(harness.server.saveExpert.mock.calls[0]?.[0]).toMatchObject({
+      skills: [],
+      skillSelections: [
+        {
+          packageId: `pkg_${"b".repeat(64)}`,
+          entryPath: "planner/v2/SKILL.md",
+          activation: "startup",
+        },
+      ],
+    });
     await close();
   });
 

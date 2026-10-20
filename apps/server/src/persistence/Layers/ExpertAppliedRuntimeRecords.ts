@@ -29,7 +29,8 @@ const makeExpertAppliedRuntimeRepository = Effect.gen(function* () {
         runtime_component,
         runtime_version,
         lifecycle_generation,
-        applied_at
+        applied_at,
+        skill_application_json
       ) VALUES (
         ${record.threadId},
         ${record.snapshotId},
@@ -38,7 +39,8 @@ const makeExpertAppliedRuntimeRepository = Effect.gen(function* () {
         ${record.runtimeComponent ?? null},
         ${record.runtimeVersion ?? null},
         ${record.lifecycleGeneration},
-        ${record.appliedAt}
+        ${record.appliedAt},
+        ${record.skillApplication ? JSON.stringify(record.skillApplication) : null}
       )
       ON CONFLICT (thread_id)
       DO UPDATE SET
@@ -48,7 +50,8 @@ const makeExpertAppliedRuntimeRepository = Effect.gen(function* () {
         runtime_component = excluded.runtime_component,
         runtime_version = excluded.runtime_version,
         lifecycle_generation = excluded.lifecycle_generation,
-        applied_at = excluded.applied_at
+        applied_at = excluded.applied_at,
+        skill_application_json = excluded.skill_application_json
     `,
   });
 
@@ -64,11 +67,27 @@ const makeExpertAppliedRuntimeRepository = Effect.gen(function* () {
         runtime_component AS "runtimeComponent",
         runtime_version AS "runtimeVersion",
         lifecycle_generation AS "lifecycleGeneration",
-        applied_at AS "appliedAt"
+        applied_at AS "appliedAt",
+        skill_application_json AS "skillApplicationJson"
       FROM expert_applied_runtime_records
       WHERE thread_id = ${threadId}
     `,
   });
+
+  const findAll = sql<ExpertAppliedRuntimeDbRow>`
+    SELECT
+      thread_id AS "threadId",
+      snapshot_id AS "snapshotId",
+      provider,
+      model,
+      runtime_component AS "runtimeComponent",
+      runtime_version AS "runtimeVersion",
+      lifecycle_generation AS "lifecycleGeneration",
+      applied_at AS "appliedAt",
+      skill_application_json AS "skillApplicationJson"
+    FROM expert_applied_runtime_records
+    ORDER BY thread_id
+  `;
 
   const deleteByThreadIdQuery = SqlSchema.void({
     Request: ExpertAppliedRuntimeReadInput,
@@ -119,7 +138,26 @@ const makeExpertAppliedRuntimeRepository = Effect.gen(function* () {
       ),
     );
 
-  return { upsert, getByThreadId, deleteByThreadId } satisfies ExpertAppliedRuntimeRepositoryShape;
+  const listAll: ExpertAppliedRuntimeRepositoryShape["listAll"] = () =>
+    findAll.pipe(
+      Effect.mapError(toPersistenceSqlError("ExpertAppliedRuntimeRepository.listAll:query")),
+      Effect.flatMap((rows) =>
+        Effect.forEach(rows, (row) =>
+          expertAppliedRuntimeRecordFromDbRow(row).pipe(
+            Effect.mapError(
+              toPersistenceDecodeError("ExpertAppliedRuntimeRepository.listAll:rowToRecord"),
+            ),
+          ),
+        ),
+      ),
+    );
+
+  return {
+    upsert,
+    getByThreadId,
+    listAll,
+    deleteByThreadId,
+  } satisfies ExpertAppliedRuntimeRepositoryShape;
 });
 
 export const ExpertAppliedRuntimeRepositoryLive = Layer.effect(

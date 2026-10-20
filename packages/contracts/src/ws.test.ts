@@ -264,6 +264,57 @@ it.effect("validates MCP discovery and selected import websocket request schemas
   }),
 );
 
+it.effect("validates owner skill package import, update, read and removal requests", () =>
+  Effect.gen(function* () {
+    const base = { id: "req-skill-package" };
+    const packageId = `pkg_${"a".repeat(64)}`;
+    const sourceId = `src_${"b".repeat(64)}`;
+    const preview = yield* decode(WebSocketRequest, {
+      ...base,
+      body: {
+        _tag: WS_METHODS.serverPreviewSkillPackage,
+        path: "/tmp/skills/SKILL.md",
+      },
+    });
+    assert.strictEqual(preview.body._tag, WS_METHODS.serverPreviewSkillPackage);
+
+    const importRequest = yield* decode(WebSocketRequest, {
+      ...base,
+      body: { _tag: WS_METHODS.serverImportSkillPackage, previewId: "preview-1" },
+    });
+    assert.strictEqual(importRequest.body._tag, WS_METHODS.serverImportSkillPackage);
+
+    const update = yield* decode(WebSocketRequest, {
+      ...base,
+      body: {
+        _tag: WS_METHODS.serverPreviewSkillPackageUpdate,
+        sourceId,
+        expectedRevision: 3,
+      },
+    });
+    assert.strictEqual(update.body._tag, WS_METHODS.serverPreviewSkillPackageUpdate);
+
+    for (const method of [
+      WS_METHODS.serverReadSkillPackage,
+      WS_METHODS.serverPreviewSkillPackageRemoval,
+    ]) {
+      const parsed = yield* decode(WebSocketRequest, {
+        ...base,
+        body: { _tag: method, packageId },
+      });
+      assert.strictEqual(parsed.body._tag, method);
+    }
+
+    const invalidPackageId = yield* Effect.exit(
+      decode(WebSocketRequest, {
+        ...base,
+        body: { _tag: WS_METHODS.serverRemoveSkillPackage, packageId: "../package" },
+      }),
+    );
+    assert.strictEqual(invalidPackageId._tag, "Failure");
+  }),
+);
+
 it.effect("bounds MCP transport settings and restricts source references to metadata", () =>
   Effect.gen(function* () {
     const valid = yield* decode(WebSocketRequest, {

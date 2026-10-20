@@ -84,6 +84,8 @@ import {
   withLibraryRootLock,
 } from "./projectAgent/libraryGit";
 import { ProjectAgentRepository } from "./persistence/Services/ProjectAgentRepository";
+import { HubWorkRepository } from "./persistence/Services/HubWorkRepository";
+import { makeHubWorkService } from "./projectAgent/hubWorkService";
 import { authErrorResponse, makeEffectAuthRequest } from "./auth/effectHttp";
 import {
   ServerAuth,
@@ -191,6 +193,7 @@ import { createExpertStore } from "./experts/ExpertStore";
 import { readHubExpertCatalog } from "./agentGateway/hubExpertCatalog";
 import { buildAgentGatewayProviderAvailabilities } from "./agentGateway/providerAvailability";
 import { makeWorkbenchExpertRpcHandlers } from "./workbench/host/expertRpc.ts";
+import { createSkillPackageSwitchHost } from "./workbench/host/skillPackageSwitchHost.ts";
 import { makeWorkbenchContextRpcHandlers } from "./workbench/host/contextRpc.ts";
 import { readThreadContextDetails } from "./workbench/host/contextThreadDetails.ts";
 import { ContextRepository, ContextRepositoryLive } from "./context/ContextRepository.ts";
@@ -533,6 +536,12 @@ const makeWsRpcHandlersLayer = () =>
       const todoService = yield* TodoService;
       const projectAgentService = yield* ProjectAgentService;
       const projectAgentRepository = yield* ProjectAgentRepository;
+      const hubWorkRepository = yield* HubWorkRepository;
+      const hubWorkService = makeHubWorkService({
+        repository: hubWorkRepository,
+        projectAgentRepository,
+        projectAgentService,
+      });
       const config = yield* ServerConfig;
       const devServerManager = yield* DevServerManager;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -1367,6 +1376,28 @@ const makeWsRpcHandlersLayer = () =>
         requireOwner,
         rpcEffect,
         expertRpcEffect,
+        createSkillPackageSwitchHost: (principal) =>
+          createSkillPackageSwitchHost({
+            stateDir: config.stateDir,
+            experts: workbenchExpertRuntime.experts,
+            hubWorkRepository,
+            hubWorkService,
+            readThreads: () =>
+              Effect.runPromise(
+                projectionReadModelQuery
+                  .getSnapshot()
+                  .pipe(Effect.map((snapshot) => snapshot.threads)),
+              ),
+            readAppliedRuntimeRecords: () =>
+              Effect.runPromise(workbenchExpertRuntime.readAppliedRuntimeRecords()),
+            runEffect: Effect.runPromise,
+            dispatch: (command) =>
+              Effect.runPromise(
+                dispatchOrchestrationCommand(command).pipe(
+                  Effect.provideService(CurrentManagedAttachmentPrincipal, principal),
+                ),
+              ),
+          }),
         loadProjectionThreads: () =>
           projectionReadModelQuery.getSnapshot().pipe(Effect.map((snapshot) => snapshot.threads)),
       });

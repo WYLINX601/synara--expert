@@ -64,6 +64,7 @@ import {
 } from "./terminalContext";
 import { resolveTerminalThreadCreationState } from "./threadBootstrap";
 import { promoteThreadCreate } from "./threadCreatePromotion";
+import { bindDraftExpertSkillInvocations } from "./expertSkillInvocation";
 import { isRequestOutcomeUnknown } from "./requestOutcome";
 import { newCommandId, newMessageId, randomUUID } from "./utils";
 
@@ -473,6 +474,7 @@ async function dispatchDraftThreadOnce(
     }
 
     const stagedTurnAttachments = await turnAttachmentsPromise;
+    const fixedSkills = await bindDraftExpertSkillInvocations(api, threadId, mentionedSkills);
     await stagedTurnAttachments.runWithDispatch((turnAttachments) =>
       api.orchestration.dispatchCommand({
         type: "thread.turn.start",
@@ -483,7 +485,7 @@ async function dispatchDraftThreadOnce(
           role: "user",
           text: outgoingMessageText,
           attachments: turnAttachments,
-          ...(mentionedSkills.length > 0 ? { skills: mentionedSkills } : {}),
+          ...(fixedSkills.length > 0 ? { skills: fixedSkills } : {}),
           ...(mentionedMentions.length > 0 ? { mentions: mentionedMentions } : {}),
         },
         modelSelection,

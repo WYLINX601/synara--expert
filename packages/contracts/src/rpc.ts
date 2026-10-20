@@ -125,6 +125,27 @@ import {
   McpConnectionStateSchema,
 } from "./mcp";
 import {
+  SkillPackage,
+  SkillPackageImportInput,
+  SkillPackageImportResult,
+  SkillPackagePreview,
+  SkillPackagePreviewInput,
+  SkillPackageReadInput,
+  SkillPackageRemovalPreview,
+  SkillPackageRemoveInput,
+  SkillPackageSource,
+  SkillPackageUpdatePreview,
+  SkillPackageUpdatePreviewInput,
+} from "./skillPackage";
+import {
+  SkillPackageSwitchApplyInput,
+  SkillPackageSwitchApplyResult,
+  SkillPackageSwitchInput,
+  SkillPackageSwitchPreview,
+  SkillPackageSwitchProgressReadInput,
+  SkillPackageSwitchProgressResult,
+} from "./skillPackageSwitch";
+import {
   ContextCommandReadInput,
   ContextCommandResult,
   ContextMigrationClaimInput,
@@ -1461,6 +1482,90 @@ export const WsServerPreviewExpertRpc = Rpc.make(WS_METHODS.serverPreviewExpert,
   error: WsRpcError,
 });
 
+export const WsServerListSkillPackagesRpc = Rpc.make(WS_METHODS.serverListSkillPackages, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(SkillPackage),
+  error: WsRpcError,
+});
+
+export const WsServerListSkillPackageSourcesRpc = Rpc.make(
+  WS_METHODS.serverListSkillPackageSources,
+  {
+    payload: Schema.Struct({}),
+    success: Schema.Array(SkillPackageSource),
+    error: WsRpcError,
+  },
+);
+
+export const WsServerReadSkillPackageRpc = Rpc.make(WS_METHODS.serverReadSkillPackage, {
+  payload: SkillPackageReadInput,
+  success: SkillPackage,
+  error: WsRpcError,
+});
+
+export const WsServerPreviewSkillPackageRpc = Rpc.make(WS_METHODS.serverPreviewSkillPackage, {
+  payload: SkillPackagePreviewInput,
+  success: SkillPackagePreview,
+  error: WsRpcError,
+});
+
+export const WsServerPreviewSkillPackageUpdateRpc = Rpc.make(
+  WS_METHODS.serverPreviewSkillPackageUpdate,
+  {
+    payload: SkillPackageUpdatePreviewInput,
+    success: SkillPackageUpdatePreview,
+    error: WsRpcError,
+  },
+);
+
+export const WsServerPreviewSkillPackageRemovalRpc = Rpc.make(
+  WS_METHODS.serverPreviewSkillPackageRemoval,
+  {
+    payload: SkillPackageReadInput,
+    success: SkillPackageRemovalPreview,
+    error: WsRpcError,
+  },
+);
+
+export const WsServerImportSkillPackageRpc = Rpc.make(WS_METHODS.serverImportSkillPackage, {
+  payload: SkillPackageImportInput,
+  success: SkillPackageImportResult,
+  error: WsRpcError,
+});
+
+export const WsServerRemoveSkillPackageRpc = Rpc.make(WS_METHODS.serverRemoveSkillPackage, {
+  payload: SkillPackageRemoveInput,
+  success: Schema.Void,
+  error: WsRpcError,
+});
+
+export const WsServerPreviewSkillPackageSwitchRpc = Rpc.make(
+  WS_METHODS.serverPreviewSkillPackageSwitch,
+  {
+    payload: SkillPackageSwitchInput,
+    success: SkillPackageSwitchPreview,
+    error: WsRpcError,
+  },
+);
+
+export const WsServerApplySkillPackageSwitchRpc = Rpc.make(
+  WS_METHODS.serverApplySkillPackageSwitch,
+  {
+    payload: SkillPackageSwitchApplyInput,
+    success: SkillPackageSwitchApplyResult,
+    error: WsRpcError,
+  },
+);
+
+export const WsServerReadSkillPackageSwitchProgressRpc = Rpc.make(
+  WS_METHODS.serverReadSkillPackageSwitchProgress,
+  {
+    payload: SkillPackageSwitchProgressReadInput,
+    success: SkillPackageSwitchProgressResult,
+    error: WsRpcError,
+  },
+);
+
 export const WsServerReadExpertSnapshotRpc = Rpc.make(WS_METHODS.serverReadExpertSnapshot, {
   payload: ExpertSnapshotReadInput,
   success: ExpertSnapshot,
@@ -2295,6 +2400,17 @@ const WS_FEATURE_RPC_GROUP_3 = RpcGroup.make(
   WsServerRestoreExpertRpc,
   WsServerDeleteExpertRpc,
   WsServerPreviewExpertRpc,
+  WsServerListSkillPackagesRpc,
+  WsServerListSkillPackageSourcesRpc,
+  WsServerReadSkillPackageRpc,
+  WsServerPreviewSkillPackageRpc,
+  WsServerPreviewSkillPackageUpdateRpc,
+  WsServerPreviewSkillPackageRemovalRpc,
+  WsServerImportSkillPackageRpc,
+  WsServerRemoveSkillPackageRpc,
+  WsServerPreviewSkillPackageSwitchRpc,
+  WsServerApplySkillPackageSwitchRpc,
+  WsServerReadSkillPackageSwitchProgressRpc,
   WsServerReadExpertSnapshotRpc,
   WsServerReadExpertAppliedRuntimeRpc,
   WsServerListExpertConnectionsRpc,

@@ -15,6 +15,7 @@ import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { ensureExpertClient } from "~/workbench/host/expertClient";
+import { PENDING_EXPERT_SKILL_SNAPSHOT } from "~/lib/expertSkillInvocation";
 import { isLocalFolderMentionQuery } from "~/lib/localFolderMentions";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import {
@@ -229,7 +230,14 @@ export function useComposerDiscovery({
     [providerNativeCommands, selectedProvider],
   );
   // Unsent drafts reuse the existing preview; accepted bindings always take precedence.
-  const expertSkills = expertBinding
+  const expertEntries = expertBinding
+    ? expertSnapshotQuery.isError
+      ? undefined
+      : expertSnapshotQuery.data?.skillEntries
+    : draftExpert?.isError
+      ? undefined
+      : draftExpert?.preview?.skillEntries;
+  const legacyExpertSkills = expertBinding
     ? expertSnapshotQuery.isError
       ? undefined
       : expertSnapshotQuery.data?.skills
@@ -239,13 +247,34 @@ export function useComposerDiscovery({
   const providerSkills = useMemo(
     () =>
       hasExpertSkillSource
-        ? (expertSkills?.map((skill) => ({
-            ...skill,
-            enabled: true,
-            scope: "expert",
-          })) ?? EMPTY_PROVIDER_SKILLS)
+        ? expertEntries
+          ? expertEntries
+              .filter((entry) => entry.userInvocable !== false)
+              .map((entry) => ({
+                name: entry.name,
+                description: entry.description || undefined,
+                path: `synara-expert-skill:${entry.packageId}#${entry.entryPath}`,
+                enabled: true,
+                scope: "expert",
+                expert: {
+                  snapshotId: expertBinding?.snapshotId ?? PENDING_EXPERT_SKILL_SNAPSHOT,
+                  packageId: entry.packageId,
+                  entryPath: entry.entryPath,
+                },
+              }))
+          : (legacyExpertSkills?.map((skill) => ({
+              ...skill,
+              enabled: true,
+              scope: "expert",
+            })) ?? EMPTY_PROVIDER_SKILLS)
         : (providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS),
-    [hasExpertSkillSource, expertSkills, providerSkillsQuery.data],
+    [
+      hasExpertSkillSource,
+      expertEntries,
+      expertBinding?.snapshotId,
+      legacyExpertSkills,
+      providerSkillsQuery.data,
+    ],
   );
   const skillsLoading = expertBinding
     ? expertSnapshotQuery.isLoading || expertSnapshotQuery.isFetching

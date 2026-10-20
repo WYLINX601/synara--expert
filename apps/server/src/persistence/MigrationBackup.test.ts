@@ -1042,10 +1042,10 @@ describe("migration backups", () => {
     expect(marker!.payload).toMatchObject({
       version: 3,
       phase: "migration-in-progress",
-      moduleVersions: { source: { expert: 0, context: 0 }, target: { expert: 5, context: 1 } },
+      moduleVersions: { source: { expert: 0, context: 0 }, target: { expert: 6, context: 1 } },
       migrationVersions: {
         source: { official: currentOfficialTarget, workbench: 0, format: 0 },
-        target: { official: currentOfficialTarget, workbench: 5, format: 1 },
+        target: { official: currentOfficialTarget, workbench: 6, format: 1 },
       },
     });
 
@@ -1117,7 +1117,7 @@ describe("migration backups", () => {
       resumeAttempts: 2,
       migrationVersions: {
         source: { official: currentOfficialTarget, workbench: 0, format: 0 },
-        target: { official: currentOfficialTarget, workbench: 5, format: 1 },
+        target: { official: currentOfficialTarget, workbench: 6, format: 1 },
       },
     });
 
@@ -1188,6 +1188,7 @@ describe("migration backups", () => {
             { module_id: "expert", migration_id: 3 },
             { module_id: "expert", migration_id: 4 },
             { module_id: "expert", migration_id: 5 },
+            { module_id: "expert", migration_id: 6 },
           ]);
         }).pipe(
           Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
@@ -1202,7 +1203,7 @@ describe("migration backups", () => {
         phase: "migration-completed",
         migrationVersions: {
           source: { official: 108, workbench: 0, format: 0 },
-          target: { official: currentOfficialMigrationCount(), workbench: 5, format: 1 },
+          target: { official: currentOfficialMigrationCount(), workbench: 6, format: 1 },
         },
         legacyExpertMigrations:
           legacyThrough === 109
@@ -1564,10 +1565,10 @@ describe("migration backups", () => {
     expect(provenance).toMatchObject({
       version: 3,
       phase: "migration-completed",
-      moduleVersions: { source: { expert: 0, context: 0 }, target: { expert: 5, context: 1 } },
+      moduleVersions: { source: { expert: 0, context: 0 }, target: { expert: 6, context: 1 } },
       migrationVersions: {
         source: { official: currentOfficialMigrationCount(), workbench: 0, format: 0 },
-        target: { official: currentOfficialMigrationCount(), workbench: 5, format: 1 },
+        target: { official: currentOfficialMigrationCount(), workbench: 6, format: 1 },
       },
     });
     expect(await backupPaths(dbPath)).toEqual([provenance.backupPath]);

@@ -12,11 +12,14 @@ import {
   type ExpertDefinition,
   type ExpertPreview,
   type ExpertSnapshot,
+  type ResolvedExpertSkillEntry,
 } from "@synara/contracts";
 import { Schema } from "effect";
 
 import { ensurePrivateDirectorySync, syncDirectoryEntry } from "../privatePathPermissions";
+import { inspectBmadWorkspace } from "./bmadSkillPreset.ts";
 import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
+import { withSkillPackageLifecycle } from "./skillPackageLifecycle.ts";
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024;
@@ -46,8 +49,23 @@ type SourceResource = {
   readonly selectedFile?: string;
 };
 
-type CollectedResource = ResourceEntry & { readonly bytes?: Buffer; readonly sourcePath?: string };
+export type CollectedExpertResource = ResourceEntry & {
+  readonly bytes?: Buffer;
+  readonly sourcePath?: string;
+};
+type CollectedResource = CollectedExpertResource;
 type TreeEntry = ResourceEntry & { readonly sourcePath: string; readonly bytes?: Buffer };
+type ExpertSkillSelections = NonNullable<(typeof ExpertSaveInput.Type)["skillSelections"]>;
+
+async function resolvePackageSelections(
+  stateDir: string,
+  selections: ReadonlyArray<ExpertSkillSelections[number]>,
+): Promise<ResolvedExpertSkillEntry[]> {
+  // SkillPackageStore imports the resource collection capability from this module.
+  // Load it only after ExpertStore has initialized to avoid an eager module cycle.
+  const { createSkillPackageStore } = await import("./SkillPackageStore.ts");
+  return createSkillPackageStore(stateDir).resolveSelections(selections);
+}
 
 export interface ExpertStore {
   list(): Promise<ExpertDefinition[]>;
@@ -59,6 +77,11 @@ export interface ExpertStore {
   preview(input: typeof ExpertPreviewInput.Type): Promise<ExpertPreview>;
   prepareSnapshot(id: string): Promise<typeof ExpertBinding.Type>;
   readSnapshot(snapshotId: string): Promise<ExpertSnapshot>;
+  listStoredSnapshots(): Promise<ReadonlyArray<ExpertSnapshot>>;
+  removeLegacySkillSnapshots(
+    snapshotIds: ReadonlyArray<string>,
+    verifyNoReferences?: () => Promise<void>,
+  ): Promise<ReadonlyArray<string>>;
 }
 
 export class ExpertStoreError extends Error {
@@ -172,7 +195,14 @@ function validateDefinitionInput(input: typeof ExpertSaveInput.Type): void {
   ) {
     throw new ExpertStoreError("Expert definition is too large.", "invalid_input");
   }
-  for (const skill of input.skills) sourcePath(skill.path, `Skill ${skill.name}`);
+  if (input.skillSelections === undefined) {
+    for (const skill of input.skills) sourcePath(skill.path, `Skill ${skill.name}`);
+  } else if (input.skills.length > 0) {
+    throw new ExpertStoreError(
+      "Package-based skill selections cannot be mixed with legacy skill paths.",
+      "invalid_input",
+    );
+  }
   for (const reference of input.references) sourcePath(reference, "Reference");
   for (const connection of input.connections) {
     if (connection.tools.length > 200) {
@@ -191,10 +221,23 @@ function definitionPath(directory: string, id: string): string {
   return path.join(directory, `${id}.json`);
 }
 
+function definitionRevisionPath(directory: string, id: string, revision: number): string {
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new ExpertStoreError("Expert revision is invalid.", "invalid_input");
+  }
+  return path.join(directory, id, `${revision}.json`);
+}
+
 function decodeDefinition(value: unknown): ExpertDefinition {
   const definition = decodeDefinitionInput(value);
   if (!EXPERT_ID_PATTERN.test(definition.id)) {
     throw new ExpertStoreError("Expert ID is invalid.", "snapshot_corrupt");
+  }
+  if (definition.skillSelections !== undefined && definition.skills.length > 0) {
+    throw new ExpertStoreError(
+      "Package-based skill selections cannot be mixed with legacy skill paths.",
+      "snapshot_corrupt",
+    );
   }
   return definition;
 }
@@ -231,6 +274,7 @@ async function safeReadFileWithMetadata(
     const pathAfter = await fs.lstat(filePath);
     const realAfter = await fs.realpath(filePath);
     if (
+      bytes.byteLength > MAX_FILE_BYTES ||
       !pathAfter.isFile() ||
       pathAfter.isSymbolicLink() ||
       after.dev !== opened.dev ||
@@ -336,13 +380,19 @@ async function readCollectedTree(
     realSourceRoot,
     onEntry: async (entry) => {
       if (entries.length >= remaining.entries) {
-        throw new ExpertStoreError("Snapshot contains too many files.", "invalid_resource");
+        throw new ExpertStoreError(
+          `Resource entry limit exceeded at: ${entry.sourcePath}`,
+          "invalid_resource",
+        );
       }
       if (entry.kind === "file") {
         const bytes = entry.bytes!;
         totalBytes += bytes.byteLength;
         if (totalBytes > remaining.bytes) {
-          throw new ExpertStoreError("Snapshot exceeds the total size limit.", "invalid_resource");
+          throw new ExpertStoreError(
+            `Resource total size limit exceeded at: ${entry.sourcePath}`,
+            "invalid_resource",
+          );
         }
         if (
           bytes.byteLength !== entry.size ||
@@ -445,6 +495,10 @@ function hashSnapshot(snapshot: ExpertSnapshot, resources: ReadonlyArray<Resourc
     preferredProvider: snapshot.preferredProvider ?? null,
     resources: [...resources].sort((left, right) => left.path.localeCompare(right.path)),
   };
+  if (snapshot.schemaVersion === 2) {
+    payload.schemaVersion = 2;
+    payload.skillSelections = snapshot.skillSelections;
+  }
   // Older manifests had no MCP binding. Omitting the key entirely preserves
   // their content hash while making each new snapshot pin its connection revs.
   if (snapshot.mcpBinding) {
@@ -623,14 +677,21 @@ async function makeTreeWritable(directory: string): Promise<void> {
 async function collectSnapshotResources(
   snapshotRoot: string,
   expectedResources?: ReadonlyArray<ResourceEntry>,
+  allowMissingSkillsRoot = false,
 ): Promise<ResourceEntry[]> {
   const collected: ResourceEntry[] = [];
   const expectedByPath = new Map(expectedResources?.map((resource) => [resource.path, resource]));
   let totalBytes = 0;
   const realSnapshotRoot = await fs.realpath(snapshotRoot);
-  const addTree = async (relativeRoot: string): Promise<void> => {
+  const addTree = async (relativeRoot: string, optional = false): Promise<void> => {
     const fullRoot = path.join(snapshotRoot, relativeRoot);
-    const rootStat = await fs.lstat(fullRoot);
+    let rootStat: Awaited<ReturnType<typeof fs.lstat>>;
+    try {
+      rootStat = await fs.lstat(fullRoot);
+    } catch (cause) {
+      if (optional && (cause as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw cause;
+    }
     if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
       throw new ExpertStoreError("Snapshot resource root is invalid.", "snapshot_corrupt");
     }
@@ -671,7 +732,7 @@ async function collectSnapshotResources(
       });
     }
   };
-  await addTree("skills");
+  await addTree("skills", allowMissingSkillsRoot);
   await addTree("references");
   if (collected.length > MAX_SNAPSHOT_ENTRIES) {
     throw new ExpertStoreError("Snapshot contains too many files.", "invalid_resource");
@@ -684,17 +745,32 @@ async function safeRemoveTree(directory: string): Promise<void> {
   await fs.rm(directory, { recursive: true, force: true });
 }
 
-function hydrateSnapshot(snapshot: ExpertSnapshot, snapshotRoot: string): ExpertSnapshot {
-  return {
+async function hydrateSnapshot(
+  snapshot: ExpertSnapshot,
+  snapshotRoot: string,
+): Promise<ExpertSnapshot> {
+  const hydrated: ExpertSnapshot = {
     ...snapshot,
     skillsRoot: path.join(snapshotRoot, "skills"),
-    skills: snapshot.skills.map((skill) => ({
-      ...skill,
-      path: path.join(snapshotRoot, ...skill.path.split("/")),
-    })),
+    skills:
+      snapshot.schemaVersion === 2
+        ? []
+        : snapshot.skills.map((skill) => ({
+            ...skill,
+            path: path.join(snapshotRoot, ...skill.path.split("/")),
+          })),
     references: snapshot.references.map((reference) =>
       path.join(snapshotRoot, ...reference.split("/")),
     ),
+  };
+  if (snapshot.schemaVersion !== 2) return hydrated;
+  const stateDir = path.resolve(snapshotRoot, "..", "..", "..");
+  const resolved = await resolvePackageSelections(stateDir, snapshot.skillSelections!);
+  return {
+    ...hydrated,
+    skillsRoot: path.join(stateDir, "experts", "skill-packages"),
+    skills: resolved.map(({ name, path: skillPath }) => ({ name, path: skillPath })),
+    skillEntries: resolved,
   };
 }
 
@@ -733,11 +809,19 @@ export async function readVerifiedStoredExpertSnapshot(
     throw new ExpertStoreError("Snapshot manifest is invalid.", "snapshot_corrupt", { cause });
   }
   const snapshot = stored.snapshot;
+  const packageBased = snapshot.schemaVersion === 2;
   if (
     snapshot.snapshotId !== snapshotId ||
     !EXPERT_ID_PATTERN.test(snapshot.expertId) ||
     snapshot.skillsRoot !== "skills" ||
     stored.resources.length > MAX_SNAPSHOT_ENTRIES ||
+    (packageBased &&
+      (!Array.isArray(snapshot.skillSelections) ||
+        snapshot.skills.length > 0 ||
+        snapshot.skillEntries !== undefined ||
+        stored.resources.some((entry) => entry.path.startsWith("skills/")))) ||
+    (!packageBased &&
+      (snapshot.skillSelections !== undefined || snapshot.skillEntries !== undefined)) ||
     stored.resources.some(
       (entry) =>
         !["skills", "references"].some((rootName) => isSafeRelativePath(entry.path, rootName)),
@@ -751,7 +835,24 @@ export async function readVerifiedStoredExpertSnapshot(
   ) {
     throw new ExpertStoreError("Snapshot resource references are invalid.", "snapshot_corrupt");
   }
-  const actualResources = await collectSnapshotResources(snapshotRoot, stored.resources);
+  if (packageBased) {
+    try {
+      await fs.lstat(path.join(snapshotRoot, "skills"));
+      throw new ExpertStoreError(
+        "Package-based snapshots must not contain a skills directory.",
+        "snapshot_corrupt",
+      );
+    } catch (cause) {
+      if (cause instanceof ExpertStoreError || (cause as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw cause;
+      }
+    }
+  }
+  const actualResources = await collectSnapshotResources(
+    snapshotRoot,
+    stored.resources,
+    packageBased,
+  );
   if (stableJson(actualResources) !== stableJson(stored.resources)) {
     throw new ExpertStoreError(
       "Snapshot resources failed integrity validation.",
@@ -761,8 +862,37 @@ export async function readVerifiedStoredExpertSnapshot(
   if (hashSnapshot(snapshot, actualResources) !== snapshotId) {
     throw new ExpertStoreError("Snapshot content hash does not match its ID.", "snapshot_corrupt");
   }
+  if (packageBased) {
+    try {
+      await resolvePackageSelections(
+        path.resolve(snapshotRoot, "..", "..", ".."),
+        snapshot.skillSelections!,
+      );
+    } catch (cause) {
+      throw new ExpertStoreError(
+        "Snapshot skill package selections failed integrity validation.",
+        "snapshot_corrupt",
+        { cause },
+      );
+    }
+  }
   return snapshot;
 }
+
+/** Shared immutable-file capability for Expert snapshots and content-addressed skill packages.
+ * Collection rejects inner links and special files; callers own their manifest/hash semantics.
+ * Do not use this capability to grant model tools or bypass provider filesystem approvals.
+ */
+export const expertResourceFiles = {
+  collect: readCollectedTree,
+  read: safeReadFile,
+  copy: copyResources,
+  makeReadOnly: makeSnapshotReadOnly,
+  sealRoot: makeSnapshotRootReadOnly,
+  removeStaging: safeRemoveTree,
+  hashJson,
+  stableJson,
+};
 
 export function createExpertStore(stateDir: string): ExpertStore {
   if (!path.isAbsolute(stateDir) || stateDir.includes("\0")) {
@@ -770,12 +900,14 @@ export function createExpertStore(stateDir: string): ExpertStore {
   }
   const root = path.join(path.resolve(stateDir), "experts");
   const definitionsDir = path.join(root, "definitions");
+  const revisionsDir = path.join(root, "revisions");
   const snapshotsDir = path.join(root, "snapshots");
   const initializationPath = path.join(root, "initialized.json");
   const initializationMarker = '{"version":1}\n';
   const connectionStore = createExpertConnectionStore(stateDir);
   ensurePrivateDirectorySync(root);
   ensurePrivateDirectorySync(definitionsDir);
+  ensurePrivateDirectorySync(revisionsDir);
   ensurePrivateDirectorySync(snapshotsDir);
 
   // ponytail: one write queue per local store; use cross-process locks if the same state directory is shared by multiple servers.
@@ -836,6 +968,25 @@ export function createExpertStore(stateDir: string): ExpertStore {
     }
   };
 
+  const persistRevision = async (definition: ExpertDefinition): Promise<void> => {
+    const filePath = definitionRevisionPath(revisionsDir, definition.id, definition.revision);
+    try {
+      const existing = decodeDefinition(
+        JSON.parse((await safeReadFile(filePath)).toString("utf8")),
+      );
+      if (stableJson(existing) !== stableJson(definition)) {
+        throw new ExpertStoreError(
+          "Expert revision history contains conflicting content.",
+          "snapshot_corrupt",
+        );
+      }
+      return;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+    }
+    await writeAtomically(filePath, `${JSON.stringify(definition, null, 2)}\n`);
+  };
+
   const list = (): Promise<ExpertDefinition[]> =>
     withWriteLock(async () => {
       await ensureInitialized();
@@ -857,296 +1008,405 @@ export function createExpertStore(stateDir: string): ExpertStore {
     });
 
   const save = (rawInput: typeof ExpertSaveInput.Type): Promise<ExpertDefinition> =>
-    withWriteLock(async () => {
-      await ensureInitialized();
-      const input = decodeSaveInput(rawInput);
-      validateDefinitionInput(input);
-      const id = input.id ?? randomUUID().replaceAll("-", "");
-      if (!EXPERT_ID_PATTERN.test(id)) {
-        throw new ExpertStoreError(
-          "Expert ID may contain lowercase letters, digits, _ and - only.",
-          "invalid_input",
+    withSkillPackageLifecycle(stateDir, () =>
+      withWriteLock(async () => {
+        await ensureInitialized();
+        const input = decodeSaveInput(rawInput);
+        validateDefinitionInput(input);
+        if (input.skillSelections !== undefined) {
+          try {
+            await resolvePackageSelections(stateDir, input.skillSelections);
+          } catch (cause) {
+            throw new ExpertStoreError(
+              "Expert skill package selections are invalid or unavailable.",
+              "invalid_resource",
+              { cause },
+            );
+          }
+        }
+        const id = input.id ?? randomUUID().replaceAll("-", "");
+        if (!EXPERT_ID_PATTERN.test(id)) {
+          throw new ExpertStoreError(
+            "Expert ID may contain lowercase letters, digits, _ and - only.",
+            "invalid_input",
+          );
+        }
+        const previous = await readDefinitionFile(id);
+        if (previous && input.expectedRevision === undefined) {
+          throw new ExpertStoreError(
+            "Saving an existing expert requires expectedRevision.",
+            "revision_conflict",
+          );
+        }
+        if ((previous?.revision ?? undefined) !== input.expectedRevision) {
+          throw new ExpertStoreError(
+            "Expert revision changed; reload before saving.",
+            "revision_conflict",
+          );
+        }
+        const definition = decodeDefinition({
+          id,
+          name: input.name.trim(),
+          description: input.description,
+          useCases: input.useCases,
+          persona: input.persona,
+          outputRequirements: input.outputRequirements,
+          skills: input.skills,
+          ...(input.skillSelections !== undefined
+            ? { skillSelections: input.skillSelections }
+            : {}),
+          references: input.references,
+          connections: input.connections,
+          preferredProvider: input.preferredProvider,
+          revision: (previous?.revision ?? 0) + 1,
+          archived: previous?.archived ?? false,
+          updatedAt: new Date().toISOString(),
+        });
+        if (previous) await persistRevision(previous);
+        await writeAtomically(
+          definitionPath(definitionsDir, id),
+          `${JSON.stringify(definition, null, 2)}\n`,
         );
-      }
-      const previous = await readDefinitionFile(id);
-      if (previous && input.expectedRevision === undefined) {
-        throw new ExpertStoreError(
-          "Saving an existing expert requires expectedRevision.",
-          "revision_conflict",
-        );
-      }
-      if ((previous?.revision ?? undefined) !== input.expectedRevision) {
-        throw new ExpertStoreError(
-          "Expert revision changed; reload before saving.",
-          "revision_conflict",
-        );
-      }
-      const definition = decodeDefinition({
-        id,
-        name: input.name.trim(),
-        description: input.description,
-        useCases: input.useCases,
-        persona: input.persona,
-        outputRequirements: input.outputRequirements,
-        skills: input.skills,
-        references: input.references,
-        connections: input.connections,
-        preferredProvider: input.preferredProvider,
-        revision: (previous?.revision ?? 0) + 1,
-        archived: previous?.archived ?? false,
-        updatedAt: new Date().toISOString(),
-      });
-      await writeAtomically(
-        definitionPath(definitionsDir, id),
-        `${JSON.stringify(definition, null, 2)}\n`,
-      );
-      return definition;
-    });
+        return definition;
+      }),
+    );
 
   const archive = (id: string, expectedRevision?: number): Promise<ExpertDefinition> =>
-    withWriteLock(async () => {
-      await ensureInitialized();
-      const definition = await readDefinitionFile(id);
-      if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
-      if (expectedRevision !== undefined && definition.revision !== expectedRevision) {
-        throw new ExpertStoreError(
-          "Expert revision changed; reload before archiving.",
-          "revision_conflict",
+    withSkillPackageLifecycle(stateDir, () =>
+      withWriteLock(async () => {
+        await ensureInitialized();
+        const definition = await readDefinitionFile(id);
+        if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
+        if (expectedRevision !== undefined && definition.revision !== expectedRevision) {
+          throw new ExpertStoreError(
+            "Expert revision changed; reload before archiving.",
+            "revision_conflict",
+          );
+        }
+        if (definition.archived) return definition;
+        const archived = {
+          ...definition,
+          archived: true,
+          revision: definition.revision + 1,
+          updatedAt: new Date().toISOString(),
+        };
+        await persistRevision(definition);
+        await writeAtomically(
+          definitionPath(definitionsDir, id),
+          `${JSON.stringify(archived, null, 2)}\n`,
         );
-      }
-      if (definition.archived) return definition;
-      const archived = {
-        ...definition,
-        archived: true,
-        revision: definition.revision + 1,
-        updatedAt: new Date().toISOString(),
-      };
-      await writeAtomically(
-        definitionPath(definitionsDir, id),
-        `${JSON.stringify(archived, null, 2)}\n`,
-      );
-      return archived;
-    });
+        return archived;
+      }),
+    );
 
   const restore = (id: string, expectedRevision: number): Promise<ExpertDefinition> =>
-    withWriteLock(async () => {
-      await ensureInitialized();
-      const definition = await readDefinitionFile(id);
-      if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
-      if (definition.revision !== expectedRevision) {
-        throw new ExpertStoreError(
-          "Expert revision changed; reload before restoring.",
-          "revision_conflict",
+    withSkillPackageLifecycle(stateDir, () =>
+      withWriteLock(async () => {
+        await ensureInitialized();
+        const definition = await readDefinitionFile(id);
+        if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
+        if (definition.revision !== expectedRevision) {
+          throw new ExpertStoreError(
+            "Expert revision changed; reload before restoring.",
+            "revision_conflict",
+          );
+        }
+        if (!definition.archived) return definition;
+        const restored = {
+          ...definition,
+          archived: false,
+          revision: definition.revision + 1,
+          updatedAt: new Date().toISOString(),
+        };
+        await persistRevision(definition);
+        await writeAtomically(
+          definitionPath(definitionsDir, id),
+          `${JSON.stringify(restored, null, 2)}\n`,
         );
-      }
-      if (!definition.archived) return definition;
-      const restored = {
-        ...definition,
-        archived: false,
-        revision: definition.revision + 1,
-        updatedAt: new Date().toISOString(),
-      };
-      await writeAtomically(
-        definitionPath(definitionsDir, id),
-        `${JSON.stringify(restored, null, 2)}\n`,
-      );
-      return restored;
-    });
+        return restored;
+      }),
+    );
 
   const remove = (id: string, expectedRevision: number): Promise<void> =>
-    withWriteLock(async () => {
-      await ensureInitialized();
-      const definition = await readDefinitionFile(id);
-      if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
-      if (definition.revision !== expectedRevision) {
-        throw new ExpertStoreError(
-          "Expert revision changed; reload before deleting.",
-          "revision_conflict",
-        );
-      }
-      // Existing tasks own immutable snapshots independently of the definition.
-      await fs.unlink(definitionPath(definitionsDir, id));
-      await syncDirectoryEntry(definitionsDir);
-    });
+    withSkillPackageLifecycle(stateDir, () =>
+      withWriteLock(async () => {
+        await ensureInitialized();
+        const definition = await readDefinitionFile(id);
+        if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
+        if (definition.revision !== expectedRevision) {
+          throw new ExpertStoreError(
+            "Expert revision changed; reload before deleting.",
+            "revision_conflict",
+          );
+        }
+        // Existing tasks own immutable snapshots independently of the definition.
+        await persistRevision(definition);
+        await fs.unlink(definitionPath(definitionsDir, id));
+        await syncDirectoryEntry(definitionsDir);
+      }),
+    );
 
   const readSnapshot = async (snapshotId: string): Promise<ExpertSnapshot> => {
     await ensureInitialized();
     const snapshotRoot = path.join(snapshotsDir, snapshotId);
     const snapshot = await readVerifiedStoredExpertSnapshot(snapshotRoot, snapshotId);
+    if (snapshot.schemaVersion !== 2 && snapshot.skills.length > 0) {
+      throw new ExpertStoreError(
+        "This task snapshot uses legacy skill paths; convert the Expert before starting it.",
+        "invalid_resource",
+      );
+    }
     return hydrateSnapshot(snapshot, snapshotRoot);
   };
 
-  const prepareSnapshot = async (id: string): Promise<typeof ExpertBinding.Type> => {
+  const listStoredSnapshots = async (): Promise<ReadonlyArray<ExpertSnapshot>> => {
     await ensureInitialized();
-    const definition = await readDefinitionFile(id);
-    if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
-    if (definition.archived)
-      throw new ExpertStoreError("Archived experts cannot create new snapshots.", "invalid_input");
-
-    const sourceResources: SourceResource[] = [];
-    const skillTargets: string[] = [];
-    for (const [index, skill] of definition.skills.entries()) {
-      const skillFile = sourcePath(skill.path, `Skill ${skill.name}`);
-      const skillFileStat = await fs.lstat(skillFile);
-      if (skillFileStat.isSymbolicLink() || !skillFileStat.isFile()) {
+    const entries = await fs.readdir(snapshotsDir, { withFileTypes: true });
+    const snapshots: ExpertSnapshot[] = [];
+    for (const entry of entries) {
+      if (!SNAPSHOT_ID_PATTERN.test(entry.name) || !entry.isDirectory() || entry.isSymbolicLink()) {
         throw new ExpertStoreError(
-          `Skill path must be a regular skill file: ${skillFile}`,
-          "invalid_resource",
+          "Snapshot inventory contains an unknown or unsafe entry: " + entry.name,
+          "snapshot_corrupt",
         );
       }
-      const sourceRoot = path.dirname(skillFile);
-      const targetRoot = `skills/${String(index).padStart(3, "0")}-${safePart(path.basename(sourceRoot))}`;
-      sourceResources.push({ sourceRoot, targetRoot, selectedFile: skillFile });
-      skillTargets.push(path.posix.join(targetRoot, path.basename(skillFile)));
-    }
-    const referenceTargets: string[] = [];
-    for (const [index, reference] of definition.references.entries()) {
-      const selectedPath = sourcePath(reference, "Reference");
-      const selectedStat = await fs.lstat(selectedPath);
-      if (
-        selectedStat.isSymbolicLink() ||
-        (!selectedStat.isDirectory() && !selectedStat.isFile())
-      ) {
-        throw new ExpertStoreError(
-          `Reference must be a regular file or directory: ${selectedPath}`,
-          "invalid_resource",
-        );
-      }
-      const targetRoot = `references/${String(index).padStart(3, "0")}-${safePart(path.basename(selectedPath))}`;
-      sourceResources.push({ sourceRoot: selectedPath, targetRoot });
-      referenceTargets.push(targetRoot);
-    }
-
-    const collected: CollectedResource[] = [];
-    let totalBytes = 0;
-    for (const resource of sourceResources) {
-      const entries = await readCollectedTree(resource, {
-        bytes: MAX_SNAPSHOT_BYTES - totalBytes,
-        entries: MAX_SNAPSHOT_ENTRIES - collected.length,
-      });
-      collected.push(...entries);
-      totalBytes += entries.reduce((total, entry) => total + entry.size, 0);
-    }
-    const connectionStore = createExpertConnectionStore(stateDir);
-    const mcpBindingServers = [];
-    for (const connection of definition.connections) {
-      if (
-        connection.enabled === false ||
-        (connection.toolMode !== "all" && connection.tools.length === 0)
-      ) {
-        continue;
-      }
-      const config = await connectionStore.pinRevision(connection.id);
-      if (!config && connection.required) {
-        throw new ExpertStoreError(
-          `Required expert connection is not configured: ${connection.id}`,
-          "invalid_resource",
-        );
-      }
-      mcpBindingServers.push({
-        id: connection.id,
-        ...(config ? { configRevision: config.revision } : {}),
-        required: connection.required,
-        ...(connection.toolMode ? { toolMode: connection.toolMode } : {}),
-        tools: connection.tools,
-      });
-    }
-    const resources = collected
-      .map(({ path: resourcePath, kind, size, sha256, executable }) => ({
-        path: resourcePath,
-        kind,
-        size,
-        sha256,
-        ...(executable !== undefined ? { executable } : {}),
-      }))
-      .sort((left, right) => left.path.localeCompare(right.path));
-    const relativeSnapshot: ExpertSnapshot = {
-      snapshotId: "pending",
-      expertId: definition.id,
-      displayName: definition.name,
-      revision: definition.revision,
-      description: definition.description,
-      useCases: definition.useCases,
-      persona: definition.persona,
-      outputRequirements: definition.outputRequirements,
-      skills: definition.skills.map((skill, index) => ({ ...skill, path: skillTargets[index]! })),
-      skillsRoot: "skills",
-      references: referenceTargets,
-      connections: definition.connections,
-      mcpBinding: {
-        schemaVersion: 1,
-        source: "snapshot",
-        ...(mcpBindingServers.some((server) => server.toolMode === "all")
-          ? { authorizationId: randomUUID() }
-          : {}),
-        createdAt: new Date().toISOString(),
-        servers: mcpBindingServers,
-      },
-      preferredProvider: definition.preferredProvider,
-      createdAt: "1970-01-01T00:00:00.000Z",
-    };
-    const snapshotId = hashSnapshot(relativeSnapshot, resources);
-    const finalPath = path.join(snapshotsDir, snapshotId);
-    try {
-      const existing = await readSnapshot(snapshotId);
-      if (existing.expertId !== definition.id || existing.revision !== definition.revision) {
-        throw new ExpertStoreError("Snapshot ID collision.", "snapshot_corrupt");
-      }
-      return Schema.decodeUnknownSync(ExpertBinding)({
-        expertId: existing.expertId,
-        snapshotId,
-        displayName: existing.displayName,
-        revision: existing.revision,
-      });
-    } catch (cause) {
-      if (!(cause instanceof ExpertStoreError && cause.code === "not_found")) throw cause;
-    }
-
-    const stagePath = path.join(snapshotsDir, `.staging-${randomUUID()}`);
-    await fs.mkdir(stagePath, { mode: 0o700 });
-    try {
-      await fs.mkdir(path.join(stagePath, "skills"), { mode: 0o700 });
-      await fs.mkdir(path.join(stagePath, "references"), { mode: 0o700 });
-      await copyResources(stagePath, collected);
-      const stored: StoredSnapshot = {
-        snapshot: { ...relativeSnapshot, snapshotId, createdAt: new Date().toISOString() },
-        resources,
-      };
-      const manifest = path.join(stagePath, "snapshot.json");
-      const handle = await fs.open(
-        manifest,
-        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
-        0o600,
+      snapshots.push(
+        await readVerifiedStoredExpertSnapshot(path.join(snapshotsDir, entry.name), entry.name),
       );
-      try {
-        await handle.writeFile(`${JSON.stringify(stored, null, 2)}\n`);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
-      await syncDirectoryEntry(stagePath);
-      await makeSnapshotReadOnly(stagePath, resources);
-      try {
-        await fs.rename(stagePath, finalPath);
-      } catch (cause) {
-        const maybeExisting = await fs.lstat(finalPath).catch(() => null);
-        if (!maybeExisting) throw cause;
-        await safeRemoveTree(stagePath);
-      }
-      await makeSnapshotRootReadOnly(finalPath);
-      await syncDirectoryEntry(snapshotsDir);
-    } catch (cause) {
-      await safeRemoveTree(stagePath).catch(() => undefined);
-      throw cause;
     }
-    const snapshot = await readSnapshot(snapshotId);
-    return Schema.decodeUnknownSync(ExpertBinding)({
-      expertId: snapshot.expertId,
-      snapshotId,
-      displayName: snapshot.displayName,
-      revision: snapshot.revision,
-    });
+    return snapshots.sort((left, right) => left.snapshotId.localeCompare(right.snapshotId));
   };
+
+  const removeLegacySkillSnapshots = (
+    snapshotIds: ReadonlyArray<string>,
+    verifyNoReferences?: () => Promise<void>,
+  ): Promise<ReadonlyArray<string>> =>
+    withSkillPackageLifecycle(stateDir, () =>
+      withWriteLock(async () => {
+        await ensureInitialized();
+        // The host rechecks every durable reference while this shared lifecycle
+        // lock prevents concurrent definition/package/snapshot mutations.
+        await verifyNoReferences?.();
+        if (new Set(snapshotIds).size !== snapshotIds.length) {
+          throw new ExpertStoreError("Duplicate snapshot ID in cleanup request.", "invalid_input");
+        }
+        const verified: string[] = [];
+        for (const snapshotId of snapshotIds) {
+          if (!SNAPSHOT_ID_PATTERN.test(snapshotId)) {
+            throw new ExpertStoreError("Snapshot ID is invalid.", "invalid_input");
+          }
+          let snapshot: ExpertSnapshot;
+          try {
+            snapshot = await readVerifiedStoredExpertSnapshot(
+              path.join(snapshotsDir, snapshotId),
+              snapshotId,
+            );
+          } catch (cause) {
+            // A host-verified retry may arrive after a previous cleanup removed
+            // this entry but before durable switch progress was advanced.
+            if (
+              verifyNoReferences &&
+              cause instanceof ExpertStoreError &&
+              cause.code === "not_found"
+            ) {
+              continue;
+            }
+            throw cause;
+          }
+          if (snapshot.schemaVersion === 2 || snapshot.skills.length === 0) {
+            throw new ExpertStoreError(
+              "Only verified legacy skill snapshots can be removed by migration cleanup.",
+              "invalid_input",
+            );
+          }
+          verified.push(snapshotId);
+        }
+        for (const snapshotId of verified) {
+          await safeRemoveTree(path.join(snapshotsDir, snapshotId));
+        }
+        if (verified.length > 0) await syncDirectoryEntry(snapshotsDir);
+        return verified;
+      }),
+    );
+
+  const prepareSnapshot = (id: string): Promise<typeof ExpertBinding.Type> =>
+    withSkillPackageLifecycle(stateDir, async () => {
+      await ensureInitialized();
+      const definition = await readDefinitionFile(id);
+      if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
+      if (definition.archived)
+        throw new ExpertStoreError(
+          "Archived experts cannot create new snapshots.",
+          "invalid_input",
+        );
+
+      if (definition.skillSelections === undefined && definition.skills.length > 0) {
+        throw new ExpertStoreError(
+          "This Expert uses legacy skill paths; convert its skills to shared packages before starting it.",
+          "invalid_resource",
+        );
+      }
+      const skillSelections = definition.skillSelections ?? [];
+      try {
+        await resolvePackageSelections(stateDir, skillSelections);
+      } catch (cause) {
+        throw new ExpertStoreError(
+          "Expert skill package selections are invalid or unavailable.",
+          "invalid_resource",
+          { cause },
+        );
+      }
+
+      const sourceResources: SourceResource[] = [];
+      const referenceTargets: string[] = [];
+      for (const [index, reference] of definition.references.entries()) {
+        const selectedPath = sourcePath(reference, "Reference");
+        const selectedStat = await fs.lstat(selectedPath);
+        if (
+          selectedStat.isSymbolicLink() ||
+          (!selectedStat.isDirectory() && !selectedStat.isFile())
+        ) {
+          throw new ExpertStoreError(
+            `Reference must be a regular file or directory: ${selectedPath}`,
+            "invalid_resource",
+          );
+        }
+        const targetRoot = `references/${String(index).padStart(3, "0")}-${safePart(path.basename(selectedPath))}`;
+        sourceResources.push({ sourceRoot: selectedPath, targetRoot });
+        referenceTargets.push(targetRoot);
+      }
+
+      const collected: CollectedResource[] = [];
+      let totalBytes = 0;
+      for (const resource of sourceResources) {
+        const entries = await readCollectedTree(resource, {
+          bytes: MAX_SNAPSHOT_BYTES - totalBytes,
+          entries: MAX_SNAPSHOT_ENTRIES - collected.length,
+        });
+        collected.push(...entries);
+        totalBytes += entries.reduce((total, entry) => total + entry.size, 0);
+      }
+      const connectionStore = createExpertConnectionStore(stateDir);
+      const mcpBindingServers = [];
+      for (const connection of definition.connections) {
+        if (
+          connection.enabled === false ||
+          (connection.toolMode !== "all" && connection.tools.length === 0)
+        ) {
+          continue;
+        }
+        const config = await connectionStore.pinRevision(connection.id);
+        if (!config && connection.required) {
+          throw new ExpertStoreError(
+            `Required expert connection is not configured: ${connection.id}`,
+            "invalid_resource",
+          );
+        }
+        mcpBindingServers.push({
+          id: connection.id,
+          ...(config ? { configRevision: config.revision } : {}),
+          required: connection.required,
+          ...(connection.toolMode ? { toolMode: connection.toolMode } : {}),
+          tools: connection.tools,
+        });
+      }
+      const resources = collected
+        .map(({ path: resourcePath, kind, size, sha256, executable }) => ({
+          path: resourcePath,
+          kind,
+          size,
+          sha256,
+          ...(executable !== undefined ? { executable } : {}),
+        }))
+        .sort((left, right) => left.path.localeCompare(right.path));
+      const relativeSnapshot: ExpertSnapshot = {
+        snapshotId: "pending",
+        expertId: definition.id,
+        displayName: definition.name,
+        revision: definition.revision,
+        description: definition.description,
+        useCases: definition.useCases,
+        persona: definition.persona,
+        outputRequirements: definition.outputRequirements,
+        schemaVersion: 2,
+        skills: [],
+        skillSelections,
+        skillsRoot: "skills",
+        references: referenceTargets,
+        connections: definition.connections,
+        mcpBinding: {
+          schemaVersion: 1,
+          source: "snapshot",
+          ...(mcpBindingServers.some((server) => server.toolMode === "all")
+            ? { authorizationId: randomUUID() }
+            : {}),
+          createdAt: new Date().toISOString(),
+          servers: mcpBindingServers,
+        },
+        preferredProvider: definition.preferredProvider,
+        createdAt: "1970-01-01T00:00:00.000Z",
+      };
+      const snapshotId = hashSnapshot(relativeSnapshot, resources);
+      const finalPath = path.join(snapshotsDir, snapshotId);
+      try {
+        const existing = await readSnapshot(snapshotId);
+        if (existing.expertId !== definition.id || existing.revision !== definition.revision) {
+          throw new ExpertStoreError("Snapshot ID collision.", "snapshot_corrupt");
+        }
+        return Schema.decodeUnknownSync(ExpertBinding)({
+          expertId: existing.expertId,
+          snapshotId,
+          displayName: existing.displayName,
+          revision: existing.revision,
+        });
+      } catch (cause) {
+        if (!(cause instanceof ExpertStoreError && cause.code === "not_found")) throw cause;
+      }
+
+      const stagePath = path.join(snapshotsDir, `.staging-${randomUUID()}`);
+      await fs.mkdir(stagePath, { mode: 0o700 });
+      try {
+        await fs.mkdir(path.join(stagePath, "references"), { mode: 0o700 });
+        await copyResources(stagePath, collected);
+        const stored: StoredSnapshot = {
+          snapshot: { ...relativeSnapshot, snapshotId, createdAt: new Date().toISOString() },
+          resources,
+        };
+        const manifest = path.join(stagePath, "snapshot.json");
+        const handle = await fs.open(
+          manifest,
+          fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+          0o600,
+        );
+        try {
+          await handle.writeFile(`${JSON.stringify(stored, null, 2)}\n`);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+        await syncDirectoryEntry(stagePath);
+        await makeSnapshotReadOnly(stagePath, resources);
+        try {
+          await fs.rename(stagePath, finalPath);
+        } catch (cause) {
+          const maybeExisting = await fs.lstat(finalPath).catch(() => null);
+          if (!maybeExisting) throw cause;
+          await safeRemoveTree(stagePath);
+        }
+        await makeSnapshotRootReadOnly(finalPath);
+        await syncDirectoryEntry(snapshotsDir);
+      } catch (cause) {
+        await safeRemoveTree(stagePath).catch(() => undefined);
+        throw cause;
+      }
+      const snapshot = await readSnapshot(snapshotId);
+      return Schema.decodeUnknownSync(ExpertBinding)({
+        expertId: snapshot.expertId,
+        snapshotId,
+        displayName: snapshot.displayName,
+        revision: snapshot.revision,
+      });
+    });
 
   const preview = async (rawInput: typeof ExpertPreviewInput.Type): Promise<ExpertPreview> => {
     await ensureInitialized();
@@ -1158,6 +1418,8 @@ export function createExpertStore(stateDir: string): ExpertStore {
     if (definition.archived) issues.push("已归档专家不能用于新任务。");
     let inspectedBytes = 0;
     let inspectedEntries = 0;
+    let workspaceBlocked = false;
+    let skillEntries: ResolvedExpertSkillEntry[] | undefined;
     const inspect = async (resourcePath: string, kind: "skill" | "reference"): Promise<void> => {
       const size = await validateResourceTree(resourcePath, kind);
       inspectedBytes += size.bytes;
@@ -1169,15 +1431,20 @@ export function createExpertStore(stateDir: string): ExpertStore {
         );
       }
     };
-    for (const skill of definition.skills) {
+    if (definition.skillSelections !== undefined) {
       try {
-        await inspect(skill.path, "skill");
+        skillEntries = await resolvePackageSelections(stateDir, definition.skillSelections);
       } catch (cause) {
         incompatible = true;
         issues.push(
-          `技能“${skill.name}”无法读取或包含不安全路径：${String(cause instanceof Error ? cause.message : cause)}`,
+          `技能包选择无法读取或校验失败：${String(cause instanceof Error ? cause.message : cause)}`,
         );
       }
+    } else if (definition.skills.length > 0) {
+      incompatible = true;
+      issues.push("此专家仍使用旧式本机技能路径；转换为共享技能包后才能启动。");
+    } else {
+      skillEntries = await resolvePackageSelections(stateDir, []);
     }
     for (const reference of definition.references) {
       try {
@@ -1188,6 +1455,18 @@ export function createExpertStore(stateDir: string): ExpertStore {
           `参考资料无法读取或包含不安全路径：${String(cause instanceof Error ? cause.message : cause)}`,
         );
       }
+    }
+    try {
+      const bmadPreflight = await inspectBmadWorkspace(skillEntries ?? [], input.cwd);
+      if (bmadPreflight?.issues.length) {
+        workspaceBlocked = true;
+        issues.push(...bmadPreflight.issues.map((issue) => `BMad workspace: ${issue}`));
+      }
+    } catch (cause) {
+      workspaceBlocked = true;
+      issues.push(
+        `BMad workspace preflight failed: ${String(cause instanceof Error ? cause.message : cause)}`,
+      );
     }
     let connectionBlocked = false;
     let connectionPartial = false;
@@ -1239,14 +1518,20 @@ export function createExpertStore(stateDir: string): ExpertStore {
         );
       }
     }
-    const status = connectionBlocked
-      ? "blocked"
-      : incompatible
-        ? "incompatible"
-        : connectionPartial
-          ? "partial"
-          : "available";
-    return { definition, status, issues };
+    const status =
+      connectionBlocked || workspaceBlocked
+        ? "blocked"
+        : incompatible
+          ? "incompatible"
+          : connectionPartial
+            ? "partial"
+            : "available";
+    return {
+      definition,
+      ...(skillEntries !== undefined ? { skillEntries } : {}),
+      status,
+      issues,
+    };
   };
 
   let initialization: Promise<void> | undefined;
@@ -1347,5 +1632,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
     preview,
     prepareSnapshot,
     readSnapshot,
+    listStoredSnapshots,
+    removeLegacySkillSnapshots,
   };
 }

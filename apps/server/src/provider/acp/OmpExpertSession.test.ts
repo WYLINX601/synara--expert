@@ -3,11 +3,13 @@
 // Layer: Provider ACP tests
 
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import type { ProviderExpertSession, ProviderSkillReference } from "@synara/contracts";
 import { Effect } from "effect";
+import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -258,6 +260,54 @@ describe("prepareOmpExpertSession", () => {
     await Effect.runPromise(preparation.cleanup());
     await expect(stat(overlayPath)).rejects.toThrow();
     expect(OMP_EXPERT_PROJECTION_VERSION).toBe("omp-acp-native-v1");
+  });
+
+  it("keeps Expert V2 catalog instructions while bypassing OMP native skill projection", async () => {
+    const root = await makeRoot();
+    const cwd = path.join(root, "project");
+    const skill = await createSkill(root);
+    const calls: Array<ReadonlyArray<string>> = [];
+    const runCli = makeRunner({ cwd, skills: [skill], calls });
+    const persona = "You are a careful reviewer.\n\nFixed V2 catalog and startup body.";
+    const expertSession: ProviderExpertSession = {
+      snapshotId: "expert-v2-omp",
+      persona,
+      skillsRoot: path.dirname(path.dirname(skill.path)),
+      skills: [skill],
+      skillLoading: "index",
+      skillEntries: [
+        {
+          packageId: `pkg_${"c".repeat(64)}`,
+          entryPath: "skills/reviewer/SKILL.md",
+          activation: "startup",
+          name: skill.name,
+          description: "Review with care.",
+          path: skill.path,
+        },
+      ],
+      references: [],
+    };
+
+    const preparation = await Effect.runPromise(
+      prepareOmpExpertSession({
+        cwd,
+        env: { HOME: root },
+        runCli,
+        expertSession,
+      }),
+    );
+
+    const instructions = composeProviderBaseInstructions({ expertPersona: persona }) ?? "";
+    expect(preparation.issues).toEqual([]);
+    expect(preparation.loadedSkills).toEqual([]);
+    expect(preparation.configOverlayPath).toBeUndefined();
+    expect(preparation.instructionsHash).toBe(
+      createHash("sha256").update(instructions, "utf8").digest("hex"),
+    );
+    expect(await readFile(preparation.appendSystemPromptPath!, "utf8")).toContain(persona);
+    expect(calls.some((args) => args[0] === "skill")).toBe(false);
+    expect(calls.some((args) => args[0] === "config" && args[1] === "get")).toBe(false);
+    await Effect.runPromise(preparation.cleanup());
   });
 
   it("blocks skills.enabled=false without silently enabling skills", async () => {

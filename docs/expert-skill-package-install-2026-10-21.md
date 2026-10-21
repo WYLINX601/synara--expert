@@ -35,3 +35,15 @@
 - Claude HTTP 401、Linux/Windows 实机以及人工视觉回放仍未验证。原实施记录保留原阶段状态，后续交付状态以本交接与实际安装结果为准。
 
 功能、隔离转换和真实运行的详细范围见[实施验收](expert-skill-package-implementation.md)。
+
+## 2026-10-21 安装重试与 GitHub 交付
+
+用户再次明确授权本机安装 0.1.3 并更新 GitHub。原安装回执为 `blocked-application-still-running`，不是已安装成功。本轮在原生退出确认中正常退出应用，未强杀任务。
+
+- 前两次重试分别被安装脚本的 Node TypeScript 参数属性解析、源码扩展名解析阻止，均发生在替换应用和迁移日用数据库之前。私有安装脚本修正为 Node 显式类型转换，迁移演练使用仓库锁定 Bun；失败日志与首次备份保留。
+- 最终回执于 2026-10-21 10:04:19（Asia/Shanghai）记录 `installed-and-started`：本机 0.1.3 已替换并启动，原 home 生命周期锁与服务进程一致，health 通过，Expert / Context / native ledger 分别为 6 / 1 / 135。25 个受保护配置文件逐文件摘要一致，未转换日用专家定义。
+- 数据库副本迁移演练、原有业务表内容摘要、native ledger 与新增 receipt 列检查通过。最终完整备份在私有证据目录的 `private-backup-0.1.2-before-0.1.3-retry/`，包含旧 app、home、profile 和一致性 SQLite；不上传。
+- 源码已推送个人仓库 main；`workbench-v0.1.3` 指向冻结构建源 `dbb0c4f1d57fe742bcdb165dd33cd8aca08b6ca8`。该前缀不触发上游 Stable/Beta tag 发布。
+- 个人 macOS arm64 预览包发布入口：[Personal Workbench 0.1.3](https://github.com/WYLINX601/synara--expert/releases/tag/workbench-v0.1.3)。DMG / ZIP 及 SHA-256、原始构建来源文件随包提供。上传保留原始 build-only 元数据，不改写为上游正式签名发布资格；没有自动更新 feed，也未验收远端 CI、Apple 公证、Linux/Windows 实机或新增真实 Provider 回合。
+
+本节是后续授权及实际交付记录；上文“不推送/公开发布”和待安装说明保留原阶段语境。安装回执中的 pushed/publicRelease 字段只描述安装程序当时范围，GitHub 最终状态应以本节和远端为准。

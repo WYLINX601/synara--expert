@@ -2453,14 +2453,7 @@ const make = Effect.gen(function* () {
           : undefined;
         return {
           ...providerSessionOptions,
-          ...(expertSession && preflight && preflight.optionalIssues.length > 0
-            ? {
-                expertSession: {
-                  ...expertSession,
-                  persona: `${expertSession.persona}\n\nUnavailable optional connections:\n${preflight.optionalIssues.map((issue) => `- ${issue}`).join("\n")}`,
-                },
-              }
-            : {}),
+          ...(expertSession && preflight ? { expertRuntimeNotices: preflight.optionalIssues } : {}),
         };
       });
 

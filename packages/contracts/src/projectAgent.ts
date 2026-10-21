@@ -475,9 +475,13 @@ export const ProjectAgentGetOverviewInput = Schema.Struct({
 });
 export type ProjectAgentGetOverviewInput = typeof ProjectAgentGetOverviewInput.Type;
 
-export const ProjectAgentListExpertsInput = Schema.Struct({ projectId: ProjectId });
+export const ProjectAgentListExpertsInput = Schema.Struct({
+  projectId: ProjectId,
+  targetProjectId: Schema.optional(ProjectId),
+});
 export type ProjectAgentListExpertsInput = typeof ProjectAgentListExpertsInput.Type;
 export const HubExpertSummary = Schema.Struct({
+  targetProjectId: Schema.optional(ProjectId),
   expertId: TrimmedNonEmptyString,
   displayName: TrimmedNonEmptyString,
   description: Schema.String,
@@ -860,6 +864,10 @@ export const ProjectAgentSubscribeInput = Schema.Struct({
 export type ProjectAgentSubscribeInput = typeof ProjectAgentSubscribeInput.Type;
 
 export const ProjectAgentStreamEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("deliverables-changed"),
+    projectId: ProjectId,
+  }),
   Schema.Struct({
     type: Schema.Literal("work-item-upserted"),
     projectId: ProjectId,

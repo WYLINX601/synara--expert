@@ -1,10 +1,11 @@
 import type { ProjectId } from "@synara/contracts";
-import { useQuery } from "@tanstack/react-query";
-import { useMemo, useSyncExternalStore } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import {
   readHubReferenceClient,
   hubReferenceConnectionGeneration as readConnection,
   subscribeToHubReferenceConnection as subscribe,
+  subscribeToHubDeliverableChanges,
 } from "~/workbench/host/hubReferenceClient";
 import type { ComposerCommandItem } from "../ComposerCommandMenu";
 import { buildHubReferenceMenuItems } from "./hubComposerReferences.logic";
@@ -18,6 +19,15 @@ export function useHubComposerReferences(input: {
 }) {
   const connection = useSyncExternalStore(subscribe, readConnection, () => null);
   const enabled = input.enabled && input.hubId !== null && connection !== null;
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!enabled || !input.hubId) return;
+    return subscribeToHubDeliverableChanges(input.hubId, () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["hub-references", connection, input.hubId, "deliverables"],
+      });
+    });
+  }, [enabled, input.hubId, connection, queryClient]);
   const experts = useQuery({
     queryKey: ["hub-references", connection, input.hubId, "experts"],
     enabled: enabled && input.isCoordinator,

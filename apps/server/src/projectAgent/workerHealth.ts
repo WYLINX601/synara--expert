@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { ProjectManagedWorkerSettleOutcome } from "@synara/contracts";
 
 export const PROJECT_AGENT_WORKER_HEALTH_INTERVAL_MS = 60_000;
@@ -91,9 +93,7 @@ export function isWorkerAlertEvent(eventType: string): boolean {
 // coordinator model — only a give-up ("Waiting on you") or a real settle
 // earns a coordinator turn.
 export const WORKER_WAKE_EVENT_TYPES: ReadonlySet<string> = new Set([
-  "thread.turn-diff-completed",
-  "thread.turn-interrupt-requested",
-  "thread.session-stop-requested",
+  "turn.completed",
   "approval.requested",
   "user-input.requested",
   "worker.error",
@@ -124,11 +124,29 @@ export function formatWorkerWatchLine(input: {
 export const WORKER_INBOX_REPORT_FILE = "report.md";
 const WORKER_REPORT_ASSISTANT_TEXT_MAX_CHARS = 4_000;
 
-const WORKER_SETTLEMENT_REPORT_EVENTS = new Set([
-  "thread.turn-diff-completed",
-  "thread.turn-interrupt-requested",
-  "thread.session-stop-requested",
-]);
+const WORKER_SETTLEMENT_REPORT_EVENTS = new Set(["turn.completed"]);
+
+export type WorkerRuntimeTerminalState = "completed" | "failed" | "interrupted" | "cancelled";
+
+export function isWorkerRuntimeTerminalState(value: unknown): value is WorkerRuntimeTerminalState {
+  return (
+    value === "completed" || value === "failed" || value === "interrupted" || value === "cancelled"
+  );
+}
+
+/** Stable per-thread/turn/generation identity for durable settlement replay. */
+export function workerTurnSettlementSourceId(input: {
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly lifecycleGeneration?: string | null;
+}): string {
+  const identity = JSON.stringify([
+    input.threadId,
+    input.turnId,
+    input.lifecycleGeneration ?? null,
+  ]);
+  return `worker-turn:${createHash("sha256").update(identity).digest("hex")}`;
+}
 
 export type WorkerSettlementOutcome = "completed" | "failed" | "interrupted" | "updated";
 
@@ -143,13 +161,20 @@ export function shouldMaterializeWorkerSettlementReport(eventType: string): bool
 export function classifyWorkerSettlement(input: {
   readonly eventType: string;
   readonly sessionStatus: string | null | undefined;
+  readonly runtimeTurnState?: WorkerRuntimeTerminalState;
 }): WorkerSettlementOutcome {
   const status = input.sessionStatus ?? "";
   const eventType = input.eventType;
+  if (input.runtimeTurnState !== undefined) {
+    if (input.runtimeTurnState === "completed") return "completed";
+    if (input.runtimeTurnState === "failed") return "failed";
+    return "interrupted";
+  }
   if (
-    eventType.includes("interrupt") ||
     status === "interrupted" ||
-    eventType === "worker.interrupted"
+    status === "stopped" ||
+    eventType === "worker.interrupted" ||
+    eventType === "worker.stopped"
   ) {
     return "interrupted";
   }
@@ -160,13 +185,6 @@ export function classifyWorkerSettlement(input: {
     eventType === "worker.disconnected"
   ) {
     return "failed";
-  }
-  if (
-    eventType === "thread.turn-diff-completed" ||
-    eventType === "worker.stopped" ||
-    eventType.includes("session-stop")
-  ) {
-    return "completed";
   }
   return "updated";
 }
@@ -182,24 +200,47 @@ export interface WorkerMonitorNotice {
   readonly phrase: string;
 }
 
-export function workerMonitorNoticeForEvent(eventType: string): WorkerMonitorNotice | null {
+export function workerMonitorNoticeForEvent(
+  eventType: string,
+  runtimeTurnState?: WorkerRuntimeTerminalState,
+): WorkerMonitorNotice | null {
   switch (eventType) {
-    case "thread.turn-diff-completed":
-      return {
-        kind: "settle",
-        outcome: "completed",
-        tone: "info",
-        marker: "\u2713",
-        phrase: "finished",
-      };
-    case "thread.session-stop-requested":
+    case "turn.completed":
+      if (runtimeTurnState === "completed") {
+        return {
+          kind: "settle",
+          outcome: "completed",
+          tone: "info",
+          marker: "\u2713",
+          phrase: "finished",
+        };
+      }
+      if (runtimeTurnState === "failed") {
+        return {
+          kind: "settle",
+          outcome: "failed",
+          tone: "error",
+          marker: "\u2717",
+          phrase: "failed",
+        };
+      }
+      if (runtimeTurnState === "interrupted" || runtimeTurnState === "cancelled") {
+        return {
+          kind: "settle",
+          outcome: "interrupted",
+          tone: "error",
+          marker: "\u26a0",
+          phrase: "was interrupted",
+        };
+      }
+      return null;
     case "worker.stopped":
       return {
         kind: "settle",
-        outcome: "stopped",
-        tone: "info",
-        marker: "\u2713",
-        phrase: "stopped",
+        outcome: "interrupted",
+        tone: "error",
+        marker: "\u26a0",
+        phrase: "was interrupted",
       };
     case "approval.requested":
       return {
@@ -217,7 +258,6 @@ export function workerMonitorNoticeForEvent(eventType: string): WorkerMonitorNot
         marker: "\u26a0",
         phrase: "needs your input",
       };
-    case "thread.turn-interrupt-requested":
     case "worker.interrupted":
       return {
         kind: "settle",
@@ -383,10 +423,12 @@ export function formatWorkerSettlementReport(input: {
   readonly status: string | null | undefined;
   readonly lastError: string | null | undefined;
   readonly lastAssistantText: string | null | undefined;
+  readonly runtimeTurnState?: WorkerRuntimeTerminalState;
 }): string {
   const outcome = classifyWorkerSettlement({
     eventType: input.eventType,
     sessionStatus: input.status,
+    ...(input.runtimeTurnState === undefined ? {} : { runtimeTurnState: input.runtimeTurnState }),
   });
   const error = input.lastError?.trim() || "none";
   const lastReply = input.lastAssistantText?.trim() || "(none)";

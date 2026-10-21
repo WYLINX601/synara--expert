@@ -28,6 +28,7 @@ import {
   PROVIDER_DISPLAY_NAMES,
   hubWorkItem,
   type OrchestrationCommand,
+  type OrchestrationSession,
   type ProjectActivity,
   type ProjectActivityKind,
   type ProjectInboxEvent,
@@ -51,6 +52,7 @@ import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { coordinatorCheckinTurnReport } from "@synara/shared/coordinatorCheckin";
 import { resolveThreadWorkspaceCwd } from "@synara/shared/threadEnvironment";
 import { isOrdinaryProjectRow } from "@synara/shared/projectContainers";
+import { deriveTurnStartSession } from "../../orchestration/turnStartSession.ts";
 import {
   coordinatorWelcomeDisplayName,
   coordinatorWelcomeMessageId,
@@ -146,9 +148,12 @@ import {
 } from "../materializer.ts";
 import {
   mergePinnedFocusItems,
+  allowedDigestSources,
+  sanitizeDigestFocusItems,
   validateDigestFocusItems,
   wakeReceiptRequestId,
 } from "../digest.ts";
+import { buildRuntimeDigest } from "../digestRuntimeState.ts";
 import {
   canAcceptTask,
   canConfigureProject,
@@ -173,6 +178,7 @@ import {
   formatWorkerSettlementReport,
   formatWorkerWatchLine,
   isFailedWorkerSessionStatus,
+  isWorkerRuntimeTerminalState,
   isTerminalWorkerSettleOutcome,
   isWorkerAlertEvent,
   lastAssistantTextFromMessages,
@@ -189,6 +195,7 @@ import {
   WORKER_WAKE_EVENT_TYPES,
   workerInboxReportPath,
   workerMonitorNoticeForEvent,
+  workerTurnSettlementSourceId,
 } from "../workerHealth.ts";
 import {
   ProjectAgentService,
@@ -385,6 +392,80 @@ export const makeProjectAgentService = Effect.gen(function* () {
       cause,
     });
 
+  const classifyRecoveryInterrupt = (threadId: ThreadId, turnId: string) =>
+    Effect.gen(function* () {
+      const highWater = yield* orchestrationEngine.getEventHighWaterSequence;
+      const recoveryCommandPrefix = `${WORKER_RECOVERY_COMMAND_PREFIX}${threadId}:`;
+      // Fold a per-thread, event-type-filtered stream so history size does not
+      // determine memory use. `thread.session-set` assigns the projected
+      // session exactly; `thread.turn-start-requested` uses the same idle to
+      // starting transition as ProjectionPipeline. That reconstructs which
+      // active turn a manual interrupt without payload.turnId targeted.
+      const provenance = yield* orchestrationEngine
+        .readThreadEventsThrough(threadId, 0, highWater, [
+          "thread.session-set",
+          "thread.turn-start-requested",
+          "thread.turn-interrupt-requested",
+        ])
+        .pipe(
+          Stream.runFold(
+            () => ({
+              session: null as OrchestrationSession | null,
+              recoveryInterruptMatched: false,
+              nonRecoveryInterruptMatched: false,
+            }),
+            (state, event) => {
+              switch (event.type) {
+                case "thread.session-set":
+                  return { ...state, session: event.payload.session };
+                case "thread.turn-start-requested": {
+                  const providerName =
+                    state.session?.providerName ?? event.payload.modelSelection?.provider ?? null;
+                  const providerInstanceId =
+                    state.session?.providerInstanceId ??
+                    event.payload.modelSelection?.instanceId ??
+                    state.session?.providerName ??
+                    event.payload.modelSelection?.provider;
+                  const startingSession = deriveTurnStartSession({
+                    threadId,
+                    currentSession: state.session,
+                    providerName,
+                    ...(providerInstanceId === undefined ? {} : { providerInstanceId }),
+                    requestedRuntimeMode: event.payload.runtimeMode,
+                    requestedAt: event.payload.createdAt,
+                  });
+                  return startingSession === null ? state : { ...state, session: startingSession };
+                }
+                case "thread.turn-interrupt-requested": {
+                  const requestedTurnId =
+                    event.payload.turnId ?? state.session?.activeTurnId ?? null;
+                  if (requestedTurnId !== turnId) return state;
+                  const isRecoveryInterrupt =
+                    event.payload.requestedBy === "system" &&
+                    typeof event.commandId === "string" &&
+                    event.commandId.startsWith(recoveryCommandPrefix) &&
+                    event.commandId.endsWith(":interrupt");
+                  return {
+                    ...state,
+                    recoveryInterruptMatched: state.recoveryInterruptMatched || isRecoveryInterrupt,
+                    nonRecoveryInterruptMatched:
+                      state.nonRecoveryInterruptMatched || !isRecoveryInterrupt,
+                  };
+                }
+                default:
+                  return state;
+              }
+            },
+          ),
+        );
+      if (provenance.nonRecoveryInterruptMatched) return Option.some(false);
+      return Option.some(provenance.recoveryInterruptMatched);
+    }).pipe(Effect.catch(() => Effect.succeed(Option.none<boolean>())));
+  const shouldDeferInterruptedTurnSettlement = (threadId: ThreadId, turnId: string) =>
+    classifyRecoveryInterrupt(threadId, turnId).pipe(
+      Effect.map((provenance) => Option.isNone(provenance) || provenance.value),
+    );
+
   // Per-project serialization: the wake check-then-act, configure, and the
   // health-check dispatch paths all read-then-write the same coordinator
   // state, so they run under one keyed semaphore per project.
@@ -480,6 +561,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
   const recordWorkerMonitorEvent = (input: {
     readonly worker: ProjectManagedWorker;
     readonly eventType: string;
+    readonly runtimeTurnState?: import("../workerHealth.ts").WorkerRuntimeTerminalState;
     readonly sourceEventId: string;
     readonly createdAt: string;
     readonly coordinatorThreadId: ThreadId;
@@ -490,16 +572,16 @@ export const makeProjectAgentService = Effect.gen(function* () {
     readonly lastKnownPr?: { readonly url: string } | null;
   }) =>
     Effect.gen(function* () {
-      const notice = workerMonitorNoticeForEvent(input.eventType);
+      const notice = workerMonitorNoticeForEvent(input.eventType, input.runtimeTurnState);
       if (notice === null) return;
       const worker = input.worker;
-      // A terminal settle already reported: same-episode re-ingests — a
-      // replayed stop or the health loop's status pass — must not post a
-      // second row, and a settled worker cannot go stuck. A genuinely new
-      // terminal transition (missing → completed) still reports.
+      // A settled worker cannot go stuck until a new turn request re-arms it.
+      // Runtime terminal activity replay is deduped by the thread/turn/generation
+      // inbox key. A later idle/stopped health snapshot must not replace that
+      // accepted outcome; a genuinely new runtime terminal turn may do so.
       if (
         isTerminalWorkerSettleOutcome(worker.settleOutcome) &&
-        (notice.kind === "stuck" || notice.outcome === worker.settleOutcome)
+        (notice.kind === "stuck" || input.eventType !== "turn.completed")
       ) {
         return;
       }
@@ -816,16 +898,16 @@ export const makeProjectAgentService = Effect.gen(function* () {
       // engine error doesn't burn an attempt.
       const claimLadderStep = (
         patch: Partial<ProjectManagedWorker>,
-        dispatch: Effect.Effect<boolean, ProjectAgentServiceError>,
+        dispatch: Effect.Effect<boolean | "interrupted-only", ProjectAgentServiceError>,
       ) =>
         Effect.gen(function* () {
           const claimed: ProjectManagedWorker = { ...updated, ...patch, updatedAt: nowIso };
           const previous = updated;
           if (!(yield* persistWorkerUpdate(claimed))) return false;
           const dispatched = yield* dispatch;
-          if (!dispatched) {
+          if (dispatched === false || dispatched === "interrupted-only") {
             yield* persistWorkerUpdate(previous);
-            return false;
+            return dispatched;
           }
           updated = claimed;
           return true;
@@ -856,9 +938,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
 
       // Recovery dispatches reuse the same orchestration commands the
       // coordinator tools send (steer message, interrupt, queued turn). Their
-      // deterministic command ids carry the WORKER_RECOVERY_COMMAND_PREFIX so
-      // the settle reactor ignores the interrupt side effects, and a crash
-      // between dispatch and the row write replays the same ids.
+      // deterministic command ids make a crash between dispatch and the row
+      // write replay the same commands and identify the durable interrupt.
       const dispatchRecovery = (command: OrchestrationCommand) =>
         orchestrationEngine.dispatch(command).pipe(
           Effect.as(true),
@@ -1238,21 +1319,35 @@ export const makeProjectAgentService = Effect.gen(function* () {
                     if (command === null) {
                       yield* latchNeedsYou(`silent:${lastActivity}`);
                     } else {
+                      const activeTurnId =
+                        shell.session?.activeTurnId ??
+                        (shell.latestTurn?.state === "running"
+                          ? (shell.latestTurn.turnId ?? null)
+                          : null);
                       const turnActive =
-                        shell.session?.activeTurnId != null ||
-                        shell.latestTurn?.state === "running";
+                        activeTurnId !== null || shell.latestTurn?.state === "running";
                       const interruptCommandId = `${WORKER_RECOVERY_COMMAND_PREFIX}${worker.threadId}:${lastActivity}:interrupt`;
                       const dispatchStep = Effect.gen(function* () {
-                        const interrupted = turnActive
-                          ? yield* dispatchRecovery({
-                              type: "thread.turn.interrupt",
-                              commandId: CommandId.makeUnsafe(interruptCommandId),
-                              threadId: worker.threadId,
-                              createdAt: nowIso,
-                            })
-                          : true;
+                        // An active turn must have an identity so its durable
+                        // interrupt request can be tied to the later terminal
+                        // event. If the projection cannot identify it, roll
+                        // the claim back instead of issuing an ambiguous stop.
+                        if (turnActive && activeTurnId === null) return false;
+                        const interrupted =
+                          activeTurnId !== null
+                            ? yield* dispatchRecovery({
+                                type: "thread.turn.interrupt",
+                                commandId: CommandId.makeUnsafe(interruptCommandId),
+                                threadId: worker.threadId,
+                                turnId: activeTurnId,
+                                requestedBy: "system",
+                                createdAt: nowIso,
+                              })
+                            : true;
                         if (!interrupted) return false;
-                        return yield* dispatchRecovery(command);
+                        const redispatched = yield* dispatchRecovery(command);
+                        if (redispatched) return true;
+                        return activeTurnId === null ? false : "interrupted-only";
                       });
                       const claimed = yield* claimLadderStep(
                         {
@@ -1262,7 +1357,14 @@ export const makeProjectAgentService = Effect.gen(function* () {
                         },
                         dispatchStep,
                       );
-                      if (claimed) {
+                      if (claimed === "interrupted-only") {
+                        // The turn was stopped durably, but its prompt could
+                        // not be re-dispatched. Keep the rolled-back ladder
+                        // step and surface the existing needs-you latch; a
+                        // later terminal must still be classified from the
+                        // durable interrupt provenance.
+                        yield* latchNeedsYou(`silent:${lastActivity}:redispatch-failed`);
+                      } else if (claimed) {
                         yield* ingestHealthEvent(
                           `worker-health:${worker.threadId}:redispatched:${lastActivity}`,
                           "worker.recovery-redispatched",
@@ -1635,6 +1737,27 @@ export const makeProjectAgentService = Effect.gen(function* () {
       return { summarizedThreadCount, pendingThreadCount };
     });
 
+  const countPendingWakeEvents = (projectId: ProjectId) =>
+    Effect.gen(function* () {
+      const cursor = yield* repository
+        .getCursor(projectId)
+        .pipe(Effect.mapError(toServiceError("Failed to load digest cursor.")));
+      let pendingWakeCount = 0;
+      let afterId = cursor.processedThroughInboxId;
+      let afterCreatedAt = cursor.processedThroughCreatedAt;
+      for (;;) {
+        const page = yield* repository
+          .listInboxAfter({ projectId, afterId, afterCreatedAt, limit: 100 })
+          .pipe(Effect.mapError(toServiceError("Failed to load digest inbox.")));
+        pendingWakeCount += page.filter((event) => event.eligibleWake).length;
+        if (page.length < 100) break;
+        const last = page[page.length - 1]!;
+        afterId = last.id;
+        afterCreatedAt = last.createdAt;
+      }
+      return pendingWakeCount;
+    });
+
   const buildOverview = (
     projectId: ProjectId,
     principal?: ProjectAgentPrincipal,
@@ -1702,6 +1825,36 @@ export const makeProjectAgentService = Effect.gen(function* () {
             .list(projectId)
             .pipe(Effect.mapError(toServiceError("Failed to load hub work.")))).map(hubWorkItem)
         : [];
+      if (digestValue) {
+        const [index, documents] = yield* Effect.all([
+          repository.listThreadIndex(projectId),
+          repository.listDocumentHeads(projectId),
+        ]).pipe(Effect.mapError(toServiceError("Failed to validate digest navigation.")));
+        const allowed = allowedDigestSources({
+          activities: [],
+          taskIds: tasks.map((task) => task.id),
+          threadIds: index
+            .filter((thread) => !thread.excluded && !thread.archived)
+            .map((thread) => thread.threadId),
+          documentPaths: documents.map((document) => document.logicalPath),
+        });
+        const current = buildRuntimeDigest({
+          workItems: hubWorkItems,
+          workers,
+          pendingWakeCount: yield* countPendingWakeEvents(projectId),
+        });
+        const focus = current
+          ? mergePinnedFocusItems(
+              current.focusItems,
+              digestValue.focusItems.filter((item) => item.pinned),
+            )
+          : digestValue.focusItems;
+        digestValue = {
+          ...digestValue,
+          ...(current ? { summary: current.summary } : {}),
+          focusItems: sanitizeDigestFocusItems(focus, allowed),
+        };
+      }
       const blockers = tasks
         .filter((task) => task.status === "blocked")
         .map((task) => ({
@@ -2262,6 +2415,16 @@ export const makeProjectAgentService = Effect.gen(function* () {
       const threads = yield* repository
         .listThreadIndex(projectId)
         .pipe(Effect.mapError(toServiceError("Failed to load digest threads.")));
+      const workers = yield* repository
+        .listManagedWorkers(projectId)
+        .pipe(Effect.mapError(toServiceError("Failed to load digest workers.")));
+      const workItems = Option.isSome(hubWorkRepository)
+        ? (yield* hubWorkRepository.value
+            .list(projectId)
+            .pipe(Effect.mapError(toServiceError("Failed to load digest work.")))).map(hubWorkItem)
+        : [];
+      const pendingWakeCount = yield* countPendingWakeEvents(projectId);
+      const runtimeDigest = buildRuntimeDigest({ workItems, workers, pendingWakeCount });
       // wake-skipped rows are wake bookkeeping, not group activity — feeding
       // them into the digest input would churn the signature (and the prompt)
       // with noise that never belongs in a project summary.
@@ -2279,6 +2442,9 @@ export const makeProjectAgentService = Effect.gen(function* () {
             thread.lastUpdatedAt,
           ]),
           coverage,
+          workers,
+          workItems,
+          pendingWakeCount,
         ]),
       );
       if ((yield* Ref.get(digestInputSignatures)).get(projectId) === inputSignature) {
@@ -2306,46 +2472,58 @@ export const makeProjectAgentService = Effect.gen(function* () {
         .getProjectShellById(projectId)
         .pipe(Effect.mapError(toServiceError("Failed to load project for digest.")));
       const cwd = Option.isSome(project) ? project.value.workspaceRoot : serverConfig.cwd;
-      const allowed = new Set([
-        ...digestActivity.map((entry) => entry.id),
-        ...tasks.map((task) => task.id),
-        ...threads.map((thread) => thread.threadId),
-        ...documents.map((doc) => doc.logicalPath),
-      ]);
-      const generated = yield* textGeneration
-        .generateProjectDigest({
-          cwd,
-          previousSummary: previousSummary ?? undefined,
-          activity: digestActivity.map((entry) => `${entry.id}: ${entry.summary}`).join("\n"),
-          coverage: `summarized=${coverage.summarizedThreadCount} pending=${coverage.pendingThreadCount}`,
-          pinnedFocus: (lastGood?.focusItems ?? [])
-            .filter((item) => item.pinned)
-            .map((item) => item.title)
-            .join("\n"),
-        })
-        .pipe(
-          Effect.map((result) => ({
-            summary: sanitizeProjectDigestSummary(result.summary) ?? INITIAL_PROJECT_DIGEST_SUMMARY,
-            focusItems: mergePinnedFocusItems(
-              validateDigestFocusItems(result.focusItems, allowed),
-              (lastGood?.focusItems ?? []).filter((item) => item.pinned),
-            ),
-            error: null as string | null,
-          })),
-          Effect.catch((error) =>
-            Effect.succeed({
-              summary:
-                previousSummary ??
-                "Project summary is unavailable until the next successful refresh.",
-              focusItems: lastGood?.focusItems ?? [],
-              error: error instanceof Error ? error.message : "Project digest generation failed.",
-            }),
-          ),
-        );
+      const allowed = allowedDigestSources({
+        activities: digestActivity,
+        taskIds: tasks.map((task) => task.id),
+        threadIds: threads
+          .filter((thread) => !thread.excluded && !thread.archived)
+          .map((thread) => thread.threadId),
+        documentPaths: documents.map((doc) => doc.logicalPath),
+      });
+      const safePreviousFocus = sanitizeDigestFocusItems(lastGood?.focusItems ?? [], allowed);
+      const generated = yield* runtimeDigest
+        ? Effect.succeed({ ...runtimeDigest, error: null as string | null })
+        : textGeneration
+            .generateProjectDigest({
+              cwd,
+              previousSummary: previousSummary ?? undefined,
+              activity: digestActivity.map((entry) => `${entry.id}: ${entry.summary}`).join("\n"),
+              coverage: `summarized=${coverage.summarizedThreadCount} pending=${coverage.pendingThreadCount}`,
+              pinnedFocus: (lastGood?.focusItems ?? [])
+                .filter((item) => item.pinned)
+                .map((item) => item.title)
+                .join("\n"),
+            })
+            .pipe(
+              Effect.map((result) => ({
+                summary:
+                  sanitizeProjectDigestSummary(result.summary) ?? INITIAL_PROJECT_DIGEST_SUMMARY,
+                focusItems: mergePinnedFocusItems(
+                  validateDigestFocusItems(result.focusItems, allowed),
+                  safePreviousFocus.filter((item) => item.pinned),
+                ),
+                error: null as string | null,
+              })),
+              Effect.catch((error) =>
+                Effect.succeed({
+                  summary:
+                    previousSummary ??
+                    "Project summary is unavailable until the next successful refresh.",
+                  focusItems: safePreviousFocus,
+                  error:
+                    error instanceof Error ? error.message : "Project digest generation failed.",
+                }),
+              ),
+            );
       const digest = {
         projectId,
         summary: generated.summary,
-        focusItems: generated.focusItems,
+        focusItems: runtimeDigest
+          ? mergePinnedFocusItems(
+              sanitizeDigestFocusItems(generated.focusItems, allowed),
+              safePreviousFocus.filter((item) => item.pinned),
+            )
+          : generated.focusItems,
         coverageFromSequence: lastGood?.coverageFromSequence ?? 0,
         coverageToSequence: digestActivity[0]?.sequence ?? 0,
         historicalCoverage:
@@ -2492,6 +2670,48 @@ export const makeProjectAgentService = Effect.gen(function* () {
       const overview = yield* buildOverview(input.projectId);
       yield* storeReceipt(input.requestId, input.projectId, "linkProject", overview);
       return overview;
+    });
+
+  // A terminal runtime activity can be committed just before a process crash
+  // prevents the live domain-event reactor from recording its worker result.
+  // Re-read the current terminal turn from the durable projection on health
+  // passes; the canonical turn identity makes this replay idempotent.
+  const reconcileLatestRuntimeTerminal = (input: {
+    readonly threadId: ThreadId;
+    readonly shell: OrchestrationThreadShell;
+  }) =>
+    Effect.gen(function* () {
+      const latestTurn = input.shell.latestTurn;
+      if (latestTurn === null || latestTurn.state === "running") return false;
+      const detail = yield* snapshotQuery
+        .getThreadDetailById(input.threadId)
+        .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+      if (Option.isNone(detail)) return false;
+      const activity = detail.value.activities.find(
+        (candidate) =>
+          candidate.kind === "turn.completed" && candidate.turnId === latestTurn.turnId,
+      );
+      if (!activity || activity.payload === null || typeof activity.payload !== "object")
+        return false;
+      const payload = activity.payload as Record<string, unknown>;
+      if (!isWorkerRuntimeTerminalState(payload.state)) return false;
+      yield* impl.ingestSettledThreadEvent({
+        threadId: input.threadId,
+        sourceEventId: workerTurnSettlementSourceId({
+          threadId: input.threadId,
+          turnId: latestTurn.turnId,
+          lifecycleGeneration:
+            typeof payload.lifecycleGeneration === "string" ? payload.lifecycleGeneration : null,
+        }),
+        eventType: "turn.completed",
+        runtimeTurnState: payload.state,
+        turnId: latestTurn.turnId,
+        ...(typeof payload.lifecycleGeneration === "string"
+          ? { lifecycleGeneration: payload.lifecycleGeneration }
+          : {}),
+        createdAt: activity.createdAt,
+      });
+      return true;
     });
 
   const impl: ProjectAgentServiceShape = {
@@ -5658,6 +5878,13 @@ export const makeProjectAgentService = Effect.gen(function* () {
 
     ingestSettledThreadEvent: (input) =>
       Effect.gen(function* () {
+        const isRuntimeTurnTerminal = input.eventType === "turn.completed";
+        if (
+          isRuntimeTurnTerminal &&
+          (input.turnId === undefined || !isWorkerRuntimeTerminalState(input.runtimeTurnState))
+        ) {
+          return;
+        }
         const task = yield* repository
           .findTaskByAssignedThread(input.threadId)
           .pipe(Effect.mapError(toServiceError("Failed to resolve task for event.")));
@@ -5684,18 +5911,65 @@ export const makeProjectAgentService = Effect.gen(function* () {
           .getConfig(projectId)
           .pipe(Effect.mapError(toServiceError("Failed to load coordinator for event.")));
         if (Option.isNone(config) || !config.value.enabled) return;
-        // A diff-completed event whose checkpoint closed missing/error belongs
-        // to a turn that did not finish cleanly — e.g. a turn the recovery
-        // ladder itself interrupted. Reclassify it so everything downstream
-        // treats it as an interruption (never `completed`): no false
-        // "finished" row, and the recovery counter is not reset by the
-        // ladder's own interrupt.
-        const eventType =
-          input.eventType === "thread.turn-diff-completed" &&
-          input.checkpointStatus !== undefined &&
-          input.checkpointStatus !== "ready"
-            ? "worker.interrupted"
-            : input.eventType;
+        const healthStopStatus =
+          input.eventType === "worker.stopped"
+            ? "stopped"
+            : input.eventType === "worker.interrupted"
+              ? "interrupted"
+              : null;
+        if (isRuntimeTurnTerminal && Option.isNone(configByCoordinator)) {
+          const currentTurn = Option.isSome(shell) ? shell.value.latestTurn : null;
+          // A diff placeholder or a delayed terminal event for an older turn
+          // cannot settle whatever turn is now current. The durable runtime
+          // activity is accepted only after its turn is terminal in projection.
+          if (
+            currentTurn === null ||
+            currentTurn.turnId !== input.turnId ||
+            currentTurn.state === "running"
+          ) {
+            return;
+          }
+        }
+        if (healthStopStatus !== null && Option.isNone(configByCoordinator)) {
+          // Health snapshots can go stale between inspection and ingestion.
+          // Re-read the session status and reject a stop reported for a shell
+          // that has already resumed or started another turn.
+          if (
+            Option.isNone(shell) ||
+            shell.value.session?.status !== healthStopStatus ||
+            shell.value.latestTurn?.state === "running"
+          ) {
+            return;
+          }
+        }
+        const interruptedTurnId =
+          isRuntimeTurnTerminal &&
+          (input.runtimeTurnState === "interrupted" || input.runtimeTurnState === "cancelled")
+            ? input.turnId
+            : healthStopStatus !== null && Option.isSome(shell)
+              ? (shell.value.latestTurn?.turnId ?? undefined)
+              : undefined;
+        if (Option.isSome(worker) && interruptedTurnId !== undefined) {
+          // Suppress only a proven recovery interrupt for this current turn.
+          // A later manual stop overrides it. If step 2 rolls back after
+          // redispatch failure, or durable evidence is unavailable, defer
+          // rather than settling the internal stop as a worker result.
+          if (yield* shouldDeferInterruptedTurnSettlement(input.threadId, interruptedTurnId)) {
+            return;
+          }
+        }
+        // Diff completion and explicit stop/interrupt requests are not runtime
+        // outcomes. Only a durable terminal activity supplies this state.
+        const eventType = input.eventType;
+        const sourceEventId = isRuntimeTurnTerminal
+          ? workerTurnSettlementSourceId({
+              threadId: input.threadId,
+              turnId: input.turnId!,
+              ...(input.lifecycleGeneration === undefined
+                ? {}
+                : { lifecycleGeneration: input.lifecycleGeneration }),
+            })
+          : input.sourceEventId;
         if (Option.isSome(configByCoordinator)) {
           // Coordinator self-events never wake coordination. Automation
           // "check-in" turns additionally stay out of the coordinator
@@ -5703,7 +5977,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
           // concluded instead.
           let summary = "Coordinator self-events do not wake coordination.";
           let kind: ProjectActivityKind = "wake-skipped";
-          if (input.eventType === "thread.turn-diff-completed" && input.turnId !== undefined) {
+          if (isRuntimeTurnTerminal && input.turnId !== undefined) {
             const detail = yield* snapshotQuery
               .getThreadDetailById(input.threadId)
               .pipe(Effect.catch(() => Effect.succeed(Option.none())));
@@ -5758,7 +6032,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
             id: branded.inbox(),
             projectId,
             sourceThreadId: input.threadId,
-            sourceEventId: input.sourceEventId,
+            sourceEventId,
             eventType,
             taskId: Option.isSome(task) ? task.value.id : null,
             eligibleWake,
@@ -5782,6 +6056,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
           const outcome = classifyWorkerSettlement({
             eventType,
             sessionStatus: Option.isSome(shell) ? shell.value.session?.status : null,
+            ...(isRuntimeTurnTerminal ? { runtimeTurnState: input.runtimeTurnState } : {}),
           });
           const report = formatWorkerSettlementReport({
             title,
@@ -5790,6 +6065,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
             status: Option.isSome(shell) ? shell.value.session?.status : null,
             lastError: Option.isSome(shell) ? shell.value.session?.lastError : null,
             lastAssistantText,
+            ...(isRuntimeTurnTerminal ? { runtimeTurnState: input.runtimeTurnState } : {}),
           });
           const written = yield* upsertSystemDocument({
             projectId,
@@ -5856,7 +6132,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
           yield* recordWorkerMonitorEvent({
             worker: worker.value,
             eventType,
-            sourceEventId: input.sourceEventId,
+            sourceEventId,
+            ...(isRuntimeTurnTerminal ? { runtimeTurnState: input.runtimeTurnState } : {}),
             createdAt: input.createdAt,
             coordinatorThreadId: config.value.coordinatorThreadId,
             taskId: Option.isSome(task) ? task.value.id : null,
@@ -6129,7 +6406,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
             goalId: activeGoal?.id ?? null,
             taskId: eligible[0]?.taskId ?? null,
             source: null,
-            summary: `Dispatched coordinator continuation ${runId}. Later events remain queued.`,
+            summary: `Dispatched coordinator continuation ${runId}.`,
             createdAt: isoNow(),
           });
           yield* impl.scheduleDigest(projectId);
@@ -6187,7 +6464,20 @@ export const makeProjectAgentService = Effect.gen(function* () {
             const shell = yield* snapshotQuery
               .getThreadShellById(threadId)
               .pipe(Effect.catch(() => Effect.succeed(Option.none())));
-            const worker = workerByThread.get(threadId);
+            let reconciledRuntimeTerminal = false;
+            if (Option.isSome(shell)) {
+              reconciledRuntimeTerminal = yield* reconcileLatestRuntimeTerminal({
+                threadId,
+                shell: shell.value,
+              });
+            }
+            let worker = workerByThread.get(threadId);
+            if (reconciledRuntimeTerminal && worker !== undefined) {
+              const refreshed = yield* repository
+                .findManagedWorkerByThread(threadId)
+                .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+              if (Option.isSome(refreshed)) worker = refreshed.value;
+            }
             if (worker !== undefined) {
               yield* inspectManagedWorkerHealth({ worker, shell, liveWorkerThreadIds });
               continue;
@@ -6335,11 +6625,31 @@ export const makeProjectAgentService = Effect.gen(function* () {
               .pipe(Effect.catch(() => Effect.void));
           });
         if (input.action === "stop") {
+          const shell = yield* snapshotQuery
+            .getThreadShellById(worker.threadId)
+            .pipe(Effect.mapError(toServiceError("Failed to load worker thread.")));
+          const activeTurnId = Option.isSome(shell)
+            ? (shell.value.session?.activeTurnId ?? null)
+            : null;
+          // A recovery interrupt clears activeTurnId before the worker alert
+          // is resolved. For an unfinished delegated task, let the user's
+          // explicit Stop target that interrupted latest turn so durable
+          // provenance records the human intent. A completed idle turn stays
+          // an untargeted release and must not be interrupted by stale id.
+          const turnId =
+            activeTurnId ??
+            (!isTerminalWorkerSettleOutcome(worker.settleOutcome) &&
+            Option.isSome(shell) &&
+            shell.value.latestTurn?.state === "interrupted"
+              ? (shell.value.latestTurn.turnId ?? undefined)
+              : undefined);
           yield* orchestrationEngine
             .dispatch({
               type: "thread.turn.interrupt",
               commandId: CommandId.makeUnsafe(`agent-resolve:${input.requestId}:stop`),
               threadId: worker.threadId,
+              ...(turnId === undefined ? {} : { turnId }),
+              requestedBy: "user",
               createdAt: nowIso,
             })
             .pipe(Effect.mapError(toServiceError("Failed to interrupt the worker thread.")));
@@ -6672,6 +6982,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
             if (event.type === "digest-upserted") return event.digest.projectId === input.projectId;
             if (event.type === "thread-index-upserted") return event.projectId === input.projectId;
             if (event.type === "work-item-upserted") return event.projectId === input.projectId;
+            if (event.type === "deliverables-changed") return event.projectId === input.projectId;
             return event.head.projectId === input.projectId;
           };
           const liveQueue = yield* Queue.bounded<ProjectAgentStreamEvent, Cause.Done>(64);
@@ -6907,6 +7218,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
     publish: (input, principal) =>
       deliveryIdentity(input.projectId, principal).pipe(
         Effect.flatMap((identity) => delivery.publish(identity, input)),
+        Effect.tap(() => publish({ type: "deliverables-changed", projectId: input.projectId })),
         Effect.mapError(deliveryError),
       ),
     list: (input, principal) =>
@@ -6927,12 +7239,14 @@ export const makeProjectAgentService = Effect.gen(function* () {
     withdraw: (input, principal) =>
       deliveryIdentity(input.projectId, principal).pipe(
         Effect.flatMap((identity) => delivery.withdraw(identity, input)),
+        Effect.tap(() => publish({ type: "deliverables-changed", projectId: input.projectId })),
         Effect.mapError(deliveryError),
       ),
     maintainLibraryPaths: (input) =>
-      delivery
-        .maintainLibraryPaths(input.projectId, input.root, input.change)
-        .pipe(Effect.mapError(deliveryError)),
+      delivery.maintainLibraryPaths(input.projectId, input.root, input.change).pipe(
+        Effect.tap(() => publish({ type: "deliverables-changed", projectId: input.projectId })),
+        Effect.mapError(deliveryError),
+      ),
   };
   return { ...impl, deliverables } satisfies ProjectAgentServiceShape;
 });

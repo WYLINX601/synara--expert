@@ -846,106 +846,37 @@ const readPinnedFileBytes = (
   expectedSize: number,
   expectedHash: string,
 ) =>
-  Effect.acquireUseRelease(
-    Effect.tryPromise({
-      try: async () => {
-        const directory = await fs.mkdtemp(path.join(os.tmpdir(), "synara-hub-deliverable-read-"));
-        const workTree = path.join(directory, "worktree");
-        await fs.mkdir(workTree);
-        return { directory, workTree, indexPath: path.join(directory, "index") };
-      },
-      catch: (cause) => toServiceError(cause, "Could not create a private pinned-read workspace."),
-    }),
-    ({ workTree, indexPath }) =>
-      Effect.gen(function* () {
-        if (!/^[0-9a-f]{40}$/i.test(commitSha)) {
-          return yield* fail("Pinned Hub library commit is invalid.", "unavailable");
-        }
-        if (expectedSize > HUB_DELIVERABLE_MAX_FILE_BYTES) {
-          return yield* fail(
-            "Pinned Hub deliverable exceeds the supported size limit.",
-            "unavailable",
-          );
-        }
-        const relative = yield* normalizeLibraryRelativePath(libraryPath).pipe(
-          Effect.mapError((cause) => toServiceError(cause, "Pinned library path is invalid.")),
-        );
-        yield* git
-          .execute({
-            operation: "hub.deliverables.checkoutPinnedFile",
-            cwd: root,
-            args: [`--work-tree=${workTree}`, "checkout", commitSha, "--", relative],
-            env: {
-              GIT_INDEX_FILE: indexPath,
-              GIT_LITERAL_PATHSPECS: "1",
-              GIT_TERMINAL_PROMPT: "0",
-            },
-          })
-          .pipe(
-            Effect.mapError((cause) =>
-              toServiceError(cause, "Pinned Hub deliverable is unavailable."),
-            ),
-          );
-        const bytes = yield* Effect.tryPromise({
-          try: async () => {
-            const realWorkTree = await fs.realpath(workTree);
-            const candidate = path.resolve(realWorkTree, ...relative.split("/"));
-            if (!isContainedPath(realWorkTree, candidate)) {
-              throw new HubDeliverablesError({
-                message: "Pinned Hub deliverable escaped its private checkout.",
-                code: "unavailable",
-              });
-            }
-            let current = realWorkTree;
-            const segments = relative.split("/");
-            for (const [index, segment] of segments.entries()) {
-              current = path.join(current, segment);
-              const stat = await fs.lstat(current);
-              if (stat.isSymbolicLink()) {
-                throw new HubDeliverablesError({
-                  message: "Pinned Hub deliverable contains a symbolic link.",
-                  code: "unavailable",
-                });
-              }
-              if (index < segments.length - 1 && !stat.isDirectory()) {
-                throw new HubDeliverablesError({
-                  message: "Pinned Hub deliverable path contains a non-directory entry.",
-                  code: "unavailable",
-                });
-              }
-              if (index === segments.length - 1 && !stat.isFile()) {
-                throw new HubDeliverablesError({
-                  message: "Pinned Hub deliverable is not a regular file.",
-                  code: "unavailable",
-                });
-              }
-            }
-            const realTarget = await fs.realpath(candidate);
-            if (!isContainedPath(realWorkTree, realTarget)) {
-              throw new HubDeliverablesError({
-                message: "Pinned Hub deliverable escaped its private checkout.",
-                code: "unavailable",
-              });
-            }
-            const content = await fs.readFile(realTarget);
-            if (content.byteLength !== expectedSize || hashBytes(content) !== expectedHash) {
-              throw new HubDeliverablesError({
-                message: "Pinned Hub deliverable failed its size or integrity check.",
-                code: "unavailable",
-              });
-            }
-            return content;
-          },
-          catch: (cause) => toServiceError(cause, "Could not read pinned Hub deliverable bytes."),
-        });
-        return bytes;
-      }),
-    ({ directory }) =>
-      Effect.tryPromise({
-        try: () => fs.rm(directory, { recursive: true, force: true }),
-        catch: () => undefined,
-      }).pipe(Effect.catch(() => Effect.void)),
-  );
+  Effect.gen(function* () {
+    if (!/^[0-9a-f]{40}$/i.test(commitSha)) {
+      return yield* fail("Pinned Hub library commit is invalid.", "unavailable");
+    }
+    if (expectedSize > HUB_DELIVERABLE_MAX_FILE_BYTES) {
+      return yield* fail("Pinned Hub deliverable exceeds the supported size limit.", "unavailable");
+    }
+    const relative = yield* normalizeLibraryRelativePath(libraryPath).pipe(
+      Effect.mapError((cause) => toServiceError(cause, "Pinned library path is invalid.")),
+    );
+    const blob = yield* git
+      .readBlobAtRev({
+        cwd: root,
+        filePath: relative,
+        rev: commitSha,
+        maxBytes: expectedSize,
+      })
+      .pipe(
+        Effect.mapError((cause) =>
+          toServiceError(cause, "Could not read pinned Hub deliverable bytes."),
+        ),
+      );
+    const bytes = Buffer.from(blob.bytes);
+    if (bytes.byteLength !== expectedSize || hashBytes(bytes) !== expectedHash) {
+      return yield* fail(
+        "Pinned Hub deliverable failed its size or integrity check.",
+        "unavailable",
+      );
+    }
+    return bytes;
+  });
 
 const findCommittedRequest = (
   git: GitCoreShape,
@@ -1063,7 +994,7 @@ const validateExistingTargets = (
 const commitOnlyPaths = (
   git: GitCoreShape,
   root: string,
-  paths: readonly string[],
+  files: readonly PreparedFile[],
   commitMarkerId: string,
 ) =>
   Effect.acquireUseRelease(
@@ -1105,16 +1036,49 @@ const commitOnlyPaths = (
               toServiceError(cause, "Could not prepare Hub library index."),
             ),
           );
-        yield* git
-          .execute({
-            operation: "hub.deliverables.stage",
-            cwd: root,
-            args: ["add", "-A", "--", ...paths],
-            env,
-          })
-          .pipe(
-            Effect.mapError((cause) => toServiceError(cause, "Could not stage Hub deliverables.")),
+        for (const file of files) {
+          const relative = yield* normalizeLibraryRelativePath(file.libraryPath).pipe(
+            Effect.mapError((cause) => toServiceError(cause, "Generated library path is invalid.")),
           );
+          const bytes = Buffer.from(file.bytesBase64, "base64");
+          if (hashBytes(bytes) !== file.file.sha256) {
+            return yield* fail(
+              `Journaled deliverable "${file.file.path}" failed its integrity check.`,
+              "unavailable",
+            );
+          }
+          const object = yield* git
+            .execute({
+              operation: "hub.deliverables.hashObject",
+              cwd: root,
+              args: ["hash-object", "-w", "--no-filters", "--stdin"],
+              env,
+              stdinBytes: bytes,
+            })
+            .pipe(
+              Effect.mapError((cause) =>
+                toServiceError(cause, "Could not write raw Hub deliverable bytes to Git."),
+              ),
+            );
+          const objectId = object.stdout.trim();
+          if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(objectId)) {
+            return yield* fail("Git returned an invalid Hub deliverable blob id.", "unavailable");
+          }
+          const indexRecord = Buffer.from(`100644 ${objectId} 0\t${relative}\0`, "utf8");
+          yield* git
+            .execute({
+              operation: "hub.deliverables.stageRawBlob",
+              cwd: root,
+              args: ["update-index", "-z", "--index-info"],
+              env,
+              stdinBytes: indexRecord,
+            })
+            .pipe(
+              Effect.mapError((cause) =>
+                toServiceError(cause, "Could not stage Hub deliverables."),
+              ),
+            );
+        }
         const staged = yield* git
           .execute({
             operation: "hub.deliverables.stagedPaths",
@@ -1128,12 +1092,30 @@ const commitOnlyPaths = (
             ),
           );
         if (staged.stdout.trim().length > 0) {
-          yield* git
+          const tree = yield* git
             .execute({
-              operation: "hub.deliverables.commit",
+              operation: "hub.deliverables.writeTree",
+              cwd: root,
+              args: ["write-tree"],
+              env,
+            })
+            .pipe(
+              Effect.mapError((cause) =>
+                toServiceError(cause, "Could not prepare the Hub deliverable commit tree."),
+              ),
+            );
+          const treeSha = tree.stdout.trim();
+          if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(treeSha)) {
+            return yield* fail("Git returned an invalid Hub deliverable tree id.", "unavailable");
+          }
+          const commit = yield* git
+            .execute({
+              operation: "hub.deliverables.commitTree",
               cwd: root,
               args: [
-                "commit",
+                "commit-tree",
+                treeSha,
+                ...(hasHead ? ["-p", headProbe.stdout.trim()] : []),
                 "-m",
                 "Publish Hub deliverables",
                 "-m",
@@ -1143,18 +1125,35 @@ const commitOnlyPaths = (
             })
             .pipe(
               Effect.mapError((cause) =>
-                toServiceError(cause, "Could not commit Hub deliverables."),
+                toServiceError(cause, "Could not create the Hub deliverable commit."),
               ),
             );
+          const commitSha = commit.stdout.trim();
+          if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(commitSha)) {
+            return yield* fail("Git returned an invalid Hub deliverable commit id.", "unavailable");
+          }
+          yield* git
+            .execute({
+              operation: "hub.deliverables.updateRef",
+              cwd: root,
+              args: [
+                "update-ref",
+                "-m",
+                "Publish Hub deliverables",
+                "HEAD",
+                commitSha,
+                hasHead ? headProbe.stdout.trim() : "0".repeat(commitSha.length),
+              ],
+              env,
+            })
+            .pipe(
+              Effect.mapError((cause) =>
+                toServiceError(cause, "Could not publish the Hub deliverable commit."),
+              ),
+            );
+          return commitSha.toLowerCase();
         }
-        const head = yield* git
-          .execute({ operation: "hub.deliverables.head", cwd: root, args: ["rev-parse", "HEAD"] })
-          .pipe(
-            Effect.mapError((cause) =>
-              toServiceError(cause, "Could not resolve the Hub library commit."),
-            ),
-          );
-        const commitSha = head.stdout.trim();
+        const commitSha = headProbe.stdout.trim();
         if (!/^[0-9a-f]{40}$/i.test(commitSha)) {
           return yield* fail("Hub library returned an invalid commit id.", "unavailable");
         }
@@ -1885,12 +1884,17 @@ export const makeHubDeliverablesService = (dependencies: HubDeliverablesDependen
                         ),
                     });
                   }
-                  const commitSha = yield* commitOnlyPaths(
-                    git,
-                    root,
-                    prepared.map((file) => file.libraryPath),
-                    commitMarkerId,
-                  );
+                  const commitSha = yield* commitOnlyPaths(git, root, prepared, commitMarkerId);
+                  for (const file of prepared) {
+                    yield* readPinnedFileBytes(
+                      git,
+                      root,
+                      commitSha,
+                      file.libraryPath,
+                      file.file.sizeBytes,
+                      file.file.sha256,
+                    ).pipe(Effect.asVoid);
+                  }
                   const committedFilesJson = JSON.stringify({ files: storedFiles, provenance });
                   yield* sql`
               UPDATE hub_expert_deliverable_requests

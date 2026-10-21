@@ -33,6 +33,7 @@ import {
   ProviderSteerTurnInput,
   ProviderSessionStartInput,
   ProviderExpertSession,
+  ProviderExpertRuntimeNotices,
   ProviderExpertApplication,
   ExpertSkillApplication,
   type ExpertAppliedRuntimeRecord,
@@ -484,6 +485,16 @@ function readPersistedExpertSession(
   return Schema.is(ProviderExpertSession)(payload.expertSession) ? payload.expertSession : null;
 }
 
+function readPersistedExpertRuntimeNotices(
+  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
+): ReadonlyArray<string> | null {
+  const payload = runtimePayloadRecord(runtimePayload);
+  if (!Object.hasOwn(payload, "expertRuntimeNotices")) return [];
+  return Schema.is(ProviderExpertRuntimeNotices)(payload.expertRuntimeNotices)
+    ? payload.expertRuntimeNotices
+    : null;
+}
+
 function readPersistedContextSession(
   runtimePayload: ProviderRuntimeBinding["runtimePayload"],
 ): ContextSessionType | null | undefined {
@@ -522,6 +533,20 @@ function sameContextSession(
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function expertRuntimeNoticeInstructions(notices: ReadonlyArray<string>): string {
+  return notices.length > 0
+    ? `Unavailable optional connections:\n${notices.map((notice) => `- ${notice}`).join("\n")}`
+    : "";
+}
+
+function appendExpertRuntimeInstructions(
+  expertSession: ProviderExpertSession,
+  instructions: string,
+): ProviderExpertSession {
+  if (!instructions) return expertSession;
+  return { ...expertSession, persona: `${expertSession.persona}\n\n${instructions}` };
 }
 
 function readPersistedComputerControl(
@@ -1063,9 +1088,23 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     };
     const prepareExpertSession = (
       expertSession: ProviderExpertSession | undefined,
-      input: { readonly operation: string; readonly cwd?: string },
+      input: {
+        readonly operation: string;
+        readonly cwd?: string;
+        readonly runtimeNotices?: ReadonlyArray<string>;
+      },
     ): Effect.Effect<ProviderExpertSession | undefined, ProviderValidationError> => {
-      if (!expertSession) return Effect.succeed(undefined);
+      const runtimeNoticeInstructions = expertRuntimeNoticeInstructions(input.runtimeNotices ?? []);
+      if (!expertSession) {
+        return runtimeNoticeInstructions
+          ? Effect.fail(
+              toValidationError(
+                input.operation,
+                "Expert runtime notices require a pinned Expert snapshot.",
+              ),
+            )
+          : Effect.succeed(undefined);
+      }
       if (expertSession.skillLoading !== "index") {
         if (skillPackageStore && expertSession.skills.length > 0) {
           return Effect.fail(
@@ -1075,7 +1114,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             ),
           );
         }
-        return Effect.succeed(expertSession);
+        return Effect.succeed(
+          appendExpertRuntimeInstructions(expertSession, runtimeNoticeInstructions),
+        );
       }
       if (!skillPackageStore || !expertStore || !Array.isArray(expertSession.skillEntries)) {
         return Effect.fail(
@@ -1170,7 +1211,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           const bmadEvidence = bmad
             ? `BMad workspace preflight evidence (this does not grant tools or authorization): ${JSON.stringify({ projectRoot: bmad.projectRoot, configurationHash: bmad.configurationHash })}.`
             : "";
-          const instructions = [compiled.text, bmadEvidence].filter(Boolean).join("\n\n");
+          const instructions = [compiled.text, bmadEvidence, runtimeNoticeInstructions]
+            .filter(Boolean)
+            .join("\n\n");
           return {
             ...expertSession,
             skillsRoot: path.join(options!.stateDir!, "experts", "skill-packages"),
@@ -3013,11 +3056,20 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             const hasPersistedResumeCursor = hasResumeCursor(binding.resumeCursor);
             const persistedCwd = readPersistedCwd(binding.runtimePayload);
             const persistedExpertSession = readPersistedExpertSession(binding.runtimePayload);
+            const persistedExpertRuntimeNotices = readPersistedExpertRuntimeNotices(
+              binding.runtimePayload,
+            );
             const persistedContextSession = readPersistedContextSession(binding.runtimePayload);
             if (persistedExpertSession === null) {
               return yield* toValidationError(
                 input.operation,
                 `Cannot recover thread '${threadId}' because its persisted Expert snapshot configuration is invalid.`,
+              );
+            }
+            if (persistedExpertRuntimeNotices === null) {
+              return yield* toValidationError(
+                input.operation,
+                `Cannot recover thread '${threadId}' because its persisted Expert runtime notices are invalid.`,
               );
             }
             if (persistedContextSession === null) {
@@ -3040,6 +3092,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               {
                 operation: input.operation,
                 ...(persistedCwd ? { cwd: persistedCwd } : {}),
+                runtimeNotices: persistedExpertRuntimeNotices,
               },
             );
             const persistedModelSelection = readPersistedModelSelection(binding.runtimePayload);
@@ -3234,6 +3287,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 launchOptionsAuthoritative: true,
                 runtimePayload: {
                   expertSession: persistedExpertSession ?? null,
+                  expertRuntimeNotices: persistedExpertRuntimeNotices,
                   contextSession: persistedContextSession ?? null,
                 },
               }).pipe(
@@ -3247,6 +3301,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                           [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: false,
                           ...(persistedComputerControl ? { enableComputerControl: true } : {}),
                           expertSession: persistedExpertSession ?? null,
+                          expertRuntimeNotices: persistedExpertRuntimeNotices,
                           contextSession: persistedContextSession ?? null,
                           ...(persistedAutoApproveSynaraTools
                             ? { autoApproveSynaraTools: true }
@@ -3662,6 +3717,15 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             `Cannot dispatch a turn for thread '${input.threadId}' because its persisted Expert snapshot configuration is invalid.`,
           );
         }
+        const persistedExpertRuntimeNotices = readPersistedExpertRuntimeNotices(
+          providerBinding?.runtimePayload,
+        );
+        if (persistedExpertRuntimeNotices === null) {
+          return yield* toValidationError(
+            input.operation,
+            `Cannot dispatch a turn for thread '${input.threadId}' because its persisted Expert runtime notices are invalid.`,
+          );
+        }
         const boundCwd = providerBinding
           ? readPersistedCwd(providerBinding.runtimePayload)
           : undefined;
@@ -3670,6 +3734,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           {
             operation: input.operation,
             ...(boundCwd ? { cwd: boundCwd } : {}),
+            runtimeNotices: persistedExpertRuntimeNotices,
           },
         );
         const persistedContextSession = readPersistedContextSession(
@@ -3816,9 +3881,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         const verifiedExpertSession = yield* prepareExpertSession(input.expertSession, {
           operation: "ProviderService.startSession",
           ...(input.cwd ? { cwd: input.cwd } : {}),
+          runtimeNotices: input.expertRuntimeNotices ?? [],
         });
+        const { expertRuntimeNotices: _expertRuntimeNotices, ...adapterInputWithoutNotices } =
+          input;
         const adapterInput = {
-          ...input,
+          ...adapterInputWithoutNotices,
           ...(verifiedExpertSession ? { expertSession: verifiedExpertSession } : {}),
         };
         // Reject disabled providers before waiting on lifecycle work, then
@@ -4151,6 +4219,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                       [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: false,
                       ...(effectiveComputerControl ? { enableComputerControl: true } : {}),
                       expertSession: input.expertSession ?? null,
+                      expertRuntimeNotices: input.expertRuntimeNotices ?? [],
                       contextSession: input.contextSession ?? null,
                       [PRIOR_TRANSCRIPT_BOOTSTRAP_PENDING]: priorTranscriptBootstrapPending,
                     },
@@ -4231,6 +4300,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               const previousExpertSession = readPersistedExpertSession(
                 persistedBinding.runtimePayload,
               );
+              const previousExpertRuntimeNotices = readPersistedExpertRuntimeNotices(
+                persistedBinding.runtimePayload,
+              );
               const previousContextSession = readPersistedContextSession(
                 persistedBinding.runtimePayload,
               );
@@ -4238,6 +4310,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 return yield* toValidationError(
                   "ProviderService.startSession",
                   `Cannot restore thread '${threadId}' because its persisted Expert snapshot configuration is invalid.`,
+                );
+              }
+              if (previousExpertRuntimeNotices === null) {
+                return yield* toValidationError(
+                  "ProviderService.startSession",
+                  `Cannot restore thread '${threadId}' because its persisted Expert runtime notices are invalid.`,
                 );
               }
               if (previousContextSession === null) {
@@ -4294,6 +4372,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                           {
                             operation: "ProviderService.startSession.restore",
                             ...(previousCwd ? { cwd: previousCwd } : {}),
+                            runtimeNotices: previousExpertRuntimeNotices,
                           },
                         );
                         const restoredSession = yield* previousAdapter.startSession({
@@ -4356,6 +4435,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                             runtimePayload: {
                               [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: false,
                               expertSession: previousExpertSession ?? null,
+                              expertRuntimeNotices: previousExpertRuntimeNotices,
                               contextSession: previousContextSession ?? null,
                               [PRIOR_TRANSCRIPT_BOOTSTRAP_PENDING]:
                                 previousPriorTranscriptBootstrapPending,
@@ -4629,8 +4709,18 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
 
         const effectiveExpertSession =
           input.expertSession ?? readPersistedExpertSession(sourceBinding.runtimePayload);
+        const sourceExpertRuntimeNotices = readPersistedExpertRuntimeNotices(
+          sourceBinding.runtimePayload,
+        );
+        const effectiveExpertRuntimeNotices =
+          input.expertRuntimeNotices ?? sourceExpertRuntimeNotices;
         const sourceContextSession = readPersistedContextSession(sourceBinding.runtimePayload);
-        if (effectiveExpertSession === null || sourceContextSession === null) {
+        if (
+          effectiveExpertSession === null ||
+          sourceExpertRuntimeNotices === null ||
+          effectiveExpertRuntimeNotices === null ||
+          sourceContextSession === null
+        ) {
           return yield* toValidationError(
             "ProviderService.forkThread",
             `Cannot fork thread '${input.sourceThreadId}' because its persisted instruction snapshot is invalid.`,
@@ -4667,6 +4757,16 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             `Non-empty Context is not supported by provider '${adapter.provider}'.`,
           );
         }
+        const verifiedExpertSession = yield* prepareExpertSession(
+          effectiveExpertSession ?? undefined,
+          {
+            operation: "ProviderService.forkThread",
+            ...(targetCwd ? { cwd: targetCwd } : {}),
+            runtimeNotices: effectiveExpertRuntimeNotices,
+          },
+        );
+        const { expertRuntimeNotices: _expertRuntimeNotices, ...adapterInputWithoutNotices } =
+          input;
 
         // Reserve the target generation before native init/fork so the provider
         // receives the generation that will own its ACK, events, binding, and
@@ -4674,7 +4774,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         return yield* lifecycle.run(input.threadId, (lease) =>
           Effect.gen(function* () {
             const forked = yield* adapter.forkThread!({
-              ...input,
+              ...adapterInputWithoutNotices,
               threadId: input.threadId,
               sourceThreadId: input.sourceThreadId,
               providerInstanceId: resolvedSource.instance.instanceId,
@@ -4691,7 +4791,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 ? { expectedCodexContinuationGeneration }
                 : {}),
               ...(sourceCwd ? { sourceCwd } : {}),
-              ...(effectiveExpertSession ? { expertSession: effectiveExpertSession } : {}),
+              ...(verifiedExpertSession ? { expertSession: verifiedExpertSession } : {}),
               ...(effectiveContextSession ? { contextSession: effectiveContextSession } : {}),
               lifecycleGeneration: lease.generation,
               runtimeMode: input.runtimeMode,
@@ -4745,6 +4845,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 launchOptionsAuthoritative: true,
                 runtimePayload: {
                   expertSession: effectiveExpertSession ?? null,
+                  expertRuntimeNotices: effectiveExpertRuntimeNotices,
                   contextSession: effectiveContextSession ?? null,
                 },
               });
@@ -4755,7 +4856,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 session,
                 lifecycleGeneration: lease.generation,
                 persist: recordAppliedExpertRuntime(
-                  effectiveExpertSession ?? undefined,
+                  verifiedExpertSession,
                   session,
                   lease.generation,
                   effectiveContextSession ?? undefined,
@@ -4769,7 +4870,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 lifecycleGeneration: lease.generation,
                 persist: persistAppliedContextRuntime({
                   contextSession: effectiveContextSession ?? undefined,
-                  expertSession: effectiveExpertSession ?? undefined,
+                  expertSession: verifiedExpertSession,
                   session,
                   lifecycleGeneration: lease.generation,
                 }),
@@ -4807,6 +4908,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 launchOptionsAuthoritative: true,
                 runtimePayload: {
                   expertSession: effectiveExpertSession ?? null,
+                  expertRuntimeNotices: effectiveExpertRuntimeNotices,
                   contextSession: effectiveContextSession ?? null,
                 },
               });

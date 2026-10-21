@@ -230,6 +230,7 @@ export function listHubExpertSummaries(input: {
       Effect.gen(function* () {
         if (!definition)
           return {
+            targetProjectId: input.projectId,
             expertId: expertIds[index]!,
             displayName: "Unavailable Expert",
             description: "",
@@ -278,6 +279,7 @@ export function listHubExpertSummaries(input: {
           }
         }
         return {
+          targetProjectId: input.projectId,
           expertId: definition.id,
           displayName: definition.name,
           description: definition.description.slice(0, 800),

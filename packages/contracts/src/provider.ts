@@ -82,6 +82,10 @@ export const ProviderExpertSession = Schema.Struct({
 });
 export type ProviderExpertSession = typeof ProviderExpertSession.Type;
 
+/** Runtime-only notices compiled alongside a pinned Expert without changing its identity. */
+export const ProviderExpertRuntimeNotices = Schema.Array(TrimmedNonEmptyString);
+export type ProviderExpertRuntimeNotices = typeof ProviderExpertRuntimeNotices.Type;
+
 export const ProviderSessionStartInput = Schema.Struct({
   threadId: ThreadId,
   provider: Schema.optional(ProviderDriverKind),
@@ -103,6 +107,8 @@ export const ProviderSessionStartInput = Schema.Struct({
   enableComputerControl: Schema.optional(Schema.Boolean),
   /** Immutable Expert snapshot resolved server-side from the thread binding. */
   expertSession: Schema.optional(ProviderExpertSession),
+  /** Runtime notices compiled after the immutable Expert snapshot is validated. */
+  expertRuntimeNotices: Schema.optional(ProviderExpertRuntimeNotices),
   /** Frozen Space + Project Context resolved for this thread, independent of Expert. */
   contextSession: Schema.optional(ContextSession),
   /**
@@ -163,6 +169,8 @@ export const ProviderForkThreadInput = Schema.Struct({
   enableComputerControl: Schema.optional(Schema.Boolean),
   /** Immutable Expert snapshot inherited by a native provider fork when present. */
   expertSession: Schema.optional(ProviderExpertSession),
+  /** Runtime notices compiled after the immutable Expert snapshot is validated. */
+  expertRuntimeNotices: Schema.optional(ProviderExpertRuntimeNotices),
   /** Frozen Space + Project Context carried independently into a native fork. */
   contextSession: Schema.optional(ContextSession),
   /**

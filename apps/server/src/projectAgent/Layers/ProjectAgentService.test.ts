@@ -13,6 +13,7 @@ import {
   ProjectInboxEventId,
   ProjectTaskId,
   ThreadId,
+  type RuntimeTurnState,
   type HubWorkRecord,
   type OrchestrationCommand,
   type ProviderKind,
@@ -53,8 +54,12 @@ import { ProviderHealth } from "../../provider/Services/ProviderHealth.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProjectionThreadSessionRepository } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import type { ProviderSession } from "@synara/contracts";
-import { ProjectAgentService } from "../Services/ProjectAgentService.ts";
+import {
+  ProjectAgentService,
+  type ProjectAgentServiceShape,
+} from "../Services/ProjectAgentService.ts";
 import { ProjectAgentServiceLive } from "./ProjectAgentService.ts";
+import { workerTurnSettlementSourceId } from "../workerHealth.ts";
 
 const groupId = ProjectId.makeUnsafe("project-group-1");
 const groupId2 = ProjectId.makeUnsafe("project-group-2");
@@ -86,6 +91,8 @@ function makeTestLayer(options?: {
   readonly failFirstImport?: boolean;
   readonly shellLookupError?: boolean;
   readonly failCommandTypes?: ReadonlyArray<OrchestrationCommand["type"]>;
+  readonly failRecoveryRedispatch?: boolean;
+  readonly failThreadEventRead?: boolean;
   readonly disabledProviders?: ReadonlyArray<ProviderKind>;
   readonly unavailableProviders?: ReadonlyArray<ProviderKind>;
   readonly providerSessions?: ReadonlyArray<ProviderSession>;
@@ -105,6 +112,7 @@ function makeTestLayer(options?: {
       } | null;
       latestTurn?: {
         state: string;
+        turnId?: string;
         startedAt?: string;
         completedAt?: string | null;
       } | null;
@@ -180,9 +188,94 @@ function makeTestLayer(options?: {
         turnId?: string | null;
         dispatchOrigin?: string | null;
       }>;
+      activities?: Array<{
+        id?: string;
+        kind: string;
+        turnId?: string | null;
+        payload?: unknown;
+        createdAt: string;
+      }>;
     }
   > = {};
   const dispatched: OrchestrationCommand[] = [];
+  let failThreadEventRead = options?.failThreadEventRead ?? false;
+  const durableThreadEvents: Array<{
+    readonly sequence: number;
+    readonly eventId: string;
+    readonly type: string;
+    readonly commandId: string | null;
+    readonly payload: Record<string, unknown>;
+  }> = [];
+  const recordDurableEvent = (input: {
+    readonly type: string;
+    readonly commandId: string | null;
+    readonly payload: Record<string, unknown>;
+  }) => {
+    const sequence = durableThreadEvents.length + 1;
+    const event = {
+      sequence,
+      eventId: `interrupt-event-${sequence}`,
+      ...input,
+    };
+    durableThreadEvents.push(event);
+    return event;
+  };
+  const recordInterruptEvent = (input: {
+    readonly threadId: ThreadId;
+    readonly commandId: string;
+    readonly turnId?: string;
+    readonly requestedBy?: "user" | "agent" | "system";
+  }) =>
+    recordDurableEvent({
+      type: "thread.turn-interrupt-requested",
+      commandId: input.commandId,
+      payload: {
+        threadId: input.threadId,
+        ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+        ...(input.requestedBy === undefined ? {} : { requestedBy: input.requestedBy }),
+        createdAt: now,
+      },
+    });
+  const recordSessionSetEvent = (input: {
+    readonly threadId: ThreadId;
+    readonly status: "ready" | "running" | "stopped";
+    readonly activeTurnId: string | null;
+    readonly createdAt: string;
+  }) =>
+    recordDurableEvent({
+      type: "thread.session-set",
+      commandId: `test-session-set:${durableThreadEvents.length + 1}`,
+      payload: {
+        threadId: input.threadId,
+        session: {
+          threadId: input.threadId,
+          status: input.status,
+          providerName: "codex",
+          providerInstanceId: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: input.activeTurnId,
+          lastError: null,
+          updatedAt: input.createdAt,
+        },
+      },
+    });
+  const recordTurnStartEvent = (input: {
+    readonly threadId: ThreadId;
+    readonly dispatchMode: "steer" | "queue";
+    readonly createdAt: string;
+  }) =>
+    recordDurableEvent({
+      type: "thread.turn-start-requested",
+      commandId: `test-turn-start:${durableThreadEvents.length + 1}`,
+      payload: {
+        threadId: input.threadId,
+        messageId: `test-message:${durableThreadEvents.length + 1}`,
+        dispatchMode: input.dispatchMode,
+        runtimeMode: "full-access",
+        interactionMode: "collaboration",
+        createdAt: input.createdAt,
+      },
+    });
   const automationDefinitions: Array<{
     readonly id: string;
     readonly enabled: boolean;
@@ -340,7 +433,54 @@ function makeTestLayer(options?: {
         if (options?.failCommandTypes?.includes(command.type)) {
           return yield* Effect.fail(new Error(`refusing ${command.type}`));
         }
+        if (
+          options?.failRecoveryRedispatch === true &&
+          command.type === "thread.turn.start" &&
+          command.commandId.endsWith(":redispatch")
+        ) {
+          return yield* Effect.fail(new Error("refusing recovery redispatch"));
+        }
+        if (command.type === "thread.turn.interrupt") {
+          recordInterruptEvent({
+            threadId: command.threadId,
+            commandId: command.commandId,
+            ...(command.turnId === undefined ? {} : { turnId: command.turnId }),
+            ...(command.requestedBy === undefined ? {} : { requestedBy: command.requestedBy }),
+          });
+        } else if (command.type === "thread.turn.start") {
+          recordTurnStartEvent({
+            threadId: command.threadId,
+            dispatchMode: command.dispatchMode ?? "steer",
+            createdAt: command.createdAt,
+          });
+        }
       }),
+    getEventHighWaterSequence: Effect.suspend(() =>
+      failThreadEventRead
+        ? Effect.fail(new Error("event store unavailable"))
+        : Effect.succeed(durableThreadEvents.at(-1)?.sequence ?? 0),
+    ),
+    readThreadEventsThrough: (
+      threadId: string,
+      fromSequenceExclusive: number,
+      throughSequenceInclusive: number,
+      eventTypes?: ReadonlyArray<string>,
+      limit?: number,
+    ) =>
+      failThreadEventRead
+        ? Stream.fail(new Error("event store unavailable"))
+        : Stream.fromIterable(
+            (() => {
+              const matching = durableThreadEvents.filter(
+                (event) =>
+                  event.payload.threadId === threadId &&
+                  event.sequence > fromSequenceExclusive &&
+                  event.sequence <= throughSequenceInclusive &&
+                  (eventTypes === undefined || eventTypes.includes(event.type)),
+              );
+              return limit === undefined ? matching : matching.slice(0, limit);
+            })(),
+          ),
   } as unknown as OrchestrationEngineService["Service"]);
   const serverSettings: ServerSettings = {
     ...DEFAULT_SERVER_SETTINGS,
@@ -405,6 +545,13 @@ function makeTestLayer(options?: {
   } as unknown as AutomationService["Service"]);
   return {
     dispatched,
+    durableThreadEvents,
+    recordInterruptEvent,
+    recordSessionSetEvent,
+    recordTurnStartEvent,
+    setThreadEventReadFailure: (failed: boolean) => {
+      failThreadEventRead = failed;
+    },
     automationDefinitions,
     automationUpdates,
     automationDeletes,
@@ -471,6 +618,59 @@ function makeTestLayer(options?: {
     ),
   };
 }
+
+const ingestRuntimeTerminal = (
+  service: ProjectAgentServiceShape,
+  harness: ReturnType<typeof makeTestLayer>,
+  input: {
+    readonly threadId: ThreadId;
+    readonly turnId: string;
+    readonly state: RuntimeTurnState;
+    readonly createdAt: string;
+    readonly lifecycleGeneration?: string;
+    readonly sessionStatus?: string;
+  },
+) => {
+  const existing = harness.threadShells[input.threadId];
+  const sessionStatus =
+    input.sessionStatus ??
+    (input.state === "completed" ? "ready" : input.state === "failed" ? "error" : "stopped");
+  harness.threadShells[input.threadId] = {
+    ...(existing ?? {}),
+    projectId: existing?.projectId ?? groupId,
+    title: existing?.title ?? "Runtime worker",
+    session: {
+      ...(existing?.session ?? {}),
+      status: sessionStatus,
+      updatedAt: input.createdAt,
+      lastError: input.state === "failed" ? "provider failure" : null,
+    },
+    latestTurn: {
+      state: input.state,
+      turnId: input.turnId,
+      startedAt: existing?.latestTurn?.startedAt ?? input.createdAt,
+      completedAt: input.createdAt,
+    },
+  };
+  const sourceEventId = workerTurnSettlementSourceId({
+    threadId: input.threadId,
+    turnId: input.turnId,
+    ...(input.lifecycleGeneration === undefined
+      ? {}
+      : { lifecycleGeneration: input.lifecycleGeneration }),
+  });
+  return service.ingestSettledThreadEvent({
+    threadId: input.threadId,
+    sourceEventId,
+    eventType: "turn.completed",
+    runtimeTurnState: input.state,
+    turnId: input.turnId,
+    ...(input.lifecycleGeneration === undefined
+      ? {}
+      : { lifecycleGeneration: input.lifecycleGeneration }),
+    createdAt: input.createdAt,
+  });
+};
 
 const leftoverConfig = {
   projectId: ordinaryId,
@@ -1610,14 +1810,16 @@ it.effect("resolves linked-repo workers through the task assignment", () => {
       assert.equal(principal.projectId, groupId);
       assert.equal(principal.taskId, ProjectTaskId.makeUnsafe("task-linked"));
     }
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: linkedWorkerThreadId,
-      sourceEventId: "linked-turn-1",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-linked-1",
+      state: "completed",
       createdAt: "2026-09-20T00:02:00.000Z",
     });
     const rows = yield* repository.listInboxAfter({ projectId: groupId, limit: 10 });
-    const wake = rows.find((row) => row.sourceEventId === "linked-turn-1");
+    const wake = rows.find(
+      (row) => row.sourceThreadId === linkedWorkerThreadId && row.eventType === "turn.completed",
+    );
     assert.equal(wake?.eligibleWake, true);
     const report = yield* repository.getDocumentHead(
       groupId,
@@ -1659,10 +1861,10 @@ it.effect("refreshes the digest when the coordinator's own turn settles", () => 
     assert.equal(Option.isSome(seeded) ? seeded.value.summary : null, "Coordinator is ready.");
     // A coordinator settle records the wake-skip activity and must re-arm the
     // debounced digest — the Focus card kept the seeded summary when it did not.
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: coordinatorThreadId,
-      sourceEventId: "coordinator-settle-1",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-coordinator-settle-1",
+      state: "completed",
       createdAt: now,
     });
     yield* TestClock.adjust("61 seconds");
@@ -3878,7 +4080,12 @@ it.effect("publishes worker updates and schedules digests only after the operati
       true,
     );
     yield* TestClock.adjust("61 seconds");
-    assert.equal(harness.digestGenerationInputs.length, 1);
+    const digest = yield* repository.getDigest(groupId);
+    assert.equal(
+      Option.isSome(digest) ? digest.value.summary.includes("Patch the linked repo") : false,
+      true,
+    );
+    assert.equal(harness.digestGenerationInputs.length, 0);
   }).pipe(
     Effect.provide(AgentGatewayOperationRepositoryLive.pipe(Layer.provideMerge(harness.layer))),
   );
@@ -4654,15 +4861,17 @@ it.effect("posts a settle row into the coordinator thread and wakes it", () => {
     harness.dispatched.length = 0;
     harness.runNowCalls.length = 0;
 
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: workerThreadId,
-      sourceEventId: "settle-worker-done",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-settle-worker-1",
+      state: "completed",
       createdAt: "2026-09-20T00:05:00.000Z",
     });
 
     const inbox = yield* repository.listInboxAfter({ projectId: groupId, limit: 10 });
-    const event = inbox.find((row) => row.sourceEventId === "settle-worker-done");
+    const event = inbox.find(
+      (row) => row.sourceThreadId === workerThreadId && row.eventType === "turn.completed",
+    );
     assert.equal(event?.eligibleWake, true);
     const rows = harness.dispatched.filter(
       (command) =>
@@ -4708,16 +4917,16 @@ it.effect("posts one roll-up when every worker in the creation batch settles", (
           command.activity.kind === "synara.workers.settled",
       );
 
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: threadA,
-      sourceEventId: "roll-a-done",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-roll-a",
+      state: "completed",
       createdAt: "2026-09-20T00:05:00.000Z",
     });
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: threadB,
-      sourceEventId: "roll-b-done",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-roll-b",
+      state: "completed",
       createdAt: "2026-09-20T00:06:00.000Z",
     });
     assert.equal(rollups().length, 0);
@@ -4734,10 +4943,10 @@ it.effect("posts one roll-up when every worker in the creation batch settles", (
     // Waiting on approval is not an end state: no roll-up yet.
     assert.equal(rollups().length, 0);
 
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: threadC,
-      sourceEventId: "roll-c-done",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-roll-c",
+      state: "completed",
       createdAt: "2026-09-20T00:08:00.000Z",
     });
     assert.equal(rollups().length, 1);
@@ -4755,10 +4964,10 @@ it.effect("posts one roll-up when every worker in the creation batch settles", (
     assert.equal(batchEvent?.eligibleWake, true);
 
     // Re-ingesting the same settle event reposts nothing.
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: threadC,
-      sourceEventId: "roll-c-done",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-roll-c",
+      state: "completed",
       createdAt: "2026-09-20T00:08:00.000Z",
     });
     assert.equal(rollups().length, 1);
@@ -4840,11 +5049,11 @@ it.effect("rolls up one created worker only after its unstarted Hub peers fail o
           command.type === "thread.activity.append" &&
           command.activity.kind === "synara.workers.settled",
       );
-    for (const [threadId, sourceEventId] of [[threadA, "hub-roll-a-done"]] as const)
-      yield* service.ingestSettledThreadEvent({
+    for (const threadId of [threadA] as const)
+      yield* ingestRuntimeTerminal(service, harness, {
         threadId,
-        sourceEventId,
-        eventType: "thread.turn-diff-completed",
+        turnId: "turn-hub-roll-a",
+        state: "completed",
         createdAt: "2026-09-20T00:05:00.000Z",
       });
     assert.equal(rollups().length, 0);
@@ -4997,6 +5206,52 @@ it.effect("reports a missing worker shell once", () => {
 // Every pass re-reads the row, so a mid-episode restart resumes the same step.
 const recoveryCommands = (harness: ReturnType<typeof makeTestLayer>) =>
   harness.dispatched.filter((command) => command.commandId.startsWith("agent-recovery:"));
+
+const driveRecoveryToStepTwo = (
+  service: ProjectAgentServiceShape,
+  harness: ReturnType<typeof makeTestLayer>,
+  workerThreadId: ThreadId,
+) =>
+  Effect.gen(function* () {
+    harness.recordSessionSetEvent({
+      threadId: workerThreadId,
+      status: "running",
+      activeTurnId: "turn-live",
+      createdAt: "1970-01-01T00:00:00.000Z",
+    });
+    yield* TestClock.adjust("11 minutes");
+    yield* service.inspectWorkerHealth();
+    const nudge = recoveryCommands(harness).find((command) => command.type === "thread.turn.start");
+    if (nudge?.type !== "thread.turn.start") {
+      throw new Error("expected the recovery nudge command");
+    }
+    // The nudge is a steer, so its ownership callback arrives while the old
+    // provider turn is still active and temporarily replaces its command id.
+    yield* service.recordWorkerTurnRequest({
+      threadId: workerThreadId,
+      commandId: nudge.commandId,
+      dispatchOrigin: "automation",
+      turnId: null,
+      eventType: "thread.turn-start-requested",
+      createdAt: "1970-01-01T00:11:00.000Z",
+    });
+
+    yield* TestClock.adjust("6 minutes");
+    yield* service.inspectWorkerHealth();
+    const interrupt = recoveryCommands(harness).find(
+      (command) => command.type === "thread.turn.interrupt",
+    );
+    const redispatch = recoveryCommands(harness).filter(
+      (command) => command.type === "thread.turn.start",
+    )[1];
+    if (interrupt?.type !== "thread.turn.interrupt") {
+      throw new Error("expected the recovery interrupt command");
+    }
+    if (redispatch?.type !== "thread.turn.start") {
+      throw new Error("expected the recovery re-dispatch command");
+    }
+    return { interrupt, redispatch };
+  });
 
 const stuckRowSummaries = (harness: ReturnType<typeof makeTestLayer>) =>
   harness.dispatched
@@ -5434,16 +5689,16 @@ it.effect("quotes report_result in the settle row and roll-up", () => {
     );
     harness.dispatched.length = 0;
 
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: threadA,
-      sourceEventId: "result-a-done",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-result-a",
+      state: "completed",
       createdAt: "2026-09-20T00:05:00.000Z",
     });
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: threadB,
-      sourceEventId: "result-b-done",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-result-b",
+      state: "completed",
       createdAt: "2026-09-20T00:06:00.000Z",
     });
 
@@ -5511,16 +5766,16 @@ it.effect("adds the tracked PR link to finished rows and the roll-up", () => {
     };
     harness.dispatched.length = 0;
 
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: threadA,
-      sourceEventId: "pr-a-done",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-pr-a",
+      state: "completed",
       createdAt: "2026-09-20T00:05:00.000Z",
     });
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: threadB,
-      sourceEventId: "pr-b-done",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-pr-b",
+      state: "completed",
       createdAt: "2026-09-20T00:06:00.000Z",
     });
 
@@ -5820,10 +6075,10 @@ it.effect("re-arms monitoring after settle when a new turn starts", () => {
     harness.threadShells[workerThreadId] = quietRunningShell("1970-01-01T00:00:00.000Z");
     harness.providerSessions.push(liveProviderSession(workerThreadId));
 
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: workerThreadId,
-      sourceEventId: "rearm-settle",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-rearm-1",
+      state: "completed",
       createdAt: "1970-01-01T00:02:00.000Z",
     });
     const settledWorker = yield* repository.findManagedWorkerByThread(workerThreadId);
@@ -5841,6 +6096,10 @@ it.effect("re-arms monitoring after settle when a new turn starts", () => {
       turnId: "turn-rearm",
       createdAt: "1970-01-01T00:03:00.000Z",
     });
+    harness.threadShells[workerThreadId] = {
+      ...quietRunningShell("1970-01-01T00:00:00.000Z"),
+      latestTurn: { state: "running", turnId: "turn-rearm", startedAt: "1970-01-01T00:03:00.000Z" },
+    };
     const rearmed = yield* repository.findManagedWorkerByThread(workerThreadId);
     assert.equal(Option.isSome(rearmed) ? rearmed.value.settledAt : "x", null);
     assert.equal(Option.isSome(rearmed) ? rearmed.value.settleOutcome : "x", null);
@@ -5875,10 +6134,10 @@ it.effect("suppresses monitor rows while the hub is paused", () => {
     yield* service.pauseGroup({ requestId: "req-pause", projectId: groupId }, { kind: "user" });
     harness.dispatched.length = 0;
 
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: workerThreadId,
-      sourceEventId: "pause-settle",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-pause-1",
+      state: "completed",
       createdAt: "2026-09-20T00:05:00.000Z",
     });
 
@@ -5949,10 +6208,10 @@ it.effect("rejects a monitor write built on a stale worker row", () => {
     assert.equal(Option.isSome(stale), true);
     if (Option.isNone(stale)) return;
 
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: workerThreadId,
-      sourceEventId: "cas-settle",
-      eventType: "thread.turn-diff-completed",
+      turnId: "turn-cas-1",
+      state: "completed",
       createdAt: "2026-09-20T00:05:00.000Z",
     });
 
@@ -5995,12 +6254,11 @@ it.effect("logs coordinator check-ins to the activity log without waking it", ()
         },
       ],
     };
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: coordinatorThreadId,
-      sourceEventId: "checkin-silent-1",
-      eventType: "thread.turn-diff-completed",
-      createdAt: "2026-09-20T00:10:00.000Z",
       turnId: "turn-checkin-1",
+      state: "completed",
+      createdAt: "2026-09-20T00:10:00.000Z",
     });
 
     harness.threadDetails[coordinatorThreadId] = {
@@ -6020,12 +6278,11 @@ it.effect("logs coordinator check-ins to the activity log without waking it", ()
         },
       ],
     };
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: coordinatorThreadId,
-      sourceEventId: "checkin-report-1",
-      eventType: "thread.turn-diff-completed",
-      createdAt: "2026-09-20T01:10:00.000Z",
       turnId: "turn-checkin-2",
+      state: "completed",
+      createdAt: "2026-09-20T01:10:00.000Z",
     });
 
     const activity = yield* repository.listActivity({ projectId: groupId, limit: 40 });
@@ -6041,11 +6298,9 @@ it.effect("logs coordinator check-ins to the activity log without waking it", ()
   }).pipe(Effect.provide(harness.layer));
 });
 
-// A turn-diff that closed missing/error belongs to a turn the ladder
-// interrupted — it settles `interrupted`, never `completed`: the recovery
-// count survives and no false "finished" row posts. A `ready` diff still
-// settles completed and refunds the count (a genuine success).
-it.effect("settles a missing diff as interrupted without resetting the recovery count", () => {
+// The recovery ladder's own interrupt is not a worker result. It preserves
+// the recovery count; a later accepted runtime completion is a real settle.
+it.effect("ignores the recovery ladder interrupt and settles a later runtime completion", () => {
   const harness = makeTestLayer();
   return Effect.gen(function* () {
     const service = yield* ProjectAgentService;
@@ -6060,30 +6315,47 @@ it.effect("settles a missing diff as interrupted without resetting the recovery 
       titles: ["Stalled worker"],
       prompts: ["Draft the schema migration"],
     });
-    harness.threadShells[workerThreadId] = quietRunningShell("1970-01-01T00:00:00.000Z");
+    harness.threadShells[workerThreadId] = {
+      ...quietRunningShell("1970-01-01T00:00:00.000Z"),
+      latestTurn: { state: "running", turnId: "turn-live", startedAt: "1970-01-01T00:00:00.000Z" },
+    };
     harness.providerSessions.push(liveProviderSession(workerThreadId));
     harness.dispatched.length = 0;
 
-    // Drive the ladder to step 2: nudge at +11m, interrupt + re-dispatch at
-    // +17m — the cap is spent inside the first cycle.
-    yield* TestClock.adjust("11 minutes");
-    yield* service.inspectWorkerHealth();
-    yield* TestClock.adjust("6 minutes");
-    yield* service.inspectWorkerHealth();
+    // Drive the ladder to step 2, including the real nudge ownership callback
+    // that lands while the old provider turn is still active.
+    const { interrupt } = yield* driveRecoveryToStepTwo(service, harness, workerThreadId);
     const mid = yield* repository.findManagedWorkerByThread(workerThreadId);
     assert.equal(Option.isSome(mid) ? mid.value.recoveriesUsed : null, 2);
+    assert.equal(interrupt.turnId, "turn-live");
+    assert.equal(interrupt.requestedBy, "system");
+    assert.deepEqual(
+      harness.durableThreadEvents
+        .filter((event) => event.type === "thread.turn-interrupt-requested")
+        .map((event) => ({
+          commandId: event.commandId,
+          turnId: event.payload.turnId,
+          requestedBy: event.payload.requestedBy,
+        })),
+      [
+        {
+          commandId: interrupt.commandId,
+          turnId: "turn-live",
+          requestedBy: "system",
+        },
+      ],
+    );
 
-    // The ladder's own interrupt closes the checkpoint `missing`: the
-    // diff-completed event must not read as a clean finish.
-    yield* service.ingestSettledThreadEvent({
+    // The ladder's own interrupt terminal is durable, but still belongs to
+    // recovery mechanics rather than the worker's accepted result.
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: workerThreadId,
-      sourceEventId: "diff-missing-1",
-      eventType: "thread.turn-diff-completed",
-      checkpointStatus: "missing",
+      turnId: "turn-live",
+      state: "interrupted",
       createdAt: "1970-01-01T00:18:00.000Z",
     });
     const worker = yield* repository.findManagedWorkerByThread(workerThreadId);
-    assert.equal(Option.isSome(worker) ? worker.value.settleOutcome : null, "interrupted");
+    assert.equal(Option.isSome(worker) ? worker.value.settleOutcome : null, null);
     // The ladder's own interrupt never refunds the attempts it spent.
     assert.equal(Option.isSome(worker) ? worker.value.recoveriesUsed : null, 2);
     const settled = harness.dispatched.filter(
@@ -6091,10 +6363,7 @@ it.effect("settles a missing diff as interrupted without resetting the recovery 
         command.type === "thread.activity.append" &&
         command.activity.kind === "synara.worker.settled",
     );
-    assert.equal(settled.length, 1);
-    if (settled[0]!.type === "thread.activity.append") {
-      assert.equal(settled[0]!.activity.summary, "⚠ Stalled worker was interrupted");
-    }
+    assert.equal(settled.length, 0);
 
     // A re-armed worker whose next turn genuinely finishes still settles
     // completed — and refunds the recovery count.
@@ -6106,11 +6375,10 @@ it.effect("settles a missing diff as interrupted without resetting the recovery 
       eventType: "thread.turn-start-requested",
       createdAt: "1970-01-01T00:19:00.000Z",
     });
-    yield* service.ingestSettledThreadEvent({
+    yield* ingestRuntimeTerminal(service, harness, {
       threadId: workerThreadId,
-      sourceEventId: "diff-ready-1",
-      eventType: "thread.turn-diff-completed",
-      checkpointStatus: "ready",
+      turnId: "turn-follow-up",
+      state: "completed",
       createdAt: "1970-01-01T00:25:00.000Z",
     });
     const finished = yield* repository.findManagedWorkerByThread(workerThreadId);
@@ -6121,10 +6389,506 @@ it.effect("settles a missing diff as interrupted without resetting the recovery 
         command.type === "thread.activity.append" &&
         command.activity.kind === "synara.worker.settled",
     );
-    assert.equal(settledRows.length, 2);
-    if (settledRows[1]!.type === "thread.activity.append") {
-      assert.equal(settledRows[1]!.activity.summary, "✓ Stalled worker finished — no result filed");
+    assert.equal(settledRows.length, 1);
+    if (settledRows[0]!.type === "thread.activity.append") {
+      assert.equal(settledRows[0]!.activity.summary, "✓ Stalled worker finished — no result filed");
     }
+  }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+});
+
+it.effect(
+  "honors a user stop after recovery re-dispatch ownership but before the new turn starts",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const overview = yield* configureTestGroup(service, "req-recovery-user-stop");
+      const workerThreadId = ThreadId.makeUnsafe("thread-recovery-user-stop");
+      yield* service.recordManagedWorkerThreads({
+        requestId: "req-recovery-user-stop-record",
+        callerThreadId: overview.config!.coordinatorThreadId!,
+        threadIds: [workerThreadId],
+        titles: ["Stalled worker"],
+        prompts: ["Draft the schema migration"],
+      });
+      harness.threadShells[workerThreadId] = {
+        ...quietRunningShell("1970-01-01T00:00:00.000Z"),
+        latestTurn: { state: "running", turnId: "turn-live", startedAt: now },
+      };
+      harness.providerSessions.push(liveProviderSession(workerThreadId));
+
+      const { redispatch } = yield* driveRecoveryToStepTwo(service, harness, workerThreadId);
+      // The callback can claim redispatch ownership before the provider starts
+      // the new turn; it still must not hide a user's stop of the old turn.
+      yield* service.recordWorkerTurnRequest({
+        threadId: workerThreadId,
+        commandId: redispatch.commandId,
+        dispatchOrigin: "automation",
+        turnId: null,
+        eventType: "thread.turn-start-requested",
+        createdAt: "1970-01-01T00:17:00.000Z",
+      });
+      harness.recordInterruptEvent({
+        threadId: workerThreadId,
+        commandId: "user-stop-same-turn",
+        requestedBy: "user",
+      });
+      yield* service.ingestSettledThreadEvent({
+        threadId: workerThreadId,
+        sourceEventId: "worker-health:thread-recovery-user-stop:stopped:stale",
+        eventType: "worker.stopped",
+        createdAt: "1970-01-01T00:17:30.000Z",
+      });
+      const staleHealthStop = yield* repository.findManagedWorkerByThread(workerThreadId);
+      assert.equal(
+        Option.isSome(staleHealthStop) ? staleHealthStop.value.settleOutcome : null,
+        null,
+      );
+
+      const currentShell = harness.threadShells[workerThreadId]!;
+      harness.threadShells[workerThreadId] = {
+        ...currentShell,
+        session: {
+          ...currentShell.session!,
+          status: "stopped",
+          updatedAt: "1970-01-01T00:18:00.000Z",
+        },
+        latestTurn: {
+          state: "interrupted",
+          turnId: "turn-live",
+          startedAt: "1970-01-01T00:00:00.000Z",
+        },
+      };
+      yield* service.inspectWorkerHealth();
+
+      const worker = yield* repository.findManagedWorkerByThread(workerThreadId);
+      assert.equal(Option.isSome(worker) ? worker.value.settleOutcome : null, "interrupted");
+    }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+  },
+);
+
+it.effect(
+  "suppresses a dispatched recovery interrupt after redispatch rolls back, then honors a user stop",
+  () => {
+    const harness = makeTestLayer({ failRecoveryRedispatch: true });
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const overview = yield* configureTestGroup(service, "req-recovery-partial-step-two");
+      const workerThreadId = ThreadId.makeUnsafe("thread-recovery-partial-step-two");
+      yield* service.recordManagedWorkerThreads({
+        requestId: "req-recovery-partial-step-two-record",
+        callerThreadId: overview.config!.coordinatorThreadId!,
+        threadIds: [workerThreadId],
+        titles: ["Stalled worker"],
+        prompts: ["Draft the schema migration"],
+      });
+      harness.threadShells[workerThreadId] = {
+        ...quietRunningShell("1970-01-01T00:00:00.000Z"),
+        latestTurn: { state: "running", turnId: "turn-live", startedAt: now },
+      };
+      harness.providerSessions.push(liveProviderSession(workerThreadId));
+
+      const { interrupt, redispatch } = yield* driveRecoveryToStepTwo(
+        service,
+        harness,
+        workerThreadId,
+      );
+      assert.equal(interrupt.turnId, "turn-live");
+      assert(redispatch.commandId.endsWith(":redispatch"));
+      assert.equal(
+        harness.durableThreadEvents.some(
+          (event) =>
+            event.type === "thread.turn-interrupt-requested" &&
+            event.commandId === interrupt.commandId,
+        ),
+        true,
+      );
+      const rolledBackWorker = yield* repository.findManagedWorkerByThread(workerThreadId);
+      assert.equal(Option.isSome(rolledBackWorker) ? rolledBackWorker.value.recoveryStep : null, 1);
+      assert.equal(Option.isSome(rolledBackWorker) ? rolledBackWorker.value.needsYou : false, true);
+
+      // The recovery interrupt committed before the failed re-dispatch. Its
+      // durable provenance suppresses settlement even though the mutable
+      // recovery step was rolled back to 1.
+      yield* ingestRuntimeTerminal(service, harness, {
+        threadId: workerThreadId,
+        turnId: "turn-live",
+        state: "interrupted",
+        createdAt: "1970-01-01T00:18:00.000Z",
+      });
+      const afterRecoveryInterrupt = yield* repository.findManagedWorkerByThread(workerThreadId);
+      assert.equal(
+        Option.isSome(afterRecoveryInterrupt) ? afterRecoveryInterrupt.value.settleOutcome : null,
+        null,
+      );
+
+      // The health fallback sees the same stopped shell, but must consult the
+      // same durable provenance instead of converting the internal stop into
+      // a terminal worker result.
+      yield* service.inspectWorkerHealth();
+      const afterHealthFallback = yield* repository.findManagedWorkerByThread(workerThreadId);
+      assert.equal(
+        Option.isSome(afterHealthFallback) ? afterHealthFallback.value.settleOutcome : null,
+        null,
+      );
+
+      // A prior waiting result can carry a settle timestamp without being a
+      // terminal outcome; this worker remains eligible for its latest-turn
+      // Stop target.
+      const waitingWorker = Option.getOrThrow(
+        yield* repository.findManagedWorkerByThread(workerThreadId),
+      );
+      yield* repository.upsertManagedWorker({
+        ...waitingWorker,
+        settledAt: "1970-01-01T00:16:00.000Z",
+        settleOutcome: "waiting-input",
+      });
+
+      // A real worker-alert Stop happens after the recovery interrupt has
+      // cleared activeTurnId. Its latest interrupted turn remains the task
+      // target, so the user command must carry that identity explicitly.
+      const stoppedShell = harness.threadShells[workerThreadId]!;
+      harness.threadShells[workerThreadId] = {
+        ...stoppedShell,
+        session: { ...stoppedShell.session!, status: "stopped", activeTurnId: null },
+      };
+      harness.recordSessionSetEvent({
+        threadId: workerThreadId,
+        status: "stopped",
+        activeTurnId: null,
+        createdAt: "1970-01-01T00:18:30.000Z",
+      });
+      yield* service.resolveWorkerAlert(
+        {
+          requestId: "req-resolve-partial-recovery-stop",
+          projectId: groupId,
+          threadId: workerThreadId,
+          action: "stop",
+        },
+        { kind: "user" },
+      );
+      const userStopCommand = harness.dispatched.findLast(
+        (command) =>
+          command.type === "thread.turn.interrupt" &&
+          command.commandId === "agent-resolve:req-resolve-partial-recovery-stop:stop",
+      );
+      assert.equal(userStopCommand?.type, "thread.turn.interrupt");
+      if (userStopCommand?.type === "thread.turn.interrupt") {
+        assert.equal(userStopCommand.turnId, "turn-live");
+        assert.equal(userStopCommand.requestedBy, "user");
+      }
+      const afterUserStopRequest = yield* repository.findManagedWorkerByThread(workerThreadId);
+      assert.equal(
+        Option.isSome(afterUserStopRequest) ? afterUserStopRequest.value.needsYou : true,
+        false,
+      );
+
+      // The native stopped-session health pass observes the durable user
+      // interrupt and settles this task as an actual user stop.
+      yield* service.inspectWorkerHealth();
+      const afterUserStop = yield* repository.findManagedWorkerByThread(workerThreadId);
+      assert.equal(
+        Option.isSome(afterUserStop) ? afterUserStop.value.settleOutcome : null,
+        "interrupted",
+      );
+      assert.equal(Option.isSome(afterUserStop) ? afterUserStop.value.needsYou : true, false);
+    }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+  },
+);
+
+it.effect(
+  "ignores a historical idle Stop while honoring an explicit current-turn user stop",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const overview = yield* configureTestGroup(service, "req-recovery-idle-stop");
+      const workerThreadId = ThreadId.makeUnsafe("thread-recovery-idle-stop");
+      yield* service.recordManagedWorkerThreads({
+        requestId: "req-recovery-idle-stop-record",
+        callerThreadId: overview.config!.coordinatorThreadId!,
+        threadIds: [workerThreadId],
+        titles: ["Stalled worker"],
+        prompts: ["Draft the schema migration"],
+      });
+      harness.threadShells[workerThreadId] = {
+        ...quietRunningShell("1970-01-01T00:00:00.000Z"),
+        latestTurn: { state: "running", turnId: "turn-live", startedAt: now },
+      };
+      harness.providerSessions.push(liveProviderSession(workerThreadId));
+
+      // Idle user Stop requests can legitimately have no projected activity
+      // because there was no active turn to associate at request time.
+      harness.recordSessionSetEvent({
+        threadId: workerThreadId,
+        status: "ready",
+        activeTurnId: null,
+        createdAt: "1969-12-31T23:50:00.000Z",
+      });
+      harness.recordInterruptEvent({
+        threadId: workerThreadId,
+        commandId: "historical-idle-user-stop",
+        requestedBy: "user",
+      });
+      const { redispatch } = yield* driveRecoveryToStepTwo(service, harness, workerThreadId);
+      yield* service.recordWorkerTurnRequest({
+        threadId: workerThreadId,
+        commandId: redispatch.commandId,
+        dispatchOrigin: "automation",
+        turnId: null,
+        eventType: "thread.turn-start-requested",
+        createdAt: "1970-01-01T00:17:00.000Z",
+      });
+      harness.recordInterruptEvent({
+        threadId: workerThreadId,
+        commandId: "current-user-stop",
+        turnId: "turn-live",
+        requestedBy: "user",
+      });
+      yield* ingestRuntimeTerminal(service, harness, {
+        threadId: workerThreadId,
+        turnId: "turn-live",
+        state: "interrupted",
+        createdAt: "1970-01-01T00:18:00.000Z",
+      });
+
+      const worker = yield* repository.findManagedWorkerByThread(workerThreadId);
+      assert.equal(Option.isSome(worker) ? worker.value.settleOutcome : null, "interrupted");
+    }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+  },
+);
+
+it.effect("keeps a completed idle worker stop untargeted and completed", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    const overview = yield* configureTestGroup(service, "req-completed-idle-worker-stop");
+    const workerThreadId = ThreadId.makeUnsafe("thread-completed-idle-worker-stop");
+    yield* service.recordManagedWorkerThreads({
+      requestId: "req-completed-idle-worker-stop-record",
+      callerThreadId: overview.config!.coordinatorThreadId!,
+      threadIds: [workerThreadId],
+      titles: ["Completed worker"],
+      prompts: ["Draft the schema migration"],
+    });
+    const worker = Option.getOrThrow(yield* repository.findManagedWorkerByThread(workerThreadId));
+    yield* repository.upsertManagedWorker({
+      ...worker,
+      settledAt: "1970-01-01T00:01:00.000Z",
+      settleOutcome: "completed",
+    });
+    harness.threadShells[workerThreadId] = {
+      ...quietRunningShell("1970-01-01T00:01:00.000Z"),
+      session: {
+        status: "ready",
+        updatedAt: "1970-01-01T00:01:00.000Z",
+        lastError: null,
+        activeTurnId: null,
+      },
+      latestTurn: {
+        state: "completed",
+        turnId: "turn-completed",
+        startedAt: "1970-01-01T00:00:00.000Z",
+        completedAt: "1970-01-01T00:01:00.000Z",
+      },
+    };
+    harness.recordSessionSetEvent({
+      threadId: workerThreadId,
+      status: "ready",
+      activeTurnId: null,
+      createdAt: "1970-01-01T00:01:00.000Z",
+    });
+
+    yield* service.resolveWorkerAlert(
+      {
+        requestId: "req-resolve-completed-idle-stop",
+        projectId: groupId,
+        threadId: workerThreadId,
+        action: "stop",
+      },
+      { kind: "user" },
+    );
+    const stopCommand = harness.dispatched.findLast(
+      (command) =>
+        command.type === "thread.turn.interrupt" &&
+        command.commandId === "agent-resolve:req-resolve-completed-idle-stop:stop",
+    );
+    assert.equal(stopCommand?.type, "thread.turn.interrupt");
+    if (stopCommand?.type === "thread.turn.interrupt") {
+      assert.equal(stopCommand.turnId, undefined);
+      assert.equal(stopCommand.requestedBy, "user");
+    }
+
+    yield* service.inspectWorkerHealth();
+    const afterStop = yield* repository.findManagedWorkerByThread(workerThreadId);
+    assert.equal(Option.isSome(afterStop) ? afterStop.value.settleOutcome : null, "completed");
+  }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+});
+
+it.effect(
+  "ignores an old active-turn Stop when only the recovery interrupt targets the current turn",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const overview = yield* configureTestGroup(service, "req-recovery-old-stop");
+      const workerThreadId = ThreadId.makeUnsafe("thread-recovery-old-stop");
+      yield* service.recordManagedWorkerThreads({
+        requestId: "req-recovery-old-stop-record",
+        callerThreadId: overview.config!.coordinatorThreadId!,
+        threadIds: [workerThreadId],
+        titles: ["Stalled worker"],
+        prompts: ["Draft the schema migration"],
+      });
+      harness.threadShells[workerThreadId] = {
+        ...quietRunningShell("1970-01-01T00:00:00.000Z"),
+        latestTurn: { state: "running", turnId: "turn-live", startedAt: now },
+      };
+      harness.providerSessions.push(liveProviderSession(workerThreadId));
+      harness.recordSessionSetEvent({
+        threadId: workerThreadId,
+        status: "running",
+        activeTurnId: "turn-old",
+        createdAt: "1969-12-31T23:50:00.000Z",
+      });
+      harness.recordInterruptEvent({
+        threadId: workerThreadId,
+        commandId: "historical-active-user-stop",
+        requestedBy: "user",
+      });
+      yield* driveRecoveryToStepTwo(service, harness, workerThreadId);
+
+      // No detail activity is present for the old stop. Its event-time active
+      // turn is reconstructed from the durable session timeline instead.
+      yield* ingestRuntimeTerminal(service, harness, {
+        threadId: workerThreadId,
+        turnId: "turn-live",
+        state: "interrupted",
+        createdAt: "1970-01-01T00:18:00.000Z",
+      });
+      const worker = yield* repository.findManagedWorkerByThread(workerThreadId);
+      assert.equal(Option.isSome(worker) ? worker.value.settleOutcome : null, null);
+    }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+  },
+);
+
+it.effect(
+  "settles an abort on the re-dispatched turn instead of matching the old turn's ladder interrupt",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const overview = yield* configureTestGroup(service, "req-recovery-new-turn-abort");
+      const workerThreadId = ThreadId.makeUnsafe("thread-recovery-new-turn-abort");
+      yield* service.recordManagedWorkerThreads({
+        requestId: "req-recovery-new-turn-abort-record",
+        callerThreadId: overview.config!.coordinatorThreadId!,
+        threadIds: [workerThreadId],
+        titles: ["Stalled worker"],
+        prompts: ["Draft the schema migration"],
+      });
+      harness.threadShells[workerThreadId] = {
+        ...quietRunningShell("1970-01-01T00:00:00.000Z"),
+        latestTurn: { state: "running", turnId: "turn-live", startedAt: now },
+      };
+      harness.providerSessions.push(liveProviderSession(workerThreadId));
+
+      const { interrupt, redispatch } = yield* driveRecoveryToStepTwo(
+        service,
+        harness,
+        workerThreadId,
+      );
+      yield* service.recordWorkerTurnRequest({
+        threadId: workerThreadId,
+        commandId: redispatch.commandId,
+        dispatchOrigin: "automation",
+        turnId: null,
+        eventType: "thread.turn-start-requested",
+        createdAt: "1970-01-01T00:17:00.000Z",
+      });
+      assert.equal(interrupt.turnId, "turn-live");
+      harness.recordSessionSetEvent({
+        threadId: workerThreadId,
+        status: "running",
+        activeTurnId: "turn-redispatched",
+        createdAt: "1970-01-01T00:17:30.000Z",
+      });
+
+      // The re-dispatched turn becomes current and then aborts. The durable
+      // ladder interrupt belongs to turn-live, so it cannot suppress this one.
+      harness.threadShells[workerThreadId] = {
+        ...harness.threadShells[workerThreadId]!,
+        session: {
+          ...harness.threadShells[workerThreadId]!.session!,
+          activeTurnId: "turn-redispatched",
+        },
+        latestTurn: {
+          state: "interrupted",
+          turnId: "turn-redispatched",
+          startedAt: "1970-01-01T00:17:30.000Z",
+        },
+      };
+      yield* ingestRuntimeTerminal(service, harness, {
+        threadId: workerThreadId,
+        turnId: "turn-redispatched",
+        state: "interrupted",
+        createdAt: "1970-01-01T00:18:00.000Z",
+      });
+
+      const worker = yield* repository.findManagedWorkerByThread(workerThreadId);
+      assert.equal(Option.isSome(worker) ? worker.value.settleOutcome : null, "interrupted");
+    }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+  },
+);
+
+it.effect("defers a recovery terminal until interrupt provenance can be read", () => {
+  const harness = makeTestLayer({ failThreadEventRead: true });
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    const overview = yield* configureTestGroup(service, "req-recovery-unavailable-provenance");
+    const workerThreadId = ThreadId.makeUnsafe("thread-recovery-unavailable-provenance");
+    yield* service.recordManagedWorkerThreads({
+      requestId: "req-recovery-unavailable-provenance-record",
+      callerThreadId: overview.config!.coordinatorThreadId!,
+      threadIds: [workerThreadId],
+      titles: ["Stalled worker"],
+      prompts: ["Draft the schema migration"],
+    });
+    harness.threadShells[workerThreadId] = {
+      ...quietRunningShell("1970-01-01T00:00:00.000Z"),
+      latestTurn: { state: "running", turnId: "turn-live", startedAt: now },
+    };
+    harness.providerSessions.push(liveProviderSession(workerThreadId));
+    yield* driveRecoveryToStepTwo(service, harness, workerThreadId);
+    yield* ingestRuntimeTerminal(service, harness, {
+      threadId: workerThreadId,
+      turnId: "turn-live",
+      state: "interrupted",
+      createdAt: "1970-01-01T00:18:00.000Z",
+    });
+
+    const deferred = yield* repository.findManagedWorkerByThread(workerThreadId);
+    assert.equal(Option.isSome(deferred) ? deferred.value.settleOutcome : null, null);
+
+    // The fallback observes the same stopped snapshot. A failed provenance
+    // read must defer this path too, rather than recording a terminal event.
+    yield* service.inspectWorkerHealth();
+    const healthDeferred = yield* repository.findManagedWorkerByThread(workerThreadId);
+    assert.equal(Option.isSome(healthDeferred) ? healthDeferred.value.settleOutcome : null, null);
+
+    // The runtime terminal remains durable; a later reconciliation retries
+    // after the event store recovers and recognizes the recovery interrupt.
+    harness.setThreadEventReadFailure(false);
+    yield* service.inspectWorkerHealth();
+    const retried = yield* repository.findManagedWorkerByThread(workerThreadId);
+    assert.equal(Option.isSome(retried) ? retried.value.settleOutcome : null, null);
   }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
 });
 
@@ -6465,3 +7229,455 @@ it.effect("keeps taskless and settled managed workers from delegating further th
     }
   }).pipe(Effect.provide(harness.layer));
 });
+
+it.effect(
+  "refreshes digest when worker results and Hub work progress change without activity",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const workRepository = yield* HubWorkRepository;
+      const overview = yield* configureTestGroup(service, "req-digest-runtime-setup");
+      const workerThreadId = ThreadId.makeUnsafe("thread-digest-result-worker");
+      yield* service.recordManagedWorkerThreads({
+        requestId: "req-digest-runtime-worker",
+        callerThreadId: overview.config!.coordinatorThreadId,
+        threadIds: [workerThreadId],
+        titles: ["Result worker"],
+      });
+
+      yield* service.refreshDigest(
+        { projectId: groupId, requestId: "req-digest-runtime-1" },
+        { kind: "user" },
+      );
+      const firstWorkerDigest = yield* repository.getDigest(groupId);
+      assert.equal(Option.isSome(firstWorkerDigest), true);
+      assert.equal(
+        Option.isSome(firstWorkerDigest)
+          ? firstWorkerDigest.value.summary.includes("Result worker: awaiting runtime status")
+          : false,
+        true,
+      );
+
+      const worker = Option.getOrThrow(yield* repository.findManagedWorkerByThread(workerThreadId));
+      yield* repository.saveManagedWorkerMonitor({
+        worker: {
+          ...worker,
+          settledAt: "2026-09-20T00:01:00.000Z",
+          settleOutcome: "completed",
+          resultSummary: "Migrated the schema and verified 12 files.",
+          resultAt: "2026-09-20T00:01:00.000Z",
+          updatedAt: "2026-09-20T00:01:00.000Z",
+        },
+        expectedUpdatedAt: worker.updatedAt,
+      });
+      // No activity row was appended between refreshes: the worker result alone
+      // must invalidate the digest input signature.
+      yield* service.refreshDigest(
+        { projectId: groupId, requestId: "req-digest-runtime-2" },
+        { kind: "user" },
+      );
+      const resultDigest = yield* repository.getDigest(groupId);
+      assert.equal(
+        Option.isSome(resultDigest)
+          ? resultDigest.value.summary.includes(
+              "Result worker: result reported. Migrated the schema and verified 12 files.",
+            )
+          : false,
+        true,
+      );
+
+      const work: HubWorkRecord = {
+        id: "digest-progress-work",
+        projectId: groupId,
+        targetProjectId: groupId,
+        sourceThreadId: overview.config!.coordinatorThreadId,
+        sourceMessageId: null,
+        title: "Progress work",
+        workerThreadId: null,
+        state: "working",
+        queueReason: null,
+        resultSummary: null,
+        progress: null,
+        requestId: "digest-progress-request",
+        scopeKey: "digest-progress-scope",
+        fingerprint: "digest-progress-plan",
+        taskIndex: 0,
+        creationSpec: { prompt: "Inspect the repo", target: modelSelection },
+        sourceMessages: [],
+        slotHeld: false,
+        admittedAt: null,
+        admissionCommandId: null,
+        admissionMessageId: null,
+        admissionPreviousState: null,
+        admissionPreviousSlotHeld: false,
+        revision: 0,
+        createdAt: now,
+        updatedAt: now,
+      };
+      yield* workRepository.submit([work]);
+      yield* service.refreshDigest(
+        { projectId: groupId, requestId: "req-digest-runtime-3" },
+        { kind: "user" },
+      );
+      const progressStartedDigest = yield* repository.getDigest(groupId);
+      assert.equal(
+        Option.isSome(progressStartedDigest)
+          ? progressStartedDigest.value.summary.includes("Progress work: working.")
+          : false,
+        true,
+      );
+
+      yield* workRepository.save({
+        record: {
+          ...work,
+          progress: {
+            revision: 1,
+            steps: [{ id: "inspect", text: "Inspecting the repository", status: "inProgress" }],
+            summary: "Found three affected modules; checking the lifecycle boundary.",
+          },
+          revision: 1,
+          updatedAt: "2026-09-20T00:02:00.000Z",
+        },
+        expectedRevision: 0,
+      });
+      // Again, the durable work progress is the only changed digest input.
+      yield* service.refreshDigest(
+        { projectId: groupId, requestId: "req-digest-runtime-4" },
+        { kind: "user" },
+      );
+      const progressDigest = yield* repository.getDigest(groupId);
+      assert.equal(
+        Option.isSome(progressDigest)
+          ? progressDigest.value.summary.includes(
+              "Progress work: working. Found three affected modules; checking the lifecycle boundary.",
+            )
+          : false,
+        true,
+      );
+      assert.equal(harness.digestGenerationInputs.length, 0);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect(
+  "uses stopped workers, idle work, and the live pending count over stale digest activity",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const workRepository = yield* HubWorkRepository;
+      const overview = yield* configureTestGroup(service, "req-digest-stale-setup");
+      const stoppedThreadId = ThreadId.makeUnsafe("thread-digest-stopped");
+      yield* service.recordManagedWorkerThreads({
+        requestId: "req-digest-stopped-worker",
+        callerThreadId: overview.config!.coordinatorThreadId,
+        threadIds: [stoppedThreadId],
+        titles: ["Stopped worker"],
+      });
+      const worker = Option.getOrThrow(
+        yield* repository.findManagedWorkerByThread(stoppedThreadId),
+      );
+      yield* repository.saveManagedWorkerMonitor({
+        worker: {
+          ...worker,
+          settledAt: "2026-09-20T00:03:00.000Z",
+          settleOutcome: "stopped",
+          updatedAt: "2026-09-20T00:03:00.000Z",
+        },
+        expectedUpdatedAt: worker.updatedAt,
+      });
+      yield* workRepository.submit([
+        {
+          id: "digest-idle-work",
+          projectId: groupId,
+          targetProjectId: groupId,
+          sourceThreadId: overview.config!.coordinatorThreadId,
+          sourceMessageId: null,
+          title: "Idle work",
+          workerThreadId: null,
+          state: "idle",
+          queueReason: null,
+          resultSummary: null,
+          progress: null,
+          requestId: "digest-idle-request",
+          scopeKey: "digest-idle-scope",
+          fingerprint: "digest-idle-plan",
+          taskIndex: 0,
+          creationSpec: { prompt: "Wait for scheduling", target: modelSelection },
+          sourceMessages: [],
+          slotHeld: false,
+          admittedAt: null,
+          admissionCommandId: null,
+          admissionMessageId: null,
+          admissionPreviousState: null,
+          admissionPreviousSlotHeld: false,
+          revision: 0,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ]);
+      yield* repository.appendActivity({
+        id: ProjectActivityId.makeUnsafe("pa-stale-completed-later-events"),
+        projectId: groupId,
+        kind: "wake-enqueued",
+        actorKind: "system",
+        actorThreadId: overview.config!.coordinatorThreadId,
+        goalId: null,
+        taskId: null,
+        source: null,
+        summary: "Coordinator continuation completed. Later events remain queued.",
+        createdAt: "2026-09-20T00:02:00.000Z",
+      });
+
+      yield* service.refreshDigest(
+        { projectId: groupId, requestId: "req-digest-stale-refresh" },
+        { kind: "user" },
+      );
+      const digest = yield* repository.getDigest(groupId);
+      assert.equal(Option.isSome(digest), true);
+      if (Option.isSome(digest)) {
+        assert.equal(digest.value.summary.includes("Coordinator inbox: 0 pending event(s)."), true);
+        assert.equal(digest.value.summary.includes("Stopped worker: stopped."), true);
+        assert.equal(digest.value.summary.includes("Idle work: idle."), true);
+        assert.equal(digest.value.summary.includes("Later events remain queued"), false);
+      }
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("settles a non-Git runtime completion once and preserves it after an idle stop", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    const overview = yield* configureTestGroup(service, "req-terminal-nongit-setup");
+    const workerThreadId = ThreadId.makeUnsafe("thread-terminal-nongit");
+    yield* service.recordManagedWorkerThreads({
+      requestId: "req-terminal-nongit-worker",
+      callerThreadId: overview.config!.coordinatorThreadId,
+      threadIds: [workerThreadId],
+      titles: ["Non-Git worker"],
+    });
+    harness.threadShells[workerThreadId] = {
+      projectId: groupId,
+      title: "Non-Git worker",
+      session: { status: "ready", updatedAt: now, lastError: null },
+      worktreePath: null,
+    };
+    const terminal = {
+      threadId: workerThreadId,
+      turnId: "turn-nongit-complete",
+      state: "completed" as const,
+      createdAt: "2026-09-20T00:05:00.000Z",
+      lifecycleGeneration: "generation-nongit-1",
+    };
+    yield* ingestRuntimeTerminal(service, harness, terminal);
+    const sourceEventId = workerTurnSettlementSourceId({
+      threadId: workerThreadId,
+      turnId: terminal.turnId,
+      lifecycleGeneration: terminal.lifecycleGeneration,
+    });
+    const worker = yield* repository.findManagedWorkerByThread(workerThreadId);
+    assert.equal(Option.isSome(worker) ? worker.value.settleOutcome : null, "completed");
+    let inbox = yield* repository.listInboxAfter({ projectId: groupId, limit: 20 });
+    assert.equal(inbox.filter((event) => event.sourceEventId === sourceEventId).length, 1);
+
+    // Replaying the same terminal identity and then observing a stop request
+    // or stopped/idle session cannot turn the accepted completion into a stop.
+    yield* ingestRuntimeTerminal(service, harness, { ...terminal, sessionStatus: "stopped" });
+    yield* service.ingestSettledThreadEvent({
+      threadId: workerThreadId,
+      sourceEventId: "stop-request-after-completion",
+      eventType: "thread.session-stop-requested",
+      createdAt: "2026-09-20T00:06:00.000Z",
+    });
+    yield* service.inspectWorkerHealth();
+    const afterIdleStop = yield* repository.findManagedWorkerByThread(workerThreadId);
+    assert.equal(
+      Option.isSome(afterIdleStop) ? afterIdleStop.value.settleOutcome : null,
+      "completed",
+    );
+    inbox = yield* repository.listInboxAfter({ projectId: groupId, limit: 20 });
+    assert.equal(inbox.filter((event) => event.sourceEventId === sourceEventId).length, 1);
+    const settledRows = harness.dispatched.filter(
+      (command) =>
+        command.type === "thread.activity.append" &&
+        command.activity.kind === "synara.worker.settled" &&
+        command.activity.summary.includes("Non-Git worker"),
+    );
+    assert.equal(settledRows.length, 1);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("does not settle a running turn from a missing diff or stop request", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    const overview = yield* configureTestGroup(service, "req-terminal-running-setup");
+    const workerThreadId = ThreadId.makeUnsafe("thread-terminal-running");
+    yield* service.recordManagedWorkerThreads({
+      requestId: "req-terminal-running-worker",
+      callerThreadId: overview.config!.coordinatorThreadId,
+      threadIds: [workerThreadId],
+      titles: ["Running worker"],
+    });
+    harness.threadShells[workerThreadId] = {
+      projectId: groupId,
+      title: "Running worker",
+      session: { status: "running", updatedAt: now, lastError: null },
+      latestTurn: { state: "running", turnId: "turn-running-current", startedAt: now },
+    };
+    yield* service.ingestSettledThreadEvent({
+      threadId: workerThreadId,
+      sourceEventId: "missing-diff-placeholder",
+      eventType: "thread.turn-diff-completed",
+      createdAt: "2026-09-20T00:05:00.000Z",
+    });
+    yield* service.ingestSettledThreadEvent({
+      threadId: workerThreadId,
+      sourceEventId: "stop-request-running",
+      eventType: "thread.session-stop-requested",
+      createdAt: "2026-09-20T00:06:00.000Z",
+    });
+    // Even a malformed early terminal delivery is rejected while the
+    // durable projection still says this exact turn is running.
+    yield* service.ingestSettledThreadEvent({
+      threadId: workerThreadId,
+      sourceEventId: "premature-runtime-terminal",
+      eventType: "turn.completed",
+      runtimeTurnState: "completed",
+      turnId: "turn-running-current",
+      createdAt: "2026-09-20T00:07:00.000Z",
+    });
+    const worker = yield* repository.findManagedWorkerByThread(workerThreadId);
+    assert.equal(Option.isSome(worker) ? worker.value.settledAt : "missing", null);
+    assert.equal(
+      harness.dispatched.some(
+        (command) =>
+          command.type === "thread.activity.append" &&
+          command.activity.kind === "synara.worker.settled",
+      ),
+      false,
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect(
+  "reconciles only the current durable terminal after restart and maps failure states",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const overview = yield* configureTestGroup(service, "req-terminal-reconcile-setup");
+      const failedThreadId = ThreadId.makeUnsafe("thread-terminal-failed");
+      const cancelledThreadId = ThreadId.makeUnsafe("thread-terminal-cancelled");
+      const interruptedThreadId = ThreadId.makeUnsafe("thread-terminal-interrupted");
+      const replayThreadId = ThreadId.makeUnsafe("thread-terminal-replay");
+      yield* service.recordManagedWorkerThreads({
+        requestId: "req-terminal-reconcile-workers",
+        callerThreadId: overview.config!.coordinatorThreadId,
+        threadIds: [failedThreadId, cancelledThreadId, interruptedThreadId, replayThreadId],
+        titles: ["Failed", "Cancelled", "Interrupted", "Replay"],
+      });
+      yield* ingestRuntimeTerminal(service, harness, {
+        threadId: failedThreadId,
+        turnId: "turn-failed",
+        state: "failed",
+        createdAt: "2026-09-20T00:05:00.000Z",
+      });
+      yield* ingestRuntimeTerminal(service, harness, {
+        threadId: cancelledThreadId,
+        turnId: "turn-cancelled",
+        state: "cancelled",
+        createdAt: "2026-09-20T00:06:00.000Z",
+      });
+      yield* ingestRuntimeTerminal(service, harness, {
+        threadId: interruptedThreadId,
+        turnId: "turn-interrupted",
+        state: "interrupted",
+        createdAt: "2026-09-20T00:07:00.000Z",
+      });
+      assert.equal(
+        Option.getOrThrow(yield* repository.findManagedWorkerByThread(failedThreadId))
+          .settleOutcome,
+        "failed",
+      );
+      assert.equal(
+        Option.getOrThrow(yield* repository.findManagedWorkerByThread(cancelledThreadId))
+          .settleOutcome,
+        "interrupted",
+      );
+      assert.equal(
+        Option.getOrThrow(yield* repository.findManagedWorkerByThread(interruptedThreadId))
+          .settleOutcome,
+        "interrupted",
+      );
+
+      const oldTurnId = "turn-replay-old";
+      const currentTurnId = "turn-replay-current";
+      harness.threadShells[replayThreadId] = {
+        projectId: groupId,
+        title: "Replay",
+        session: { status: "error", updatedAt: "2026-09-20T00:08:00.000Z", lastError: "failed" },
+        latestTurn: {
+          state: "failed",
+          turnId: currentTurnId,
+          startedAt: "2026-09-20T00:07:00.000Z",
+          completedAt: "2026-09-20T00:08:00.000Z",
+        },
+      };
+      harness.threadDetails[replayThreadId] = {
+        messages: [],
+        activities: [
+          {
+            kind: "turn.completed",
+            turnId: oldTurnId,
+            payload: { state: "completed", lifecycleGeneration: "generation-old" },
+            createdAt: "2026-09-20T00:04:00.000Z",
+          },
+          {
+            kind: "turn.completed",
+            turnId: currentTurnId,
+            payload: { state: "failed", lifecycleGeneration: "generation-current" },
+            createdAt: "2026-09-20T00:08:00.000Z",
+          },
+        ],
+      };
+      // Simulate a restart between durable activity projection and domain ingest.
+      yield* service.inspectWorkerHealth();
+      const replayed = yield* repository.findManagedWorkerByThread(replayThreadId);
+      assert.equal(Option.isSome(replayed) ? replayed.value.settleOutcome : null, "failed");
+      yield* service.ingestSettledThreadEvent({
+        threadId: replayThreadId,
+        sourceEventId: workerTurnSettlementSourceId({
+          threadId: replayThreadId,
+          turnId: oldTurnId,
+          lifecycleGeneration: "generation-old",
+        }),
+        eventType: "turn.completed",
+        runtimeTurnState: "completed",
+        turnId: oldTurnId,
+        lifecycleGeneration: "generation-old",
+        createdAt: "2026-09-20T00:04:00.000Z",
+      });
+      yield* service.inspectWorkerHealth();
+      const afterStaleReplay = yield* repository.findManagedWorkerByThread(replayThreadId);
+      assert.equal(
+        Option.isSome(afterStaleReplay) ? afterStaleReplay.value.settleOutcome : null,
+        "failed",
+      );
+      const settledRows = harness.dispatched.filter(
+        (command) =>
+          command.type === "thread.activity.append" &&
+          command.activity.kind === "synara.worker.settled" &&
+          command.activity.summary.includes("Replay"),
+      );
+      assert.equal(settledRows.length, 1);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);

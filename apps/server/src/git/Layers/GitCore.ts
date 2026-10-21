@@ -51,6 +51,7 @@ import {
   type ExecuteGitProgress,
   type GitCommitOptions,
   type GitCoreShape,
+  type GitReadBlobAtRevInput,
   type ExecuteGitInput,
   type ExecuteGitResult,
   type GitWorkingTreePatch,
@@ -186,6 +187,8 @@ interface ExecuteGitOptions {
   allowNonZeroExit?: boolean | undefined;
   fallbackErrorMessage?: string | undefined;
   env?: NodeJS.ProcessEnv | undefined;
+  stdinBytes?: Uint8Array | undefined;
+  stdoutMode?: "text" | "bytes" | undefined;
   progress?: ExecuteGitProgress | undefined;
   maxOutputBytes?: number | undefined;
   outputMode?: "error" | "truncate" | undefined;
@@ -676,6 +679,7 @@ const createTrace2Monitor = Effect.fn(function* (
 
 export interface CollectedGitOutput {
   readonly text: string;
+  readonly bytes?: Uint8Array;
   readonly truncated: boolean;
 }
 
@@ -775,6 +779,43 @@ export const collectGitOutput = Effect.fn(function* <E>(
   return { text, truncated };
 });
 
+const collectGitOutputBytes = Effect.fn(function* <E>(
+  input: Pick<ExecuteGitInput, "operation" | "cwd" | "args">,
+  stream: Stream.Stream<Uint8Array, E>,
+  maxOutputBytes: number,
+  outputMode: "error" | "truncate",
+): Effect.fn.Return<CollectedGitOutput, GitCommandError> {
+  let receivedBytes = 0;
+  let retainedBytes = 0;
+  let truncated = false;
+  const chunks: Uint8Array[] = [];
+
+  yield* Stream.runForEach(stream, (chunk) =>
+    Effect.gen(function* () {
+      receivedBytes += chunk.byteLength;
+      const remaining = Math.max(0, maxOutputBytes - retainedBytes);
+      const retained = Math.min(chunk.byteLength, remaining);
+      if (retained > 0) {
+        chunks.push(chunk.slice(0, retained));
+        retainedBytes += retained;
+      }
+      if (receivedBytes > maxOutputBytes) {
+        truncated = true;
+        if (outputMode === "error") {
+          return yield* new GitCommandError({
+            operation: input.operation,
+            command: commandLabel(input.args),
+            cwd: input.cwd,
+            detail: `${commandLabel(input.args)} output exceeded ${maxOutputBytes} bytes and was truncated.`,
+          });
+        }
+      }
+    }),
+  ).pipe(Effect.mapError(toGitCommandError(input, "output stream failed.")));
+
+  return { text: "", bytes: Buffer.concat(chunks, retainedBytes), truncated };
+});
+
 export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"] }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -835,6 +876,9 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
                   ...input.env,
                   ...trace2Monitor.env,
                 },
+                ...(input.stdinBytes === undefined
+                  ? {}
+                  : { stdin: { stream: Stream.make(input.stdinBytes) } }),
               }),
             )
             .pipe(Effect.mapError(toGitCommandError(commandInput, "failed to spawn.")));
@@ -846,14 +890,16 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
 
           const [stdoutResult, stderrResult, exitCode] = yield* Effect.all(
             [
-              collectGitOutput(
-                commandInput,
-                child.stdout,
-                maxOutputBytes,
-                input.progress?.onStdoutLine,
-                outputMode,
-                input.progress?.stdoutLineDelimiter,
-              ),
+              input.stdoutMode === "bytes"
+                ? collectGitOutputBytes(commandInput, child.stdout, maxOutputBytes, outputMode)
+                : collectGitOutput(
+                    commandInput,
+                    child.stdout,
+                    maxOutputBytes,
+                    input.progress?.onStdoutLine,
+                    outputMode,
+                    input.progress?.stdoutLineDelimiter,
+                  ),
               collectGitOutput(
                 commandInput,
                 child.stderr,
@@ -886,6 +932,7 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
           return {
             code: exitCode,
             stdout: stdoutResult.text,
+            ...(stdoutResult.bytes === undefined ? {} : { stdoutBytes: stdoutResult.bytes }),
             stderr: stderrResult.text,
             stdoutTruncated: stdoutResult.truncated,
             stderrTruncated: stderrResult.truncated,
@@ -960,6 +1007,8 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
         allowNonZeroExit: true,
         ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
         ...(options.env ? { env: options.env } : {}),
+        ...(options.stdinBytes !== undefined ? { stdinBytes: options.stdinBytes } : {}),
+        ...(options.stdoutMode !== undefined ? { stdoutMode: options.stdoutMode } : {}),
         ...(options.progress ? { progress: options.progress } : {}),
         ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}),
         ...(options.outputMode !== undefined ? { outputMode: options.outputMode } : {}),
@@ -2289,6 +2338,92 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
         }
 
         return { contents, resolvedRev, missing: false, truncated };
+      });
+
+    const readBlobAtRev: GitCoreShape["readBlobAtRev"] = (input: GitReadBlobAtRevInput) =>
+      Effect.gen(function* () {
+        const filePath = input.filePath.trim();
+        if (!isWorkspaceRelativePathSafe(filePath) || filePath.includes("\0")) {
+          return yield* createGitCommandError(
+            "GitCore.readBlobAtRev",
+            input.cwd,
+            ["ls-tree", filePath],
+            "File path must be a workspace-relative path.",
+          );
+        }
+        if (
+          !Number.isSafeInteger(input.maxBytes) ||
+          input.maxBytes < 0 ||
+          input.maxBytes > GIT_READ_FILE_AT_REV_MAX_BYTES
+        ) {
+          return yield* createGitCommandError(
+            "GitCore.readBlobAtRev",
+            input.cwd,
+            ["cat-file", "blob"],
+            `Blob byte limit must be between 0 and ${GIT_READ_FILE_AT_REV_MAX_BYTES}.`,
+          );
+        }
+
+        const resolvedRev = yield* resolveCommitObjectId(
+          input.cwd,
+          input.rev.trim(),
+          "GitCore.readBlobAtRev.revParse",
+        );
+        const tree = yield* executeGit(
+          "GitCore.readBlobAtRev.tree",
+          input.cwd,
+          ["ls-tree", "-z", "--full-tree", resolvedRev, "--", filePath],
+          {
+            env: { GIT_LITERAL_PATHSPECS: "1" },
+            maxOutputBytes: 4096,
+          },
+        );
+        const records = tree.stdout.split("\0");
+        const record = records.length === 2 && records[1] === "" ? records[0] : undefined;
+        const separator = record?.indexOf("\t") ?? -1;
+        const metadata = separator < 0 ? [] : record!.slice(0, separator).split(" ");
+        const [mode, type, objectId] = metadata;
+        const recordPath = separator < 0 ? undefined : record!.slice(separator + 1);
+        if (
+          recordPath !== filePath ||
+          type !== "blob" ||
+          !["100644", "100755"].includes(mode ?? "")
+        ) {
+          return yield* createGitCommandError(
+            "GitCore.readBlobAtRev",
+            input.cwd,
+            ["ls-tree", "-z", "--full-tree", resolvedRev, "--", filePath],
+            "The requested revision does not contain a regular file at that path.",
+          );
+        }
+        if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(objectId ?? "")) {
+          return yield* createGitCommandError(
+            "GitCore.readBlobAtRev",
+            input.cwd,
+            ["ls-tree", "-z", "--full-tree", resolvedRev, "--", filePath],
+            "Git returned an invalid blob object id.",
+          );
+        }
+
+        const blob = yield* executeGit(
+          "GitCore.readBlobAtRev.blob",
+          input.cwd,
+          ["cat-file", "blob", objectId!],
+          {
+            stdoutMode: "bytes",
+            maxOutputBytes: input.maxBytes,
+            outputMode: "truncate",
+          },
+        );
+        if (blob.stdoutTruncated) {
+          return yield* createGitCommandError(
+            "GitCore.readBlobAtRev",
+            input.cwd,
+            ["cat-file", "blob", objectId!],
+            `Blob exceeds the ${input.maxBytes}-byte read limit.`,
+          );
+        }
+        return { bytes: blob.stdoutBytes ?? new Uint8Array(0), resolvedRev };
       });
 
     const readBranchPatch: GitCoreShape["readBranchPatch"] = (cwd) =>
@@ -4357,6 +4492,7 @@ export const makeGitCore = (options?: { executeOverride?: GitCoreShape["execute"
       readBranchPatch,
       blameLine,
       readFileAtRev,
+      readBlobAtRev,
       readRefPatch,
       readDiffStats,
       prepareCommitContext,

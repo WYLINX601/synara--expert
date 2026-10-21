@@ -11,6 +11,8 @@ import {
   lastAssistantTextFromMessages,
   shouldMaterializeWorkerSettlementReport,
   workerInboxReportPath,
+  workerMonitorNoticeForEvent,
+  workerTurnSettlementSourceId,
 } from "./workerHealth.ts";
 
 describe("worker health", () => {
@@ -105,16 +107,17 @@ describe("worker health", () => {
     expect(workerInboxReportPath("thread-worker")).toBe("inbox/thread-worker/report.md");
   });
 
-  it("materializes reports from settle and health events, not approval prompts", () => {
-    expect(shouldMaterializeWorkerSettlementReport("thread.turn-diff-completed")).toBe(true);
-    expect(shouldMaterializeWorkerSettlementReport("thread.session-stop-requested")).toBe(true);
+  it("materializes reports from durable runtime terminals and health events", () => {
+    expect(shouldMaterializeWorkerSettlementReport("turn.completed")).toBe(true);
+    expect(shouldMaterializeWorkerSettlementReport("thread.turn-diff-completed")).toBe(false);
+    expect(shouldMaterializeWorkerSettlementReport("thread.session-stop-requested")).toBe(false);
     expect(shouldMaterializeWorkerSettlementReport("worker.error")).toBe(true);
     expect(shouldMaterializeWorkerSettlementReport("thread.approval-response-requested")).toBe(
       false,
     );
   });
 
-  it("classifies quota death as failed and a finished turn as completed", () => {
+  it("uses runtime terminal state and never treats a diff placeholder as completion", () => {
     expect(
       classifyWorkerSettlement({
         eventType: "worker.error",
@@ -123,17 +126,25 @@ describe("worker health", () => {
     ).toBe("failed");
     expect(
       classifyWorkerSettlement({
-        eventType: "thread.turn-diff-completed",
+        eventType: "turn.completed",
         sessionStatus: "ready",
+        runtimeTurnState: "completed",
       }),
     ).toBe("completed");
-  });
-
-  it("does not treat a finished worker as failed", () => {
     expect(
       classifyWorkerSettlement({
         eventType: "thread.turn-diff-completed",
         sessionStatus: "ready",
+      }),
+    ).toBe("updated");
+  });
+
+  it("does not reinterpret an accepted completion from a later stopped session", () => {
+    expect(
+      classifyWorkerSettlement({
+        eventType: "turn.completed",
+        sessionStatus: "stopped",
+        runtimeTurnState: "completed",
       }),
     ).toBe("completed");
     expect(
@@ -144,19 +155,21 @@ describe("worker health", () => {
     ).not.toBe("failed");
   });
 
-  it("does not treat a user stop or archive with no error as failed", () => {
+  it("classifies a stopped worker as interrupted and stop requests as non-outcomes", () => {
     expect(
       classifyWorkerSettlement({
         eventType: "worker.stopped",
         sessionStatus: "stopped",
       }),
-    ).toBe("completed");
+    ).toBe("interrupted");
     expect(
       classifyWorkerSettlement({
         eventType: "thread.session-stop-requested",
         sessionStatus: "stopped",
       }),
-    ).toBe("completed");
+    ).toBe("interrupted");
+    expect(workerMonitorNoticeForEvent("thread.session-stop-requested")).toBeNull();
+    expect(workerMonitorNoticeForEvent("thread.turn-interrupt-requested")).toBeNull();
   });
 
   it("maps a real error status to failed", () => {
@@ -168,25 +181,39 @@ describe("worker health", () => {
     ).toBe("failed");
     expect(
       classifyWorkerSettlement({
-        eventType: "thread.turn-diff-completed",
-        sessionStatus: "error",
+        eventType: "turn.completed",
+        sessionStatus: "stopped",
+        runtimeTurnState: "failed",
       }),
     ).toBe("failed");
   });
 
-  it("maps an interrupt to interrupted", () => {
+  it("maps cancellation and interruption terminal states to interrupted", () => {
     expect(
       classifyWorkerSettlement({
-        eventType: "thread.turn-interrupt-requested",
+        eventType: "turn.completed",
         sessionStatus: "running",
+        runtimeTurnState: "cancelled",
       }),
     ).toBe("interrupted");
     expect(
       classifyWorkerSettlement({
-        eventType: "worker.interrupted",
-        sessionStatus: "interrupted",
+        eventType: "turn.completed",
+        sessionStatus: "ready",
+        runtimeTurnState: "interrupted",
       }),
     ).toBe("interrupted");
+  });
+
+  it("deduplicates a runtime turn by stable thread, turn, and generation identity", () => {
+    const identity = { threadId: "thread-a", turnId: "turn-1", lifecycleGeneration: "gen-1" };
+    expect(workerTurnSettlementSourceId(identity)).toBe(workerTurnSettlementSourceId(identity));
+    expect(workerTurnSettlementSourceId(identity)).not.toBe(
+      workerTurnSettlementSourceId({ ...identity, turnId: "turn-2" }),
+    );
+    expect(workerTurnSettlementSourceId(identity)).not.toBe(
+      workerTurnSettlementSourceId({ ...identity, lifecycleGeneration: "gen-2" }),
+    );
   });
 
   it("takes the latest assistant text for the durable report", () => {
@@ -203,10 +230,11 @@ describe("worker health", () => {
     const report = formatWorkerSettlementReport({
       title: "Sample: repo layout",
       threadId: "thread-worker",
-      eventType: "thread.turn-diff-completed",
+      eventType: "turn.completed",
       status: "ready",
       lastError: null,
       lastAssistantText: "Top-level folders: apps, packages, docs.",
+      runtimeTurnState: "completed",
     });
     expect(report).toContain("Outcome: completed");
     expect(report).toContain("Top-level folders: apps, packages, docs.");

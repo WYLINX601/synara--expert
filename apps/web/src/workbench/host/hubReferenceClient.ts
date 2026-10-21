@@ -1,4 +1,4 @@
-import type { NativeApi } from "@synara/contracts";
+import type { NativeApi, ProjectId } from "@synara/contracts";
 import {
   onNativeApiServerCapabilitiesChange,
   readNativeApi,
@@ -24,4 +24,28 @@ export function hubReferenceConnectionGeneration(): string | null {
 
 export function subscribeToHubReferenceConnection(listener: () => void): () => void {
   return onNativeApiServerCapabilitiesChange(listener);
+}
+
+/** Existing stream snapshots also refresh after reconnection / a missed notification. */
+export function subscribeToHubDeliverableChanges(
+  projectId: ProjectId,
+  listener: () => void,
+): () => void {
+  const api = readNativeApi()?.projectAgent;
+  if (!api) return () => {};
+  const release =
+    api.onEvent?.((event) => {
+      if (
+        (event.type === "deliverables-changed" && event.projectId === projectId) ||
+        (event.type === "snapshot" && event.overview.projectId === projectId)
+      )
+        listener();
+    }) ?? (() => {});
+  // The Library may be open while the Hub panel is closed. Own a reference to
+  // the native subscription instead of relying on another panel to keep it live.
+  void api.subscribe?.({ projectId }).catch(() => undefined);
+  return () => {
+    release();
+    void api.unsubscribe?.({ projectId }).catch(() => undefined);
+  };
 }

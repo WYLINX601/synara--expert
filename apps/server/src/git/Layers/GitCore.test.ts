@@ -974,6 +974,64 @@ it.layer(TestLayer)("git integration", (it) => {
     );
   });
 
+  describe("readBlobAtRev", () => {
+    it.effect("reads raw binary blobs and rejects non-regular tree entries", () =>
+      Effect.gen(function* () {
+        const core = yield* GitCore;
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const rawBytes = Buffer.from([0x00, 0xff, 0x80, 0xc3, 0xa9, 0x0a, 0x0d, 0x0a]);
+        const linkBytes = Buffer.from("target");
+        const rawObject = yield* core.execute({
+          operation: "GitCore.test.hashRawBlob",
+          cwd: tmp,
+          args: ["hash-object", "-w", "--no-filters", "--stdin"],
+          stdinBytes: rawBytes,
+        });
+        const linkObject = yield* core.execute({
+          operation: "GitCore.test.hashSymlinkBlob",
+          cwd: tmp,
+          args: ["hash-object", "-w", "--no-filters", "--stdin"],
+          stdinBytes: linkBytes,
+        });
+        yield* core.execute({
+          operation: "GitCore.test.addRawIndexEntries",
+          cwd: tmp,
+          args: ["update-index", "-z", "--index-info"],
+          stdinBytes: Buffer.from(
+            `100644 ${rawObject.stdout.trim()} 0\t資料 résumé.pdf\0` +
+              `120000 ${linkObject.stdout.trim()} 0\tsymlink.pdf\0`,
+            "utf8",
+          ),
+        });
+        yield* git(tmp, ["commit", "-m", "raw file entries"]);
+        const rev = yield* git(tmp, ["rev-parse", "HEAD"]);
+
+        const blob = yield* core.readBlobAtRev({
+          cwd: tmp,
+          filePath: "資料 résumé.pdf",
+          rev,
+          maxBytes: rawBytes.byteLength,
+        });
+        expect(blob.resolvedRev).toBe(rev);
+        expect(Buffer.from(blob.bytes)).toEqual(rawBytes);
+
+        const symlink = yield* Effect.result(
+          core.readBlobAtRev({
+            cwd: tmp,
+            filePath: "symlink.pdf",
+            rev,
+            maxBytes: linkBytes.byteLength,
+          }),
+        );
+        expect(symlink._tag).toBe("Failure");
+        if (symlink._tag === "Failure") {
+          expect(symlink.failure.message).toContain("regular file");
+        }
+      }),
+    );
+  });
+
   // ── initGitRepo ──
 
   // ── listGitBranches ──

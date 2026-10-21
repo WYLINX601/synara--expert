@@ -4,19 +4,13 @@ import { Cause, Duration, Effect, Layer, Schedule, Stream } from "effect";
 
 import {
   PROJECT_AGENT_WORKER_HEALTH_INTERVAL_MS,
-  WORKER_RECOVERY_COMMAND_PREFIX,
+  isWorkerRuntimeTerminalState,
+  workerTurnSettlementSourceId,
 } from "../workerHealth.ts";
 
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectAgentReactor } from "../Services/ProjectAgentReactor.ts";
 import { ProjectAgentService } from "../Services/ProjectAgentService.ts";
-
-const SETTLE_EVENT_TYPES: ReadonlySet<OrchestrationEvent["type"]> = new Set([
-  "thread.turn-diff-completed",
-  "thread.turn-interrupt-requested",
-  "thread.session-set",
-  "thread.session-stop-requested",
-]);
 
 // Turn-ownership signals: who started the worker's active turn decides
 // whether the ladder may steer it (coordinator/ladder only) and re-arms
@@ -61,7 +55,6 @@ const make = Effect.gen(function* () {
 
   const isWatchedEvent = (type: OrchestrationEvent["type"]) =>
     type === "project.deleted" ||
-    SETTLE_EVENT_TYPES.has(type) ||
     TURN_REQUEST_EVENT_TYPES.has(type) ||
     type === "thread.activity-appended";
 
@@ -95,7 +88,42 @@ const make = Effect.gen(function* () {
       if (event.type === "thread.activity-appended") {
         const payload = event.payload;
         if (!("threadId" in payload) || !("activity" in payload)) return;
-        const activity = payload.activity as { kind?: unknown; id?: unknown };
+        const activity = payload.activity as {
+          createdAt?: unknown;
+          kind?: unknown;
+          payload?: unknown;
+          turnId?: unknown;
+        };
+        if (activity?.kind === "turn.completed") {
+          const terminalPayload = activity.payload;
+          if (
+            typeof activity.turnId !== "string" ||
+            terminalPayload === null ||
+            typeof terminalPayload !== "object"
+          ) {
+            return;
+          }
+          const state = (terminalPayload as Record<string, unknown>).state;
+          if (!isWorkerRuntimeTerminalState(state)) return;
+          const generation = (terminalPayload as Record<string, unknown>).lifecycleGeneration;
+          yield* projectAgent.ingestSettledThreadEvent({
+            threadId: payload.threadId as ThreadId,
+            sourceEventId: workerTurnSettlementSourceId({
+              threadId: payload.threadId,
+              turnId: activity.turnId,
+              lifecycleGeneration: typeof generation === "string" ? generation : null,
+            }),
+            eventType: "turn.completed",
+            runtimeTurnState: state,
+            turnId: activity.turnId,
+            ...(typeof generation === "string" ? { lifecycleGeneration: generation } : {}),
+            createdAt:
+              typeof activity.createdAt === "string"
+                ? activity.createdAt
+                : new Date().toISOString(),
+          });
+          return;
+        }
         if (typeof activity?.kind !== "string" || !REQUEST_ACTIVITY_KINDS.has(activity.kind)) {
           return;
         }
@@ -107,30 +135,6 @@ const make = Effect.gen(function* () {
         });
         return;
       }
-
-      if (!SETTLE_EVENT_TYPES.has(event.type)) return;
-      // The recovery ladder's own dispatches (queued steer interrupts, the
-      // explicit interrupt) must not settle the worker — an "interrupted"
-      // outcome would end the episode it is trying to fix.
-      if (event.commandId !== null && event.commandId.startsWith(WORKER_RECOVERY_COMMAND_PREFIX)) {
-        return;
-      }
-      const payload = event.payload;
-      if (!("threadId" in payload)) return;
-      yield* projectAgent.ingestSettledThreadEvent({
-        threadId: payload.threadId as ThreadId,
-        sourceEventId: `${event.sequence}:${event.type}`,
-        eventType: event.type,
-        // A turn-diff that closed missing/error (e.g. a turn the ladder
-        // interrupted) is reclassified inside ingest as an interruption.
-        ...("status" in payload && typeof payload.status === "string"
-          ? { checkpointStatus: payload.status }
-          : {}),
-        ...("turnId" in payload && typeof payload.turnId === "string"
-          ? { turnId: payload.turnId }
-          : {}),
-        createdAt: new Date().toISOString(),
-      });
     }).pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {

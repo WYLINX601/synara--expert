@@ -19,7 +19,12 @@ import { LIBRARY_UPLOAD_ROUTE_PATH } from "@synara/shared/binaryTransfer";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { resolveWsHttpUrl } from "~/lib/wsHttpUrl";
-import { readNativeApi } from "~/nativeApi";
+import {
+  readNativeApi,
+  readNativeApiServerConnection,
+  onNativeApiServerCapabilitiesChange,
+} from "~/nativeApi";
+import { subscribeToHubDeliverableChanges } from "~/workbench/host/hubReferenceClient";
 
 import {
   indexLibraryKeyDeliverables,
@@ -39,6 +44,22 @@ const libraryUploadErrorMessage = (payload: unknown, status: number) => {
 };
 
 type NativeLibraryApi = NonNullable<ReturnType<typeof readNativeApi>>["projectAgent"]["library"];
+
+/** Seed the directories that the Library opens by default, including after a
+ * reconnect interrupts the first load. Both entry paths use the same reads. */
+async function listInitialLibraryDirectories(library: NativeLibraryApi, projectId: ProjectId) {
+  const listed = await library.list({ projectId });
+  const rootDirs = listed.entries.filter((entry) => entry.kind === "directory");
+  const childListings = await Promise.all(
+    rootDirs.map((entry) => library.list({ projectId, relativePath: entry.relativePath })),
+  );
+  const entriesByDir = new Map<string, readonly LibraryEntry[]>([[ROOT_DIRECTORY, listed.entries]]);
+  for (const [index, entry] of rootDirs.entries()) {
+    const children = childListings[index];
+    if (children) entriesByDir.set(entry.relativePath, children.entries);
+  }
+  return { root: listed.root, entriesByDir, directories: new Set(entriesByDir.keys()) };
+}
 
 export function useGroupLibrary(input: {
   readonly projectId: ProjectId | null;
@@ -61,6 +82,7 @@ export function useGroupLibrary(input: {
   // coalesce into a single follow-up instead of stacking sequential reloads.
   const refreshInFlightRef = useRef<Promise<void> | null>(null);
   const refreshQueuedRef = useRef(false);
+  const loadRef = useRef<() => void>(() => undefined);
 
   const refreshDeliverables = async (projectId: ProjectId, generation?: number) => {
     const expectedGeneration = generation ?? loadGeneration.current;
@@ -93,6 +115,15 @@ export function useGroupLibrary(input: {
     }
   };
 
+  const refreshStatus = async (projectId: ProjectId) => {
+    const api = readNativeApi();
+    if (!api?.projectAgent) return;
+    const generation = loadGeneration.current;
+    const nextStatus = await api.projectAgent.library.status({ projectId }).catch(() => null);
+    if (nextStatus && projectIdRef.current === projectId && loadGeneration.current === generation)
+      setStatus(nextStatus);
+  };
+
   // Refresh in place: keep every cached listing until its directory's fresh one
   // lands, so expanded subfolders never flash empty. The root plus every
   // directory already fetched (including collapsed ones) is re-listed and
@@ -105,10 +136,11 @@ export function useGroupLibrary(input: {
       refreshQueuedRef.current = true;
       return;
     }
-    const generation = loadGeneration.current;
+    const generation = ++loadGeneration.current;
     const stillCurrent = () =>
       projectIdRef.current === projectId && loadGeneration.current === generation;
     const dirs = new Set(loadedDirs.current);
+    const needsInitialDirectories = dirs.size === 0;
     dirs.add(ROOT_DIRECTORY);
     let refreshFailed = false;
     const run = (async () => {
@@ -116,7 +148,19 @@ export function useGroupLibrary(input: {
         Array.from(dirs, async (dir) => {
           const listArgs =
             dir === ROOT_DIRECTORY ? { projectId } : { projectId, relativePath: dir };
+          const eagerRoot = needsInitialDirectories && dir === ROOT_DIRECTORY;
           try {
+            if (eagerRoot) {
+              const initial = await listInitialLibraryDirectories(
+                api.projectAgent.library,
+                projectId,
+              );
+              if (!stillCurrent()) return;
+              setRoot(initial.root);
+              setEntriesByDir(initial.entriesByDir);
+              loadedDirs.current = initial.directories;
+              return;
+            }
             const listed = await api.projectAgent.library.list(listArgs);
             if (!stillCurrent()) return;
             setEntriesByDir((current) => new Map(current).set(dir, listed.entries));
@@ -128,17 +172,43 @@ export function useGroupLibrary(input: {
           }
         }),
       );
+      if (!stillCurrent()) return;
       await Promise.all([refreshStatus(projectId), refreshDeliverables(projectId, generation)]);
       if (stillCurrent() && !refreshFailed) setError(null);
     })();
     refreshInFlightRef.current = run;
     void run.finally(() => {
+      if (refreshInFlightRef.current !== run) return;
       refreshInFlightRef.current = null;
       if (!refreshQueuedRef.current) return;
       refreshQueuedRef.current = false;
-      if (stillCurrent()) load();
+      loadRef.current();
     });
   };
+
+  useEffect(() => {
+    loadRef.current = load;
+  });
+  useEffect(() => {
+    if (!input.enabled || !input.projectId) return;
+    const unsubscribe = subscribeToHubDeliverableChanges(input.projectId, () => loadRef.current());
+    let previous = readNativeApiServerConnection();
+    const unsubscribeConnection = onNativeApiServerCapabilitiesChange(() => {
+      const connection = readNativeApiServerConnection();
+      if (
+        connection.generation === previous.generation &&
+        connection.connected === previous.connected
+      )
+        return;
+      previous = connection;
+      loadGeneration.current += 1;
+      if (connection.connected) loadRef.current();
+    });
+    return () => {
+      unsubscribe();
+      unsubscribeConnection();
+    };
+  }, [input.enabled, input.projectId]);
 
   useEffect(() => {
     const projectId = input.projectId;
@@ -165,64 +235,55 @@ export function useGroupLibrary(input: {
     setDeliverables([]);
     setDeliverablesError(null);
     setDeliverablesLoading(true);
-    void refreshDeliverables(projectId, generation);
     loadedDirs.current = new Set();
-    void (async () => {
-      try {
-        const [listed, nextStatus] = await Promise.all([
-          api.projectAgent.library.list({ projectId }),
-          api.projectAgent.library.status({ projectId }),
-        ]);
-        // Eagerly list root directories so seeded-expanded folders (Artifacts)
-        // render their contents on first open instead of an empty expander.
-        const rootDirs = listed.entries.filter((entry) => entry.kind === "directory");
-        const childListings = await Promise.all(
-          rootDirs.map((entry) =>
-            api.projectAgent.library.list({
-              projectId,
-              relativePath: entry.relativePath,
-            }),
-          ),
-        );
-        if (!stillCurrent()) return;
-        const entriesByDir = new Map<string, readonly LibraryEntry[]>([
-          [ROOT_DIRECTORY, listed.entries],
-        ]);
-        const dirs = new Set([ROOT_DIRECTORY]);
-        rootDirs.forEach((entry, index) => {
-          const childEntries = childListings[index];
-          if (childEntries) {
-            entriesByDir.set(entry.relativePath, childEntries.entries);
-            dirs.add(entry.relativePath);
-          }
-        });
-        loadedDirs.current = dirs;
-        setEntriesByDir(entriesByDir);
-        setRoot(listed.root);
-        setStatus(nextStatus);
-        setError(null);
-      } catch (cause) {
-        if (!stillCurrent()) return;
-        setError(libraryErrorMessage(cause, "Failed to load the library."));
-      }
-    })();
+    const initialLoad = Promise.all([
+      refreshDeliverables(projectId, generation),
+      (async () => {
+        try {
+          const [initial, nextStatus] = await Promise.all([
+            listInitialLibraryDirectories(api.projectAgent.library, projectId),
+            api.projectAgent.library.status({ projectId }),
+          ]);
+          if (!stillCurrent()) return;
+          loadedDirs.current = initial.directories;
+          setEntriesByDir(initial.entriesByDir);
+          setRoot(initial.root);
+          setStatus(nextStatus);
+          setError(null);
+        } catch (cause) {
+          if (!stillCurrent()) return;
+          setError(libraryErrorMessage(cause, "Failed to load the library."));
+        }
+      })(),
+    ]).then(() => undefined);
+    refreshInFlightRef.current = initialLoad;
+    void initialLoad.finally(() => {
+      if (refreshInFlightRef.current !== initialLoad) return;
+      refreshInFlightRef.current = null;
+      if (!refreshQueuedRef.current) return;
+      refreshQueuedRef.current = false;
+      loadRef.current();
+    });
   }, [input.enabled, input.projectId]);
 
   const loadDirectory = useCallback(async (relativePath: string | undefined) => {
     const api = readNativeApi();
     const projectId = projectIdRef.current;
     if (!api?.projectAgent || !projectId) return false;
+    const generation = loadGeneration.current;
     const dir = relativePath ?? ROOT_DIRECTORY;
     const listArgs = relativePath === undefined ? { projectId } : { projectId, relativePath };
+    const stillCurrent = () =>
+      projectIdRef.current === projectId && loadGeneration.current === generation;
     try {
       const listed = await api.projectAgent.library.list(listArgs);
-      if (projectIdRef.current !== projectId) return false;
+      if (!stillCurrent()) return false;
       setRoot(listed.root);
       setEntriesByDir((current) => new Map(current).set(dir, listed.entries));
       loadedDirs.current = new Set([...loadedDirs.current, dir]);
       return true;
     } catch (cause) {
-      if (projectIdRef.current === projectId) {
+      if (stillCurrent()) {
         setError(libraryErrorMessage(cause, "Failed to list the library."));
       }
       return false;
@@ -239,13 +300,6 @@ export function useGroupLibrary(input: {
       if (!loaded) refreshed = false;
     }
     return refreshed;
-  };
-
-  const refreshStatus = async (projectId: ProjectId) => {
-    const api = readNativeApi();
-    if (!api?.projectAgent) return;
-    const nextStatus = await api.projectAgent.library.status({ projectId }).catch(() => null);
-    if (nextStatus && projectIdRef.current === projectId) setStatus(nextStatus);
   };
 
   const runMutation = async (

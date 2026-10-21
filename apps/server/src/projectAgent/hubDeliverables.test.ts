@@ -505,6 +505,96 @@ describe("Hub deliverables service", () => {
     );
   });
 
+  it("preserves raw binary bytes across publication recovery with Git filters enabled", async () => {
+    const harness = await makeHarness();
+    const rawPdf = Buffer.from([
+      0x25, 0x50, 0x44, 0x46, 0x00, 0xff, 0x80, 0xc3, 0xa9, 0x0a, 0x0d, 0x0a,
+    ]);
+    await writeWorkspaceFiles(harness, WORKER_A, { "seed.md": "initialize library" });
+    await writeWorkspaceFiles(harness, WORKER_B, {
+      "summary.md": "recovered text",
+      "résumé 数据.pdf": rawPdf,
+    });
+
+    await run(
+      Effect.gen(function* () {
+        const service = yield* makeService(harness);
+        const git = yield* GitCore;
+        const sql = yield* SqlClient.SqlClient;
+        yield* service.publish(
+          workerIdentity(),
+          publishInput("filter-seed", 0, [{ path: "seed.md" }]),
+        );
+
+        const libraryRoot = harness.roots.get(HUB_A)!;
+        yield* Effect.promise(() =>
+          fs.writeFile(
+            path.join(libraryRoot, ".gitattributes"),
+            "*.pdf text eol=crlf filter=blocked\n",
+          ),
+        );
+        yield* git.execute({
+          operation: "hub.deliverables.test.setAutocrlf",
+          cwd: libraryRoot,
+          args: ["config", "core.autocrlf", "true"],
+        });
+        yield* git.execute({
+          operation: "hub.deliverables.test.requireUnavailableFilter",
+          cwd: libraryRoot,
+          args: ["config", "filter.blocked.required", "true"],
+        });
+
+        const input = publishInput("recover-raw-binary", 1, [
+          { path: "summary.md" },
+          { path: "résumé 数据.pdf" },
+        ]);
+        yield* Effect.promise(() =>
+          writeWorkspaceFiles(harness, WORKER_A, {
+            "summary.md": "recovered text",
+            "résumé 数据.pdf": rawPdf,
+          }),
+        );
+        yield* sql.unsafe(`
+          CREATE TRIGGER fail_binary_deliverable_commit_journal
+          BEFORE UPDATE ON hub_expert_deliverable_requests
+          WHEN NEW.status = 'committed'
+          BEGIN SELECT RAISE(ABORT, 'injected binary commit journal failure'); END
+        `);
+
+        const firstAttempt = yield* Effect.result(service.publish(workerIdentity(), input));
+        assert.equal(failure(firstAttempt).code, "unavailable");
+        const committedByFirstAttempt = yield* git.execute({
+          operation: "hub.deliverables.test.rawRecoveryMarkerHead",
+          cwd: libraryRoot,
+          args: ["rev-parse", "HEAD"],
+        });
+
+        yield* sql.unsafe("DROP TRIGGER fail_binary_deliverable_commit_journal");
+        yield* service.publish(
+          workerIdentity(HUB_A, WORKER_B),
+          publishInput("sibling", 0, [{ path: "summary.md" }, { path: "résumé 数据.pdf" }]),
+        );
+        const recovered = yield* service.publish(workerIdentity(), input);
+        assert.equal(recovered.replayed, true);
+        assert.equal(recovered.collection.commitSha, committedByFirstAttempt.stdout.trim());
+
+        const text = yield* service.read(userIdentity(), {
+          ownerThreadId: WORKER_A,
+          path: "summary.md",
+        });
+        assert.deepEqual(text.content, { encoding: "utf-8", text: "recovered text" });
+        const binary = yield* service.read(userIdentity(), {
+          ownerThreadId: WORKER_A,
+          path: "résumé 数据.pdf",
+        });
+        assert.deepEqual(binary.content, {
+          encoding: "base64",
+          data: rawPdf.toString("base64"),
+        });
+      }),
+    );
+  });
+
   it("retries a validated copied batch after Git fails before commit", async () => {
     const harness = await makeHarness();
     await writeWorkspaceFiles(harness, WORKER_A, { "plan.md": "copied before git failure" });
@@ -516,7 +606,7 @@ describe("Hub deliverables service", () => {
         const gitWithInjectedFailure: HubDeliverablesDependencies["git"] = {
           ...git,
           execute: (input) => {
-            if (input.operation === "hub.deliverables.commit" && failCommitOnce) {
+            if (input.operation === "hub.deliverables.commitTree" && failCommitOnce) {
               failCommitOnce = false;
               return Effect.fail(new Error("injected failure before git commit")) as never;
             }

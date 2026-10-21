@@ -1,4 +1,4 @@
-import type { ProjectId } from "@synara/contracts";
+import { ProjectId } from "@synara/contracts";
 import type { AgentGatewayOperationRepositoryShape } from "./Services/AgentGatewayOperationRepository";
 import type { ProjectionThreadMessageRepositoryShape } from "../persistence/Services/ProjectionThreadMessages";
 import type { ProjectionTurnRepositoryShape } from "../persistence/Services/ProjectionTurns";
@@ -26,7 +26,9 @@ import type { ManagedAttachmentRepositoryShape } from "../persistence/Services/M
 import type { ProjectAgentRepositoryShape } from "../persistence/Services/ProjectAgentRepository";
 import { GROUPS_BETA_ONLY_MESSAGE, isServerGroupsEnabled } from "../projectAgent/groupsBetaGate";
 import { makeHubWorkService } from "../projectAgent/hubWorkService";
-import { listHubExpertSummaries, resolveHubCreationSpec } from "./hubExpertDispatch";
+import { resolveHubTargetProjectId } from "../projectAgent/hubTarget";
+import { readHubExpertCatalog } from "./hubExpertCatalog";
+import { resolveHubCreationSpec } from "./hubExpertDispatch";
 import type { ProjectAgentServiceShape } from "../projectAgent/Services/ProjectAgentService";
 import type { makeCreateThreadsHandler } from "./creationCoordinator";
 import { stableGatewayDigest } from "./creationUtils";
@@ -279,7 +281,10 @@ export function makeHubWorkGateway(dependencies: {
       const hubConfig = yield* projectAgentRepository.getConfig(principal.projectId);
       if (Option.isNone(hubConfig))
         return yield* Effect.fail(new ToolInputError("Hub was not found."));
-      const defaultTargetProjectId = hubConfig.value.sourceProjectId ?? principal.projectId;
+      const defaultTargetProjectId = resolveHubTargetProjectId({
+        hubId: principal.projectId,
+        sourceProjectId: hubConfig.value.sourceProjectId,
+      });
       const tasks = [];
       for (const [taskIndex, spec] of input.threads.entries()) {
         const project = yield* snapshotQuery.getProjectShellById(
@@ -327,7 +332,12 @@ export function makeHubWorkGateway(dependencies: {
           "List only this Hub’s participating Experts and their dispatch availability. An empty list has no Experts. If no participant matches authorized work, omit expertId and supply an explicit target to create an ordinary Worker. Explicit unavailable Expert or target requests must fail.",
         inputSchema: {
           type: "object",
-          properties: {},
+          properties: {
+            targetProjectId: {
+              type: "string",
+              description: "Optional linked project to check; defaults to the Hub dispatch target.",
+            },
+          },
           additionalProperties: false,
         },
         annotations: {
@@ -335,41 +345,30 @@ export function makeHubWorkGateway(dependencies: {
           ...READ_ONLY_TOOL_ANNOTATIONS,
         },
       },
-      handler: (_args, context) =>
+      handler: (args, context) =>
         Effect.gen(function* () {
           const principal = yield* principalFor(context);
           if (principal.kind !== "coordinator")
             return yield* Effect.fail(
               new ToolInputError("Only a Hub coordinator can list Experts."),
             );
-          const config = yield* dependencies.projectAgentRepository.getConfig(principal.projectId);
-          if (Option.isNone(config))
-            return yield* Effect.fail(new ToolInputError("Hub was not found."));
-          const caller = yield* snapshotQuery.getThreadShellById(principal.threadId);
-          if (Option.isNone(caller))
-            return yield* Effect.fail(new ToolInputError("Coordinator thread was not found."));
-          return mcpToolResultJson({
-            experts: yield* listHubExpertSummaries({
-              dependencies: {
-                expertStore: dependencies.expertStore,
-                providerDiscovery: dependencies.providerDiscovery,
-                loadProviderAvailabilities: dependencies.loadProviderAvailabilities,
-                getProjectWorkspaceRoot: (projectId) =>
-                  snapshotQuery.getProjectShellById(projectId).pipe(
-                    Effect.flatMap(
-                      Option.match({
-                        onNone: () =>
-                          Effect.fail(new ToolInputError("Target project was not found.")),
-                        onSome: (project) => Effect.succeed(project.workspaceRoot),
-                      }),
-                    ),
-                  ),
-              },
-              callerTarget: caller.value.modelSelection,
-              projectId: principal.projectId,
-              expertIds: config.value.expertIds ?? [],
-            }),
+          const target = readStringArg(args, "targetProjectId");
+          const experts = yield* readHubExpertCatalog({
+            projectId: principal.projectId,
+            ...(target ? { targetProjectId: ProjectId.makeUnsafe(target) } : {}),
+            snapshotQuery,
+            assertTarget: projectAgentService.assertCallerMayCreateThreadInProject,
+            loadConfig: (projectId) =>
+              projectAgentRepository
+                .getConfig(projectId)
+                .pipe(Effect.map((config) => (Option.isSome(config) ? config.value : null))),
+            dependencies: {
+              expertStore: dependencies.expertStore,
+              providerDiscovery: dependencies.providerDiscovery,
+              loadProviderAvailabilities: dependencies.loadProviderAvailabilities,
+            },
           });
+          return mcpToolResultJson({ experts });
         }).pipe(Effect.catch((error) => Effect.succeed(mcpToolResultError(errorText(error))))),
     },
     {

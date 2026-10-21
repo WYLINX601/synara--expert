@@ -1,8 +1,10 @@
+import { ProjectActivityId, ThreadId } from "@synara/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
   allowedDigestSources,
   mergePinnedFocusItems,
+  sanitizeDigestFocusItems,
   validateDigestFocusItems,
   wakeReceiptRequestId,
 } from "./digest";
@@ -10,7 +12,7 @@ import {
 describe("project digest helpers", () => {
   it("drops focus items without a known source", () => {
     const allowed = allowedDigestSources({
-      activityIds: ["act-1"],
+      activities: [],
       taskIds: ["task-1"],
       threadIds: ["thread-1"],
       documentPaths: ["decisions.md"],
@@ -23,6 +25,46 @@ describe("project digest helpers", () => {
       allowed,
     );
     expect(items.map((item) => item.title)).toEqual(["Known task"]);
+  });
+
+  it("resolves activity references to their real thread instead of casting the activity id", () => {
+    const threadId = ThreadId.makeUnsafe("worker");
+    const sources = allowedDigestSources({
+      activities: [
+        {
+          id: ProjectActivityId.makeUnsafe("activity"),
+          source: { threadId },
+          actorThreadId: null,
+          taskId: null,
+        },
+      ],
+      threadIds: [threadId],
+      taskIds: [],
+      documentPaths: ["decisions.md"],
+    });
+    const result = validateDigestFocusItems(
+      [
+        { title: "Worker result", kind: "message", source: "activity" },
+        { title: "Wrong source kind", kind: "message", source: "decisions.md" },
+      ],
+      sources,
+    );
+    expect(result[0]?.sourceThreadId).toBe(threadId);
+    expect(result[1]?.sourceThreadId).toBeUndefined();
+    expect(
+      sanitizeDigestFocusItems(
+        [
+          {
+            id: "old",
+            title: "Old pinned item",
+            kind: "message",
+            pinned: true,
+            sourceThreadId: ThreadId.makeUnsafe("activity"),
+          },
+        ],
+        sources,
+      )[0],
+    ).not.toHaveProperty("sourceThreadId");
   });
 
   it("keeps pinned items ahead of generated ones", () => {

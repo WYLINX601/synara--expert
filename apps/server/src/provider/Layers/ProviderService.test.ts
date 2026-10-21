@@ -11258,6 +11258,20 @@ const expertV2Runtime = makeProviderServiceLayer(
   },
   { confirmSkillApplication: true },
 );
+const expertV2ForkContextRepository = makeMutableContextRepository();
+const expertV2ForkRuntime = makeProviderServiceLayer(
+  {
+    stateDir: path.join(expertV2RuntimeRoot, "state"),
+    persistExpertAppliedRuntime: (record) =>
+      Effect.sync(() => {
+        expertV2AppliedWrites.push(record);
+      }),
+  },
+  {
+    confirmSkillApplication: true,
+    contextRepository: expertV2ForkContextRepository.repository,
+  },
+);
 
 expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
   it.effect(
@@ -11450,6 +11464,131 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
           expertV2Runtime.codex.startSession.mock.calls.length,
           startsBeforeSubstitution,
         );
+      }),
+  );
+});
+
+expertV2ForkRuntime.layer("ProviderService Expert V2 runtime notices and fork Context", (it) => {
+  it.effect(
+    "keeps optional notices outside the pinned identity and preserves compiled instructions through a native fork",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => expertV2FixturePromise);
+        const service = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const source = asThreadId("expert-v2-runtime-notice-source");
+        const target = asThreadId("expert-v2-runtime-notice-fork");
+        const notice = "Optional review connection is unavailable.";
+        const sourceContext = makeTestContextSession(
+          "expert-v2-runtime-notice-source-context",
+          "Source project instructions.",
+        );
+        const targetContext = makeTestContextSession(
+          "expert-v2-runtime-notice-target-context",
+          "Fork project instructions.",
+        );
+        expertV2ForkContextRepository.setContext(source, sourceContext);
+        expertV2ForkContextRepository.setContext(target, targetContext);
+
+        yield* service.startSession(source, {
+          provider: "codex",
+          threadId: source,
+          runtimeMode: "full-access",
+          expertSession: fixture.session,
+          expertRuntimeNotices: [notice],
+          contextSession: sourceContext,
+        });
+        const sourceBinding = Option.getOrThrow(yield* directory.getBinding(source));
+        const sourcePayload = asRuntimePayloadRecord(sourceBinding.runtimePayload);
+        assert.deepEqual(sourcePayload.expertSession, fixture.session);
+        assert.deepEqual(sourcePayload.expertRuntimeNotices, [notice]);
+        const sourceAdapterInput = expertV2ForkRuntime.codex.startSession.mock.calls.at(-1)?.[0];
+        assert.ok(sourceAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(sourceAdapterInput?.expertSession?.persona.includes(notice));
+        assert.isUndefined(sourceAdapterInput?.expertRuntimeNotices);
+        const sourceApplied = expertV2ForkContextRepository.applied.get(source);
+        const sourceInstructions = composeProviderBaseInstructions({
+          expertPersona: sourceAdapterInput?.expertSession?.persona,
+          contextInstructions: sourceContext.text,
+        });
+        assert.equal(sourceApplied?.submittedInstructions, sourceInstructions);
+        assert.equal(
+          sourceApplied?.baseInstructionsHash,
+          createHash("sha256")
+            .update(sourceInstructions ?? "")
+            .digest("hex"),
+        );
+
+        yield* expertV2ForkRuntime.codex.stopSession(source);
+        yield* service.sendTurn({
+          threadId: source,
+          input: "Resume with the same notice",
+          attachments: [],
+        });
+        const resumedAdapterInput = expertV2ForkRuntime.codex.startSession.mock.calls.at(-1)?.[0];
+        assert.ok(resumedAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(resumedAdapterInput?.expertSession?.persona.includes(notice));
+        const resumedApplied = expertV2ForkContextRepository.applied.get(source);
+        const resumedInstructions = composeProviderBaseInstructions({
+          expertPersona: resumedAdapterInput?.expertSession?.persona,
+          contextInstructions: sourceContext.text,
+        });
+        assert.equal(resumedApplied?.submittedInstructions, resumedInstructions);
+        assert.equal(
+          resumedApplied?.baseInstructionsHash,
+          createHash("sha256")
+            .update(resumedInstructions ?? "")
+            .digest("hex"),
+        );
+
+        expertV2ForkRuntime.codex.forkThread.mockImplementationOnce((input) =>
+          Effect.gen(function* () {
+            const forkedSession = yield* expertV2ForkRuntime.codex.startSession({
+              provider: "codex",
+              threadId: input.threadId,
+              runtimeMode: input.runtimeMode,
+              ...(input.lifecycleGeneration !== undefined
+                ? { lifecycleGeneration: input.lifecycleGeneration }
+                : {}),
+              ...(input.expertSession !== undefined ? { expertSession: input.expertSession } : {}),
+              ...(input.contextSession !== undefined
+                ? { contextSession: input.contextSession }
+                : {}),
+            });
+            return { threadId: input.threadId, resumeCursor: forkedSession.resumeCursor };
+          }),
+        );
+        const fork = yield* service.forkThread!({
+          sourceThreadId: source,
+          threadId: target,
+          runtimeMode: "full-access",
+        });
+        assert.equal(fork?.threadId, target);
+        const forkInput = expertV2ForkRuntime.codex.forkThread.mock.calls.at(-1)?.[0];
+        assert.ok(forkInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(forkInput?.expertSession?.persona.includes(notice));
+        assert.isUndefined(forkInput?.expertRuntimeNotices);
+        const targetBinding = Option.getOrThrow(yield* directory.getBinding(target));
+        const targetPayload = asRuntimePayloadRecord(targetBinding.runtimePayload);
+        assert.deepEqual(targetPayload.expertSession, fixture.session);
+        assert.deepEqual(targetPayload.expertRuntimeNotices, [notice]);
+        const targetApplied = expertV2ForkContextRepository.applied.get(target);
+        const targetInstructions = composeProviderBaseInstructions({
+          expertPersona: forkInput?.expertSession?.persona,
+          contextInstructions: targetContext.text,
+        });
+        assert.equal(targetApplied?.submittedInstructions, targetInstructions);
+        assert.equal(
+          targetApplied?.baseInstructionsHash,
+          createHash("sha256")
+            .update(targetInstructions ?? "")
+            .digest("hex"),
+        );
+
+        yield* service.sendTurn({ threadId: target, input: "First fork turn", attachments: [] });
+        assert.equal(expertV2ForkRuntime.codex.sendTurn.mock.calls.at(-1)?.[0]?.threadId, target);
+        yield* service.stopSession({ threadId: source });
+        yield* service.stopSession({ threadId: target });
       }),
   );
 });

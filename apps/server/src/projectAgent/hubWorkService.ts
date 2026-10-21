@@ -29,6 +29,7 @@ import {
 import type { ProjectAgentRepositoryShape } from "../persistence/Services/ProjectAgentRepository";
 import { ProjectAgentServiceError } from "./Errors";
 import { resolveHubWorkLifecycle } from "./hubWorkLifecycle";
+import { resolveHubTargetProjectId } from "./hubTarget";
 import { GROUPS_BETA_ONLY_MESSAGE, isServerGroupsEnabled } from "./groupsBetaGate";
 import type { ProjectAgentPrincipal } from "./principal";
 import type { ProjectAgentServiceShape } from "./Services/ProjectAgentService";
@@ -322,8 +323,11 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
             return yield* Effect.fail(
               fail("Task context references must belong to this frozen source request.", "invalid"),
             );
-          const targetProjectId =
-            task.spec.projectId ?? config.sourceProjectId ?? principal.projectId;
+          const targetProjectId = resolveHubTargetProjectId({
+            hubId: principal.projectId,
+            sourceProjectId: config.sourceProjectId,
+            targetProjectId: task.spec.projectId,
+          });
           yield* projectAgentService.assertCallerMayCreateThreadInProject({
             callerThreadId: input.callerThreadId,
             targetProjectId,

@@ -103,6 +103,24 @@ it("persists terminal error identity and announced retry state in chat activitie
   }
 });
 
+it("normalizes a provider turn abort to a durable interrupted terminal activity", () => {
+  const event = runtimeEvent({
+    type: "turn.aborted",
+    eventId: "turn-aborted",
+    turnId: TURN_ID,
+    lifecycleGeneration: "generation-7",
+    payload: {},
+  });
+  const [activity] = projectProviderRuntimeActivities(event);
+  expect(activity).toMatchObject({
+    kind: "turn.completed",
+    summary: "Turn interrupted",
+    turnId: TURN_ID,
+    payload: { state: "interrupted", lifecycleGeneration: "generation-7" },
+  });
+  expect(() => decodeActivityAppendCommand(activity!)).not.toThrow();
+});
+
 it("records the model a turn started on and nothing when the provider names none", () => {
   const event = runtimeEvent({
     provider: "claudeAgent",

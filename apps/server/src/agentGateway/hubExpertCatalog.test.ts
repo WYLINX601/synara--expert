@@ -14,6 +14,7 @@ function setup(
     configured?: boolean;
     coordinatorProjectId?: string;
     expertIds?: readonly string[];
+    sourceProjectId?: string;
   } = {},
 ) {
   const expert: ExpertDefinition = {
@@ -41,15 +42,18 @@ function setup(
   );
   const list = vi.fn(async () => [expert]);
   const read = vi.fn(async (): Promise<ExpertDefinition | null> => expert);
+  const preview = vi.fn(async (_input: unknown) => ({ status: "available", issues: [] }));
+  const assertTarget = vi.fn(() => Effect.void);
   const input: Input = {
+    assertTarget,
     projectId: hubId,
     snapshotQuery: {
-      getProjectShellById: () =>
+      getProjectShellById: (id: string) =>
         Effect.succeed(
           Option.some({
-            id: hubId,
+            id,
             kind: options.kind ?? "group",
-            workspaceRoot: "/work/hub",
+            workspaceRoot: id === hubId ? "/work/hub" : `/work/${id}`,
           }),
         ),
       getThreadShellById: () =>
@@ -65,13 +69,19 @@ function setup(
       Effect.succeed(
         options.configured === false
           ? null
-          : { coordinatorThreadId: coordinatorId, expertIds: options.expertIds ?? [expert.id] },
+          : {
+              coordinatorThreadId: coordinatorId,
+              expertIds: options.expertIds ?? [expert.id],
+              ...(options.sourceProjectId
+                ? { sourceProjectId: ProjectId.makeUnsafe(options.sourceProjectId) }
+                : {}),
+            },
       ),
     dependencies: {
       expertStore: {
         list,
         read,
-        preview: async () => ({ status: "available", issues: [] }),
+        preview,
         prepareSnapshot,
         readSnapshot: async () => {
           throw new Error("catalogue must not read snapshots");
@@ -83,10 +93,41 @@ function setup(
       ),
     },
   };
-  return { input, expert, list, read, listModels, prepareSnapshot };
+  return { input, expert, list, read, listModels, prepareSnapshot, preview, assertTarget };
 }
 
 describe("Hub Expert catalogue read capability", () => {
+  it("checks the source project used by default dispatch, and lets an explicit target override it", async () => {
+    const h = setup({ sourceProjectId: "source-repo" });
+    const defaultResult = await Effect.runPromise(readHubExpertCatalog(h.input));
+    expect(defaultResult[0]?.targetProjectId).toBe("source-repo");
+    expect(h.preview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cwd: "/work/source-repo" }),
+    );
+    const explicit = ProjectId.makeUnsafe("linked-repo");
+    await Effect.runPromise(readHubExpertCatalog({ ...h.input, targetProjectId: explicit }));
+    expect(h.preview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cwd: "/work/linked-repo" }),
+    );
+    expect(h.assertTarget).toHaveBeenLastCalledWith({
+      callerThreadId: coordinatorId,
+      targetProjectId: explicit,
+    });
+  });
+
+  it("refuses an unauthorized target before reading experts", async () => {
+    const h = setup();
+    await expect(
+      Effect.runPromise(
+        readHubExpertCatalog({
+          ...h.input,
+          assertTarget: () => Effect.fail(new Error("Target is not linked")),
+        }),
+      ),
+    ).rejects.toThrow("not linked");
+    expect(h.read).not.toHaveBeenCalled();
+  });
+
   it("returns an empty roster without global discovery or provider preflight", async () => {
     const h = setup({ expertIds: [] });
     expect(await Effect.runPromise(readHubExpertCatalog(h.input))).toEqual([]);
@@ -100,6 +141,7 @@ describe("Hub Expert catalogue read capability", () => {
     const result = await Effect.runPromise(readHubExpertCatalog(h.input));
     expect(result).toEqual([
       {
+        targetProjectId: hubId,
         expertId: h.expert.id,
         displayName: "Unavailable Expert",
         description: "",
@@ -117,6 +159,7 @@ describe("Hub Expert catalogue read capability", () => {
     const result = await Effect.runPromise(readHubExpertCatalog(h.input));
     expect(result).toEqual([
       {
+        targetProjectId: hubId,
         expertId: h.expert.id,
         displayName: h.expert.name,
         description: h.expert.description,

@@ -1357,6 +1357,9 @@ export function projectProviderRuntimeActivities(
           summary,
           payload: toActivityPayload({
             state,
+            ...(event.lifecycleGeneration
+              ? { lifecycleGeneration: event.lifecycleGeneration }
+              : {}),
             ...(event.provider === "claudeAgent" ? { provider: event.provider } : {}),
             ...(event.payload.tokenAccountingVersion === 1
               ? {
@@ -1386,6 +1389,28 @@ export function projectProviderRuntimeActivities(
         },
       ];
     }
+
+    case "turn.aborted":
+      // Normalize the provider's abort lifecycle to the same durable terminal
+      // activity used by turn.completed. Consumers can then reconcile it after
+      // a restart without treating an abort request as a finished turn.
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "turn.completed",
+          summary: "Turn interrupted",
+          payload: toActivityPayload({
+            state: "interrupted",
+            ...(event.lifecycleGeneration
+              ? { lifecycleGeneration: event.lifecycleGeneration }
+              : {}),
+          }),
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
 
     case "hook.started":
     case "hook.progress":

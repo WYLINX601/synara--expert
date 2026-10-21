@@ -13590,12 +13590,12 @@ describe("ProviderCommandReactor", () => {
       await waitFor(() => harness.sendTurn.mock.calls.length === 3);
       expect(harness.startSession).toHaveBeenCalledTimes(2);
       expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({ runtimeMode: "full-access" });
-      expect(harness.startSession.mock.calls[1]?.[1].expertSession?.persona).toContain(
+      expect(harness.startSession.mock.calls[1]?.[1].expertSession?.persona).not.toContain(
         "Unavailable optional connections",
       );
-      expect(harness.startSession.mock.calls[1]?.[1].expertSession?.persona).toContain(
-        "optional-review",
-      );
+      expect(harness.startSession.mock.calls[1]?.[1].expertRuntimeNotices).toEqual([
+        expect.stringContaining("optional-review"),
+      ]);
     } finally {
       await fixture.close();
     }

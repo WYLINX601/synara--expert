@@ -44,6 +44,10 @@ export interface ExecuteGitInput {
   readonly cwd: string;
   readonly args: ReadonlyArray<string>;
   readonly env?: NodeJS.ProcessEnv;
+  /** Raw stdin for Git plumbing commands that consume object or index records. */
+  readonly stdinBytes?: Uint8Array;
+  /** Capture stdout without decoding it as UTF-8. */
+  readonly stdoutMode?: "text" | "bytes";
   readonly allowNonZeroExit?: boolean;
   /** null waits for completion or caller interruption without a wall-clock deadline. */
   readonly timeoutMs?: number | null;
@@ -55,6 +59,7 @@ export interface ExecuteGitInput {
 export interface ExecuteGitResult {
   readonly code: number;
   readonly stdout: string;
+  readonly stdoutBytes?: Uint8Array;
   readonly stderr: string;
   readonly stdoutTruncated?: boolean;
   readonly stderrTruncated?: boolean;
@@ -132,6 +137,19 @@ export interface GitRangeContext {
 export interface GitWorkingTreePatch {
   patch: string;
   truncated: boolean;
+}
+
+export interface GitReadBlobAtRevInput {
+  readonly cwd: string;
+  readonly filePath: string;
+  readonly rev: string;
+  /** Maximum raw blob bytes to capture. */
+  readonly maxBytes: number;
+}
+
+export interface GitReadBlobAtRevResult {
+  readonly bytes: Uint8Array;
+  readonly resolvedRev: string;
 }
 
 export interface GitRenameBranchInput {
@@ -279,6 +297,11 @@ export interface GitCoreShape {
   readonly readFileAtRev: (
     input: GitReadFileAtRevInput,
   ) => Effect.Effect<GitReadFileAtRevResult, GitCommandError>;
+
+  /** Read a regular file's raw Git blob without applying checkout filters. */
+  readonly readBlobAtRev: (
+    input: GitReadBlobAtRevInput,
+  ) => Effect.Effect<GitReadBlobAtRevResult, GitCommandError>;
 
   readonly readRefPatch: (
     cwd: string,

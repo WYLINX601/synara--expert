@@ -2853,6 +2853,8 @@ const makeWsRpcHandlersLayer = () =>
           rpcEffect(
             readHubExpertCatalog({
               projectId: input.projectId,
+              targetProjectId: input.targetProjectId,
+              assertTarget: projectAgentService.assertCallerMayCreateThreadInProject,
               snapshotQuery: projectionReadModelQuery,
               loadConfig: (projectId) =>
                 projectAgentRepository

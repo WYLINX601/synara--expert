@@ -1,4 +1,5 @@
 import type {
+  RuntimeTurnState,
   ProjectActivity,
   HubDeliverablePublishInput,
   HubDeliverableListInput,
@@ -297,13 +298,12 @@ export interface ProjectAgentServiceShape {
     readonly threadId: ThreadId;
     readonly sourceEventId: string;
     readonly eventType: string;
-    /** Checkpoint status carried by `thread.turn-diff-completed` — a diff that
-     * ended `missing`/`error` describes an interrupted turn, never a clean
-     * finish, and must not settle the worker as `completed`. */
-    readonly checkpointStatus?: string;
-    /** Turn the event belongs to — used to classify coordinator check-in
-     * turns for the group activity log. */
+    /** The accepted runtime terminal state from the durable `turn.completed` activity. */
+    readonly runtimeTurnState?: RuntimeTurnState;
+    /** Turn the event belongs to — used for current-turn validation and check-in classification. */
     readonly turnId?: string;
+    /** Runtime lifecycle generation, included in the durable idempotency identity. */
+    readonly lifecycleGeneration?: string;
     readonly createdAt: string;
   }) => Effect.Effect<void, ProjectAgentServiceError>;
   readonly processPendingWakes: (

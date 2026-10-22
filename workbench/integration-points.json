@@ -150,7 +150,7 @@
         "scripts/expert-p0/skill-package-switch.ts",
         "apps/server/src/orchestration/Layers/OrchestrationEngine.ts"
       ],
-      "responsibility": "Expert-owned immutable packages and source pointers are accessed through owner RPC and the narrow ExpertClient. A shared in-process stateDir writer queue serializes package publication/removal with Expert revisions and task snapshot publication. Deletion scans all definitions, retained revisions and snapshots (including accepted Hub bindings), failing closed on unknown ownership. V2 snapshots pin selected entries without copying skills; references retain their original owner. Host provider lifecycle composes and verifies catalog instructions and persists submission receipts through expert ledger migration 6. The existing Settings parent and composer own navigation, subscriptions, draft promotion and permissions; draft skill identities are bound to the accepted snapshot before dispatch. BMad presets and workspace inspection stay outside generic storage. The boundary check covers declared direct imports, not runtime permissions or transitive isolation. The one-time switch runs through authenticated owner RPC with a reviewed digest and durable backup/progress; native stop, cancel and delete own task history and eventual purge; the switch conservatively retains snapshots named in its reviewed plan and reports retained artifacts. Cleanup rechecks references under the lifecycle lock; Claude projections are scoped to managed metadata, while OMP temporary files remain adapter-owned. Expert task admission preflights the effective worktree or project workspace before binding a snapshot.",
+      "responsibility": "Expert-owned immutable packages and source pointers are accessed through owner RPC and the narrow ExpertClient. A shared in-process stateDir writer queue serializes package publication/removal with Expert revisions and task snapshot publication. Deletion scans all definitions, retained revisions and snapshots (including accepted Hub bindings), failing closed on unknown ownership. V2 snapshots pin selected entries without copying skills; references retain their original owner. Host provider lifecycle composes and verifies catalog instructions and persists submission receipts through expert ledger migration 6. The existing Settings parent and composer own navigation, subscriptions, draft promotion and permissions; draft skill identities are bound to the accepted snapshot before dispatch. BMad presets and workspace inspection stay outside generic storage. The existing Expert editor owns the unified skill picker draft; discovery and path preview use existing host capabilities. Apply validates and imports immutable packages before updating only the draft, while explicit Save retains Expert revision conflict checks. Reuse copies saved skill selections without mutating the source Expert; async completions are scoped to the active connection and dialog. The boundary check covers declared direct imports, not runtime permissions or transitive isolation. The one-time switch runs through authenticated owner RPC with a reviewed digest and durable backup/progress; native stop, cancel and delete own task history and eventual purge; the switch conservatively retains snapshots named in its reviewed plan and reports retained artifacts. Cleanup rechecks references under the lifecycle lock; Claude projections are scoped to managed metadata, while OMP temporary files remain adapter-owned. Expert task admission preflights the effective worktree or project workspace before binding a snapshot.",
       "tests": [
         "packages/contracts/src/skillPackage.test.ts",
         "apps/server/src/experts/SkillPackageStore.test.ts",
@@ -160,6 +160,8 @@
         "apps/server/src/persistence/Layers/ExpertAppliedRuntimeRecords.test.ts",
         "apps/web/src/components/settings/SkillPackagesSettingsPanel.browser.tsx",
         "apps/web/src/components/settings/ExpertSkillPackagesEditor.test.tsx",
+        "apps/web/src/components/settings/SkillPicker.browser.tsx",
+        "apps/web/src/components/settings/skillPickerModel.test.ts",
         "apps/web/src/lib/expertSkillInvocation.test.ts",
         "apps/web/src/components/chat/useComposerDiscovery.browser.tsx",
         "apps/web/src/lib/queuedComposerDispatch.test.ts",
@@ -179,6 +181,8 @@
         "apps/web/src/components/settings/SkillPackagesSettingsPanel.tsx",
         "apps/web/src/components/settings/skillPackageSettingsQueries.ts",
         "apps/web/src/components/settings/ExpertSkillPackagesEditor.tsx",
+        "apps/web/src/components/settings/SkillPicker.tsx",
+        "apps/web/src/components/settings/skillPickerModel.ts",
         "apps/web/src/components/settings/expertSkillPackagesSettingsModel.ts",
         "apps/web/src/lib/expertSkillInvocation.ts",
         "apps/server/src/experts/SkillPackageSwitch.ts"

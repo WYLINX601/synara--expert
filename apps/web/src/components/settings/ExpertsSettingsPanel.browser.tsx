@@ -12,6 +12,7 @@ import {
 import { page } from "vitest/browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import type { SkillPackage, SkillPackagePreview } from "@synara/contracts";
 
 const harness = vi.hoisted(() => {
   const makeExpert = (overrides: Record<string, unknown> = {}) => ({
@@ -30,7 +31,11 @@ const harness = vi.hoisted(() => {
     updatedAt: "2026-10-03T00:00:00.000Z",
     ...overrides,
   });
-  const makeSkillPackage = (version: string, entryPath: string, userInvocable?: boolean) => ({
+  const makeSkillPackage = (
+    version: string,
+    entryPath: string,
+    userInvocable?: boolean,
+  ): SkillPackage => ({
     schemaVersion: 1 as const,
     packageId: `pkg_${version.repeat(64)}`,
     rootName: "planner-skills",
@@ -47,6 +52,7 @@ const harness = vi.hoisted(() => {
     fileCount: 1,
     totalBytes: 100,
   });
+  const importedSkillPackage = makeSkillPackage("c", "SKILL.md");
   const data = {
     experts: [makeExpert()],
     skillPackages: [
@@ -130,6 +136,37 @@ const harness = vi.hoisted(() => {
       const definition = data.experts.find((expert) => expert.id === expertId) ?? makeExpert();
       return { definition, status: "available" as const, issues: [] };
     }),
+    readSkillPackage: vi.fn(async ({ packageId }: { packageId: string }) => {
+      const pkg = data.skillPackages.find((item) => item.packageId === packageId);
+      if (!pkg) throw new Error(`Unknown skill package: ${packageId}`);
+      return pkg;
+    }),
+    previewSkillPackage: vi.fn(
+      async ({ path }: { path: string }): Promise<SkillPackagePreview> => ({
+        previewId: `preview-${path}`,
+        sourcePath: path,
+        realRoot: path,
+        expiresAt: "2026-10-22T00:00:00.000Z",
+        package: importedSkillPackage,
+        issues: [],
+      }),
+    ),
+    importSkillPackage: vi.fn(async ({ previewId: _previewId }: { previewId: string }) => {
+      if (!data.skillPackages.some((item) => item.packageId === importedSkillPackage.packageId))
+        data.skillPackages = [...data.skillPackages, importedSkillPackage];
+      return {
+        package: importedSkillPackage,
+        source: {
+          sourceId: `src_${"c".repeat(64)}`,
+          sourcePath: "/manual/planning",
+          realRoot: "/manual/planning",
+          packageId: importedSkillPackage.packageId,
+          revision: 1,
+          importedAt: "2026-10-22T00:00:00.000Z",
+        },
+        reused: false,
+      };
+    }),
     readExpertSnapshot: vi.fn(async () => null),
     readExpertAppliedRuntime: vi.fn(async () => null),
     testExpertConnection: vi.fn(async () => ({ tools: [] as string[] })),
@@ -208,11 +245,94 @@ async function mountPanel(initialEntry = "/settings") {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
+async function selectRoutedExpert(router: ReturnType<typeof createRouter>, expertId: string) {
+  await router.navigate({
+    to: "/settings" as never,
+    search: { expertId } as never,
+  } as never);
+}
+
 beforeEach(() => {
   harness.data.experts = [harness.makeExpert()];
+  harness.data.skillPackages = [
+    harness.makeSkillPackage("a", "planner/SKILL.md"),
+    harness.makeSkillPackage("b", "planner/v2/SKILL.md", false),
+  ];
   for (const operation of Object.values(harness.server)) operation.mockReset();
   harness.server.listExperts.mockImplementation(async () => harness.data.experts);
   harness.server.listSkillPackages.mockImplementation(async () => harness.data.skillPackages);
+  harness.server.readSkillPackage.mockImplementation(
+    async ({ packageId }: { packageId: string }) => {
+      const pkg = harness.data.skillPackages.find((item) => item.packageId === packageId);
+      if (!pkg) throw new Error(`Unknown skill package: ${packageId}`);
+      return pkg;
+    },
+  );
+  harness.server.previewSkillPackage.mockImplementation(
+    async ({ path }: { path: string }): Promise<SkillPackagePreview> => ({
+      previewId: `preview-${path}`,
+      sourcePath: path,
+      realRoot: path,
+      expiresAt: "2026-10-22T00:00:00.000Z",
+      package: {
+        schemaVersion: 1,
+        packageId: `pkg_${"c".repeat(64)}`,
+        rootName: "imported-skills",
+        resources: [],
+        entries: [
+          {
+            entryPath: "SKILL.md",
+            name: "Imported skill",
+            description: "Imported for the Expert draft.",
+            issues: [],
+          },
+        ],
+        fileCount: 1,
+        totalBytes: 10,
+      },
+      issues: [],
+    }),
+  );
+  harness.server.importSkillPackage.mockImplementation(async () => {
+    const imported: SkillPackage = {
+      schemaVersion: 1,
+      packageId: `pkg_${"c".repeat(64)}`,
+      rootName: "imported-skills",
+      resources: [],
+      entries: [
+        {
+          entryPath: "SKILL.md",
+          name: "Imported skill",
+          description: "Imported for the Expert draft.",
+          issues: [],
+        },
+      ],
+      fileCount: 1,
+      totalBytes: 10,
+    };
+    if (!harness.data.skillPackages.some((item) => item.packageId === imported.packageId))
+      harness.data.skillPackages = [...harness.data.skillPackages, imported];
+    return {
+      package: imported,
+      source: {
+        sourceId: `src_${"c".repeat(64)}`,
+        sourcePath: "/manual/planning",
+        realRoot: "/manual/planning",
+        packageId: imported.packageId,
+        revision: 1,
+        importedAt: "2026-10-22T00:00:00.000Z",
+      },
+      reused: false,
+    };
+  });
   harness.server.listExpertConnections.mockImplementation(async () => harness.data.connections);
   harness.data.connectionState = "active";
   harness.server.getExpertConnectionState.mockImplementation(async ({ id }: { id: string }) => ({
@@ -355,49 +475,185 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     await close();
   });
 
-  it("keeps legacy skills until confirmed, guards package draft changes, and switches a fixed version explicitly", async () => {
+  it("converts a legacy path into a package selection only after Apply", async () => {
     harness.data.experts = [
       harness.makeExpert({
-        skills: [{ name: "旧路径技能", path: "/legacy/planner/SKILL.md" }],
+        skills: [{ name: "synara:planning", path: "/skills/planning/SKILL.md" }],
       }),
     ];
     const { close } = await mountPanel("/settings?expertId=planner");
-    await expect.element(page.getByText("旧路径技能", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "改用版本包", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "查看技能 synara:planning", exact: true }))
+      .toBeVisible();
+    await page.getByRole("button", { name: "添加技能", exact: true }).click();
+    const catalogSkill = page.getByRole("checkbox", {
+      name: "Planning framework",
+      exact: true,
+    });
+    await expect.element(catalogSkill).toBeChecked();
     await page.getByRole("button", { name: "取消", exact: true }).click();
-    await expect.element(page.getByText("旧路径技能", { exact: true })).toBeVisible();
-    expect(page.getByRole("checkbox").length).toBe(0);
+    expect(harness.server.importSkillPackage).not.toHaveBeenCalled();
+    expect(harness.server.saveExpert).not.toHaveBeenCalled();
+    await expect
+      .element(page.getByRole("button", { name: "查看技能 synara:planning", exact: true }))
+      .toBeVisible();
 
-    await page.getByRole("button", { name: "改用版本包", exact: true }).click();
-    await page.getByRole("button", { name: "确认切换", exact: true }).click();
-    const oldVersionEntry = page.getByRole("checkbox").nth(0);
-    await oldVersionEntry.click();
-    await expect.element(oldVersionEntry).toBeChecked();
+    await page.getByRole("button", { name: "添加技能", exact: true }).click();
+    await expect
+      .element(page.getByRole("checkbox", { name: "Planning framework", exact: true }))
+      .toBeChecked();
+    await page.getByRole("button", { name: "应用选择（1）", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "查看技能 Imported skill", exact: true }))
+      .toBeVisible();
+    expect(harness.server.previewSkillPackage).toHaveBeenCalledWith({
+      path: "/skills/planning/SKILL.md",
+    });
+    expect(harness.server.importSkillPackage).toHaveBeenCalledTimes(1);
+    expect(harness.server.saveExpert).not.toHaveBeenCalled();
+    await close();
+  });
 
-    await page.getByRole("button", { name: "返回专家列表", exact: true }).click();
-    await expect.element(page.getByRole("button", { name: "放弃更改", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "取消", exact: true }).click();
-    await expect.element(oldVersionEntry).toBeChecked();
+  it("drops a pending path preview when the route switches to another Expert", async () => {
+    const reviewer = harness.makeExpert({ id: "reviewer", name: "评审专家" });
+    harness.data.experts = [harness.makeExpert(), reviewer];
+    const latePreview = deferred<SkillPackagePreview>();
+    harness.server.previewSkillPackage.mockReturnValueOnce(latePreview.promise);
+    const { close, router } = await mountPanel("/settings?expertId=planner");
+    await page.getByRole("button", { name: "添加技能", exact: true }).click();
+    await page.getByRole("radio", { name: "按路径", exact: true }).click();
+    await page
+      .getByRole("textbox", { name: "新技能路径", exact: true })
+      .fill("/late/planner/SKILL.md");
+    await page.getByRole("button", { name: "读取技能", exact: true }).click();
+    await expect.poll(() => harness.server.previewSkillPackage.mock.calls.length).toBe(1);
 
-    await page.getByRole("button", { name: "切换所选版本", exact: true }).click();
-    const selectedEntry = page.getByRole("checkbox").nth(1);
-    await expect.element(selectedEntry).toBeChecked();
-    await expect.element(page.getByText(/不用于 Composer 显式调用/u)).toBeVisible();
-    await page.getByRole("combobox", { name: "技能 Planner 加载时机" }).click();
-    await page.getByRole("option", { name: "启动时", exact: true }).click();
+    await selectRoutedExpert(router, "reviewer");
+    await expect
+      .element(page.getByRole("heading", { name: "评审专家", exact: true }))
+      .toBeVisible();
+    latePreview.resolve({
+      previewId: "late-preview",
+      sourcePath: "/late/planner/SKILL.md",
+      realRoot: "/late/planner",
+      expiresAt: "2026-10-22T00:00:00.000Z",
+      package: harness.makeSkillPackage("c", "SKILL.md"),
+      issues: [],
+    });
+    await latePreview.promise;
 
-    await page.getByRole("button", { name: "保存更改", exact: true }).click();
-    await expect.poll(() => harness.server.saveExpert.mock.calls.length).toBe(1);
-    expect(harness.server.saveExpert.mock.calls[0]?.[0]).toMatchObject({
-      skills: [],
-      skillSelections: [
+    await expect.element(page.getByRole("heading", { name: "技能 0", exact: true })).toBeVisible();
+    expect(harness.server.importSkillPackage).not.toHaveBeenCalled();
+    expect(harness.server.saveExpert).not.toHaveBeenCalled();
+    await close();
+  });
+
+  it("does not apply an import response to a different Expert selected while Apply is pending", async () => {
+    const reviewer = harness.makeExpert({ id: "reviewer", name: "评审专家" });
+    harness.data.experts = [harness.makeExpert(), reviewer];
+    const pendingImport = deferred<Awaited<ReturnType<typeof harness.server.importSkillPackage>>>();
+    harness.server.importSkillPackage.mockReturnValueOnce(pendingImport.promise);
+    const { close, router } = await mountPanel("/settings?expertId=planner");
+    await page.getByRole("button", { name: "添加技能", exact: true }).click();
+    await page.getByRole("radio", { name: "按路径", exact: true }).click();
+    await page
+      .getByRole("textbox", { name: "新技能路径", exact: true })
+      .fill("/late/planner/SKILL.md");
+    await page.getByRole("button", { name: "读取技能", exact: true }).click();
+    await expect
+      .element(page.getByRole("checkbox", { name: "Imported skill", exact: true }))
+      .toBeChecked();
+    await page.getByRole("button", { name: "应用选择（1）", exact: true }).click();
+    await expect.poll(() => harness.server.importSkillPackage.mock.calls.length).toBe(1);
+
+    await selectRoutedExpert(router, "reviewer");
+    await expect
+      .element(page.getByRole("heading", { name: "评审专家", exact: true }))
+      .toBeVisible();
+    const imported = harness.makeSkillPackage("c", "SKILL.md");
+    harness.data.skillPackages = [...harness.data.skillPackages, imported];
+    pendingImport.resolve({
+      package: imported,
+      source: {
+        sourceId: `src_${"c".repeat(64)}`,
+        sourcePath: "/late/planner",
+        realRoot: "/late/planner",
+        packageId: imported.packageId,
+        revision: 1,
+        importedAt: "2026-10-22T00:00:00.000Z",
+      },
+      reused: false,
+    });
+    await pendingImport.promise;
+
+    await expect.element(page.getByRole("heading", { name: "技能 0", exact: true })).toBeVisible();
+    expect(harness.server.saveExpert).not.toHaveBeenCalled();
+    await close();
+  });
+
+  it("invalidates a pending skill Apply when the selected Expert receives a newer revision", async () => {
+    const pendingImport = deferred<Awaited<ReturnType<typeof harness.server.importSkillPackage>>>();
+    harness.server.importSkillPackage.mockReturnValueOnce(pendingImport.promise);
+    const { close, queryClient } = await mountPanel("/settings?expertId=planner");
+    await page.getByRole("button", { name: "添加技能", exact: true }).click();
+    await page.getByRole("radio", { name: "按路径", exact: true }).click();
+    await page
+      .getByRole("textbox", { name: "新技能路径", exact: true })
+      .fill("/late/planner/SKILL.md");
+    await page.getByRole("button", { name: "读取技能", exact: true }).click();
+    await expect
+      .element(page.getByRole("checkbox", { name: "Imported skill", exact: true }))
+      .toBeChecked();
+    await page.getByRole("button", { name: "应用选择（1）", exact: true }).click();
+    await expect.poll(() => harness.server.importSkillPackage.mock.calls.length).toBe(1);
+
+    const latest = harness.makeExpert({ revision: 8, description: "来自服务端的新版本" });
+    harness.data.experts = [latest];
+    queryClient.setQueryData(EXPERTS_QUERY_KEY, [latest]);
+    await expect.element(page.getByText("v8", { exact: true })).toBeVisible();
+    await expect.element(page.getByRole("dialog", { name: /添加技能至/u })).not.toBeInTheDocument();
+
+    const imported: SkillPackage = {
+      schemaVersion: 1,
+      packageId: `pkg_${"c".repeat(64)}`,
+      rootName: "imported-skills",
+      resources: [],
+      entries: [
         {
-          packageId: `pkg_${"b".repeat(64)}`,
-          entryPath: "planner/v2/SKILL.md",
-          activation: "startup",
+          entryPath: "SKILL.md",
+          name: "Imported skill",
+          description: "Imported for the Expert draft.",
+          issues: [],
         },
       ],
+      fileCount: 1,
+      totalBytes: 10,
+    };
+    harness.data.skillPackages = [...harness.data.skillPackages, imported];
+    pendingImport.resolve({
+      package: imported,
+      source: {
+        sourceId: `src_${"c".repeat(64)}`,
+        sourcePath: "/late/planner",
+        realRoot: "/late/planner",
+        packageId: imported.packageId,
+        revision: 1,
+        importedAt: "2026-10-22T00:00:00.000Z",
+      },
+      reused: false,
     });
+    await pendingImport.promise;
+
+    await page.getByRole("button", { name: "添加技能", exact: true }).click();
+    await expect.element(page.getByText("已选 0 项", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByRole("checkbox", { name: "Imported skill", exact: true }))
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("checkbox", { name: "Imported skill", exact: true }))
+      .not.toBeChecked();
+    expect(harness.server.saveExpert).not.toHaveBeenCalled();
+    await page.getByRole("button", { name: "取消", exact: true }).click();
     await close();
   });
 
@@ -550,10 +806,14 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     await expect.element(source).toHaveTextContent("Synara");
     await page.getByRole("checkbox", { name: "Planning framework", exact: true }).click();
     await page.getByRole("button", { name: /应用选择/ }).click();
-    await page.getByRole("button", { name: "查看技能 synara:planning", exact: true }).click();
     await expect
-      .element(page.getByRole("textbox", { name: "技能 1 名称" }))
-      .toHaveValue("synara:planning");
+      .element(page.getByRole("button", { name: "查看技能 Imported skill", exact: true }))
+      .toBeVisible();
+    expect(harness.server.previewSkillPackage).toHaveBeenCalledWith({
+      path: "/skills/planning/SKILL.md",
+    });
+    expect(harness.server.importSkillPackage).toHaveBeenCalledTimes(1);
+    expect(harness.server.saveExpert).not.toHaveBeenCalled();
 
     await page.getByRole("button", { name: /请填写专家名称.*定位问题/ }).click();
     await expect.element(name).toHaveFocus();
@@ -562,7 +822,7 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     await close();
   });
 
-  it("keeps cancelled additions out of the draft and saves manual skills with deduplicated references", async () => {
+  it("keeps a cancelled preview out of the draft and saves an imported path as a package selection", async () => {
     const { close } = await mountPanel("/settings?expertId=planner");
     await expect.element(page.getByRole("heading", { name: "技能 0", exact: true })).toBeVisible();
     await expect
@@ -573,10 +833,15 @@ describe("ExpertsSettingsPanel browser interactions", () => {
 
     await page.getByRole("button", { name: "添加技能", exact: true }).click();
     await page.getByRole("radio", { name: "按路径", exact: true }).click();
-    await page.getByRole("textbox", { name: "新技能名称" }).fill("手动规划");
     await page.getByRole("textbox", { name: "新技能路径" }).fill("/manual/planning/SKILL.md");
+    await page.getByRole("button", { name: "读取技能", exact: true }).click();
+    await expect
+      .element(page.getByRole("checkbox", { name: "Imported skill", exact: true }))
+      .toBeChecked();
     await page.getByRole("button", { name: "取消", exact: true }).click();
     await expect.element(page.getByRole("button", { name: "保存更改" })).not.toBeInTheDocument();
+    expect(harness.server.importSkillPackage).not.toHaveBeenCalled();
+    expect(harness.server.saveExpert).not.toHaveBeenCalled();
 
     await page.getByRole("button", { name: "添加参考资料", exact: true }).click();
     await page.getByRole("textbox", { name: "参考资料路径", exact: true }).fill("/docs/cancel.md");
@@ -585,16 +850,16 @@ describe("ExpertsSettingsPanel browser interactions", () => {
 
     await page.getByRole("button", { name: "添加技能", exact: true }).click();
     await page.getByRole("radio", { name: "按路径", exact: true }).click();
-    await page.getByRole("textbox", { name: "新技能名称" }).fill("手动规划");
     await page.getByRole("textbox", { name: "新技能路径" }).fill("/manual/planning/SKILL.md");
-    await page
-      .getByRole("dialog", { name: "添加技能", exact: true })
-      .getByRole("button", { name: "添加技能", exact: true })
-      .click();
+    await page.getByRole("button", { name: "读取技能", exact: true }).click();
+    await expect.poll(() => harness.server.importSkillPackage.mock.calls.length).toBe(0);
+    await page.getByRole("button", { name: "应用选择（1）", exact: true }).click();
     await expect.element(page.getByRole("heading", { name: "技能 1", exact: true })).toBeVisible();
-    await expect
-      .element(page.getByRole("textbox", { name: "技能 1 路径" }))
-      .not.toBeInTheDocument();
+    expect(harness.server.importSkillPackage).toHaveBeenCalledTimes(1);
+    expect(harness.server.importSkillPackage).toHaveBeenCalledWith({
+      previewId: "preview-/manual/planning/SKILL.md",
+      idempotencyKey: "preview-/manual/planning/SKILL.md",
+    });
 
     await page.getByRole("button", { name: "添加参考资料", exact: true }).click();
     await page.getByRole("radio", { name: "批量粘贴", exact: true }).click();
@@ -619,14 +884,21 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     expect(harness.server.saveExpert.mock.calls[0]?.[0]).toMatchObject({
       id: "planner",
       expectedRevision: 7,
-      skills: [{ name: "手动规划", path: "/manual/planning/SKILL.md" }],
+      skills: [],
+      skillSelections: [
+        {
+          packageId: `pkg_${"c".repeat(64)}`,
+          entryPath: "SKILL.md",
+          activation: "on-demand",
+        },
+      ],
       references: ["/docs/brief.md", "/docs/spec.md"],
     });
     await expect.element(page.getByRole("button", { name: "保存更改" })).not.toBeInTheDocument();
     await close();
   });
 
-  it("can remove the last catalog selection while preserving manual skills, and locates errors in expanded rows", async () => {
+  it("keeps other legacy paths when removing a catalog choice, then converts the remaining path", async () => {
     harness.data.experts = [
       harness.makeExpert({
         skills: [
@@ -641,30 +913,22 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     await expect
       .element(page.getByRole("checkbox", { name: "Planning framework", exact: true }))
       .toBeChecked();
+    await expect
+      .element(page.getByRole("checkbox", { name: "手动技能", exact: true }))
+      .toBeChecked();
     await page.getByRole("checkbox", { name: "Planning framework", exact: true }).click();
     await expect
-      .element(page.getByRole("button", { name: "应用选择（0）", exact: true }))
+      .element(page.getByRole("button", { name: "应用选择（1）", exact: true }))
       .toBeEnabled();
-    await page.getByRole("button", { name: "应用选择（0）", exact: true }).click();
+    await page.getByRole("button", { name: "应用选择（1）", exact: true }).click();
     await expect
-      .element(page.getByRole("button", { name: "查看技能 手动技能", exact: true }))
+      .element(page.getByRole("button", { name: "查看技能 Imported skill", exact: true }))
       .toBeVisible();
     await expect
       .element(page.getByRole("button", { name: "查看技能 synara:planning", exact: true }))
       .not.toBeInTheDocument();
-    await page.getByRole("button", { name: "查看技能 手动技能", exact: true }).click();
-    const skillPath = page.getByRole("textbox", { name: "技能 1 路径", exact: true });
-    await skillPath.fill("");
-    await page.getByRole("button", { name: /请填写本机技能入口文件路径.*定位问题/ }).click();
-    await expect.element(skillPath).toHaveFocus();
-    await skillPath.fill("/manual/updated/SKILL.md");
-    await expect.element(skillPath).toHaveFocus();
-    await page.getByRole("button", { name: "查看参考资料 1", exact: true }).click();
-    const referencePath = page.getByRole("textbox", { name: "参考资料路径 1", exact: true });
-    await referencePath.fill("/docs/updated.md");
-    await expect.element(referencePath).toHaveFocus();
-    await page.getByRole("button", { name: "放弃", exact: true }).click();
-    await expect.element(page.getByRole("heading", { name: "技能 2", exact: true })).toBeVisible();
+    expect(harness.server.previewSkillPackage).toHaveBeenCalledWith({ path: "/manual/SKILL.md" });
+    expect(harness.server.importSkillPackage).toHaveBeenCalledTimes(1);
     expect(harness.server.saveExpert).not.toHaveBeenCalled();
     await close();
   });

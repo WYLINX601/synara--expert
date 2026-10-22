@@ -1,11 +1,10 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { ProviderSkillDescriptor, ProviderSkillReference } from "@synara/contracts";
 import { ChevronRightIcon, XIcon } from "~/lib/icons";
 import { disclosureChevronClassName } from "~/lib/disclosureMotion";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Input } from "../ui/input";
-import { SkillPicker } from "./SkillPicker";
 import { SettingsListRow, SettingsSectionShell } from "./SettingsPanelPrimitives";
 import {
   expertSkillPathKey,
@@ -19,37 +18,21 @@ export function ExpertSkillsEditor({
   skills,
   issues,
   catalog,
-  catalogLoading,
-  catalogError,
+  action,
   disabled,
   onChange,
 }: {
   skills: ReadonlyArray<ProviderSkillReference>;
   issues: ReadonlyArray<ExpertDraftIssue>;
   catalog: ReadonlyArray<ProviderSkillDescriptor>;
-  catalogLoading: boolean;
-  catalogError: string | null;
+  action: ReactNode;
   disabled: boolean;
   onChange: (skills: ProviderSkillReference[]) => void;
 }) {
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
 
   return (
-    <SettingsSectionShell
-      title="技能"
-      count={skills.length}
-      layout="compact"
-      action={
-        <SkillPicker
-          skills={skills}
-          catalog={catalog}
-          catalogLoading={catalogLoading}
-          catalogError={catalogError}
-          disabled={disabled}
-          onApply={onChange}
-        />
-      }
-    >
+    <SettingsSectionShell title="技能" count={skills.length} layout="compact" action={action}>
       {issues
         .filter((issue) => issue.field === "skills" && issue.index === undefined)
         .map((issue) => (

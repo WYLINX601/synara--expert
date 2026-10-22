@@ -63,24 +63,23 @@ const commonDraft = {
 };
 
 describe("ExpertSkillPackagesEditor integration", () => {
-  it("keeps old path skills visible while packages are available to import and select separately", () => {
+  it("keeps legacy path skills visible and exposes the unified picker", () => {
     const markup = renderEditor({
       ...commonDraft,
       skills: [{ name: "Legacy planner", path: "/old/skills/planner/SKILL.md" }],
     });
 
     expect(markup).toContain("Legacy planner");
-    expect(markup).toContain("版本包技能");
-    expect(markup).toContain("改用版本包");
+    expect(markup).toContain('aria-label="添加技能"');
+    expect(markup).not.toContain("改用版本包");
     expect(markup).not.toContain('aria-label="选择技能 Planner"');
   });
 
-  it("shows fixed package entries only after package mode is explicitly present", () => {
+  it("keeps an empty package draft collapsed until the picker opens", () => {
     const markup = renderEditor({ ...commonDraft, skills: [], skillSelections: [] });
 
-    expect(markup).toContain("Planner");
-    expect(markup).toContain('aria-label="选择技能 Planner"');
-    expect(markup).toContain("启动时");
-    expect(markup).toContain("按需");
+    expect(markup).toContain('aria-label="添加技能"');
+    expect(markup).not.toContain("Planner");
+    expect(markup).not.toContain('aria-label="选择技能 Planner"');
   });
 });

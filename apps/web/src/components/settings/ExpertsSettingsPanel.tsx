@@ -423,6 +423,7 @@ export function ExpertsSettingsPanel(props: {
       ) : draft ? (
         <>
           <ExpertEditor
+            key={`${selectedId ?? "new-expert"}:${baseline?.revision ?? 0}`}
             header={
               <div className="flex min-h-8 flex-wrap items-center justify-between gap-2">
                 <div className="flex min-w-32 flex-1 items-center gap-2">
@@ -498,6 +499,7 @@ export function ExpertsSettingsPanel(props: {
             connections={connectionsQuery.data ?? []}
             connectionsLoading={connectionsQuery.isPending && !connectionsQuery.data}
             connectionsError={connectionsQuery.isError ? errorText(connectionsQuery.error) : null}
+            experts={experts}
             catalog={skillsQuery.data?.skills ?? []}
             catalogLoading={skillsQuery.isPending && !skillsQuery.data}
             catalogError={skillsQuery.isError ? errorText(skillsQuery.error) : null}

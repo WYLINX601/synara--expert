@@ -1,6 +1,7 @@
 import {
   EXPERT_PROVIDER_KINDS,
   type ExpertConnectionConfig,
+  type ExpertDefinition,
   type ExpertSaveInput,
 } from "@synara/contracts";
 import { isExpertProvider } from "@synara/shared/expertProviders";
@@ -29,6 +30,7 @@ export function ExpertEditor({
   connectionsLoading,
   connectionsError,
   catalog,
+  experts = [],
   catalogLoading,
   catalogError,
   onTabChange,
@@ -45,6 +47,7 @@ export function ExpertEditor({
   connectionsLoading: boolean;
   connectionsError: string | null;
   catalog: Parameters<typeof ExpertSkillsEditor>[0]["catalog"];
+  experts?: ReadonlyArray<ExpertDefinition>;
   catalogLoading: boolean;
   catalogError: string | null;
   onTabChange: (tab: ExpertEditorTab) => void;
@@ -280,24 +283,18 @@ export function ExpertEditor({
             </SettingsSectionShell>
           </SettingsCard>
           <SettingsCard className="px-4">
-            {draft.skillSelections === undefined ? (
-              <ExpertSkillsEditor
-                skills={draft.skills}
-                issues={issues}
-                catalog={catalog}
-                catalogLoading={catalogLoading}
-                catalogError={catalogError}
-                disabled={readonly}
-                onChange={(skills) => onChange({ skills })}
-              />
-            ) : null}
             <ExpertSkillPackagesEditor
               selections={draft.skillSelections}
               legacySkills={draft.skills}
+              expertName={draft.name}
+              experts={experts}
+              catalog={catalog}
+              catalogLoading={catalogLoading}
+              catalogError={catalogError}
+              issues={issues}
               disabled={readonly}
               onChange={(skillSelections) => onChange({ skillSelections, skills: [] })}
-              onSwitchToPackages={() => onChange({ skillSelections: [], skills: [] })}
-              onSwitchToLegacy={() => onChange({ skillSelections: undefined, skills: [] })}
+              onLegacyChange={(skills) => onChange({ skills })}
             />
             <ExpertReferencesEditor
               references={draft.references}

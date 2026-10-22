@@ -90,3 +90,15 @@ Codex 实测证据：`live-provider/v2-optional-mcp-native-fork-20261021-attempt
 浏览器检查复用仓库配置，仅通过外置配置将缓存隔离到 web 的 node_modules，并将测试 API 指向 localhost:51107。初期运行因错误 locator 等待超时，后核实 Base UI checkbox 的实际可访问名称来自关联 label；改为实际名称。另修正旧路径展示名称、Tooltip 内容定位和路径预览后默认仅看已选的测试预期。修正仅涉及测试；完整重跑 31 项通过。临时 smoke 文件已删除，诊断失败日志保留，不计入通过。最终日志、运行配置和受检文件摘要位于证据目录的 `batch2-checks/`。
 
 本批交付是用户批准的技能配置正式 UI。旧 BMad wrapper 的自动资源根识别、模型实际执行及安装发布不在本批通过结论内；第一批结果保持原有证据范围。
+
+## 2026-10-22 推送与本机安装
+
+用户明确授权“推送并安装”。修复、UI 和版本提交已推送到 `origin/codex/hub-reliability-batch-1`；本次没有合并 main 或创建公开 Release。安装源码固定为 `0321e8d3230853fa9cd6b474ca5b666ea2ec5b77`，Workbench 版本 `0.1.4`，上游仍为锁定的 `v1.0.5`。本记录随后提交，不改变已安装的运行代码。
+
+- 版本构建测试 21 项通过；格式、lint（0 errors、1041 warnings）、7 个 workspace 类型检查和 release smoke 通过。两批运行代码沿用各自上方所列验证，没有把历史全仓运行改记为本次新 SHA 全量运行。
+- 本机 macOS arm64 DMG/ZIP 构建通过，打包运行依赖与隔离启动通过，安装前后深层严格签名校验通过。使用本地 ad-hoc 签名，没有 Developer ID 公证。图标沿用安装版 Assets.car，明确记为外部输入。首轮因缺少 Rust 被拒绝；重建通过现有 artifact 导入入口，复用与锁定 source/nativeRevision/补丁/二进制摘要一致的原生 Cua 组件；没有删除原校验。
+- 安装维护锁内备份应用、完整 home/profile 和一致性 SQLite；副本启动迁移通过，88 张既有业务表数据及原生迁移账本保持。随后替换 `/Applications/Personal Workbench.app` 并实际启动，运行 PID 与原 home 生命周期锁一致，健康检查通过。Expert/Context/native 版本分别为 `6/1/135`，25 个受保护配置文件保持，未自动转换专家配置。
+- 已实际打开安装版专家列表（12 位专家）及新版添加技能弹窗，没有应用或保存测试草稿。安装证据根为 `/Users/wangyuelin/.codex/task-artifacts/hub-install-2026-10-22/`；最终 `installation-result.json` 为 `installed-and-started`，截图 `installed-skills-dialog.png`。
+- 配套恢复备份保留在该证据根的 `private-backup-0.1.3-before-0.1.4/`。恢复前先停止新版所有目标 home 访问者，保存升级后的新增数据，再配套恢复应用与 home/profile；不可直接启动备份旧应用写入当前数据。
+
+本次安装不新增其他 Provider 实测、Linux/Windows 实机验证或旧 BMad wrapper 自动资源识别结论。

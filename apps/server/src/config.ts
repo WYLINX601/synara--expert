@@ -221,18 +221,30 @@ export interface ResolvedWorkspaceRoots {
  */
 export const resolveCanonicalWorkspaceRoots = Effect.fn(function* (input: {
   readonly homeDir: string;
+  readonly managedWorkspaceRoot?: string;
   readonly platform?: NodeJS.Platform;
-}): Effect.fn.Return<ResolvedWorkspaceRoots, never, FileSystem.FileSystem | Path.Path> {
+}): Effect.fn.Return<ResolvedWorkspaceRoots, Error, FileSystem.FileSystem | Path.Path> {
   const platform = input.platform ?? process.platform;
+  const pathApi = platform === "win32" ? pathWin32 : pathPosix;
+  const managedWorkspaceRoot = input.managedWorkspaceRoot;
+  if (
+    managedWorkspaceRoot !== undefined &&
+    (!managedWorkspaceRoot.trim() || !pathApi.isAbsolute(managedWorkspaceRoot))
+  ) {
+    return yield* Effect.fail(
+      new Error("SYNARA_MANAGED_WORKSPACE_ROOT must be a non-empty absolute path."),
+    );
+  }
+
   const homeDir = yield* realpathNearestExisting(input.homeDir);
   const chatWorkspaceRoot = yield* realpathNearestExisting(
-    resolveDefaultChatWorkspaceRoot({ homeDir, platform }),
+    managedWorkspaceRoot ?? resolveDefaultChatWorkspaceRoot({ homeDir, platform }),
   );
   const studioWorkspaceRoot = yield* realpathNearestExisting(
-    resolveDefaultStudioWorkspaceRoot({ homeDir, platform }),
+    pathApi.join(chatWorkspaceRoot, "Studio"),
   );
   const groupsWorkspaceRoot = yield* realpathNearestExisting(
-    resolveDefaultGroupsWorkspaceRoot({ homeDir, platform }),
+    pathApi.join(chatWorkspaceRoot, "Groups"),
   );
   return { homeDir, chatWorkspaceRoot, studioWorkspaceRoot, groupsWorkspaceRoot };
 });

@@ -178,6 +178,10 @@ const CliEnvConfig = Config.all({
   port: Config.port("SYNARA_PORT").pipe(Config.option, Config.map(Option.getOrUndefined)),
   host: Config.string("SYNARA_HOST").pipe(Config.option, Config.map(Option.getOrUndefined)),
   synaraHome: Config.string("SYNARA_HOME").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  managedWorkspaceRoot: Config.string("SYNARA_MANAGED_WORKSPACE_ROOT").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
   devUrl: Config.url("VITE_DEV_SERVER_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   publicUrl: Config.url("SYNARA_PUBLIC_URL").pipe(Config.option, Config.map(Option.getOrUndefined)),
   allowInsecureRemote: optionalBooleanEnvironmentConfig("SYNARA_ALLOW_INSECURE_REMOTE"),
@@ -282,8 +286,26 @@ const ServerConfigLive = (input: CliInput) =>
         false,
       );
       const configuredHome = Option.getOrUndefined(input.synaraHome) ?? env.synaraHome;
-      const baseDir = yield* resolveBaseDir(configuredHome);
       const userHomeDir = OS.homedir();
+      const { homeDir, chatWorkspaceRoot, studioWorkspaceRoot, groupsWorkspaceRoot } =
+        yield* resolveCanonicalWorkspaceRoots({
+          homeDir: userHomeDir,
+          ...(env.managedWorkspaceRoot === undefined
+            ? {}
+            : { managedWorkspaceRoot: env.managedWorkspaceRoot }),
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new StartupError({
+                message:
+                  cause instanceof Error
+                    ? cause.message
+                    : "Failed to resolve managed workspace roots",
+                cause,
+              }),
+          ),
+        );
+      const baseDir = yield* resolveBaseDir(configuredHome);
       const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
       // A "Copy my data to Beta" request from a stable install lands as a
       // marker in this home; it must be consumed before the private state
@@ -353,9 +375,6 @@ const ServerConfigLive = (input: CliInput) =>
           message: remotePolicyError,
         });
       }
-
-      const { homeDir, chatWorkspaceRoot, studioWorkspaceRoot, groupsWorkspaceRoot } =
-        yield* resolveCanonicalWorkspaceRoots({ homeDir: userHomeDir });
 
       const config: ServerConfigShape = {
         mode,

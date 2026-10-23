@@ -56,6 +56,7 @@ describe("resolveStaticDir", () => {
 
 const runResolveCanonicalWorkspaceRoots = (input: {
   readonly homeDir: string;
+  readonly managedWorkspaceRoot?: string;
   readonly platform?: NodeJS.Platform;
 }) =>
   Effect.runPromise(resolveCanonicalWorkspaceRoots(input).pipe(Effect.provide(NodeServices.layer)));
@@ -123,6 +124,59 @@ describe("resolveCanonicalWorkspaceRoots", () => {
     expect(result.groupsWorkspaceRoot).toBe(
       path.join(expectedHomeDir, "Documents", "Synara", "Groups"),
     );
+  });
+
+  it("canonicalizes an explicit managed root while keeping homeDir tied to the actual home", async () => {
+    const root = makeTempDir();
+    const actualHome = path.join(root, "actual-home");
+    fs.mkdirSync(actualHome, { recursive: true });
+    const realWorkspaceRoot = path.join(root, "preview-workspace");
+    fs.mkdirSync(realWorkspaceRoot, { recursive: true });
+    const workspaceRootLink = path.join(root, "workspace-link");
+    fs.symlinkSync(realWorkspaceRoot, workspaceRootLink, "dir");
+
+    const result = await runResolveCanonicalWorkspaceRoots({
+      homeDir: actualHome,
+      managedWorkspaceRoot: workspaceRootLink,
+    });
+
+    expect(result.homeDir).toBe(fs.realpathSync(actualHome));
+    expect(result.chatWorkspaceRoot).toBe(fs.realpathSync(realWorkspaceRoot));
+    expect(result.studioWorkspaceRoot).toBe(
+      path.join(fs.realpathSync(realWorkspaceRoot), "Studio"),
+    );
+    expect(result.groupsWorkspaceRoot).toBe(
+      path.join(fs.realpathSync(realWorkspaceRoot), "Groups"),
+    );
+  });
+
+  it("canonicalizes a missing explicit root through its nearest existing symlink ancestor", async () => {
+    const root = makeTempDir();
+    const realParent = path.join(root, "real-parent");
+    fs.mkdirSync(realParent, { recursive: true });
+    const parentLink = path.join(root, "parent-link");
+    fs.symlinkSync(realParent, parentLink, "dir");
+    const expectedRoot = path.join(fs.realpathSync(realParent), "preview", "browser");
+
+    const result = await runResolveCanonicalWorkspaceRoots({
+      homeDir: root,
+      managedWorkspaceRoot: path.join(parentLink, "preview", "browser"),
+    });
+
+    expect(result.chatWorkspaceRoot).toBe(expectedRoot);
+    expect(result.studioWorkspaceRoot).toBe(path.join(expectedRoot, "Studio"));
+    expect(result.groupsWorkspaceRoot).toBe(path.join(expectedRoot, "Groups"));
+  });
+
+  it("rejects a relative explicit managed workspace root", async () => {
+    const root = makeTempDir();
+
+    await expect(
+      runResolveCanonicalWorkspaceRoots({
+        homeDir: root,
+        managedWorkspaceRoot: "relative-preview-root",
+      }),
+    ).rejects.toThrow("SYNARA_MANAGED_WORKSPACE_ROOT must be a non-empty absolute path.");
   });
 
   it("canonicalizes the nearest existing ancestor when the workspace root itself does not exist yet", async () => {

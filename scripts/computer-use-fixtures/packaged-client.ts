@@ -133,9 +133,16 @@ export async function connectPackagedOwner(cdpPort: number): Promise<PackagedOwn
 
 /** Reusable by non-Electron isolated fixtures whose owner connection is
  * explicitly supplied in memory, never discovered from another instance. */
-export async function connectOwnerUrl(rawUrl: string): Promise<PackagedOwnerConnection> {
+export async function connectOwnerUrl(
+  rawUrl: string,
+  options: { readonly allowUnauthenticatedLoopback?: boolean } = {},
+): Promise<PackagedOwnerConnection> {
   const url = assertLoopbackUrl(rawUrl, "ws:");
-  if (!url.searchParams.get("token")) throw new Error("An authenticated owner URL is required.");
+  // Browser-only operator connections may explicitly use a local server whose
+  // authentication is disabled. This never bypasses the server's auth policy;
+  // packaged/probe callers still require a token by default.
+  if (!url.searchParams.get("token") && options.allowUnauthenticatedLoopback !== true)
+    throw new Error("An authenticated owner URL is required.");
   const negotiate = new URL(url);
   negotiate.protocol = "http:";
   negotiate.pathname = WS_NEGOTIATE_HTTP_PATH;

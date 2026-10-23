@@ -2,7 +2,7 @@ import "~/index.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ProjectId, SpaceId, ThreadId } from "@synara/contracts";
-import type { ExpertDefinition, ProjectAgentOverview } from "@synara/contracts";
+import type { ExpertDefinition, HubTeamPreset, ProjectAgentOverview } from "@synara/contracts";
 import { page } from "vitest/browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -29,7 +29,24 @@ function expert(input: { id: string; name: string; archived?: boolean }): Expert
   };
 }
 
+function preset(overrides: Partial<HubTeamPreset> = {}): HubTeamPreset {
+  return {
+    id: "preset-product",
+    name: "产品协作团",
+    purpose: "完善产品方案",
+    expertIds: ["writer"],
+    coordinatorInstructions: "先澄清，再组织评审",
+    collaborationPreferences: "并行收集意见",
+    revision: 3,
+    createdAt: "2026-10-20T00:00:00.000Z",
+    updatedAt: "2026-10-21T00:00:00.000Z",
+    archivedAt: null,
+    ...overrides,
+  };
+}
+
 const api = vi.hoisted(() => {
+  const teams: Array<Record<string, unknown>> = [];
   const readDocumentResult = {
     head: {
       projectId: "project-group-1",
@@ -82,12 +99,62 @@ const api = vi.hoisted(() => {
     provider: {
       listModels: vi.fn(async () => ({ models: [], source: "disabled" })),
     },
+    hubTeamsData: teams,
+    hubTeams: {
+      list: vi.fn(async () => teams),
+      read: vi.fn(async () => null),
+      save: vi.fn(async (input: Record<string, unknown>) => {
+        const existing = teams.find((team) => team.id === input.id);
+        const saved = {
+          ...input,
+          revision: (typeof existing?.revision === "number" ? existing.revision : 0) + 1,
+          createdAt:
+            typeof existing?.createdAt === "string"
+              ? existing.createdAt
+              : "2026-10-22T00:00:00.000Z",
+          updatedAt: "2026-10-22T00:01:00.000Z",
+          archivedAt: null,
+        };
+        teams.splice(0, teams.length, saved, ...teams.filter((team) => team.id !== input.id));
+        return saved;
+      }),
+      setArchived: vi.fn(async (input: { id: string; archived: boolean }) => {
+        const existing = teams.find((team) => team.id === input.id) ?? {};
+        const saved = {
+          ...existing,
+          revision: (typeof existing.revision === "number" ? existing.revision : 0) + 1,
+          updatedAt: "2026-10-22T00:01:00.000Z",
+          archivedAt: input.archived ? "2026-10-22T00:01:00.000Z" : null,
+        };
+        teams.splice(
+          0,
+          teams.length,
+          ...teams.map((team) => (team.id === input.id ? saved : team)),
+        );
+        return saved;
+      }),
+    },
   };
 });
 
 vi.mock("~/nativeApi", () => ({
   readNativeApi: () => api,
   ensureNativeApi: () => api,
+  readNativeApiServerCapabilityState: () => "supported",
+  readNativeApiServerConnection: () => ({
+    generation: "group-settings-browser",
+    connected: true,
+  }),
+  onNativeApiServerCapabilitiesChange: () => () => undefined,
+}));
+
+vi.mock("~/hooks/useNativeApiServerCapability", () => ({
+  useNativeApiServerCapabilitySnapshot: () => ({
+    generation: "group-settings-browser",
+    capability: "supported",
+    connected: true,
+    api,
+  }),
 }));
 
 vi.mock("~/components/PluginLibrary", () => ({
@@ -159,6 +226,26 @@ function renderDialog(props: Partial<Parameters<typeof GroupSettingsDialog>[0]> 
 describe("GroupSettingsDialog", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    api.hubTeamsData.length = 0;
+    api.hubTeams.list.mockImplementation(async () => api.hubTeamsData);
+    api.hubTeams.save.mockImplementation(async (input: Record<string, unknown>) => {
+      const existing = api.hubTeamsData.find((team) => team.id === input.id);
+      const saved = {
+        ...input,
+        revision: (typeof existing?.revision === "number" ? existing.revision : 0) + 1,
+        createdAt:
+          typeof existing?.createdAt === "string" ? existing.createdAt : "2026-10-22T00:00:00.000Z",
+        updatedAt: "2026-10-22T00:01:00.000Z",
+        archivedAt: null,
+      };
+      api.hubTeamsData.splice(
+        0,
+        api.hubTeamsData.length,
+        saved,
+        ...api.hubTeamsData.filter((team) => team.id !== input.id),
+      );
+      return saved;
+    });
     api.server.listExperts.mockResolvedValue([]);
     api.projectAgent.getOverview.mockResolvedValue(overview());
     api.projectAgent.configure.mockResolvedValue(overview());
@@ -230,6 +317,7 @@ describe("GroupSettingsDialog", () => {
     expect(payload.projectId).toBe(PROJECT_ID);
     expect(payload.goal).toBe("grow the library");
     expect(payload.expectedRevision).toBe(4);
+    expect(payload).not.toHaveProperty("collaboration");
     expect(payload.captureEnabled).toBe(true);
     expect(payload.autoMemoryEnabled).toBe(true);
     expect(payload.limits).toMatchObject({ maxConcurrentWorkers: 3 });
@@ -272,6 +360,122 @@ describe("GroupSettingsDialog", () => {
     const payload = api.projectAgent.configure.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.expertIds).toEqual(["research", "writer"]);
     expect(api.server.listExperts).toHaveBeenCalledOnce();
+  });
+
+  it("copies a selected team preset into the Hub draft and preserves unavailable member IDs", async () => {
+    api.hubTeamsData.push(preset({ expertIds: ["writer", "missing-expert"] }));
+    api.server.listExperts.mockResolvedValue([expert({ id: "writer", name: "Writer" })]);
+    const existing = overview();
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({ config: { ...existing.config!, goal: "old goal", expertIds: [] } }),
+    );
+    await renderDialog();
+
+    await page.getByRole("button", { name: "Experts" }).click();
+    await page.getByRole("radio", { name: "专家团模式" }).click();
+    const presetSelect = page.getByRole("combobox", { name: "从专家团预设采用副本" });
+    await presetSelect.click();
+    await page.getByRole("option", { name: "产品协作团 · v3" }).click();
+
+    await expect.element(page.getByText("missing-expert · 不可用")).toBeInTheDocument();
+    await expect
+      .element(page.getByText("未选择或没有匹配专家时，可使用普通线程"))
+      .not.toBeInTheDocument();
+    await page.getByRole("button", { name: /角色与协调方式/ }).click();
+    await page.getByLabelText("协调者角色与协调方式").fill("Hub 本地副本里的新协调方式");
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+
+    await vi.waitFor(() => expect(api.projectAgent.configure).toHaveBeenCalledOnce());
+    const payload = api.projectAgent.configure.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.goal).toBe("完善产品方案");
+    expect(payload.expertIds).toEqual(["writer", "missing-expert"]);
+    expect(payload.collaboration).toMatchObject({
+      schemaVersion: 1,
+      mode: "expert-team",
+      coordinatorInstructions: "Hub 本地副本里的新协调方式",
+      collaborationPreferences: "并行收集意见",
+      presetSource: { id: "preset-product", revision: 3 },
+    });
+    expect(api.hubTeams.save).not.toHaveBeenCalled();
+    expect(api.hubTeamsData[0]?.coordinatorInstructions).toBe("先澄清，再组织评审");
+  });
+
+  it("restores coordinator defaults in the draft and applies them only on Save", async () => {
+    const existing = overview();
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({
+        config: {
+          ...existing.config!,
+          expertIds: ["writer"],
+          collaboration: {
+            schemaVersion: 1,
+            mode: "expert-team",
+            coordinatorInstructions: "saved custom role",
+            collaborationPreferences: "review in parallel",
+            presetSource: { id: "preset-product", revision: 2 },
+          },
+        },
+      }),
+    );
+    await renderDialog();
+
+    await page.getByRole("button", { name: "Experts" }).click();
+    await page.getByRole("button", { name: /角色与协调方式/ }).click();
+    const coordinator = page.getByLabelText("协调者角色与协调方式");
+    await expect.element(coordinator).toHaveValue("saved custom role");
+    await page.getByRole("button", { name: "恢复默认" }).click();
+    await expect.element(coordinator).toHaveValue("");
+    expect(api.projectAgent.configure).not.toHaveBeenCalled();
+
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await vi.waitFor(() => expect(api.projectAgent.configure).toHaveBeenCalledOnce());
+    const payload = api.projectAgent.configure.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.collaboration).toEqual({
+      schemaVersion: 1,
+      mode: "expert-team",
+      collaborationPreferences: "review in parallel",
+      presetSource: { id: "preset-product", revision: 2 },
+    });
+  });
+
+  it("saves a Hub copy as a team preset without configuring the Hub", async () => {
+    const existing = overview();
+    api.server.listExperts.mockResolvedValue([expert({ id: "writer", name: "Writer" })]);
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({
+        config: {
+          ...existing.config!,
+          goal: "current team purpose",
+          expertIds: ["writer"],
+          collaboration: {
+            schemaVersion: 1,
+            mode: "expert-team",
+            coordinatorInstructions: "local coordinator role",
+            collaborationPreferences: "parallel review",
+          },
+        },
+      }),
+    );
+    await renderDialog();
+
+    await page.getByRole("button", { name: "Experts" }).click();
+    await page.getByRole("button", { name: "另存为专家团" }).click();
+    await page.getByLabelText("另存专家团名称").fill("当前 Hub 副本");
+    await page.getByRole("button", { name: "保存专家团" }).click();
+
+    await vi.waitFor(() => expect(api.hubTeams.save).toHaveBeenCalledOnce());
+    expect(api.hubTeams.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "当前 Hub 副本",
+        purpose: "current team purpose",
+        expertIds: ["writer"],
+        coordinatorInstructions: "local coordinator role",
+        collaborationPreferences: "parallel review",
+        expectedRevision: null,
+      }),
+    );
+    expect(api.projectAgent.configure).not.toHaveBeenCalled();
+    await expect.element(page.getByRole("status")).toHaveTextContent("已另存为专家团");
   });
 
   it("shows archived and missing selections as removable and allows other edits to save", async () => {

@@ -1,3 +1,5 @@
+import { HubPlanService } from "./workbench/host/hubPlanService.ts";
+import { makeHubPlanRpcHandlers } from "./workbench/host/hubPlanRpc.ts";
 import { readEventLoopStatus } from "./eventLoopMonitor";
 import { makeGitActionRunner } from "./git/gitActionRunner";
 import { AgentGatewaySessionRegistry } from "./agentGateway/Services/AgentGatewaySessionRegistry";
@@ -226,6 +228,8 @@ import { ProviderRuntimeEventRepository } from "./persistence/Services/ProviderR
 import { ExpertAppliedRuntimeRepository } from "./persistence/Services/ExpertAppliedRuntimeRecords.ts";
 import { ExpertAppliedRuntimeRepositoryLive } from "./persistence/Layers/ExpertAppliedRuntimeRecords.ts";
 import { requireWsOwnerSession } from "./wsOwnerAuthorization";
+import { HubCollaborationConfigService } from "./workbench/host/hubCollaborationConfig.ts";
+import { makeHubCollaborationRpcHandlers } from "./workbench/host/hubCollaborationRpc.ts";
 import { makeWsRequestAdmission } from "./wsRequestAdmission";
 import { voiceUploadAdmissionGate } from "./voiceUploadAdmission";
 import {
@@ -536,6 +540,8 @@ const makeWsRpcHandlersLayer = () =>
       const todoService = yield* TodoService;
       const projectAgentService = yield* ProjectAgentService;
       const projectAgentRepository = yield* ProjectAgentRepository;
+      const hubConfigStore = yield* Effect.serviceOption(HubCollaborationConfigService);
+      const hubPlanService = yield* Effect.serviceOption(HubPlanService);
       const hubWorkRepository = yield* HubWorkRepository;
       const hubWorkService = makeHubWorkService({
         repository: hubWorkRepository,
@@ -1496,6 +1502,33 @@ const makeWsRpcHandlersLayer = () =>
               if (normalizedCommand.type === "thread.turn.start") {
                 yield* projectAgentService.assertGroupCoordinatorTurnAllowed({
                   threadId: normalizedCommand.threadId,
+                  turnStart: {
+                    commandId: normalizedCommand.commandId,
+                    messageId: normalizedCommand.message.messageId,
+                    messageText: normalizedCommand.message.text,
+                    attachments: normalizedCommand.message.attachments,
+                    skills: normalizedCommand.message.skills,
+                    mentions: normalizedCommand.message.mentions,
+                    runtimeMode: normalizedCommand.runtimeMode,
+                    interactionMode: normalizedCommand.interactionMode,
+                    ...(normalizedCommand.modelSelection !== undefined
+                      ? { modelSelection: normalizedCommand.modelSelection }
+                      : {}),
+                    providerOptions: normalizedCommand.providerOptions,
+                    enableComputerControl: normalizedCommand.enableComputerControl,
+                    computerControlMode: normalizedCommand.computerControlMode,
+                    computerControlGeneration: normalizedCommand.computerControlGeneration,
+                    reviewTarget: normalizedCommand.reviewTarget,
+                    assistantDeliveryMode: normalizedCommand.assistantDeliveryMode,
+                    dispatchMode: normalizedCommand.dispatchMode,
+                    ...(normalizedCommand.dispatchOrigin !== undefined
+                      ? { dispatchOrigin: normalizedCommand.dispatchOrigin }
+                      : {}),
+                    sourceProposedPlan: normalizedCommand.sourceProposedPlan,
+                    asyncUserInputResponse: normalizedCommand.asyncUserInputResponse,
+                    resumePrecondition: normalizedCommand.resumePrecondition,
+                    createdAt: normalizedCommand.createdAt,
+                  },
                 });
               }
               const result = yield* dispatchOrchestrationCommand(normalizedCommand);
@@ -2431,6 +2464,14 @@ const makeWsRpcHandlersLayer = () =>
         [WS_METHODS.serverUpdateSettings]: (input) =>
           rpcEffect(serverSettings.updateSettingsView(input), "Failed to update server settings"),
         ...workbenchExpertRpcHandlers,
+        ...makeHubPlanRpcHandlers({
+          service: Option.getOrUndefined(hubPlanService),
+          requireOwner: requireWsOwnerSession,
+        }),
+        ...makeHubCollaborationRpcHandlers({
+          store: Option.getOrUndefined(hubConfigStore),
+          requireOwner: requireWsOwnerSession,
+        }),
         ...workbenchContextRpcHandlers,
         [WS_METHODS.serverRefreshProviders]: () =>
           rpcEffect(

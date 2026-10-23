@@ -6,15 +6,21 @@ import { assert, it } from "@effect/vitest";
 import {
   AutomationId,
   DEFAULT_SERVER_SETTINGS,
+  MessageId,
   ProjectActivityId,
   ProjectDocumentRevisionId,
   ProjectGoalId,
   ProjectId,
   ProjectInboxEventId,
   ProjectTaskId,
+  ProjectTaskAttemptId,
   ThreadId,
+  type TurnId,
+  type RuntimeMode,
   type RuntimeTurnState,
   type HubWorkRecord,
+  type HubPlanInputRequest,
+  type ModelSelection,
   type OrchestrationCommand,
   type ProviderKind,
   type ProjectAgentStreamEvent,
@@ -40,6 +46,14 @@ import { HubWorkRepositoryLive } from "../../persistence/Layers/HubWorkRepositor
 import { HubWorkRepository } from "../../persistence/Services/HubWorkRepository.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import { ProjectAgentRepository } from "../../persistence/Services/ProjectAgentRepository.ts";
+import {
+  OrchestrationCommandReceiptRepository,
+  type OrchestrationCommandReceipt,
+  type OrchestrationCommandReceiptRepositoryShape,
+} from "../../persistence/Services/OrchestrationCommandReceipts.ts";
+import { makeHubPlanStore } from "../../hubCollaboration/HubPlanStore.ts";
+import { stableGatewayDigest, makeAgentCreationIds } from "../../agentGateway/creationUtils.ts";
+import { renderHubWorkPrompt } from "../../agentGateway/hubWorkSource.ts";
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { coordinatorWelcomeMessageId } from "../groupCoordinatorHost.ts";
 import {
@@ -59,7 +73,7 @@ import {
   type ProjectAgentServiceShape,
 } from "../Services/ProjectAgentService.ts";
 import { ProjectAgentServiceLive } from "./ProjectAgentService.ts";
-import { workerTurnSettlementSourceId } from "../workerHealth.ts";
+import { WORKER_RECOVERY_NUDGE_TEXT, workerTurnSettlementSourceId } from "../workerHealth.ts";
 
 const groupId = ProjectId.makeUnsafe("project-group-1");
 const groupId2 = ProjectId.makeUnsafe("project-group-2");
@@ -96,6 +110,10 @@ function makeTestLayer(options?: {
   readonly disabledProviders?: ReadonlyArray<ProviderKind>;
   readonly unavailableProviders?: ReadonlyArray<ProviderKind>;
   readonly providerSessions?: ReadonlyArray<ProviderSession>;
+  readonly workerMonitorRace?: {
+    readonly threadId: ThreadId;
+    readonly mode: "cas-miss" | "same-timestamp";
+  };
 }) {
   const threadShells: Record<
     string,
@@ -113,6 +131,7 @@ function makeTestLayer(options?: {
       latestTurn?: {
         state: string;
         turnId?: string;
+        requestedAt?: string;
         startedAt?: string;
         completedAt?: string | null;
       } | null;
@@ -126,6 +145,12 @@ function makeTestLayer(options?: {
       envMode?: string;
       creationSource?: "synara_mcp";
       sourceThreadId?: ThreadId;
+      sourceTurnId?: TurnId | null;
+      gatewayOperationId?: string | null;
+      gatewayOperationIndex?: number | null;
+      runtimeMode?: RuntimeMode;
+      interactionMode?: "default" | "plan" | "collaboration";
+      modelSelection?: ModelSelection | null;
     }
   > = {
     [groupMemberThreadId]: {
@@ -152,9 +177,9 @@ function makeTestLayer(options?: {
         id: threadId,
         projectId: row.projectId,
         title: row.title,
-        modelSelection: null,
-        runtimeMode: "full-access",
-        interactionMode: "collaboration",
+        modelSelection: row.modelSelection ?? null,
+        runtimeMode: row.runtimeMode ?? "full-access",
+        interactionMode: row.interactionMode ?? "collaboration",
         branch: null,
         worktreePath: row.worktreePath ?? null,
         workingDirectory: row.workingDirectory ?? null,
@@ -170,6 +195,9 @@ function makeTestLayer(options?: {
         session: row.session,
         creationSource: row.creationSource ?? null,
         sourceThreadId: row.sourceThreadId ?? null,
+        sourceTurnId: row.sourceTurnId ?? null,
+        gatewayOperationId: row.gatewayOperationId ?? null,
+        gatewayOperationIndex: row.gatewayOperationIndex ?? null,
         lastKnownPr: row.lastKnownPr ?? null,
         createdAt: now,
         updatedAt: row.updatedAt ?? now,
@@ -198,6 +226,23 @@ function makeTestLayer(options?: {
     }
   > = {};
   const dispatched: OrchestrationCommand[] = [];
+  const commandReceiptRows = new Map<string, unknown>();
+  const recordCommandReceipt = (
+    command: Extract<OrchestrationCommand, { type: "thread.turn.start" | "thread.turn.interrupt" }>,
+    status: "accepted" | "rejected",
+    error: string | null = null,
+  ) =>
+    commandReceiptRows.set(String(command.commandId), {
+      commandId: command.commandId,
+      aggregateKind: "thread",
+      aggregateId: command.threadId,
+      acceptedAt: command.createdAt,
+      resultSequence: 0,
+      status,
+      error,
+      fingerprintVersion: null,
+      commandFingerprint: null,
+    });
   let failThreadEventRead = options?.failThreadEventRead ?? false;
   const durableThreadEvents: Array<{
     readonly sequence: number;
@@ -431,6 +476,9 @@ function makeTestLayer(options?: {
           return yield* Effect.fail(new Error("crash after thread"));
         }
         if (options?.failCommandTypes?.includes(command.type)) {
+          if (command.type === "thread.turn.start" || command.type === "thread.turn.interrupt") {
+            recordCommandReceipt(command, "rejected", `refusing ${command.type}`);
+          }
           return yield* Effect.fail(new Error(`refusing ${command.type}`));
         }
         if (
@@ -438,7 +486,11 @@ function makeTestLayer(options?: {
           command.type === "thread.turn.start" &&
           command.commandId.endsWith(":redispatch")
         ) {
+          recordCommandReceipt(command, "rejected", "refusing recovery redispatch");
           return yield* Effect.fail(new Error("refusing recovery redispatch"));
+        }
+        if (command.type === "thread.turn.start" || command.type === "thread.turn.interrupt") {
+          recordCommandReceipt(command, "accepted");
         }
         if (command.type === "thread.turn.interrupt") {
           recordInterruptEvent({
@@ -543,6 +595,38 @@ function makeTestLayer(options?: {
     },
     listRunsForDefinition: () => Effect.succeed([...automationRuns]),
   } as unknown as AutomationService["Service"]);
+  const repositoryLayer = Layer.effect(
+    ProjectAgentRepository,
+    Effect.gen(function* () {
+      const repository = yield* ProjectAgentRepository;
+      const race = options?.workerMonitorRace;
+      if (!race) return repository;
+      let interleaved = false;
+      return {
+        ...repository,
+        saveManagedWorkerMonitor: (input) =>
+          Effect.gen(function* () {
+            if (!interleaved && input.worker.threadId === race.threadId) {
+              interleaved = true;
+              const current = yield* repository.findManagedWorkerByThread(race.threadId);
+              if (Option.isSome(current)) {
+                const acceptedAt =
+                  race.mode === "same-timestamp"
+                    ? (input.worker.settledAt ?? current.value.updatedAt)
+                    : "2026-09-20T00:04:00.000Z";
+                yield* repository.upsertManagedWorker({
+                  ...current.value,
+                  resultSummary: "Accepted while worker monitoring settled.",
+                  resultAt: acceptedAt,
+                  updatedAt: acceptedAt,
+                });
+              }
+            }
+            return yield* repository.saveManagedWorkerMonitor(input);
+          }),
+      };
+    }),
+  ).pipe(Layer.provideMerge(ProjectAgentRepositoryLive));
   return {
     dispatched,
     durableThreadEvents,
@@ -610,8 +694,29 @@ function makeTestLayer(options?: {
             ),
         } as unknown as ProjectionThreadSessionRepository["Service"]),
       ),
-      Layer.provideMerge(ProjectAgentRepositoryLive),
+      Layer.provideMerge(repositoryLayer),
       Layer.provideMerge(HubWorkRepositoryLive),
+      Layer.provide(
+        Layer.succeed(OrchestrationCommandReceiptRepository, {
+          insert: (
+            receipt: Parameters<OrchestrationCommandReceiptRepositoryShape["insert"]>[0],
+          ) => {
+            if (commandReceiptRows.has(String(receipt.commandId))) return Effect.succeed(false);
+            commandReceiptRows.set(String(receipt.commandId), receipt);
+            return Effect.succeed(true);
+          },
+          getByCommandId: (
+            input: Parameters<OrchestrationCommandReceiptRepositoryShape["getByCommandId"]>[0],
+          ) => {
+            const receipt = commandReceiptRows.get(String(input.commandId));
+            return Effect.succeed(
+              receipt === undefined
+                ? Option.none()
+                : Option.some(receipt as OrchestrationCommandReceipt),
+            );
+          },
+        } satisfies OrchestrationCommandReceiptRepositoryShape),
+      ),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "pa-group-" })),
       Layer.provideMerge(NodeServices.layer),
@@ -780,6 +885,80 @@ it.effect(
         ),
       );
       assert.equal(Exit.isFailure(stale), true);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect(
+  "saves collaboration copies with CAS and normalized replay while preserving legacy Hubs",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO projection_projects (project_id, kind, title, workspace_root, scripts_json, created_at, updated_at)
+      VALUES (${groupId}, 'group', 'Hub', '/tmp/collab-hub', '[]', ${now}, ${now})`;
+      const base = { projectId: groupId, coordinatorModelSelection: modelSelection };
+      const initial = yield* service.configure(
+        { ...base, requestId: "collab-initial" },
+        { kind: "user" },
+      );
+      assert.equal(initial.config?.collaboration, undefined);
+      const collaboration = {
+        schemaVersion: 1 as const,
+        mode: "expert-team" as const,
+        coordinatorInstructions: "  Organize reviews  ",
+      };
+      const missingRevision = yield* Effect.exit(
+        service.configure({ ...base, requestId: "collab-no-cas", collaboration }, { kind: "user" }),
+      );
+      assert.equal(Exit.isFailure(missingRevision), true);
+      const copied = yield* service.configure(
+        {
+          ...base,
+          requestId: "collab-copy",
+          expectedRevision: initial.config!.revision,
+          collaboration,
+          expertIds: ["missing-preset-member"],
+        },
+        { kind: "user" },
+      );
+      assert.equal(copied.config?.collaboration?.coordinatorInstructions, "Organize reviews");
+      assert.deepEqual(copied.config?.expertIds, ["missing-preset-member"]);
+      const replay = yield* service.configure(
+        {
+          ...base,
+          requestId: "collab-copy",
+          expectedRevision: initial.config!.revision,
+          collaboration,
+          expertIds: ["missing-preset-member"],
+        },
+        { kind: "user" },
+      );
+      assert.equal(replay.config?.revision, copied.config?.revision);
+      const changedReplay = yield* Effect.exit(
+        service.configure(
+          {
+            ...base,
+            requestId: "collab-copy",
+            collaboration: { ...collaboration, mode: "standard" },
+          },
+          { kind: "user" },
+        ),
+      );
+      assert.equal(Exit.isFailure(changedReplay), true);
+      const kept = yield* service.configure(
+        { ...base, requestId: "collab-keep", goal: "New direction" },
+        { kind: "user" },
+      );
+      assert.deepEqual(kept.config?.collaboration, copied.config?.collaboration);
+      const denied = yield* Effect.exit(
+        service.resolveParticipatingExpert!(
+          { projectId: groupId, expertId: "missing-preset-member" },
+          { kind: "coordinator", projectId: groupId, threadId: copied.config!.coordinatorThreadId },
+        ),
+      );
+      assert.equal(Exit.isFailure(denied), true);
     }).pipe(Effect.provide(harness.layer));
   },
 );
@@ -4418,6 +4597,578 @@ it.effect("refuses coordinator turns while the hub is paused or archived", () =>
   }).pipe(Effect.provide(harness.layer));
 });
 
+for (const targetProjectId of [groupId, ordinaryId]) {
+  it.effect(`admits the initial HubPlan turn and its exact recovery in ${targetProjectId}`, () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const workRepository = yield* HubWorkRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const planStore = makeHubPlanStore(sql);
+      const overview = yield* configureTestGroup(service, "req-plan-initial-turn");
+      const coordinatorThreadId = overview.config!.coordinatorThreadId!;
+      if (targetProjectId !== groupId) {
+        yield* sql`
+          INSERT OR IGNORE INTO projection_projects (
+            project_id, kind, title, workspace_root, scripts_json, created_at, updated_at
+          ) VALUES (${groupId}, 'group', 'Hub', '/tmp/plan-initial-turn', '[]', ${now}, ${now})
+        `;
+        yield* sql`
+          INSERT OR IGNORE INTO projection_projects (
+            project_id, kind, title, workspace_root, scripts_json, created_at, updated_at
+          ) VALUES (${targetProjectId}, 'project', 'Source repository', '/tmp/plan-recovery-source', '[]', ${now}, ${now})
+        `;
+        const linked = yield* service.linkProject(
+          {
+            requestId: "link-recovery-source",
+            projectId: groupId,
+            linkedProjectId: targetProjectId,
+          },
+          { kind: "user" },
+        );
+        const config = linked.config!;
+        yield* repository.saveConfig(
+          { ...config, sourceProjectId: targetProjectId, revision: config.revision + 1 },
+          config.revision,
+        );
+      }
+      harness.threadShells[coordinatorThreadId] = {
+        projectId: groupId,
+        title: "Coordinator",
+        runtimeMode: "approval-required",
+        session: { status: "ready", updatedAt: now, lastError: null },
+      };
+
+      const target = {
+        provider: "codex",
+        instanceId: "codex",
+        model: "gpt-6.1-sol",
+        options: { reasoningEffort: "low" },
+      } as const;
+      const goalId = ProjectGoalId.makeUnsafe("goal-plan-initial-turn");
+      const taskId = ProjectTaskId.makeUnsafe("task-plan-initial-turn");
+      const attemptId = ProjectTaskAttemptId.makeUnsafe("attempt-plan-initial-turn");
+      const workItemId = "hub-work:plan-initial-turn";
+      const operationId = `gateway:create:${stableGatewayDigest({
+        principalKind: "hub-work",
+        principalId: coordinatorThreadId,
+        callerTurnId: `hub-work:${workItemId}`,
+        requestId: workItemId,
+      })}`;
+      const created = makeAgentCreationIds(operationId, 0);
+      yield* repository.saveGoal(
+        {
+          id: goalId,
+          projectId: groupId,
+          objective: "Create a bounded report",
+          authorizationSource: "user",
+          scopeVersion: 1,
+          acceptanceCriteria: "The report is complete",
+          limits,
+          status: "active",
+          continuationCount: 0,
+          workerCreationCount: 1,
+          authorizedAt: now,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+        },
+        null,
+      );
+      yield* repository.saveTask(
+        {
+          id: taskId,
+          projectId: groupId,
+          goalId,
+          title: "Author",
+          description: "Create a bounded report",
+          acceptanceCriteria: "The report is complete",
+          status: "running",
+          dependsOnTaskIds: [],
+          assignedThreadId: created.threadId,
+          repairCount: 0,
+          archivedAt: null,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+        },
+        null,
+      );
+      yield* repository.saveAttempt({
+        id: attemptId,
+        projectId: groupId,
+        taskId,
+        workerThreadId: created.threadId,
+        gatewayOperationId: operationId,
+        requestId: "request-plan-initial-turn",
+        attemptNumber: 1,
+        outcome: "running",
+        error: null,
+        createdAt: now,
+        finishedAt: null,
+      });
+
+      const sourceMessageId = MessageId.makeUnsafe("plan-initial-source-message");
+      const sourceMessages = [
+        {
+          threadId: coordinatorThreadId,
+          messageId: sourceMessageId,
+          turnId: null,
+          text: "Create a bounded report.",
+          attachments: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      ] as const;
+      const work: HubWorkRecord = {
+        id: workItemId,
+        projectId: groupId,
+        sourceThreadId: coordinatorThreadId,
+        sourceMessageId,
+        title: "Author",
+        targetProjectId,
+        requestId: workItemId,
+        scopeKey: "plan-initial-turn-scope",
+        fingerprint: "sha256:plan-initial-turn",
+        taskIndex: 0,
+        creationSpec: {
+          title: "Author",
+          prompt: "Create a bounded report.",
+          target,
+          projectId: targetProjectId,
+          environment: "local",
+          inheritedRuntimeMode: "approval-required",
+        },
+        sourceMessages,
+        workerThreadId: created.threadId,
+        state: "working",
+        queueReason: null,
+        resultSummary: null,
+        progress: null,
+        slotHeld: true,
+        admittedAt: now,
+        admissionCommandId: null,
+        admissionMessageId: null,
+        admissionPreviousState: null,
+        admissionPreviousSlotHeld: false,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      };
+      yield* workRepository.submit([work]);
+      yield* sql`
+      INSERT OR IGNORE INTO projection_projects (
+        project_id, kind, title, workspace_root, scripts_json, created_at, updated_at
+      ) VALUES (
+        ${groupId}, 'group', 'Hub', '/tmp/plan-initial-turn', '[]', ${now}, ${now}
+      )
+    `;
+
+      yield* planStore.savePlan(
+        {
+          id: "plan-initial-turn",
+          hubId: groupId,
+          goalId,
+          revision: 1,
+          stateVersion: 0,
+          controlState: "active",
+          definition: {
+            objective: "Create a bounded report",
+            scope: "One author node",
+            stages: [{ key: "draft", title: "Draft", releasePolicy: "auto" }],
+            nodes: [
+              {
+                key: "author",
+                stageKey: "draft",
+                title: "Author",
+                brief: "Create a bounded report.",
+                role: "author",
+                target,
+                dependsOnNodeKeys: [],
+                workMode: "agent",
+                acceptanceCriteria: "The report is complete",
+              },
+            ],
+            maxRepairRounds: 0,
+          },
+          configSnapshot: {
+            configRevision: 1,
+            settings: { schemaVersion: 1, mode: "standard" },
+            expertIds: [],
+          },
+          stageGenerations: { draft: 1 },
+          createdAt: now,
+          updatedAt: now,
+        },
+        null,
+      );
+      yield* planStore.appendAttemptBinding({
+        id: "binding-plan-initial-turn",
+        planId: "plan-initial-turn",
+        revision: 1,
+        nodeKey: "author",
+        taskId,
+        attemptId,
+        workItemId,
+        stageGeneration: 1,
+        createdAt: now,
+      });
+
+      harness.threadShells[created.threadId] = {
+        projectId: targetProjectId,
+        title: "Author",
+        modelSelection: target,
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        creationSource: "synara_mcp",
+        sourceThreadId: coordinatorThreadId,
+        sourceTurnId: null,
+        gatewayOperationId: operationId,
+        gatewayOperationIndex: 0,
+        session: { status: "ready", updatedAt: now, lastError: null },
+      };
+      const turnStart = {
+        commandId: created.turnStartCommandId,
+        messageId: created.messageId,
+        messageText: renderHubWorkPrompt({
+          workItemId,
+          brief: work.creationSpec.prompt,
+          sourceMessages,
+        }),
+        attachments: [],
+        runtimeMode: "approval-required" as const,
+        interactionMode: "default" as const,
+        modelSelection: target,
+        enableComputerControl: false,
+        computerControlMode: "off",
+        computerControlGeneration: 0,
+        assistantDeliveryMode: "streaming",
+        dispatchMode: "queue" as const,
+        dispatchOrigin: "agent" as const,
+      };
+
+      yield* service.assertGroupCoordinatorTurnAllowed({
+        threadId: created.threadId,
+        turnStart,
+      });
+      const forgedAdditionalTurn = yield* Effect.exit(
+        service.assertGroupCoordinatorTurnAllowed({
+          threadId: created.threadId,
+          turnStart: {
+            ...turnStart,
+            commandId: "owner-forged-extra-turn",
+            messageId: "owner-forged-extra-message" as typeof created.messageId,
+            messageText: "Start an unrelated extra task",
+            dispatchOrigin: "user",
+          },
+        }),
+      );
+      assert.equal(forgedAdditionalTurn._tag, "Failure");
+
+      const recoveryEpisode = "2026-09-20T00:20:00.000Z";
+      const recoveryNudgeAt = "2026-09-20T00:17:00.000Z";
+      const taskPrompt = renderHubWorkPrompt({
+        workItemId,
+        brief: work.creationSpec.prompt,
+        sourceMessages,
+      });
+      yield* repository.upsertManagedWorker({
+        projectId: groupId,
+        threadId: created.threadId,
+        batchId: workItemId,
+        requestId: workItemId,
+        title: "Author",
+        taskId,
+        settledAt: null,
+        settleOutcome: null,
+        waitingSince: null,
+        stuckKind: "silent",
+        stuckSince: recoveryEpisode,
+        taskPrompt,
+        recoveryEpisode,
+        recoveryStep: 2,
+        nudgeAt: recoveryNudgeAt,
+        recoveriesUsed: 2,
+        needsYou: false,
+        needsYouAt: null,
+        activeTurnOrigin: "ladder",
+        activeTurnCommandId: "agent-recovery:old-nudge",
+        resultSummary: null,
+        resultAt: null,
+        createdAt: now,
+        updatedAt: recoveryEpisode,
+      });
+      const stepTwoWorker = Option.getOrThrow(
+        yield* repository.findManagedWorkerByThread(created.threadId),
+      );
+      yield* repository.upsertManagedWorker({ ...stepTwoWorker, recoveryStep: 1 });
+      harness.threadShells[created.threadId] = {
+        ...harness.threadShells[created.threadId]!,
+        session: {
+          status: "running",
+          updatedAt: recoveryEpisode,
+          activeTurnId: "turn-before-recovery",
+          lastError: null,
+        },
+        latestTurn: {
+          state: "running",
+          turnId: "turn-before-recovery",
+          requestedAt: now,
+          startedAt: now,
+        },
+      };
+      const nudgeId = `agent-recovery:${created.threadId}:${recoveryEpisode}:nudge`;
+      const nudgeStart = {
+        commandId: nudgeId,
+        messageId: `${nudgeId}:message`,
+        messageText: WORKER_RECOVERY_NUDGE_TEXT,
+        attachments: [],
+        runtimeMode: "approval-required" as const,
+        interactionMode: "default" as const,
+        dispatchOrigin: "automation" as const,
+        dispatchMode: "steer" as const,
+        enableComputerControl: false,
+        computerControlMode: "off",
+        computerControlGeneration: 0,
+        assistantDeliveryMode: "streaming",
+        createdAt: recoveryNudgeAt,
+      };
+      assert.equal(
+        yield* service.assertGroupCoordinatorTurnAllowed({
+          threadId: created.threadId,
+          turnStart: nudgeStart,
+        }),
+        "plan-recovery-steer",
+      );
+      for (const forged of [
+        { ...nudgeStart, messageText: "Start a different task" },
+        { ...nudgeStart, dispatchMode: "queue" as const },
+        { ...nudgeStart, commandId: `${nudgeId}-other-episode` },
+        { ...nudgeStart, enableComputerControl: true },
+      ]) {
+        assert.equal(
+          (yield* Effect.exit(
+            service.assertGroupCoordinatorTurnAllowed({
+              threadId: created.threadId,
+              turnStart: forged,
+            }),
+          ))._tag,
+          "Failure",
+        );
+      }
+      harness.threadShells[created.threadId]!.hasPendingApprovals = true;
+      assert.equal(
+        (yield* Effect.exit(
+          service.assertGroupCoordinatorTurnAllowed({
+            threadId: created.threadId,
+            turnStart: nudgeStart,
+          }),
+        ))._tag,
+        "Failure",
+      );
+      harness.threadShells[created.threadId]!.hasPendingApprovals = false;
+      yield* repository.upsertManagedWorker(stepTwoWorker);
+      yield* workRepository.save({
+        record: {
+          ...work,
+          state: "idle",
+          slotHeld: false,
+          admittedAt: null,
+          revision: work.revision + 1,
+          updatedAt: recoveryEpisode,
+        },
+        expectedRevision: work.revision,
+      });
+      harness.threadShells[created.threadId] = {
+        ...harness.threadShells[created.threadId]!,
+        session: { status: "ready", updatedAt: recoveryEpisode, lastError: null },
+        latestTurn: {
+          state: "interrupted",
+          turnId: "turn-before-recovery",
+          requestedAt: now,
+          startedAt: now,
+        },
+      };
+      harness.recordInterruptEvent({
+        threadId: created.threadId,
+        commandId: `agent-recovery:${created.threadId}:${recoveryEpisode}:interrupt`,
+        turnId: "turn-before-recovery",
+        requestedBy: "system",
+      });
+
+      // A saved step two waits without burning its intent when native HubWork
+      // capacity is full. Once capacity is released, it reuses that exact
+      // episode identity and does not start a second turn after an accepted
+      // receipt is observed on a following health tick.
+      const capacityFillerThreads = [0, 1, 2].map((index) =>
+        ThreadId.makeUnsafe(`thread-plan-recovery-capacity-${index}`),
+      );
+      yield* workRepository.submit(
+        capacityFillerThreads.map((threadId, index) => ({
+          ...work,
+          id: `hub-work:plan-recovery-capacity-${index}`,
+          requestId: "hub-work:plan-recovery-capacity",
+          scopeKey: "plan-recovery-capacity",
+          fingerprint: "sha256:plan-recovery-capacity",
+          taskIndex: index,
+          workerThreadId: threadId,
+          state: "working" as const,
+          slotHeld: true,
+          admissionCommandId: null,
+          admissionMessageId: null,
+          revision: 1,
+        })),
+      );
+      const recoveryCommandPrefix = `agent-recovery:${created.threadId}:${recoveryEpisode}:`;
+      const recoveryStarts = () =>
+        harness.dispatched.filter(
+          (command) =>
+            command.type === "thread.turn.start" &&
+            String(command.commandId) === `${recoveryCommandPrefix}redispatch`,
+        );
+      harness.dispatched.length = 0;
+      yield* service.inspectWorkerHealth();
+      assert.equal(recoveryStarts().length, 0);
+      const waitingForCapacity = yield* repository.findManagedWorkerByThread(created.threadId);
+      assert.equal(
+        Option.isSome(waitingForCapacity) ? waitingForCapacity.value.recoveryStep : null,
+        2,
+      );
+
+      for (let index = 0; index < capacityFillerThreads.length; index += 1) {
+        const fillerId = `hub-work:plan-recovery-capacity-${index}`;
+        const filler = yield* workRepository.get(fillerId);
+        assert(filler);
+        yield* workRepository.save({
+          record: {
+            ...filler,
+            state: "idle",
+            slotHeld: false,
+            admittedAt: null,
+            revision: filler.revision + 1,
+            updatedAt: recoveryEpisode,
+          },
+          expectedRevision: filler.revision,
+        });
+      }
+      yield* planStore.saveInputRequest({
+        planId: "plan-initial-turn",
+        revision: 1,
+        id: "input-request-recovery-pending" as HubPlanInputRequest["id"],
+        nodeKey: "author",
+        stageKey: "draft",
+        generation: 1,
+        attemptId,
+        workerThreadId: created.threadId,
+        questions: [{ title: "Which format?", options: ["Markdown", "PDF"] }],
+        status: "pending",
+        createdAt: recoveryEpisode,
+        updatedAt: recoveryEpisode,
+      });
+      yield* service.inspectWorkerHealth();
+      assert.equal(recoveryStarts().length, 0);
+      const pendingWorker = yield* repository.findManagedWorkerByThread(created.threadId);
+      assert.equal(Option.isSome(pendingWorker) ? pendingWorker.value.recoveryStep : null, 2);
+
+      yield* planStore.saveInputRequest({
+        planId: "plan-initial-turn",
+        revision: 1,
+        id: "input-request-recovery-pending" as HubPlanInputRequest["id"],
+        nodeKey: "author",
+        stageKey: "draft",
+        generation: 1,
+        attemptId,
+        workerThreadId: created.threadId,
+        questions: [{ title: "Which format?", options: ["Markdown", "PDF"] }],
+        status: "stale",
+        createdAt: recoveryEpisode,
+        updatedAt: "2026-09-20T00:21:00.000Z",
+      });
+      yield* service.pauseGroup(
+        { requestId: "req-pause-recovery-plan", projectId: groupId },
+        { kind: "user" },
+      );
+      yield* service.inspectWorkerHealth();
+      assert.equal(recoveryStarts().length, 0);
+      yield* service.resumeGroup(
+        { requestId: "req-resume-recovery-plan", projectId: groupId },
+        { kind: "user" },
+      );
+      yield* service.inspectWorkerHealth();
+      assert.equal(recoveryStarts().length, 1);
+      const recovery = recoveryStarts()[0]!;
+      if (recovery.type !== "thread.turn.start") throw new Error("expected a recovery start");
+      assert.equal(recovery.dispatchMode, "queue");
+      assert.equal(recovery.dispatchOrigin, "automation");
+      assert.equal(recovery.message.text, taskPrompt);
+      assert.equal(recovery.createdAt, recoveryNudgeAt);
+      const admittedWork = yield* workRepository.get(workItemId);
+      assert.equal(admittedWork?.state, "starting");
+      assert.equal(admittedWork?.slotHeld, true);
+      assert.equal(admittedWork?.admissionCommandId, recovery.commandId);
+      assert.equal(admittedWork?.admissionMessageId, recovery.message.messageId);
+
+      const normalizedRecoveryStart = {
+        commandId: recovery.commandId,
+        messageId: recovery.message.messageId,
+        messageText: recovery.message.text,
+        createdAt: recovery.createdAt,
+        dispatchOrigin: recovery.dispatchOrigin,
+        dispatchMode: recovery.dispatchMode,
+        runtimeMode: "approval-required" as const,
+        interactionMode: "default" as const,
+        modelSelection: target,
+        enableComputerControl: false,
+        computerControlMode: "off" as const,
+        computerControlGeneration: 0,
+        assistantDeliveryMode: "streaming" as const,
+        attachments: [],
+      };
+      assert.equal(
+        yield* service.assertGroupCoordinatorTurnAllowed({
+          threadId: created.threadId,
+          turnStart: normalizedRecoveryStart,
+        }),
+        "plan-recovery",
+      );
+      assert.equal(
+        (yield* Effect.exit(
+          service.assertGroupCoordinatorTurnAllowed({
+            threadId: created.threadId,
+            turnStart: { ...normalizedRecoveryStart, messageText: `${taskPrompt}\nforged` },
+          }),
+        ))._tag,
+        "Failure",
+      );
+      yield* service.inspectWorkerHealth();
+      assert.equal(recoveryStarts().length, 1);
+      if (targetProjectId !== groupId) {
+        // Origin repositories are included in the native allowlist. Remove
+        // that relation as well to model a genuine loss of target access.
+        yield* sql`DELETE FROM hub_project_origins WHERE hub_id = ${groupId}`;
+        yield* service.unlinkProject(
+          {
+            requestId: "unlink-recovery-source",
+            projectId: groupId,
+            linkedProjectId: targetProjectId,
+          },
+          { kind: "user" },
+        );
+        assert.equal(
+          (yield* Effect.exit(
+            service.assertGroupCoordinatorTurnAllowed({
+              threadId: created.threadId,
+              turnStart: normalizedRecoveryStart,
+            }),
+          ))._tag,
+          "Failure",
+        );
+      }
+    }).pipe(Effect.provide(harness.layer));
+  });
+}
+
 it.effect("restartCoordinator stops the provider session and re-fires the heartbeat", () => {
   const harness = makeTestLayer();
   return Effect.gen(function* () {
@@ -6227,6 +6978,109 @@ it.effect("rejects a monitor write built on a stale worker row", () => {
     assert.equal(Option.isSome(fresh) ? fresh.value.needsYou : null, false);
   }).pipe(Effect.provide(harness.layer));
 });
+
+it.effect("preserves accepted result evidence across a monitor CAS retry", () => {
+  const workerThreadId = ThreadId.makeUnsafe("thread-monitor-result-cas-miss");
+  const harness = makeTestLayer({
+    workerMonitorRace: { threadId: workerThreadId, mode: "cas-miss" },
+  });
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    const overview = yield* configureTestGroup(service, "req-monitor-result-cas-miss");
+    yield* service.recordManagedWorkerThreads({
+      requestId: "req-monitor-result-cas-miss-worker",
+      callerThreadId: overview.config!.coordinatorThreadId!,
+      threadIds: [workerThreadId],
+      titles: ["Monitor race worker"],
+    });
+
+    yield* ingestRuntimeTerminal(service, harness, {
+      threadId: workerThreadId,
+      turnId: "turn-monitor-result-cas-miss",
+      state: "completed",
+      createdAt: "2026-09-20T00:05:00.000Z",
+    });
+
+    const persisted = yield* repository.findManagedWorkerByThread(workerThreadId);
+    assert.equal(Option.isSome(persisted), true);
+    if (Option.isSome(persisted)) {
+      assert.equal(persisted.value.resultSummary, "Accepted while worker monitoring settled.");
+      assert.equal(persisted.value.resultAt, "2026-09-20T00:04:00.000Z");
+      assert.equal(persisted.value.settleOutcome, "completed");
+    }
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("preserves accepted result evidence when finalizer and monitor share a timestamp", () => {
+  const workerThreadId = ThreadId.makeUnsafe("thread-monitor-result-same-time");
+  const harness = makeTestLayer({
+    workerMonitorRace: { threadId: workerThreadId, mode: "same-timestamp" },
+  });
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    const overview = yield* configureTestGroup(service, "req-monitor-result-same-time");
+    yield* service.recordManagedWorkerThreads({
+      requestId: "req-monitor-result-same-time-worker",
+      callerThreadId: overview.config!.coordinatorThreadId!,
+      threadIds: [workerThreadId],
+      titles: ["Same-time monitor race worker"],
+    });
+
+    yield* ingestRuntimeTerminal(service, harness, {
+      threadId: workerThreadId,
+      turnId: "turn-monitor-result-same-time",
+      state: "completed",
+      createdAt: now,
+    });
+
+    const persisted = yield* repository.findManagedWorkerByThread(workerThreadId);
+    assert.equal(Option.isSome(persisted), true);
+    if (Option.isSome(persisted)) {
+      assert.equal(persisted.value.resultSummary, "Accepted while worker monitoring settled.");
+      assert.equal(persisted.value.resultAt, now);
+      assert.equal(persisted.value.settleOutcome, "completed");
+    }
+  }).pipe(Effect.provide(harness.layer));
+});
+
+for (const mode of ["cas-miss", "same-timestamp"] as const) {
+  it.effect(`preserves accepted result evidence during turn ownership ${mode}`, () => {
+    const workerThreadId = ThreadId.makeUnsafe(`thread-ownership-result-${mode}`);
+    const harness = makeTestLayer({ workerMonitorRace: { threadId: workerThreadId, mode } });
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const overview = yield* configureTestGroup(service, `req-ownership-result-${mode}`);
+      yield* service.recordManagedWorkerThreads({
+        requestId: `req-ownership-result-worker-${mode}`,
+        callerThreadId: overview.config!.coordinatorThreadId!,
+        threadIds: [workerThreadId],
+        titles: ["Ownership race worker"],
+      });
+      const before = Option.getOrThrow(yield* repository.findManagedWorkerByThread(workerThreadId));
+      yield* service.recordWorkerTurnRequest({
+        threadId: workerThreadId,
+        eventType: "thread.turn-start-requested",
+        dispatchOrigin: "automation",
+        commandId: `ownership-result-${mode}`,
+        turnId: `turn-ownership-result-${mode}`,
+        createdAt: now,
+      });
+      const persisted = Option.getOrThrow(
+        yield* repository.findManagedWorkerByThread(workerThreadId),
+      );
+      assert.equal(persisted.resultSummary, "Accepted while worker monitoring settled.");
+      assert.equal(
+        persisted.resultAt,
+        mode === "same-timestamp" ? before.updatedAt : "2026-09-20T00:04:00.000Z",
+      );
+      assert.equal(persisted.activeTurnOrigin, "coordinator");
+      assert.equal(persisted.activeTurnCommandId, `ownership-result-${mode}`);
+    }).pipe(Effect.provide(harness.layer));
+  });
+}
 
 it.effect("logs coordinator check-ins to the activity log without waking it", () => {
   const harness = makeTestLayer();

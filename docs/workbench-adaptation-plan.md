@@ -42,6 +42,24 @@ Context 页面、自动保存与旧指令迁移通过 `workbench/host/contextCli
 
 连接状态与共享连接代次由现有宿主 transport 提供。重连开始即暂停依赖 Context 的写入，当前代次的实际读取成功后再恢复；多个观察者复用同一查询结果，旧代次的晚返回不能授权新连接。自动保存队列仍按原 API、数据实例和项目区分。相同项目或 Space 切换数据所有者时，未保存、已发送待回执及结果不确定的操作都属于受保护状态；保留旧草稿及离开保护，明确丢弃后才采纳新所有者。首次发送与迁移交互在异步步骤返回后再次核对当前连接及数据归属，不以开始时的闭包快照放行。
 
+### Hub 协作模块接入（2026-10-22）
+
+`hub.collaboration` 负责专家团预设、Hub 配置副本、计划修订、固定候选、审核与人工出口；宿主继续拥有 Goal、Task、Attempt、HubWork、Provider 会话、线程和成果版本。首期一个 Hub 同时一份活跃计划，确认后绑定一个原生 Goal；不新增执行器或绕过原生队列。
+
+- 服务端业务位于 `apps/server/src/hubCollaboration`，通过 `workbench/host/hubPlanService`、`hubPlanExecution` 和窄 RPC 适配接入宿主。扩展仓储复用同一 SqlClient 事务，原子保存计划版本、原生任务绑定、事件、回执和 outbox；Expert ledger 追加 7、8、9 号迁移，已运行迁移不变；9 号持久化定向问题与答复授权。
+- 前端位于 `apps/web/src/features/hubCollaboration`。专家团挂载既有 Experts 设置，当前副本挂载 GroupSettingsDialog；Graph 与消息卡嵌入原 ChatView / MessagesTimeline，继承原聊天布局、滚动、快捷键与订阅。Graph 只读，业务操作留在消息卡。它不是隔离聊天行为的新路由。
+- `contracts/hubCollaboration.ts`、`hubPlan.ts` 持有跨进程契约；新增能力通过可选 capability 协商，旧服务缺失能力时不开放对应写操作。前端用宿主窄客户端读取快照和事件，以现有项目事件触发刷新并在可见时轮询兜底；不引入第二事件总线。
+- 执行授权只来自 owner 计划命令。Agent 只能提案或提交自己当前尝试的专业证据；队列准入、实际启动、续跑和恢复共同检查计划绑定。确认时固定成员、协调方式及每个节点的显式 Provider/instance/model，运行中的配置编辑不改写该快照。
+- Provider 回合结束与业务成果验收分开：已结束但没有有效成果的节点显示受阻，只有 owner 的显式重试可创建新 attempt；重试保留原 Work 的终态、固定模型及阶段代次，不重复已有有效成果的节点。固定成果引用使用 `workerThreadId`；`ownerThreadId` 只用于读取时定位来源。
+- Worker 通过显式 `synara_hub_request_input` 提问，问题固定计划版本、阶段代次、节点、尝试与线程。owner 的 `respondInput` 原子记录答案及 outbox；续跑复用同一 Worker 的原生 follow-up 准入、容量预约、命令回执与实际 Provider 启动门禁，绑定完整输入及原运行设置。回答不批准权限、计划或成果；仍有原生审批／输入或活跃回合时等待，暂停保留、失效拒绝。已接受回执只修复历史送达记录，不新增执行授权。
+- 续跑回合收尾优先使用原生消息与回合的准确关联。排队消息尚无 turnId 时，只能以现有 ProjectionTurns 的同线程、同回合、同 pendingMessageId 记录补足只读关联；未知或不匹配时保持预约，不凭时间接近推断。回合结束只释放对应占用；没有业务成果仍是未提交，不转成成功。固定成果校验解析真实作者 Worker 身份，不伪造 owner 或放宽成果接口授权。
+- 受管理 Worker 的原生恢复继续使用 health ladder；step1 只允许同一持久 episode 的固定 nudge 引导原活动回合，step2 先完成旧回合停止，再通过与定向回复共享的原子容量预约派发固定任务。宿主实际启动门禁依据精确验证返回的恢复种类检查原生待办和活动回合，不以前缀授予权限；目标项目沿用冻结 Work 及当前 Hub 关联权限。不能确认首轮已接受／排队事实时，不另开自动补发通道。
+- 计划停止先保护已有成果及需要显式重试的正常结束／失败尝试；其他未完成且已停止的 idle Work 通过既有取消路径解除调度阻塞。缺失线程不能报告停止完成；现有停止回调依赖宿主投影，不能据此宣称已验证所有 Provider 的实际进程清理。
+- 默认输入仍给 Hub；显式选择问题后复用原生问题表单，普通输入框保持挂载并保留草稿和附件，自动队列发送暂缓。问题草稿经窄适配复用 `composerDraftStore`，以完整尝试身份隔离；在 Hub 内回复与进入原线程回答使用同一问题命令，不建立另一套消息路由。Graph 按当前问题投影等待回复／送达，原生 Work 状态保持真实值。
+- T3 的 `planRevisionImpact` 只计算新旧定义及配置的影响闭包，以阶段共享候选为失效边界，再沿新旧依赖取下游。未受影响结果仅为 carry-forward 候选，不能自动沿用成果或审批；运行中修订、hold 与确认／撤销在接入完成并验收前仍不开放。
+- Graph 默认使用原生输入区胶囊收起，展开后横向展示节点，详情按需复用 StageInspector。节点快照的原生任务、Work 与报告只读投影须核对当前修订、阶段代次和分配尝试；审核结果还绑定当前候选 ID 与摘要。Graph 不推断权限恢复、不直接重试；确认与计划操作定位既有消息卡，继续经过原命令校验，不另建执行状态或详情系统。
+- 接入清单见 `workbench/integration-points.json` 的 `hub.collaboration`。边界检查覆盖声明目录的静态导入、深层接入与约定例外，不证明运行时权限隔离或真实 Provider 成功。实施状态与未验收范围见[Hub 评审记录](./hub-review-2026-10-22/README.md#implementation-status)。
+
 ### 路由与布局契约
 
 先核对真实父布局，再选择 URL 与挂载层级：

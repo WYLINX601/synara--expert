@@ -316,6 +316,23 @@
           "owner": "Workbench Hub deliverables persistence",
           "reason": "The service owns only its independent-ledger collection and request tables on the host connection. Publication pointers and maintenance intents require the existing SQL transaction capability.",
           "tests": ["apps/server/src/projectAgent/hubDeliverables.test.ts"]
+        },
+        {
+          "file": "apps/server/src/hubCollaboration/HubCollaborationConfigStore.ts",
+          "specifiers": ["effect/unstable/sql/SqlClient"],
+          "owner": "Hub collaboration persistence adapter",
+          "reason": "Receives the existing SqlClient; native config and roster writes participate in the same ambient transaction. No independent connection or executor.",
+          "tests": [
+            "apps/server/src/hubCollaboration/HubCollaborationConfigStore.test.ts",
+            "apps/server/src/persistence/Layers/ProjectAgentRepository.test.ts"
+          ]
+        },
+        {
+          "file": "apps/server/src/hubCollaboration/HubPlanStore.ts",
+          "specifiers": ["effect/unstable/sql/SqlClient", "effect/unstable/sql/SqlError"],
+          "owner": "Hub collaboration persistence adapter",
+          "reason": "Shared SqlClient only, for atomic plan, native task, receipt and outbox operations. No independent database or task scheduler.",
+          "tests": ["apps/server/src/hubCollaboration/HubPlanStore.test.ts"]
         }
       ]
     },
@@ -597,6 +614,81 @@
         "apps/server/src/persistence/Layers/HubWorkRepository.test.ts",
         "apps/server/src/projectAgent/hubWorkService.test.ts",
         "apps/server/src/projectAgent/Layers/ProjectAgentService.test.ts"
+      ]
+    },
+    {
+      "id": "hub.collaboration",
+      "surface": "hub-collaboration",
+      "entryFiles": [
+        "apps/server/src/wsRpc.ts",
+        "apps/server/src/serverLayers.ts",
+        "apps/server/src/workbench/host/hubCollaborationRpc.ts",
+        "apps/server/src/workbench/host/hubCollaborationConfig.ts",
+        "apps/server/src/persistence/Layers/ProjectAgentRepository.ts",
+        "apps/server/src/projectAgent/Layers/ProjectAgentService.ts",
+        "apps/server/src/projectAgent/Services/ProjectAgentService.ts",
+        "apps/server/src/persistence/Layers/HubWorkRepository.ts",
+        "apps/server/src/persistence/Services/HubWorkRepository.ts",
+        "apps/server/src/projectAgent/hubWorkService.ts",
+        "apps/server/src/projectAgent/hubWorkAdmission.ts",
+        "apps/web/src/wsNativeApi.ts",
+        "apps/web/src/workbench/host/hubCollaborationClient.ts",
+        "apps/web/src/components/settings/ExpertsSettingsPanel.tsx",
+        "apps/web/src/components/chat/group/GroupSettingsDialog.tsx",
+        "apps/web/src/components/chat/group/groupSettingsDialog.logic.ts",
+        "packages/contracts/src/hubCollaboration.ts",
+        "packages/contracts/src/hubPlan.ts",
+        "packages/contracts/src/ws.ts",
+        "packages/contracts/src/rpc.ts",
+        "packages/contracts/src/ipc.ts",
+        "apps/server/src/workbench/host/hubPlanService.ts",
+        "apps/server/src/workbench/host/hubPlanRpc.ts",
+        "apps/server/src/workbench/host/hubPlanExecution.ts",
+        "apps/server/src/agentGateway/Layers/AgentGateway.ts",
+        "apps/server/src/agentGateway/hubPlanTools.ts",
+        "apps/server/src/agentGateway/hubWorkGateway.ts",
+        "apps/server/src/agentGateway/delegatedAttachments.ts",
+        "apps/server/src/workbench/host/hubPlanInitialStart.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts",
+        "apps/web/src/workbench/host/hubPlanClient.ts",
+        "apps/web/src/workbench/host/hubInputRequestDraftClient.ts",
+        "apps/web/src/components/ChatView.tsx",
+        "apps/web/src/components/chat/useChatQueuedTurns.ts",
+        "apps/web/src/components/chat/MessagesTimeline.tsx",
+        "apps/web/src/components/chat/MessagesTimeline.logic.ts"
+      ],
+      "featureRoots": [
+        "apps/server/src/hubCollaboration",
+        "apps/web/src/features/hubCollaboration"
+      ],
+      "responsibility": "Owner-authorized configuration and plan RPCs persist immutable presets, configuration snapshots, candidates, reviews, decisions, directed input requests and execution intents. Host adapters bind plans to native Goal/Task/HubWork records and gate queue admission, worker startup and provider session restore. Directed answers resume only their original attempt through the existing outbox and native follow-up admission; they do not approve scope or bypass sandbox policy. Web features project read-only progress and business actions into the native transcript; the native composer draft store retains isolated reply drafts through a narrow host adapter. T3 revision impact analysis is preparatory and grants no execution or carry-forward authority. Static boundary coverage does not prove real provider execution or process recovery.",
+      "tests": [
+        "apps/server/src/workbench/host/hubCollaborationRpc.test.ts",
+        "apps/server/src/hubCollaboration/HubCollaborationConfigStore.test.ts",
+        "apps/server/src/hubCollaboration/planGraph.test.ts",
+        "apps/server/src/persistence/Layers/ProjectAgentRepository.test.ts",
+        "apps/server/src/projectAgent/Layers/ProjectAgentService.test.ts",
+        "apps/server/src/projectAgent/hubWorkService.test.ts",
+        "packages/contracts/src/hubPlan.test.ts",
+        "apps/server/src/hubCollaboration/HubPlanStore.test.ts",
+        "apps/server/src/hubCollaboration/HubPlanInputStore.test.ts",
+        "apps/server/src/hubCollaboration/hubPlanInput.test.ts",
+        "apps/server/src/workbench/host/hubPlanInitialStart.test.ts",
+        "apps/server/src/hubCollaboration/planRevisionImpact.test.ts",
+        "apps/server/src/hubCollaboration/HubPlanService.test.ts",
+        "apps/server/src/workbench/host/hubPlanExecution.test.ts",
+        "apps/server/src/workbench/host/hubPlanRpc.test.ts",
+        "apps/server/src/agentGateway/hubPlanTools.test.ts",
+        "apps/server/src/agentGateway/delegatedAttachments.test.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
+        "apps/web/src/components/chat/HubPlanActions.browser.tsx",
+        "apps/web/src/components/chat/MessagesTimeline.hubPlan.browser.tsx",
+        "apps/web/src/features/hubCollaboration/hubInputRequest.logic.test.ts",
+        "apps/web/src/features/hubCollaboration/hubGraph.logic.test.ts",
+        "apps/web/src/components/chat/GraphBoard.browser.tsx",
+        "apps/web/src/features/hubCollaboration/HubInputRequestReplyComposer.browser.tsx",
+        "apps/server/src/workbench/host/hubPlanService.test.ts",
+        "apps/server/src/projectAgent/hubWorkLifecycle.test.ts"
       ]
     }
   ]

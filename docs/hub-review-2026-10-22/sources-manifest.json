@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-22",
+  "head": "93c751172091495c3b26991b92624cd6571a92fb",
+  "files": [
+    {
+      "file": "sources/Hub_交互原型_V0.4.html",
+      "original": "/Users/wangyuelin/Downloads/Hub_交互原型_V0.4.html",
+      "sha256": "dde78694ee55ff6515225793798e5674944b39c7bfd92e64fe41a6c2fed5a84b",
+      "bytes": 81148,
+      "identical": true
+    },
+    {
+      "file": "sources/Hub_原型与开发对接_V0.4.md",
+      "original": "/Users/wangyuelin/Downloads/Hub_原型与开发对接_V0.4.md",
+      "sha256": "6b88d0fd69e5173225b0c4b998d027c23aa7f1c12aa3d200acaeb957dbdca7eb",
+      "bytes": 19612,
+      "identical": true
+    },
+    {
+      "file": "sources/Hub专家团协作与任务编排_PRD_V0.3.html",
+      "original": "/Users/wangyuelin/Downloads/Hub专家团协作与任务编排_PRD_V0.3.html",
+      "sha256": "deb7b924810afb574cae2cab57a959636df20e4806037eac66028342b7f3eb53",
+      "bytes": 113538,
+      "identical": true
+    },
+    {
+      "file": "sources/Hub专家团协作与任务编排_PRD_V0.3.md",
+      "original": "/Users/wangyuelin/Downloads/Hub专家团协作与任务编排_PRD_V0.3.md",
+      "sha256": "bd9108fe05dab79065c94a8cf5eed11fe40cd2c6917cc627a41e9c519aad9fd8",
+      "bytes": 70933,
+      "identical": true
+    }
+  ]
+}

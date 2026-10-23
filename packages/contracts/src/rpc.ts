@@ -1,3 +1,18 @@
+import {
+  HubPlanListInputSchema,
+  HubPlanReadInputSchema,
+  HubPlanEventsInputSchema,
+  HubPlanProposeInputSchema,
+  HubPlanCommandInputSchema,
+  HubPlanSnapshotSchema,
+  HubPlanEventSchema,
+} from "./hubPlan";
+import {
+  HubTeamPreset,
+  HubTeamSaveInput,
+  HubTeamArchiveInput,
+  HubTeamReadInput,
+} from "./hubCollaboration";
 import { Schema } from "effect";
 import {
   ProjectAgentDeliverablesListInput,
@@ -1440,6 +1455,56 @@ export const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSetting
   error: WsRpcError,
 });
 
+export const WsHubPlansListRpc = Rpc.make(WS_METHODS.hubPlansList, {
+  payload: HubPlanListInputSchema,
+  success: Schema.Array(HubPlanSnapshotSchema),
+  error: WsRpcError,
+});
+export const WsHubPlansReadRpc = Rpc.make(WS_METHODS.hubPlansRead, {
+  payload: HubPlanReadInputSchema,
+  success: Schema.NullOr(HubPlanSnapshotSchema),
+  error: WsRpcError,
+});
+export const WsHubPlansEventsRpc = Rpc.make(WS_METHODS.hubPlansEvents, {
+  payload: HubPlanEventsInputSchema,
+  success: Schema.Array(HubPlanEventSchema),
+  error: WsRpcError,
+});
+export const WsHubPlansProposeRpc = Rpc.make(WS_METHODS.hubPlansPropose, {
+  payload: HubPlanProposeInputSchema,
+  success: HubPlanSnapshotSchema,
+  error: WsRpcError,
+});
+export const WsHubPlansCommandRpc = Rpc.make(WS_METHODS.hubPlansCommand, {
+  payload: HubPlanCommandInputSchema,
+  success: HubPlanSnapshotSchema,
+  error: WsRpcError,
+});
+
+export const WsHubTeamsListRpc = Rpc.make(WS_METHODS.hubTeamsList, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(HubTeamPreset),
+  error: WsRpcError,
+});
+
+export const WsHubTeamsReadRpc = Rpc.make(WS_METHODS.hubTeamsRead, {
+  payload: HubTeamReadInput,
+  success: Schema.NullOr(HubTeamPreset),
+  error: WsRpcError,
+});
+
+export const WsHubTeamsSaveRpc = Rpc.make(WS_METHODS.hubTeamsSave, {
+  payload: HubTeamSaveInput,
+  success: HubTeamPreset,
+  error: WsRpcError,
+});
+
+export const WsHubTeamsSetArchivedRpc = Rpc.make(WS_METHODS.hubTeamsSetArchived, {
+  payload: HubTeamArchiveInput,
+  success: HubTeamPreset,
+  error: WsRpcError,
+});
+
 export const WsServerListExpertsRpc = Rpc.make(WS_METHODS.serverListExperts, {
   payload: Schema.Struct({}),
   success: Schema.Array(ExpertDefinition),
@@ -2393,6 +2458,15 @@ const WS_FEATURE_RPC_GROUP_3 = RpcGroup.make(
   WsServerGetEnvironmentRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
+  WsHubPlansListRpc,
+  WsHubPlansReadRpc,
+  WsHubPlansEventsRpc,
+  WsHubPlansProposeRpc,
+  WsHubPlansCommandRpc,
+  WsHubTeamsListRpc,
+  WsHubTeamsReadRpc,
+  WsHubTeamsSaveRpc,
+  WsHubTeamsSetArchivedRpc,
   WsServerListExpertsRpc,
   WsServerReadExpertRpc,
   WsServerSaveExpertRpc,

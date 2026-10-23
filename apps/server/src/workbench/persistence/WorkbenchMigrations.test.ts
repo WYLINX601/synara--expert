@@ -497,6 +497,53 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
       assert.deepStrictEqual(foreignKeys, [
         { table: "projection_projects", from: "hub_id", to: "project_id", on_delete: "CASCADE" },
       ]);
+      const hubPlanTables = yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN (
+          'hub_plans',
+          'hub_plan_revisions',
+          'hub_plan_node_bindings',
+          'hub_plan_attempt_bindings',
+          'hub_plan_candidates',
+          'hub_plan_reviews',
+          'hub_plan_releases',
+          'hub_plan_events',
+          'hub_plan_operation_receipts',
+          'hub_plan_outbox',
+          'hub_plan_input_requests'
+        )
+        ORDER BY name
+      `;
+      assert.deepStrictEqual(
+        hubPlanTables.map(({ name }) => name),
+        [
+          "hub_plan_attempt_bindings",
+          "hub_plan_candidates",
+          "hub_plan_events",
+          "hub_plan_input_requests",
+          "hub_plan_node_bindings",
+          "hub_plan_operation_receipts",
+          "hub_plan_outbox",
+          "hub_plan_releases",
+          "hub_plan_reviews",
+          "hub_plan_revisions",
+          "hub_plans",
+        ],
+      );
+      const inputRequestColumns = yield* sql<{ readonly name: string }>`
+        SELECT name FROM pragma_table_info('hub_plan_input_requests') ORDER BY cid
+      `;
+      assert.deepStrictEqual(
+        inputRequestColumns.map(({ name }) => name),
+        ["plan_id", "revision", "request_id", "record_json", "created_at", "updated_at"],
+      );
+      const activePlanIndex = yield* sql<{ readonly sql: string }>`
+        SELECT sql FROM sqlite_master
+        WHERE type = 'index' AND name = 'idx_hub_plans_one_nonterminal'
+      `;
+      assert.isTrue(
+        activePlanIndex[0]?.sql?.includes("'active', 'pausing', 'paused', 'cancelling'"),
+      );
       yield* sql`
         INSERT INTO projection_projects (
           project_id, title, workspace_root, scripts_json, created_at, updated_at

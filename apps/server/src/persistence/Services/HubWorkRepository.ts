@@ -32,6 +32,7 @@ export interface HubWorkRepositoryShape {
   readonly listPendingProjects: () => Effect.Effect<readonly ProjectId[], HubWorkRepositoryError>;
   readonly claimNext: (
     projectId: ProjectId,
+    workItemId?: string,
   ) => Effect.Effect<HubWorkRecord | null, HubWorkRepositoryError>;
   readonly reserveWorker: (input: {
     readonly threadId: ThreadId;

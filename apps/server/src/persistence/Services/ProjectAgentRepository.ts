@@ -273,6 +273,8 @@ export interface ProjectAgentRepositoryShape {
   readonly saveManagedWorkerMonitor: (input: {
     readonly worker: ProjectManagedWorker;
     readonly expectedUpdatedAt: IsoDateTime;
+    /** Keep structured worker-result evidence outside monitor-owned updates. */
+    readonly preserveResultEvidence?: boolean;
   }) => Effect.Effect<{ readonly applied: boolean }, ProjectAgentRepositoryError>;
   readonly findManagedWorkerByThread: (
     threadId: ThreadId,

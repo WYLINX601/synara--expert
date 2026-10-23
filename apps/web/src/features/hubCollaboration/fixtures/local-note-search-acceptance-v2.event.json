@@ -1,0 +1,93 @@
+{
+  "sequence": 2,
+  "planId": "local-note-search-acceptance",
+  "hubId": "b0995f07-76f9-4696-8587-0e131060f263",
+  "kind": "plan.proposed",
+  "payload": {
+    "snapshot": {
+      "controlState": "draft",
+      "createdAt": "2026-10-22T13:25:28.333Z",
+      "definition": {
+        "maxRepairRounds": 0,
+        "nodes": [
+          {
+            "acceptanceCriteria": "需求清单不超过五条，限于本地笔记搜索，每条边界与验收条件明确、假设显式标注；Markdown 已通过 Hub 成果工具成功登记，并提供可读取的 ownerThreadId、path、revision 固定版本标识。仅隔离 Hub 内部保存登记，无应用代码、联网或对外发布；不修改专家预设。",
+            "brief": "仅基于用户给定主题编写一份不超过五条的本地笔记搜索需求清单，保存为本隔离 Hub 内的 Markdown。每条说明范围与可观察的验收条件；缺失信息标为待用户确认的假设，不虚构调研结论。必须先用 synara_hub_list_deliverables 查询自己的当前 revision，再用 synara_hub_publish_deliverables（expectedRevision=查询值，初次为0）登记该 Markdown。完成后交接工具返回的 ownerThreadId、path、revision，固定供审核员及用户读取的版本；不得仅在聊天回复正文后视为交付。登记失败则报告阻塞。不写应用代码、不联网、不向外部服务或上线环境发布；不修改专家预设。",
+            "dependsOnNodeKeys": [],
+            "expertId": "product-manager",
+            "key": "requirements",
+            "role": "author",
+            "stageKey": "requirements-review",
+            "target": {
+              "instanceId": "codex",
+              "model": "gpt-6.1-sol",
+              "options": {
+                "reasoningEffort": "low"
+              },
+              "provider": "codex"
+            },
+            "title": "产品经理：编写本地笔记搜索需求",
+            "workMode": "agent"
+          },
+          {
+            "acceptanceCriteria": "有通过 Hub 成果读取工具显式读取作者 ownerThreadId、path、revision 固定版本的记录；审核意见引用同一版本，明确范围是否清晰并给出结论与问题；最终等待用户人工放行。无实现、联网、对外发布或专家预设修改；缺失版本、读取失败或目标不可用时如实报告阻塞，不替换。",
+            "brief": "接收作者成功登记的 ownerThreadId、path、revision 后，必须调用 synara_hub_read_deliverable，并显式传入这三个字段读取该固定版本；不得省略 revision，不得用当前最新版、聊天摘要或未登记文件替代。读取失败或缺少版本标识则报告阻塞。检查该需求是否不超过五条，范围、排除项和验收条件是否明确，是否仍局限于本地笔记搜索。逐条指出歧义或越界，给出通过或需修改结论和待用户决定事项；审核意见必须标明所审固定版本。审核意见可在本隔离 Hub 内保存并登记 Markdown；无论结论如何，最终保留用户人工放行关口，不得代替用户放行。不扩写需求、不写应用代码、不联网、不向外部服务或上线环境发布、不修改专家预设。此前成员可用性查询为 false；不替换专家或显式目标，不可用则报告阻塞。",
+            "dependsOnNodeKeys": ["requirements"],
+            "expertId": "code-reviewer",
+            "key": "scope-review",
+            "role": "reviewer",
+            "stageKey": "requirements-review",
+            "target": {
+              "instanceId": "codex",
+              "model": "gpt-6.1-sol",
+              "options": {
+                "reasoningEffort": "low"
+              },
+              "provider": "codex"
+            },
+            "title": "代码审查员：审核需求范围",
+            "workMode": "agent"
+          }
+        ],
+        "objective": "隔离实例协作验收：产品经理编写不超过五条的本地笔记搜索需求，代码审查员审核范围，最终由用户人工放行。",
+        "scope": "仅编写不超过五条的本地笔记搜索需求清单和范围审核意见，审核后由用户人工放行。暂不执行；须由用户通过计划卡确认后才可启动专家。只使用当前 Hub 成员 product-manager、code-reviewer；两个节点显式目标保持 codex / codex / gpt-6.1-sol，reasoningEffort=low；不修改任何专家预设。不写应用代码、不联网、不新增功能实现任务。“不发布”仅指不向外部服务或上线环境发布；允许在本隔离 Hub 内保存并用 Hub 成果工具登记版本化 Markdown，供作者、审核员与用户查看。作者须登记需求固定版本并交接 ownerThreadId、path、revision；审核员必须读取该明确版本，不得以当前最新版或聊天摘要替代。代码审查员此前查询标记 available=false、preferredProvider=pi；保留可用性限制，执行目标不可用时报告阻塞，不静默替换成员或目标。最终人工放行仅验收文档，不授权开发或对外发布。",
+        "stages": [
+          {
+            "key": "requirements-review",
+            "releasePolicy": "user",
+            "title": "本地笔记搜索需求编写、审核与用户放行"
+          }
+        ]
+      },
+      "eventSequence": 1,
+      "goalId": null,
+      "graph": {
+        "controlState": "draft",
+        "releasedCount": 0,
+        "stageCount": 1,
+        "stages": [
+          {
+            "blockingReasons": ["The current stage generation is unavailable or invalid."],
+            "candidateId": null,
+            "generation": null,
+            "isReleased": false,
+            "outputDigest": null,
+            "outputSummary": null,
+            "releasePolicy": "user",
+            "stageKey": "requirements-review",
+            "status": "draft",
+            "title": "本地笔记搜索需求编写、审核与用户放行",
+            "underlyingStatus": "draft"
+          }
+        ]
+      },
+      "hubId": "b0995f07-76f9-4696-8587-0e131060f263",
+      "id": "local-note-search-acceptance",
+      "nodeStates": [],
+      "revision": 2,
+      "stateVersion": 2,
+      "updatedAt": "2026-10-22T13:27:53.153Z"
+    }
+  },
+  "createdAt": "2026-10-22T13:27:53.155Z"
+}

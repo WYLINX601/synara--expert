@@ -59,6 +59,9 @@ import type {
   ProjectAgentUpdateGoalInput,
   ProjectAgentUpdateTaskInput,
   ProjectAgentWriteDocumentInput,
+  ModelSelection,
+  ProviderInteractionMode,
+  RuntimeMode,
   ProjectDocumentRevision,
   ProjectGoal,
   ProjectId,
@@ -75,6 +78,30 @@ import type {
   HubDeliverableReferenceInput,
   HubDeliverablesLibraryChange,
 } from "../hubDeliverables.ts";
+
+export interface ProjectAgentTurnStartAuthorization {
+  readonly commandId: string;
+  readonly messageId: string;
+  readonly messageText: string;
+  readonly attachments?: readonly unknown[] | undefined;
+  readonly skills?: readonly unknown[] | undefined;
+  readonly mentions?: readonly unknown[] | undefined;
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+  readonly modelSelection?: ModelSelection | undefined;
+  readonly providerOptions?: unknown;
+  readonly enableComputerControl?: boolean | undefined;
+  readonly computerControlMode?: unknown;
+  readonly computerControlGeneration?: number | undefined;
+  readonly reviewTarget?: unknown;
+  readonly assistantDeliveryMode?: unknown;
+  readonly dispatchMode?: unknown;
+  readonly dispatchOrigin?: "user" | "automation" | "agent" | undefined;
+  readonly sourceProposedPlan?: unknown;
+  readonly asyncUserInputResponse?: unknown;
+  readonly resumePrecondition?: unknown;
+  readonly createdAt?: string | undefined;
+}
 
 export interface ProjectAgentServiceShape {
   /** Host-only validation for new mentions; never an Agent configuration tool. */
@@ -187,7 +214,8 @@ export interface ProjectAgentServiceShape {
   ) => Effect.Effect<ProjectAgentDeleteGroupResult, ProjectAgentServiceError>;
   readonly assertGroupCoordinatorTurnAllowed: (input: {
     readonly threadId: ThreadId;
-  }) => Effect.Effect<void, ProjectAgentServiceError>;
+    readonly turnStart?: ProjectAgentTurnStartAuthorization | undefined;
+  }) => Effect.Effect<"plan-recovery" | "plan-recovery-steer" | void, ProjectAgentServiceError>;
   readonly assertCallerMayCreateThreadInProject: (input: {
     readonly callerThreadId: ThreadId;
     readonly targetProjectId: ProjectId;

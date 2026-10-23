@@ -1,5 +1,9 @@
 import { ProjectId, ThreadId } from "@synara/contracts";
-import type { ModelSelection, ProjectAgentConfig } from "@synara/contracts";
+import type {
+  HubCollaborationSettings,
+  ModelSelection,
+  ProjectAgentConfig,
+} from "@synara/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -112,6 +116,15 @@ describe("buildGroupSettingsDraft", () => {
     expect(draft.libraryPath).toBe("/tmp/lib");
     expect(draft.libraryRemoteUrl).toBe("https://example.com/lib.git");
     expect(draft.libraryPushOnChange).toBe(true);
+  });
+
+  it("keeps an omitted legacy collaboration config absent", () => {
+    const draft = buildGroupSettingsDraft({
+      config: baseConfig,
+      projectName: "alpha",
+      defaultModelSelection: null,
+    });
+    expect(draft).not.toHaveProperty("collaboration");
   });
 
   it("resolves 'Use default' sources: falls back to defaultModelSelection, then the codex fallback", () => {
@@ -348,6 +361,46 @@ describe("resolveSaveAttemptRequestId", () => {
 describe("buildGroupConfigureInput", () => {
   const projectId = ProjectId.makeUnsafe("project-1");
 
+  it("omits collaboration when a legacy Hub only saves another setting", () => {
+    const input = buildGroupConfigureInput({
+      projectId,
+      requestId: "req-legacy",
+      mode: "edit",
+      draft: makeDraft({ goal: "new goal" }),
+      baseline: makeBaseline({}, baseConfig),
+    });
+    expect(input).not.toHaveProperty("collaboration");
+  });
+
+  it("sends a copied preset source and clears default coordinator text only after a changed draft is saved", () => {
+    const custom: HubCollaborationSettings = {
+      schemaVersion: 1,
+      mode: "expert-team",
+      coordinatorInstructions: "coordinate the team",
+      collaborationPreferences: "parallel review when useful",
+      presetSource: { id: "preset-1", revision: 3 },
+    };
+    const restored: HubCollaborationSettings = {
+      schemaVersion: 1,
+      mode: "expert-team",
+      collaborationPreferences: "parallel review when useful",
+      presetSource: { id: "preset-1", revision: 3 },
+    };
+    const baseline = makeBaseline({ expertIds: ["writer"], collaboration: custom });
+    const input = buildGroupConfigureInput({
+      projectId,
+      requestId: "req-reset-coordinator",
+      mode: "edit",
+      draft: makeDraft({ expertIds: ["writer"], collaboration: restored }),
+      baseline,
+    });
+
+    expect(input.collaboration).toEqual(restored);
+    expect(
+      groupSettingsDirtySections(makeDraft({ collaboration: restored }), baseline.draft),
+    ).toContain("experts");
+  });
+
   it("persists an explicitly linked source Project on the first configure", () => {
     const sourceProjectId = ProjectId.makeUnsafe("project-source");
     const input = buildGroupConfigureInput({
@@ -537,6 +590,23 @@ describe("saveGroupSettings", () => {
       configure: vi.fn(),
     });
     expect(result).toEqual({ ok: false, error: "Give the hub a name." });
+  });
+
+  it("requires a selected Expert in expert-team mode", async () => {
+    const configure = vi.fn();
+    const result = await saveGroupSettings({
+      projectId,
+      requestId: "req-empty-team",
+      mode: "onboarding",
+      draft: makeDraft({
+        collaboration: { schemaVersion: 1, mode: "expert-team" },
+        expertIds: [],
+      }),
+      baseline: makeBaseline({}, null),
+      configure,
+    });
+    expect(result).toEqual({ ok: false, error: "专家团模式至少选择一位专家。" });
+    expect(configure).not.toHaveBeenCalled();
   });
 
   it("configures before renaming when the name changed", async () => {

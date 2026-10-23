@@ -1,3 +1,8 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { makeHubPlanExecution } from "../../workbench/host/hubPlanExecution.ts";
+import { resolveHubCreationSpec } from "../hubExpertDispatch.ts";
+import { HubPlanService } from "../../workbench/host/hubPlanService.ts";
+import { makeHubPlanTools } from "../hubPlanTools.ts";
 import { ProjectionThreadMessageRepository } from "../../persistence/Services/ProjectionThreadMessages.ts";
 /**
  * AgentGatewayLive - Synara app-control MCP tool surface.
@@ -41,6 +46,7 @@ import {
 import { runtimeModeEscalatesPrivilege } from "@synara/shared/runtimeMode";
 import { INLINE_VISUALS_BETA_FEATURE } from "@synara/shared/betaFeatures";
 import { Effect, Layer, Option } from "effect";
+import * as Cause from "effect/Cause";
 
 import { GitCore } from "../../git/Services/GitCore.ts";
 import { GitManager } from "../../git/Services/GitManager.ts";
@@ -341,6 +347,7 @@ export const makeAgentGateway = Effect.gen(function* () {
         .pipe(Effect.mapError((error) => new ToolInputError(error.message))),
   });
 
+  const planService = Option.getOrUndefined(yield* Effect.serviceOption(HubPlanService));
   const hubRepository = Option.getOrUndefined(yield* Effect.serviceOption(HubWorkRepository));
   const projectRepository = Option.getOrUndefined(
     yield* Effect.serviceOption(ProjectAgentRepository),
@@ -357,9 +364,205 @@ export const makeAgentGateway = Effect.gen(function* () {
   const hubMessages = Option.getOrUndefined(
     yield* Effect.serviceOption(ProjectionThreadMessageRepository),
   );
-  const hubGateway =
+  const planSql = Option.getOrUndefined(yield* Effect.serviceOption(SqlClient.SqlClient));
+  const planExperts = createExpertStore(serverConfig.stateDir);
+  let hubGateway: ReturnType<typeof makeHubWorkGateway> | null = null;
+  const planExecution =
+    planSql && projectRepository && hubRepository && planService
+      ? makeHubPlanExecution({
+          sql: planSql,
+          projectAgentRepository: projectRepository,
+          workRepository: hubRepository,
+          resolveCreationSpec: ({ spec, callerThreadId, targetProjectId }) =>
+            Effect.gen(function* () {
+              const caller = yield* requireThreadShell(callerThreadId);
+              const project = yield* snapshotQuery.getProjectShellById(targetProjectId);
+              if (Option.isNone(project))
+                return yield* Effect.fail(new ToolInputError("Plan target project was not found."));
+              return yield* resolveHubCreationSpec({
+                dependencies: {
+                  expertStore: planExperts,
+                  providerDiscovery,
+                  loadProviderAvailabilities,
+                  getProjectWorkspaceRoot: () => Effect.succeed(project.value.workspaceRoot),
+                },
+                targetProjectId,
+                callerTarget: caller.modelSelection,
+                spec,
+              });
+            }),
+          readSourceMessages: ({ hubId, sourceMessageIds }) =>
+            Effect.gen(function* () {
+              const config = yield* projectRepository.getConfig(hubId);
+              if (Option.isNone(config))
+                return yield* Effect.fail(new ToolInputError("Hub is unavailable."));
+              return yield* resolveHubWorkSource({
+                snapshotQuery,
+                callerThreadId: config.value.coordinatorThreadId,
+                callerTurnId: null,
+                contextMessageIds: sourceMessageIds,
+              });
+            }),
+          readExpert: (id) => planExperts.read(id),
+          readExpertSnapshot: (id) => planExperts.readSnapshot(id),
+          interruptWorker: (threadId) =>
+            orchestrationEngine
+              .dispatch({
+                type: "thread.turn.interrupt",
+                commandId: CommandId.makeUnsafe(`hub-plan:interrupt:${randomUUID()}`),
+                threadId,
+                createdAt: isoNow(),
+              })
+              .pipe(Effect.asVoid),
+          readWorkerRunning: (threadId) =>
+            requireThreadShell(threadId).pipe(
+              Effect.map(
+                (thread) =>
+                  thread.session?.activeTurnId != null ||
+                  thread.latestTurn?.state === "running" ||
+                  ["starting", "running"].includes(thread.session?.status ?? ""),
+              ),
+            ),
+          readInputResponseDispatchState: (threadId) =>
+            snapshotQuery.getThreadShellById(threadId).pipe(
+              Effect.map((thread) =>
+                Option.isNone(thread)
+                  ? null
+                  : {
+                      hasActiveTurn:
+                        thread.value.session?.activeTurnId != null ||
+                        thread.value.latestTurn?.state === "running" ||
+                        ["starting", "running"].includes(thread.value.session?.status ?? ""),
+                      hasPendingApprovals: thread.value.hasPendingApprovals === true,
+                      hasPendingUserInput: thread.value.hasPendingUserInput === true,
+                      archived: thread.value.archivedAt !== null,
+                      runtimeMode: thread.value.runtimeMode,
+                      interactionMode: thread.value.interactionMode,
+                      modelSelection: thread.value.modelSelection,
+                    },
+              ),
+            ),
+          inputResponseWasAccepted: ({ threadId, commandId }) =>
+            commandReceipts
+              ? commandReceipts
+                  .getByCommandId({ commandId: CommandId.makeUnsafe(commandId) })
+                  .pipe(
+                    Effect.map(
+                      (receipt) =>
+                        Option.isSome(receipt) &&
+                        receipt.value.status === "accepted" &&
+                        receipt.value.aggregateKind === "thread" &&
+                        receipt.value.aggregateId === threadId,
+                    ),
+                  )
+              : Effect.succeed(false),
+          dispatchInputResponse: (input) =>
+            Effect.gen(function* () {
+              if (!hubGateway) return "deferred" as const;
+              const latest = yield* snapshotQuery.getThreadShellById(input.threadId);
+              if (Option.isNone(latest)) return "rejected" as const;
+              const shell = latest.value;
+              if (
+                shell.archivedAt !== null ||
+                shell.hasPendingApprovals === true ||
+                shell.hasPendingUserInput === true ||
+                shell.session?.activeTurnId != null ||
+                shell.latestTurn?.state === "running" ||
+                ["starting", "running"].includes(shell.session?.status ?? "")
+              ) {
+                return "deferred" as const;
+              }
+              if (
+                shell.runtimeMode !== input.runtimeMode ||
+                shell.interactionMode !== input.interactionMode ||
+                JSON.stringify(shell.modelSelection) !== JSON.stringify(input.modelSelection)
+              ) {
+                return "rejected" as const;
+              }
+              const admitted = yield* Effect.exit(
+                hubGateway.service.admitFollowup({
+                  threadId: input.threadId,
+                  commandId: input.commandId,
+                  messageId: input.messageId,
+                  inputRequestId: input.inputRequestId,
+                }),
+              );
+              if (admitted._tag === "Failure") {
+                const error = Option.getOrUndefined(Cause.findErrorOption(admitted.cause)) as
+                  | { readonly code?: string }
+                  | undefined;
+                return error?.code === "limit" || error?.code === "conflict"
+                  ? ("deferred" as const)
+                  : ("rejected" as const);
+              }
+              const reservation = admitted.value;
+              if (!reservation) return "deferred" as const;
+              const command = {
+                type: "thread.turn.start",
+                commandId: CommandId.makeUnsafe(input.commandId),
+                threadId: input.threadId,
+                message: {
+                  messageId: MessageId.makeUnsafe(input.messageId),
+                  role: "user",
+                  text: input.messageText,
+                  attachments: [],
+                },
+                dispatchMode: "queue",
+                dispatchOrigin: "user",
+                runtimeMode: input.runtimeMode,
+                interactionMode: input.interactionMode,
+                modelSelection: input.modelSelection,
+                createdAt: input.createdAt,
+              } satisfies OrchestrationCommand;
+              const releaseReservation = () =>
+                hubGateway!.service.releaseFailedFollowup({
+                  workItemId: reservation.id,
+                  admittedAt: reservation.admittedAt,
+                  expectedRevision: reservation.revision,
+                  commandId: input.commandId,
+                });
+              return yield* orchestrationEngine.dispatch(command).pipe(
+                Effect.as("accepted" as const),
+                Effect.catchTag("OrchestrationCommandPreviouslyRejectedError", () =>
+                  releaseReservation().pipe(Effect.as("rejected" as const)),
+                ),
+                Effect.catchTag("OrchestrationCommandIdentityCollisionError", () =>
+                  Effect.gen(function* () {
+                    const receipt = commandReceipts
+                      ? yield* commandReceipts.getByCommandId({
+                          commandId: CommandId.makeUnsafe(input.commandId),
+                        })
+                      : Option.none();
+                    if (
+                      Option.isSome(receipt) &&
+                      receipt.value.status === "accepted" &&
+                      receipt.value.aggregateKind === "thread" &&
+                      receipt.value.aggregateId === input.threadId
+                    ) {
+                      return "accepted" as const;
+                    }
+                    yield* releaseReservation();
+                    return "rejected" as const;
+                  }),
+                ),
+                Effect.catch((error) =>
+                  releaseReservation().pipe(
+                    Effect.as("deferred" as const),
+                    Effect.tap(() =>
+                      Effect.logWarning("Hub input response dispatch will retry", { error }),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          readPlanSnapshot: (request) => planService.read(request, { kind: "user" }),
+          reconcilePlanSnapshot: (hubId) => planService.reconcile(hubId),
+        })
+      : undefined;
+  hubGateway =
     hubRepository && projectRepository && attachmentRepository
       ? makeHubWorkGateway({
+          ...(planExecution ? { planExecution } : {}),
           repository: hubRepository,
           creationOperations: operationRepository,
           ...(hubMessages ? { messages: hubMessages } : {}),
@@ -1674,7 +1877,15 @@ export const makeAgentGateway = Effect.gen(function* () {
       : []),
     ...computerBrowserTools,
     // Offer Hub tools only when the authoritative shared feature policy enables them.
-    ...(isServerGroupsEnabled() ? [...projectAgentTools, ...(hubGateway?.tools ?? [])] : []),
+    ...(isServerGroupsEnabled()
+      ? [
+          ...projectAgentTools,
+          ...(hubGateway?.tools ?? []),
+          ...(planService
+            ? makeHubPlanTools({ plans: planService, projectAgent: projectAgentService })
+            : []),
+        ]
+      : []),
   ];
 
   // The computer family by name, read off the unfiltered catalog above: a

@@ -180,7 +180,7 @@ export const makeHubWorkRepository = Effect.gen(function* () {
         Effect.mapError(storageError),
       ),
 
-    claimNext: (projectId) => {
+    claimNext: (projectId, workItemId) => {
       const now = new Date().toISOString();
       return sql<RecordRow>`
         UPDATE project_agent_work_items
@@ -200,6 +200,7 @@ export const makeHubWorkRepository = Effect.gen(function* () {
                   AND linked.linked_project_id = json_extract(queued.record_json, '$.targetProjectId')
               )
             )
+            AND (${workItemId ?? null} IS NULL OR queued.work_item_id = ${workItemId ?? ""})
             AND ${availableCapacity}
           ORDER BY queued.sequence LIMIT 1
         )

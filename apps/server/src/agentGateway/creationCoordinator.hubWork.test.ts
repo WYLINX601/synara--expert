@@ -440,6 +440,30 @@ layer("Hub work creation saga", (it) => {
     }),
   );
 
+  it.effect("preserves pinned model options on the initial HubWork turn command", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture("pinned-options");
+      const result = yield* fixture.handler(
+        {
+          ...INPUT,
+          requestId: "hub-saga-pinned-options",
+          threads: [
+            {
+              ...INPUT.threads[0]!,
+              target: { ...TARGET, options: { reasoningEffort: "low" } },
+            },
+          ],
+        },
+        fixture.context,
+      );
+      assert.notEqual(result.isError, true);
+      const start = fixture.commands.find((command) => command.type === "thread.turn.start");
+      assert.isDefined(start);
+      if (start?.type !== "thread.turn.start") throw new Error("missing worker start");
+      assert.deepEqual(start.modelSelection?.options, { reasoningEffort: "low" });
+    }),
+  );
+
   it.effect(
     "rolls back the Hub worker link on commit failure and refuses replacement dispatch on replay",
     () =>

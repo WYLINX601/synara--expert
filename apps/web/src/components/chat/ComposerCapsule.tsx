@@ -108,10 +108,12 @@ export function ComposerCapsule({
 
 interface ComposerCapsulePopoverProps {
   icon?: ReactNode;
-  label: ReactNode;
+  label: ReactNode | ((open: boolean) => ReactNode);
   title?: string | undefined;
   testId?: string;
   popupTestId?: string;
+  popupClassName?: string;
+  popupPositionerClassName?: string;
   /** The full panel. A function receives `close` for actions that hand focus back. */
   children: ReactNode | ((close: () => void) => ReactNode);
 }
@@ -124,6 +126,8 @@ export function ComposerCapsulePopover({
   title,
   testId,
   popupTestId,
+  popupClassName,
+  popupPositionerClassName,
   children,
 }: ComposerCapsulePopoverProps) {
   const [open, setOpen] = useState(false);
@@ -139,7 +143,9 @@ export function ComposerCapsulePopover({
         data-testid={testId}
       >
         {icon}
-        <span className="min-w-0 truncate">{label}</span>
+        <span className="min-w-0 truncate">
+          {typeof label === "function" ? label(open) : label}
+        </span>
       </PopoverTrigger>
       <PopoverPopup
         side="top"
@@ -148,7 +154,8 @@ export function ComposerCapsulePopover({
         anchor={() =>
           triggerRef.current?.closest(COMPOSER_CAPSULE_ROW_SELECTOR) ?? triggerRef.current
         }
-        className="w-(--anchor-width) [&_[data-slot=popover-viewport]]:p-1"
+        className={cn("w-(--anchor-width) [&_[data-slot=popover-viewport]]:p-1", popupClassName)}
+        positionerClassName={popupPositionerClassName}
         data-testid={popupTestId}
       >
         {typeof children === "function" ? children(close) : children}

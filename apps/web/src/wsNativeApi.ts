@@ -567,6 +567,19 @@ export function createWsNativeApi(): NativeApi {
     threadStreamFailureListeners.emit(failure);
   });
   const api: NativeApi = {
+    hubPlans: {
+      list: (input) => transport.request(WS_METHODS.hubPlansList, input),
+      read: (input) => transport.request(WS_METHODS.hubPlansRead, input),
+      events: (input) => transport.request(WS_METHODS.hubPlansEvents, input),
+      propose: (input) => transport.request(WS_METHODS.hubPlansPropose, input),
+      command: (input) => transport.request(WS_METHODS.hubPlansCommand, input),
+    },
+    hubTeams: {
+      list: () => transport.request(WS_METHODS.hubTeamsList),
+      read: (input) => transport.request(WS_METHODS.hubTeamsRead, input),
+      save: (input) => transport.request(WS_METHODS.hubTeamsSave, input),
+      setArchived: (input) => transport.request(WS_METHODS.hubTeamsSetArchived, input),
+    },
     context: {
       getSpace: (input) => transport.request(WS_METHODS.contextGetSpace, input),
       getProject: (input) => transport.request(WS_METHODS.contextGetProject, input),

@@ -1,3 +1,4 @@
+import { HubPlanServiceLive } from "./workbench/host/hubPlanService.ts";
 import { ProjectionThreadMessageRepositoryLive } from "./persistence/Layers/ProjectionThreadMessages";
 import { OrchestrationCommandReceiptRepositoryLive } from "./persistence/Layers/OrchestrationCommandReceipts";
 import { QueuedTurnPromotionRepositoryLive } from "./persistence/Layers/QueuedTurnPromotions";
@@ -63,6 +64,7 @@ import { AutomationRepositoryLive } from "./persistence/Layers/AutomationReposit
 import { TodoRepositoryLive } from "./persistence/Layers/TodoRepository";
 import { TodoServiceLive } from "./todo/Layers/TodoService";
 import { ProjectAgentRepositoryLive } from "./persistence/Layers/ProjectAgentRepository";
+import { HubCollaborationConfigLive } from "./workbench/host/hubCollaborationConfig.ts";
 import { ProjectAgentReactorLive } from "./projectAgent/Layers/ProjectAgentReactor";
 import { ProjectAgentServiceLive } from "./projectAgent/Layers/ProjectAgentService";
 import { ProjectPullRequestPinsLive } from "./persistence/Layers/ProjectPullRequestPins";
@@ -145,6 +147,10 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(runtimeServicesLayer),
     Layer.provideMerge(serverSettingsLayer),
     Layer.provideMerge(providerHealthLayer),
+  );
+  const hubPlanServiceLayer = HubPlanServiceLive.pipe(
+    Layer.provideMerge(projectAgentServiceLayer),
+    Layer.provideMerge(runtimeServicesLayer),
   );
   const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
     Layer.provideMerge(ContextRepositoryLive),
@@ -249,6 +255,7 @@ export function makeServerRuntimeServicesLayer(
   const agentGatewayLayer = AgentGatewayLive.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
+        hubPlanServiceLayer,
         ProjectionThreadMessageRepositoryLive,
         OrchestrationCommandReceiptRepositoryLive,
         // The same instance the todo.* RPCs use, so a to-do an agent adds reaches open windows.
@@ -299,6 +306,8 @@ export function makeServerRuntimeServicesLayer(
   );
 
   return Layer.mergeAll(
+    HubCollaborationConfigLive,
+    hubPlanServiceLayer,
     agentGatewayCredentialsLayer,
     agentGatewayLayer,
     BrowserAutomationHostLive,

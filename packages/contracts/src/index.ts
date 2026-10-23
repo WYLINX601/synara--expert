@@ -47,6 +47,8 @@ export * from "./environment";
 export * from "./project";
 export * from "./projectAgent";
 export * from "./hubWork";
+export * from "./hubCollaboration";
+export * from "./hubPlan";
 export * from "./hubDeliverables";
 export * from "./projectImport";
 export * from "./studio";

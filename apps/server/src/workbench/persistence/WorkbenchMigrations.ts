@@ -13,6 +13,12 @@ import { HUB_PROJECT_ORIGIN_SQL } from "./HubProjectOriginMigration.ts";
 import { HUB_EXPERT_V1_SQL, HUB_EXPERT_V1_EFFECT } from "./HubExpertV1Migration.ts";
 import { HUB_EXPERT_PARTICIPANTS_SQL } from "./HubExpertParticipantsMigration.ts";
 import {
+  HUB_COLLABORATION_V1_SQL,
+  HUB_COLLABORATION_V1_EFFECT,
+} from "./HubCollaborationMigration.ts";
+import { HUB_PLAN_SQL, HUB_PLAN_EFFECT } from "./HubPlanMigration.ts";
+import { HUB_PLAN_INPUT_REQUEST_SQL, HUB_PLAN_INPUT_REQUEST_EFFECT } from "./HubPlanMigration.ts";
+import {
   CONTEXT_SCHEMA_OBJECTS_QUERY,
   validateFrozenContextSchema,
   type SqliteSchemaObject,
@@ -355,6 +361,30 @@ export const workbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] 
     name: "ExpertSkillApplication",
     checksum: "sha256:d5a205fd4bc04221ae9f4a16a8dde18b2b53a83b8b7eb068102eafb1cc626114",
     statement: "ALTER TABLE expert_applied_runtime_records ADD COLUMN skill_application_json TEXT",
+  },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 7,
+    name: "HubCollaborationPresetsAndSettings",
+    checksum: "sha256:791f43d30cdace88bfe9c5dc5354e210768b58876bbe3fe37825ad2e1404a67b",
+    statement: HUB_COLLABORATION_V1_SQL,
+    effect: HUB_COLLABORATION_V1_EFFECT,
+  },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 8,
+    name: "HubPlanStateAndOutbox",
+    checksum: "sha256:f0cb93776624de7874786a05d93c254baaacc55ae700b8a34ccf4758e3fef0d9",
+    statement: HUB_PLAN_SQL,
+    effect: HUB_PLAN_EFFECT,
+  },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 9,
+    name: "HubPlanDirectedInput",
+    checksum: "sha256:c1eed65d20738b04e96d8197d66fa5094fbb0fac6899e23cfb2b9c6ef6cabcdc",
+    statement: HUB_PLAN_INPUT_REQUEST_SQL,
+    effect: HUB_PLAN_INPUT_REQUEST_EFFECT,
   },
 ];
 

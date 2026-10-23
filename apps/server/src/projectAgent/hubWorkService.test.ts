@@ -17,6 +17,7 @@ import { OrchestrationCommandReceiptRepositoryLive } from "../persistence/Layers
 import { ProjectionThreadMessageRepositoryLive } from "../persistence/Layers/ProjectionThreadMessages";
 import { OrchestrationCommandReceiptRepository } from "../persistence/Services/OrchestrationCommandReceipts";
 import { ProjectionThreadMessageRepository } from "../persistence/Services/ProjectionThreadMessages";
+import type { ProjectionTurnById } from "../persistence/Services/ProjectionTurns";
 import { ProjectAgentServiceError } from "./Errors";
 import { HubWorkRepositoryLive } from "../persistence/Layers/HubWorkRepository";
 import { ProjectAgentRepositoryLive } from "../persistence/Layers/ProjectAgentRepository";
@@ -24,6 +25,7 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite";
 import { HubWorkRepository } from "../persistence/Services/HubWorkRepository";
 import { ProjectAgentRepository } from "../persistence/Services/ProjectAgentRepository";
 import { makeHubWorkService } from "./hubWorkService";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 const tests = it.layer(
   Layer.mergeAll(
@@ -396,6 +398,46 @@ tests("Hub work provenance, ownership and lifecycle", (it) => {
         assert.equal((yield* h.repository.get(claimed!.id))?.state, "cancelled");
       }),
   );
+  it.effect("requires plan control to stop work in a collaboration-configured Hub", () =>
+    Effect.gen(function* () {
+      const h = yield* harness("plan-work-cancel-gate");
+      const sql = yield* SqlClient.SqlClient;
+      yield* h.service.submit(h.input);
+      const queued = (yield* h.repository.list(h.projectId))[0]!;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES (${h.projectId}, 'Plan work Hub', '/tmp/plan-work-hub', '[]', ${now}, ${now})
+      `;
+      const config = yield* h.projectAgentRepository.getConfig(h.projectId);
+      if (Option.isNone(config)) throw new Error("Missing test hub");
+      yield* h.projectAgentRepository.saveConfig(
+        {
+          ...config.value,
+          collaboration: { schemaVersion: 1, mode: "standard" },
+          revision: config.value.revision + 1,
+          updatedAt: now,
+        },
+        config.value.revision,
+      );
+      let checkedPlanBinding = false;
+      const service = makeHubWorkService({
+        ...h.dependencies,
+        planExecution: {
+          assertWorkAllowed: (record) => {
+            checkedPlanBinding = record.id === queued.id;
+            return Effect.void;
+          },
+        },
+      });
+      const cancelled = yield* Effect.exit(
+        service.cancel({ workItemId: queued.id }, { kind: "user" }),
+      );
+      assert.isTrue(Exit.isFailure(cancelled));
+      assert.isTrue(checkedPlanBinding);
+      assert.strictEqual((yield* h.repository.get(queued.id))?.state, "queued");
+    }),
+  );
   it.effect("keeps queued work durable while a hub is paused or its repository is unlinked", () =>
     Effect.gen(function* () {
       const h = yield* harness("queue-reasons");
@@ -480,6 +522,185 @@ tests("Hub work provenance, ownership and lifecycle", (it) => {
       assert.equal(settled?.slotHeld, false);
       assert.equal(settled?.state, "idle");
       assert.isNotNull(yield* h.service.claimNext(h.projectId));
+    }),
+  );
+
+  it.effect("releases an answered new turn whose native message has no assigned turn ID", () =>
+    Effect.gen(function* () {
+      const h = yield* harness("native-answer-settled");
+      yield* h.service.submit(h.input);
+      const claimed = yield* h.service.claimNext(h.projectId);
+      yield* h.service.attachWorker({ workItemId: claimed!.id, workerThreadId: h.workerId });
+      const commandId = CommandId.makeUnsafe("native-answer:send");
+      const messageId = MessageId.makeUnsafe("native-answer:message");
+      const turnId = TurnId.makeUnsafe("native-answer:turn");
+      const admission = yield* h.service.admitFollowup({
+        threadId: h.workerId,
+        commandId,
+        messageId,
+      });
+      const responseCreatedAt = new Date(Date.parse(admission!.admittedAt!) - 1_000).toISOString();
+      const completedAt = new Date(Date.parse(admission!.admittedAt!) + 1_000).toISOString();
+      yield* h.commandReceipts.insert({
+        commandId,
+        aggregateKind: "thread",
+        aggregateId: h.workerId,
+        acceptedAt: admission!.admittedAt!,
+        resultSequence: 1,
+        status: "accepted",
+        error: null,
+        fingerprintVersion: 1,
+        commandFingerprint: "b".repeat(64),
+      });
+      yield* h.messages.upsert({
+        threadId: h.workerId,
+        messageId,
+        turnId: null,
+        role: "user",
+        text: "The answer was saved before the queued turn was admitted.",
+        startsNewTurn: true,
+        isStreaming: false,
+        source: "native",
+        createdAt: responseCreatedAt,
+        updatedAt: responseCreatedAt,
+      });
+      h.setShells([
+        {
+          id: h.workerId,
+          archivedAt: null,
+          session: { status: "idle", activeTurnId: null, updatedAt: completedAt },
+          latestTurn: {
+            turnId,
+            state: "completed",
+            requestedAt: responseCreatedAt,
+            startedAt: responseCreatedAt,
+            completedAt,
+            assistantMessageId: null,
+          },
+        } as unknown as OrchestrationThreadShell,
+      ]);
+      const nativeTurn = {
+        threadId: h.workerId,
+        turnId,
+        pendingMessageId: messageId,
+        state: "completed",
+        requestedAt: responseCreatedAt,
+        startedAt: responseCreatedAt,
+        completedAt,
+      } as unknown as ProjectionTurnById;
+      const lookups: Array<{ threadId: ThreadId; turnId: TurnId }> = [];
+      const service = makeHubWorkService({
+        ...h.dependencies,
+        projectionTurns: {
+          getByTurnId: (query) => {
+            lookups.push(query);
+            return Effect.succeed(Option.some(nativeTurn));
+          },
+        },
+      });
+
+      yield* service.reconcile(h.projectId);
+
+      assert.deepEqual(lookups, [{ threadId: h.workerId, turnId }]);
+      const settled = yield* h.repository.get(claimed!.id);
+      assert.equal(settled?.state, "idle");
+      assert.equal(settled?.slotHeld, false);
+      assert.equal(settled?.admittedAt, null);
+      assert.equal(settled?.admissionCommandId, null);
+      assert.equal(settled?.admissionMessageId, null);
+    }),
+  );
+
+  it.effect("keeps the reservation when a null-turn admission lacks an exact native binding", () =>
+    Effect.gen(function* () {
+      const h = yield* harness("native-answer-unproven");
+      yield* h.service.submit(h.input);
+      const claimed = yield* h.service.claimNext(h.projectId);
+      yield* h.service.attachWorker({ workItemId: claimed!.id, workerThreadId: h.workerId });
+      const commandId = CommandId.makeUnsafe("native-answer-unproven:send");
+      const messageId = MessageId.makeUnsafe("native-answer-unproven:message");
+      const turnId = TurnId.makeUnsafe("native-answer-unproven:turn");
+      const admission = yield* h.service.admitFollowup({
+        threadId: h.workerId,
+        commandId,
+        messageId,
+      });
+      const responseCreatedAt = new Date(Date.parse(admission!.admittedAt!) - 1_000).toISOString();
+      const completedAt = new Date(Date.parse(admission!.admittedAt!) + 1_000).toISOString();
+      yield* h.commandReceipts.insert({
+        commandId,
+        aggregateKind: "thread",
+        aggregateId: h.workerId,
+        acceptedAt: admission!.admittedAt!,
+        resultSequence: 1,
+        status: "accepted",
+        error: null,
+        fingerprintVersion: 1,
+        commandFingerprint: "c".repeat(64),
+      });
+      yield* h.messages.upsert({
+        threadId: h.workerId,
+        messageId,
+        turnId: null,
+        role: "user",
+        text: "Keep this admission reserved without native turn provenance.",
+        startsNewTurn: true,
+        isStreaming: false,
+        source: "native",
+        createdAt: responseCreatedAt,
+        updatedAt: responseCreatedAt,
+      });
+      h.setShells([
+        {
+          id: h.workerId,
+          archivedAt: null,
+          session: { status: "idle", activeTurnId: null, updatedAt: completedAt },
+          latestTurn: {
+            turnId,
+            state: "completed",
+            requestedAt: responseCreatedAt,
+            startedAt: responseCreatedAt,
+            completedAt,
+            assistantMessageId: null,
+          },
+        } as unknown as OrchestrationThreadShell,
+      ]);
+      let nativeTurn: ProjectionTurnById | null = null;
+      const service = makeHubWorkService({
+        ...h.dependencies,
+        projectionTurns: {
+          getByTurnId: () =>
+            Effect.succeed(nativeTurn === null ? Option.none() : Option.some(nativeTurn)),
+        },
+      });
+      const row = (overrides: Partial<ProjectionTurnById> = {}) =>
+        ({
+          threadId: h.workerId,
+          turnId,
+          pendingMessageId: messageId,
+          state: "completed",
+          requestedAt: responseCreatedAt,
+          startedAt: responseCreatedAt,
+          completedAt,
+          ...overrides,
+        }) as ProjectionTurnById;
+
+      for (const unproven of [
+        null,
+        row({ threadId: ThreadId.makeUnsafe("wrong-thread") }),
+        row({ turnId: TurnId.makeUnsafe("wrong-turn") }),
+        row({ pendingMessageId: MessageId.makeUnsafe("wrong-message") }),
+        row({ state: "running", completedAt: null }),
+        row({ completedAt: new Date(Date.parse(admission!.admittedAt!) - 1_000).toISOString() }),
+      ]) {
+        nativeTurn = unproven;
+        yield* service.reconcile(h.projectId);
+        const stillReserved = yield* h.repository.get(claimed!.id);
+        assert.equal(stillReserved?.state, "starting");
+        assert.equal(stillReserved?.slotHeld, true);
+        assert.equal(stillReserved?.admissionCommandId, commandId);
+        assert.equal(stillReserved?.admissionMessageId, messageId);
+      }
     }),
   );
 

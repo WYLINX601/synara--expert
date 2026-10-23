@@ -405,6 +405,16 @@ import { LibraryPanel } from "./chat/group/LibraryPanel";
 import { useHubComposerReferences } from "./chat/group/useHubComposerReferences";
 import { useHubWorkItems } from "./chat/project/useHubWorkItems";
 import { hubWorkItemsBySourceMessage } from "./chat/project/hubWorkItems";
+import { GraphBoard } from "~/features/hubCollaboration/GraphBoard";
+import { isHubPlanControlEvent } from "~/features/hubCollaboration/hubPlan.logic";
+import { HubPlanTimelineProvider } from "~/features/hubCollaboration/HubPlanTimelineContext";
+import { HubInputRequestReplyComposer } from "~/features/hubCollaboration/HubInputRequestReplyComposer";
+import {
+  guardDirectedReplyModeSend,
+  hubInputRequestDraftKey,
+  type HubInputRequestReplyTarget,
+} from "~/features/hubCollaboration/hubInputRequest.logic";
+import { useHubPlans } from "~/features/hubCollaboration/useHubPlans";
 import { useProjectAgentSummaries } from "./chat/project/useProjectAgentSummaries";
 import { useProjectAgentSummariesStore } from "./chat/project/useProjectAgentSummaries";
 import { GroupPausedBanner } from "./chat/group/GroupPausedBanner";
@@ -1992,6 +2002,48 @@ export default function ChatView({
   const activeGroupSummary = isCoordinatorConversation ? summaryFor(activeThread?.projectId) : null;
   const hubWorkItems = useHubWorkItems(
     isCoordinatorConversation ? (activeThread?.projectId ?? null) : null,
+  );
+  const activeHubSummary = activeHubProject
+    ? (summariesByProjectId.get(activeHubProject.id) ?? null)
+    : null;
+  const isHubWorkerConversation = Boolean(
+    activeThread &&
+    !isCoordinatorConversation &&
+    activeHubProject &&
+    activeHubSummary?.memberThreadIds?.includes(activeThread.id),
+  );
+  const hubPlanProjectId = isCoordinatorConversation
+    ? (activeThread?.projectId ?? null)
+    : isHubWorkerConversation
+      ? (activeHubProject?.id ?? null)
+      : null;
+  const hubPlans = useHubPlans({
+    hubId: hubPlanProjectId,
+    enabled: isCoordinatorConversation || isHubWorkerConversation,
+  });
+  const [hubInputReplyTarget, setHubInputReplyTarget] = useState<HubInputRequestReplyTarget | null>(
+    null,
+  );
+  useEffect(() => {
+    setHubInputReplyTarget((current) => {
+      if (!current || current.request.workerThreadId !== activeThreadId) return null;
+      return current;
+    });
+  }, [activeThreadId]);
+  const activeHubInputReplyTarget =
+    hubInputReplyTarget &&
+    ((isCoordinatorConversation && activeThread?.projectId === hubInputReplyTarget.hubId) ||
+      (isHubWorkerConversation &&
+        activeHubProject?.id === hubInputReplyTarget.hubId &&
+        activeThread?.id === hubInputReplyTarget.request.workerThreadId))
+      ? hubInputReplyTarget
+      : null;
+  const hubPlanOperationEvent = useMemo(
+    () =>
+      hubPlans.events
+        .filter((event) => event.planId === hubPlans.plan?.id && isHubPlanControlEvent(event))
+        .toSorted((left, right) => right.sequence - left.sequence)[0] ?? null,
+    [hubPlans.events, hubPlans.plan?.id],
   );
   const hubWorkItemsByMessageId = useMemo(
     () => hubWorkItemsBySourceMessage(hubWorkItems, activeThread?.id),
@@ -4644,6 +4696,7 @@ export default function ChatView({
     scheduleComposerFocus,
     removeQueuedComposerTurnFromDraft,
     lateComposerSendHandlersRef,
+    suspendAutoDispatch: activeHubInputReplyTarget !== null,
     insertQueuedComposerTurn,
     phase,
     localDispatch,
@@ -4924,16 +4977,20 @@ export default function ChatView({
   }, [claudeSwitchKey]);
   const onSend = useCallback(
     async (...args: Parameters<typeof submitComposerTurn>) => {
+      const sendOrdinaryTurn = guardDirectedReplyModeSend(
+        activeHubInputReplyTarget !== null,
+        submitComposerTurn,
+      );
       // Keep the choice captured for this send: later picker changes belong to the
       // next message. Automatic queue drains must not acknowledge a new draft choice.
       const switchKeyForSend = claudeSwitchKey;
-      const accepted = await submitComposerTurn(...args);
+      const accepted = await sendOrdinaryTurn(...args);
       if (accepted && switchKeyForSend !== null && args[2] === undefined) {
         setSubmittedClaudeSwitchKey(switchKeyForSend);
       }
       return accepted;
     },
-    [claudeSwitchKey, submitComposerTurn],
+    [activeHubInputReplyTarget, claudeSwitchKey, submitComposerTurn],
   );
   const showClaudeModelSwitchNote =
     claudeSwitchKey !== null &&
@@ -5223,6 +5280,7 @@ export default function ChatView({
   // empty composer, added under a draft (and left for the reader) otherwise.
   const onSendVisualChoice = useCallback(
     (message: string) => {
+      if (activeHubInputReplyTarget !== null) return;
       const draft = (
         composerEditorRef.current?.readSnapshot()?.value ?? promptRef.current
       ).trimEnd();
@@ -5240,7 +5298,14 @@ export default function ChatView({
       setComposerPromptValue(message);
       setComposerAutoSendRequest((current) => current + 1);
     },
-    [composerEditorRef, promptRef, setComposerPromptValue, threadId, isPreparingComposerImages],
+    [
+      activeHubInputReplyTarget,
+      composerEditorRef,
+      promptRef,
+      setComposerPromptValue,
+      threadId,
+      isPreparingComposerImages,
+    ],
   );
 
   // A denied task offers the same visible, one-request invocation as the slash menu.
@@ -6420,17 +6485,55 @@ export default function ChatView({
       data-chat-composer-slot=""
       data-empty-landing-composer-block={isCenteredEmptyLanding ? "true" : undefined}
     >
+      {isCoordinatorConversation && hubPlans.plan ? (
+        <GraphBoard
+          snapshot={hubPlans.plan}
+          connected={hubPlans.connected}
+          error={hubPlans.error}
+          onRefresh={() => hubPlans.refresh(true)}
+          onOpenThread={onNavigateToThread}
+          onOpenPlanActions={
+            hubPlanOperationEvent
+              ? () => {
+                  timelineControllerRef.current?.scrollToHubPlanEvent?.(
+                    hubPlanOperationEvent.planId,
+                    hubPlanOperationEvent.sequence,
+                  );
+                }
+              : undefined
+          }
+        />
+      ) : null}
       <form
         ref={composerFormRef}
-        onSubmit={onSend}
+        onSubmit={activeHubInputReplyTarget ? (event) => event.preventDefault() : onSend}
         className="relative z-10 w-full overflow-visible"
         data-chat-composer-form="true"
         data-chat-pane-scope={paneScopeId}
       >
         <ComposerColumnFrame>
+          {activeHubInputReplyTarget ? (
+            <HubInputRequestReplyComposer
+              key={hubInputRequestDraftKey(activeHubInputReplyTarget)}
+              target={activeHubInputReplyTarget}
+              plan={hubPlans.plan}
+              connected={hubPlans.connected}
+              onSubmit={(request, answers) =>
+                hubPlans.respondInputRequest(activeHubInputReplyTarget.event, request, answers)
+              }
+              onCancel={() => {
+                const completedTargetKey = hubInputRequestDraftKey(activeHubInputReplyTarget);
+                setHubInputReplyTarget((current) =>
+                  current && hubInputRequestDraftKey(current) === completedTargetKey
+                    ? null
+                    : current,
+                );
+              }}
+            />
+          ) : null}
           {/* A bare wrapper keeps the normal-flow panels' -mb-px seam onto the input shell
-                via margin collapse. */}
-          <div>
+              via margin collapse. */}
+          <div hidden={activeHubInputReplyTarget !== null}>
             {/* Activity above the input floats as capsules; only queued follow-ups keep
                 the stacked rail fused onto the input. */}
             <ComposerCapsuleRow>
@@ -6606,6 +6709,7 @@ export default function ChatView({
             {emptyLandingControls}
           </div>
           <div
+            hidden={activeHubInputReplyTarget !== null}
             className={cn(
               COMPOSER_INPUT_SHELL_CLASS_NAME,
               composerProviderState.composerFrameClassName,
@@ -7234,125 +7338,144 @@ export default function ChatView({
             {shouldRenderChatPaneContent && !isCenteredEmptyLanding ? (
               <div className="flex min-h-0 flex-1 flex-col">
                 <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-                  <ChatTranscriptPane
-                    activeThreadId={activeThread.id}
-                    activeTurnId={activeTurnIdForTranscript}
-                    agentActivityDetail={openAgentActivityDetail}
-                    hasMessages={timelineEntries.length > 0}
-                    isWorking={isWorking}
-                    workingLabel={resolveWorkingLabel({
-                      isSettlingTurnDispatch,
-                      isSendBusy,
-                      turnTakenOver,
-                      isConnecting,
-                      providerName: providerDisplayName,
-                    })}
-                    worktreeSetup={activeWorktreeSetup}
-                    worktreeSetupPendingAction={worktreeSetupPendingAction}
-                    onResolveWorktreeSetup={onResolveWorktreeSetup}
-                    activeTurnInProgress={activeTurnInProgress}
-                    subagentsRunning={hasRunningSubagents}
-                    subagentRun={subagentRunContext}
-                    runningSubagentRun={runningSubagentRun}
-                    subagentThread={subagentThread}
-                    collapseFinishedTurns={settings.collapseFinishedTurns}
-                    activeTurnStartedAt={activeWorkStartedAt}
-                    listRef={legendListRef}
-                    timelineControllerRef={timelineControllerRef}
-                    findHighlightStore={threadFindHighlightStore}
-                    pinnedMessageIds={pinnedMessageIds}
-                    canPinMessage={canPinMessage}
-                    onTogglePinMessage={handleTogglePinMessageGuarded}
-                    onForkFromMessage={handleForkFromMessage}
-                    goalAchievements={goalAchievements}
-                    enteringUserMessageIds={enteringUserMessageIds}
-                    tailAnchorMessageId={
-                      settings.anchorSentMessagesToTop &&
-                      tailAnchor !== null &&
-                      tailAnchor.threadId === activeThread.id
-                        ? tailAnchor.messageId
+                  <HubPlanTimelineProvider
+                    value={
+                      isCoordinatorConversation
+                        ? {
+                            snapshot: hubPlans.plan,
+                            events: hubPlans.events,
+                            connected: hubPlans.connected,
+                            onAction: hubPlans.performAction,
+                            onBeginInputReply: setHubInputReplyTarget,
+                            onRespondInput: hubPlans.respondInputRequest,
+                            onOpenThread: (threadId, inputRequestTarget) => {
+                              if (inputRequestTarget) setHubInputReplyTarget(inputRequestTarget);
+                              onNavigateToThread(threadId);
+                            },
+                          }
                         : null
                     }
-                    tailAnchorScrollInFlightRef={tailAnchorScrollInFlightRef}
-                    crossTaskOrigin={resolvedCrossTaskOrigin}
-                    forkSource={forkSource}
-                    isTemporaryThread={isThreadTemporary}
-                    isLocalDraft={isLocalDraftThread}
-                    isProjectImport={activeThread.isProjectImport === true}
-                    timelineEntries={timelineEntries}
-                    messageChangeSignal={timelineMessages}
-                    turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
-                    turnTimingByTurnId={turnTimingByTurnId}
-                    conversationOnly={isCoordinatorConversation}
-                    hubWorkItemsByMessageId={hubWorkItemsByMessageId}
-                    threadError={activeThread?.error ?? null}
-                    recoverableTurnId={
-                      activeLatestTurnState === "error" ? activeLatestTurnId : null
-                    }
-                    turnRecoveryDisabled={
-                      isSendBusy ||
-                      isConnecting ||
-                      isWorking ||
-                      pendingApprovals.length > 0 ||
-                      pendingUserInputs.length > 0
-                    }
-                    onContinueFailedTurn={onContinueFailedTurn}
-                    onChangeRecoveryModel={() => handleModelPickerOpenChange(true)}
-                    unblockingThread={unblockingActiveThread}
-                    onDismissThreadError={dismissActiveThreadError}
-                    onUnblockThread={unblockThread}
-                    onOpenTurnDiff={onOpenTurnDiff}
-                    onOpenThread={onNavigateToThread}
-                    onOpenAutomation={onOpenAutomation}
-                    onStopBackgroundTask={onStopBackgroundTask}
-                    computerControlEnabled={enableComputerControl}
-                    onEnableComputerControl={handleEnableComputerControlFromDenial}
-                    revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
-                    onRevertUserMessage={onRevertUserMessage}
-                    onUndoTurnFiles={onUndoTurnFiles}
-                    onEditUserMessage={onEditUserMessage}
-                    onRespondToAsyncUserInput={onRespondToAsyncUserInput}
-                    editableUserMessageId={editableUserMessageId}
-                    isRevertingCheckpoint={isRevertingCheckpoint}
-                    onExpandTimelineImage={onExpandTimelineImage}
-                    // End-follow belongs to the reader, including the gaps
-                    // between assistant text and subsequent tool/layout updates.
-                    followLiveOutput={!isUserScrollDetached}
-                    animateTailAnchorSlide={!hasStreamingAssistantText}
-                    onIsAtEndChange={onIsAtEndChange}
-                    onNavigate={onTranscriptNavigate}
-                    markdownCwd={threadWorkspaceCwd ?? undefined}
-                    resolvedTheme={resolvedTheme}
-                    chatFontSizePx={settings.chatFontSizePx}
-                    timestampFormat={timestampFormat}
-                    messageTrailAudioSource={settings.messageTrailAudioSource}
-                    messageTrailMicrophoneId={settings.messageTrailMicrophoneId}
-                    workspaceRoot={threadArtifactWorkspaceRoot ?? undefined}
-                    keybindings={keybindings}
-                    availableEditors={availableEditors}
-                    emptyStateContent={transcriptEmptyStateContent}
-                    emptyStateProjectName={activeProjectDisplayName}
-                    terminalWorkspaceTerminalTabActive={terminalWorkspaceTerminalTabActive}
-                    onMessagesScroll={onMessagesScroll}
-                    onMessagesClickCapture={onMessagesClickCapture}
-                    onMessagesMouseUp={onMessagesMouseUp}
-                    onMessagesWheel={onMessagesWheel}
-                    onEmbeddedScrollIntent={onEmbeddedScrollIntent}
-                    onSendVisualChoice={onSendVisualChoice}
-                    onMessagesPointerDown={onMessagesPointerDown}
-                    onMessagesPointerUp={onMessagesPointerUp}
-                    onMessagesPointerCancel={onMessagesPointerCancel}
-                    onMessagesTouchStart={onMessagesTouchStart}
-                    onMessagesTouchMove={onMessagesTouchMove}
-                    onMessagesTouchEnd={onMessagesTouchEnd}
-                    onOpenAgentActivity={setOpenAgentActivityId}
-                    onCloseAgentActivityDetail={closeAgentActivityDetail}
-                    scrollButtonVisible={showScrollToBottom}
-                    onScrollToBottom={onScrollToBottom}
-                    contentInsetRightPx={contentInsetRightPx}
-                    contentInsetBottomPx={composerTranscriptInsetPx}
-                    contentInsetBottomClearancePx={composerOverlayBottomClearancePx}
-                  />
+                  >
+                    <ChatTranscriptPane
+                      activeThreadId={activeThread.id}
+                      activeTurnId={activeTurnIdForTranscript}
+                      agentActivityDetail={openAgentActivityDetail}
+                      hasMessages={timelineEntries.length > 0}
+                      isWorking={isWorking}
+                      workingLabel={resolveWorkingLabel({
+                        isSettlingTurnDispatch,
+                        isSendBusy,
+                        turnTakenOver,
+                        isConnecting,
+                        providerName: providerDisplayName,
+                      })}
+                      worktreeSetup={activeWorktreeSetup}
+                      worktreeSetupPendingAction={worktreeSetupPendingAction}
+                      onResolveWorktreeSetup={onResolveWorktreeSetup}
+                      activeTurnInProgress={activeTurnInProgress}
+                      subagentsRunning={hasRunningSubagents}
+                      subagentRun={subagentRunContext}
+                      runningSubagentRun={runningSubagentRun}
+                      subagentThread={subagentThread}
+                      collapseFinishedTurns={settings.collapseFinishedTurns}
+                      activeTurnStartedAt={activeWorkStartedAt}
+                      listRef={legendListRef}
+                      timelineControllerRef={timelineControllerRef}
+                      findHighlightStore={threadFindHighlightStore}
+                      pinnedMessageIds={pinnedMessageIds}
+                      canPinMessage={canPinMessage}
+                      onTogglePinMessage={handleTogglePinMessageGuarded}
+                      onForkFromMessage={handleForkFromMessage}
+                      goalAchievements={goalAchievements}
+                      enteringUserMessageIds={enteringUserMessageIds}
+                      tailAnchorMessageId={
+                        settings.anchorSentMessagesToTop &&
+                        tailAnchor !== null &&
+                        tailAnchor.threadId === activeThread.id
+                          ? tailAnchor.messageId
+                          : null
+                      }
+                      tailAnchorScrollInFlightRef={tailAnchorScrollInFlightRef}
+                      crossTaskOrigin={resolvedCrossTaskOrigin}
+                      forkSource={forkSource}
+                      isTemporaryThread={isThreadTemporary}
+                      isLocalDraft={isLocalDraftThread}
+                      isProjectImport={activeThread.isProjectImport === true}
+                      timelineEntries={timelineEntries}
+                      messageChangeSignal={timelineMessages}
+                      turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
+                      turnTimingByTurnId={turnTimingByTurnId}
+                      conversationOnly={isCoordinatorConversation}
+                      hubWorkItemsByMessageId={hubWorkItemsByMessageId}
+                      threadError={activeThread?.error ?? null}
+                      recoverableTurnId={
+                        activeLatestTurnState === "error" ? activeLatestTurnId : null
+                      }
+                      turnRecoveryDisabled={
+                        isSendBusy ||
+                        isConnecting ||
+                        isWorking ||
+                        pendingApprovals.length > 0 ||
+                        pendingUserInputs.length > 0
+                      }
+                      onContinueFailedTurn={onContinueFailedTurn}
+                      onChangeRecoveryModel={() => handleModelPickerOpenChange(true)}
+                      unblockingThread={unblockingActiveThread}
+                      onDismissThreadError={dismissActiveThreadError}
+                      onUnblockThread={unblockThread}
+                      onOpenTurnDiff={onOpenTurnDiff}
+                      onOpenThread={onNavigateToThread}
+                      onOpenAutomation={onOpenAutomation}
+                      onStopBackgroundTask={onStopBackgroundTask}
+                      computerControlEnabled={enableComputerControl}
+                      onEnableComputerControl={handleEnableComputerControlFromDenial}
+                      revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
+                      onRevertUserMessage={onRevertUserMessage}
+                      onUndoTurnFiles={onUndoTurnFiles}
+                      onEditUserMessage={onEditUserMessage}
+                      onRespondToAsyncUserInput={onRespondToAsyncUserInput}
+                      editableUserMessageId={editableUserMessageId}
+                      isRevertingCheckpoint={isRevertingCheckpoint}
+                      onExpandTimelineImage={onExpandTimelineImage}
+                      // End-follow belongs to the reader, including the gaps
+                      // between assistant text and subsequent tool/layout updates.
+                      followLiveOutput={!isUserScrollDetached}
+                      animateTailAnchorSlide={!hasStreamingAssistantText}
+                      onIsAtEndChange={onIsAtEndChange}
+                      onNavigate={onTranscriptNavigate}
+                      markdownCwd={threadWorkspaceCwd ?? undefined}
+                      resolvedTheme={resolvedTheme}
+                      chatFontSizePx={settings.chatFontSizePx}
+                      timestampFormat={timestampFormat}
+                      messageTrailAudioSource={settings.messageTrailAudioSource}
+                      messageTrailMicrophoneId={settings.messageTrailMicrophoneId}
+                      workspaceRoot={threadArtifactWorkspaceRoot ?? undefined}
+                      keybindings={keybindings}
+                      availableEditors={availableEditors}
+                      emptyStateContent={transcriptEmptyStateContent}
+                      emptyStateProjectName={activeProjectDisplayName}
+                      terminalWorkspaceTerminalTabActive={terminalWorkspaceTerminalTabActive}
+                      onMessagesScroll={onMessagesScroll}
+                      onMessagesClickCapture={onMessagesClickCapture}
+                      onMessagesMouseUp={onMessagesMouseUp}
+                      onMessagesWheel={onMessagesWheel}
+                      onEmbeddedScrollIntent={onEmbeddedScrollIntent}
+                      onSendVisualChoice={onSendVisualChoice}
+                      onMessagesPointerDown={onMessagesPointerDown}
+                      onMessagesPointerUp={onMessagesPointerUp}
+                      onMessagesPointerCancel={onMessagesPointerCancel}
+                      onMessagesTouchStart={onMessagesTouchStart}
+                      onMessagesTouchMove={onMessagesTouchMove}
+                      onMessagesTouchEnd={onMessagesTouchEnd}
+                      onOpenAgentActivity={setOpenAgentActivityId}
+                      onCloseAgentActivityDetail={closeAgentActivityDetail}
+                      scrollButtonVisible={showScrollToBottom}
+                      onScrollToBottom={onScrollToBottom}
+                      contentInsetRightPx={contentInsetRightPx}
+                      contentInsetBottomPx={composerTranscriptInsetPx}
+                      contentInsetBottomClearancePx={composerOverlayBottomClearancePx}
+                    />
+                  </HubPlanTimelineProvider>
                   {/* Suggestions reserve clearance for both sets of controls.
                       Without them, the paused banner needs its own minimum gap
                       above the composer floating at `bottom-full`. */}

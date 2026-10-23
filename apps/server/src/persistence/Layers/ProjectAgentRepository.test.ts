@@ -32,6 +32,42 @@ const limits = {
 };
 
 layer("ProjectAgentRepository", (it) => {
+  it.effect(
+    "monitor settlement preserves concurrently accepted results even at the same timestamp",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const repository = yield* ProjectAgentRepository;
+        const threadId = ThreadId.makeUnsafe("thread-sql-monitor-result-race");
+        yield* sql`
+        INSERT INTO project_agent_managed_workers
+          (project_id, thread_id, batch_id, request_id, title, created_at, updated_at)
+        VALUES (${projectId}, ${threadId}, 'batch-race', 'work-race', 'Monitor race', ${now}, ${now})
+      `;
+        const stale = Option.getOrThrow(yield* repository.findManagedWorkerByThread(threadId));
+        // An accepted plan result commits after the monitor read, within the same millisecond.
+        yield* sql`UPDATE project_agent_managed_workers
+        SET result_summary = 'Accepted candidate', result_at = ${now}
+        WHERE thread_id = ${threadId}`;
+        const update = { ...stale, settledAt: now, settleOutcome: "completed" as const };
+        const saved = yield* repository.saveManagedWorkerMonitor({
+          worker: update,
+          expectedUpdatedAt: now,
+          preserveResultEvidence: true,
+        });
+        assert.isTrue(saved.applied);
+        const accepted = Option.getOrThrow(yield* repository.findManagedWorkerByThread(threadId));
+        assert.equal(accepted.resultSummary, "Accepted candidate");
+        assert.equal(accepted.resultAt, now);
+        assert.equal(accepted.settleOutcome, "completed");
+        // Recovery callers that intentionally clear evidence retain the previous default behavior.
+        yield* repository.saveManagedWorkerMonitor({ worker: update, expectedUpdatedAt: now });
+        const cleared = Option.getOrThrow(yield* repository.findManagedWorkerByThread(threadId));
+        assert.isNull(cleared.resultSummary);
+        assert.isNull(cleared.resultAt);
+      }),
+  );
+
   it.effect("CAS config writes reject stale revisions", () =>
     Effect.gen(function* () {
       const repository = yield* ProjectAgentRepository;
@@ -112,6 +148,225 @@ layer("ProjectAgentRepository", (it) => {
       yield* repository.saveConfig({ ...config, revision: 3, expertIds: [] }, 2);
       const cleared = yield* repository.getConfig(rosterProjectId);
       assert.deepStrictEqual(Option.isSome(cleared) ? cleared.value.expertIds : null, []);
+    }),
+  );
+
+  it.effect("keeps Hub collaboration history atomic with config and roster writes", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectAgentRepository;
+      const collaborationProjectId = ProjectId.makeUnsafe("project-hub-collaboration-store");
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES (
+          ${collaborationProjectId}, 'Hub', '/tmp/hub-collaboration', '[]', ${now}, ${now}
+        )
+      `;
+      const baseConfig = {
+        projectId: collaborationProjectId,
+        coordinatorThreadId: ThreadId.makeUnsafe("thread-hub-collaboration-store"),
+        coordinatorName: "Hub Coordinator",
+        coordinatorModelSelection: { provider: "codex" as const, model: "gpt-5-codex" },
+        limits,
+        captureEnabled: true,
+        enabled: true,
+        automationId: null,
+        createdAt: now,
+        updatedAt: now,
+        disabledAt: null,
+      };
+      const settings = {
+        schemaVersion: 1 as const,
+        mode: "expert-team" as const,
+        coordinatorInstructions: "  Assign work by specialty  ",
+      };
+      const created = yield* repository.saveConfig(
+        {
+          ...baseConfig,
+          revision: 1,
+          expertIds: ["reviewer", "architect", "reviewer"],
+          collaboration: settings,
+        },
+        null,
+      );
+      assert.deepStrictEqual(created.collaboration, {
+        schemaVersion: 1,
+        mode: "expert-team",
+        coordinatorInstructions: "Assign work by specialty",
+      });
+
+      const firstHistory = yield* sql<{
+        readonly revision: number;
+        readonly settingsJson: string;
+        readonly expertIdsJson: string;
+      }>`
+        SELECT
+          revision,
+          settings_json AS "settingsJson",
+          expert_ids_json AS "expertIdsJson"
+        FROM hub_collaboration_config_revisions
+        WHERE hub_id = ${collaborationProjectId}
+      `;
+      assert.deepStrictEqual(
+        firstHistory.map(({ revision, settingsJson, expertIdsJson }) => ({
+          revision,
+          settings: JSON.parse(settingsJson),
+          expertIds: JSON.parse(expertIdsJson),
+        })),
+        [
+          {
+            revision: 1,
+            settings: {
+              schemaVersion: 1,
+              mode: "expert-team",
+              coordinatorInstructions: "Assign work by specialty",
+            },
+            expertIds: ["architect", "reviewer"],
+          },
+        ],
+      );
+
+      yield* sql`
+        CREATE TRIGGER reject_hub_collaboration_revision
+        BEFORE INSERT ON hub_collaboration_config_revisions
+        WHEN NEW.revision = 2
+        BEGIN SELECT RAISE(ABORT, 'rejected collaboration history'); END
+      `;
+      const rejectedUpdate = yield* Effect.exit(
+        repository.saveConfig({ ...baseConfig, revision: 2, expertIds: ["writer"] }, 1),
+      );
+      assert.isTrue(Exit.isFailure(rejectedUpdate));
+      const rolledBackConfig = yield* repository.getConfig(collaborationProjectId);
+      assert.isTrue(Option.isSome(rolledBackConfig));
+      if (Option.isSome(rolledBackConfig)) {
+        assert.strictEqual(rolledBackConfig.value.revision, 1);
+        assert.deepStrictEqual(rolledBackConfig.value.expertIds, ["architect", "reviewer"]);
+        assert.deepStrictEqual(rolledBackConfig.value.collaboration, created.collaboration);
+      }
+      const rolledBackSidecar = yield* sql<{ readonly revision: number; readonly count: number }>`
+        SELECT
+          config.revision,
+          (SELECT COUNT(*) FROM hub_collaboration_config_revisions WHERE hub_id = config.hub_id) AS count
+        FROM hub_collaboration_configs AS config
+        WHERE config.hub_id = ${collaborationProjectId}
+      `;
+      assert.deepStrictEqual(rolledBackSidecar, [{ revision: 1, count: 1 }]);
+      const rolledBackRoster = yield* sql<{ readonly expertId: string }>`
+        SELECT expert_id AS "expertId"
+        FROM hub_expert_participants
+        WHERE hub_id = ${collaborationProjectId}
+        ORDER BY expert_id
+      `;
+      assert.deepStrictEqual(
+        rolledBackRoster.map(({ expertId }) => expertId),
+        ["architect", "reviewer"],
+      );
+
+      yield* sql`DROP TRIGGER reject_hub_collaboration_revision`;
+      const updated = yield* repository.saveConfig(
+        { ...baseConfig, revision: 2, expertIds: ["writer"] },
+        1,
+      );
+      assert.deepStrictEqual(updated.collaboration, created.collaboration);
+      const loaded = yield* repository.getConfig(collaborationProjectId);
+      assert.isTrue(Option.isSome(loaded));
+      if (Option.isSome(loaded)) {
+        assert.strictEqual(loaded.value.revision, 2);
+        assert.deepStrictEqual(loaded.value.expertIds, ["writer"]);
+        assert.deepStrictEqual(loaded.value.collaboration, created.collaboration);
+      }
+      const history = yield* sql<{
+        readonly revision: number;
+        readonly expertIdsJson: string;
+        readonly requestId: string;
+      }>`
+        SELECT
+          revision,
+          expert_ids_json AS "expertIdsJson",
+          request_id AS "requestId"
+        FROM hub_collaboration_config_revisions
+        WHERE hub_id = ${collaborationProjectId}
+        ORDER BY revision
+      `;
+      assert.deepStrictEqual(
+        history.map(({ revision, expertIdsJson, requestId }) => ({
+          revision,
+          expertIds: JSON.parse(expertIdsJson),
+          requestId,
+        })),
+        [
+          {
+            revision: 1,
+            expertIds: ["architect", "reviewer"],
+            requestId: `hub-settings:${collaborationProjectId}:1`,
+          },
+          {
+            revision: 2,
+            expertIds: ["writer"],
+            requestId: `hub-settings:${collaborationProjectId}:2`,
+          },
+        ],
+      );
+
+      const staleNativeCas = yield* Effect.exit(
+        repository.saveConfig(
+          {
+            ...baseConfig,
+            revision: 3,
+            expertIds: ["stale"],
+            collaboration: { schemaVersion: 1, mode: "standard" },
+          },
+          1,
+        ),
+      );
+      assert.isTrue(Exit.isFailure(staleNativeCas));
+      const afterStaleCas = yield* repository.getConfig(collaborationProjectId);
+      assert.isTrue(Option.isSome(afterStaleCas));
+      if (Option.isSome(afterStaleCas)) {
+        assert.strictEqual(afterStaleCas.value.revision, 2);
+        assert.deepStrictEqual(afterStaleCas.value.expertIds, ["writer"]);
+        assert.deepStrictEqual(afterStaleCas.value.collaboration, created.collaboration);
+      }
+      const afterStaleHistory = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count
+        FROM hub_collaboration_config_revisions
+        WHERE hub_id = ${collaborationProjectId}
+      `;
+      assert.strictEqual(afterStaleHistory[0]?.count, 2);
+    }),
+  );
+
+  it.effect("keeps legacy configs without collaboration settings unchanged", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectAgentRepository;
+      const legacyProjectId = ProjectId.makeUnsafe("project-hub-collaboration-legacy");
+      const config = {
+        projectId: legacyProjectId,
+        coordinatorThreadId: ThreadId.makeUnsafe("thread-hub-collaboration-legacy"),
+        coordinatorName: "Legacy Coordinator",
+        coordinatorModelSelection: { provider: "codex" as const, model: "gpt-5-codex" },
+        limits,
+        captureEnabled: true,
+        enabled: true,
+        automationId: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+        disabledAt: null,
+      };
+      const saved = yield* repository.saveConfig(config, null);
+      assert.isFalse(Object.hasOwn(saved, "collaboration"));
+      const loaded = yield* repository.getConfig(legacyProjectId);
+      assert.isTrue(Option.isSome(loaded));
+      if (Option.isSome(loaded)) assert.isFalse(Object.hasOwn(loaded.value, "collaboration"));
+      const rows = yield* sql<{ readonly configCount: number; readonly revisionCount: number }>`
+        SELECT
+          (SELECT COUNT(*) FROM hub_collaboration_configs WHERE hub_id = ${legacyProjectId}) AS "configCount",
+          (SELECT COUNT(*) FROM hub_collaboration_config_revisions WHERE hub_id = ${legacyProjectId}) AS "revisionCount"
+      `;
+      assert.deepStrictEqual(rows, [{ configCount: 0, revisionCount: 0 }]);
     }),
   );
 
@@ -302,6 +557,71 @@ layer("ProjectAgentRepository", (it) => {
         projectId: ProjectId.makeUnsafe("project-other"),
       });
       assert.equal(Option.isNone(other), true);
+    }),
+  );
+
+  it.effect("pauses and resumes a goal after a zero-row write without weakening revision CAS", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const repository = yield* ProjectAgentRepository;
+      const goalProjectId = ProjectId.makeUnsafe("project-goal-zero-row-pause");
+      yield* repository.saveConfig(
+        {
+          projectId: goalProjectId,
+          coordinatorThreadId: ThreadId.makeUnsafe("thread-goal-zero-row-pause"),
+          coordinatorName: "Goal control test",
+          coordinatorModelSelection: { provider: "codex", model: "test-model" },
+          limits,
+          captureEnabled: true,
+          enabled: true,
+          automationId: null,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+          disabledAt: null,
+        },
+        null,
+      );
+      const goal = {
+        id: ProjectGoalId.makeUnsafe("goal-zero-row-pause"),
+        projectId: goalProjectId,
+        objective: "Keep native plan controls atomic",
+        authorizationSource: "user" as const,
+        scopeVersion: 1,
+        acceptanceCriteria: null,
+        limits,
+        status: "active" as const,
+        continuationCount: 0,
+        workerCreationCount: 0,
+        authorizedAt: now,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      };
+      yield* repository.saveGoal(goal, null);
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          // Plan commands may perform a legitimate zero-row cleanup first.
+          yield* sql`UPDATE project_agent_goals SET status = 'active' WHERE goal_id = 'missing'`;
+          yield* repository.saveGoal({ ...goal, status: "paused", revision: 2 }, 1);
+        }),
+      );
+      const paused = Option.getOrThrow(yield* repository.getGoal(goal.id));
+      assert.equal(paused.status, "paused");
+      assert.equal(paused.revision, 2);
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* sql`UPDATE project_agent_goals SET status = 'active' WHERE goal_id = 'missing'`;
+          yield* repository.saveGoal({ ...paused, status: "active", revision: 3 }, 2);
+        }),
+      );
+      const stale = yield* Effect.exit(
+        sql.withTransaction(repository.saveGoal({ ...goal, status: "paused", revision: 4 }, 1)),
+      );
+      assert.isTrue(Exit.isFailure(stale));
+      const resumed = Option.getOrThrow(yield* repository.getGoal(goal.id));
+      assert.equal(resumed.status, "active");
+      assert.equal(resumed.revision, 3);
     }),
   );
 

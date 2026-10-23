@@ -24,7 +24,7 @@ import {
   resolveProviderAttachmentPath,
   resolveProviderDispatchAttachments,
 } from "../provider/providerAttachmentPaths.ts";
-import { cloneDelegatedAttachments } from "./delegatedAttachments.ts";
+import { cloneDelegatedAttachments, delegatedAttachmentId } from "./delegatedAttachments.ts";
 
 const now = "2026-10-02T18:00:00.000Z";
 const sourceThreadId = ThreadId.makeUnsafe("source-thread");
@@ -121,6 +121,17 @@ it.effect(
         const first = yield* cloneDelegatedAttachments(input);
         assert.lengthOf(first, 1);
         assert.notEqual(first[0]!.id, source.attachments[0]!.id);
+        assert.equal(
+          first[0]!.id,
+          delegatedAttachmentId({
+            dispatchKey: input.dispatchKey,
+            targetThreadId,
+            targetMessageId,
+            sourceThreadId,
+            sourceMessageId,
+            sourceAttachmentId: source.attachments[0]!.id,
+          }),
+        );
         assert.deepEqual(yield* cloneDelegatedAttachments(input), first);
         const claim = yield* store.repository.claimForAcceptedTurn({
           attachmentIds: first.map((attachment) => attachment.id),

@@ -12,7 +12,7 @@ import type {
   SpaceId,
 } from "@synara/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, type ComponentType } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentType } from "react";
 
 import { createCentralIconComponent } from "~/lib/central-icons";
 import { FolderOpenIcon } from "~/lib/icons";
@@ -59,6 +59,8 @@ import { useWorkspacePathsStore } from "~/workspacePathsStore";
 import { useVoidSpaceStore } from "~/voidSpaceStore";
 import { toastManager } from "~/components/ui/toast";
 import { EXPERTS_QUERY_KEY } from "~/components/settings/expertSettingsQueries";
+import { useNativeApiServerCapabilitySnapshot } from "~/hooks/useNativeApiServerCapability";
+import { HubCollaborationSection } from "~/features/hubCollaboration/HubCollaborationSection";
 
 import { GroupEnvironmentSection } from "./GroupEnvironmentSection";
 import { GroupExpertsSection } from "./GroupExpertsSection";
@@ -127,6 +129,14 @@ export function GroupSettingsDialog(props: {
   readonly onSaved?: ((overview: ProjectAgentOverview) => void) | undefined;
 }) {
   const queryClient = useQueryClient();
+  const { generation: connectionGeneration } = useNativeApiServerCapabilitySnapshot(
+    "hubCollaboration.team.presets",
+  );
+  const saveScopeRef = useRef({ projectId: props.projectId, generation: connectionGeneration });
+  useLayoutEffect(() => {
+    saveScopeRef.current = { projectId: props.projectId, generation: connectionGeneration };
+  }, [connectionGeneration, props.projectId]);
+  const baselineScopeRef = useRef({ projectId: props.projectId, generation: connectionGeneration });
   const expertsQuery = useQuery<ReadonlyArray<ExpertDefinition>>({
     queryKey: EXPERTS_QUERY_KEY,
     queryFn: () => ensureExpertClient().listExperts(),
@@ -179,14 +189,17 @@ export function GroupSettingsDialog(props: {
     requestId: string;
   } | null>(null);
   const openRef = useRef(false);
+  const openedProjectIdRef = useRef(props.projectId);
   const seededNameRef = useRef(props.projectName);
 
   const config = agent.overview?.config ?? null;
 
   useEffect(() => {
-    if (props.open && !openRef.current) {
+    if (props.open && (!openRef.current || openedProjectIdRef.current !== props.projectId)) {
       openRef.current = true;
+      openedProjectIdRef.current = props.projectId;
       seededNameRef.current = props.projectName;
+      baselineScopeRef.current = { projectId: props.projectId, generation: connectionGeneration };
       failedAttemptRef.current = null;
       setSection(props.initialSection ?? "general");
       setDraft(null);
@@ -198,8 +211,9 @@ export function GroupSettingsDialog(props: {
     }
     if (!props.open) {
       openRef.current = false;
+      openedProjectIdRef.current = props.projectId;
     }
-  }, [props.open, props.initialSection, props.projectName]);
+  }, [connectionGeneration, props.open, props.initialSection, props.projectId, props.projectName]);
 
   useEffect(() => {
     if (pendingSpaceId !== undefined && pendingSpaceId === projectSpaceId) {
@@ -237,7 +251,13 @@ export function GroupSettingsDialog(props: {
   };
 
   useEffect(() => {
-    if (!props.open || draft !== null || agent.overview === null) return;
+    if (
+      !props.open ||
+      draft !== null ||
+      agent.overview === null ||
+      agent.overview.projectId !== props.projectId
+    )
+      return;
     const base = buildGroupSettingsBaseline({
       config,
       projectName: props.projectName,
@@ -245,7 +265,17 @@ export function GroupSettingsDialog(props: {
     });
     setBaseline(base);
     setDraft(base.draft);
-  }, [agent.overview, config, draft, props.defaultModelSelection, props.open, props.projectName]);
+    baselineScopeRef.current = { projectId: props.projectId, generation: connectionGeneration };
+  }, [
+    agent.overview,
+    config,
+    connectionGeneration,
+    draft,
+    props.defaultModelSelection,
+    props.open,
+    props.projectId,
+    props.projectName,
+  ]);
 
   // The project can be renamed while the dialog is open; re-seed the name into
   // baseline, and into the draft too when the user has not edited it.
@@ -277,7 +307,18 @@ export function GroupSettingsDialog(props: {
 
   const handleSave = async () => {
     if (!draft || !baseline || saving) return;
+    const saveScope = { projectId: props.projectId, generation: connectionGeneration };
+    const stillOwnsSave = () =>
+      saveScopeRef.current.projectId === saveScope.projectId &&
+      saveScopeRef.current.generation === saveScope.generation;
     const api = readNativeApi();
+    if (
+      baselineScopeRef.current.projectId !== saveScope.projectId ||
+      baselineScopeRef.current.generation !== saveScope.generation
+    ) {
+      setSaveError("服务连接或 Hub 已变化。关闭并重新打开设置后再保存。");
+      return;
+    }
     if (!api?.projectAgent) {
       setSaveError("Project coordinator is unavailable.");
       return;
@@ -322,10 +363,18 @@ export function GroupSettingsDialog(props: {
           contextSource: true,
         });
       } catch (error) {
+        if (!stillOwnsSave()) return;
         setSaving(false);
         setSaveError(
           error instanceof Error ? error.message : "Could not link the source project. Try again.",
         );
+        return;
+      }
+      if (!stillOwnsSave()) {
+        if (saveScopeRef.current.projectId === saveScope.projectId) {
+          setSaving(false);
+          setSaveError("服务连接已变化，当前草稿仍保留，请重新保存。");
+        }
         return;
       }
       useProjectAgentSummariesStore.getState().applyOverview(linkedOverview);
@@ -396,6 +445,12 @@ export function GroupSettingsDialog(props: {
       configure: (payload) => api.projectAgent.configure(payload),
     });
     setSaving(false);
+    if (!stillOwnsSave()) {
+      if (saveScopeRef.current.projectId === saveScope.projectId) {
+        setSaveError("服务连接已变化，当前草稿仍保留，请重新保存。");
+      }
+      return;
+    }
     if (!result.ok) {
       failedAttemptRef.current = { requestId, fingerprint };
       setSaveError(result.error);
@@ -574,21 +629,39 @@ export function GroupSettingsDialog(props: {
                   ) : null}
                 </>
               ) : section === "experts" ? (
-                <GroupExpertsSection
-                  expertIds={draft.expertIds}
-                  experts={expertsQuery.data}
-                  loading={expertsQuery.isPending || expertsQuery.isFetching}
-                  error={
-                    expertsQuery.error instanceof Error
-                      ? expertsQuery.error.message
-                      : expertsQuery.error
-                        ? "请重试。"
-                        : null
-                  }
-                  onChange={(expertIds) =>
-                    setDraft((current) => (current ? { ...current, expertIds } : current))
-                  }
-                />
+                <div className="space-y-6">
+                  <HubCollaborationSection
+                    active={props.open && section === "experts"}
+                    hubName={draft.name}
+                    purpose={draft.goal}
+                    collaboration={draft.collaboration}
+                    expertIds={draft.expertIds}
+                    onChange={(patch) =>
+                      setDraft((current) => (current ? { ...current, ...patch } : current))
+                    }
+                  />
+                  <GroupExpertsSection
+                    expertIds={draft.expertIds}
+                    experts={expertsQuery.data}
+                    loading={expertsQuery.isPending || expertsQuery.isFetching}
+                    error={
+                      expertsQuery.error instanceof Error
+                        ? expertsQuery.error.message
+                        : expertsQuery.error
+                          ? "请重试。"
+                          : null
+                    }
+                    showOrdinaryFallback={(draft.collaboration?.mode ?? "standard") === "standard"}
+                    onChange={(expertIds) =>
+                      setDraft((current) => (current ? { ...current, expertIds } : current))
+                    }
+                  />
+                  {draft.collaboration?.mode === "expert-team" && draft.expertIds.length === 0 ? (
+                    <p className="text-ui-sm text-destructive" role="status">
+                      专家团模式至少选择一位专家。
+                    </p>
+                  ) : null}
+                </div>
               ) : section === "memory" ? (
                 <GroupMemorySection
                   configured={agent.overview?.configured === true}

@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { HubCollaborationSettings } from "./hubCollaboration";
 
 import {
   AutomationId,
@@ -91,6 +92,7 @@ export const ProjectAgentConfig = Schema.Struct({
   linkedProjectIds: Schema.optional(Schema.Array(ProjectId)),
   /** Selected expert roster; omitted on internal lifecycle writes to preserve it. */
   expertIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  collaboration: Schema.optional(HubCollaborationSettings),
   /** Explicit Context source; absent on hubs created before Hub × Expert V1. */
   sourceProjectId: Schema.optional(ProjectId),
   libraryPath: Schema.optional(TrimmedNonEmptyString),
@@ -552,6 +554,7 @@ export const ProjectAgentConfigureInput = Schema.Struct({
   autoMemoryEnabled: Schema.optional(Schema.Boolean),
   /** Omitted means preserve the stored roster; an empty list clears it. */
   expertIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  collaboration: Schema.optional(HubCollaborationSettings),
   userDisplayName: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(120))),
   libraryPath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   libraryRemoteUrl: Schema.optional(Schema.NullOr(LibraryRemoteUrl)),

@@ -19,6 +19,7 @@ export default mergeConfig(
     test: {
       include: [
         "src/components/**/*.browser.tsx",
+        "src/features/**/*.browser.tsx",
         "src/hooks/**/*.browser.ts",
         "src/hooks/**/*.browser.tsx",
         "src/lib/**/*.browser.ts",

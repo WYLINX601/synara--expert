@@ -142,6 +142,9 @@ it("keeps legacy Context 111 byte-for-byte frozen and uses its checksum for cont
       [4, "HubExpertDeliverables"],
       [5, "HubExpertParticipants"],
       [6, "ExpertSkillApplication"],
+      [7, "HubCollaborationPresetsAndSettings"],
+      [8, "HubPlanStateAndOutbox"],
+      [9, "HubPlanDirectedInput"],
     ],
   );
 });
@@ -189,6 +192,9 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
             ["expert", 4],
             ["expert", 5],
             ["expert", 6],
+            ["expert", 7],
+            ["expert", 8],
+            ["expert", 9],
           ],
         );
         assert.deepStrictEqual(yield* readPreservedData, before);
@@ -209,6 +215,9 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
             ["expert", 4],
             ["expert", 5],
             ["expert", 6],
+            ["expert", 7],
+            ["expert", 8],
+            ["expert", 9],
           ],
         );
         const repeated = yield* finishUpgrade;
@@ -227,7 +236,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
         assert.strictEqual(settled.kind, "ready");
         if (settled.kind === "ready") {
           assert.deepStrictEqual(settled.workbench.modules, {
-            expert: { sourceVersion: 6, targetVersion: 6 },
+            expert: { sourceVersion: 9, targetVersion: 9 },
             context: { sourceVersion: 1, targetVersion: 1 },
           });
           assert.isFalse(settled.requiresBackup);
@@ -253,6 +262,9 @@ it.effect(
           ["expert", 4],
           ["expert", 5],
           ["expert", 6],
+          ["expert", 7],
+          ["expert", 8],
+          ["expert", 9],
           ["context", 1],
         ],
       );
@@ -288,6 +300,9 @@ for (const through of [109, 110] as const) {
               ["expert", 4],
               ["expert", 5],
               ["expert", 6],
+              ["expert", 7],
+              ["expert", 8],
+              ["expert", 9],
               ["context", 1],
             ]
           : [
@@ -295,6 +310,9 @@ for (const through of [109, 110] as const) {
               ["expert", 4],
               ["expert", 5],
               ["expert", 6],
+              ["expert", 7],
+              ["expert", 8],
+              ["expert", 9],
               ["context", 1],
             ],
       );

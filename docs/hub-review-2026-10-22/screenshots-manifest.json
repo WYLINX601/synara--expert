@@ -1,0 +1,224 @@
+[
+  {
+    "file": "screenshots/01-prototype-create.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 42189
+  },
+  {
+    "file": "screenshots/01b-prototype-empty.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 46352
+  },
+  {
+    "file": "screenshots/02-prototype-teams.jpg",
+    "width": 580,
+    "height": 823,
+    "bytes": 30289
+  },
+  {
+    "file": "screenshots/02b-prototype-team-editor.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 47589
+  },
+  {
+    "file": "screenshots/03-prototype-plan.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 53640
+  },
+  {
+    "file": "screenshots/03b-prototype-plan-desktop.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 47347
+  },
+  {
+    "file": "screenshots/04-prototype-cocreate.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 54291
+  },
+  {
+    "file": "screenshots/05-prototype-thread.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 41783
+  },
+  {
+    "file": "screenshots/06-prototype-gate.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 59944
+  },
+  {
+    "file": "screenshots/06b-prototype-return.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 59744
+  },
+  {
+    "file": "screenshots/06c-prototype-return-state.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 64581
+  },
+  {
+    "file": "screenshots/07-prototype-artifact.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 75796
+  },
+  {
+    "file": "screenshots/08-current-expert-editor.jpg",
+    "width": 2844,
+    "height": 1836,
+    "bytes": 391589
+  },
+  {
+    "file": "screenshots/09-prototype-paused.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 61766
+  },
+  {
+    "file": "screenshots/10-prototype-done.jpg",
+    "width": 1280,
+    "height": 800,
+    "bytes": 59673
+  },
+  {
+    "file": "screenshots/11-current-create.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 19451
+  },
+  {
+    "file": "screenshots/12-current-experts.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 40103
+  },
+  {
+    "file": "screenshots/13-v05-gate.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 63002
+  },
+  {
+    "file": "screenshots/14-v05-revising.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 63767
+  },
+  {
+    "file": "screenshots/15-v05-narrow.jpg",
+    "width": 600,
+    "height": 800,
+    "bytes": 49689
+  },
+  {
+    "file": "screenshots/16-v05-paused.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 63650
+  },
+  {
+    "file": "screenshots/17-v05-plan-notes.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 76296
+  },
+  {
+    "file": "screenshots/18-v06-develop.jpg",
+    "width": 1025,
+    "height": 823,
+    "bytes": 56952
+  },
+  {
+    "file": "screenshots/19-v06-revision.jpg",
+    "width": 1025,
+    "height": 823,
+    "bytes": 66514
+  },
+  {
+    "file": "screenshots/20-v05-reference.jpg",
+    "width": 1025,
+    "height": 823,
+    "bytes": 57576
+  },
+  {
+    "file": "screenshots/21-v06-gate.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 58901
+  },
+  {
+    "file": "screenshots/22-v06-narrow.jpg",
+    "width": 600,
+    "height": 800,
+    "bytes": 43810
+  },
+  {
+    "file": "screenshots/23-v06-overview.jpg",
+    "width": 1025,
+    "height": 823,
+    "bytes": 59408
+  },
+  {
+    "file": "screenshots/24-v07-gate.jpg",
+    "width": 1025,
+    "height": 823,
+    "bytes": 60183
+  },
+  {
+    "file": "screenshots/25-v07-paused.jpg",
+    "width": 1025,
+    "height": 823,
+    "bytes": 56644
+  },
+  {
+    "file": "screenshots/26-v07-narrow.jpg",
+    "width": 600,
+    "height": 800,
+    "bytes": 42020
+  },
+  {
+    "file": "screenshots/27-v07-merge-reference.jpg",
+    "width": 1025,
+    "height": 823,
+    "bytes": 60998
+  },
+  {
+    "file": "screenshots/28-v08-snapshot.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 79122
+  },
+  {
+    "file": "screenshots/29-v08-coordinator.jpg",
+    "width": 1280,
+    "height": 720,
+    "bytes": 54157
+  },
+  {
+    "file": "screenshots/30-v08-parallel-narrow-detail.jpg",
+    "width": 600,
+    "height": 800,
+    "bytes": 36338
+  },
+  {
+    "file": "screenshots/31-v08-narrow.jpg",
+    "width": 600,
+    "height": 800,
+    "bytes": 37351
+  },
+  {
+    "file": "screenshots/32-v08-gate.jpg",
+    "width": 1025,
+    "height": 823,
+    "bytes": 60493
+  }
+]

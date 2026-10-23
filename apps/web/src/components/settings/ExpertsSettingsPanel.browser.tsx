@@ -12,7 +12,7 @@ import {
 import { page } from "vitest/browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import type { SkillPackage, SkillPackagePreview } from "@synara/contracts";
+import type { HubTeamPreset, SkillPackage, SkillPackagePreview } from "@synara/contracts";
 
 const harness = vi.hoisted(() => {
   const makeExpert = (overrides: Record<string, unknown> = {}) => ({
@@ -55,6 +55,7 @@ const harness = vi.hoisted(() => {
   const importedSkillPackage = makeSkillPackage("c", "SKILL.md");
   const data = {
     experts: [makeExpert()],
+    teams: [] as Array<Record<string, unknown>>,
     skillPackages: [
       makeSkillPackage("a", "planner/SKILL.md"),
       makeSkillPackage("b", "planner/v2/SKILL.md", false),
@@ -171,10 +172,40 @@ const harness = vi.hoisted(() => {
     readExpertAppliedRuntime: vi.fn(async () => null),
     testExpertConnection: vi.fn(async () => ({ tools: [] as string[] })),
   };
-  return { data, makeExpert, makeSkillPackage, server };
+  const hubTeams = {
+    list: vi.fn(async () => data.teams),
+    read: vi.fn(async () => null),
+    save: vi.fn(async (input: Record<string, unknown>) => {
+      const existing = data.teams.find((team) => team.id === input.id);
+      const saved = {
+        ...input,
+        revision: (typeof existing?.revision === "number" ? existing.revision : 0) + 1,
+        createdAt:
+          typeof existing?.createdAt === "string" ? existing.createdAt : "2026-10-22T00:00:00.000Z",
+        updatedAt: "2026-10-22T00:01:00.000Z",
+        archivedAt: null as string | null,
+      };
+      data.teams = [saved, ...data.teams.filter((team) => team.id !== input.id)];
+      return saved;
+    }),
+    setArchived: vi.fn(async (input: { id: string; archived: boolean }) => {
+      const existing = data.teams.find((team) => team.id === input.id) ?? {};
+      const saved = {
+        ...existing,
+        revision: (typeof existing.revision === "number" ? existing.revision : 0) + 1,
+        updatedAt: "2026-10-22T00:01:00.000Z",
+        archivedAt: input.archived ? "2026-10-22T00:01:00.000Z" : null,
+      };
+      data.teams = data.teams.map((team) => (team.id === input.id ? saved : team));
+      return saved;
+    }),
+  };
+  return { data, makeExpert, makeSkillPackage, server, hubTeams };
 });
 
-vi.mock("~/nativeApi", () => ({ ensureNativeApi: () => ({ server: harness.server }) }));
+vi.mock("~/nativeApi", () => ({
+  ensureNativeApi: () => ({ server: harness.server, hubTeams: harness.hubTeams }),
+}));
 vi.mock("~/hooks/useNativeApiServerCapability", () => ({
   useNativeApiServerCapabilitySnapshot: () => ({
     generation: "experts-settings-browser",
@@ -260,6 +291,54 @@ async function selectRoutedExpert(router: ReturnType<typeof createRouter>, exper
   } as never);
 }
 
+function makeHubTeam(overrides: Partial<HubTeamPreset> = {}): HubTeamPreset {
+  return {
+    id: "team-research",
+    name: "研究协作团",
+    purpose: "研究与写作",
+    expertIds: ["planner"],
+    coordinatorInstructions: "先澄清问题",
+    collaborationPreferences: "需要时交叉评审",
+    revision: 4,
+    createdAt: "2026-10-20T00:00:00.000Z",
+    updatedAt: "2026-10-21T00:00:00.000Z",
+    archivedAt: null,
+    ...overrides,
+  };
+}
+
+function resetHubTeamsHarness() {
+  harness.data.teams = [];
+  for (const operation of Object.values(harness.hubTeams)) operation.mockReset();
+  harness.hubTeams.list.mockImplementation(async () => harness.data.teams);
+  harness.hubTeams.save.mockImplementation(async (input: Record<string, unknown>) => {
+    const existing = harness.data.teams.find((team) => team.id === input.id);
+    const saved = {
+      ...input,
+      revision: (typeof existing?.revision === "number" ? existing.revision : 0) + 1,
+      createdAt:
+        typeof existing?.createdAt === "string" ? existing.createdAt : "2026-10-22T00:00:00.000Z",
+      updatedAt: "2026-10-22T00:01:00.000Z",
+      archivedAt: null as string | null,
+    };
+    harness.data.teams = [saved, ...harness.data.teams.filter((team) => team.id !== input.id)];
+    return saved;
+  });
+  harness.hubTeams.setArchived.mockImplementation(
+    async (input: { id: string; archived: boolean }) => {
+      const existing = harness.data.teams.find((team) => team.id === input.id) ?? {};
+      const saved = {
+        ...existing,
+        revision: (typeof existing.revision === "number" ? existing.revision : 0) + 1,
+        updatedAt: "2026-10-22T00:01:00.000Z",
+        archivedAt: input.archived ? "2026-10-22T00:01:00.000Z" : null,
+      };
+      harness.data.teams = harness.data.teams.map((team) => (team.id === input.id ? saved : team));
+      return saved;
+    },
+  );
+}
+
 beforeEach(() => {
   harness.data.experts = [harness.makeExpert()];
   harness.data.skillPackages = [
@@ -267,6 +346,7 @@ beforeEach(() => {
     harness.makeSkillPackage("b", "planner/v2/SKILL.md", false),
   ];
   for (const operation of Object.values(harness.server)) operation.mockReset();
+  resetHubTeamsHarness();
   harness.server.listExperts.mockImplementation(async () => harness.data.experts);
   harness.server.listSkillPackages.mockImplementation(async () => harness.data.skillPackages);
   harness.server.readSkillPackage.mockImplementation(
@@ -386,6 +466,99 @@ beforeEach(() => {
 });
 
 describe("ExpertsSettingsPanel browser interactions", () => {
+  it("retains a team draft after a CAS save error and retries with its baseline revision", async () => {
+    harness.data.teams = [makeHubTeam()];
+    const { close } = await mountPanel("/settings");
+    try {
+      await page.getByRole("radio", { name: "专家团" }).click();
+      await page.getByRole("button", { name: "编辑" }).click();
+      const purpose = page.getByLabelText("专家团用途");
+      await purpose.fill("updated purpose");
+      harness.hubTeams.save.mockRejectedValueOnce(new Error("revision conflict"));
+
+      await page.getByRole("button", { name: "保存专家团" }).click();
+      await expect.element(page.getByRole("alert")).toHaveTextContent("revision conflict");
+      await expect.element(purpose).toHaveValue("updated purpose");
+      expect(harness.hubTeams.save.mock.calls[0]?.[0]).toMatchObject({
+        id: "team-research",
+        expectedRevision: 4,
+      });
+
+      await page.getByRole("button", { name: "保存专家团" }).click();
+      await expect.poll(() => harness.hubTeams.save.mock.calls.length).toBe(2);
+      expect(harness.hubTeams.save.mock.calls[1]?.[0]).toMatchObject({
+        id: "team-research",
+        expectedRevision: 4,
+        purpose: "updated purpose",
+      });
+    } finally {
+      await close();
+    }
+  });
+
+  it("guards route departure while a team save is pending", async () => {
+    const { close, router } = await mountPanel("/settings");
+    try {
+      await page.getByRole("radio", { name: "专家团" }).click();
+      await page.getByRole("button", { name: "新建专家团" }).click();
+      await page.getByLabelText("专家团名称").fill("新团队");
+      await page.getByRole("checkbox", { name: "规划专家" }).click();
+
+      const pending = deferred<HubTeamPreset>();
+      harness.hubTeams.save.mockImplementationOnce(() => pending.promise);
+      const navigation = router.navigate({ to: "/connections" as never } as never);
+      await expect.element(page.getByRole("heading", { name: "未保存的更改" })).toBeVisible();
+      await page.getByRole("button", { name: "保存并继续" }).click();
+      await expect.poll(() => harness.hubTeams.save.mock.calls.length).toBe(1);
+      expect(router.state.location.pathname).toBe("/settings");
+
+      const input = harness.hubTeams.save.mock.calls[0]?.[0] as Record<string, unknown>;
+      pending.resolve(
+        makeHubTeam({
+          id: input.id as string,
+          name: input.name as string,
+          purpose: input.purpose as string,
+          expertIds: input.expertIds as string[],
+          revision: 1,
+        }),
+      );
+      await navigation;
+      expect(router.state.location.pathname).toBe("/connections");
+    } finally {
+      await close();
+    }
+  });
+
+  it("archives and restores team presets with revisioned actions", async () => {
+    harness.data.teams = [makeHubTeam()];
+    const { close } = await mountPanel("/settings");
+    try {
+      await page.getByRole("radio", { name: "专家团" }).click();
+      await page.getByRole("button", { name: "归档", exact: true }).click();
+      await page.getByRole("button", { name: "确认归档" }).click();
+      await expect.poll(() => harness.hubTeams.setArchived.mock.calls.length).toBe(1);
+      expect(harness.hubTeams.setArchived.mock.calls[0]?.[0]).toMatchObject({
+        id: "team-research",
+        expectedRevision: 4,
+        archived: true,
+      });
+
+      await page.getByRole("button", { name: "查看已归档" }).click();
+      await page.getByRole("button", { name: "恢复" }).click();
+      await page.getByRole("button", { name: "确认恢复" }).click();
+      await expect.poll(() => harness.hubTeams.setArchived.mock.calls.length).toBe(2);
+      expect(harness.hubTeams.setArchived.mock.calls[1]?.[0]).toMatchObject({
+        id: "team-research",
+        expectedRevision: 5,
+        archived: false,
+      });
+      await page.getByRole("button", { name: "返回专家团" }).click();
+      await expect.element(page.getByText("研究协作团")).toBeInTheDocument();
+    } finally {
+      await close();
+    }
+  });
+
   it("offers Claude and Oh My Pi as expert preferred providers", async () => {
     const { close } = await mountPanel("/settings?expertId=planner");
     await page.getByRole("tab", { name: "设置", exact: true }).click();

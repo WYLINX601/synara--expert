@@ -45,9 +45,11 @@ import {
   type ProjectDocumentRevision,
   type ProjectTaskStatus,
   type ProviderSession,
+  type HubWorkRecord,
 } from "@synara/contracts";
 import { groupThreadStateLabel, resolveGroupThreadState } from "@synara/shared/groupThreadState";
 import { HubWorkRepository } from "../../persistence/Services/HubWorkRepository";
+import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { coordinatorCheckinTurnReport } from "@synara/shared/coordinatorCheckin";
 import { resolveThreadWorkspaceCwd } from "@synara/shared/threadEnvironment";
@@ -78,6 +80,22 @@ import {
 } from "../libraryGit.ts";
 import { isContainedPath } from "../../workspace/realPathContainment.ts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import {
+  matchesHubPlanInputResponseStart,
+  type HubPlanInputResponseAuthorization,
+} from "../../hubCollaboration/hubPlanInput.ts";
+import {
+  makeHubCollaborationConfigStore,
+  normalizeHubCollaborationSettings,
+} from "../../hubCollaboration/HubCollaborationConfigStore.ts";
+import {
+  hubWorkTaskPrompt,
+  matchesHubPlanInitialStart,
+  matchesHubWorkFrozenSettings,
+  matchesHubWorkTargetSelection,
+  matchesHubWorkThreadProvenance,
+} from "../../workbench/host/hubPlanInitialStart.ts";
+import { makeHubPlanStore } from "../../hubCollaboration/HubPlanStore.ts";
 import {
   makeHubDeliverablesService,
   formatHubDeliverableContext,
@@ -136,6 +154,7 @@ import {
 } from "../../persistence/Services/ProjectAgentRepository.ts";
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { LibraryError, ProjectAgentServiceError } from "../Errors.ts";
+import { reserveHubWorkAdmission, rollbackHubWorkAdmission } from "../hubWorkAdmission.ts";
 import { isAllowedGroupCoordinatorCreateTarget } from "../groupCreateAllowlist.ts";
 import { gateProjectAgentServiceForStable, isServerGroupsEnabled } from "../groupsBetaGate.ts";
 import { cleanupGroupWorkspaceRoot } from "../../groupWorkspaceScaffold.ts";
@@ -200,12 +219,120 @@ import {
 import {
   ProjectAgentService,
   type ProjectAgentServiceShape,
+  type ProjectAgentTurnStartAuthorization,
 } from "../Services/ProjectAgentService.ts";
 
 const fail = (message: string, code?: ProjectAgentServiceError["code"]) =>
   new ProjectAgentServiceError({ message, ...(code ? { code } : {}) });
 
 const isoNow = () => new Date().toISOString();
+
+const nextMonitorUpdatedAt = (current: string, eventAt: string) => {
+  const currentMs = Date.parse(current);
+  const eventMs = Date.parse(eventAt);
+  if (!Number.isFinite(currentMs) || !Number.isFinite(eventMs)) return eventAt;
+  return new Date(Math.max(eventMs, currentMs + 1)).toISOString();
+};
+
+const recoveryStartIdentity = (threadId: ThreadId, episode: string) => {
+  const commandId = `${WORKER_RECOVERY_COMMAND_PREFIX}${threadId}:${episode}:redispatch`;
+  return { commandId, messageId: `${commandId}:message` };
+};
+
+const hasNoEntries = (value: readonly unknown[] | undefined) =>
+  value === undefined || value.length === 0;
+
+const matchesHubPlanRecoveryStart = (input: {
+  readonly kind?: "resume" | "steer";
+  readonly worker: ProjectManagedWorker | null;
+  readonly work: HubWorkRecord | null;
+  readonly shell: OrchestrationThreadShell;
+  readonly coordinatorRuntimeMode: OrchestrationThreadShell["runtimeMode"];
+  readonly binding: {
+    readonly planId: string;
+    readonly taskId: string;
+    readonly workItemId: string;
+  };
+  readonly plan: { readonly id: string; readonly hubId: string };
+  readonly turnStart: ProjectAgentTurnStartAuthorization;
+}): boolean => {
+  const { worker, work, shell, coordinatorRuntimeMode, binding, plan, turnStart } = input;
+  const isSteer = input.kind === "steer";
+  if (
+    !worker ||
+    !work ||
+    worker.recoveryEpisode === null ||
+    worker.recoveryStep !== (isSteer ? 1 : 2) ||
+    worker.nudgeAt === null ||
+    worker.taskPrompt === null ||
+    worker.taskPrompt.trim().length === 0 ||
+    worker.activeTurnOrigin === "user" ||
+    worker.needsYou ||
+    worker.projectId !== plan.hubId ||
+    worker.taskId !== binding.taskId ||
+    worker.requestId !== binding.workItemId ||
+    binding.planId !== plan.id ||
+    binding.workItemId !== work.id ||
+    work.projectId !== plan.hubId ||
+    worker.settledAt !== null ||
+    worker.settleOutcome !== null ||
+    worker.resultSummary !== null ||
+    worker.resultAt !== null ||
+    work.resultSummary !== null ||
+    work.workerThreadId !== worker.threadId ||
+    work.slotHeld !== true ||
+    !(isSteer ? ["working", "waiting"] : ["starting", "working", "waiting"]).includes(work.state) ||
+    shell.hasPendingApprovals === true ||
+    shell.hasPendingUserInput === true
+  ) {
+    return false;
+  }
+  const identity = isSteer
+    ? {
+        commandId: `${WORKER_RECOVERY_COMMAND_PREFIX}${worker.threadId}:${worker.recoveryEpisode}:nudge`,
+        messageId: `${WORKER_RECOVERY_COMMAND_PREFIX}${worker.threadId}:${worker.recoveryEpisode}:nudge:message`,
+      }
+    : recoveryStartIdentity(worker.threadId, worker.recoveryEpisode);
+  if (
+    isSteer
+      ? worker.stuckKind !== "silent" ||
+        (shell.session?.activeTurnId == null && shell.latestTurn?.state !== "running")
+      : work.admissionCommandId !== identity.commandId ||
+        work.admissionMessageId !== identity.messageId
+  ) {
+    return false;
+  }
+  if (
+    !matchesHubWorkThreadProvenance({ threadId: worker.threadId, shell, work }) ||
+    !matchesHubWorkFrozenSettings({ work, shell, coordinatorRuntimeMode }) ||
+    worker.taskPrompt !== hubWorkTaskPrompt(work)
+  ) {
+    return false;
+  }
+  return Boolean(
+    turnStart.commandId === identity.commandId &&
+    turnStart.messageId === identity.messageId &&
+    turnStart.messageText === (isSteer ? WORKER_RECOVERY_NUDGE_TEXT : worker.taskPrompt) &&
+    turnStart.createdAt === worker.nudgeAt &&
+    turnStart.dispatchOrigin === "automation" &&
+    turnStart.dispatchMode === (isSteer ? "steer" : "queue") &&
+    turnStart.runtimeMode === shell.runtimeMode &&
+    turnStart.interactionMode === shell.interactionMode &&
+    matchesHubWorkTargetSelection(work, turnStart.modelSelection) &&
+    turnStart.providerOptions === undefined &&
+    hasNoEntries(turnStart.attachments) &&
+    hasNoEntries(turnStart.skills) &&
+    hasNoEntries(turnStart.mentions) &&
+    turnStart.enableComputerControl === false &&
+    turnStart.computerControlMode === "off" &&
+    turnStart.computerControlGeneration === 0 &&
+    turnStart.assistantDeliveryMode === "streaming" &&
+    turnStart.reviewTarget === undefined &&
+    turnStart.sourceProposedPlan === undefined &&
+    turnStart.asyncUserInputResponse === undefined &&
+    turnStart.resumePrecondition === undefined,
+  );
+};
 
 // A wake claim stays fresh long enough to cover crash-vs-slow dispatch; an
 // expired claim means the earlier runNow threw and the range is re-dispatched.
@@ -343,6 +470,7 @@ const SEED_DOCUMENTS: ReadonlyArray<{ path: string; content: string }> = [
 export const makeProjectAgentService = Effect.gen(function* () {
   const repository = yield* ProjectAgentRepository;
   const hubWorkRepository = yield* Effect.serviceOption(HubWorkRepository);
+  const commandReceipts = yield* Effect.serviceOption(OrchestrationCommandReceiptRepository);
   const snapshotQuery = yield* ProjectionSnapshotQuery;
   const projectionThreads = yield* ProjectionThreadRepository;
   const orchestrationEngine = yield* OrchestrationEngineService;
@@ -356,6 +484,9 @@ export const makeProjectAgentService = Effect.gen(function* () {
   const textGeneration = yield* TextGeneration;
   const git = yield* GitCore;
   const deliverablesSql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const hubPlanStore = Option.isSome(deliverablesSql)
+    ? makeHubPlanStore(deliverablesSql.value)
+    : null;
   let deliverablesService: HubDeliverablesService | undefined;
   const events = yield* PubSub.unbounded<ProjectAgentStreamEvent>();
   const digestInflight = yield* Ref.make(new Set<string>());
@@ -587,14 +718,15 @@ export const makeProjectAgentService = Effect.gen(function* () {
       }
       // The worker's structured report beats the generic outcome phrase —
       // "Shipped the migration, 12 files changed" over "finished".
-      const resultPhrase = (() => {
-        const line = worker.resultSummary?.split("\n")[0]?.trim();
+      const resultPhraseFor = (resultSummary: string | null) => {
+        const line = resultSummary?.split("\n")[0]?.trim();
         if (line) return line.length > 140 ? `${line.slice(0, 137)}...` : line;
         // A finished worker that never filed a structured result gets the
         // gap noted inline so nobody has to open the thread to check.
         if (notice.outcome === "completed") return `${notice.phrase} — no result filed`;
         return notice.phrase;
-      })();
+      };
+      const resultPhrase = resultPhraseFor(worker.resultSummary);
       const prUrl = input.lastKnownPr?.url ?? null;
       const threadPayload = {
         threadId: worker.threadId,
@@ -604,11 +736,6 @@ export const makeProjectAgentService = Effect.gen(function* () {
         ...(worker.resultSummary ? { result: worker.resultSummary } : {}),
         ...(prUrl !== null ? { pr: prUrl } : {}),
       };
-      // The finish row carries the tracked PR link plus the no-result note.
-      const rowPhrase =
-        prUrl !== null && notice.outcome === "completed"
-          ? `${resultPhrase} — ${prUrl}`
-          : resultPhrase;
       if (notice.kind === "stuck") {
         if (input.suppressRows === true) return;
         const needsYou = input.eventType === "worker.needs-you";
@@ -636,20 +763,19 @@ export const makeProjectAgentService = Effect.gen(function* () {
         });
         return;
       }
-      const updated: ProjectManagedWorker = {
-        ...worker,
-        taskId: input.taskId ?? worker.taskId,
+      const monitorFields = (base: ProjectManagedWorker): Partial<ProjectManagedWorker> => ({
+        ...(input.taskId === null ? {} : { taskId: input.taskId }),
         settledAt: input.createdAt,
         settleOutcome: notice.outcome,
         waitingSince:
           notice.outcome === "waiting-approval" || notice.outcome === "waiting-input"
-            ? (worker.waitingSince ?? input.createdAt)
+            ? (base.waitingSince ?? input.createdAt)
             : null,
         // An event means the worker is alive; any stuck episode and recovery
         // ladder run is over, and a flagged "Waiting on you" resolves.
         // `recoveriesUsed` only resets on a genuine success — the ladder's own
         // re-dispatches keep the count so the cap can't loop forever.
-        recoveriesUsed: notice.outcome === "completed" ? 0 : worker.recoveriesUsed,
+        recoveriesUsed: notice.outcome === "completed" ? 0 : base.recoveriesUsed,
         stuckKind: null,
         stuckSince: null,
         recoveryEpisode: null,
@@ -657,10 +783,18 @@ export const makeProjectAgentService = Effect.gen(function* () {
         nudgeAt: null,
         needsYou: false,
         needsYouAt: null,
-        updatedAt: input.createdAt,
+      });
+      const updated: ProjectManagedWorker = {
+        ...worker,
+        ...monitorFields(worker),
+        updatedAt: nextMonitorUpdatedAt(worker.updatedAt, input.createdAt),
       };
       const saved = yield* repository
-        .saveManagedWorkerMonitor({ worker: updated, expectedUpdatedAt: worker.updatedAt })
+        .saveManagedWorkerMonitor({
+          worker: updated,
+          expectedUpdatedAt: worker.updatedAt,
+          preserveResultEvidence: true,
+        })
         .pipe(Effect.mapError(toServiceError("Failed to update managed worker.")));
       let persistedWorker = updated;
       if (!saved.applied) {
@@ -671,19 +805,32 @@ export const makeProjectAgentService = Effect.gen(function* () {
           .pipe(Effect.mapError(toServiceError("Failed to re-read managed worker.")));
         if (Option.isSome(fresh)) {
           persistedWorker = {
-            ...updated,
-            taskId: fresh.value.taskId ?? updated.taskId,
-            recoveriesUsed: updated.recoveriesUsed,
-            updatedAt: fresh.value.updatedAt,
+            ...fresh.value,
+            ...monitorFields(fresh.value),
+            updatedAt: nextMonitorUpdatedAt(fresh.value.updatedAt, input.createdAt),
           };
           yield* repository
             .saveManagedWorkerMonitor({
               worker: persistedWorker,
               expectedUpdatedAt: fresh.value.updatedAt,
+              preserveResultEvidence: true,
             })
             .pipe(Effect.mapError(toServiceError("Failed to update managed worker.")));
         }
       }
+      const persistedResultPhrase = resultPhraseFor(persistedWorker.resultSummary);
+      const persistedRowPhrase =
+        prUrl !== null && notice.outcome === "completed"
+          ? `${persistedResultPhrase} — ${prUrl}`
+          : persistedResultPhrase;
+      const persistedThreadPayload = {
+        threadId: persistedWorker.threadId,
+        title: persistedWorker.title,
+        outcome: notice.outcome,
+        projectId: persistedWorker.projectId,
+        ...(persistedWorker.resultSummary ? { result: persistedWorker.resultSummary } : {}),
+        ...(prUrl !== null ? { pr: prUrl } : {}),
+      };
       if (input.suppressRows !== true) {
         yield* postWorkerMonitorRow({
           coordinatorThreadId: input.coordinatorThreadId,
@@ -691,16 +838,16 @@ export const makeProjectAgentService = Effect.gen(function* () {
           tone: notice.tone,
           kind: "synara.worker.settled",
           summary: formatWorkerMonitorRow({
-            title: worker.title,
+            title: persistedWorker.title,
             marker: notice.marker,
-            phrase: rowPhrase,
+            phrase: persistedRowPhrase,
           }),
           payload: {
             source: "worker_monitor",
             eventType: input.eventType,
             marker: notice.marker,
-            phrase: rowPhrase,
-            thread: threadPayload,
+            phrase: persistedRowPhrase,
+            thread: persistedThreadPayload,
           },
           createdAt: input.createdAt,
         });
@@ -838,6 +985,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
     /** Thread ids with a live provider session (connecting/ready/running).
      * null when the live listing failed — the disconnect check is skipped. */
     readonly liveWorkerThreadIds: ReadonlySet<string> | null;
+    /** Provider sessions with an actual active turn; null means liveness is unknown. */
+    readonly liveProviderTurnThreadIds: ReadonlySet<string> | null;
   }) =>
     Effect.gen(function* () {
       const worker = input.worker;
@@ -855,7 +1004,11 @@ export const makeProjectAgentService = Effect.gen(function* () {
       const persistWorkerUpdate = (next: ProjectManagedWorker) =>
         Effect.gen(function* () {
           const claimed = yield* repository
-            .saveManagedWorkerMonitor({ worker: next, expectedUpdatedAt: rowStamp })
+            .saveManagedWorkerMonitor({
+              worker: next,
+              expectedUpdatedAt: rowStamp,
+              preserveResultEvidence: true,
+            })
             .pipe(Effect.mapError(serviceError));
           if (claimed.applied) {
             rowStamp = next.updatedAt;
@@ -882,6 +1035,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
             .saveManagedWorkerMonitor({
               worker: merged,
               expectedUpdatedAt: fresh.value.updatedAt,
+              preserveResultEvidence: true,
             })
             .pipe(Effect.mapError(serviceError));
           if (retried.applied) {
@@ -944,17 +1098,27 @@ export const makeProjectAgentService = Effect.gen(function* () {
         orchestrationEngine.dispatch(command).pipe(
           Effect.as(true),
           Effect.catch((error) =>
-            appendActivity({
-              projectId: worker.projectId,
-              kind: "error",
-              actorKind: "system",
-              actorThreadId: worker.threadId,
-              goalId: null,
-              taskId: null,
-              source: null,
-              summary: `Worker recovery dispatch ${command.type} on ${worker.threadId}: ${String(error)}`,
-              createdAt: nowIso,
-            }).pipe(Effect.as(false)),
+            Effect.gen(function* () {
+              const accepted =
+                command.type === "thread.turn.start"
+                  ? yield* recoveryCommandReceipt(command.commandId).pipe(
+                      Effect.catch(() => Effect.succeed(null)),
+                    )
+                  : null;
+              if (accepted === "accepted") return true;
+              yield* appendActivity({
+                projectId: worker.projectId,
+                kind: "error",
+                actorKind: "system",
+                actorThreadId: worker.threadId,
+                goalId: null,
+                taskId: null,
+                source: null,
+                summary: `Worker recovery dispatch ${command.type} on ${worker.threadId}: ${String(error)}`,
+                createdAt: nowIso,
+              });
+              return false;
+            }),
           ),
         );
 
@@ -1047,10 +1211,10 @@ export const makeProjectAgentService = Effect.gen(function* () {
             );
           }
         });
-      const redispatchCommand = (step: string) => {
+      const redispatchCommand = (step: string, createdAt = nowIso, episode = lastActivity) => {
         const prompt = worker.taskPrompt;
         if (prompt === null || prompt.trim().length === 0) return null;
-        const commandId = `${WORKER_RECOVERY_COMMAND_PREFIX}${worker.threadId}:${lastActivity}:${step}`;
+        const commandId = `${WORKER_RECOVERY_COMMAND_PREFIX}${worker.threadId}:${episode}:${step}`;
         return {
           type: "thread.turn.start" as const,
           commandId: CommandId.makeUnsafe(commandId),
@@ -1065,7 +1229,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
           dispatchOrigin: "automation" as const,
           runtimeMode: shell.runtimeMode,
           interactionMode: shell.interactionMode,
-          createdAt: nowIso,
+          createdAt,
         };
       };
       const nudgeCommand = (step: string) => {
@@ -1231,8 +1395,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
                 // stamp WITHOUT resetting the ladder's position, so the same
                 // chain keeps escalating instead of restarting each echo.
                 if (
-                  updated.stuckSince !== lastActivity ||
-                  updated.recoveryEpisode !== lastActivity
+                  updated.recoveryStep !== 2 &&
+                  (updated.stuckSince !== lastActivity || updated.recoveryEpisode !== lastActivity)
                 ) {
                   const claimed: ProjectManagedWorker = {
                     ...updated,
@@ -1280,7 +1444,10 @@ export const makeProjectAgentService = Effect.gen(function* () {
                   }
                 }
               }
-              if (updated.recoveryEpisode === lastActivity) {
+              if (
+                updated.recoveryEpisode === lastActivity ||
+                (updated.recoveryStep === 2 && updated.recoveryEpisode !== null)
+              ) {
                 if (updated.recoveryStep === 0) {
                   if (updated.recoveriesUsed >= WORKER_RECOVERY_MAX_ATTEMPTS) {
                     yield* latchNeedsYou(`silent:${lastActivity}`);
@@ -1315,7 +1482,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
                   if (updated.recoveriesUsed >= WORKER_RECOVERY_MAX_ATTEMPTS) {
                     yield* latchNeedsYou(`silent:${lastActivity}`);
                   } else {
-                    const command = redispatchCommand("redispatch");
+                    const command = redispatchCommand("redispatch", nowIso);
                     if (command === null) {
                       yield* latchNeedsYou(`silent:${lastActivity}`);
                     } else {
@@ -1325,14 +1492,104 @@ export const makeProjectAgentService = Effect.gen(function* () {
                           ? (shell.latestTurn.turnId ?? null)
                           : null);
                       const turnActive =
-                        activeTurnId !== null || shell.latestTurn?.state === "running";
+                        activeTurnId !== null ||
+                        input.liveProviderTurnThreadIds?.has(worker.threadId) === true;
                       const interruptCommandId = `${WORKER_RECOVERY_COMMAND_PREFIX}${worker.threadId}:${lastActivity}:interrupt`;
+                      let interruptedOnlyPlanRecovery = false;
                       const dispatchStep = Effect.gen(function* () {
                         // An active turn must have an identity so its durable
                         // interrupt request can be tied to the later terminal
                         // event. If the projection cannot identify it, roll
                         // the claim back instead of issuing an ambiguous stop.
                         if (turnActive && activeTurnId === null) return false;
+                        const planBinding = hubPlanStore
+                          ? yield* hubPlanStore
+                              .findAttemptBindingByThread({ threadId: worker.threadId })
+                              .pipe(
+                                Effect.mapError(
+                                  toServiceError("Failed to resolve recovery plan attempt."),
+                                ),
+                              )
+                          : null;
+                        if (planBinding) {
+                          const active = yield* Effect.exit(
+                            currentPlanAttemptForThread(worker.threadId, undefined, {
+                              allowRecoveryAdmission: true,
+                            }),
+                          );
+                          if (active._tag === "Failure" || !active.value?.recoveryIntentValid) {
+                            return false;
+                          }
+                          if (turnActive) {
+                            const interruptReceipt =
+                              yield* recoveryCommandReceipt(interruptCommandId);
+                            if (interruptReceipt === "rejected") return false;
+                            if (interruptReceipt !== "accepted") {
+                              const interrupted = yield* dispatchRecovery({
+                                type: "thread.turn.interrupt",
+                                commandId: CommandId.makeUnsafe(interruptCommandId),
+                                threadId: worker.threadId,
+                                turnId: activeTurnId!,
+                                requestedBy: "system",
+                                createdAt: lastActivity,
+                              });
+                              if (!interrupted) return false;
+                            }
+                            // Persist step two and wait for the old native turn
+                            // to settle before reserving a replacement slot.
+                            interruptedOnlyPlanRecovery = true;
+                            return true;
+                          }
+                          if (
+                            shell.latestTurn === null ||
+                            shell.latestTurn.state === "running" ||
+                            input.liveProviderTurnThreadIds === null ||
+                            input.liveProviderTurnThreadIds.has(worker.threadId)
+                          ) {
+                            interruptedOnlyPlanRecovery = true;
+                            return true;
+                          }
+                          const recoveryAdmission = yield* reservePlanRecoveryAdmission({
+                            threadId: worker.threadId,
+                            episode: lastActivity,
+                            shell,
+                          });
+                          if (
+                            recoveryAdmission.kind === "denied" ||
+                            recoveryAdmission.kind === "capacity"
+                          ) {
+                            interruptedOnlyPlanRecovery = true;
+                            return true;
+                          }
+                          if (recoveryAdmission.kind === "rejected") return "interrupted-only";
+                          if (recoveryAdmission.kind === "accepted") return true;
+                          if (recoveryAdmission.kind !== "reserved") return false;
+                          if (Option.isNone(hubWorkRepository)) return false;
+                          const workRepository = hubWorkRepository.value;
+                          const redispatched = yield* dispatchRecovery(command);
+                          if (redispatched) return true;
+                          const latest = yield* workRepository
+                            .get(recoveryAdmission.admitted.id)
+                            .pipe(Effect.mapError(serviceError));
+                          if (
+                            latest?.state === "starting" &&
+                            latest.slotHeld &&
+                            latest.admissionCommandId === command.commandId &&
+                            latest.admissionMessageId === command.message.messageId
+                          ) {
+                            yield* rollbackHubWorkAdmission(workRepository, latest).pipe(
+                              Effect.mapError(serviceError),
+                              Effect.catch(() => Effect.void),
+                            );
+                            yield* (
+                              impl.notifyWorkItemChanged?.({
+                                projectId: latest.projectId,
+                                workItemId: latest.id,
+                              }) ?? Effect.void
+                            );
+                          }
+                          return false;
+                        }
                         const interrupted =
                           activeTurnId !== null
                             ? yield* dispatchRecovery({
@@ -1364,7 +1621,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
                         // later terminal must still be classified from the
                         // durable interrupt provenance.
                         yield* latchNeedsYou(`silent:${lastActivity}:redispatch-failed`);
-                      } else if (claimed) {
+                      } else if (claimed && !interruptedOnlyPlanRecovery) {
                         yield* ingestHealthEvent(
                           `worker-health:${worker.threadId}:redispatched:${lastActivity}`,
                           "worker.recovery-redispatched",
@@ -1381,14 +1638,37 @@ export const makeProjectAgentService = Effect.gen(function* () {
                   // window — that stall counts as another episode of the same
                   // chain and either starts a new cycle or, at the cap, flags
                   // the worker "Waiting on you".
-                  const claimed: ProjectManagedWorker = {
-                    ...updated,
-                    recoveryStep: 0,
-                    updatedAt: nowIso,
-                  };
-                  if (yield* persistWorkerUpdate(claimed)) updated = claimed;
-                  if (updated.recoveriesUsed >= WORKER_RECOVERY_MAX_ATTEMPTS) {
-                    yield* latchNeedsYou(`silent:${lastActivity}`);
+                  const planBinding = hubPlanStore
+                    ? yield* hubPlanStore
+                        .findAttemptBindingByThread({ threadId: worker.threadId })
+                        .pipe(
+                          Effect.mapError(
+                            toServiceError("Failed to resolve recovery plan attempt."),
+                          ),
+                        )
+                    : null;
+                  const stepTwoReceipt = planBinding
+                    ? yield* recoveryCommandReceipt(
+                        recoveryStartIdentity(
+                          worker.threadId,
+                          updated.recoveryEpisode ?? lastActivity,
+                        ).commandId,
+                      )
+                    : null;
+                  if (!planBinding) {
+                    const claimed: ProjectManagedWorker = {
+                      ...updated,
+                      recoveryStep: 0,
+                      updatedAt: nowIso,
+                    };
+                    if (yield* persistWorkerUpdate(claimed)) updated = claimed;
+                    if (updated.recoveriesUsed >= WORKER_RECOVERY_MAX_ATTEMPTS) {
+                      yield* latchNeedsYou(`silent:${lastActivity}`);
+                    }
+                  } else if (stepTwoReceipt === "accepted") {
+                    yield* latchNeedsYou(
+                      `silent:${updated.recoveryEpisode ?? lastActivity}:redispatch-stalled`,
+                    );
                   }
                 }
               }
@@ -1409,6 +1689,107 @@ export const makeProjectAgentService = Effect.gen(function* () {
                 updatedAt: nowIso,
               };
               if (yield* persistWorkerUpdate(claimed)) updated = claimed;
+            }
+          }
+        }
+      }
+      if (updated.recoveryStep === 2 && updated.recoveryEpisode !== null && !updated.needsYou) {
+        const planBinding = hubPlanStore
+          ? yield* hubPlanStore
+              .findAttemptBindingByThread({ threadId: worker.threadId })
+              .pipe(Effect.mapError(toServiceError("Failed to resolve recovery plan attempt.")))
+          : null;
+        if (planBinding) {
+          const episode = updated.recoveryEpisode;
+          const identity = recoveryStartIdentity(worker.threadId, episode);
+          const active = yield* Effect.exit(
+            currentPlanAttemptForThread(worker.threadId, undefined, {
+              allowRecoveryAdmission: true,
+            }),
+          );
+          if (active._tag === "Success" && active.value?.recoveryIntentValid) {
+            const receipt = yield* recoveryCommandReceipt(identity.commandId);
+            if (receipt === "rejected") {
+              yield* latchNeedsYou(`silent:${episode}:redispatch-rejected`);
+            } else if (receipt !== "accepted") {
+              const interruptId = `${WORKER_RECOVERY_COMMAND_PREFIX}${worker.threadId}:${episode}:interrupt`;
+              const activeTurnId =
+                shell.session?.activeTurnId ??
+                (shell.latestTurn?.state === "running" ? shell.latestTurn.turnId : null);
+              const turnActive =
+                activeTurnId !== null ||
+                shell.latestTurn?.state === "running" ||
+                input.liveProviderTurnThreadIds?.has(worker.threadId) === true;
+              if (turnActive) {
+                if (activeTurnId !== null) {
+                  const interruptReceipt = yield* recoveryCommandReceipt(interruptId);
+                  if (interruptReceipt === "rejected") {
+                    yield* latchNeedsYou(`silent:${episode}:interrupt-rejected`);
+                  } else if (interruptReceipt !== "accepted") {
+                    yield* dispatchRecovery({
+                      type: "thread.turn.interrupt",
+                      commandId: CommandId.makeUnsafe(interruptId),
+                      threadId: worker.threadId,
+                      turnId: activeTurnId,
+                      requestedBy: "system",
+                      createdAt: episode,
+                    });
+                  }
+                }
+              } else if (
+                input.liveProviderTurnThreadIds !== null &&
+                !input.liveProviderTurnThreadIds.has(worker.threadId) &&
+                shell.hasPendingApprovals !== true &&
+                shell.hasPendingUserInput !== true &&
+                shell.latestTurn !== null &&
+                shell.latestTurn.requestedAt <= episode &&
+                updated.nudgeAt !== null
+              ) {
+                const admission = yield* reservePlanRecoveryAdmission({
+                  threadId: worker.threadId,
+                  episode,
+                  shell,
+                });
+                if (admission.kind === "rejected") {
+                  yield* latchNeedsYou(`silent:${episode}:redispatch-rejected`);
+                } else if (admission.kind === "reserved") {
+                  const command = redispatchCommand("redispatch", updated.nudgeAt, episode);
+                  if (command === null) {
+                    yield* latchNeedsYou(`silent:${episode}:missing-task-prompt`);
+                  } else if (!(yield* dispatchRecovery(command))) {
+                    if (Option.isNone(hubWorkRepository)) return;
+                    const workRepository = hubWorkRepository.value;
+                    const latest = yield* workRepository
+                      .get(admission.admitted.id)
+                      .pipe(Effect.mapError(serviceError));
+                    if (
+                      latest?.state === "starting" &&
+                      latest.slotHeld &&
+                      latest.admissionCommandId === identity.commandId &&
+                      latest.admissionMessageId === identity.messageId
+                    ) {
+                      yield* rollbackHubWorkAdmission(workRepository, latest).pipe(
+                        Effect.mapError(serviceError),
+                        Effect.catch(() => Effect.void),
+                      );
+                      yield* (
+                        impl.notifyWorkItemChanged?.({
+                          projectId: latest.projectId,
+                          workItemId: latest.id,
+                        }) ?? Effect.void
+                      );
+                    }
+                    if ((yield* recoveryCommandReceipt(identity.commandId)) === "rejected") {
+                      yield* latchNeedsYou(`silent:${episode}:redispatch-rejected`);
+                    }
+                  } else {
+                    yield* ingestHealthEvent(
+                      `worker-health:${worker.threadId}:redispatched:${episode}`,
+                      "worker.recovery-redispatched",
+                    );
+                  }
+                }
+              }
             }
           }
         }
@@ -1488,6 +1869,437 @@ export const makeProjectAgentService = Effect.gen(function* () {
         }),
       ),
     );
+
+  const currentPlanAttemptForThread = (
+    threadId: ThreadId,
+    turnStart?: ProjectAgentTurnStartAuthorization,
+    options?: { readonly allowRecoveryAdmission?: boolean },
+  ) =>
+    Effect.gen(function* () {
+      if (!hubPlanStore) return null;
+      const binding = yield* hubPlanStore
+        .findAttemptBindingByThread({ threadId })
+        .pipe(Effect.mapError(toServiceError("Failed to resolve plan worker binding.")));
+      if (!binding) return null;
+      const plan = yield* hubPlanStore
+        .read({ planId: binding.planId })
+        .pipe(Effect.mapError(toServiceError("Failed to load worker plan.")));
+      if (!plan) return yield* Effect.fail(fail("Worker plan was not found.", "not-found"));
+      const orderedBindings = yield* hubPlanStore
+        .listAttemptBindings({ planId: binding.planId })
+        .pipe(Effect.mapError(toServiceError("Failed to inspect current plan attempt.")));
+      const latestBinding = orderedBindings
+        .filter(
+          (candidate) =>
+            candidate.revision === binding.revision &&
+            candidate.nodeKey === binding.nodeKey &&
+            candidate.stageGeneration === binding.stageGeneration,
+        )
+        .toSorted(
+          (left, right) =>
+            left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+        )
+        .at(-1);
+      const node = plan.definition.nodes.find((candidate) => candidate.key === binding.nodeKey);
+      const config = yield* requireConfig(ProjectId.makeUnsafe(plan.hubId));
+      const goal = plan.goalId
+        ? yield* repository
+            .getGoal(ProjectGoalId.makeUnsafe(plan.goalId))
+            .pipe(Effect.mapError(toServiceError("Failed to load worker plan goal.")))
+        : Option.none();
+      const task = yield* repository
+        .getTask(ProjectTaskId.makeUnsafe(binding.taskId))
+        .pipe(Effect.mapError(toServiceError("Failed to load worker plan task.")));
+      const attempts = Option.isSome(task)
+        ? yield* repository
+            .listAttemptsForTask(task.value.id)
+            .pipe(Effect.mapError(toServiceError("Failed to load worker plan attempts.")))
+        : [];
+      const attempt = attempts.find((candidate) => candidate.id === binding.attemptId);
+      const work = Option.isSome(hubWorkRepository)
+        ? yield* hubWorkRepository.value
+            .get(binding.workItemId)
+            .pipe(Effect.mapError(toServiceError("Failed to load bound plan work.")))
+        : null;
+      const managedWorker =
+        turnStart !== undefined || options?.allowRecoveryAdmission === true
+          ? yield* repository
+              .findManagedWorkerByThread(threadId)
+              .pipe(Effect.mapError(toServiceError("Failed to load bound plan Worker state.")))
+          : Option.none<ProjectManagedWorker>();
+      const recoveryCandidates =
+        Option.isSome(managedWorker) && hubPlanStore
+          ? yield* hubPlanStore
+              .listCandidates({ planId: binding.planId })
+              .pipe(Effect.mapError(toServiceError("Failed to inspect plan recovery evidence.")))
+          : [];
+      const inputRequests = yield* hubPlanStore
+        .listInputRequests({ planId: binding.planId })
+        .pipe(Effect.mapError(toServiceError("Failed to inspect directed Worker input.")));
+      const boundInputRequests = inputRequests.filter(
+        (request) =>
+          request.revision === binding.revision &&
+          request.nodeKey === binding.nodeKey &&
+          request.stageKey === node?.stageKey &&
+          request.generation === binding.stageGeneration &&
+          request.attemptId === binding.attemptId &&
+          request.workerThreadId === threadId,
+      );
+      const awaitingInput = boundInputRequests.some(
+        (request) => request.status === "pending" || request.status === "answered",
+      );
+      const authorizedRequest = turnStart
+        ? boundInputRequests.find(
+            (request) =>
+              (request.status === "answered" || request.status === "delivered") &&
+              request.answers !== undefined &&
+              request.responseCommandId === turnStart.commandId &&
+              request.responseMessageId === turnStart.messageId,
+          )
+        : undefined;
+      const exactInputResponse = Boolean(
+        turnStart &&
+        authorizedRequest &&
+        matchesHubPlanInputResponseStart({
+          request: authorizedRequest as HubPlanInputResponseAuthorization,
+          turnStart,
+          work,
+        }),
+      );
+      const workerState = Option.isSome(managedWorker) ? managedWorker.value : null;
+      const recoveryIdentity =
+        workerState?.recoveryEpisode === null || workerState?.recoveryEpisode === undefined
+          ? null
+          : recoveryStartIdentity(threadId, workerState.recoveryEpisode);
+      const hasCurrentCandidate = recoveryCandidates.some(
+        (candidate) =>
+          candidate.revision === binding.revision &&
+          candidate.stageKey === node?.stageKey &&
+          candidate.generation === binding.stageGeneration &&
+          candidate.authorNodeKey === binding.nodeKey &&
+          candidate.authorAttemptId === binding.attemptId,
+      );
+      const recoveryIntentValid = Boolean(
+        workerState &&
+        recoveryIdentity &&
+        workerState.recoveryStep === 2 &&
+        workerState.nudgeAt !== null &&
+        workerState.taskPrompt !== null &&
+        workerState.projectId === plan.hubId &&
+        workerState.taskId === binding.taskId &&
+        workerState.requestId === binding.workItemId &&
+        workerState.taskPrompt === (work ? hubWorkTaskPrompt(work) : null) &&
+        workerState.activeTurnOrigin !== "user" &&
+        !workerState.needsYou &&
+        workerState.settledAt === null &&
+        workerState.settleOutcome === null &&
+        workerState.resultSummary === null &&
+        workerState.resultAt === null &&
+        !awaitingInput &&
+        work?.id === binding.workItemId &&
+        work.projectId === plan.hubId &&
+        work.resultSummary === null &&
+        work.workerThreadId === threadId &&
+        ["starting", "working", "waiting", "idle", "failed"].includes(work.state) &&
+        work.state !== "completed" &&
+        work.state !== "cancelled" &&
+        (work.admissionCommandId === null ||
+          (work.admissionCommandId === recoveryIdentity.commandId &&
+            work.admissionMessageId === recoveryIdentity.messageId)) &&
+        !hasCurrentCandidate,
+      );
+      const recoveryAdmissionEligible = Boolean(
+        options?.allowRecoveryAdmission === true &&
+        recoveryIntentValid &&
+        work !== null &&
+        ((work.slotHeld === false &&
+          work.admissionCommandId === null &&
+          (work.state === "idle" || work.state === "failed")) ||
+          (work.state === "starting" &&
+            work.slotHeld &&
+            recoveryIdentity !== null &&
+            work.admissionCommandId === recoveryIdentity?.commandId &&
+            work.admissionMessageId === recoveryIdentity.messageId &&
+            work.admissionPreviousSlotHeld === false)),
+      );
+      const turnShells =
+        turnStart && work
+          ? yield* Effect.all([
+              snapshotQuery.getThreadShellById(threadId),
+              snapshotQuery.getThreadShellById(config.coordinatorThreadId),
+            ]).pipe(Effect.mapError(toServiceError("Failed to load plan Worker turn provenance.")))
+          : null;
+      const workerShell = turnShells?.[0] ?? Option.none<OrchestrationThreadShell>();
+      const coordinatorShell = turnShells?.[1] ?? Option.none<OrchestrationThreadShell>();
+      const exactRecoveryStart = Boolean(
+        turnStart &&
+        recoveryIntentValid &&
+        Option.isSome(workerShell) &&
+        Option.isSome(coordinatorShell) &&
+        matchesHubPlanRecoveryStart({
+          worker: workerState,
+          work,
+          shell: workerShell.value,
+          coordinatorRuntimeMode: coordinatorShell.value.runtimeMode,
+          binding,
+          plan,
+          turnStart,
+        }),
+      );
+      const exactRecoverySteer = Boolean(
+        turnStart &&
+        !awaitingInput &&
+        !hasCurrentCandidate &&
+        Option.isSome(workerShell) &&
+        Option.isSome(coordinatorShell) &&
+        matchesHubPlanRecoveryStart({
+          kind: "steer",
+          worker: workerState,
+          work,
+          shell: workerShell.value,
+          coordinatorRuntimeMode: coordinatorShell.value.runtimeMode,
+          binding,
+          plan,
+          turnStart,
+        }),
+      );
+      let exactInitialStart = false;
+      if (turnStart && work) {
+        exactInitialStart =
+          Option.isSome(workerShell) &&
+          Option.isSome(coordinatorShell) &&
+          matchesHubPlanInitialStart({
+            threadId,
+            shell: workerShell.value,
+            coordinatorRuntimeMode: coordinatorShell.value.runtimeMode,
+            work,
+            turnStart,
+          });
+      }
+      if (
+        !node ||
+        latestBinding?.id !== binding.id ||
+        plan.controlState !== "active" ||
+        plan.revision !== binding.revision ||
+        plan.stageGenerations[node.stageKey] !== binding.stageGeneration ||
+        !plan.configSnapshot.settings ||
+        !config.enabled ||
+        config.pausedAt !== null ||
+        config.archivedAt !== null ||
+        Option.isNone(goal) ||
+        goal.value.projectId !== ProjectId.makeUnsafe(plan.hubId) ||
+        goal.value.status !== "active" ||
+        goal.value.scopeVersion !== plan.revision ||
+        Option.isNone(task) ||
+        task.value.projectId !== ProjectId.makeUnsafe(plan.hubId) ||
+        task.value.goalId !== goal.value.id ||
+        task.value.assignedThreadId !== threadId ||
+        !attempt ||
+        attempt.taskId !== task.value.id ||
+        attempt.workerThreadId !== threadId ||
+        attempt.outcome !== "running" ||
+        !work ||
+        work.workerThreadId !== threadId ||
+        !isAllowedGroupCoordinatorCreateTarget({
+          targetProjectId: work.targetProjectId,
+          groupProjectId: ProjectId.makeUnsafe(plan.hubId),
+          linkedProjectIds: config.linkedProjectIds ?? [],
+        }) ||
+        (work.state !== "working" &&
+          work.state !== "waiting" &&
+          !(
+            work.state === "starting" &&
+            (exactInputResponse || exactInitialStart || exactRecoveryStart)
+          ) &&
+          !(
+            recoveryAdmissionEligible &&
+            (work.state === "idle" || work.state === "failed" || work.state === "starting")
+          ))
+      ) {
+        return yield* Effect.fail(
+          fail("This worker is not the current attempt for an active plan revision.", "conflict"),
+        );
+      }
+      return {
+        binding,
+        plan,
+        node,
+        task: task.value,
+        attempt,
+        work,
+        awaitingInput,
+        exactInputResponse,
+        exactInitialStart,
+        exactRecoveryStart,
+        exactRecoverySteer,
+        recoveryAdmissionEligible,
+        recoveryIntentValid: Boolean(recoveryIntentValid),
+        workerState,
+      };
+    });
+
+  const assertPlanWorkerTurn = (
+    threadId: ThreadId,
+    turnStart?: ProjectAgentTurnStartAuthorization,
+  ) =>
+    Effect.gen(function* () {
+      const active = yield* currentPlanAttemptForThread(threadId, turnStart);
+      if (active) {
+        if (active.awaitingInput && !active.exactInputResponse) {
+          return yield* Effect.fail(
+            fail("This Worker is waiting for its directed Hub input response.", "conflict"),
+          );
+        }
+        if (turnStart && !active.exactInputResponse) {
+          if (active.exactInitialStart) return;
+          if (active.exactRecoveryStart) return "plan-recovery" as const;
+          if (active.exactRecoverySteer) return "plan-recovery-steer" as const;
+          return yield* Effect.fail(
+            fail(
+              "Plan Workers can only resume through their exact saved Hub input response.",
+              "forbidden",
+            ),
+          );
+        }
+        return;
+      }
+      const task = yield* repository
+        .findTaskByAssignedThread(threadId)
+        .pipe(Effect.mapError(toServiceError("Failed to resolve assigned worker task.")));
+      const work = Option.isSome(hubWorkRepository)
+        ? yield* hubWorkRepository.value
+            .findByWorker(threadId)
+            .pipe(Effect.mapError(toServiceError("Failed to resolve assigned Hub work.")))
+        : null;
+      const projectId = Option.isSome(task) ? task.value.projectId : work?.projectId;
+      if (!projectId) return;
+      const config = yield* repository
+        .getConfig(projectId)
+        .pipe(Effect.mapError(toServiceError("Failed to load assigned Hub configuration.")));
+      const hasConfiguredCollaboration =
+        Option.isSome(config) && config.value.collaboration !== undefined;
+      const hasLivePlan = hubPlanStore
+        ? (yield* hubPlanStore
+            .list({ hubId: projectId })
+            .pipe(Effect.mapError(toServiceError("Failed to inspect Hub plans.")))).some((plan) =>
+            ["active", "pausing", "paused", "cancelling"].includes(plan.controlState),
+          )
+        : false;
+      if (hasConfiguredCollaboration || hasLivePlan) {
+        return yield* Effect.fail(
+          fail("Unbound workers cannot run in a plan-managed Hub.", "forbidden"),
+        );
+      }
+    });
+
+  const recoveryCommandReceipt = (commandId: string) =>
+    Effect.gen(function* () {
+      if (Option.isNone(commandReceipts)) return null;
+      const receipt = yield* commandReceipts.value
+        .getByCommandId({ commandId: CommandId.makeUnsafe(commandId) })
+        .pipe(Effect.mapError(toServiceError("Failed to inspect worker recovery receipt.")));
+      return Option.isSome(receipt) ? receipt.value.status : null;
+    });
+
+  const reservePlanRecoveryAdmission = (input: {
+    readonly threadId: ThreadId;
+    readonly episode: string;
+    readonly shell: OrchestrationThreadShell;
+  }) =>
+    Effect.gen(function* () {
+      if (!hubPlanStore || Option.isNone(hubWorkRepository)) return { kind: "unmanaged" as const };
+      const binding = yield* hubPlanStore
+        .findAttemptBindingByThread({ threadId: input.threadId })
+        .pipe(Effect.mapError(toServiceError("Failed to resolve recovery plan attempt.")));
+      if (!binding) return { kind: "unmanaged" as const };
+      if (
+        input.shell.hasPendingApprovals ||
+        input.shell.hasPendingUserInput ||
+        input.shell.session?.activeTurnId != null ||
+        input.shell.latestTurn?.state === "running" ||
+        Option.isNone(commandReceipts)
+      ) {
+        return { kind: "denied" as const };
+      }
+      const active = yield* Effect.exit(
+        currentPlanAttemptForThread(input.threadId, undefined, { allowRecoveryAdmission: true }),
+      );
+      if (
+        active._tag === "Failure" ||
+        !active.value?.recoveryIntentValid ||
+        !active.value.recoveryAdmissionEligible
+      ) {
+        return { kind: "denied" as const };
+      }
+      const worker = yield* repository
+        .findManagedWorkerByThread(input.threadId)
+        .pipe(Effect.mapError(toServiceError("Failed to reload recovery Worker state.")));
+      if (
+        Option.isNone(worker) ||
+        worker.value.recoveryEpisode !== input.episode ||
+        worker.value.recoveryStep !== 2 ||
+        worker.value.taskPrompt === null ||
+        worker.value.taskPrompt !== hubWorkTaskPrompt(active.value.work)
+      ) {
+        return { kind: "denied" as const };
+      }
+      const config = yield* requireConfig(ProjectId.makeUnsafe(active.value.plan.hubId));
+      const coordinatorShell = yield* snapshotQuery
+        .getThreadShellById(config.coordinatorThreadId)
+        .pipe(Effect.mapError(toServiceError("Failed to load recovery coordinator provenance.")));
+      if (
+        Option.isNone(coordinatorShell) ||
+        !matchesHubWorkThreadProvenance({
+          threadId: input.threadId,
+          shell: input.shell,
+          work: active.value.work,
+        }) ||
+        !matchesHubWorkFrozenSettings({
+          work: active.value.work,
+          shell: input.shell,
+          coordinatorRuntimeMode: coordinatorShell.value.runtimeMode,
+        })
+      ) {
+        return { kind: "denied" as const };
+      }
+      const identity = recoveryStartIdentity(input.threadId, input.episode);
+      const receiptStatus = yield* recoveryCommandReceipt(identity.commandId);
+      if (receiptStatus === "accepted") return { kind: "accepted" as const };
+      if (receiptStatus === "rejected") return { kind: "rejected" as const };
+      const admitted = yield* reserveHubWorkAdmission(hubWorkRepository.value, {
+        threadId: input.threadId,
+        commandId: identity.commandId,
+        messageId: identity.messageId,
+      }).pipe(Effect.mapError(toServiceError("Failed to reserve recovery Worker capacity.")));
+      if (!admitted) return { kind: "capacity" as const };
+      if (
+        admitted.state !== "starting" ||
+        !admitted.slotHeld ||
+        admitted.admissionCommandId !== identity.commandId ||
+        admitted.admissionMessageId !== identity.messageId
+      ) {
+        return { kind: "denied" as const };
+      }
+      yield* (
+        impl.notifyWorkItemChanged?.({
+          projectId: admitted.projectId,
+          workItemId: admitted.id,
+        }) ?? Effect.void
+      );
+      return { kind: "reserved" as const, admitted };
+    });
+
+  const settingsForTurnContext = (projectId: ProjectId, config: ProjectAgentConfig) =>
+    Effect.gen(function* () {
+      if (!hubPlanStore) return config.collaboration;
+      const plans = yield* hubPlanStore
+        .list({ hubId: projectId })
+        .pipe(Effect.mapError(toServiceError("Failed to load frozen plan context.")));
+      const activePlan = plans
+        .filter((plan) => ["active", "pausing", "paused", "cancelling"].includes(plan.controlState))
+        .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+      return activePlan?.configSnapshot.settings ?? config.collaboration;
+    });
 
   const appendActivity = (input: Omit<ProjectActivity, "id" | "sequence">) =>
     Effect.gen(function* () {
@@ -2884,12 +3696,29 @@ export const makeProjectAgentService = Effect.gen(function* () {
               fail("Only the user can configure Project Coordinator.", "forbidden"),
             );
           }
+          const normalizedCollaboration = input.collaboration
+            ? yield* normalizeHubCollaborationSettings(input.collaboration).pipe(
+                Effect.mapError(toServiceError("Invalid collaboration settings.")),
+              )
+            : undefined;
           const existingReceipt = yield* replayReceipt(
             input.requestId,
             input.projectId,
             (json) => JSON.parse(json) as ProjectAgentOverview,
           );
           if (existingReceipt) {
+            if (
+              normalizedCollaboration !== undefined &&
+              JSON.stringify(normalizedCollaboration) !==
+                JSON.stringify(existingReceipt.config?.collaboration)
+            ) {
+              return yield* Effect.fail(
+                fail(
+                  "This configuration request was already used with different collaboration settings.",
+                  "conflict",
+                ),
+              );
+            }
             if (
               input.expertIds !== undefined &&
               JSON.stringify([...new Set(input.expertIds)].sort()) !==
@@ -2927,7 +3756,61 @@ export const makeProjectAgentService = Effect.gen(function* () {
           const previousExpertIds = new Set(
             Option.isSome(existing) ? (existing.value.expertIds ?? []) : [],
           );
+          const collaboration =
+            normalizedCollaboration ??
+            (Option.isSome(existing) ? existing.value.collaboration : undefined);
+          if (
+            input.collaboration &&
+            Option.isSome(existing) &&
+            input.expectedRevision === undefined
+          ) {
+            return yield* Effect.fail(
+              fail(
+                "Collaboration settings require the current configuration revision.",
+                "conflict",
+              ),
+            );
+          }
+          if (
+            input.collaboration &&
+            Option.isSome(existing) &&
+            input.collaboration.mode !== existing.value.collaboration?.mode
+          ) {
+            const activeGoal = yield* repository
+              .getActiveGoal(input.projectId)
+              .pipe(Effect.mapError(toServiceError("Failed to check active work.")));
+            const work = Option.isSome(hubWorkRepository)
+              ? yield* hubWorkRepository.value
+                  .list(input.projectId)
+                  .pipe(Effect.mapError(toServiceError("Failed to check active work.")))
+              : [];
+            if (
+              Option.isSome(activeGoal) ||
+              work.some((item) => !["completed", "failed", "cancelled"].includes(item.state))
+            ) {
+              return yield* Effect.fail(
+                fail(
+                  "Finish or stop active work before changing the Hub collaboration mode.",
+                  "conflict",
+                ),
+              );
+            }
+          }
+          if (input.collaboration?.presetSource) {
+            if (Option.isNone(deliverablesSql))
+              return yield* Effect.fail(fail("Hub preset storage is unavailable.", "invalid"));
+            const source = yield* makeHubCollaborationConfigStore(deliverablesSql.value)
+              .readTeam(input.collaboration.presetSource)
+              .pipe(Effect.mapError(toServiceError("Failed to read the team preset revision.")));
+            if (!source)
+              return yield* Effect.fail(
+                fail("The selected team preset revision does not exist.", "invalid"),
+              );
+          }
           for (const expertId of expertIds) {
+            // A copied preset can retain unavailable members for repair in Settings.
+            // Actual dispatch still resolves and validates every selected Expert.
+            if (collaboration !== undefined) continue;
             if (previousExpertIds.has(expertId)) continue;
             const definition = yield* Effect.tryPromise({
               try: () => expertStore.read(expertId),
@@ -3060,6 +3943,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
           const config: ProjectAgentConfig = {
             projectId: input.projectId,
             expertIds,
+            ...(collaboration ? { collaboration } : {}),
             ...(sourceProjectId !== undefined ? { sourceProjectId } : {}),
             coordinatorThreadId,
             coordinatorName,
@@ -5180,6 +6064,10 @@ export const makeProjectAgentService = Effect.gen(function* () {
         const config = yield* repository
           .getConfig(principal.projectId)
           .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+        const collaborationSettings =
+          isCoordinator && Option.isSome(config)
+            ? yield* settingsForTurnContext(principal.projectId, config.value)
+            : undefined;
         if (principal.kind === "coordinator") {
           yield* ensureProjectBotPlaybook(principal.projectId).pipe(
             Effect.catch(() => Effect.void),
@@ -5322,6 +6210,22 @@ export const makeProjectAgentService = Effect.gen(function* () {
         const budget = truncateToContextBudget(
           [
             { label: "Instructions (user-owned)", text: packet.instructions },
+            ...(isCoordinator && collaborationSettings?.coordinatorInstructions
+              ? [
+                  {
+                    label: "Team coordination guidance (does not grant execution permissions)",
+                    text: collaborationSettings.coordinatorInstructions,
+                  },
+                ]
+              : []),
+            ...(isCoordinator && collaborationSettings
+              ? [
+                  {
+                    label: "Hub plan execution protocol",
+                    text: "For formal work, first propose a plan with synara_hub_propose_plan. Every node must specify its concrete provider, instance, and model target; defaults are frozen when the plan is proposed. The user confirms only through the plan card. Read plan state, task bindings, and attempt IDs with synara_hub_list_plans. Do not bypass plans with synara_create_threads. The confirmed scope and plan revision cannot be changed by prompt wording; changes require a separately authorized plan revision.",
+                  },
+                ]
+              : []),
             { label: "Hub memory index", text: memoryIndexText },
             ...(workItem && workItem.projectId === principal.projectId
               ? [
@@ -5443,6 +6347,11 @@ export const makeProjectAgentService = Effect.gen(function* () {
         }
         if (principal.kind !== "coordinator") return;
         const config = yield* requireConfig(principal.projectId);
+        if (config.collaboration !== undefined) {
+          return yield* Effect.fail(
+            fail("New-mode Hub worker creation requires an authorized plan node.", "forbidden"),
+          );
+        }
         // The user's configured limits apply, clamped to the hard caps — the
         // defaults act as the ceiling, not a floor the user cannot go below.
         const limits = {
@@ -5480,6 +6389,93 @@ export const makeProjectAgentService = Effect.gen(function* () {
       Effect.gen(function* () {
         const principal = yield* impl.resolvePrincipalForThread(input.callerThreadId);
         if (principal.kind !== "coordinator") return;
+        const config = yield* requireConfig(principal.projectId);
+        const planBinding = hubPlanStore
+          ? yield* hubPlanStore
+              .findAttemptBindingByWork({ workItemId: input.requestId })
+              .pipe(Effect.mapError(toServiceError("Failed to resolve authorized plan attempt.")))
+          : null;
+        if (config.collaboration !== undefined && !planBinding) {
+          return yield* Effect.fail(
+            fail("Unbound workers cannot be created in a plan-managed Hub.", "forbidden"),
+          );
+        }
+        if (planBinding && input.threadIds.length !== 1) {
+          return yield* Effect.fail(
+            fail("A plan attempt must create exactly one worker thread.", "invalid"),
+          );
+        }
+        let planRecord: import("../../hubCollaboration/HubPlanStore.ts").PlanRecord | null = null;
+        let planTask: ProjectTask | null = null;
+        if (planBinding) {
+          if (!hubPlanStore)
+            return yield* Effect.fail(fail("Plan execution is unavailable.", "forbidden"));
+          planRecord = yield* hubPlanStore
+            .read({ planId: planBinding.planId })
+            .pipe(Effect.mapError(toServiceError("Failed to load authorized plan.")));
+          if (!planRecord || planRecord.hubId !== principal.projectId) {
+            return yield* Effect.fail(fail("Plan binding belongs to another Hub.", "forbidden"));
+          }
+          const orderedBindings = yield* hubPlanStore
+            .listAttemptBindings({ planId: planBinding.planId })
+            .pipe(Effect.mapError(toServiceError("Failed to inspect current plan attempt.")));
+          const latestBinding = orderedBindings
+            .filter(
+              (candidate) =>
+                candidate.revision === planBinding.revision &&
+                candidate.nodeKey === planBinding.nodeKey &&
+                candidate.stageGeneration === planBinding.stageGeneration,
+            )
+            .toSorted(
+              (left, right) =>
+                left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+            )
+            .at(-1);
+          const node = planRecord.definition.nodes.find(
+            (candidate) => candidate.key === planBinding.nodeKey,
+          );
+          const stageGeneration = node ? planRecord.stageGenerations[node.stageKey] : undefined;
+          const goalOption = planRecord.goalId
+            ? yield* repository
+                .getGoal(ProjectGoalId.makeUnsafe(planRecord.goalId))
+                .pipe(Effect.mapError(toServiceError("Failed to load authorized plan goal.")))
+            : Option.none();
+          const taskOption = yield* repository
+            .getTask(ProjectTaskId.makeUnsafe(planBinding.taskId))
+            .pipe(Effect.mapError(toServiceError("Failed to load bound plan task.")));
+          const work = Option.isSome(hubWorkRepository)
+            ? yield* hubWorkRepository.value
+                .get(planBinding.workItemId)
+                .pipe(Effect.mapError(toServiceError("Failed to load bound Hub work.")))
+            : null;
+          if (
+            planRecord.controlState !== "active" ||
+            planRecord.revision !== planBinding.revision ||
+            latestBinding?.id !== planBinding.id ||
+            !planRecord.configSnapshot.settings ||
+            !node ||
+            stageGeneration !== planBinding.stageGeneration ||
+            Option.isNone(goalOption) ||
+            goalOption.value.projectId !== principal.projectId ||
+            goalOption.value.status !== "active" ||
+            goalOption.value.scopeVersion !== planRecord.revision ||
+            Option.isNone(taskOption) ||
+            taskOption.value.projectId !== principal.projectId ||
+            taskOption.value.goalId !== goalOption.value.id ||
+            taskOption.value.title !== node.title ||
+            taskOption.value.assignedThreadId !== null ||
+            taskOption.value.archivedAt !== null ||
+            work === null ||
+            work.id !== input.requestId ||
+            work.state !== "starting" ||
+            work.workerThreadId !== null
+          ) {
+            return yield* Effect.fail(
+              fail("Plan worker creation no longer matches its active task binding.", "conflict"),
+            );
+          }
+          planTask = taskOption.value;
+        }
         const now = isoNow();
         // createdAt feeds the never-started grace, which runs on Clock time.
         const clockCreatedAt = new Date(yield* Clock.currentTimeMillis).toISOString();
@@ -5505,7 +6501,73 @@ export const makeProjectAgentService = Effect.gen(function* () {
             .pipe(Effect.mapError(toServiceError("Failed to index worker thread.")));
           yield* publishThreadIndexUpserts(principal.projectId, [indexEntry]);
           let taskId: ProjectTaskId | null = null;
-          if (activeGoal) {
+          if (planBinding && planTask) {
+            if (!hubPlanStore || !planRecord) {
+              return yield* Effect.fail(fail("Plan execution is unavailable.", "forbidden"));
+            }
+            const currentAttempts = yield* repository
+              .listAttemptsForTask(planTask.id)
+              .pipe(Effect.mapError(toServiceError("Failed to load plan task attempts.")));
+            const expectedAttemptRequestId = `${input.requestId}:attempt:${threadId}`;
+            const existingAttempt = yield* repository
+              .getAttemptByRequestId(expectedAttemptRequestId)
+              .pipe(Effect.mapError(toServiceError("Failed to check plan attempt replay.")));
+            if (Option.isSome(existingAttempt)) {
+              if (
+                existingAttempt.value.id !== planBinding.attemptId ||
+                existingAttempt.value.taskId !== planTask.id ||
+                existingAttempt.value.workerThreadId !== threadId
+              ) {
+                return yield* Effect.fail(
+                  fail("Plan attempt replay has a different identity.", "conflict"),
+                );
+              }
+              if (planTask.assignedThreadId !== threadId) {
+                return yield* Effect.fail(
+                  fail("Plan attempt is already assigned to another worker.", "conflict"),
+                );
+              }
+            } else {
+              if (
+                planTask.assignedThreadId !== null ||
+                (planTask.status !== "planned" && planTask.status !== "ready")
+              ) {
+                return yield* Effect.fail(
+                  fail("Bound plan task is no longer ready for its first attempt.", "conflict"),
+                );
+              }
+              const assigned = {
+                ...planTask,
+                status: "running" as const,
+                assignedThreadId: threadId,
+                revision: planTask.revision + 1,
+                updatedAt: now,
+              };
+              yield* repository
+                .saveTask(assigned, planTask.revision)
+                .pipe(Effect.mapError(toServiceError("Failed to assign plan worker task.")));
+              yield* repository
+                .saveAttempt({
+                  id: ProjectTaskAttemptId.makeUnsafe(planBinding.attemptId),
+                  projectId: principal.projectId,
+                  taskId: planTask.id,
+                  workerThreadId: threadId,
+                  gatewayOperationId: input.requestId,
+                  requestId: expectedAttemptRequestId,
+                  attemptNumber:
+                    currentAttempts.reduce(
+                      (maximum, attempt) => Math.max(maximum, attempt.attemptNumber),
+                      0,
+                    ) + 1,
+                  outcome: "running",
+                  error: null,
+                  createdAt: now,
+                  finishedAt: null,
+                })
+                .pipe(Effect.mapError(toServiceError("Failed to save plan worker attempt.")));
+            }
+            taskId = planTask.id;
+          } else if (activeGoal) {
             const task = yield* impl.createTask(
               {
                 requestId: `${input.requestId}:task:${threadId}`,
@@ -5589,13 +6651,13 @@ export const makeProjectAgentService = Effect.gen(function* () {
             .pipe(Effect.mapError(toServiceError("Failed to track managed worker.")));
           yield* appendActivity({
             projectId: principal.projectId,
-            kind: "task-created",
+            kind: taskId ? "attempt-recorded" : "task-created",
             actorKind: "coordinator",
             actorThreadId: principal.threadId,
             goalId: activeGoal?.id ?? null,
-            taskId: null,
+            taskId,
             source: null,
-            summary: `Opened worker: ${title}`,
+            summary: planBinding ? `Started plan task worker: ${title}` : `Opened worker: ${title}`,
             createdAt: now,
           });
         }
@@ -5738,27 +6800,187 @@ export const makeProjectAgentService = Effect.gen(function* () {
         if (task.projectId !== input.projectId) {
           return yield* Effect.fail(fail("Task does not belong to this project.", "forbidden"));
         }
-        if (principal.kind === "worker" && principal.taskId !== task.id) {
+        const workerPlanBinding =
+          principal.kind === "worker" && hubPlanStore
+            ? yield* hubPlanStore
+                .findAttemptBindingByThread({ threadId: principal.threadId })
+                .pipe(Effect.mapError(toServiceError("Failed to resolve plan result attempt.")))
+            : null;
+        if (
+          principal.kind === "worker" &&
+          principal.taskId !== task.id &&
+          workerPlanBinding?.taskId !== task.id
+        ) {
           return yield* Effect.fail(fail("Workers can only report their own task.", "forbidden"));
         }
+        let planManagedTask = false;
+        const projectConfig = yield* repository
+          .getConfig(input.projectId)
+          .pipe(Effect.mapError(toServiceError("Failed to check plan-managed task mode.")));
+        if (Option.isSome(projectConfig) && projectConfig.value.collaboration !== undefined) {
+          planManagedTask = true;
+        }
+        if (hubPlanStore) {
+          const plans = yield* hubPlanStore
+            .list({ hubId: input.projectId })
+            .pipe(Effect.mapError(toServiceError("Failed to check plan task ownership.")));
+          for (const plan of plans) {
+            const bindings = yield* hubPlanStore
+              .listBindings({ planId: plan.id, revision: plan.revision })
+              .pipe(Effect.mapError(toServiceError("Failed to check plan task binding.")));
+            if (bindings.some((binding) => binding.taskId === task.id)) {
+              planManagedTask = true;
+              break;
+            }
+          }
+        }
+        let currentPlanAttempt = !planManagedTask;
+        let activePlanAttempt: Effect.Success<ReturnType<typeof currentPlanAttemptForThread>> =
+          null;
+        let recordedAttemptId = input.attemptId ?? null;
+        if (planManagedTask) {
+          currentPlanAttempt = false;
+          if (principal.kind === "worker" && workerPlanBinding?.taskId === task.id) {
+            if (input.attemptId !== undefined && input.attemptId !== workerPlanBinding.attemptId) {
+              return yield* Effect.fail(
+                fail("Plan result attempt ID does not match this worker.", "conflict"),
+              );
+            }
+            const current = yield* Effect.exit(currentPlanAttemptForThread(principal.threadId));
+            if (current._tag === "Success") {
+              currentPlanAttempt = true;
+              activePlanAttempt = current.value;
+            }
+            recordedAttemptId = workerPlanBinding.attemptId as ProjectTaskAttemptId;
+          }
+        }
         const now = isoNow();
-        yield* repository
-          .saveEvidence({
-            id: branded.evidence(),
-            projectId: input.projectId,
-            taskId: task.id,
-            attemptId: input.attemptId ?? null,
-            kind: input.evidenceKind ?? "message",
-            classification: "reported",
-            authorKind: principal.kind === "user" ? "user" : principal.kind,
-            authorThreadId: principal.kind === "user" ? null : principal.threadId,
-            sourceThreadId: principal.kind === "user" ? null : principal.threadId,
-            sourceMessageId: null,
-            sourceTurnId: null,
-            summary: input.summary,
-            createdAt: now,
-          })
-          .pipe(Effect.mapError(toServiceError("Failed to record evidence.")));
+        const recordEvidenceAndFinalize = Effect.gen(function* () {
+          yield* repository
+            .saveEvidence({
+              id: branded.evidence(),
+              projectId: input.projectId,
+              taskId: task.id,
+              attemptId: recordedAttemptId,
+              kind: input.evidenceKind ?? "message",
+              classification: "reported",
+              authorKind: principal.kind === "user" ? "user" : principal.kind,
+              authorThreadId: principal.kind === "user" ? null : principal.threadId,
+              sourceThreadId: principal.kind === "user" ? null : principal.threadId,
+              sourceMessageId: null,
+              sourceTurnId: null,
+              summary: input.summary,
+              createdAt: now,
+            })
+            .pipe(Effect.mapError(toServiceError("Failed to record evidence.")));
+          if (
+            planManagedTask &&
+            currentPlanAttempt &&
+            activePlanAttempt?.node.role === "worker" &&
+            principal.kind === "worker"
+          ) {
+            const latestPlan = hubPlanStore
+              ? yield* hubPlanStore
+                  .read({ planId: activePlanAttempt.plan.id })
+                  .pipe(Effect.mapError(toServiceError("Failed to recheck plan worker state.")))
+              : null;
+            const latestBinding = hubPlanStore
+              ? yield* hubPlanStore
+                  .findAttemptBindingByWork({ workItemId: activePlanAttempt.binding.workItemId })
+                  .pipe(Effect.mapError(toServiceError("Failed to recheck plan worker binding.")))
+              : null;
+            const latestWork = Option.isSome(hubWorkRepository)
+              ? yield* hubWorkRepository.value
+                  .get(activePlanAttempt.binding.workItemId)
+                  .pipe(Effect.mapError(toServiceError("Failed to recheck plan worker Work.")))
+              : null;
+            const latestConfig = yield* repository
+              .getConfig(input.projectId)
+              .pipe(Effect.mapError(toServiceError("Failed to recheck plan worker Hub.")));
+            if (
+              !latestPlan ||
+              latestPlan.controlState !== "active" ||
+              latestPlan.revision !== activePlanAttempt.plan.revision ||
+              latestPlan.stageGenerations[activePlanAttempt.node.stageKey] !==
+                activePlanAttempt.binding.stageGeneration ||
+              latestBinding?.id !== activePlanAttempt.binding.id ||
+              !latestWork ||
+              latestWork.workerThreadId !== principal.threadId ||
+              (latestWork.state !== "working" && latestWork.state !== "waiting") ||
+              Option.isNone(latestConfig) ||
+              !latestConfig.value.enabled ||
+              latestConfig.value.pausedAt !== null ||
+              latestConfig.value.archivedAt !== null
+            ) {
+              currentPlanAttempt = false;
+            }
+          }
+          if (
+            planManagedTask &&
+            currentPlanAttempt &&
+            activePlanAttempt?.node.role === "worker" &&
+            principal.kind === "worker"
+          ) {
+            const currentTask = yield* repository
+              .getTask(task.id)
+              .pipe(Effect.mapError(toServiceError("Failed to reload plan worker task.")));
+            if (
+              Option.isNone(currentTask) ||
+              currentTask.value.assignedThreadId !== principal.threadId ||
+              currentTask.value.status !== "running"
+            ) {
+              return yield* Effect.fail(fail("Plan worker task is no longer running.", "conflict"));
+            }
+            const attempts = yield* repository
+              .listAttemptsForTask(task.id)
+              .pipe(Effect.mapError(toServiceError("Failed to reload plan worker attempt.")));
+            const attempt = attempts.find(
+              (candidate) => candidate.id === activePlanAttempt!.binding.attemptId,
+            );
+            if (
+              !attempt ||
+              attempt.workerThreadId !== principal.threadId ||
+              attempt.outcome !== "running"
+            ) {
+              return yield* Effect.fail(
+                fail("Plan worker attempt is no longer running.", "conflict"),
+              );
+            }
+            const savedTask = yield* repository
+              .saveTask(
+                {
+                  ...currentTask.value,
+                  status: "done",
+                  revision: currentTask.value.revision + 1,
+                  updatedAt: now,
+                },
+                currentTask.value.revision,
+              )
+              .pipe(Effect.mapError(toServiceError("Failed to complete plan worker task.")));
+            yield* repository
+              .saveAttempt({ ...attempt, outcome: "succeeded", error: null, finishedAt: now })
+              .pipe(Effect.mapError(toServiceError("Failed to complete plan worker attempt.")));
+            yield* publish({ type: "task-upserted", task: savedTask });
+          } else if (!planManagedTask && task.status === "running" && currentPlanAttempt) {
+            const reviewed: ProjectTask = {
+              ...task,
+              status: "review",
+              revision: task.revision + 1,
+              updatedAt: now,
+            };
+            const saved = yield* repository
+              .saveTask(reviewed, task.revision)
+              .pipe(Effect.mapError(toServiceError("Failed to move task to review.")));
+            yield* publish({ type: "task-upserted", task: saved });
+          }
+        });
+        if (Option.isSome(deliverablesSql)) {
+          yield* deliverablesSql.value
+            .withTransaction(recordEvidenceAndFinalize)
+            .pipe(Effect.mapError(toServiceError("Failed to record plan worker result.")));
+        } else {
+          yield* recordEvidenceAndFinalize;
+        }
         // The structured summary lands on the managed-worker row — the settle
         // row and the batch roll-up quote it instead of generic text.
         if (principal.kind !== "user") {
@@ -5780,18 +7002,6 @@ export const makeProjectAgentService = Effect.gen(function* () {
               .pipe(Effect.catch(() => Effect.void));
           }
         }
-        if (task.status === "running") {
-          const reviewed: ProjectTask = {
-            ...task,
-            status: "review",
-            revision: task.revision + 1,
-            updatedAt: now,
-          };
-          const saved = yield* repository
-            .saveTask(reviewed, task.revision)
-            .pipe(Effect.mapError(toServiceError("Failed to move task to review.")));
-          yield* publish({ type: "task-upserted", task: saved });
-        }
         return yield* appendActivity({
           projectId: input.projectId,
           kind: "attempt-recorded",
@@ -5800,7 +7010,10 @@ export const makeProjectAgentService = Effect.gen(function* () {
           goalId: task.goalId,
           taskId: task.id,
           source: null,
-          summary: `Worker outcome recorded; task remains under review until accepted. ${input.summary}`,
+          summary:
+            planManagedTask && !currentPlanAttempt
+              ? `Historical plan attempt result recorded; current task state was left unchanged. ${input.summary}`
+              : `Worker outcome recorded; task remains under review until accepted. ${input.summary}`,
           createdAt: now,
         });
       }),
@@ -5885,7 +7098,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
         ) {
           return;
         }
-        const task = yield* repository
+        let task = yield* repository
           .findTaskByAssignedThread(input.threadId)
           .pipe(Effect.mapError(toServiceError("Failed to resolve task for event.")));
         const worker = yield* repository
@@ -5911,6 +7124,16 @@ export const makeProjectAgentService = Effect.gen(function* () {
           .getConfig(projectId)
           .pipe(Effect.mapError(toServiceError("Failed to load coordinator for event.")));
         if (Option.isNone(config) || !config.value.enabled) return;
+        if (Option.isSome(worker)) {
+          const currentPlanAttempt = yield* Effect.exit(
+            currentPlanAttemptForThread(input.threadId),
+          );
+          if (currentPlanAttempt._tag === "Failure" || config.value.collaboration !== undefined) {
+            // Preserve the event and worker report as history, but leave the
+            // current native task and plan output state untouched.
+            task = Option.none();
+          }
+        }
         const healthStopStatus =
           input.eventType === "worker.stopped"
             ? "stopped"
@@ -6445,6 +7668,17 @@ export const makeProjectAgentService = Effect.gen(function* () {
                   )
                   .map((session: ProviderSession) => session.threadId),
               );
+        const liveProviderTurnThreadIds =
+          liveSessions === null
+            ? null
+            : new Set<string>(
+                liveSessions
+                  .filter(
+                    (session: ProviderSession) =>
+                      session.status === "running" && session.activeTurnId !== undefined,
+                  )
+                  .map((session: ProviderSession) => session.threadId),
+              );
         for (const config of configs) {
           if (!config.enabled) continue;
           if (config.pausedAt !== null || config.archivedAt !== null) continue;
@@ -6479,7 +7713,12 @@ export const makeProjectAgentService = Effect.gen(function* () {
               if (Option.isSome(refreshed)) worker = refreshed.value;
             }
             if (worker !== undefined) {
-              yield* inspectManagedWorkerHealth({ worker, shell, liveWorkerThreadIds });
+              yield* inspectManagedWorkerHealth({
+                worker,
+                shell,
+                liveWorkerThreadIds,
+                liveProviderTurnThreadIds,
+              });
               continue;
             }
             if (Option.isNone(shell)) {
@@ -6526,10 +7765,9 @@ export const makeProjectAgentService = Effect.gen(function* () {
             : input.commandId !== null && input.commandId.startsWith(WORKER_RECOVERY_COMMAND_PREFIX)
               ? ("ladder" as const)
               : ("coordinator" as const);
-        const updated: ProjectManagedWorker = {
-          ...worker,
+        const ownershipFields = (base: ProjectManagedWorker): Partial<ProjectManagedWorker> => ({
           activeTurnOrigin: origin,
-          activeTurnCommandId: input.commandId ?? worker.activeTurnCommandId,
+          activeTurnCommandId: input.commandId ?? base.activeTurnCommandId,
           // Re-arm: a new coordinator/ladder turn on a settled worker re-opens
           // monitoring — the next settle reports again.
           ...(origin !== "user"
@@ -6541,12 +7779,17 @@ export const makeProjectAgentService = Effect.gen(function* () {
                 needsYouAt: null,
               }
             : {}),
-          updatedAt: input.createdAt,
+        });
+        const updated: ProjectManagedWorker = {
+          ...worker,
+          ...ownershipFields(worker),
+          updatedAt: nextMonitorUpdatedAt(worker.updatedAt, input.createdAt),
         };
         const saved = yield* repository
           .saveManagedWorkerMonitor({
             worker: updated,
             expectedUpdatedAt: worker.updatedAt,
+            preserveResultEvidence: true,
           })
           .pipe(Effect.catch(() => Effect.succeed({ applied: false as const })));
         if (!saved.applied) {
@@ -6557,23 +7800,18 @@ export const makeProjectAgentService = Effect.gen(function* () {
             .pipe(Effect.catch(() => Effect.succeed(Option.none())));
           if (Option.isSome(fresh)) {
             const retried: ProjectManagedWorker = {
-              ...updated,
-              // Keep the ladder/monitor state the winner wrote; only the
-              // ownership + re-arm fields are reapplied.
-              stuckKind: fresh.value.stuckKind,
-              stuckSince: fresh.value.stuckSince,
-              recoveryEpisode: fresh.value.recoveryEpisode,
-              recoveryStep: fresh.value.recoveryStep,
-              nudgeAt: fresh.value.nudgeAt,
-              recoveriesUsed: fresh.value.recoveriesUsed,
+              ...fresh.value,
+              ...ownershipFields(fresh.value),
+              // Retain alert facts from the winning health/monitor write.
               needsYou: fresh.value.needsYou,
               needsYouAt: fresh.value.needsYouAt,
-              updatedAt: fresh.value.updatedAt,
+              updatedAt: nextMonitorUpdatedAt(fresh.value.updatedAt, input.createdAt),
             };
             yield* repository
               .saveManagedWorkerMonitor({
                 worker: retried,
                 expectedUpdatedAt: fresh.value.updatedAt,
+                preserveResultEvidence: true,
               })
               .pipe(Effect.catch(() => Effect.void));
           }
@@ -6610,6 +7848,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
               .saveManagedWorkerMonitor({
                 worker: { ...worker, ...patch, updatedAt: nowIso },
                 expectedUpdatedAt: worker.updatedAt,
+                preserveResultEvidence: true,
               })
               .pipe(Effect.catch(() => Effect.succeed({ applied: false as const })));
             if (saved.applied) return;
@@ -6621,6 +7860,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
               .saveManagedWorkerMonitor({
                 worker: { ...fresh.value, ...patch, updatedAt: fresh.value.updatedAt },
                 expectedUpdatedAt: fresh.value.updatedAt,
+                preserveResultEvidence: true,
               })
               .pipe(Effect.catch(() => Effect.void));
           });
@@ -6849,6 +8089,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
             }),
           ),
         );
+        yield* assertPlanWorkerTurn(input.targetThreadId);
         if (caller.kind === "coordinator") {
           if (targetShell.projectId !== caller.projectId) {
             const config = yield* requireConfig(caller.projectId);
@@ -6909,10 +8150,11 @@ export const makeProjectAgentService = Effect.gen(function* () {
     // the gate.
     assertGroupCoordinatorTurnAllowed: (input) =>
       Effect.gen(function* () {
+        const planAuthorization = yield* assertPlanWorkerTurn(input.threadId, input.turnStart);
         const config = yield* repository
           .getConfigByCoordinatorThread(input.threadId)
           .pipe(Effect.mapError(toServiceError("Failed to load hub coordinator state.")));
-        if (Option.isNone(config)) return;
+        if (Option.isNone(config)) return planAuthorization;
         if (config.value.pausedAt !== null) {
           return yield* Effect.fail(
             fail("This hub is paused — resume it before driving the coordinator.", "conflict"),
@@ -6923,6 +8165,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
             fail("This hub is archived — unarchive it before driving the coordinator.", "conflict"),
           );
         }
+        return planAuthorization;
       }),
 
     onProjectDeleted: (projectId) =>

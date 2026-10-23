@@ -18,6 +18,7 @@ import { ExpertList } from "./ExpertList";
 import { ExpertActionsMenu } from "./ExpertActionsMenu";
 import { ExpertPreviewPopover } from "./ExpertPreviewPopover";
 import { ExpertSaveBar } from "./ExpertSaveBar";
+import { SettingsSegmentedControl } from "./SettingControls";
 import {
   expertDraftFromDefinition,
   expertDraftsEqual,
@@ -28,6 +29,10 @@ import type { ExpertDraftIssue } from "./expertSettingsModel";
 import { EXPERT_CONNECTIONS_QUERY_KEY, EXPERTS_QUERY_KEY } from "./expertSettingsQueries";
 import { skillsCatalogQueryOptions } from "~/lib/providerDiscoveryReactQuery";
 import { useExpertDraftGuard } from "./useExpertDraftGuard";
+import {
+  HubTeamsSettingsPanel,
+  type HubTeamsSettingsPanelHandle,
+} from "~/features/hubCollaboration/HubTeamsSettingsPanel";
 
 const EMPTY_EXPERTS: ReadonlyArray<ExpertDefinition> = [];
 
@@ -53,6 +58,8 @@ export function ExpertsSettingsPanel(props: {
   });
   const experts = expertsQuery.data ?? EMPTY_EXPERTS;
   const [view, setView] = useState<"list" | "editor">("list");
+  const [settingsKind, setSettingsKind] = useState<"experts" | "teams">("experts");
+  const hubTeamsPanelRef = useRef<HubTeamsSettingsPanelHandle>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [baseline, setBaseline] = useState<ExpertDefinition | null>(null);
   const [draft, setDraft] = useState<ExpertSaveInput | null>(null);
@@ -70,9 +77,12 @@ export function ExpertsSettingsPanel(props: {
 
   const readonly = baseline?.archived === true;
   const baselineDraft = useMemo(() => expertDraftFromDefinition(baseline ?? undefined), [baseline]);
-  const isDirty = Boolean(draft && !readonly && !expertDraftsEqual(draft, baselineDraft));
+  const isDirty = Boolean(
+    settingsKind === "experts" && draft && !readonly && !expertDraftsEqual(draft, baselineDraft),
+  );
   const issues = useMemo(() => (draft ? validateExpertDraft(draft) : []), [draft]);
-  const showEditorData = active && view === "editor" && tab === "capabilities";
+  const showEditorData =
+    settingsKind === "experts" && active && view === "editor" && tab === "capabilities";
   const connectionsQuery = useQuery({
     queryKey: EXPERT_CONNECTIONS_QUERY_KEY,
     queryFn: () => ensureExpertClient().listExpertConnections(),
@@ -156,6 +166,17 @@ export function ExpertsSettingsPanel(props: {
     onDiscard: discardDraft,
   });
 
+  const changeSettingsKind = async (next: "experts" | "teams") => {
+    if (next === settingsKind) return;
+    if (settingsKind === "teams") {
+      const teamPanel = hubTeamsPanelRef.current;
+      if (teamPanel && !(await teamPanel.confirmLeave())) return;
+    } else if (!(await confirmLeave())) {
+      return;
+    }
+    setSettingsKind(next);
+  };
+
   useEffect(() => {
     if (!requestedExpertId) {
       lastRouteRequestRef.current = null;
@@ -163,12 +184,23 @@ export function ExpertsSettingsPanel(props: {
     }
     if (!expertsQuery.data || lastRouteRequestRef.current === requestedExpertId) return;
     const requested = experts.find((expert) => expert.id === requestedExpertId);
-    lastRouteRequestRef.current = requestedExpertId;
-    if (!requested) return;
-    if (view === "editor" && baselineRef.current?.id === requested.id) return;
+    if (!requested) {
+      lastRouteRequestRef.current = requestedExpertId;
+      return;
+    }
+    if (
+      settingsKind === "experts" &&
+      view === "editor" &&
+      baselineRef.current?.id === requested.id
+    ) {
+      lastRouteRequestRef.current = requestedExpertId;
+      return;
+    }
 
     void (async () => {
+      if (settingsKind === "teams" && !(await hubTeamsPanelRef.current?.confirmLeave())) return;
       if (!(await confirmLeave())) return;
+      lastRouteRequestRef.current = requestedExpertId;
       const latest =
         queryClient
           .getQueryData<ReadonlyArray<ExpertDefinition>>(EXPERTS_QUERY_KEY)
@@ -181,9 +213,18 @@ export function ExpertsSettingsPanel(props: {
       setSelectedId(latest.id);
       setTab("capabilities");
       setActionError(null);
+      setSettingsKind("experts");
       setView("editor");
     })();
-  }, [confirmLeave, experts, expertsQuery.data, queryClient, requestedExpertId, view]);
+  }, [
+    confirmLeave,
+    experts,
+    expertsQuery.data,
+    queryClient,
+    requestedExpertId,
+    settingsKind,
+    view,
+  ]);
 
   useEffect(() => {
     if (!baseline || !draft || !expertsQuery.data) return;
@@ -332,6 +373,7 @@ export function ExpertsSettingsPanel(props: {
 
   const handleSaveKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!(event.metaKey || event.ctrlKey) || event.key.toLocaleLowerCase() !== "s") return;
+    if (settingsKind !== "experts") return;
     if (view !== "editor" || !active) return;
     event.preventDefault();
     event.stopPropagation();
@@ -395,7 +437,24 @@ export function ExpertsSettingsPanel(props: {
 
   return (
     <div className="space-y-5" onKeyDown={handleSaveKey}>
-      {view === "list" ? (
+      <SettingsSegmentedControl
+        value={settingsKind}
+        onValueChange={(next) => void changeSettingsKind(next)}
+        ariaLabel="专家设置分类"
+        options={[
+          { value: "experts", label: "单个专家" },
+          { value: "teams", label: "专家团" },
+        ]}
+      />
+      {settingsKind === "teams" ? (
+        <HubTeamsSettingsPanel
+          ref={hubTeamsPanelRef}
+          active={active}
+          experts={expertsQuery.data}
+          expertsLoading={expertsQuery.isPending || expertsQuery.isFetching}
+          expertsError={expertsQuery.error ? errorText(expertsQuery.error) : null}
+        />
+      ) : view === "list" ? (
         expertsQuery.isPending && !expertsQuery.data ? (
           <SettingsEmptyState layout="status">正在读取专家…</SettingsEmptyState>
         ) : expertsQuery.isError && !expertsQuery.data ? (

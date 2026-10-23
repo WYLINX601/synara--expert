@@ -1,3 +1,4 @@
+import { ProjectAgentServiceError } from "../../projectAgent/Errors.ts";
 // FILE: ProviderCommandReactor.test.ts
 // Purpose: Verifies provider intent orchestration, queueing, rollback, and transcript bootstrap flows.
 // Layer: Orchestration integration tests
@@ -10,6 +11,7 @@ import path from "node:path";
 
 import type {
   ClaudeCacheObservation,
+  HubWorkRecord,
   ModelSelection,
   OrchestrationCommand,
   OrchestrationEvent,
@@ -28,6 +30,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
   MessageId,
+  ProjectTaskAttemptId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProjectId,
   ThreadId,
@@ -133,6 +136,7 @@ import {
 } from "./ProviderCommandReactor.ts";
 import * as groupsBetaGate from "../../projectAgent/groupsBetaGate.ts";
 import { ProjectAgentService } from "../../projectAgent/Services/ProjectAgentService.ts";
+import type { ProjectAgentTurnStartAuthorization } from "../../projectAgent/Services/ProjectAgentService.ts";
 import { ProjectAgentRepository } from "../../persistence/Services/ProjectAgentRepository.ts";
 import {
   OrchestrationEngineService,
@@ -155,6 +159,19 @@ import {
   type CheckpointStoreShape,
 } from "../../checkpointing/Services/CheckpointStore.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { makeAgentCreationIds, stableGatewayDigest } from "../../agentGateway/creationUtils.ts";
+import { renderHubWorkPrompt } from "../../agentGateway/hubWorkSource.ts";
+import {
+  hubPlanInputResponseDigest,
+  hubPlanInputResponseIdentity,
+  matchesHubPlanInputResponseStart,
+  renderHubPlanInputResponse,
+  type HubPlanInputResponseAuthorization,
+} from "../../hubCollaboration/hubPlanInput.ts";
+import {
+  matchesHubPlanInitialStart,
+  type HubPlanInitialStartShell,
+} from "../../workbench/host/hubPlanInitialStart.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.makeUnsafe(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId =>
@@ -370,6 +387,13 @@ describe("ProviderCommandReactor", () => {
     >;
     readonly startClaudeCompaction?: NonNullable<ProviderServiceShape["startClaudeCompaction"]>;
     readonly coordinatorThreadIds?: readonly string[];
+    readonly initialThread?: {
+      readonly threadId?: ThreadId;
+      readonly sourceThreadId?: ThreadId;
+      readonly sourceTurnId?: TurnId;
+      readonly gatewayOperationId?: string;
+      readonly gatewayOperationIndex?: number;
+    };
     readonly coordinatorConfigState?:
       | {
           readonly enabled?: boolean;
@@ -378,6 +402,11 @@ describe("ProviderCommandReactor", () => {
         }
       | undefined;
     readonly formatContextPacket?: string;
+    readonly rejectHubExecution?: boolean;
+    readonly assertGroupCoordinatorTurnAllowed?: (input: {
+      readonly threadId: ThreadId;
+      readonly turnStart?: ProjectAgentTurnStartAuthorization;
+    }) => Effect.Effect<"plan-recovery" | "plan-recovery-steer" | void, ProjectAgentServiceError>;
     readonly projectAdditionalFolders?: readonly string[];
     readonly getPersistedSessionProfile?: ProviderServiceShape["getPersistedSessionProfile"];
     readonly ingestRuntimeEvents?: boolean;
@@ -753,6 +782,15 @@ describe("ProviderCommandReactor", () => {
     };
 
     const projectAgentLayer = Layer.succeed(ProjectAgentService, {
+      assertGroupCoordinatorTurnAllowed: (assertionInput: {
+        readonly threadId: ThreadId;
+        readonly turnStart?: ProjectAgentTurnStartAuthorization;
+      }) =>
+        input?.assertGroupCoordinatorTurnAllowed
+          ? input.assertGroupCoordinatorTurnAllowed(assertionInput)
+          : input?.rejectHubExecution
+            ? Effect.fail(new ProjectAgentServiceError({ message: "Hub plan is paused." }))
+            : Effect.void,
       formatContextPacketForTurn: () => Effect.succeed(input?.formatContextPacket ?? ""),
     } as unknown as (typeof ProjectAgentService)["Service"]);
     const orchestrationLayer = OrchestrationEngineLive.pipe(
@@ -964,7 +1002,7 @@ describe("ProviderCommandReactor", () => {
       engine.dispatch({
         type: "thread.create",
         commandId: CommandId.makeUnsafe("cmd-thread-create"),
-        threadId: ThreadId.makeUnsafe("thread-1"),
+        threadId: input?.initialThread?.threadId ?? ThreadId.makeUnsafe("thread-1"),
         projectId: asProjectId("project-1"),
         title: "Thread",
         modelSelection: modelSelection,
@@ -972,11 +1010,18 @@ describe("ProviderCommandReactor", () => {
         runtimeMode: "approval-required",
         branch: null,
         worktreePath: null,
-        ...(input?.gatewayOperationId
+        ...(input?.initialThread?.gatewayOperationId || input?.gatewayOperationId
           ? {
               creationSource: "synara_mcp" as const,
-              gatewayOperationId: input.gatewayOperationId,
-              gatewayOperationIndex: 0,
+              ...(input?.initialThread?.sourceThreadId
+                ? { sourceThreadId: input.initialThread.sourceThreadId }
+                : {}),
+              ...(input?.initialThread?.sourceTurnId
+                ? { sourceTurnId: input.initialThread.sourceTurnId }
+                : {}),
+              gatewayOperationId:
+                input?.initialThread?.gatewayOperationId ?? input?.gatewayOperationId,
+              gatewayOperationIndex: input?.initialThread?.gatewayOperationIndex ?? 0,
             }
           : {}),
         createdAt: now,
@@ -1242,6 +1287,491 @@ describe("ProviderCommandReactor", () => {
       )?.text,
     ).toBe("What happened?");
     expect((await harness.completionState())[0]?.context_consumed).toBe(1);
+  });
+
+  it("refuses Hub work at the provider boundary before starting a runtime", async () => {
+    const harness = await createHarness({ rejectHubExecution: true });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        commandId: CommandId.makeUnsafe("hub-plan-paused-send"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: MessageId.makeUnsafe("hub-plan-paused-message"),
+          role: "user",
+          text: "Continue",
+          attachments: [],
+        },
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    await waitFor(async () => (await readHarnessThread(harness))?.session?.status === "error");
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect((await readHarnessThread(harness))?.session?.lastError).toContain("Hub plan is paused");
+  });
+
+  it("runs the exact persisted HubWork initial turn through the provider reactor gate", async () => {
+    const coordinatorThreadId = ThreadId.makeUnsafe("thread-1");
+    const now = new Date().toISOString();
+    const workItemId = "hub-work:provider-reactor-initial";
+    const operationId = `gateway:create:${stableGatewayDigest({
+      principalKind: "hub-work",
+      principalId: coordinatorThreadId,
+      callerTurnId: `hub-work:${workItemId}`,
+      requestId: workItemId,
+    })}`;
+    const ids = makeAgentCreationIds(operationId, 0);
+    const target = {
+      provider: "codex",
+      instanceId: "codex",
+      model: "gpt-6.1-sol",
+      options: { reasoningEffort: "low" },
+    } as const;
+    const sourceMessageId = MessageId.makeUnsafe("provider-reactor-initial-source");
+    const sourceMessages = [
+      {
+        threadId: coordinatorThreadId,
+        messageId: sourceMessageId,
+        turnId: null,
+        text: "Create a bounded report.",
+        attachments: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+    ] as const;
+    const work: HubWorkRecord = {
+      id: workItemId,
+      projectId: asProjectId("project-1"),
+      sourceThreadId: coordinatorThreadId,
+      sourceMessageId,
+      title: "Author",
+      targetProjectId: asProjectId("project-1"),
+      requestId: workItemId,
+      scopeKey: "provider-reactor-initial-scope",
+      fingerprint: "sha256:provider-reactor-initial",
+      taskIndex: 0,
+      creationSpec: {
+        title: "Author",
+        prompt: "Create a bounded report.",
+        target,
+        projectId: asProjectId("project-1"),
+        environment: "local",
+        inheritedRuntimeMode: "approval-required",
+      },
+      sourceMessages,
+      workerThreadId: ids.threadId,
+      state: "starting",
+      queueReason: null,
+      resultSummary: null,
+      progress: null,
+      slotHeld: true,
+      admittedAt: now,
+      admissionCommandId: null,
+      admissionMessageId: null,
+      admissionPreviousState: null,
+      admissionPreviousSlotHeld: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const shell: HubPlanInitialStartShell = {
+      id: ids.threadId,
+      projectId: "project-1",
+      modelSelection: target,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      creationSource: "synara_mcp",
+      sourceThreadId: coordinatorThreadId,
+      sourceTurnId: null,
+      gatewayOperationId: operationId,
+      gatewayOperationIndex: 0,
+    };
+    const matches: boolean[] = [];
+    const turnStarts: Array<ProjectAgentTurnStartAuthorization | undefined> = [];
+    const harness = await createHarness({
+      threadModelSelection: target,
+      initialThread: {
+        threadId: ids.threadId,
+        sourceThreadId: coordinatorThreadId,
+        gatewayOperationId: operationId,
+        gatewayOperationIndex: 0,
+      },
+      assertGroupCoordinatorTurnAllowed: ({ threadId, turnStart }) => {
+        turnStarts.push(turnStart);
+        const matched =
+          turnStart !== undefined &&
+          matchesHubPlanInitialStart({
+            threadId,
+            shell,
+            coordinatorRuntimeMode: "approval-required",
+            work,
+            turnStart,
+          });
+        matches.push(matched);
+        return matched
+          ? Effect.void
+          : Effect.fail(
+              new ProjectAgentServiceError({ message: "Plan Worker turn was not authorized." }),
+            );
+      },
+    });
+    const prompt = renderHubWorkPrompt({
+      workItemId,
+      brief: work.creationSpec.prompt,
+      sourceMessages,
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: ids.turnStartCommandId,
+        threadId: ids.threadId,
+        message: {
+          messageId: ids.messageId,
+          role: "user",
+          text: prompt,
+          attachments: [],
+        },
+        dispatchMode: "queue",
+        dispatchOrigin: "agent",
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        modelSelection: target,
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => matches.length === 1);
+    expect({ matches, turnStarts }).toEqual({
+      matches: [true],
+      turnStarts: [
+        expect.objectContaining({
+          commandId: ids.turnStartCommandId,
+          messageId: ids.messageId,
+          messageText: prompt,
+          modelSelection: target,
+          dispatchOrigin: "agent",
+        }),
+      ],
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+    expect(matches).toEqual([true]);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      modelSelection: target,
+    });
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId: ids.threadId,
+      modelSelection: target,
+    });
+
+    harness.setRuntimeSessionTurnState({
+      threadId: ids.threadId,
+      status: "ready",
+      runtimeMode: "approval-required",
+    });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("provider-reactor-forged-extra-turn"),
+        threadId: ids.threadId,
+        message: {
+          messageId: MessageId.makeUnsafe("provider-reactor-forged-extra-message"),
+          role: "user",
+          text: "Start an unrelated extra task",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        modelSelection: target,
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    await waitFor(() => matches.length === 2);
+    await harness.drain();
+    expect(matches).toEqual([true, false]);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("admits a saved directed answer with the provider reactor's normalized native defaults", async () => {
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const target = {
+      provider: "codex",
+      instanceId: "codex",
+      model: "gpt-6.1-sol",
+      options: { reasoningEffort: "low" },
+    } as const;
+    const baseRequest = {
+      id: "directed-provider-answer",
+      nodeKey: "author",
+      stageKey: "draft",
+      generation: 1,
+      attemptId: ProjectTaskAttemptId.makeUnsafe("directed-provider-answer-attempt"),
+      workerThreadId: threadId,
+      questions: [{ title: "Which format?", options: ["Markdown", "PDF"] }],
+      status: "delivered" as const,
+      answers: ["Markdown"],
+    };
+    const identity = hubPlanInputResponseIdentity({
+      planId: "plan-provider-input",
+      requestId: baseRequest.id,
+    });
+    const createdAt = new Date().toISOString();
+    const request: HubPlanInputResponseAuthorization = {
+      ...baseRequest,
+      responseCreatedAt: createdAt,
+      responseCommandId: identity.responseCommandId,
+      responseMessageId: identity.responseMessageId,
+      responseMessageDigest: hubPlanInputResponseDigest(baseRequest),
+      responseRuntimeMode: "approval-required",
+      responseInteractionMode: "default",
+      responseModelSelection: target,
+      updatedAt: createdAt,
+    };
+    const responseWork = {
+      slotHeld: true,
+      admissionCommandId: identity.responseCommandId,
+      admissionMessageId: identity.responseMessageId,
+    };
+    const matches: boolean[] = [];
+    const turnStarts: Array<ProjectAgentTurnStartAuthorization | undefined> = [];
+    const harness = await createHarness({
+      threadModelSelection: target,
+      assertGroupCoordinatorTurnAllowed: ({ threadId: actualThreadId, turnStart }) => {
+        turnStarts.push(turnStart);
+        const matched =
+          turnStart !== undefined &&
+          matchesHubPlanInputResponseStart({
+            request,
+            turnStart,
+            work: responseWork,
+          }) &&
+          actualThreadId === threadId;
+        matches.push(matched);
+        return matched
+          ? Effect.void
+          : Effect.fail(
+              new ProjectAgentServiceError({
+                message: "Directed Hub input response was not authorized.",
+              }),
+            );
+      },
+    });
+    const messageText = renderHubPlanInputResponse(request);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe(identity.responseCommandId),
+        threadId,
+        message: {
+          messageId: MessageId.makeUnsafe(identity.responseMessageId),
+          role: "user",
+          text: messageText,
+          attachments: [],
+        },
+        dispatchMode: "queue",
+        dispatchOrigin: "user",
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        modelSelection: target,
+        createdAt,
+      }),
+    );
+
+    await waitFor(() => matches.length === 1);
+    expect(matches).toEqual([true]);
+    expect(turnStarts[0]).toMatchObject({
+      commandId: identity.responseCommandId,
+      messageId: identity.responseMessageId,
+      messageText,
+      attachments: [],
+      enableComputerControl: false,
+      computerControlMode: "off",
+      computerControlGeneration: 0,
+      assistantDeliveryMode: "streaming",
+    });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await harness.drain();
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId,
+      input: expect.stringContaining("Owner answers:\n1. Markdown"),
+      modelSelection: target,
+    });
+  });
+
+  it.each([true, false])(
+    "keeps an authorized plan recovery nudge on its original live turn (live=%s)",
+    async (live) => {
+      const authorizations: Array<ProjectAgentTurnStartAuthorization | undefined> = [];
+      const harness = await createHarness({
+        assertGroupCoordinatorTurnAllowed: ({ turnStart }) => {
+          authorizations.push(turnStart);
+          return Effect.succeed("plan-recovery-steer" as const);
+        },
+      });
+      const threadId = ThreadId.makeUnsafe("thread-1");
+      const now = new Date().toISOString();
+      harness.setRuntimeSessionTurnState({
+        threadId,
+        status: live ? "running" : "ready",
+        ...(live ? { activeTurnId: asTurnId("original-plan-turn") } : {}),
+      });
+      // Deliberately keep a stale running projection in the negative case.
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.makeUnsafe("plan-nudge-running-projection"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: asTurnId("original-plan-turn"),
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe("agent-recovery:thread-1:exact-episode:nudge"),
+          threadId,
+          message: {
+            messageId: MessageId.makeUnsafe("agent-recovery:thread-1:exact-episode:nudge:message"),
+            role: "user",
+            text: "Native persisted recovery nudge",
+            attachments: [],
+          },
+          dispatchMode: "steer",
+          dispatchOrigin: "automation",
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt: now,
+        }),
+      );
+      await waitFor(() => authorizations.length > 0);
+      await harness.drain();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.steerTurn).toHaveBeenCalledTimes(live ? 1 : 0);
+    },
+  );
+
+  it("rechecks native pending interactions only for an exact plan-recovery authorization", async () => {
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const target = {
+      provider: "codex",
+      instanceId: "codex",
+      model: "gpt-6.1-sol",
+      options: { reasoningEffort: "low" },
+    } as const;
+    const turnStarts: Array<ProjectAgentTurnStartAuthorization | undefined> = [];
+    const harness = await createHarness({
+      threadModelSelection: target,
+      assertGroupCoordinatorTurnAllowed: ({ turnStart }) => {
+        turnStarts.push(turnStart);
+        return Effect.succeed("plan-recovery");
+      },
+    });
+    const now = new Date().toISOString();
+    const pendingRequestId = ApprovalRequestId.makeUnsafe("native-pending-before-plan-recovery");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.makeUnsafe("native-pending-before-plan-recovery-activity"),
+        threadId,
+        activity: {
+          id: EventId.makeUnsafe("native-pending-before-plan-recovery-activity-row"),
+          tone: "approval",
+          kind: "approval.requested",
+          summary: "Command approval requested",
+          payload: {
+            requestId: pendingRequestId,
+            requestKind: "command",
+            lifecycleGeneration: "approval-generation",
+          },
+          turnId: null,
+          createdAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.pendingInteractionRepository.upsert({
+        interactionKind: "approval",
+        requestId: pendingRequestId,
+        threadId,
+        turnId: TurnId.makeUnsafe("turn-waiting-for-approval"),
+        lifecycleGeneration: "approval-generation",
+        status: "pending",
+        decision: null,
+        responseCommandId: null,
+        responseRequestedAt: null,
+        createdAt: now,
+        resolvedAt: null,
+      }),
+    );
+    const dispatchRecovery = (episode: string) =>
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe(`agent-recovery:${threadId}:${episode}:redispatch`),
+        threadId,
+        message: {
+          messageId: MessageId.makeUnsafe(
+            `agent-recovery:${threadId}:${episode}:redispatch:message`,
+          ),
+          role: "user",
+          text: "Exact persisted HubWork task prompt",
+          attachments: [],
+        },
+        dispatchMode: "queue",
+        dispatchOrigin: "automation",
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        modelSelection: target,
+        createdAt: now,
+      });
+
+    await Effect.runPromise(dispatchRecovery("episode-with-pending-approval"));
+    await waitFor(() => turnStarts.length === 1);
+    await harness.drain();
+    expect(turnStarts[0]).toMatchObject({
+      dispatchOrigin: "automation",
+      dispatchMode: "queue",
+      enableComputerControl: false,
+      computerControlMode: "off",
+      computerControlGeneration: 0,
+      assistantDeliveryMode: "streaming",
+    });
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+
+    await Effect.runPromise(
+      harness.pendingInteractionRepository.deleteByIdentity({
+        threadId,
+        interactionKind: "approval",
+        requestId: pendingRequestId,
+      }),
+    );
+    await Effect.runPromise(dispatchRecovery("episode-after-approval-cleared"));
+    await waitFor(() => turnStarts.length === 2);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(turnStarts[1]).toMatchObject({
+      dispatchOrigin: "automation",
+      dispatchMode: "queue",
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      modelSelection: target,
+      enableComputerControl: false,
+      computerControlMode: "off",
+      computerControlGeneration: 0,
+      assistantDeliveryMode: "streaming",
+    });
+    await harness.drain();
   });
 
   it("prefixes the provider input with the project context packet", async () => {

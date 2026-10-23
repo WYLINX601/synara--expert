@@ -27,6 +27,7 @@ import { Effect, Layer, Option, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
+import { makeHubCollaborationConfigStore } from "../../hubCollaboration/HubCollaborationConfigStore.ts";
 import {
   PersistenceSqlError,
   toPersistenceDecodeError,
@@ -202,6 +203,7 @@ function toWorkerRow(worker: ProjectManagedWorker): typeof WorkerRow.Type {
 
 const makeProjectAgentRepository = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const hubCollaborationStore = makeHubCollaborationConfigStore(sql);
 
   const getConfigRow = SqlSchema.findOneOption({
     Request: Schema.Struct({ projectId: ProjectId }),
@@ -392,7 +394,7 @@ const makeProjectAgentRepository = Effect.gen(function* () {
         revision = ${row.revision},
         updated_at = ${row.updatedAt}
       WHERE goal_id = ${row.id} AND revision = ${expectedRevision}
-      RETURNING changes() AS changed
+      RETURNING 1 AS changed
     `,
   });
 
@@ -440,9 +442,9 @@ const makeProjectAgentRepository = Effect.gen(function* () {
     `,
   });
 
-  const updateTask = SqlSchema.findOne({
+  const updateTask = SqlSchema.findOneOption({
     Request: Schema.Struct({ row: TaskRow, expectedRevision: Schema.Number }),
-    Result: ChangedRow,
+    Result: Schema.Struct({ taskId: ProjectTaskId }),
     execute: ({ row, expectedRevision }) => sql`
       UPDATE project_agent_tasks SET
         title = ${row.title},
@@ -455,7 +457,7 @@ const makeProjectAgentRepository = Effect.gen(function* () {
         revision = ${row.revision},
         updated_at = ${row.updatedAt}
       WHERE task_id = ${row.id} AND revision = ${expectedRevision}
-      RETURNING changes() AS changed
+      RETURNING task_id AS "taskId"
     `,
   });
 
@@ -533,10 +535,12 @@ const makeProjectAgentRepository = Effect.gen(function* () {
         SELECT source_project_id AS "sourceProjectId" FROM hub_project_origins
         WHERE hub_id = ${config.projectId}
       `;
+      const hubSettings = yield* hubCollaborationStore.readHubSettings({ hubId: config.projectId });
       return {
         ...config,
         linkedProjectIds: rows.map((row) => row.linkedProjectId),
         expertIds: expertRows.map((row) => row.expertId),
+        ...(hubSettings === null ? {} : { collaboration: hubSettings.settings }),
         ...(origins[0]
           ? { sourceProjectId: ProjectId.makeUnsafe(origins[0].sourceProjectId) }
           : {}),
@@ -820,8 +824,11 @@ const makeProjectAgentRepository = Effect.gen(function* () {
         config.expertIds === undefined
           ? undefined
           : [...new Set(config.expertIds.map((expertId) => expertId.trim()))].toSorted();
+      const { collaboration: _collaboration, ...configWithoutCollaboration } = config;
       const savedConfig =
-        normalizedExpertIds === undefined ? config : { ...config, expertIds: normalizedExpertIds };
+        normalizedExpertIds === undefined
+          ? configWithoutCollaboration
+          : { ...configWithoutCollaboration, expertIds: normalizedExpertIds };
       const saveOrigin =
         config.sourceProjectId === undefined
           ? Effect.void
@@ -847,6 +854,20 @@ const makeProjectAgentRepository = Effect.gen(function* () {
                 `;
               }
             }).pipe(Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveExpertIds")));
+      const saveCollaboration = Effect.gen(function* () {
+        const current = yield* hubCollaborationStore.readHubSettings({ hubId: config.projectId });
+        const settings = config.collaboration ?? current?.settings;
+        if (settings === undefined) return savedConfig;
+        const saved = yield* hubCollaborationStore.saveHubSettingsInTransaction({
+          hubId: config.projectId,
+          expectedRevision: current?.revision ?? null,
+          requestId: `hub-settings:${config.projectId}:${config.revision}`,
+          settings,
+        });
+        return { ...savedConfig, collaboration: saved.settings };
+      }).pipe(
+        Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveConfig:collaboration")),
+      );
       if (expectedRevision === null) {
         return sql
           .withTransaction(
@@ -854,7 +875,7 @@ const makeProjectAgentRepository = Effect.gen(function* () {
               Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveConfig:insert")),
               Effect.andThen(saveOrigin),
               Effect.andThen(saveExpertIds),
-              Effect.as(savedConfig),
+              Effect.andThen(saveCollaboration),
             ),
           )
           .pipe(
@@ -878,7 +899,7 @@ const makeProjectAgentRepository = Effect.gen(function* () {
             ),
             Effect.andThen(saveOrigin),
             Effect.andThen(saveExpertIds),
-            Effect.as(savedConfig),
+            Effect.andThen(saveCollaboration),
           ),
         )
         .pipe(
@@ -984,7 +1005,7 @@ const makeProjectAgentRepository = Effect.gen(function* () {
           toPersistenceSqlOrDecodeError("ProjectAgentRepository.saveTask:update", "changed"),
         ),
         Effect.flatMap((result) =>
-          result.changed === 1
+          Option.isSome(result)
             ? persistDeps.pipe(Effect.as(task))
             : Effect.fail(
                 toPersistenceSqlError("ProjectAgentRepository.saveTask")(revisionMismatch("task")),
@@ -1754,9 +1775,10 @@ const makeProjectAgentRepository = Effect.gen(function* () {
         Request: Schema.Struct({
           worker: WorkerRow,
           expectedUpdatedAt: IsoDateTime,
+          preserveResultEvidence: Schema.optional(Schema.Boolean),
         }),
         Result: ChangedRow,
-        execute: ({ worker, expectedUpdatedAt }) => sql`
+        execute: ({ worker, expectedUpdatedAt, preserveResultEvidence }) => sql`
           UPDATE project_agent_managed_workers SET
             settled_at = ${worker.settledAt},
             settle_outcome = ${worker.settleOutcome},
@@ -1772,13 +1794,19 @@ const makeProjectAgentRepository = Effect.gen(function* () {
             needs_you_at = ${worker.needsYouAt},
             active_turn_origin = ${worker.activeTurnOrigin},
             active_turn_command_id = ${worker.activeTurnCommandId},
-            result_summary = ${worker.resultSummary},
-            result_at = ${worker.resultAt},
+            result_summary = CASE WHEN ${preserveResultEvidence === true ? 1 : 0} = 1
+              THEN result_summary ELSE ${worker.resultSummary} END,
+            result_at = CASE WHEN ${preserveResultEvidence === true ? 1 : 0} = 1
+              THEN result_at ELSE ${worker.resultAt} END,
             updated_at = ${worker.updatedAt}
           WHERE thread_id = ${worker.threadId} AND updated_at = ${expectedUpdatedAt}
           RETURNING 1 AS changed
         `,
-      })({ worker: toWorkerRow(input.worker), expectedUpdatedAt: input.expectedUpdatedAt }).pipe(
+      })({
+        worker: toWorkerRow(input.worker),
+        expectedUpdatedAt: input.expectedUpdatedAt,
+        preserveResultEvidence: input.preserveResultEvidence,
+      }).pipe(
         Effect.map((option) => ({ applied: Option.isSome(option) })),
         Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveManagedWorkerMonitor")),
       ),

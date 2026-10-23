@@ -2,6 +2,7 @@ import {
   DEFAULT_PROJECT_AGENT_LIMITS,
   NEW_HUB_MAX_CONCURRENT_WORKERS,
   type ModelSelection,
+  type HubCollaborationSettings,
   PROJECT_AGENT_RESERVED_PATHS,
   type ProviderKind,
   type ProjectAgentConfig,
@@ -61,6 +62,7 @@ export interface GroupSettingsDraft {
   readonly icon: string;
   readonly goal: string;
   readonly expertIds: ReadonlyArray<string>;
+  readonly collaboration?: HubCollaborationSettings | undefined;
   readonly coordinatorIcon: string;
   readonly coordinatorColor: string;
   readonly coordinatorModelSelection: ModelSelection;
@@ -118,6 +120,7 @@ export function buildGroupSettingsDraft(input: {
     icon: config?.icon ?? "",
     goal: config?.goal ?? "",
     expertIds: [...new Set(config?.expertIds ?? [])],
+    ...(config?.collaboration ? { collaboration: config.collaboration } : {}),
     coordinatorIcon: config?.coordinatorIcon ?? "",
     coordinatorColor: config?.coordinatorColor ?? "",
     coordinatorModelSelection: config?.coordinatorModelSelection ?? fallbackSelection,
@@ -172,7 +175,11 @@ export function groupSettingsDirtySections(
   ) {
     dirty.add("general");
   }
-  if (!stringSetsEqual(draft.expertIds, baseline.expertIds)) {
+  if (
+    !stringSetsEqual(draft.expertIds, baseline.expertIds) ||
+    hubCollaborationFingerprint(draft.collaboration) !==
+      hubCollaborationFingerprint(baseline.collaboration)
+  ) {
     dirty.add("experts");
   }
   if (draft.autoMemoryEnabled !== baseline.autoMemoryEnabled) {
@@ -195,6 +202,36 @@ function stringSetsEqual(left: ReadonlyArray<string>, right: ReadonlyArray<strin
   return leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value));
 }
 
+function hubCollaborationFingerprint(
+  settings: HubCollaborationSettings | undefined,
+): string | null {
+  if (!settings) return null;
+  return JSON.stringify([
+    settings.schemaVersion,
+    settings.mode,
+    settings.coordinatorInstructions?.trim() || null,
+    settings.collaborationPreferences?.trim() || null,
+    settings.presetSource?.id ?? null,
+    settings.presetSource?.revision ?? null,
+  ]);
+}
+
+function normalizedHubCollaborationSettings(
+  settings: HubCollaborationSettings,
+): HubCollaborationSettings {
+  return {
+    schemaVersion: 1,
+    mode: settings.mode,
+    ...(settings.coordinatorInstructions?.trim()
+      ? { coordinatorInstructions: settings.coordinatorInstructions }
+      : {}),
+    ...(settings.collaborationPreferences?.trim()
+      ? { collaborationPreferences: settings.collaborationPreferences }
+      : {}),
+    ...(settings.presetSource ? { presetSource: settings.presetSource } : {}),
+  };
+}
+
 export function buildGroupConfigureInput(input: {
   readonly projectId: ProjectId;
   readonly sourceProjectId?: ProjectId | undefined;
@@ -214,6 +251,9 @@ export function buildGroupConfigureInput(input: {
   // already landed is not silently folded into this save.
   const config = baseline.config;
   const generalDirty = groupSettingsDirtySections(draft, baselineDraft).has("general");
+  const collaborationDirty =
+    hubCollaborationFingerprint(draft.collaboration) !==
+    hubCollaborationFingerprint(baselineDraft.collaboration);
 
   // Preserve fields the dialog does not edit so a save never drops them server-side.
   const workerRouting: ProjectAgentConfigureInput["workerRouting"] = {
@@ -245,6 +285,9 @@ export function buildGroupConfigureInput(input: {
     requestId: input.requestId,
     projectId: input.projectId,
     expertIds: [...new Set(draft.expertIds)],
+    ...(collaborationDirty && draft.collaboration
+      ? { collaboration: normalizedHubCollaborationSettings(draft.collaboration) }
+      : {}),
     ...(input.sourceProjectId ? { sourceProjectId: input.sourceProjectId } : {}),
     coordinatorModelSelection: draft.coordinatorModelSelection,
     workerRouting,
@@ -352,6 +395,12 @@ export async function saveGroupSettings(input: {
   const trimmedName = input.draft.name.trim();
   if (trimmedName.length === 0) {
     return { ok: false, error: "Give the hub a name." };
+  }
+  if (input.draft.collaboration?.mode === "expert-team" && input.draft.expertIds.length === 0) {
+    return { ok: false, error: "专家团模式至少选择一位专家。" };
+  }
+  if (input.draft.expertIds.length > 64) {
+    return { ok: false, error: "一个 Hub 最多选择 64 位专家。" };
   }
   try {
     // Configure first: a revision conflict must abort before the project meta

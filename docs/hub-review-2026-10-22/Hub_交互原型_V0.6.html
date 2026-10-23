@@ -1,0 +1,3694 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Hub · V0.6 节点式协调卡草案</title>
+    <style>
+      :root {
+        --bg: #fff;
+        --sidebar: #f7f7f5;
+        --canvas: #fbfbfa;
+        --text: #262723;
+        --muted: #777973;
+        --line: #e6e7e1;
+        --soft: #f2f3ef;
+        --accent: #405348;
+        --accentsoft: #eef2ed;
+        --orange: #906329;
+        --orangesoft: #faf4e8;
+        --red: #a1433c;
+        --radius: 10px;
+        --shadow: 0 20px 90px #22231e1c;
+        --rail: 58px;
+        --side: 224px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font:
+          14px/1.6 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          "PingFang SC",
+          "Noto Sans CJK SC",
+          "Microsoft Yahei",
+          sans-serif;
+        color: var(--text);
+        background: var(--canvas);
+      }
+      button,
+      input,
+      textarea,
+      select {
+        font: inherit;
+        color: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.42;
+      }
+      a {
+        color: inherit;
+      }
+      button,
+      input,
+      textarea,
+      select,
+      a {
+        outline-offset: 3px;
+      }
+      button:focus-visible,
+      a:focus-visible {
+        outline: 2px solid var(--accent);
+      }
+      button {
+        border: 0;
+        background: none;
+      }
+      input,
+      textarea,
+      select {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        padding: 9px 12px;
+        outline: none;
+      }
+      input:focus,
+      textarea:focus,
+      select:focus {
+        border-color: #839486;
+        box-shadow: 0 0 0 2px #4053480d;
+      }
+      textarea {
+        resize: vertical;
+        min-height: 76px;
+      }
+      input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        accent-color: var(--accent);
+        box-shadow: none;
+        flex: none;
+      }
+      svg {
+        width: 18px;
+        height: 18px;
+        vertical-align: middle;
+        flex: none;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.55;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+      h1 {
+        font-size: 24px;
+        letter-spacing: -0.6px;
+        font-weight: 650;
+      }
+      h2 {
+        font-size: 19px;
+        font-weight: 620;
+      }
+      h3 {
+        font-size: 15px;
+        font-weight: 600;
+      }
+      small,
+      .small {
+        font-size: 12px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .between {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .grow {
+        flex: 1;
+        min-width: 0;
+      }
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        padding: 8px 14px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: white;
+        font-weight: 540;
+        font-size: 13px;
+        white-space: nowrap;
+        line-height: 20px;
+      }
+      .btn:hover {
+        background: var(--soft);
+      }
+      .btn.primary {
+        background: var(--text);
+        color: white;
+        border-color: var(--text);
+      }
+      .btn.primary:hover {
+        background: #41433c;
+      }
+      .btn.ghost {
+        border-color: transparent;
+        background: transparent;
+      }
+      .btn.ghost:hover {
+        background: var(--soft);
+      }
+      .btn.small {
+        padding: 5px 10px;
+        font-size: 12px;
+      }
+      .btn.danger {
+        color: var(--red);
+      }
+      .iconbtn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        border-radius: 7px;
+        color: var(--muted);
+        flex: none;
+      }
+      .iconbtn:hover {
+        background: var(--soft);
+        color: var(--text);
+      }
+      .tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 2px 7px;
+        border-radius: 5px;
+        font-size: 11px;
+        line-height: 20px;
+        background: var(--soft);
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .tag.green {
+        background: var(--accentsoft);
+        color: var(--accent);
+      }
+      .tag.amber {
+        background: var(--orangesoft);
+        color: var(--orange);
+      }
+      .tag svg {
+        width: 13px;
+        height: 13px;
+      }
+      .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        display: inline-block;
+        background: #98a497;
+      }
+      .dot.amber {
+        background: #bd9155;
+      }
+      .divider {
+        height: 1px;
+        background: var(--line);
+        margin: 20px 0;
+      }
+      .field {
+        margin-bottom: 19px;
+      }
+      .field > label,
+      .label {
+        display: block;
+        font-size: 12px;
+        font-weight: 580;
+        margin-bottom: 7px;
+      }
+      .field .hint {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 6px;
+      }
+      .inline-link {
+        color: var(--accent);
+        font-size: 12px;
+        padding: 0;
+        text-decoration: none;
+      }
+      .inline-link:hover {
+        text-decoration: underline;
+      }
+      .chips {
+        display: flex;
+        gap: 7px;
+        flex-wrap: wrap;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        background: var(--soft);
+        border: 1px solid transparent;
+        padding: 5px 9px;
+        border-radius: 6px;
+        font-size: 12px;
+      }
+      .chip .iconbtn {
+        width: 18px;
+        height: 18px;
+      }
+      .chip .iconbtn svg {
+        width: 12px;
+        height: 12px;
+      }
+      .avatar {
+        width: 25px;
+        height: 25px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #fff;
+        font-size: 11px;
+        color: var(--accent);
+        flex: none;
+      }
+      .avatar.lg {
+        width: 36px;
+        height: 36px;
+        font-size: 14px;
+        border-radius: 10px;
+      }
+      .subtle {
+        background: var(--canvas);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 12px 14px;
+      }
+      .error {
+        color: var(--red);
+        font-size: 12px;
+        margin: 9px 0;
+      }
+      .hintbox {
+        border: 1px solid #eaddc5;
+        background: var(--orangesoft);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 12px;
+        color: #7d5a2e;
+      }
+      .segmented {
+        display: flex;
+        gap: 3px;
+        padding: 4px;
+        background: var(--soft);
+        border-radius: 9px;
+      }
+      .segmented button {
+        flex: 1;
+        border-radius: 6px;
+        padding: 7px 12px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .segmented button.active {
+        background: white;
+        color: var(--text);
+        box-shadow: 0 1px 3px #2221;
+        font-weight: 600;
+      }
+      .empty-small {
+        padding: 20px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      /* Prototype-only tools live outside the product. */
+      .proto-top {
+        height: 42px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 18px;
+        border-bottom: 1px solid var(--line);
+        background: #eeefe9;
+        font-size: 11px;
+        gap: 12px;
+      }
+      .proto-brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        white-space: nowrap;
+        letter-spacing: 0.2px;
+      }
+      .proto-brand strong {
+        font-size: 11px;
+      }
+      .proto-links {
+        display: flex;
+        gap: 6px;
+      }
+      .proto-links button {
+        font-size: 11px;
+        padding: 4px 10px;
+        border-radius: 5px;
+        color: #62685e;
+      }
+      .proto-links button:hover,
+      .proto-links button.current {
+        background: #fff;
+        color: #292c27;
+      }
+      .prototype-note {
+        color: #7c8275;
+        white-space: nowrap;
+      }
+      .shell {
+        height: calc(100dvh - 82px);
+        display: flex;
+        overflow: hidden;
+      }
+      .rail {
+        width: var(--rail);
+        flex: none;
+        background: #efefeb;
+        display: flex;
+        align-items: center;
+        flex-direction: column;
+        padding: 16px 8px 12px;
+        gap: 14px;
+        border-right: 1px solid var(--line);
+      }
+      .mark {
+        width: 31px;
+        height: 31px;
+        border-radius: 9px;
+        display: grid;
+        place-items: center;
+        background: #30372e;
+        color: white;
+        font: bold 17px Georgia;
+        margin-bottom: 13px;
+      }
+      .rail button {
+        width: 37px;
+        height: 37px;
+        border-radius: 9px;
+        color: #868980;
+      }
+      .rail button:hover {
+        background: #e5e7df;
+      }
+      .rail button.active {
+        background: #fff;
+        color: #3d513f;
+        box-shadow: 0 1px 3px #2221;
+      }
+      .rail .space {
+        flex: 1;
+      }
+      .side {
+        width: var(--side);
+        flex: none;
+        background: var(--sidebar);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        padding: 19px 12px 12px;
+      }
+      .side .side-heading {
+        padding: 0 10px 17px;
+        font-size: 16px;
+        font-weight: 600;
+      }
+      .newhub {
+        display: flex;
+        width: 100%;
+        align-items: center;
+        gap: 9px;
+        border: 1px solid var(--line);
+        background: #fff;
+        border-radius: 8px;
+        padding: 9px 11px;
+        font-size: 13px;
+        margin: 0 0 23px;
+      }
+      .side-label {
+        font-size: 10px;
+        letter-spacing: 0.6px;
+        color: #979b91;
+        padding: 0 12px;
+        margin: 10px 0 6px;
+      }
+      .navrow {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        border-radius: 7px;
+        padding: 8px 10px;
+        font-size: 13px;
+        width: 100%;
+        text-align: left;
+        position: relative;
+      }
+      .navrow:hover {
+        background: #eceee7;
+      }
+      .navrow.active {
+        background: #e8ebe2;
+        color: #2d3f31;
+        font-weight: 550;
+      }
+      .navrow .badge-count {
+        margin-left: auto;
+        font-size: 10px;
+        color: var(--orange);
+        background: var(--orangesoft);
+        border-radius: 4px;
+        padding: 0 5px;
+      }
+      .threadrow {
+        padding-left: 33px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .threadrow svg {
+        width: 14px;
+        height: 14px;
+      }
+      .nav-divider {
+        height: 1px;
+        background: var(--line);
+        margin: 16px 10px;
+      }
+      .workspace-footer {
+        margin-top: auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 8px 2px;
+        border-top: 1px solid var(--line);
+        font-size: 12px;
+      }
+      .workspace-footer .avatar {
+        background: #eceee6;
+      }
+      .side .group-header {
+        font-size: 13px;
+        padding: 7px 10px;
+        font-weight: 560;
+        display: flex;
+        gap: 7px;
+        align-items: center;
+      }
+      .main {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg);
+        position: relative;
+      }
+      .topbar {
+        height: 66px;
+        min-height: 66px;
+        border-bottom: 1px solid var(--line);
+        padding: 0 28px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .topbar .crumb {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        font-size: 13px;
+      }
+      .topbar .crumb .slash {
+        color: #bec1b6;
+      }
+      .topbar .tag {
+        font-size: 10px;
+      }
+      .hubbody {
+        flex: 1;
+        overflow: auto;
+        scroll-behavior: smooth;
+      }
+      .conversation {
+        width: min(100% - 80px, 780px);
+        margin: 0 auto;
+        padding: 28px 0 20px;
+      }
+      .message {
+        margin-bottom: 23px;
+      }
+      .message .sender {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 9px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .message.user .bubble {
+        background: var(--soft);
+        border-radius: 11px 11px 3px 11px;
+        padding: 13px 17px;
+        margin-left: 64px;
+        font-size: 13px;
+        line-height: 1.9;
+      }
+      .message.ai .body {
+        font-size: 13px;
+        line-height: 1.9;
+        padding-left: 33px;
+      }
+      .message .source {
+        font-weight: 400;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .card {
+        margin: 12px 0 22px 33px;
+        border: 1px solid #dfe3d9;
+        border-radius: 12px;
+        background: white;
+        overflow: hidden;
+      }
+      .card-header {
+        padding: 18px 20px 14px;
+      }
+      .card-header .meta {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 5px;
+      }
+      .planbody {
+        padding: 0 20px 8px;
+      }
+      .stage {
+        border-top: 1px solid var(--line);
+        padding: 15px 0;
+      }
+      .stage-header {
+        display: flex;
+        align-items: flex-start;
+        gap: 11px;
+      }
+      .stepdot {
+        width: 23px;
+        height: 23px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        border: 1px solid var(--line);
+        border-radius: 50%;
+        font-size: 10px;
+        color: var(--muted);
+        margin-top: 2px;
+        flex: none;
+      }
+      .stepdot.done {
+        background: var(--accentsoft);
+        border-color: #d7e3d3;
+        color: var(--accent);
+      }
+      .stepdot.done svg {
+        width: 12px;
+        height: 12px;
+      }
+      .stepdot.current {
+        background: var(--text);
+        color: white;
+        border-color: var(--text);
+      }
+      .stage-title {
+        font-size: 13px;
+        font-weight: 570;
+      }
+      .stage-sub {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .stage-status {
+        font-size: 11px;
+        color: var(--muted);
+        margin-left: auto;
+        white-space: nowrap;
+        padding-top: 3px;
+      }
+      .stage-status.wait {
+        color: var(--orange);
+      }
+      .stage-status.live {
+        color: var(--accent);
+      }
+      .stage-detail {
+        margin: 13px 0 0 34px;
+        border-left: 1px solid var(--line);
+        padding-left: 15px;
+      }
+      .stage-detail .worker {
+        display: flex;
+        gap: 9px;
+        align-items: center;
+        padding: 7px 0;
+        font-size: 12px;
+      }
+      .stage-detail .worker .muted {
+        margin-left: auto;
+        font-size: 11px;
+      }
+      .stage-detail .arrowtext {
+        font-size: 10px;
+        color: #93988c;
+        padding: 0 0 0 34px;
+      }
+      .gate-line {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        color: #8b744e;
+        font-size: 11px;
+        margin: 3px 0 12px 34px;
+      }
+      .gate-line svg {
+        width: 13px;
+        height: 13px;
+      }
+      .stage.dim {
+        color: #9a9d92;
+      }
+      .card-actions {
+        padding: 13px 20px;
+        background: var(--canvas);
+        border-top: 1px solid var(--line);
+        display: flex;
+        gap: 9px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .card-actions .footnote {
+        font-size: 11px;
+        color: var(--muted);
+        margin-left: auto;
+      }
+      .decision {
+        background: #faf8f1;
+        border: 1px solid #e9dfc8;
+        padding: 14px;
+        border-radius: 8px;
+        margin: 10px 0 16px 34px;
+      }
+      .decision .title {
+        font-size: 13px;
+        font-weight: 590;
+      }
+      .decision .detail {
+        font-size: 12px;
+        color: #747365;
+        margin-top: 5px;
+        line-height: 1.8;
+      }
+      .outputs {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 13px;
+      }
+      .filepill {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font-size: 11px;
+        background: #fff;
+        padding: 6px 9px;
+      }
+      .filepill:hover {
+        border-color: #a6b19f;
+        background: #fafff8;
+      }
+      .filepill svg {
+        width: 14px;
+        height: 14px;
+      }
+      .filepill span {
+        color: var(--muted);
+        font-size: 10px;
+      }
+      .composer-wrap {
+        width: min(100% - 80px, 780px);
+        margin: 0 auto;
+        padding: 4px 0 16px;
+        flex: none;
+      }
+      .composer {
+        border: 1px solid #dfe2d7;
+        background: #fff;
+        border-radius: 12px;
+        box-shadow: 0 3px 12px #00000003;
+      }
+      .composer textarea {
+        border: 0;
+        box-shadow: none;
+        resize: none;
+        background: none;
+        min-height: 64px;
+        padding: 14px 15px 4px;
+        font-size: 13px;
+        display: block;
+      }
+      .composer-bottom {
+        padding: 4px 9px 8px 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .send {
+        width: 29px;
+        height: 29px;
+        border-radius: 7px;
+        background: var(--text);
+        color: white;
+      }
+      .send svg {
+        width: 16px;
+        height: 16px;
+      }
+      .composer-bottom .small {
+        font-size: 10px;
+        color: #94988b;
+      }
+      .composer-context {
+        border: 1px solid var(--line);
+        border-bottom: 0;
+        border-radius: 9px 9px 0 0;
+        font-size: 11px;
+        margin: 0 13px;
+        padding: 6px 10px;
+        display: flex;
+        justify-content: space-between;
+        background: var(--canvas);
+      }
+      .welcome {
+        max-width: 610px;
+        margin: 80px auto;
+        text-align: center;
+      }
+      .welcome .large-symbol {
+        display: grid;
+        place-items: center;
+        width: 52px;
+        height: 52px;
+        background: var(--accentsoft);
+        border-radius: 15px;
+        margin: 0 auto 20px;
+        color: var(--accent);
+      }
+      .welcome .large-symbol svg {
+        width: 25px;
+        height: 25px;
+      }
+      .welcome p {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 9px 0 25px;
+      }
+      .suggestions {
+        display: flex;
+        gap: 9px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+      .suggestions button {
+        padding: 9px 13px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        text-align: left;
+        font-size: 12px;
+      }
+      .suggestions button:hover {
+        border-color: #a0ad99;
+      }
+      .pending-strip {
+        padding: 9px 15px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--canvas);
+        margin-bottom: 23px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .pending-strip svg {
+        width: 14px;
+        height: 14px;
+      }
+      .review-feedback {
+        margin-top: 12px;
+        padding: 11px 13px;
+        border-left: 2px solid #b2bda9;
+        background: var(--canvas);
+        font-size: 12px;
+      }
+      /* Settings reuse list/editor, not a new global navigation destination. */
+      .settings-body {
+        overflow: auto;
+        flex: 1;
+      }
+      .settings-content {
+        max-width: 880px;
+        padding: 35px 42px 60px;
+        margin: 0 auto;
+      }
+      .page-heading {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 21px;
+      }
+      .tabs {
+        display: flex;
+        gap: 24px;
+        border-bottom: 1px solid var(--line);
+        margin-bottom: 22px;
+      }
+      .tabs button {
+        padding: 0 0 12px;
+        color: var(--muted);
+        font-size: 13px;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -1px;
+      }
+      .tabs button.active {
+        color: var(--text);
+        border-color: var(--text);
+        font-weight: 600;
+      }
+      .list-toolbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        align-items: center;
+        margin-bottom: 18px;
+      }
+      .searchbox {
+        position: relative;
+        max-width: 280px;
+        width: 100%;
+      }
+      .searchbox svg {
+        position: absolute;
+        top: 11px;
+        left: 11px;
+        width: 16px;
+        height: 16px;
+        color: #9b9f93;
+      }
+      .searchbox input {
+        padding: 8px 12px 8px 35px;
+        font-size: 12px;
+        background: var(--canvas);
+      }
+      .listrows {
+        border-top: 1px solid var(--line);
+      }
+      .listitem {
+        border-bottom: 1px solid var(--line);
+        padding: 19px 4px;
+        display: flex;
+        align-items: center;
+        gap: 15px;
+      }
+      .listitem:hover {
+        background: #fcfcfa;
+      }
+      .listitem-main {
+        flex: 1;
+        text-align: left;
+        padding: 0;
+      }
+      .listitem-title {
+        font-size: 14px;
+        font-weight: 590;
+      }
+      .listitem-desc {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 3px;
+      }
+      .listitem-members {
+        font-size: 11px;
+        color: #88917f;
+        margin-top: 8px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .listitem-buttons {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .list-note {
+        margin-top: 18px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .editor-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 32px;
+      }
+      .editor-form {
+        max-width: 680px;
+      }
+      .editor-form input {
+        font-size: 13px;
+      }
+      .member-picker {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+        margin-top: 10px;
+      }
+      .member-option {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 11px 13px;
+        border-bottom: 1px solid var(--line);
+        cursor: pointer;
+      }
+      .member-option:last-child {
+        border-bottom: 0;
+      }
+      .member-option:hover {
+        background: var(--canvas);
+      }
+      .member-option b {
+        font-size: 12px;
+        font-weight: 550;
+      }
+      .member-option .desc {
+        display: block;
+        font-size: 11px;
+        color: var(--muted);
+        font-weight: 400;
+      }
+      .member-option .grow {
+        line-height: 1.5;
+      }
+      .member-option.compact {
+        padding: 9px 12px;
+      }
+      .member-option.compact .desc {
+        font-size: 10px;
+      }
+      details > summary {
+        cursor: pointer;
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 12px;
+        color: var(--muted);
+        padding: 9px 0;
+      }
+      details > summary::-webkit-details-marker {
+        display: none;
+      }
+      details > summary svg {
+        width: 13px;
+        height: 13px;
+      }
+      details[open] > summary svg {
+        transform: rotate(90deg);
+      }
+      details .details-body {
+        padding: 11px 0 1px;
+      }
+      .template-row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 9px 0;
+        font-size: 12px;
+      }
+      .template-row p {
+        font-size: 10px;
+        color: var(--muted);
+      }
+      .saved-policy {
+        font-size: 11px;
+        color: var(--muted);
+        border-top: 1px solid var(--line);
+        margin-top: 24px;
+        padding-top: 16px;
+      }
+      /* Dialog and one optional inspector. */
+      dialog {
+        border: 1px solid var(--line);
+        border-radius: 15px;
+        padding: 0;
+        width: 540px;
+        max-width: calc(100vw - 32px);
+        max-height: calc(100dvh - 110px);
+        box-shadow: var(--shadow);
+        color: var(--text);
+        overflow: auto;
+      }
+      dialog::backdrop {
+        background: #25282040;
+        backdrop-filter: blur(2px);
+      }
+      .modal-head {
+        padding: 22px 24px 17px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        position: sticky;
+        top: 0;
+        background: #fff;
+        z-index: 2;
+      }
+      .modal-body {
+        padding: 0 24px 5px;
+      }
+      .modal-footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 16px 24px;
+        border-top: 1px solid var(--line);
+        background: var(--canvas);
+        position: sticky;
+        bottom: 0;
+      }
+      .modal-footer .small {
+        font-size: 10px;
+        color: var(--muted);
+      }
+      .mode-help {
+        font-size: 11px;
+        color: var(--muted);
+        margin: 9px 1px 18px;
+      }
+      .selected-team {
+        padding: 8px 1px 2px;
+        margin-top: 4px;
+      }
+      .selected-team .chips {
+        margin-top: 8px;
+      }
+      .selected-team .chip {
+        background: #fff;
+        border-color: var(--line);
+        font-size: 11px;
+        padding: 3px 7px;
+      }
+      .instance-dialog {
+        width: 800px;
+      }
+      .instance-layout {
+        display: flex;
+        min-height: 430px;
+      }
+      .instance-nav {
+        width: 156px;
+        background: var(--sidebar);
+        border-right: 1px solid var(--line);
+        padding: 15px 12px;
+        flex: none;
+      }
+      .instance-nav button {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        padding: 8px 10px;
+        border-radius: 6px;
+        text-align: left;
+        font-size: 12px;
+        margin-bottom: 4px;
+        color: var(--muted);
+      }
+      .instance-nav button.active {
+        background: #e9ece3;
+        color: var(--text);
+      }
+      .instance-content {
+        flex: 1;
+        min-width: 0;
+        padding: 20px 24px;
+      }
+      .inspect {
+        position: absolute;
+        right: 0;
+        top: 66px;
+        bottom: 0;
+        width: 390px;
+        background: #fff;
+        border-left: 1px solid var(--line);
+        box-shadow: -10px 0 30px #1c211c08;
+        z-index: 4;
+        display: flex;
+        flex-direction: column;
+      }
+      .inspect-head {
+        padding: 18px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .inspect-body {
+        overflow: auto;
+        padding: 24px;
+        font-size: 13px;
+      }
+      .inspect-body h2 {
+        font-size: 19px;
+        margin: 10px 0;
+      }
+      .inspect-body h3 {
+        font-size: 13px;
+        margin: 21px 0 8px;
+      }
+      .inspect-body p {
+        margin: 10px 0;
+        color: #62695e;
+        line-height: 1.9;
+      }
+      .inspect-body ul {
+        padding-left: 20px;
+        font-size: 12px;
+        color: #62695e;
+      }
+      .inspect-body pre {
+        white-space: pre-wrap;
+        font-size: 11px;
+        background: var(--canvas);
+        padding: 13px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+      }
+      .inspect-body .props-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--line);
+        font-size: 12px;
+      }
+      .proto-bottom {
+        height: 40px;
+        border-top: 1px solid var(--line);
+        background: #eeefe9;
+        padding: 0 18px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 10px;
+        color: #7f8677;
+        overflow: auto;
+        white-space: nowrap;
+      }
+      .proto-bottom button {
+        font-size: 10px;
+        padding: 3px 9px;
+        border-radius: 5px;
+        border: 1px solid transparent;
+        color: #7c8375;
+      }
+      .proto-bottom button:hover {
+        border-color: #ccd2c5;
+      }
+      .proto-bottom button.active {
+        color: #304730;
+        background: white;
+        border-color: #d6dcce;
+      }
+      .proto-bottom .spacer {
+        flex: 1;
+      }
+      .toast {
+        position: fixed;
+        bottom: 58px;
+        left: 50%;
+        transform: translateX(-50%);
+        border: 1px solid var(--line);
+        background: #fff;
+        box-shadow: 0 6px 30px #2222;
+        border-radius: 9px;
+        padding: 11px 18px;
+        font-size: 12px;
+        z-index: 30;
+        max-width: 80vw;
+      }
+      .menu {
+        position: absolute;
+        right: 20px;
+        top: 54px;
+        z-index: 6;
+        background: #fff;
+        box-shadow: 0 8px 32px #2222;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 5px;
+        min-width: 170px;
+      }
+      .menu button {
+        display: block;
+        text-align: left;
+        width: 100%;
+        padding: 8px 10px;
+        font-size: 12px;
+        border-radius: 5px;
+      }
+      .menu button:hover {
+        background: var(--soft);
+      }
+      .doc-link {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        width: 100%;
+        font-size: 12px;
+      }
+      .doc-link svg {
+        color: var(--muted);
+      }
+      .gate-return {
+        margin: 0 20px 15px;
+      }
+      .gate-return textarea {
+        font-size: 12px;
+        min-height: 68px;
+      }
+      .gate-return .row {
+        justify-content: flex-end;
+        margin-top: 9px;
+      }
+      .route-banner {
+        border: 1px solid var(--line);
+        background: var(--canvas);
+        border-radius: 8px;
+        margin-bottom: 24px;
+        padding: 10px 13px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .route-banner button {
+        font-size: 11px;
+        text-decoration: underline;
+      }
+      .threadtitle {
+        margin-bottom: 25px;
+      }
+      .threadtitle p {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 7px;
+      }
+      .mini-graph {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 7px;
+        margin: 17px 0;
+      }
+      .mini-graph .graphnode {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-size: 12px;
+      }
+      .mini-graph .graphnode.current {
+        border-color: #b7c7ad;
+        background: #f5f8f0;
+      }
+      .mini-graph .graphnode .muted {
+        font-size: 10px;
+        display: block;
+        margin-top: 4px;
+      }
+      .mini-graph .gate {
+        border-color: #e4d8ba;
+        background: var(--orangesoft);
+      }
+      .mini-graph .g-arrow {
+        font-size: 13px;
+        color: #acb29f;
+        line-height: 16px;
+      }
+      .focus-item {
+        padding: 14px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .focus-item p {
+        font-size: 12px;
+        margin: 3px 0;
+      }
+      .help-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .help-grid > div {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+      }
+      .help-grid h3 {
+        font-size: 12px;
+        margin-bottom: 5px;
+      }
+      .help-grid p {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .note-pill {
+        font-size: 10px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 1px 5px;
+        color: var(--muted);
+      }
+      @media (max-width: 1100px) {
+        :root {
+          --side: 196px;
+        }
+        .conversation,
+        .composer-wrap {
+          width: calc(100% - 42px);
+        }
+        .settings-content {
+          padding: 28px;
+        }
+        .prototype-note {
+          display: none;
+        }
+        .topbar {
+          padding: 0 21px;
+        }
+        .inspect {
+          width: 360px;
+        }
+      }
+      @media (max-width: 760px) {
+        :root {
+          --side: 0px;
+        }
+        .side {
+          display: none;
+        }
+        .rail {
+          width: 46px;
+          padding: 12px 4px;
+        }
+        .proto-brand strong {
+          display: none;
+        }
+        .proto-links button {
+          padding: 4px 7px;
+        }
+        .conversation,
+        .composer-wrap {
+          width: calc(100% - 28px);
+        }
+        .message.user .bubble {
+          margin-left: 12px;
+        }
+        .card {
+          margin-left: 0;
+        }
+        .message.ai .body {
+          padding-left: 0;
+        }
+        .topbar {
+          padding: 0 15px;
+        }
+        .topbar .source-crumb {
+          display: none;
+        }
+        .settings-content {
+          padding: 24px 18px;
+        }
+        .listitem-buttons .btn {
+          font-size: 10px;
+          padding: 4px 7px;
+        }
+        .listitem .avatar.lg {
+          display: none;
+        }
+        .instance-nav {
+          width: 112px;
+          padding: 12px 4px;
+        }
+        .instance-content {
+          padding: 18px 14px;
+        }
+        .inspect {
+          width: 100%;
+        }
+        .proto-bottom .spacer,
+        .proto-bottom .small {
+          display: none;
+        }
+        .proto-top {
+          padding: 0 9px;
+        }
+        .modal-body,
+        .modal-head {
+          padding-left: 20px;
+          padding-right: 20px;
+        }
+        .card-actions .footnote {
+          margin-left: 0;
+        }
+        .welcome {
+          padding: 0 20px;
+          margin-top: 60px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          scroll-behavior: auto !important;
+          transition: none !important;
+        }
+      }
+
+      /* V0.5 collaboration-only adjustments; creation and expert settings retain V0.4 styling. */
+      .collaboration {
+        padding-top: 18px;
+      }
+      .collaboration .work-request {
+        margin-bottom: 13px;
+      }
+      .collaboration .work-request .bubble {
+        padding: 9px 13px;
+        font-size: 12px;
+        line-height: 1.7;
+      }
+      .collaboration > .message.ai {
+        margin-bottom: 8px;
+      }
+      .work-card {
+        margin-top: 0;
+        margin-bottom: 14px;
+      }
+      .work-card .card-header {
+        padding: 14px 17px 10px;
+        align-items: flex-start;
+      }
+      .work-card h3 {
+        font-size: 15px;
+      }
+      .work-card .card-header .meta {
+        font-size: 10px;
+      }
+      .work-focus {
+        padding: 0 17px 11px;
+        font-size: 12px;
+        line-height: 1.7;
+      }
+      .work-focus strong {
+        display: block;
+        margin-bottom: 3px;
+        font-weight: 570;
+      }
+      .work-focus p {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .work-card .card-actions {
+        padding: 9px 17px;
+        gap: 7px;
+        background: #f7f8f4;
+      }
+      .work-card .card-actions .btn {
+        font-size: 12px;
+        padding: 6px 10px;
+      }
+      .work-card .planbody {
+        padding: 0 17px 4px;
+      }
+      .work-card .stage {
+        padding: 10px 0;
+      }
+      .work-card .stage-title {
+        font-size: 12px;
+      }
+      .work-card .stage-sub {
+        font-size: 10px;
+        margin-top: 2px;
+      }
+      .work-card .stage-status {
+        font-size: 10px;
+      }
+      .work-card .stepdot {
+        width: 20px;
+        height: 20px;
+      }
+      .work-card .stage-detail {
+        margin-top: 8px;
+        font-size: 11px;
+      }
+      .work-card .outputs {
+        margin: 8px 0 2px;
+        gap: 5px;
+      }
+      .work-card .gate-return {
+        margin: 10px 17px;
+      }
+      .work-card .stage-downstream {
+        font-size: 11px;
+        color: var(--muted);
+        border-top: 1px solid var(--line);
+        padding: 9px 0;
+      }
+      .work-card .filepill {
+        padding: 4px 7px;
+      }
+      .pause-context {
+        font-size: 11px;
+        color: var(--orange);
+        margin-bottom: 5px;
+      }
+      .composer-context {
+        gap: 8px;
+        align-items: center;
+      }
+      .composer-context button {
+        font-size: 11px;
+        color: var(--accent);
+        white-space: nowrap;
+      }
+      .composer-wrap .composer-context span {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .work-card .stage-header > .grow,
+      .work-card .card-header > .grow {
+        min-width: 0;
+      }
+      .work-card .stage-status {
+        white-space: normal;
+        text-align: right;
+        max-width: 150px;
+      }
+      .work-card .card-actions .footnote {
+        font-size: 10px;
+      }
+      .collaboration .stage-summary {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      @media (max-width: 760px) {
+        .proto-top {
+          gap: 6px;
+        }
+        .proto-brand {
+          font-size: 9px;
+          white-space: normal;
+          max-width: 116px;
+          line-height: 1.3;
+        }
+        .proto-links {
+          gap: 1px;
+        }
+        .proto-links button {
+          font-size: 10px;
+          padding: 4px;
+        }
+        .topbar .crumb {
+          flex-wrap: wrap;
+          gap: 5px;
+          min-width: 0;
+        }
+        .topbar .crumb > span:first-child {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          max-width: 220px;
+        }
+        .topbar > .row {
+          gap: 2px;
+          flex: none;
+        }
+        .work-card .card-header {
+          gap: 7px;
+        }
+        .work-card .card-header .tag {
+          font-size: 10px;
+        }
+        .work-card .card-actions {
+          flex-wrap: wrap;
+        }
+        .work-card .stage-status {
+          max-width: 110px;
+        }
+        .composer-context {
+          margin: 0 5px;
+          flex-wrap: wrap;
+        }
+        .work-focus,
+        .work-card .stage-title,
+        .work-card .meta,
+        .route-banner {
+          overflow-wrap: anywhere;
+        }
+        .route-banner {
+          gap: 8px;
+        }
+        .route-banner > span {
+          min-width: 0;
+        }
+        .route-banner button {
+          flex: none;
+        }
+        .conversation .bubble {
+          overflow-wrap: anywhere;
+        }
+      }
+
+      /* V0.6 annotation scope: node-based coordination card. */
+      .node-work-card {
+        margin-left: 0;
+        border-color: #dce2d9;
+        overflow: visible;
+        background: #fff;
+      }
+      .node-card-head {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        padding: 12px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+      .node-card-head > div {
+        flex: 1;
+        min-width: 0;
+      }
+      .node-card-head p {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 3px;
+      }
+      .node-card-head h3 {
+        font-size: 14px;
+      }
+      .node-card-head .iconbtn {
+        width: 24px;
+        height: 28px;
+      }
+      .node-graph {
+        padding: 14px 18px 0;
+      }
+      .graph-path {
+        display: grid;
+        grid-template-columns: repeat(var(--node-count), minmax(0, 1fr));
+        list-style: none;
+        padding: 0;
+        margin: 0 0 15px;
+        gap: 18px;
+      }
+      .graph-step {
+        position: relative;
+        min-width: 0;
+      }
+      .graph-node {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 10px 4px 8px;
+        border: 1px solid #e4e7df;
+        border-radius: 9px;
+        background: #fafbf8;
+        gap: 3px;
+        position: relative;
+      }
+      .node-marker {
+        display: grid;
+        place-items: center;
+        width: 25px;
+        height: 25px;
+        border-radius: 7px;
+        color: #879181;
+        background: #ecefe7;
+        margin-bottom: 3px;
+      }
+      .node-marker svg {
+        width: 15px;
+        height: 15px;
+      }
+      .node-label {
+        font-size: 12px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .node-status {
+        font-size: 10px;
+        color: #6e7669;
+        white-space: nowrap;
+      }
+      .graph-step.future .graph-node {
+        background: white;
+        border-style: dashed;
+        color: #767e70;
+      }
+      .graph-step.future .node-marker {
+        background: #f3f4f0;
+      }
+      .graph-step.done .node-marker {
+        color: #45634b;
+        background: #e4eee1;
+      }
+      .graph-step.active .graph-node {
+        background: #f0f4ed;
+        border-color: #7f9478;
+      }
+      .graph-step.active .node-marker {
+        background: #405b43;
+        color: white;
+      }
+      .graph-step.human-wait .node-marker,
+      .graph-step.paused-step .node-marker {
+        background: #94743d;
+      }
+      .graph-step.human-wait .graph-node,
+      .graph-step.paused-step .graph-node {
+        border-color: #c1ab82;
+        background: #faf7ef;
+      }
+      .graph-step.human-wait .node-status,
+      .graph-step.paused-step .node-status {
+        color: #866735;
+      }
+      .graph-step.selected .graph-node {
+        box-shadow: 0 0 0 2px #526c4318;
+        border-color: #6e8465;
+      }
+      .graph-step.active .node-status {
+        color: #3f603d;
+        font-weight: 600;
+      }
+
+      .graph-edge {
+        position: absolute;
+        left: 100%;
+        top: 35px;
+        width: 18px;
+        height: 12px;
+        display: flex;
+        align-items: center;
+        color: #a6b49e;
+      }
+      .graph-edge:before {
+        content: "";
+        height: 1px;
+        background: currentColor;
+        width: 12px;
+      }
+      .graph-edge svg {
+        width: 10px;
+        height: 10px;
+        margin-left: -5px;
+      }
+      .done .graph-edge {
+        color: #79986a;
+      }
+      .node-expanded {
+        position: relative;
+        border: 1px solid #dbe3d6;
+        border-radius: 9px;
+        background: #f7f9f4;
+        padding: 13px 15px;
+        margin-top: 15px;
+        transition: background 0.15s ease;
+      }
+      .node-expanded:before {
+        content: "";
+        position: absolute;
+        top: -7px;
+        left: clamp(14px, var(--anchor), calc(100% - 20px));
+        width: 12px;
+        height: 12px;
+        background: inherit;
+        border-left: 1px solid #dbe3d6;
+        border-top: 1px solid #dbe3d6;
+        transform: rotate(45deg);
+      }
+      .node-expanded.paused {
+        background: #f8f6ef;
+        border-color: #e4decd;
+      }
+      .node-expanded.future {
+        background: #fafbf8;
+      }
+      .node-detail-head {
+        display: flex;
+        gap: 12px;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 7px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .node-detail-head small {
+        font-size: 11px;
+        color: #77816f;
+        font-weight: 400;
+        margin-left: 9px;
+      }
+      .node-detail-state {
+        font-size: 11px;
+        font-weight: 500;
+        color: #65745e;
+      }
+      .node-copy {
+        font-size: 12px;
+        line-height: 1.75;
+      }
+      .node-files,
+      .node-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+      }
+      .node-buttons:empty {
+        display: none;
+      }
+      .node-files .btn {
+        border-color: #dce3d6;
+        background: #fff;
+        font-weight: 400;
+        padding: 3px 8px;
+        font-size: 11px;
+      }
+      .node-buttons .btn {
+        font-size: 12px;
+        padding: 5px 11px;
+      }
+      .node-notes {
+        font-size: 11px;
+        color: #6d765f;
+        margin-top: 6px;
+      }
+      .graph-return-track {
+        height: 12px;
+        margin-top: -7px;
+        margin-bottom: 5px;
+        margin-left: var(--return-start);
+        width: var(--return-width);
+        border: 1px dashed #c5a36a;
+        border-top: 0;
+        border-radius: 0 0 6px 6px;
+        position: relative;
+        color: #a37c3c;
+      }
+      .graph-return-track svg {
+        position: absolute;
+        left: -5px;
+        top: -5px;
+        width: 9px;
+        height: 9px;
+        transform: rotate(-90deg);
+      }
+      .graph-loop {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        padding: 7px 9px;
+        background: #faf4e8;
+        color: #876535;
+        font-size: 10px;
+        border: 1px dashed #deceac;
+        border-radius: 6px;
+        margin: 0 0 10px;
+      }
+      .graph-loop svg {
+        width: 13px;
+        height: 13px;
+      }
+      .graph-loop .inline-link {
+        margin-left: auto;
+        font-size: 10px;
+        white-space: nowrap;
+      }
+      .graph-loop + .node-expanded {
+        margin-top: 10px;
+      }
+      .graph-loop + .node-expanded:before {
+        display: none;
+      }
+      .graph-foot {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 0 11px;
+        font-size: 10px;
+        color: #858d7c;
+      }
+      .graph-foot .inline-link {
+        font-size: 10px;
+      }
+      .node-controls {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .node-controls .node-files {
+        margin-left: auto;
+      }
+      .node-return {
+        margin-top: 10px;
+      }
+      .node-return textarea {
+        min-height: 65px;
+        font-size: 12px;
+        background: white;
+      }
+      .node-feedback {
+        padding: 7px 9px;
+        border-left: 2px solid #b7945e;
+        background: #fbf7ee;
+        font-size: 11px;
+        margin-top: 9px;
+      }
+      .node-feedback b {
+        font-weight: 500;
+        color: #8a6c3f;
+      }
+      .node-feedback p {
+        margin-top: 3px;
+      }
+      @media (max-width: 1100px) {
+        .collaboration {
+          width: calc(100% - 44px);
+        }
+        .node-graph {
+          padding: 15px 13px 0;
+        }
+        .graph-path {
+          gap: 12px;
+        }
+        .graph-edge {
+          width: 12px;
+        }
+        .graph-edge:before {
+          width: 9px;
+        }
+        .node-card-head {
+          padding: 13px 15px;
+        }
+      }
+      @media (max-width: 650px) {
+        .node-graph {
+          padding: 14px 10px 0;
+        }
+        .graph-path {
+          gap: 10px;
+        }
+        .graph-node {
+          padding: 8px 1px;
+        }
+        .node-label {
+          font-size: 11px;
+        }
+        .node-status {
+          font-size: 9px;
+        }
+        .node-marker {
+          width: 22px;
+          height: 22px;
+        }
+        .graph-edge {
+          width: 10px;
+          top: 30px;
+        }
+        .node-detail-head {
+          flex-wrap: wrap;
+          gap: 5px;
+        }
+        .node-expanded {
+          padding: 12px;
+        }
+        .graph-loop {
+          flex-wrap: wrap;
+        }
+        .node-card-head {
+          gap: 6px;
+        }
+        .node-card-head h3 {
+          font-size: 13px;
+        }
+        .node-card-head .tag {
+          font-size: 10px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .node-expanded {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="modal-root"></div>
+    <div id="toast-root" aria-live="polite"></div>
+    <script>
+      "use strict";
+      const ICONS = {
+        hub: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+        chat: '<path d="M21 11a8 8 0 0 1-8 8H7l-5 3 1.5-6A8 8 0 1 1 21 11Z"/>',
+        folder:
+          '<path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
+        check: '<path d="m5 12 4 4L19 6"/>',
+        chevron: '<path d="m9 5 7 7-7 7"/>',
+        down: '<path d="m6 9 6 6 6-6"/>',
+        plus: '<path d="M12 5v14M5 12h14"/>',
+        x: '<path d="m6 6 12 12M18 6 6 18"/>',
+        arrow: '<path d="M5 12h14m-6-6 6 6-6 6"/>',
+        back: '<path d="M19 12H5m6-6-6 6 6 6"/>',
+        up: '<path d="M12 19V5m-6 6 6-6 6 6"/>',
+        team: '<circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6m2 3a5 5 0 0 1 3 4v3"/>',
+        user: '<circle cx="12" cy="8" r="3.5"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/>',
+        file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8m-8 4h6"/>',
+        search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+        settings:
+          '<path d="m9 3-.6 3-2.9 1-2.5-1.4L1.5 9l2.2 2v3l-2.2 2 1.5 3.4L5.5 18l2.9 1 .6 3h4l.6-3 2.9-1 2.5 1.4 1.5-3.4-2.2-2v-3l2.2-2L19 5.6 16.5 7l-2.9-1L13 3Z"/><circle cx="11" cy="12.5" r="3"/>',
+        dots: '<circle cx="5" cy="12" r=".8" fill="currentColor"/><circle cx="12" cy="12" r=".8" fill="currentColor"/><circle cx="19" cy="12" r=".8" fill="currentColor"/>',
+        lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/>',
+        pause: '<path d="M8 5v14M16 5v14"/>',
+        play: '<path d="m7 4 14 8-14 8Z"/>',
+        clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+        spark: '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/>',
+        list: '<path d="M9 6h12M9 12h12M9 18h12M3 6h.01M3 12h.01M3 18h.01"/>',
+        branch:
+          '<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="6" r="2"/><path d="M6 7v10m0-4h6a6 6 0 0 0 6-5"/>',
+        book: '<path d="M3 4h6a3 3 0 0 1 3 3v14a3 3 0 0 0-3-3H3Zm18 0h-6a3 3 0 0 0-3 3v14a3 3 0 0 1 3-3h6Z"/>',
+        info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10h.01"/>',
+        copy: '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
+        archive: '<path d="M4 8v13h16V8M3 3h18v5H3Zm6 9h6"/>',
+        brain:
+          '<path d="M12 5c-2-5-7-3-7 1-5 1-4 7-1 8-2 5 4 8 8 5m0-14c2-5 7-3 7 1 5 1 4 7 1 8 2 5-4 8-8 5V5"/>',
+        tool: '<path d="m13 6 5 5M4 20l7-7m1-8a6 6 0 0 0-2 7L3 19l2 2 7-7a6 6 0 0 0 7-2 6 6 0 0 0 1-6l-4 4-3-3 4-4a6 6 0 0 0-5 2Z"/>',
+        bell: '<path d="M4 17h16l-2-4V9a6 6 0 0 0-12 0v4Zm6 3h4"/>',
+        code: '<path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"/>',
+      };
+      const I = (n) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ICONS.hub}</svg>`;
+      const E = (s) =>
+        String(s ?? "").replace(
+          /[&<>"']/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+        );
+      const ib = (name, act, label) =>
+        `<button class="iconbtn" data-act="${act}" aria-label="${label}" title="${label}">${I(name)}</button>`;
+      const experts = [
+        {
+          id: "pm",
+          name: "产品经理",
+          short: "产",
+          desc: "需求探索、产品方案与优先级判断",
+          skills: 3,
+        },
+        {
+          id: "tech",
+          name: "技术评审",
+          short: "审",
+          desc: "可行性、架构约束与实现风险",
+          skills: 2,
+        },
+        { id: "dev", name: "开发工程师", short: "研", desc: "代码实现、调试与本地验证", skills: 4 },
+        {
+          id: "design",
+          name: "交互设计师",
+          short: "设",
+          desc: "用户流程、交互方案与界面设计",
+          skills: 3,
+        },
+        {
+          id: "research",
+          name: "研究助理",
+          short: "研",
+          desc: "资料检索、证据整理与研究写作",
+          skills: 2,
+        },
+        {
+          id: "data",
+          name: "数据分析师",
+          short: "析",
+          desc: "数据清洗、分析与可视化",
+          skills: 2,
+          unavailable: "数据工具未连接",
+        },
+      ];
+      const defaults = [
+        {
+          id: "product",
+          name: "产品协作团",
+          purpose: "从需求共创、方案评审到产品实现",
+          members: ["pm", "tech", "dev"],
+          templates: ["方案共创与评审"],
+          revision: 1,
+        },
+        {
+          id: "research",
+          name: "研究写作团",
+          purpose: "资料研究、论证与报告写作",
+          members: ["research", "pm"],
+          templates: ["研究与交叉评审"],
+          revision: 1,
+        },
+      ];
+      const load = (k, f) => {
+        try {
+          return JSON.parse(localStorage.getItem(k)) || f;
+        } catch {
+          return f;
+        }
+      };
+      let teams = load("hub-v06-teams", structuredClone(defaults));
+      let S = {
+        page: "hub",
+        tab: "teams",
+        editor: null,
+        hub: {
+          name: "Linx 产品方案",
+          mode: "team",
+          purpose: defaults[0].purpose,
+          members: ["pm", "tech", "dev"],
+          source: "Linx",
+          teamId: "product",
+          teamRevision: 1,
+          templates: ["方案共创与评审"],
+        },
+        hubId: "demo",
+        drafts: {},
+        planNotes: {},
+        messages: [],
+        replyTarget: null,
+        createdThreads: [],
+        outputs: [],
+        reviewedRev: null,
+        acceptedRev: null,
+        run: "draft",
+        scope: "all",
+        planRev: 1,
+        outputRev: 2,
+        expanded: false,
+        thread: null,
+        inspector: null,
+        menu: false,
+        returning: false,
+        returnText: "",
+        reply: "",
+        threadMsgs: [],
+        pausedFrom: null,
+        modal: null,
+        instanceTab: "general",
+        search: "",
+        stageReplies: [],
+        onlyOne: false,
+        newHub: false,
+      };
+      let createDraft = null,
+        instanceDraft = null,
+        editorDirty = false,
+        previousFocus = null;
+      const saveTeams = () => {
+        try {
+          localStorage.setItem("hub-v06-teams", JSON.stringify(teams));
+        } catch {
+          toast("当前浏览器不支持本地保存，配置只保留在本次页面中。");
+        }
+      };
+      const expert = (id) => experts.find((x) => x.id === id);
+      const names = (ids) => ids.map((id) => expert(id)?.name || "不可用专家").join(" · ");
+      const chips = (ids, removable = false) =>
+        ids
+          .map(
+            (id) =>
+              `<span class="chip"><span>${E(expert(id)?.name || id)}</span>${removable ? ib("x", "member-remove:" + id, "移除" + (expert(id)?.name || id)) : ""}</span>`,
+          )
+          .join("");
+      const runLabels = {
+        empty: "未开始",
+        draft: "待确认",
+        cocreate: "等待补充",
+        revising: "正在修订",
+        reviewing: "审核中",
+        gate: "待你确认",
+        develop: "开发中",
+        done: "已完成",
+        paused: "已暂停",
+        blocked: "需要处理",
+      };
+      function protoTop() {
+        return `<div class="proto-top"><div class="proto-brand"><strong>LINX / HUB</strong><span>V0.6 节点式协调卡草案</span></div><nav class="proto-links" aria-label="原型场景"><button data-act="demo-create" class="${S.modal === "create" ? "current" : ""}">01 创建 Hub</button><button data-act="settings-teams" class="${S.page === "settings" ? "current" : ""}">02 专家团设置</button><button data-act="demo-work" class="${S.page === "hub" && !S.modal ? "current" : ""}">03 协作过程</button><button data-act="help">设计说明</button></nav><span class="prototype-note">本地模拟 · 不调用 Agent · 不修改仓库</span></div>`;
+      }
+      function rail() {
+        return `<aside class="rail" aria-label="应用导航"><div class="mark">S</div><button data-act="scope-note" title="现有聊天入口">${I("chat")}</button><button data-act="scope-note" title="现有项目入口">${I("folder")}</button><button class="${S.page === "hub" ? "active" : ""}" data-act="to-hub" title="Hubs">${I("hub")}</button><button data-act="scope-note" title="现有任务入口">${I("list")}</button><div class="space"></div><button data-act="settings-teams" class="${S.page === "settings" ? "active" : ""}" title="设置">${I("settings")}</button></aside>`;
+      }
+      function side() {
+        if (S.page === "settings")
+          return `<aside class="side"><div class="side-heading">设置</div><button class="navrow" data-act="to-hub">${I("back")}返回 Hub</button><div class="side-label">个人</div>${[
+            ["settings", "通用"],
+            ["user", "个人资料"],
+            ["spark", "外观"],
+            ["bell", "通知"],
+          ]
+            .map(
+              ([i, n]) =>
+                `<button class="navrow" data-act="existing-setting:${n}">${I(i)}${n}</button>`,
+            )
+            .join("")}<div class="side-label">能力与工具</div>${[
+            ["code", "Agent 提供商"],
+            ["brain", "模型"],
+            ["book", "技能"],
+          ]
+            .map(
+              ([i, n]) =>
+                `<button class="navrow" data-act="existing-setting:${n}">${I(i)}${n}</button>`,
+            )
+            .join(
+              "",
+            )}<button class="navrow active" data-act="settings-teams">${I("team")}专家</button><button class="navrow" data-act="existing-setting:MCP">${I("tool")}MCP</button><div class="workspace-footer"><span class="avatar">L</span><span>个人工作区</span></div></aside>`;
+        const r = effectiveRun();
+        const has = (id) => S.createdThreads.includes(id);
+        return `<aside class="side"><div class="side-heading between">Hubs <span class="muted small">2</span></div><button class="newhub" data-act="create">${I("plus")}新建 Hub</button><div class="side-label">工作空间</div><div class="group-header">${I(S.hub.mode === "team" ? "team" : "hub")}<span class="grow">${E(S.hub.name)}</span>${["gate", "cocreate"].includes(r) ? '<span class="dot amber"></span>' : ""}</div><button class="navrow threadrow ${!S.thread ? "active" : ""}" data-act="to-hub">${I("chat")}主对话</button>${[
+          ["pm", "需求共创"],
+          ["tech", "技术审核"],
+          ["dev", "本地开发"],
+          ["general", "方案讨论"],
+        ]
+          .filter(([id]) => has(id))
+          .map(
+            ([id, label]) =>
+              `<button class="navrow threadrow ${S.thread === id ? "active" : ""}" data-act="thread:${id}">${I("chat")}${label}${id === "pm" && r === "cocreate" ? '<span class="badge-count">待回复</span>' : ""}</button>`,
+          )
+          .join(
+            "",
+          )}<div class="nav-divider"></div><button class="navrow" data-act="ordinary-hub">${I("hub")}日常工作</button><div class="workspace-footer"><span class="avatar">L</span><span class="grow">个人工作区</span>${I("down")}</div></aside>`;
+      }
+
+      function topbar() {
+        return `<header class="topbar"><div class="crumb"><span>${E(S.hub.name)}</span><span class="tag">${S.hub.mode === "team" ? "专家团" : "普通"}</span>${S.hub.source ? `<span class="slash source-crumb">/</span><span class="muted source-crumb">${E(S.hub.source)}</span>` : ""}</div><div class="row"><button class="btn ghost small" data-act="library">${I("file")}成果</button>${ib("settings", "hub-settings", "当前 Hub 设置")}${ib("dots", "hub-menu", "更多操作")}</div></header>`;
+      }
+      const sender = (who, short, source = "") =>
+        `<div class="sender"><span class="avatar">${short}</span>${E(who)}${source ? `<span class="source">${E(source)}</span>` : ""}</div>`;
+      function welcome() {
+        return `<div class="welcome"><div class="large-symbol">${I(S.hub.mode === "team" ? "team" : "hub")}</div><h1>${E(S.hub.name)}</h1><p>${S.hub.mode === "team" ? E(S.hub.purpose || "向团队提出需求，从讨论开始，也可以委托一项工作。") : "讨论问题、整理思路，或委托一项具体工作。"}</p>${S.hub.mode === "team" ? `<div class="chips" style="justify-content:center;margin-bottom:26px">${chips(S.hub.members)}</div>` : ""}<div class="suggestions"><button data-act="suggest:discussion">先讨论一个产品想法 ${I("arrow")}</button><button data-act="suggest:plan">完善方案，审核后再开发 ${I("arrow")}</button></div></div>`;
+      }
+      let graphSelection = null,
+        graphSelectionContext = "";
+      function planCard() {
+        const r = effectiveRun(),
+          paused = S.run === "paused",
+          standard = S.hub.mode === "standard",
+          phase = phaseOnly();
+        const ctx = [S.hubId, S.run, S.planRev, S.outputRev, S.scope].join(":");
+        if (ctx !== graphSelectionContext) {
+          graphSelection = null;
+          graphSelectionContext = ctx;
+        }
+        const active = ["draft", "blocked", "cocreate", "revising"].includes(r)
+          ? "pm"
+          : r === "reviewing"
+            ? standard
+              ? "pm"
+              : "tech"
+            : r === "gate"
+              ? "gate"
+              : "dev";
+        const approved = ["develop", "done"].includes(r),
+          draft = r === "draft" || r === "blocked";
+        const stage = (id) => {
+          if (draft) return "future";
+          if (id === "pm")
+            return ["cocreate", "revising"].includes(r) || (standard && r === "reviewing")
+              ? "active"
+              : "done";
+          if (id === "tech")
+            return r === "reviewing"
+              ? "active"
+              : ["gate", "develop", "done"].includes(r)
+                ? "done"
+                : "future";
+          if (id === "gate") return r === "gate" ? "active" : approved ? "done" : "future";
+          return r === "done" ? "done" : r === "develop" ? "active" : "future";
+        };
+        const nodes = [
+          {
+            id: "pm",
+            title: standard ? "方案形成" : "需求共创",
+            owner: standard ? "工作线程" : "产品经理",
+            icon: "chat",
+          },
+          ...(!standard
+            ? [{ id: "tech", title: "技术审核", owner: "技术专家", icon: "search" }]
+            : []),
+          { id: "gate", title: "你的确认", owner: "人工放行", icon: "lock" },
+          ...(!phase ? [{ id: "dev", title: "本地开发", owner: "开发工程师", icon: "code" }] : []),
+        ];
+        const current = nodes.find((n) => n.id === active) || nodes[nodes.length - 1];
+        const selected = nodes.find((n) => n.id === graphSelection) || current;
+        const returned = S.outputs.filter((o) => o.returned);
+        const status = (n) => {
+          let st = stage(n.id);
+          if (st === "future" && !draft && returned.length && n.id === "gate")
+            return "已退回 v" + returned[returned.length - 1].revision;
+          if (st === "future" && !draft && r === "revising" && n.id === "tech") return "待重新审核";
+          if (st === "future")
+            return draft ? "待计划确认" : n.id === "dev" ? "待你放行" : "等待上游";
+          if (st === "done")
+            return n.id === "gate"
+              ? "已确认 v" + S.acceptedRev
+              : n.id === "tech"
+                ? "已审核 v" + S.reviewedRev
+                : n.id === "pm"
+                  ? "已提交 v" + S.outputRev
+                  : "已完成";
+          if (paused) return "已暂停";
+          return {
+            pm: r === "revising" ? "修订 v" + S.outputRev : standard ? "整理中" : "等你回复",
+            tech: "审核 v" + S.outputRev,
+            gate: "等你确认",
+            dev: "进行中",
+          }[n.id];
+        };
+        const link = (text, act, primary = false) =>
+          `<button class="btn ${primary ? "primary" : "small"}" data-act="${act}">${text}</button>`;
+        let content = "",
+          buttons = "",
+          files = "";
+        const id = selected.id,
+          st = stage(id),
+          isCurrent = id === current.id;
+        const rev = S.outputRev;
+        if (draft) {
+          content =
+            r === "blocked"
+              ? "当前成员存在能力缺口。调整专家或缩小范围后再确认。"
+              : phase
+                ? "本次只形成方案，经你确认后结束，不启动开发。"
+                : "先完成方案与审核；你确认具体版本后，才开始本地开发。";
+          buttons =
+            r === "blocked"
+              ? link("调整参与专家", "hub-members", true) + link("修改计划", "adjust-plan")
+              : link("确认执行", "confirm-plan", true) + link("调整计划", "adjust-plan");
+        } else if (id === "pm") {
+          if (st === "active") {
+            content =
+              r === "revising"
+                ? "正在根据你的修改意见修订方案 v" + rev + "，完成后重新审核。"
+                : standard
+                  ? "工作线程正在整理本次方案。"
+                  : "首版优先服务个人用户，还是小型团队？";
+            buttons =
+              r === "cocreate"
+                ? link("去回答", "thread:pm", true) + link("在此回复", "reply-here:pm")
+                : link(
+                    r === "revising" ? "查看修订线程" : "查看工作线程",
+                    "thread:" + (standard ? "general" : "pm"),
+                    true,
+                  ) + link("暂停", "pause");
+          } else {
+            content = "方案 v" + rev + " 已提交。原线程保留共创与修改记录。";
+            buttons = link("查看原线程", "thread:" + (standard ? "general" : "pm"));
+          }
+          if (currentOutputAvailable()) files = link("需求方案 v" + rev, "artifact:prd");
+        } else if (id === "tech") {
+          content =
+            st === "future"
+              ? "等待产品经理提交方案后开始审核。"
+              : st === "done"
+                ? "需求方案 v" + S.reviewedRev + " 已通过专业审核（模拟）。用户放行单独记录。"
+                : "正在审核需求方案 v" + rev + " 的范围与可行性。";
+          if (st !== "future")
+            buttons =
+              link("查看审核线程", "thread:tech", st === "active") +
+              (st === "active" ? link("暂停", "pause") : "");
+          if (S.reviewedRev === rev) files = link("评审记录 · 方案 v" + rev, "artifact:review");
+        } else if (id === "gate") {
+          content =
+            st === "future"
+              ? "方案就绪后，在这里查看具体版本并决定是否放行。"
+              : st === "done"
+                ? "你已确认需求方案 v" +
+                  S.acceptedRev +
+                  "。" +
+                  (phase ? "本次方案委托完成。" : "开发只使用已确认版本。")
+                : "请确认需求方案 v" +
+                  rev +
+                  "。" +
+                  (phase
+                    ? "确认后完成本次委托，不启动开发。"
+                    : "确认后进入本地开发，不含发布上线。");
+          if (st === "active")
+            buttons =
+              link(phase ? "确认并完成" : "确认并进入开发", "approve-gate", true) +
+              link("退回修改", "return-gate");
+          if (st !== "future")
+            files =
+              link("需求方案 v" + (S.acceptedRev || rev), "artifact:prd") +
+              (!standard ? link("审核对象 · 方案 v" + S.reviewedRev, "artifact:review") : "");
+        } else {
+          content =
+            st === "future"
+              ? "等待你确认方案后，再开展本地实现与验证。"
+              : st === "done"
+                ? "本地实现与验证已模拟完成，未发布上线。"
+                : "正在依据你已确认的方案 v" + S.acceptedRev + " 开展本地实现与验证。";
+          if (st !== "future")
+            buttons =
+              link(
+                st === "done" ? "查看交付摘要" : "查看开发线程",
+                st === "done" ? "artifact:result" : "thread:dev",
+                true,
+              ) + (st === "active" ? link("暂停", "pause") : "");
+        }
+        if (paused && isCurrent) {
+          content = "已暂停在" + selected.title + "。保留当前版本、专业线程与成果，恢复后继续。";
+          buttons = link("恢复执行", "resume", true);
+        }
+        const notes = S.planNotes[S.planRev] || [];
+        const feedback =
+          r === "revising" && id === "pm" && S.returnText
+            ? `<div class="node-feedback"><b>本轮修改意见</b><p>${E(S.returnText)}</p></div>`
+            : "";
+        const returnForm =
+          S.returning && id === "gate" && !paused
+            ? `<div class="node-return"><label class="label" for="return-text">需要修改什么？</label><textarea id="return-text" placeholder="写下具体修改意见，继续使用原作者线程。">${E(S.returnText)}</textarea><div class="node-buttons">${link("发送修改意见", "send-return", true)}${link("取消", "cancel-return")}</div></div>`
+            : "";
+        const loop =
+          r === "revising" || returned.length
+            ? `<div class="graph-return-track" style="--return-start:${50 / nodes.length}%;--return-width:${(nodes.findIndex((n) => n.id === "gate") / nodes.length) * 100}%" aria-hidden="true">${I("chevron")}</div><div class="graph-loop"><span>${r === "revising" ? "你的确认 → 返回需求共创" : "已保留修订路径"} · ${returned.length ? "v" + returned[returned.length - 1].revision + " → v" + rev : "本轮修订"}${r === "revising" ? " · 重新审核后再放行" : ""}</span><button class="inline-link" data-act="library">版本记录</button></div>`
+            : "";
+        const nodeHtml = nodes
+          .map((n, i) => {
+            const ns = stage(n.id),
+              sel = n.id === selected.id;
+            return `<li class="graph-step ${ns} ${ns === "active" && (n.id === "gate" || r === "cocreate") ? "human-wait" : ""} ${paused && n.id === current.id ? "paused-step" : ""} ${n.id === current.id ? "current-step" : ""} ${sel ? "selected" : ""}"><button class="graph-node" data-act="graph-node:${n.id}" aria-pressed="${sel}" aria-label="${n.title}，${status(n)}" ${n.id === current.id && !draft ? 'aria-current="step"' : ""}><span class="node-marker">${ns === "done" ? I("check") : paused && n.id === current.id ? I("pause") : I(n.icon)}</span><span class="node-label">${n.title}</span><span class="node-status">${status(n)}</span></button>${i < nodes.length - 1 ? `<span class="graph-edge" aria-hidden="true">${I("chevron")}</span>` : ""}</li>`;
+          })
+          .join("");
+        return `<article class="card node-work-card" aria-label="节点式执行计划"><header class="node-card-head"><div><h3>${planTitle()}</h3><p>计划 v${S.planRev} · ${phase ? "仅方案阶段" : "方案与本地开发 · 不发布"}</p></div><span class="tag ${paused || ["draft", "gate", "cocreate", "blocked"].includes(r) ? "amber" : "green"}">${paused ? "已暂停" : runLabels[r]}</span><button class="iconbtn" data-act="plan-details" aria-label="计划详情">${I("dots")}</button></header><div class="node-graph"><ol class="graph-path" style="--node-count:${nodes.length}" aria-label="协作阶段路径">${nodeHtml}</ol>${loop}<section class="node-expanded ${st} ${paused ? "paused" : ""}" aria-label="${draft ? "计划确认" : selected.title + "节点详情"}" style="--anchor:${((nodes.indexOf(selected) + 0.5) / nodes.length) * 100}%"><div class="node-detail-head"><span>${draft ? "执行前确认" : selected.title}<small>${draft ? "授权范围" : selected.owner}</small></span>${!draft && selected.id !== current.id ? '<button class="inline-link" data-act="graph-current">回到当前节点</button>' : `<span class="node-detail-state">${draft ? "待确认" : status(selected)}</span>`}</div><p class="node-copy">${content}</p>${notes.length && draft ? `<p class="node-notes">补充要求：${notes.map(E).join("；")}</p>` : ""}${feedback}${returnForm ? `${files ? `<div class="node-files">${files}</div>` : ""}${returnForm}` : `<div class="node-controls"><div class="node-buttons">${buttons}${!draft && selected.id !== current.id && st === "future" ? '<span class="small muted">满足前置条件后开放操作</span>' : ""}</div>${files ? `<div class="node-files">${files}</div>` : ""}</div>`}</section><footer class="graph-foot"><span>${r === "done" ? "本次工作已完成，节点与成果继续保留" : phase ? "本次范围到「你的确认」结束" : "按依赖推进 · 当前节点展开，历史节点可回看"}</span>${r === "done" ? '<button class="inline-link" data-act="library">查看全部成果</button>' : ""}</footer></div></article>`;
+      }
+
+      function standardPlanCard() {
+        return planCard();
+      }
+
+      function generalThread() {
+        return `<div class="conversation"><div class="route-banner between"><span>来自「${planTitle()}」 · 普通工作线程</span><button data-act="to-hub">返回 Hub</button></div><div class="threadtitle"><h2>方案讨论</h2><p>沿用 Hub 默认配置 · ${S.run === "paused" ? "计划已暂停" : "当前工作：" + runLabels[effectiveRun()]}</p></div><div class="message ai">${sender("工作线程", "H")}<div class="body">${S.run === "paused" ? "当前工作已暂停。讨论与修改意见保留，恢复前不会推进计划。" : effectiveRun() === "revising" ? "已收到修改意见，正在原方案上修订。无需重复回答之前的问题。" : S.onlyOne ? "当前只进行讨论，不启动正式执行。" : "按已确认范围整理方案，不自动进入开发。"}</div></div>${revisionNote()}${messageHistory("general")}</div>`;
+      }
+
+      function hubConversation() {
+        if (S.run === "empty") return welcome();
+        if (S.onlyOne)
+          return `<div class="conversation collaboration"><div class="route-banner between"><span>专业讨论 · 尚未创建正式执行计划</span><button data-act="start-from-discussion">制定执行计划</button></div><div class="message ai">${sender("Hub", "H", "模拟协调回复")}<div class="body">当前只进行讨论。你可以进入${S.hub.mode === "team" ? "产品经理" : "工作"}线程继续交流。<div><button class="inline-link" data-act="thread:${S.hub.mode === "team" ? "pm" : "general"}">进入对应线程</button></div></div></div>${messageHistory("hub")}</div>`;
+        const text = phaseOnly()
+          ? "完善一份产品方案，审核后交给我确认；本次不开发。"
+          : "和产品经理完善方案，技术审核后由我确认，再进行本地开发；暂不发布。";
+        return `<div class="conversation collaboration"><div class="message user work-request"><div class="bubble">${text}</div></div><div class="message ai">${sender("Hub", "H", "协调")}</div>${planCard()}${messageHistory("hub")}</div>`;
+      }
+
+      function threadView() {
+        if (S.thread === "general") return generalThread();
+        const who = S.thread,
+          r = effectiveRun(),
+          name = expert(who)?.name || "专家",
+          title = { pm: "需求共创", tech: "技术审核", dev: "本地开发" }[who];
+        let body = "";
+        if (who === "pm")
+          body =
+            r === "revising"
+              ? "已收到本轮修改意见。我会在原方案上修订，不需要你重复回答目标用户。"
+              : r === "cocreate"
+                ? "首版优先服务个人用户，还是小型团队？这个选择会影响首版范围。"
+                : "已提交需求方案，继续在本线程保留讨论与修改记录。";
+        else if (who === "tech")
+          body =
+            S.reviewedRev === S.outputRev
+              ? `已审核需求方案 v${S.reviewedRev}：专业审核通过（模拟）。这不是用户放行；下一步仍以计划卡的用户决定为准。`
+              : `正在核对需求方案 v${S.outputRev} 的范围、实现成本与权限边界（模拟）。`;
+        else
+          body = `依据已确认的需求方案 v${S.acceptedRev || S.outputRev}，${r === "done" ? "已模拟完成" : "进行"}本地实现与验证。发布上线不在本次授权范围。`;
+        return `<div class="conversation"><div class="route-banner between"><span>计划 v${S.planRev} · ${planTitle()} · ${who === "dev" ? "本地开发" : "方案形成与审核"}${S.run === "paused" ? " · 已暂停" : ""}</span><button data-act="to-hub">返回 Hub</button></div><div class="threadtitle"><h2>${name} · ${title}</h2><p>保留原专业线程历史 · 消息发送给 ${name}</p></div><div class="message ai">${sender(name, expert(who)?.short || "H")}<div class="body">${S.run === "paused" ? (who === "dev" ? "本地开发已暂停。已确认的需求方案 v" + (S.acceptedRev || S.outputRev) + " 与历史工作记录保留，恢复后继续当前阶段。" : who === "tech" ? "技术审核已暂停。原审核对象与已有结论保留，恢复前不继续审核。" : r === "revising" ? "方案修订已暂停。本轮修改意见与原线程记录保留，恢复前不继续修订。" : "需求共创已暂停。原问题与讨论记录保留，消息不会推进计划。") : body}</div></div>${who === "pm" ? revisionNote() : ""}${messageHistory(who)}</div>`;
+      }
+
+      function composer() {
+        const target = replyTarget(),
+          name = target === "hub" ? "Hub" : expert(target)?.name || "工作线程";
+        const directed = !S.thread && S.replyTarget;
+        const context =
+          S.thread || directed
+            ? `<div class="composer-context"><span>${directed ? "定向回复" : "当前线程"}：${E(name)} · ${planTitle()} / ${target === "tech" ? "技术审核" : target === "dev" ? "本地开发" : "需求共创"}</span>${directed ? '<button data-act="cancel-directed">取消定向回复</button>' : "<span>沿用原线程</span>"}</div>`
+            : '<div class="composer-context"><span>发送给 Hub · 讨论不等于回答专家或批准计划</span></div>';
+        return `<div class="composer-wrap">${context}<form id="composer" class="composer"><textarea id="chat-input" data-draft-key="${E(draftKey())}" aria-label="发送给${E(name)}" placeholder="${target === "hub" ? "向 Hub 提问或补充想法…" : "回复" + E(name) + "…"}" rows="2">${E(S.drafts[draftKey()] || "")}</textarea><div class="composer-bottom"><div class="row">${ib("plus", "attach-note", "引用资料")}<span class="small">${S.run === "paused" ? "计划已暂停 · 消息只记录，不推进工作" : S.hub.source ? E(S.hub.source) + " 项目背景" : "Hub 共享背景"}</span></div><button class="send" type="submit" aria-label="发送给${E(name)}">${I("up")}</button></div></form></div>`;
+      }
+
+      function menu() {
+        return S.menu
+          ? `<div class="menu"><button data-act="hub-settings">Hub 设置</button><button data-act="save-preset">保存为专家团配置</button><button data-act="${S.run === "paused" ? "resume" : "pause"}">${S.run === "paused" ? "恢复执行" : "暂停当前计划"}</button><button data-act="reset-work">重新演示当前流程</button></div>`
+          : "";
+      }
+      function inspector() {
+        if (!S.inspector) return "";
+        const [type, revText] = S.inspector.split("@"),
+          rev = Number(revText) || S.outputRev,
+          snapshot = S.outputs.find((o) => o.revision === rev),
+          reviewed = snapshot?.reviewed || S.reviewedRev === rev,
+          accepted = snapshot?.accepted || S.acceptedRev === rev,
+          phase = phaseOnly();
+        const title =
+          type === "library"
+            ? "成果"
+            : type === "plan"
+              ? "计划详情"
+              : type === "prd"
+                ? "需求方案.md"
+                : type === "review"
+                  ? "技术评审"
+                  : "交付摘要";
+        let inner = "";
+        if (type === "library")
+          inner = `<p class="muted small">当前工作成果与历史版本；查看不等于批准。</p>${
+            S.outputs.length
+              ? S.outputs
+                  .slice()
+                  .reverse()
+                  .map(
+                    (o) =>
+                      `<button class="doc-link" data-act="artifact:prd@${o.revision}">${I("file")}需求方案 v${o.revision}<span class="muted" style="margin-left:auto">${o.accepted ? "已确认" : o.returned ? "已退回" : "候选版本"}</span></button>${o.reviewed ? `<button class="doc-link" data-act="artifact:review@${o.revision}">${I("file")}技术评审 · 对象：方案 v${o.revision}</button>` : ""}`,
+                  )
+                  .join("")
+              : '<div class="empty-small">尚无正式交付成果。</div>'
+          }${effectiveRun() === "done" ? '<button class="doc-link" data-act="artifact:result">交付摘要</button>' : ""}`;
+        else if (type === "plan")
+          inner = `<span class="tag">计划 v${S.planRev}</span><h2>${planTitle()}</h2>${(S.planNotes[S.planRev] || []).length ? `<h3>本版${effectiveRun() === "draft" ? "草案" : ""}补充要求</h3><ul>${S.planNotes[S.planRev].map((note) => `<li>${E(note)}</li>`).join("")}</ul>` : ""}<p>${phase ? "完成方案形成与审核，由你确认具体版本后完成本次工作。不包含开发。" : "先形成方案、技术审核，再由你确认具体版本后进入本地开发。"}</p><div class="mini-graph"><div class="graphnode current">方案形成与审核<span class="muted">${S.hub.mode === "standard" ? "普通工作线程" : "产品经理 ⇄ 技术审核"}</span></div><span class="g-arrow">↓</span><div class="graphnode gate">用户确认具体方案版本${phase ? "，完成本次委托" : ""}</div>${phase ? "" : '<span class="g-arrow">↓</span><div class="graphnode">本地开发与验证<span class="muted">仅在用户放行后启动</span></div>'}</div><div class="props-row"><span class="muted">授权范围</span><span>${phase ? "仅方案阶段" : "方案与本地开发"}</span></div><div class="props-row"><span class="muted">不包含</span><span>${phase ? "开发、" : ""}发布上线、外部写入</span></div><p class="small">单个模拟计划；未实现真实审批、身份校验或多计划调度。</p>`;
+        else if (type === "prd")
+          inner = `<span class="tag ${accepted ? "green" : ""}">需求方案 v${rev} · ${accepted ? "用户已确认" : snapshot?.returned ? "已退回修改" : "候选版本"}</span><h2>Linx 个人工作台方案</h2><p class="small">原型演示文档，不代表仓库真实产出。</p><h3>目标</h3><p>帮助个人围绕项目组织工作，通过 Hub 将明确的工作交给专业 Agent。</p><h3>方案范围</h3><ul><li>普通 Hub 与专家团 Hub。</li><li>计划确认、专业共创、审核与用户放行。</li><li>沿用专业线程与成果入口。</li></ul><h3>用户出口</h3><p>${phase ? "确认此版本后完成方案委托，不启动开发。" : "确认此版本后才授权本地开发。"}</p>${snapshot?.feedback ? `<h3>此版本的退回意见</h3><p>${E(snapshot.feedback)}</p>` : ""}`;
+        else if (type === "review")
+          inner = `<span class="tag ${reviewed ? "green" : ""}">${reviewed ? "专业审核通过（模拟）" : "审核尚未完成"}</span><h2>技术可行性评审</h2><p>审核对象：需求方案 v${rev}。审核结论不代替用户的阶段放行。</p><h3>实施提醒</h3><p>明确本地文件访问边界，避免重复写入。新成果版本必须重新审核和确认。</p>`;
+        else
+          inner = `<span class="tag green">本次委托完成（模拟）</span><h2>交付摘要</h2><p>需求方案 v${S.acceptedRev || S.outputRev} 与审核记录已保留。${phase ? "本次仅执行方案阶段，没有启动开发。" : "本地开发与验证已模拟完成，没有执行发布。"}</p><div class="hintbox">不连接模型、工作区或真实执行器；此处不代表运行验收。</div>`;
+        return `<aside class="inspect" aria-label="${title}"><div class="inspect-head"><h3>${title}</h3>${ib("x", "close-inspector", "关闭详情")}</div><div class="inspect-body">${inner}</div></aside>`;
+      }
+
+      function teamList() {
+        const data = teams.filter(
+          (t) => !t.archived && (!S.search || (t.name + t.purpose).includes(S.search)),
+        );
+        return `<div class="list-toolbar"><div class="searchbox">${I("search")}<input id="team-search" aria-label="搜索专家团" placeholder="搜索专家团" value="${E(S.search)}"></div><button class="btn primary" data-act="new-team">${I("plus")}新建专家团</button></div><div class="listrows">${data.length ? data.map((t) => `<div class="listitem"><span class="avatar lg">${I("team")}</span><button class="listitem-main" data-act="edit-team:${t.id}"><div class="listitem-title">${E(t.name)} <span class="muted small" style="font-weight:400;margin-left:5px">v${t.revision}</span></div><div class="listitem-desc">${E(t.purpose || "未设置用途")}</div><div class="listitem-members">${t.members.map((id) => `<span>${E(expert(id)?.name || "成员不可用")}</span>`).join("")}</div></button><div class="listitem-buttons"><button class="btn small" data-act="use-team:${t.id}">创建 Hub</button>${ib("copy", "copy-team:" + t.id, "复制专家团")}${ib("archive", "archive-team:" + t.id, "归档专家团")}</div></div>`).join("") : '<div class="empty-small">暂无匹配的专家团。可新建，也可在创建 Hub 时临时选择专家。</div>'}</div><p class="list-note">复用成员与协作偏好，不包含 Hub 对话、项目资料或执行授权。</p>`;
+      }
+      function singleExperts() {
+        return `<div class="list-toolbar"><p class="muted small">沿用已有专家列表与编辑器</p><button class="btn" data-act="expert-editor:new">${I("plus")}新建专家</button></div><div class="listrows">${experts.map((x) => `<div class="listitem"><span class="avatar lg">${x.short}</span><button class="listitem-main" data-act="expert-editor:${x.id}"><div class="listitem-title">${x.name}</div><div class="listitem-desc">${x.desc}</div></button><span class="tag ${x.unavailable ? "amber" : ""}">${x.unavailable || x.skills + " 项技能"}</span>${ib("chevron", "expert-editor:" + x.id, "查看" + x.name)}</div>`).join("")}</div>`;
+      }
+      function memberOptions(members, prefix = "edit") {
+        return experts
+          .map(
+            (x) =>
+              `<label class="member-option ${prefix === "create" ? "compact" : ""}"><input type="checkbox" data-members="${prefix}" value="${x.id}" ${members.includes(x.id) ? "checked" : ""}><span class="avatar">${x.short}</span><span class="grow"><b>${x.name}</b><span class="desc">${x.desc}</span></span>${x.unavailable ? `<span class="tag amber">工具未连接</span>` : ""}</label>`,
+          )
+          .join("");
+      }
+      function teamEditor() {
+        const t = S.editor;
+        return `<div class="editor-head"><div class="row">${ib("back", "back-teams", "返回专家团列表")}<h2>${t.id ? "编辑专家团" : "新建专家团"}</h2>${t.id ? `<span class="muted small">v${t.revision}</span>` : ""}</div><button class="btn primary" data-act="save-team" id="save-team">保存</button></div><div class="editor-form"><div class="field"><label for="team-name">名称</label><input id="team-name" maxlength="80" placeholder="例如：产品协作团" value="${E(t.name)}"></div><div class="field"><label for="team-purpose">用途 <span class="muted" style="font-weight:400">· 可选</span></label><input id="team-purpose" maxlength="600" placeholder="这支团队主要帮助你完成什么？" value="${E(t.purpose)}"></div><div class="field"><div class="between"><label class="label" style="margin:0">成员</label><span id="member-count" class="muted small">${t.members.length} 位</span></div><div class="member-picker">${memberOptions(t.members)}</div><div class="hint">只选择已有 Expert，不在这里重复配置角色、技能和工具。</div></div><details ${t.templates?.length ? "open" : ""}><summary>${I("chevron")}协作偏好 <span class="muted">· 可选</span></summary><div class="details-body"><label class="label">优先参考的协作模板</label>${["方案共创与评审", "研究与交叉评审"].map((n) => `<label class="template-row"><input type="checkbox" data-template="${n}" ${t.templates.includes(n) ? "checked" : ""}><div>${n}<p>Hub 可按需求裁剪或重新设计任务 Graph</p></div></label>`).join("")}</div></details><p class="saved-policy">保存只影响后续使用这份配置创建的 Hub。现有 Hub 不会自动更新。</p><div id="team-error" class="error" role="alert"></div></div>`;
+      }
+      function settings() {
+        return `<main class="main"><header class="topbar"><div class="crumb"><span class="muted">设置</span><span class="slash">/</span><span>专家</span></div><button class="btn ghost small" data-act="to-hub">返回工作 ${I("arrow")}</button></header><div class="settings-body"><div class="settings-content">${S.editor ? teamEditor() : `<div class="page-heading"><h1>专家</h1></div><div class="tabs" role="tablist" aria-label="专家设置分类"><button role="tab" aria-selected="${S.tab === "experts"}" class="${S.tab === "experts" ? "active" : ""}" data-act="tab:experts">单个专家</button><button role="tab" aria-selected="${S.tab === "teams"}" class="${S.tab === "teams" ? "active" : ""}" data-act="tab:teams">专家团</button></div>${S.tab === "teams" ? teamList() : singleExperts()}`}</div></div></main>`;
+      }
+      function bottom() {
+        return `<div class="proto-bottom"><span>模拟事件</span>${[
+          ["draft", "计划确认"],
+          ["cocreate", "需求共创"],
+          ["revising", "修订"],
+          ["reviewing", "模拟技术审核"],
+          ["gate", "模拟待人工放行"],
+          ["develop", "开发"],
+          ["done", "完成"],
+        ]
+          .filter(([k]) => k !== "develop" || !phaseOnly())
+          .map(
+            ([k, n]) =>
+              `<button data-act="demo-state:${k}" class="${effectiveRun() === k ? "active" : ""}">${n}</button>`,
+          )
+          .join(
+            "",
+          )}<span class="spacer"></span><span class="small">一份模拟计划 · 此栏不是正式操作</span><button data-act="help">说明 ${I("info")}</button></div>`;
+      }
+
+      function effectiveRun() {
+        return S.run === "paused" ? S.pausedFrom || "reviewing" : S.run;
+      }
+      function phaseOnly() {
+        return S.scope === "phase" || S.hub.mode === "standard";
+      }
+      function planTitle() {
+        return phaseOnly() ? "产品方案与审核" : "产品方案与本地开发";
+      }
+      function replyTarget() {
+        return S.thread || S.replyTarget || "hub";
+      }
+      function draftKey() {
+        return (
+          S.hubId +
+          ":" +
+          (S.thread ? "thread:" + S.thread : S.replyTarget ? "direct:" + S.replyTarget : "hub")
+        );
+      }
+      function stashDraft() {
+        const e = document.getElementById("chat-input");
+        if (e?.dataset.draftKey) S.drafts[e.dataset.draftKey] = e.value;
+      }
+      function messageHistory(target) {
+        return S.messages
+          .filter((m) => m.target === target)
+          .map((m) =>
+            m.role === "assistant"
+              ? `<div class="message ai">${sender(target === "hub" ? "Hub" : expert(target)?.name || "工作线程", target === "hub" ? "H" : expert(target)?.short || "H", "模拟回复")}<div class="body">${E(m.text)}</div></div>`
+              : `<div class="message user"><div class="bubble">${E(m.text)}</div></div>`,
+          )
+          .join("");
+      }
+      function revisionNote() {
+        return S.returnText
+          ? `<div class="review-feedback"><b>本轮修改意见 · 修订需求方案 v${S.outputRev}</b><p>${E(S.returnText)}</p><span class="muted small">沿用原线程；这不是新的必要输入问题。</span></div>`
+          : "";
+      }
+      function currentOutputAvailable() {
+        return S.outputs.some((o) => o.revision === S.outputRev);
+      }
+      function recordOutput(patch = {}) {
+        let o = S.outputs.find((o) => o.revision === S.outputRev);
+        if (!o) {
+          o = { revision: S.outputRev, reviewed: false, accepted: false, returned: false };
+          S.outputs.push(o);
+        }
+        Object.assign(o, patch);
+      }
+      function ensureThreads(r) {
+        if (["empty", "draft", "blocked"].includes(r)) return;
+        const ids = S.hub.mode === "standard" ? ["general"] : ["pm"];
+        if (
+          S.hub.mode === "team" &&
+          !S.onlyOne &&
+          ["reviewing", "gate", "develop", "done"].includes(r)
+        )
+          ids.push("tech");
+        if (!phaseOnly() && ["develop", "done"].includes(r)) ids.push("dev");
+        S.createdThreads = [...new Set([...S.createdThreads, ...ids])];
+      }
+      const scrollPositions = {};
+      let renderedView = null;
+      function render() {
+        stashDraft();
+        const oldBody = document.querySelector(".hubbody");
+        if (oldBody && renderedView) scrollPositions[renderedView] = oldBody.scrollTop;
+        const view = S.page === "hub" ? S.hubId + ":" + (S.thread || "hub") : null;
+        const main =
+          S.page === "settings"
+            ? settings()
+            : `<main class="main">${topbar()}<div class="hubbody">${S.thread ? threadView() : hubConversation()}</div>${composer()}${menu()}${inspector()}</main>`;
+        document.getElementById("app").innerHTML =
+          protoTop() + `<div class="shell">${rail()}${side()}${main}</div>` + bottom();
+        renderedView = view;
+        const nextBody = document.querySelector(".hubbody");
+        if (nextBody) nextBody.scrollTop = scrollPositions[view] || 0;
+        bindForms();
+      }
+
+      function toast(t) {
+        const root = document.getElementById("toast-root");
+        root.innerHTML = `<div class="toast">${E(t)}</div>`;
+        clearTimeout(toast.timer);
+        toast.timer = setTimeout(() => (root.innerHTML = ""), 3500);
+      }
+      function openDialog(html, cls = "") {
+        previousFocus = document.activeElement;
+        document.getElementById("modal-root").innerHTML =
+          `<dialog id="dialog" class="${cls}">${html}</dialog>`;
+        const d = document.getElementById("dialog");
+        d.showModal();
+        d.addEventListener("cancel", (e) => {
+          e.preventDefault();
+          closeDialog();
+        });
+        d.addEventListener("click", (e) => {
+          if (e.target === d) {
+            let r = d.getBoundingClientRect();
+            if (
+              e.clientX < r.left ||
+              e.clientX > r.right ||
+              e.clientY < r.top ||
+              e.clientY > r.bottom
+            )
+              closeDialog();
+          }
+        });
+      }
+      function closeDialog() {
+        document.getElementById("dialog")?.close();
+        document.getElementById("modal-root").innerHTML = "";
+        S.modal = null;
+        previousFocus?.focus?.();
+      }
+      function createModal(preset = null, keep = false) {
+        if (!keep) {
+          let t = preset ? teams.find((x) => x.id === preset) : null;
+          createDraft = {
+            mode: t ? "team" : "standard",
+            name: t ? t.name + " Hub" : "",
+            purpose: t?.purpose || "",
+            teamId: t?.id || "",
+            teamRevision: t?.revision || null,
+            members: t ? [...t.members] : [],
+            templates: t ? [...t.templates] : [],
+            source: "",
+            custom: false,
+            picker: false,
+          };
+        }
+        S.modal = "create";
+        const d = createDraft;
+        let t = teams.find((x) => x.id === d.teamId);
+        let activeTeams = teams.filter((x) => !x.archived);
+        let teamHtml =
+          d.mode === "team"
+            ? `<div class="field"><label for="create-team">专家团</label><select id="create-team"><option value="">临时选择专家</option>${activeTeams.map((x) => `<option value="${x.id}" ${x.id === d.teamId ? "selected" : ""}>${E(x.name)}</option>`).join("")}</select>${d.members.length ? `<div class="selected-team"><div class="between"><span class="small">成员${d.custom ? " · 已调整" : ""}</span><button class="inline-link" data-act="toggle-create-picker">调整成员</button></div><div class="chips">${chips(d.members)}</div></div>` : ""}${d.picker || !d.members.length ? `<div class="member-picker">${memberOptions(d.members, "create")}</div>` : ""}<div class="hint">${t ? "使用配置副本，可为当前 Hub 单独调整。" : "直接组队即可，不要求预先保存专家团。"}</div></div>`
+            : "";
+        openDialog(
+          `<div class="modal-head"><h2>新建 Hub</h2>${ib("x", "close-modal", "关闭")}</div><div class="modal-body"><div class="segmented" role="group" aria-label="Hub 模式"><button data-act="create-mode:standard" aria-pressed="${d.mode === "standard"}" class="${d.mode === "standard" ? "active" : ""}">普通</button><button data-act="create-mode:team" aria-pressed="${d.mode === "team"}" class="${d.mode === "team" ? "active" : ""}">专家团</button></div><p class="mode-help">${d.mode === "team" ? "专业工作优先交给所选专家，Hub 负责协调。" : "延续通用 Hub 的讨论与普通线程协作。"}</p><div class="field"><label for="create-name">名称</label><input id="create-name" maxlength="80" placeholder="给这项工作起个名字" value="${E(d.name)}"></div>${teamHtml}<div class="field"><label for="create-purpose">${d.mode === "team" ? "用途" : "工作方向"} <span class="muted" style="font-weight:400">· 可选</span></label><input id="create-purpose" placeholder="主要讨论或处理什么工作" value="${E(d.purpose)}"></div><div class="field"><label for="create-source">项目背景 <span class="muted" style="font-weight:400">· 可选</span></label><select id="create-source"><option value="" ${!d.source ? "selected" : ""}>不关联项目</option><option value="Linx" ${d.source === "Linx" ? "selected" : ""}>Linx</option><option value="论文研究" ${d.source === "论文研究" ? "selected" : ""}>论文研究</option></select></div><div id="create-error" class="error" role="alert"></div></div><div class="modal-footer"><span class="small">创建不会启动任务</span><div class="row"><button class="btn ghost" data-act="close-modal">取消</button><button class="btn primary" data-act="submit-create">创建 Hub ${I("arrow")}</button></div></div>`,
+        );
+        bindCreate();
+      }
+      function syncCreate() {
+        if (!createDraft) return;
+        const value = (id) => document.getElementById(id)?.value;
+        for (let [id, key] of [
+          ["create-name", "name"],
+          ["create-purpose", "purpose"],
+          ["create-source", "source"],
+        ]) {
+          let v = value(id);
+          if (v !== undefined) createDraft[key] = v;
+        }
+      }
+      function bindCreate() {
+        ["create-name", "create-purpose", "create-source"].forEach((id) =>
+          document.getElementById(id)?.addEventListener("input", syncCreate),
+        );
+        document.getElementById("create-team")?.addEventListener("change", (e) => {
+          syncCreate();
+          const t = teams.find((x) => x.id === e.target.value);
+          createDraft.teamId = t?.id || "";
+          createDraft.teamRevision = t?.revision || null;
+          createDraft.members = t ? [...t.members] : [];
+          createDraft.templates = t ? [...t.templates] : [];
+          createDraft.purpose = t?.purpose || "";
+          createDraft.custom = false;
+          createDraft.picker = !t;
+          if (!createDraft.name.trim() || createDraft.name.endsWith(" Hub"))
+            createDraft.name = t ? t.name + " Hub" : "";
+          createModal(null, true);
+        });
+        document.querySelectorAll('[data-members="create"]').forEach((c) =>
+          c.addEventListener("change", () => {
+            syncCreate();
+            createDraft.members = [
+              ...document.querySelectorAll('[data-members="create"]:checked'),
+            ].map((x) => x.value);
+            createDraft.custom = !!createDraft.teamId;
+          }),
+        );
+      }
+      function submitCreate() {
+        syncCreate();
+        let d = createDraft,
+          error = "";
+        if (!d.name.trim()) error = "请填写 Hub 名称。";
+        else if (d.mode === "team" && !d.members.length) error = "专家团模式至少选择一位专家。";
+        if (error) {
+          document.getElementById("create-error").textContent = error;
+          return;
+        }
+        resetWorkState();
+        S.hubId = "hub-" + Date.now();
+        S.outputRev = 2;
+        S.hub = {
+          ...d,
+          name: d.name.trim(),
+          members: d.mode === "team" ? [...d.members] : [],
+          teamId: d.mode === "team" ? d.teamId : "",
+          teamRevision: d.mode === "team" ? d.teamRevision : null,
+        };
+        S.run = "empty";
+        S.page = "hub";
+        S.thread = null;
+        S.planRev = 1;
+        S.stageReplies = [];
+        S.threadMsgs = [];
+        S.inspector = null;
+        S.newHub = true;
+        S.scope = "all";
+        S.returnText = "";
+        S.returning = false;
+        closeDialog();
+        render();
+        toast("Hub 已创建。尚未创建或启动任何工作线程。");
+      }
+      function openInstance(tab = "general", keep = false) {
+        if (!keep) instanceDraft = structuredClone(S.hub);
+        S.modal = "instance";
+        S.instanceTab = tab;
+        let d = instanceDraft,
+          body = "";
+        if (tab === "general") {
+          body = `<div class="field"><label for="instance-name">名称</label><input id="instance-name" value="${E(d.name)}" maxlength="80"></div><div class="field"><label>模式</label><div class="between"><span class="tag">${d.mode === "team" ? "专家团" : "普通"}</span><button class="inline-link" data-act="switch-instance-mode">${d.mode === "team" ? "切换为普通模式" : "启用专家团"}</button></div><div class="hint">模式变更只影响后续委托；运行中的计划需先完成或取消。</div></div><div class="field"><label for="instance-purpose">工作方向</label><textarea id="instance-purpose">${E(d.purpose)}</textarea></div><div class="field"><label for="instance-source">项目背景</label><select id="instance-source">${["", "Linx", "论文研究"].map((n) => `<option value="${n}" ${d.source === n ? "selected" : ""}>${n || "不关联项目"}</option>`).join("")}</select></div>`;
+        } else if (tab === "experts") {
+          let t = teams.find((x) => x.id === d.teamId);
+          body = `<h3 style="margin-bottom:6px">本 Hub 的参与专家</h3><p class="muted small">只调整当前 Hub，不会修改专家库中的配置。</p>${t ? `<div class="subtle small" style="margin:14px 0">来源：${E(t.name)} v${d.teamRevision}${t.revision > d.teamRevision ? `<br><span class="muted">预设已有 v${t.revision}，当前 Hub 仍保留创建时配置。</span>` : ""}</div>` : ""}<div class="member-picker">${memberOptions(d.members, "instance")}</div><div class="row" style="margin-top:16px"><button class="btn small" data-act="save-instance-preset">另存为专家团</button></div>`;
+        } else if (tab === "memory")
+          body = `<h3>记忆与共同约定</h3><p class="muted small" style="margin:10px 0 18px">沿用当前 Hub 的共享指令与记忆。专家团预设不复制历史记忆。</p><div class="subtle"><span class="label">当前共同约定</span><p class="small muted">只在用户确认范围内推进；影响目标和范围的变更先确认。</p></div><p class="muted small" style="margin-top:14px">本原型不改造已有记忆编辑能力。</p>`;
+        else if (tab === "environment")
+          body = `<h3>环境</h3><p class="muted small" style="margin:10px 0 20px">沿用已有工作目录、模型和权限配置，不将它们复制到专家团预设。</p><div class="subtle small">工作目录由现有 Hub 环境机制管理。</div>`;
+        else
+          body = `<h3>插件</h3><p class="muted small" style="margin-top:10px">继续使用原有插件入口。本次不新增团队级技能或 MCP 配置副本。</p>`;
+        if (tab === "experts" && d.mode === "standard")
+          body = `<h3>当前使用普通模式</h3><p class="muted small" style="margin:10px 0 18px">普通模式不使用固定专家团。启用后，可以选择专业成员。</p><button class="btn" data-act="switch-instance-mode">启用专家团</button>`;
+        openDialog(
+          `<div class="modal-head"><div><h2>Hub 设置</h2><span class="muted small">${E(S.hub.name)}</span></div>${ib("x", "close-modal", "关闭")}</div><div class="instance-layout"><nav class="instance-nav">${[
+            ["general", "settings", "常规"],
+            ["experts", "team", "参与专家"],
+            ["memory", "brain", "记忆"],
+            ["environment", "folder", "环境"],
+            ["plugins", "tool", "插件"],
+          ]
+            .map(
+              ([k, i, n]) =>
+                `<button data-act="instance-tab:${k}" class="${tab === k ? "active" : ""}">${I(i)}${n}</button>`,
+            )
+            .join(
+              "",
+            )}</nav><div class="instance-content">${body}<div id="instance-error" class="error" role="alert"></div></div></div><div class="modal-footer"><span class="small">保存不改写已确认计划</span><div class="row"><button class="btn ghost" data-act="close-modal">取消</button><button class="btn primary" data-act="save-instance">保存</button></div></div>`,
+          "instance-dialog",
+        );
+        document
+          .querySelectorAll('[data-members="instance"]')
+          .forEach((c) =>
+            c.addEventListener(
+              "change",
+              () =>
+                (instanceDraft.members = [
+                  ...document.querySelectorAll('[data-members="instance"]:checked'),
+                ].map((x) => x.value)),
+            ),
+          );
+      }
+      function syncInstance() {
+        if (!instanceDraft) return;
+        for (let [id, key] of [
+          ["instance-name", "name"],
+          ["instance-purpose", "purpose"],
+          ["instance-source", "source"],
+        ]) {
+          let e = document.getElementById(id);
+          if (e) instanceDraft[key] = e.value;
+        }
+      }
+      function help() {
+        S.modal = "help";
+        openDialog(
+          `<div class="modal-head"><h2>V0.6 节点式协调卡草案</h2>${ib("x", "close-modal", "关闭")}</div><div class="modal-body stack"><p class="small muted">保留 V0.4 创建与专家配置流程，集中优化一份工作从共创、修订到确认的体验。不调用 Agent，不接真实 API。</p><div class="help-grid"><div><h3>回复对象明确</h3><p>Hub 默认接收普通讨论；“去回答”进入原线程，“在此回复”明确选择产品经理。草稿分别保留，取消定向回复不丢内容。</p></div><div><h3>节点式协调卡</h3><p>用节点与连线展示阶段依赖，当前节点展开问题、成果与操作。点击历史节点回看，退回后显示修订路径。新增阶段的编辑方式尚未设计。</p></div><div><h3>修订不重新提问</h3><p>退回意见进入原作者线程，显示正在修订；完成后重新审核、重新确认具体版本。</p></div><div><h3>暂停保留进度</h3><p>暂停是当前进度的覆盖状态，保留线程、成果与开发阶段。普通聊天不会推进计划。</p></div></div><h3>建议体验</h3><p class="small">确认计划 → 在 Hub 提问（计划不推进）→ 在此回复或去回答 → 底部模拟审核与待放行 → 退回修改 → 模拟新版本审核 → 确认。开发中暂停，再检查线程与成果是否仍在。</p><h3>范围与版本</h3><p class="small">计划版本、方案版本分别显示；审核对象对应方案版本。仅授权方案时，确认只完成方案，不进入开发。</p><h3>演示限制</h3><p class="small">仍只有一份模拟计划，未实现多计划调度、真实审批身份、后端去重、权限与持久化契约。底部状态切换是演示事件，不属于正式产品，也不代表真实审核或执行结果。未连接仓库或生产数据。</p><h3>本地数据</h3><p class="small">专家团使用独立存储 hub-v06-teams，不覆盖 V0.4 预设。聊天草稿、工作和历史成果仅保留在本次页面内存中；刷新会重置。</p><div class="row" style="padding-bottom:16px"><button class="btn" data-act="reset-presets">恢复示例专家团</button><button class="btn primary" data-act="close-modal">开始体验</button></div></div>`,
+        );
+      }
+
+      function adjust() {
+        S.modal = "adjust";
+        openDialog(
+          `<div class="modal-head"><h2>调整计划</h2>${ib("x", "close-modal", "关闭")}</div><div class="modal-body"><div class="field"><label>执行范围</label><select id="plan-scope"><option value="all" ${S.scope === "all" ? "selected" : ""}>方案确认后，继续本地开发</option><option value="phase" ${S.scope === "phase" ? "selected" : ""}>本次只完成方案阶段</option></select></div><div class="field"><label for="plan-adjustment">补充要求</label><textarea id="plan-adjustment" placeholder="例如：先聚焦个人使用，不做多人协作。"></textarea></div><p class="muted small" style="margin:0 0 17px">生成新版草案后重新确认。不会直接改写已获授权的执行范围。</p></div><div class="modal-footer"><span class="small">当前计划 v${S.planRev}</span><button class="btn primary" data-act="submit-adjust">生成新版计划</button></div>`,
+        );
+      }
+      function expertEditor(id) {
+        let x = expert(id);
+        S.modal = "expert";
+        openDialog(
+          `<div class="modal-head"><h2>${x ? x.name : "新建专家"}</h2>${ib("x", "close-modal", "关闭")}</div><div class="modal-body"><p class="muted small" style="margin-bottom:18px">此处衔接仓库已有 ExpertEditor，本轮不另建一套编辑器。</p><div class="tabs"><button class="active">基本信息</button><button disabled>技能</button><button disabled>资料</button><button disabled>工具</button></div><div class="subtle"><label class="label">角色与工作方式</label><p class="small">${x ? x.desc : "定义专业角色、工作方法与能力。"}</p></div><p class="muted small" style="margin:16px 0 24px">专家能力由原编辑器维护；专家团只引用 Expert ID。这里仅演示入口边界。</p></div><div class="modal-footer"><span class="small">现有能力示意 · 此处不保存</span><button class="btn" data-act="close-modal">返回</button></div>`,
+        );
+      }
+      function bindForms() {
+        document.getElementById("chat-input")?.addEventListener("input", stashDraft);
+        document.getElementById("composer")?.addEventListener("submit", (e) => {
+          e.preventDefault();
+          sendMessage();
+        });
+        document.getElementById("chat-input")?.addEventListener("keydown", (e) => {
+          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+            e.preventDefault();
+            sendMessage();
+          }
+        });
+        document
+          .getElementById("return-text")
+          ?.addEventListener("input", (e) => (S.returnText = e.target.value));
+        document.getElementById("team-search")?.addEventListener("input", (e) => {
+          let pos = e.target.selectionStart;
+          S.search = e.target.value;
+          render();
+          let inp = document.getElementById("team-search");
+          inp.focus();
+          inp.setSelectionRange(pos, pos);
+        });
+        if (S.editor) {
+          for (let [id, key] of [
+            ["team-name", "name"],
+            ["team-purpose", "purpose"],
+          ])
+            document.getElementById(id)?.addEventListener("input", (e) => {
+              S.editor[key] = e.target.value;
+              editorDirty = true;
+            });
+          document.querySelectorAll('[data-members="edit"]').forEach((c) =>
+            c.addEventListener("change", () => {
+              S.editor.members = [
+                ...document.querySelectorAll('[data-members="edit"]:checked'),
+              ].map((x) => x.value);
+              editorDirty = true;
+              document.getElementById("member-count").textContent = S.editor.members.length + " 位";
+            }),
+          );
+          document.querySelectorAll("[data-template]").forEach((c) =>
+            c.addEventListener("change", () => {
+              S.editor.templates = [...document.querySelectorAll("[data-template]:checked")].map(
+                (x) => x.dataset.template,
+              );
+              editorDirty = true;
+            }),
+          );
+        }
+      }
+      function sendMessage() {
+        const input = document.getElementById("chat-input");
+        if (!input?.value.trim()) return;
+        const text = input.value.trim(),
+          target = replyTarget();
+        S.drafts[input.dataset.draftKey] = "";
+        input.value = "";
+        S.messages.push({ target, role: "user", text });
+        if (S.run === "paused") {
+          S.messages.push({
+            target,
+            role: "assistant",
+            text: "已记录。当前计划暂停中，这条消息不会继续执行或放行阶段。",
+          });
+          render();
+          return;
+        }
+        if (S.run === "empty" && target === "hub") {
+          if (text.includes("讨论") && !text.includes("审核") && !text.includes("开发")) {
+            S.run = "cocreate";
+            S.onlyOne = true;
+            ensureThreads("cocreate");
+            render();
+            toast("已进入讨论，没有授权后续执行。");
+            return;
+          }
+          S.onlyOne = false;
+          S.run = "draft";
+          S.expanded = false;
+          render();
+          return;
+        }
+        if (target === "pm" && S.run === "cocreate") {
+          if (S.onlyOne) {
+            S.messages.push({
+              target,
+              role: "assistant",
+              text: "已记录你的补充，我们继续讨论，未启动正式执行。",
+            });
+            render();
+            return;
+          }
+          S.run = "reviewing";
+          S.replyTarget = null;
+          S.reviewedRev = null;
+          recordOutput();
+          ensureThreads("reviewing");
+          S.expanded = false;
+          S.messages.push({
+            target,
+            role: "assistant",
+            text: "已收到必要输入，整理为需求方案 v" + S.outputRev + " 并送交技术审核（模拟）。",
+          });
+          render();
+          toast("回答已进入原产品经理线程；模拟进入技术审核。");
+          return;
+        }
+        S.messages.push({
+          target,
+          role: "assistant",
+          text:
+            target === "hub"
+              ? "已收到。我会保留这条讨论，当前工作阶段保持不变。需要回答专家时，请选择工作卡上的“去回答”或“在此回复”。"
+              : "已记录补充意见。此消息不改变计划范围或阶段放行状态。",
+        });
+        render();
+      }
+
+      function saveTeam() {
+        const t = S.editor;
+        let error = !t.name.trim()
+          ? "请填写专家团名称。"
+          : !t.members.length
+            ? "至少选择一位专家。"
+            : "";
+        if (error) {
+          document.getElementById("team-error").textContent = error;
+          return;
+        }
+        if (t.id) {
+          teams = teams.map((x) =>
+            x.id === t.id ? { ...t, name: t.name.trim(), revision: x.revision + 1 } : x,
+          );
+        } else teams.push({ ...t, id: "team-" + Date.now(), name: t.name.trim(), revision: 1 });
+        saveTeams();
+        S.editor = null;
+        S.search = "";
+        editorDirty = false;
+        render();
+        toast("专家团已保存；已有 Hub 保持原配置。");
+      }
+      function useTeam(id) {
+        S.page = "hub";
+        S.editor = null;
+        render();
+        createModal(id);
+      }
+      function resetWorkState() {
+        S.planNotes = {};
+        S.replyTarget = null;
+        S.messages = [];
+        S.createdThreads = [];
+        S.outputs = [];
+        S.reviewedRev = null;
+        S.acceptedRev = null;
+        S.pausedFrom = null;
+        S.expanded = false;
+        S.returning = false;
+        S.returnText = "";
+        S.stageReplies = [];
+        S.threadMsgs = [];
+      }
+      function demoState(k, reset = false) {
+        stashDraft();
+        closeDialog();
+        S.page = "hub";
+        S.inspector = null;
+        S.returning = false;
+        S.onlyOne = false;
+        if (reset) {
+          resetWorkState();
+          S.thread = null;
+          S.newHub = false;
+          S.scope = "all";
+          S.planRev = 1;
+          S.outputRev = 2;
+          S.hubId = "demo";
+          S.hub = {
+            name: "Linx 产品方案",
+            mode: "team",
+            purpose: defaults[0].purpose,
+            members: ["pm", "tech", "dev"],
+            source: "Linx",
+            teamId: "product",
+            teamRevision: 1,
+            templates: ["方案共创与评审"],
+          };
+        }
+        if (k === "develop" && phaseOnly()) {
+          toast("本次未授权开发。请调整计划并重新确认范围。");
+          return;
+        }
+        if (k === "revising" && !S.returnText) {
+          S.returnText = "首版先聚焦个人工作台，移除多人协作。";
+          recordOutput({ reviewed: true, returned: true, feedback: S.returnText });
+          S.outputRev++;
+          S.reviewedRev = null;
+          S.acceptedRev = null;
+        }
+        if (["reviewing", "gate", "develop", "done"].includes(k)) recordOutput();
+        if (["gate", "develop", "done"].includes(k)) {
+          S.reviewedRev = S.hub.mode === "team" ? S.outputRev : null;
+          recordOutput({ reviewed: S.hub.mode === "team" });
+        }
+        if (["develop", "done"].includes(k)) {
+          S.acceptedRev = S.outputRev;
+          recordOutput({ accepted: true });
+        }
+        if (["cocreate", "revising", "reviewing"].includes(k)) {
+          S.reviewedRev = null;
+          S.acceptedRev = null;
+        }
+        ensureThreads(k);
+        S.run = k;
+        S.pausedFrom = null;
+        S.expanded = false;
+        render();
+      }
+
+      function leaveEditor(next) {
+        if (S.editor && editorDirty) {
+          S.modal = "unsaved";
+          openDialog(
+            `<div class="modal-head"><h2>保存当前更改？</h2></div><div class="modal-body"><p class="muted small" style="margin-bottom:20px">当前专家团还未保存。</p></div><div class="modal-footer"><button class="btn ghost" data-act="close-modal">继续编辑</button><button class="btn" data-act="discard-editor:${next}">放弃更改</button></div>`,
+          );
+          return false;
+        }
+        return true;
+      }
+      function act(action) {
+        stashDraft();
+        const [k, ...parts] = action.split(":");
+        let v = parts.join(":");
+        switch (k) {
+          case "close-modal":
+            closeDialog();
+            break;
+          case "scope-note":
+            toast("此入口沿用现有产品，不在本轮原型范围。");
+            break;
+          case "existing-setting":
+            toast("「" + v + "」保留现有设置；本原型聚焦专家与 Hub。");
+            break;
+          case "help":
+            help();
+            break;
+          case "create":
+          case "demo-create":
+            if (!leaveEditor("create")) break;
+            S.page = "hub";
+            render();
+            createModal();
+            break;
+          case "create-mode":
+            syncCreate();
+            createDraft.mode = v;
+            if (v === "team" && !createDraft.teamId && !createDraft.members.length) {
+              let t = teams.find((x) => !x.archived);
+              if (t) {
+                createDraft.teamId = t.id;
+                createDraft.teamRevision = t.revision;
+                createDraft.members = [...t.members];
+                createDraft.templates = [...t.templates];
+                createDraft.purpose = t.purpose;
+              }
+            }
+            createModal(null, true);
+            break;
+          case "toggle-create-picker":
+            syncCreate();
+            createDraft.picker = !createDraft.picker;
+            createModal(null, true);
+            break;
+          case "submit-create":
+            submitCreate();
+            break;
+          case "settings-teams":
+            if (!leaveEditor("settings")) break;
+            closeDialog();
+            S.page = "settings";
+            S.tab = "teams";
+            S.thread = null;
+            S.editor = null;
+            S.inspector = null;
+            S.menu = false;
+            render();
+            break;
+          case "tab":
+            if (!leaveEditor("settings")) break;
+            S.tab = v;
+            S.search = "";
+            S.editor = null;
+            render();
+            break;
+          case "new-team":
+            S.editor = { id: null, name: "", purpose: "", members: [], templates: [], revision: 0 };
+            editorDirty = false;
+            render();
+            document.getElementById("team-name")?.focus();
+            break;
+          case "edit-team":
+            S.editor = structuredClone(teams.find((x) => x.id === v));
+            editorDirty = false;
+            render();
+            break;
+          case "save-team":
+            saveTeam();
+            break;
+          case "back-teams":
+            if (!leaveEditor("settings")) break;
+            S.editor = null;
+            render();
+            break;
+          case "discard-editor":
+            closeDialog();
+            S.editor = null;
+            editorDirty = false;
+            if (v === "hub") {
+              S.page = "hub";
+              render();
+            } else if (v === "create") {
+              S.page = "hub";
+              render();
+              createModal();
+            } else {
+              S.page = "settings";
+              S.tab = "teams";
+              render();
+            }
+            break;
+          case "use-team":
+            useTeam(v);
+            break;
+          case "copy-team": {
+            let t = teams.find((x) => x.id === v);
+            S.editor = { ...structuredClone(t), id: null, name: t.name + " 副本", revision: 0 };
+            editorDirty = true;
+            render();
+            break;
+          }
+          case "archive-team":
+            S.modal = "archive";
+            openDialog(
+              `<div class="modal-head"><h2>归档这份专家团配置？</h2></div><div class="modal-body"><p class="muted small" style="margin-bottom:20px">不再用于新建 Hub。已经创建的 Hub、线程和成果不受影响。</p></div><div class="modal-footer"><button class="btn ghost" data-act="close-modal">取消</button><button class="btn primary" data-act="confirm-archive:${v}">归档配置</button></div>`,
+            );
+            break;
+          case "confirm-archive":
+            teams = teams.map((t) => (t.id === v ? { ...t, archived: true } : t));
+            saveTeams();
+            closeDialog();
+            render();
+            toast("配置已归档，已有 Hub 不受影响。");
+            break;
+          case "reset-presets":
+            teams = structuredClone(defaults);
+            saveTeams();
+            closeDialog();
+            render();
+            toast("示例专家团已恢复。");
+            break;
+          case "expert-editor":
+            expertEditor(v);
+            break;
+          case "graph-node":
+            graphSelection = v;
+            render();
+            break;
+          case "graph-current":
+            graphSelection = null;
+            render();
+            break;
+          case "reply-here":
+            if (S.run !== "cocreate" || v !== "pm") break;
+            S.replyTarget = "pm";
+            S.thread = null;
+            render();
+            document.getElementById("chat-input")?.focus();
+            break;
+          case "cancel-directed":
+            S.replyTarget = null;
+            render();
+            break;
+          case "to-hub":
+            if (!leaveEditor("hub")) break;
+            S.replyTarget = null;
+            S.page = "hub";
+            S.thread = null;
+            S.editor = null;
+            S.menu = false;
+            render();
+            break;
+          case "ordinary-hub":
+            resetWorkState();
+            S.hubId = "ordinary";
+            S.hub = {
+              name: "日常工作",
+              mode: "standard",
+              purpose: "",
+              members: [],
+              source: "",
+              teamId: "",
+              templates: [],
+            };
+            S.run = "empty";
+            S.page = "hub";
+            S.thread = null;
+            S.inspector = null;
+            render();
+            break;
+          case "demo-work":
+            demoState("draft", true);
+            break;
+          case "demo-state":
+            if (!leaveEditor("hub")) break;
+            demoState(v);
+            break;
+          case "suggest": {
+            let input = document.getElementById("chat-input");
+            input.value =
+              v === "discussion"
+                ? "我们先讨论一下这个产品的定位。"
+                : "和产品经理完善方案，请技术专家审核，我确认后再开发。";
+            stashDraft();
+            input.focus();
+            break;
+          }
+          case "start-from-discussion":
+            S.onlyOne = false;
+            S.thread = null;
+            S.run = "draft";
+            render();
+            break;
+          case "confirm-plan": {
+            if (S.run !== "draft") {
+              toast("计划状态已变化，请查看当前版本。");
+              break;
+            }
+            if (
+              S.hub.mode === "team" &&
+              ((S.scope === "phase" ? ["pm", "tech"] : ["pm", "tech", "dev"]).some(
+                (id) => !S.hub.members.includes(id),
+              ) ||
+                S.hub.members.some((id) => expert(id)?.unavailable))
+            ) {
+              S.run = "blocked";
+              render();
+              break;
+            }
+            S.onlyOne = false;
+            S.run = S.hub.mode === "team" ? "cocreate" : "reviewing";
+            ensureThreads(S.run);
+            S.replyTarget = null;
+            S.expanded = false;
+            render();
+            toast("计划 v" + S.planRev + " 已确认。留在 Hub，不自动跳转。");
+            break;
+          }
+          case "expand-stage":
+            S.expanded = !S.expanded;
+            render();
+            break;
+          case "thread":
+            if (!S.createdThreads.includes(v)) {
+              toast("该专业线程尚未创建。先完成必要输入或阶段放行。");
+              break;
+            }
+            S.replyTarget = null;
+            S.thread = v;
+            S.inspector = null;
+            render();
+            break;
+          case "plan-details":
+            S.inspector = "plan";
+            render();
+            break;
+          case "artifact":
+            S.inspector = v;
+            render();
+            break;
+          case "library":
+            S.inspector = S.inspector === "library" ? null : "library";
+            render();
+            break;
+          case "close-inspector":
+            S.inspector = null;
+            render();
+            break;
+          case "approve-gate":
+            if (S.run !== "gate") {
+              toast("确认对象已变化，请刷新当前方案。");
+              break;
+            }
+            S.acceptedRev = S.outputRev;
+            recordOutput({ accepted: true });
+            S.run = phaseOnly() ? "done" : "develop";
+            ensureThreads(S.run);
+            S.expanded = false;
+            S.returning = false;
+            render();
+            toast(
+              "已确认需求方案 v" +
+                S.outputRev +
+                "；" +
+                (S.scope === "phase" || S.hub.mode === "standard"
+                  ? "本次委托完成。"
+                  : "开发阶段已获放行。"),
+            );
+            break;
+          case "return-gate":
+            if (S.run !== "gate") break;
+            S.returning = true;
+            S.returnText = "";
+            render();
+            document.getElementById("return-text")?.focus();
+            break;
+          case "cancel-return":
+            S.returning = false;
+            render();
+            break;
+          case "send-return":
+            if (S.run !== "gate") break;
+            if (!S.returnText.trim()) {
+              toast("请填写需要修改的内容。");
+              break;
+            }
+            S.returning = false;
+            recordOutput({ returned: true, feedback: S.returnText });
+            S.outputRev++;
+            S.reviewedRev = null;
+            S.acceptedRev = null;
+            S.replyTarget = null;
+            S.run = "revising";
+            S.expanded = false;
+            S.messages.push({
+              target: S.hub.mode === "team" ? "pm" : "general",
+              role: "user",
+              text: "退回修改：" + S.returnText,
+            });
+            render();
+            toast("修改意见已发回原线程，新版本需重新审核和确认。");
+            break;
+          case "adjust-plan":
+            adjust();
+            break;
+          case "submit-adjust": {
+            S.scope = document.getElementById("plan-scope").value;
+            let txt = document.getElementById("plan-adjustment").value.trim();
+            const notes = [...(S.planNotes[S.planRev] || [])];
+            if (txt && !notes.includes(txt)) notes.push(txt);
+            S.planRev++;
+            S.planNotes[S.planRev] = notes;
+            S.run = "draft";
+            S.thread = null;
+            S.replyTarget = null;
+            S.expanded = false;
+            closeDialog();
+            render();
+            toast("已形成新版草案，等待你重新确认。");
+            break;
+          }
+          case "hub-menu":
+            S.menu = !S.menu;
+            render();
+            break;
+          case "hub-settings":
+            S.menu = false;
+            render();
+            openInstance();
+            break;
+          case "hub-members":
+            openInstance("experts");
+            break;
+          case "instance-tab":
+            syncInstance();
+            openInstance(v, true);
+            break;
+          case "switch-instance-mode":
+            syncInstance();
+            if (!["empty", "draft", "done"].includes(S.run)) {
+              toast("请先完成或取消当前计划，再切换模式。");
+              break;
+            }
+            instanceDraft.mode = instanceDraft.mode === "team" ? "standard" : "team";
+            if (instanceDraft.mode === "team" && !instanceDraft.members.length)
+              instanceDraft.members = ["pm"];
+            openInstance("general", true);
+            break;
+          case "save-instance": {
+            syncInstance();
+            if (!instanceDraft.name.trim()) {
+              document.getElementById("instance-error").textContent = "请填写 Hub 名称。";
+              break;
+            }
+            if (instanceDraft.mode === "team" && !instanceDraft.members.length) {
+              document.getElementById("instance-error").textContent =
+                "专家团模式至少保留一位专家。";
+              break;
+            }
+            S.hub = { ...instanceDraft, name: instanceDraft.name.trim() };
+            closeDialog();
+            render();
+            toast("已保存当前 Hub 配置，不改写已经确认的计划。");
+            break;
+          }
+          case "save-instance-preset":
+            syncInstance();
+            closeDialog();
+            S.page = "settings";
+            S.tab = "teams";
+            S.editor = {
+              id: null,
+              name: instanceDraft.name + " 配置",
+              purpose: instanceDraft.purpose,
+              members: [...instanceDraft.members],
+              templates: [...(instanceDraft.templates || [])],
+              revision: 0,
+            };
+            editorDirty = true;
+            render();
+            break;
+          case "save-preset":
+            if (!S.hub.members.length) {
+              toast("当前没有参与专家。先在 Hub 设置中选择成员。");
+              break;
+            }
+            S.page = "settings";
+            S.tab = "teams";
+            S.menu = false;
+            S.editor = {
+              id: null,
+              name: S.hub.name + " 配置",
+              purpose: S.hub.purpose,
+              members: [...S.hub.members],
+              templates: [...(S.hub.templates || [])],
+              revision: 0,
+            };
+            editorDirty = true;
+            render();
+            break;
+          case "pause":
+            if (["empty", "draft", "done", "paused"].includes(S.run)) {
+              toast("当前没有可暂停的执行计划。");
+              S.menu = false;
+              render();
+              break;
+            }
+            S.pausedFrom = S.run;
+            S.run = "paused";
+            S.menu = false;
+            render();
+            break;
+          case "resume":
+            if (S.run !== "paused") break;
+            S.run = S.pausedFrom || "reviewing";
+            S.pausedFrom = null;
+            S.menu = false;
+            render();
+            break;
+          case "reset-work":
+            resetWorkState();
+            S.run = "draft";
+            S.thread = null;
+            S.inspector = null;
+            S.menu = false;
+            S.stageReplies = [];
+            S.returnText = "";
+            S.threadMsgs = [];
+            S.returning = false;
+            S.onlyOne = false;
+            render();
+            break;
+          case "attach-note":
+            toast("沿用现有消息引用、文件附件与成果引用入口。");
+            break;
+          default:
+            toast("该入口属于已有产品能力，不在此原型中改造。");
+        }
+      }
+      document.addEventListener("click", (e) => {
+        const b = e.target.closest("[data-act]");
+        if (b && !b.disabled) {
+          e.preventDefault();
+          act(b.dataset.act);
+        }
+      });
+      document.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "s" && S.editor) {
+          e.preventDefault();
+          saveTeam();
+        }
+      });
+      window.addEventListener("beforeunload", (e) => {
+        if (editorDirty) {
+          e.preventDefault();
+          e.returnValue = "";
+        }
+      });
+      render();
+    </script>
+  </body>
+</html>

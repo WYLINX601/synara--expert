@@ -69,6 +69,15 @@ export function makeHubWorkGateway(dependencies: {
     unknown
   >;
   readonly createThreads: CreateThreads;
+  readonly planExecution?: {
+    readonly drain: (hubId: ProjectId) => Effect.Effect<void, unknown>;
+    readonly assertWorkAllowed: (record: HubWorkRecord) => Effect.Effect<void, unknown>;
+    readonly assertThreadAllowed: (threadId: ThreadId) => Effect.Effect<void, unknown>;
+    readonly recordStarted: (input: {
+      readonly workItemId: string;
+      readonly workerThreadId: ThreadId;
+    }) => Effect.Effect<void, unknown>;
+  };
 }) {
   const { repository, projectAgentRepository, projectAgentService, snapshotQuery } = dependencies;
   const service = makeHubWorkService({
@@ -76,6 +85,7 @@ export function makeHubWorkGateway(dependencies: {
     projectAgentRepository,
     projectAgentService,
     snapshotQuery,
+    ...(dependencies.planExecution ? { planExecution: dependencies.planExecution } : {}),
     resolveCreationSpec: ({ callerThreadId, targetProjectId, spec }) =>
       Effect.gen(function* () {
         const caller = yield* snapshotQuery.getThreadShellById(ThreadId.makeUnsafe(callerThreadId));
@@ -98,6 +108,7 @@ export function makeHubWorkGateway(dependencies: {
       }),
     ...(dependencies.messages ? { messages: dependencies.messages } : {}),
     ...(dependencies.commandReceipts ? { commandReceipts: dependencies.commandReceipts } : {}),
+    ...(dependencies.projectionTurns ? { projectionTurns: dependencies.projectionTurns } : {}),
     ...(dependencies.queuedTurnPromotions
       ? { queuedTurnPromotions: dependencies.queuedTurnPromotions }
       : {}),
@@ -123,6 +134,13 @@ export function makeHubWorkGateway(dependencies: {
       ) {
         return yield* Effect.fail(
           new GatewayToolError("hub_work_inactive", "Hub work is no longer authorized to start."),
+        );
+      }
+      if (dependencies.planExecution) {
+        yield* dependencies.planExecution.assertWorkAllowed(record);
+      } else if (config.value.collaboration !== undefined) {
+        return yield* Effect.fail(
+          new GatewayToolError("hub_work_inactive", "Plan execution is unavailable for this Hub."),
         );
       }
       yield* projectAgentService.assertCallerMayCreateThreadInProject({
@@ -194,7 +212,16 @@ export function makeHubWorkGateway(dependencies: {
               principal: LOCAL_LOOPBACK_ATTACHMENT_PRINCIPAL,
             }),
           recordWorker: (workerThreadId) =>
-            service.attachWorker({ workItemId: record.id, workerThreadId }).pipe(Effect.asVoid),
+            Effect.gen(function* () {
+              yield* service
+                .attachWorker({ workItemId: record.id, workerThreadId })
+                .pipe(Effect.asVoid);
+              if (dependencies.planExecution) {
+                yield* dependencies.planExecution
+                  .recordStarted({ workItemId: record.id, workerThreadId })
+                  .pipe(Effect.mapError((error) => new Error(errorText(error))));
+              }
+            }),
         },
       );
       if (result.isError) {
@@ -213,6 +240,7 @@ export function makeHubWorkGateway(dependencies: {
 
   const processProjectQueue = (projectId: ProjectId) =>
     Effect.gen(function* () {
+      if (dependencies.planExecution) yield* dependencies.planExecution.drain(projectId);
       yield* service.reconcile(projectId);
       const config = yield* projectAgentRepository.getConfig(projectId);
       if (

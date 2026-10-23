@@ -8,6 +8,7 @@ import {
   isThreadActivelyWorking,
 } from "@synara/shared/groupThreadState";
 import type { ProjectionThreadMessage } from "../persistence/Services/ProjectionThreadMessages";
+import type { ProjectionTurnById } from "../persistence/Services/ProjectionTurns";
 
 export interface HubWorkLifecycleInput {
   readonly record: HubWorkRecord;
@@ -15,6 +16,10 @@ export interface HubWorkLifecycleInput {
   readonly worker: ProjectManagedWorker | null;
   readonly hasPendingTurn: boolean;
   readonly admissionMessage: Pick<ProjectionThreadMessage, "startsNewTurn" | "turnId"> | null;
+  readonly resolvedAdmissionTurn?: Pick<
+    ProjectionTurnById,
+    "threadId" | "turnId" | "pendingMessageId" | "state" | "completedAt"
+  > | null;
 }
 
 function hasLiveWork(shell: OrchestrationThreadShell): boolean {
@@ -38,7 +43,25 @@ function admissionHasSettled(input: HubWorkLifecycleInput): boolean {
     shell.latestTurn?.completedAt &&
     shell.latestTurn.completedAt >= record.admittedAt &&
     (admissionMessage.turnId === null || admissionMessage.turnId === shell.latestTurn.turnId);
-  return Boolean(terminalSession || steeredTurn);
+  const resolvedNewTurn =
+    admissionMessage?.startsNewTurn === true &&
+    admissionMessage.turnId === null &&
+    record.workerThreadId !== null &&
+    record.admissionMessageId !== null &&
+    input.resolvedAdmissionTurn?.threadId === record.workerThreadId &&
+    input.resolvedAdmissionTurn.turnId === shell.latestTurn?.turnId &&
+    input.resolvedAdmissionTurn.pendingMessageId === record.admissionMessageId &&
+    input.resolvedAdmissionTurn.state === "completed" &&
+    input.resolvedAdmissionTurn.completedAt !== null &&
+    input.resolvedAdmissionTurn.completedAt >= record.admittedAt;
+  const completedAdmittedTurn =
+    admissionMessage?.startsNewTurn === true &&
+    shell.latestTurn?.state === "completed" &&
+    shell.latestTurn.turnId ===
+      (admissionMessage.turnId ?? (resolvedNewTurn ? input.resolvedAdmissionTurn?.turnId : null)) &&
+    shell.latestTurn.completedAt !== null &&
+    shell.latestTurn.completedAt >= record.admittedAt;
+  return Boolean(terminalSession || steeredTurn || completedAdmittedTurn);
 }
 
 export function resolveHubWorkLifecycle(

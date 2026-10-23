@@ -1,0 +1,1321 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>Hub 产品与原型评审稿 · 2026-10-22</title
+  ><style>
+    * {
+      box-sizing: border-box;
+    }
+    html {
+      scroll-behavior: smooth;
+    }
+    body {
+      margin: 0;
+      background: #f6f7f5;
+      color: #25322d;
+      font:
+        15px/1.75 system-ui,
+        -apple-system,
+        sans-serif;
+    }
+    nav {
+      background: #fff;
+      border-bottom: 1px solid #dfe4df;
+      padding: 15px 4vw;
+      display: flex;
+      gap: 20px;
+      flex-wrap: wrap;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    a {
+      color: #245a47;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    main {
+      max-width: 1240px;
+      margin: 30px auto;
+      padding: 0 24px 80px;
+    }
+    h1 {
+      font-size: 30px;
+      margin: 20px 0;
+    }
+    h2 {
+      font-size: 22px;
+      margin: 42px 0 16px;
+      scroll-margin-top: 88px;
+    }
+    p {
+      max-width: 100ch;
+    }
+    code {
+      font-size: 0.88em;
+      background: #edf0ec;
+      padding: 2px 4px;
+      border-radius: 3px;
+      overflow-wrap: anywhere;
+    }
+    .table-scroll {
+      overflow: auto;
+      background: #fff;
+      border: 1px solid #dfe4df;
+      border-radius: 10px;
+      margin: 16px 0;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      min-width: 660px;
+    }
+    td,
+    th {
+      text-align: left;
+      vertical-align: top;
+      padding: 13px 16px;
+      border-bottom: 1px solid #e9ece8;
+      font-size: 14px;
+    }
+    th {
+      background: #edf2ee;
+    }
+    tr:last-child td {
+      border-bottom: 0;
+    }
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 20px;
+    }
+    figure {
+      margin: 0;
+      background: #fff;
+      border: 1px solid #dfe4df;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    figure img {
+      width: 100%;
+      display: block;
+      height: 330px;
+      object-fit: contain;
+      background: #e9ece8;
+    }
+    figcaption {
+      padding: 12px;
+      font-size: 13px;
+    }
+    .banner {
+      background: #eaf2eb;
+      border: 1px solid #cbdccd;
+      border-radius: 10px;
+      padding: 18px 22px;
+      margin: 20px 0;
+    }
+    .banner a {
+      font-weight: 650;
+      margin-right: 22px;
+    }
+    .muted {
+      color: #68766c;
+      font-size: 13px;
+    }
+    @media (max-width: 700px) {
+      .gallery {
+        grid-template-columns: 1fr;
+      }
+      main {
+        padding: 0 16px 50px;
+      }
+      nav {
+        position: static;
+      }
+      h1 {
+        font-size: 24px;
+      }
+      figure img {
+        height: auto;
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+    }
+  </style>
+  <nav>
+    <strong>Hub · 产品与原型评审稿</strong><a href="#section-3">能力差异</a
+    ><a href="#section-4">实走流程</a><a href="#gallery">截图证据</a
+    ><a href="#section-5">当前方案与待议项</a>
+  </nav>
+  <main>
+    <div class="banner">
+      <a href="Hub_交互原型_V0.8.html">打开当前原型评审稿 V0.8 →</a
+      ><a href="Hub_专家团协作与任务编排_PRD_V0.8.html">整合 PRD V0.8</a
+      ><a href="Hub_技术方案_V0.8.html">技术方案 V0.8</a
+      ><a href="Hub_交互原型_V0.7.html">对照 V0.7</a><a href="Hub_交互原型_V0.5.html">V0.5</a
+      ><a href="sources/Hub_交互原型_V0.4.html">原版 V0.4</a><a href="README.md">评审文档</a>
+      <p class="muted">
+        本地评审材料；不调用真实 Agent，不代表产品功能已实现。V0.8
+        整合：协调者配置＋横向阶段＋有效放行进度；延续状态与消息操作分离。
+      </p>
+    </div>
+    <h1 id="title">Hub 产品方案与原型评审稿</h1>
+    <p>
+      日期：2026-10-22。状态：V0.7 的状态与消息分离方向已确认；本轮按新增讨论整合为 V0.8
+      评审稿，补充协调者配置、横向阶段详情与有效放行计数。正式产品尚未实施。
+    </p>
+    <p>
+      <a href="Hub_交互原型_V0.8.html">打开当前交互原型 V0.8</a> ·
+      <a href="Hub_专家团协作与任务编排_PRD_V0.8.md">整合 PRD V0.8</a> ·
+      <a href="V0.8-验证与合并说明.md">本轮验证与合并说明</a> ·
+      <a href="Hub_技术方案_V0.8.html">技术方案 V0.8</a>
+    </p>
+    <p>
+      <strong
+        >当前方案：主对话保留连续消息流，输入框上方常驻横向 Graph
+        状态看板（可收起、查看阶段详情）；回复、成果查看、确认、退回、暂停与恢复由消息卡承载，专业线程继续承载详细协作。状态呈现与具体操作分开。</strong
+      >
+    </p>
+    <p>
+      现有产品已有任务、依赖、证据验收和成果版本基础；实现时仍需补齐跨角色 Graph
+      关联、用户确认与版本约束。Graph 与 Plan 可采用相近的紧凑呈现，但 Graph
+      表达跨角色协作阶段，Plan 表达单个 Agent 的执行步骤，不能合并为同一业务状态。
+    </p>
+    <p>
+      本轮没有修改正式产品代码、提交 Git、调用真实 Agent、保存产品配置或创建真实
+      Hub。只增加本评审目录，操作了独立 HTML
+      的模拟状态，并只读查看现有前端。本次确认限于将上述交互方向纳入原型评审基线；创建配置、多计划、异常处理与后端契约等未决项仍待细化，不等于正式产品整体定稿或运行验收。
+    </p>
+    <p>
+      已补充<a href="Hub_技术方案_V0.8.md">技术设计源文档</a>与<a href="Hub_技术架构_V0.8.drawio"
+        >可编辑架构图</a
+      >：复用原生任务与队列，补齐阶段出口、版本授权、可靠恢复与前端投影。技术稿是实施提案；首期一份活跃计划，多计划并行为后续切片。本次未实施正式产品。
+    </p>
+    <h2 id="section-1">1. 来源与证据边界</h2>
+    <div class="table-scroll">
+      <table>
+        <tr>
+          <th>来源</th>
+          <th>用法与限制</th>
+        </tr>
+        <tr>
+          <td>
+            <a href="chatgpt-conversation://6ad989f6-3250-83e8-aafb-df12428c6dd9"
+              >Hub产品定位讨论</a
+            >
+          </td>
+          <td>读取最新三轮及上一轮已读取内容，确认极简原则和版本演进；没有声称逐字读完全部历史</td>
+        </tr>
+        <tr>
+          <td>
+            <a href="sources/Hub专家团协作与任务编排_PRD_V0.3.md">PRD V0.3</a> /
+            <a href="sources/Hub专家团协作与任务编排_PRD_V0.3.html">阅读版</a>
+          </td>
+          <td>规则底稿；与 V0.4 冲突处按下表标出，不改写原件</td>
+        </tr>
+        <tr>
+          <td>
+            <a href="sources/Hub_原型与开发对接_V0.4.md">交互与开发对接 V0.4</a> /
+            <a href="sources/Hub_交互原型_V0.4.html">可点击原型</a>
+          </td>
+          <td>后续增量设计；本轮实走模拟路径，不能作为运行功能证据</td>
+        </tr>
+        <tr>
+          <td>当前 checkout</td>
+          <td>
+            <code>93c751172091495c3b26991b92624cd6571a92fb</code
+            >，开工时工作区干净，与原方案标注基线一致
+          </td>
+        </tr>
+        <tr>
+          <td>当前开发前端</td>
+          <td>
+            <code>http://localhost:19783</code
+            >；已核对相关服务工作目录为本仓库，查看创建首屏与专家列表。未重新启动或修改该实例，未独立证明其每个已加载模块与
+            HEAD 完全相同
+          </td>
+        </tr>
+        <tr>
+          <td>已安装桌面产品</td>
+          <td>
+            只捕获专家编辑器；后续窗口自动化不可用，没有据此推断整个桌面版能力或安装版本等同当前源码
+          </td>
+        </tr>
+        <tr>
+          <td>代码核对</td>
+          <td>
+            主会话复读创建、任务验收、成员回退、成果版本、工作卡终态等关键证据，结合子 agent
+            的有界调用链证据；未运行端到端模型测试
+          </td>
+        </tr>
+      </table>
+    </div>
+    <p>
+      四份来源文件从 Downloads 原样复制，摘要见
+      <a href="sources-manifest.json">sources-manifest.json</a>。原对话中提到的 30
+      项原型测试不是本轮测试结果；对应 JSON/ZIP 未提供，本轮不沿用其通过结论。
+    </p>
+    <h2 id="section-2">2. 产品基线：需要合并理解，而非同时执行两版定义</h2>
+    <div class="table-scroll">
+      <table>
+        <tr>
+          <th>对象或原则</th>
+          <th>本轮复核后的阅读基线</th>
+          <th>状态</th>
+        </tr>
+        <tr>
+          <td>Hub</td>
+          <td>持续工作空间，可开展讨论和多项工作</td>
+          <td>沿用 V0.4</td>
+        </tr>
+        <tr>
+          <td>Expert</td>
+          <td>角色、技能、资料、工具的可复用专业配置</td>
+          <td>沿用</td>
+        </tr>
+        <tr>
+          <td>专家团</td>
+          <td>可复用的成员、用途、协调方式与协作偏好配置；不是运行实例</td>
+          <td>V0.4 修订 V0.3「不设独立 Team」</td>
+        </tr>
+        <tr>
+          <td>当前 Hub 成员</td>
+          <td>创建时采用配置副本；来源版本用于追溯；全局更新不自动覆盖</td>
+          <td>沿用 V0.4</td>
+        </tr>
+        <tr>
+          <td>普通／专家团模式</td>
+          <td>能力选择规则不同；正式工作都遵循计划与人工出口规则</td>
+          <td>V0.4 新增设计，尚未实现</td>
+        </tr>
+        <tr>
+          <td>Graph／计划</td>
+          <td>本次工作范围、分工、依赖和放行条件；模板只供参考与复用</td>
+          <td>沿用</td>
+        </tr>
+        <tr>
+          <td>Task／Thread</td>
+          <td>Task 表达工作及完成条件；Thread 承载连续交流，可跨阶段复用</td>
+          <td>沿用；不能把一轮结束当成业务完成</td>
+        </tr>
+        <tr>
+          <td>Coordinator</td>
+          <td>固定基础职责＋可选“角色与协调方式”；仅指导协调者，不能覆盖权限或出口</td>
+          <td>V0.8 根据新增讨论修正，不另建队长 Expert</td>
+        </tr>
+        <tr>
+          <td>人的参与</td>
+          <td>Agent 主导／人机共创，与自动／用户放行分别定义</td>
+          <td>沿用 V0.3；不退回早期三种工作方式版本</td>
+        </tr>
+        <tr>
+          <td>创建与配置形态</td>
+          <td>一个创建入口，专家设置内增加团队标签；保留当前产品外壳</td>
+          <td>沿用 V0.4 提案，细节待评审</td>
+        </tr>
+        <tr>
+          <td>协作过程形态</td>
+          <td>主对话消息流＋输入框上方只读 Graph 看板＋专业线程；具体操作放在消息卡</td>
+          <td>V0.7 已确认分离方向；V0.8 补充横向阶段、详情与放行口径</td>
+        </tr>
+      </table>
+    </div>
+    <p>
+      创建配置不是执行授权；讨论不是计划批准；看成果不是验收；专业审核通过不是用户阶段放行。这四个边界应在产品文字与真实命令中一致。
+    </p>
+    <h2 id="section-3">3. 原型与当前能力差异表</h2>
+    <p>
+      本表保留最初以 V0.4 对照源码的差异证据；当前协作界面的目标已更新为第 5 节及整合 PRD 的
+      V0.8。源码事实仍对应本轮记录的 HEAD，不是新一轮运行验收。
+    </p>
+    <p>
+      标记：<strong>复用</strong>＝已有基础；<strong>扩展</strong>＝已有基础但语义／入口不完整；<strong>新增</strong>＝本轮范围未找到对应能力；<strong>冲突</strong>＝目标行为与现有契约不同。代码定位详见第
+      6 节。
+    </p>
+    <div class="table-scroll">
+      <table>
+        <tr>
+          <th>位置／能力</th>
+          <th>当前事实</th>
+          <th>V0.4 差异与处理建议</th>
+          <th>类型／依据</th>
+        </tr>
+        <tr>
+          <td>新建 Hub</td>
+          <td>名称弹窗先建容器，再进入 onboarding 设置</td>
+          <td>
+            改为收齐模式、成员、用途、来源的一次创建体验；需设计后半步失败与取消的处理，不能只换弹窗
+          </td>
+          <td>扩展；E1，截图 11</td>
+        </tr>
+        <tr>
+          <td>创建后的 Coordinator</td>
+          <td>
+            首次 configure 创建或复用 Coordinator，导入欢迎语并创建启用的事件
+            heartbeat；不等于该路径直接启动模型回合
+          </td>
+          <td>
+            「创建不启动正式任务」可保留；「不创建任何线程」需明确是否只指专业工作线程，不能误删必要
+            Coordinator
+          </td>
+          <td>扩展；E2</td>
+        </tr>
+        <tr>
+          <td>普通／专家团模式</td>
+          <td>设置的 mode 是 onboarding/edit；成员为空或无匹配时明确允许普通线程回退</td>
+          <td>新增协作模式与严格能力选择规则；专家团不静默降级必须落到派发校验</td>
+          <td>新增＋行为变化；E3</td>
+        </tr>
+        <tr>
+          <td>专家团预设</td>
+          <td>全局专家页已有搜索、保存、归档、冲突、离开保护；当前列表是单个 Expert</td>
+          <td>新增团队定义与列表／编辑器、来源版本；复用管理模式，不把团队存成一个 Expert</td>
+          <td>新增；E4，截图 12</td>
+        </tr>
+        <tr>
+          <td>参与专家</td>
+          <td>已有搜索、勾选、归档／不可用提示</td>
+          <td>提取可复用选择器供创建和预设编辑；新增当前副本、来源说明和另存为配置</td>
+          <td>扩展；E3</td>
+        </tr>
+        <tr>
+          <td>计划与依赖</td>
+          <td>
+            ProjectGoal 有用户授权、scopeVersion；ProjectTask
+            有依赖、revision、review/done；另有聊天 PlanSidebar
+          </td>
+          <td>缺少目标方案中的计划卡、组合阶段及对应版本确认流程；不是完全没有计划基础</td>
+          <td>扩展；E5</td>
+        </tr>
+        <tr>
+          <td>工作卡</td>
+          <td>HubWorkItemCard 有 Expert 身份、进度、结果摘要、原线程入口</td>
+          <td>以计划容器引用已有工作项；工作项 completed 只表示回合和结果事实，不是业务验收</td>
+          <td>扩展；E6</td>
+        </tr>
+        <tr>
+          <td>任务验收</td>
+          <td>有证据要求，Worker 无权验收；Coordinator 或用户可接受任务并解开依赖</td>
+          <td>用户出口必须约束真实用户、计划范围、候选成果版本；协调员验收不能替代这一出口</td>
+          <td>关键语义差异；E7</td>
+        </tr>
+        <tr>
+          <td>待审批入口</td>
+          <td>HubPendingApprovals 聚合工具／Provider 请求，回发 thread.approval.respond</td>
+          <td>可以复用待处理呈现经验；不能把现有权限审批当计划或成果放行</td>
+          <td>新增业务命令；E8</td>
+        </tr>
+        <tr>
+          <td>专业线程</td>
+          <td>原 Thread、历史、输入、工具审批等已在聊天面板中</td>
+          <td>新增紧凑计划关联栏；还需明确 Hub 内代答、回复归属与多任务同线程处理</td>
+          <td>扩展；E9</td>
+        </tr>
+        <tr>
+          <td>成果与历史</td>
+          <td>已有 collection revision、历史读取、固定文件摘要与来源信息、Library 预览</td>
+          <td>补计划／任务／审核对象／用户决定的关联；不要另建平行成果库或宣称尚无版本能力</td>
+          <td>复用＋关联扩展；E10</td>
+        </tr>
+        <tr>
+          <td>暂停恢复</td>
+          <td>Hub 与 Goal 已有暂停恢复；Hub 会影响自动化和运行回合</td>
+          <td>计划暂停、Hub 全局暂停与正在停止的工作需区分；不能把 UI 状态切换当真实安全恢复</td>
+          <td>扩展；E11</td>
+        </tr>
+        <tr>
+          <td>协调员工作约定</td>
+          <td>现有 Playbook 要求用户提出工作后立即启动具名线程，不等待 Goal</td>
+          <td>新的正式委托需先确认计划，两套约定必须在实施时同步调整；不能只在前端加确认按钮</td>
+          <td>冲突；E13</td>
+        </tr>
+        <tr>
+          <td>项目背景</td>
+          <td>sourceProjectId 是固定 Context 来源；linkedProjectIds 是可管理的关联项目</td>
+          <td>V0.4 S08 暗示可以修改来源，与当前契约冲突。建议首版锁定来源；更换作为独立设计议题</td>
+          <td>冲突；E12</td>
+        </tr>
+        <tr>
+          <td>外壳与样式</td>
+          <td>现有 Rail、设置导航、聊天布局、字体与组件体系</td>
+          <td>
+            原型是信息结构参考，不是逐像素替换目标；团队列表可采用列表，但不重做现有专家能力编辑器或设置导航
+          </td>
+          <td>复用；E9，截图 08/12</td>
+        </tr>
+      </table>
+    </div>
+    <h2 id="section-4">4. 本轮实走流程与截图</h2>
+    <p>
+      以下按用户流程排列，截图编号是保存文件编号，不表示步骤编号。截图都来自本轮实际页面；模拟审核完成／开发完成通过原型底部演示栏触发。
+    </p>
+    <div class="table-scroll">
+      <table>
+        <tr>
+          <th>步骤</th>
+          <th>实际操作与观察</th>
+          <th>健康度／限制</th>
+          <th>截图</th>
+        </tr>
+        <tr>
+          <td>1 创建</td>
+          <td>查看普通与专家团选项；普通模式填写名称并创建，进入无工作线程、无计划卡的空状态</td>
+          <td>基本清楚；名称占位文案把长期空间称为「这项工作」；团队创建提交本轮未覆盖</td>
+          <td>
+            <a href="screenshots/01-prototype-create.jpg">创建</a> ·
+            <a href="screenshots/01b-prototype-empty.jpg">空状态</a>
+          </td>
+        </tr>
+        <tr>
+          <td>2 配置</td>
+          <td>查看团队列表与新建编辑器，检查成员与协作偏好入口</td>
+          <td>结构清楚；未验证保存、归档、冲突与跨刷新持久化</td>
+          <td>
+            <a href="screenshots/02-prototype-teams.jpg">列表</a> ·
+            <a href="screenshots/02b-prototype-team-editor.jpg">编辑器</a>
+          </td>
+        </tr>
+        <tr>
+          <td>3 计划确认</td>
+          <td>点击确认执行，原卡转为等待补充，没有自动跳线程</td>
+          <td>主流程成立；待确认卡应更直接说明本次批准范围</td>
+          <td><a href="screenshots/03b-prototype-plan-desktop.jpg">待确认</a></td>
+        </tr>
+        <tr>
+          <td>4 共创待办</td>
+          <td>Hub 展示产品经理问题，输入框自动标记发给产品经理</td>
+          <td>有回复对象提示，但无明显取消定向／切回 Hub 控件；卡片过高使待答内容落在首屏之外</td>
+          <td><a href="screenshots/04-prototype-cocreate.jpg">等待补充</a></td>
+        </tr>
+        <tr>
+          <td>5 专业线程</td>
+          <td>
+            点击去回答进入原线程；提交「先面向个人用户，只做本地工作台」，仍留在线程，返回 Hub
+            看到技术审核中
+          </td>
+          <td>关联栏和返回入口清楚；这里只验证模拟消息，不证明真实双向同步</td>
+          <td><a href="screenshots/05-prototype-thread.jpg">原线程</a></td>
+        </tr>
+        <tr>
+          <td>6 人工放行</td>
+          <td>模拟审核完成，显示需求方案 v2、审核结果与确认后动作</td>
+          <td>文义清楚；1280×800 初始视图主按钮在可视区下方，需要滚动；阶段勾号易与放行完成混淆</td>
+          <td><a href="screenshots/06-prototype-gate.jpg">待放行</a></td>
+        </tr>
+        <tr>
+          <td>7 退回</td>
+          <td>填写修改意见并发送，文案称将继续修订，卡片却回到「等待补充／需要明确目标用户」</td>
+          <td>
+            需修复：返工进行中与缺输入混为一谈；再模拟审核后候选变为 v3，专业审核仍标
+            v1，缺明确被审版本关联
+          </td>
+          <td>
+            <a href="screenshots/06b-prototype-return.jpg">意见输入</a> ·
+            <a href="screenshots/06c-prototype-return-state.jpg">返工状态</a>
+          </td>
+        </tr>
+        <tr>
+          <td>8 成果</td>
+          <td>打开需求方案 v3，右侧显示同版本待确认文档；关闭后点击确认并进入开发</td>
+          <td>版本展示一致；仅演示文档，无真实文件或批准记录</td>
+          <td><a href="screenshots/07-prototype-artifact.jpg">预览</a></td>
+        </tr>
+        <tr>
+          <td>9 暂停恢复</td>
+          <td>
+            开发中暂停：开发线程入口、已审核成果消失，方案阶段显示已暂停、开发显示等待方案放行；恢复后开发中和
+            v3 引用回来
+          </td>
+          <td>运行历史并未在模拟状态中永久丢失，但暂停期间呈现像回退进度，需修复</td>
+          <td><a href="screenshots/09-prototype-paused.jpg">暂停</a></td>
+        </tr>
+        <tr>
+          <td>10 完成</td>
+          <td>通过演示栏切到完成，显示成果及未发布上线</td>
+          <td>完成态可读；最终完成条件与人工验收策略仍需在计划详情表达</td>
+          <td><a href="screenshots/10-prototype-done.jpg">完成</a></td>
+        </tr>
+        <tr>
+          <td>11 当前产品入口</td>
+          <td>打开真实开发前端 New hub，只查看名称弹窗后取消</td>
+          <td>已核对首屏；未提交创建，后续设置由代码证据覆盖</td>
+          <td><a href="screenshots/11-current-create.jpg">当前创建</a></td>
+        </tr>
+        <tr>
+          <td>12 当前专家管理</td>
+          <td>打开真实开发前端 Experts，等待加载，查看搜索与三个单专家卡片</td>
+          <td>已核对当前列表；没有团队标签。桌面编辑器仅作补充参照</td>
+          <td>
+            <a href="screenshots/12-current-experts.jpg">当前列表</a> ·
+            <a href="screenshots/08-current-expert-editor.jpg">桌面编辑器</a>
+          </td>
+        </tr>
+      </table>
+    </div>
+    <p>
+      尺寸：初始默认 1280×720，面板变窄时捕获了约 580px 宽列表；随后固定 1280×800
+      复核主要流程。未进行完整移动端、200%
+      缩放、屏幕阅读器、焦点循环或对比度测试。次要文字偏小偏淡属于可见风险，不能据截图宣称 WCAG
+      合规或不合规。正式实现应沿用当前产品字体设置和已有可访问组件。
+    </p>
+    <h2 id="gallery">截图证据</h2>
+    <p>本轮捕获，点击图片查看原尺寸。原型模拟与当前产品分开标注。</p>
+    <div class="gallery">
+      <figure>
+        <a href="screenshots/01-prototype-create.jpg"
+          ><img loading="lazy" src="screenshots/01-prototype-create.jpg" alt="V0.4 · 专家团创建"
+        /></a>
+        <figcaption>V0.4 · 专家团创建</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/01b-prototype-empty.jpg"
+          ><img loading="lazy" src="screenshots/01b-prototype-empty.jpg" alt="V0.4 · 创建后空状态"
+        /></a>
+        <figcaption>V0.4 · 创建后空状态</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/02-prototype-teams.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/02-prototype-teams.jpg"
+            alt="V0.4 · 专家团列表（窄窗口）"
+        /></a>
+        <figcaption>V0.4 · 专家团列表（窄窗口）</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/02b-prototype-team-editor.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/02b-prototype-team-editor.jpg"
+            alt="V0.4 · 专家团编辑"
+        /></a>
+        <figcaption>V0.4 · 专家团编辑</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/03-prototype-plan.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/03-prototype-plan.jpg"
+            alt="V0.4 · 待确认（720px 高）"
+        /></a>
+        <figcaption>V0.4 · 待确认（720px 高）</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/03b-prototype-plan-desktop.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/03b-prototype-plan-desktop.jpg"
+            alt="V0.4 · 待确认（800px 高）"
+        /></a>
+        <figcaption>V0.4 · 待确认（800px 高）</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/04-prototype-cocreate.jpg"
+          ><img loading="lazy" src="screenshots/04-prototype-cocreate.jpg" alt="V0.4 · 共创待回答"
+        /></a>
+        <figcaption>V0.4 · 共创待回答</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/05-prototype-thread.jpg"
+          ><img loading="lazy" src="screenshots/05-prototype-thread.jpg" alt="V0.4 · 专业线程"
+        /></a>
+        <figcaption>V0.4 · 专业线程</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/06-prototype-gate.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/06-prototype-gate.jpg"
+            alt="V0.4 · 人工放行：主操作在下方"
+        /></a>
+        <figcaption>V0.4 · 人工放行：主操作在下方</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/06b-prototype-return.jpg"
+          ><img loading="lazy" src="screenshots/06b-prototype-return.jpg" alt="V0.4 · 退回意见"
+        /></a>
+        <figcaption>V0.4 · 退回意见</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/06c-prototype-return-state.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/06c-prototype-return-state.jpg"
+            alt="V0.4 · 返工后误显示等待补充"
+        /></a>
+        <figcaption>V0.4 · 返工后误显示等待补充</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/07-prototype-artifact.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/07-prototype-artifact.jpg"
+            alt="V0.4 · 固定版本预览"
+        /></a>
+        <figcaption>V0.4 · 固定版本预览</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/08-current-expert-editor.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/08-current-expert-editor.jpg"
+            alt="已安装桌面产品 · 专家编辑（未核安装版本）"
+        /></a>
+        <figcaption>已安装桌面产品 · 专家编辑（未核安装版本）</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/09-prototype-paused.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/09-prototype-paused.jpg"
+            alt="V0.4 · 暂停时进度呈现回退"
+        /></a>
+        <figcaption>V0.4 · 暂停时进度呈现回退</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/10-prototype-done.jpg"
+          ><img loading="lazy" src="screenshots/10-prototype-done.jpg" alt="V0.4 · 完成态"
+        /></a>
+        <figcaption>V0.4 · 完成态</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/11-current-create.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/11-current-create.jpg"
+            alt="当前开发前端 · 名称弹窗"
+        /></a>
+        <figcaption>当前开发前端 · 名称弹窗</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/12-current-experts.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/12-current-experts.jpg"
+            alt="当前开发前端 · 单专家列表"
+        /></a>
+        <figcaption>当前开发前端 · 单专家列表</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/13-v05-gate.jpg"
+          ><img loading="lazy" src="screenshots/13-v05-gate.jpg" alt="V0.5 · 版本放行与主操作前置"
+        /></a>
+        <figcaption>V0.5 · 版本放行与主操作前置</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/14-v05-revising.jpg"
+          ><img loading="lazy" src="screenshots/14-v05-revising.jpg" alt="V0.5 · 退回后进入修订"
+        /></a>
+        <figcaption>V0.5 · 退回后进入修订</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/15-v05-narrow.jpg"
+          ><img loading="lazy" src="screenshots/15-v05-narrow.jpg" alt="V0.5 · 仅方案范围（600px）"
+        /></a>
+        <figcaption>V0.5 · 仅方案范围（600px）</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/16-v05-paused.jpg"
+          ><img loading="lazy" src="screenshots/16-v05-paused.jpg" alt="V0.5 · 暂停保留阶段与成果"
+        /></a>
+        <figcaption>V0.5 · 暂停保留阶段与成果</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/17-v05-plan-notes.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/17-v05-plan-notes.jpg"
+            alt="V0.5 · 新版计划的补充要求"
+        /></a>
+        <figcaption>V0.5 · 新版计划的补充要求</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/18-v06-develop.jpg"
+          ><img loading="lazy" src="screenshots/18-v06-develop.jpg" alt="V0.6 · 开发节点展开"
+        /></a>
+        <figcaption>V0.6 · 开发节点展开</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/19-v06-revision.jpg"
+          ><img loading="lazy" src="screenshots/19-v06-revision.jpg" alt="V0.6 · 退回修订路径"
+        /></a>
+        <figcaption>V0.6 · 退回修订路径</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/20-v05-reference.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/20-v05-reference.jpg"
+            alt="V0.5 · 同窗口开发阶段对照（旧版 v3）"
+        /></a>
+        <figcaption>V0.5 · 同窗口开发阶段对照（旧版 v3）</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/21-v06-gate.jpg"
+          ><img loading="lazy" src="screenshots/21-v06-gate.jpg" alt="V0.6 · 放行首屏（720px 高）"
+        /></a>
+        <figcaption>V0.6 · 放行首屏（720px 高）</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/22-v06-narrow.jpg"
+          ><img loading="lazy" src="screenshots/22-v06-narrow.jpg" alt="V0.6 · 窄屏节点路径"
+        /></a>
+        <figcaption>V0.6 · 窄屏节点路径</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/23-v06-overview.jpg"
+          ><img loading="lazy" src="screenshots/23-v06-overview.jpg" alt="V0.6 · 待用户确认节点"
+        /></a>
+        <figcaption>V0.6 · 待用户确认节点</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/24-v07-gate.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/24-v07-gate.jpg"
+            alt="V0.7 · 状态看板与消息操作分离"
+        /></a>
+        <figcaption>V0.7 · 状态看板与消息操作分离</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/25-v07-paused.jpg"
+          ><img loading="lazy" src="screenshots/25-v07-paused.jpg" alt="V0.7 · 暂停消息与阶段状态"
+        /></a>
+        <figcaption>V0.7 · 暂停消息与阶段状态</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/26-v07-narrow.jpg"
+          ><img loading="lazy" src="screenshots/26-v07-narrow.jpg" alt="V0.7 · 窄屏分层布局"
+        /></a>
+        <figcaption>V0.7 · 窄屏分层布局</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/27-v07-merge-reference.jpg"
+          ><img loading="lazy" src="screenshots/27-v07-merge-reference.jpg" alt="V0.7 · 合并前对照"
+        /></a>
+        <figcaption>V0.7 · 合并前对照</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/28-v08-snapshot.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/28-v08-snapshot.jpg"
+            alt="V0.8 · 运行协调快照保持隔离"
+        /></a>
+        <figcaption>V0.8 · 运行协调快照保持隔离</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/29-v08-coordinator.jpg"
+          ><img loading="lazy" src="screenshots/29-v08-coordinator.jpg" alt="V0.8 · 单字段协调方式"
+        /></a>
+        <figcaption>V0.8 · 单字段协调方式</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/30-v08-parallel-narrow-detail.jpg"
+          ><img
+            loading="lazy"
+            src="screenshots/30-v08-parallel-narrow-detail.jpg"
+            alt="V0.8 · 并行审核分支详情"
+        /></a>
+        <figcaption>V0.8 · 并行审核分支详情</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/31-v08-narrow.jpg"
+          ><img loading="lazy" src="screenshots/31-v08-narrow.jpg" alt="V0.8 · 窄屏横向阶段"
+        /></a>
+        <figcaption>V0.8 · 窄屏横向阶段</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/32-v08-gate.jpg"
+          ><img loading="lazy" src="screenshots/32-v08-gate.jpg" alt="V0.8 · 待放行仍为 1/3"
+        /></a>
+        <figcaption>V0.8 · 待放行仍为 1/3</figcaption>
+      </figure>
+    </div>
+    <h2 id="section-5">5. 当前协作原型基线与未决议题</h2>
+    <p>
+      用户先选择优化协作过程，经过 V0.5、V0.6 两轮草案，在 V0.7
+      明确将状态与操作分离，并确认合并到本评审稿。本轮 V0.8
+      再补充协调者配置、横向阶段与放行计数；以下三层为整合后的目标，已有模拟交互保留用于继续评审。
+    </p>
+    <div class="table-scroll">
+      <table>
+        <tr>
+          <th>层次</th>
+          <th>内容</th>
+          <th>边界</th>
+        </tr>
+        <tr>
+          <td>Graph 状态看板</td>
+          <td>输入框上方展示工作名称、整体状态、已放行阶段数和横向阶段路径</td>
+          <td>无业务执行按钮；允许收起和选择阶段，详情在侧栏按需查看；不塞入专家内部 Plan 步骤</td>
+        </tr>
+        <tr>
+          <td>按时间排列的消息流</td>
+          <td>范围确认、专家提问、审核进展、版本成果、修改意见与执行回执</td>
+          <td>
+            在对应消息卡中操作；已处理卡保留原内容与回执，移除旧执行按钮，历史成果仍按版本查看
+          </td>
+        </tr>
+        <tr>
+          <td>专业线程</td>
+          <td>保留原讨论、修改记录与线程入口</td>
+          <td>Hub 负责协调，详细协作继续在原线程；不另造专家内部 Plan</td>
+        </tr>
+      </table>
+    </div>
+    <p>
+      看板独立于消息滚动区，业务状态更新不自动展开。用户可主动收起或查看阶段详情，阶段始终横向排列，窄屏在图内滚动。正式产品需适配用户字号和宿主布局，不固定沿用
+      V0.7 的 96px。读者停在底部时跟随新增内容，向上阅读后保持位置；「查看最新消息」属于消息区导航。
+    </p>
+    <p>以下保留原复核议题，并标明当前处理情况。全部尚未进入正式产品。</p>
+    <div class="table-scroll">
+      <table>
+        <tr>
+          <th>议题类别</th>
+          <th>问题</th>
+          <th>当前处理与待确认事项</th>
+        </tr>
+        <tr>
+          <td>A 先定规则</td>
+          <td>计划批准、审核通过、用户放行、任务完成容易混用</td>
+          <td>
+            保留现有 Task
+            状态源；明确何种出口需用户、批准哪版、允许做什么。待用户放行时不以完成勾号代表整个组合阶段完成
+          </td>
+        </tr>
+        <tr>
+          <td>A 先定规则</td>
+          <td>专家团模式的无匹配回退及固定背景来源尚未对齐</td>
+          <td>
+            专家缺失时提示能力缺口与调整入口；项目来源首版只读，关联资料另行管理。明确旧 Hub
+            不自动切换行为
+          </td>
+        </tr>
+        <tr>
+          <td>A 先定场景</td>
+          <td>一个 Hub 可承载多份计划，但原型只有单一全局工作状态</td>
+          <td>
+            补「两项工作并行，其中一项待回复」场景。建议只增加紧凑的当前工作选择与待处理数量，不新增管理驾驶舱；具体形态待确认
+          </td>
+        </tr>
+        <tr>
+          <td>B 协作过程</td>
+          <td>等待输入会自动改变 Hub 输入框收件人，用户不易继续问协调员</td>
+          <td>
+            当前稿保留 V0.5 的默认发给 Hub；点击回复后显式显示对象和工作，可取消定向；各自草稿保留
+          </td>
+        </tr>
+        <tr>
+          <td>B 协作过程</td>
+          <td>返工复用「目标用户待回答」；暂停隐藏已完成成果和线程</td>
+          <td>
+            分别呈现「正在修订」「等待必要补充」「审核中」；暂停是当前进度上的标记，保留各阶段状态、成果和已有线程
+          </td>
+        </tr>
+        <tr>
+          <td>B 协作过程</td>
+          <td>卡片过高，当前行动被压到首屏之外</td>
+          <td>
+            V0.7 将只读阶段路径移至输入框上方；操作随消息出现，历史消息保留。取消 V0.6
+            在状态卡内展开节点并操作的设计；读者离开底部后不强制吸附
+          </td>
+        </tr>
+        <tr>
+          <td>B 协作过程</td>
+          <td>新候选 v3 与审核 v1 未明确绑定</td>
+          <td>审核摘要直接说明「审核对象：需求方案 v3」；用户决定固定同一版本，历史批准可查</td>
+        </tr>
+        <tr>
+          <td>C 创建配置</td>
+          <td>名称、用途、任务目标之间容易混淆</td>
+          <td>
+            Hub
+            名称使用长期空间示例；用途是可选服务方向，具体任务在进入后表达；普通／专家团给一句能力差异说明
+          </td>
+        </tr>
+        <tr>
+          <td>C 创建配置</td>
+          <td>原型全局设置与当前导航、列表和字体不同</td>
+          <td>
+            继承当前壳、字号和保存保护；只增加团队标签与必要控件，不照搬演示外壳、固定字号或演示按钮
+          </td>
+        </tr>
+        <tr>
+          <td>C 失败状态</td>
+          <td>原型以成功路径为主</td>
+          <td>
+            补创建失败保留草稿、专家不可用、旧版确认、成果缺失、并发修改、断线重连；这些须有后端事实，不使用按钮伪造成功
+          </td>
+        </tr>
+      </table>
+    </div>
+    <p>
+      B 类协作布局已合入当前原型；后续继续细化 A 类规则与 C 类创建、异常场景。Graph
+      看板应从已有任务与协作事实派生，不新增一套独立业务状态机。
+    </p>
+    <p>
+      分阶段验收场景：普通讨论不启动整套计划；单节点委托可确认；人机共创能定向回复与切回
+      Hub；审核后停在用户出口；退回后继续修订而非无故等用户；暂停不抹掉历史；只批准方案阶段时不能进入开发。两份计划的回复与批准不串线留待下一轮，不声称当前
+      V0.8 已覆盖多计划。
+    </p>
+    <h2 id="section-6">6. 代码证据索引</h2>
+    <p>
+      路径均相对仓库根目录；行号对应本轮 HEAD。链接打开文件，后列行号方便定位。不存在性判断仅限
+      contracts、projectAgent、相关 group/settings、ChatView 与沿途调用链，不覆盖整仓所有实验代码。
+    </p>
+    <div class="table-scroll">
+      <table>
+        <tr>
+          <th>编号</th>
+          <th>文件与行号</th>
+          <th>证据</th>
+        </tr>
+        <tr>
+          <td>E1</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/SidebarGroupsSurface.tsx"
+              >SidebarGroupsSurface</a
+            >
+            241–285、591–599；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/lib/groupProjects.ts"
+              >groupProjects</a
+            >
+            378–445
+          </td>
+          <td>名称 → project.create 容器 → onboarding</td>
+        </tr>
+        <tr>
+          <td>E2</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/group/GroupSettingsDialog.tsx"
+              >GroupSettingsDialog</a
+            >
+            341–409；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/group/groupSettingsDialog.logic.ts"
+              >保存逻辑</a
+            >
+            338–378；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/projectAgent/Layers/ProjectAgentService.ts"
+              >服务</a
+            >
+            3009–3040、3232–3303、3339–3369
+          </td>
+          <td>configure、Coordinator、欢迎语、事件 heartbeat；首次 configure 不等于直接执行模型</td>
+        </tr>
+        <tr>
+          <td>E3</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/group/GroupSettingsDialog.tsx"
+              >GroupSettingsDialog</a
+            >
+            83–96；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/group/GroupExpertsSection.tsx"
+              >GroupExpertsSection</a
+            >
+            19–59、68–158；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/packages/contracts/src/projectAgent.ts"
+              >配置契约</a
+            >
+            71–102
+          </td>
+          <td>设置 mode 语义、成员选择与普通线程回退</td>
+        </tr>
+        <tr>
+          <td>E4</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/settings/ExpertsSettingsPanel.tsx"
+              >ExpertsSettingsPanel</a
+            >
+            123–155、238–244、278–319、398–425、489
+          </td>
+          <td>单专家列表／编辑器、离开保护、revision 冲突</td>
+        </tr>
+        <tr>
+          <td>E5</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/packages/contracts/src/projectAgent.ts"
+              >Goal/Task 契约</a
+            >
+            105–159、683–743；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/PlanSidebar.tsx"
+              >PlanSidebar</a
+            >
+            38–57
+          </td>
+          <td>已有目标、依赖、状态、提议计划展示；不等于 V0.4 完整计划模型</td>
+        </tr>
+        <tr>
+          <td>E6</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/group/HubWorkItemCard.tsx"
+              >HubWorkItemCard</a
+            >
+            20–84；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/projectAgent/hubWorkLifecycle.ts"
+              >hubWorkLifecycle</a
+            >
+            44–90；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/packages/contracts/src/hubWork.ts"
+              >hubWork</a
+            >
+            19–66
+          </td>
+          <td>工作卡与运行 completed 的边界</td>
+        </tr>
+        <tr>
+          <td>E7</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/projectAgent/Layers/ProjectAgentService.ts"
+              >服务</a
+            >
+            4630–4657、4687–4689；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/projectAgent/principal.ts"
+              >principal</a
+            >
+            56–61
+          </td>
+          <td>验收需证据，Coordinator 或用户可接受任务</td>
+        </tr>
+        <tr>
+          <td>E8</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/group/HubPendingApprovals.tsx"
+              >HubPendingApprovals</a
+            >
+            35–59、104–123；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/respondToThreadApproval.ts"
+              >respondToThreadApproval</a
+            >
+            36–68
+          </td>
+          <td>Provider 工具权限响应，不是业务阶段批准</td>
+        </tr>
+        <tr>
+          <td>E9</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/ChatView.tsx"
+              >ChatView</a
+            >
+            459–478、7520–7589；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/routes/_chat.tsx"
+              >父布局</a
+            >
+            561–668；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/routes/_chat.$threadId.tsx"
+              >线程路由</a
+            >
+            30–37；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/routes/__root.tsx"
+              >根订阅</a
+            >
+            1624–1656
+          </td>
+          <td>实际父布局、共享快捷键、订阅、KeepAlive、输入与滚动行为</td>
+        </tr>
+        <tr>
+          <td>E10</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/packages/contracts/src/hubDeliverables.ts"
+              >hubDeliverables</a
+            >
+            30–48、99–136；<a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/group/useGroupLibrary.ts"
+              >useGroupLibrary</a
+            >
+            92–111、436
+          </td>
+          <td>发布 revision、历史读取、来源及固定字节摘要</td>
+        </tr>
+        <tr>
+          <td>E11</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/projectAgent/Layers/ProjectAgentService.ts"
+              >服务</a
+            >
+            3765–3888、4458–4475
+          </td>
+          <td>Hub/Goal 暂停与恢复，不证明所有外部副作用可中断</td>
+        </tr>
+        <tr>
+          <td>E12</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/projectAgent/Layers/ProjectAgentService.ts"
+              >服务</a
+            >
+            2950–2975
+          </td>
+          <td>Context 来源不可更换，且首次配置前须已关联</td>
+        </tr>
+        <tr>
+          <td>E13</td>
+          <td>
+            <a
+              href="https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/projectAgent/projectBotPlaybook.ts"
+              >projectBotPlaybook</a
+            >
+            86
+          </td>
+          <td>现有立即派发约定与新增正式计划确认规则需要统一</td>
+        </tr>
+      </table>
+    </div>
+    <p>
+      宿主边界：Hub 仍在 <code>_chat</code> 布局中，继承
+      Rail/Sidebar、全局快捷键、订阅和聊天生命周期。后续若增加计划容器，必须复用 native task
+      source，通过公共能力接入；薄路由不能证明与聊天行为隔离。正式实现时另按开发 SOP
+      确认数据归属、集成点及必要门禁。
+    </p>
+    <h2 id="section-7">7. 历史版本：V0.5 协作过程与验证</h2>
+    <p>
+      <a href="Hub_交互原型_V0.5.html">打开 V0.5 可点击原型</a> ·
+      <a href="V0.5-协作过程说明.md">设计选择与验证记录</a>
+    </p>
+    <p>
+      在保留 V0.4
+      创建与专家配置流程的基础上，调整了默认回复对象、定向草稿、工作卡主操作、修订状态、暂停显示、批准范围和版本关联。以下是该版本的历史验证记录；回复、修订、暂停与版本约束在
+      V0.7 中延续，协调卡布局已被后续版本替代。
+    </p>
+    <ul>
+      <li>
+        实走确认 → Hub 讨论 → 显式回复 → 模拟审核 → 退回修订 → 原线程 → 新版审核 → 用户放行 →
+        暂停与恢复。
+      </li>
+      <li>
+        检查 Hub 与定向草稿恢复；普通讨论及暂停消息不推进状态；成果面板保留已退回 v2、已确认 v3
+        及各自审核对象。
+      </li>
+      <li>
+        检查只完成方案阶段的确认与完成，不进入开发；1280×720 主要操作可见，600×800 页面无横向溢出。
+      </li>
+      <li>
+        <a href="screenshots/13-v05-gate.jpg">放行界面</a> ·
+        <a href="screenshots/14-v05-revising.jpg">修订界面</a> ·
+        <a href="screenshots/15-v05-narrow.jpg">窄屏</a>。
+      </li>
+    </ul>
+    <h2 id="section-8">8. 本轮交付与未验证项</h2>
+    <ul>
+      <li>四份来源文件原样保存；本轮截图与代码依据集中在本目录。</li>
+      <li>
+        主评审稿现以 V0.8 原型与整合 PRD 为入口；本地 V0.5—V0.7 与原始 V0.3/V0.4
+        保留作历史对照。未修改正式产品代码，本次也不执行 Git 合并或发布。
+      </li>
+      <li>本轮原型检查覆盖上表点击路径；不是原型全部功能测试，更不是真实模型协作验收。</li>
+      <li>
+        当前产品的完整创建／保存、Hub
+        实际线程协作、计划级暂停、后端版本审批、持久化恢复与多端行为未运行验证。
+      </li>
+      <li>
+        文档检查仅涉及来源字节一致性、本地链接存在性、截图可读性与改动范围；未跑无关构建或应用测试。
+      </li>
+    </ul>
+    <p>后续评审以 V0.8 为入口；多计划、异常恢复及正式后端契约仍未覆盖。</p>
+    <h2 id="section-9">9. 历史版本：节点式协调卡 V0.6</h2>
+    <p>
+      用户在 V0.5 浏览器批注中提出用节点图示呈现阶段、状态和操作，随后确认制作布局草案。<a
+        href="Hub_交互原型_V0.6.html"
+        >打开 V0.6</a
+      >
+      · <a href="V0.6-节点式协调卡说明.md">设计与验证说明</a>。
+    </p>
+    <p>
+      本稿把当前节点、可回看的历史节点、等待前置条件的后续节点与修订返回路径放在同一张卡中。V0.5
+      原件保留；新增阶段与并行分支尚未实现，仍是单计划模拟。该版本的状态与操作一体布局已由 V0.7
+      替代，不再作为当前实现目标；节点路径的状态表达延续到只读看板中。
+    </p>
+    <h2 id="section-10">10. 已确认方向：V0.7 合并记录与验证</h2>
+    <p>
+      2026-10-22，用户在体验 V0.7
+      后明确表示「相对合理，合并到原型图评审稿里面」。本次将该方案纳入主稿的产品基线、协作布局和统一入口，清理过时版本指引；原型操作逻辑保持本轮已验证版本。
+    </p>
+    <p>
+      <a href="Hub_交互原型_V0.7.html">打开历史 V0.7 原型</a> ·
+      <a href="V0.7-状态与消息分离说明.md">详细设计与验证记录</a> ·
+      <a href="screenshots/24-v07-gate.jpg">放行界面</a> ·
+      <a href="screenshots/25-v07-paused.jpg">暂停界面</a> ·
+      <a href="screenshots/26-v07-narrow.jpg">窄屏</a>。
+    </p>
+    <ul>
+      <li>
+        已体验确认、定向回复、审核、退回修订、新版本放行、开发及暂停／恢复；仅方案范围确认后完成，不进入开发。
+      </li>
+      <li>
+        只读看板中操作控件数量为 0；仅一张当前操作卡，历史卡保留内容与回执，不保留旧执行按钮。
+      </li>
+      <li>
+        检查底部跟随、脱离底部后保持阅读位置、草稿保留；600px 宽布局无横向溢出，1280×720
+        主操作未被看板遮挡。
+      </li>
+      <li>以上为独立 HTML 模拟验证；真实事件同步、审批身份、持久化与多计划调度仍未验证。</li>
+    </ul>
+    <h2 id="section-11">11. 当前版本：V0.8 新讨论整合</h2>
+    <p>
+      新增讨论文本已读取；引用对话中的 V0.5 附件未取得，和本地 V0.5 不混用。本轮以本地 V0.7
+      为起点，按新增讨论更新独立 PRD 与原型，原件保留。
+    </p>
+    <p>
+      <a href="Hub_交互原型_V0.8.html">交互原型 V0.8</a> ·
+      <a href="Hub_专家团协作与任务编排_PRD_V0.8.html">PRD 阅读版</a> ·
+      <a href="Hub_专家团协作与任务编排_PRD_V0.8.md">PRD 源文档</a> ·
+      <a href="V0.8-验证与合并说明.md">本轮验证</a>
+    </p>
+    <div class="table-scroll">
+      <table>
+        <tr>
+          <th>合并点</th>
+          <th>当前规则</th>
+        </tr>
+        <tr>
+          <td>协调者定位</td>
+          <td>
+            一个可选“角色与协调方式”字段；默认／自定义／恢复默认，预设、Hub 副本和运行快照隔离
+          </td>
+        </tr>
+        <tr>
+          <td>横向 Graph</td>
+          <td>顶层阶段从左到右，窄屏图内滚动；可收起，点击阶段查看只读详情</td>
+        </tr>
+        <tr>
+          <td>操作归属</td>
+          <td>继续沿用已确认的消息操作卡；阶段详情不执行放行、退回或暂停</td>
+        </tr>
+        <tr>
+          <td>阶段出口</td>
+          <td>人工确认附着于方案阶段，不单列任务；审核通过未放行仍为 1/3</td>
+        </tr>
+        <tr>
+          <td>并行与返工</td>
+          <td>详情表达分支等待、汇合及版本返工；新候选需要新审核</td>
+        </tr>
+        <tr>
+          <td>精简</td>
+          <td>看板表达状态，消息表达待办与结果；不重复完整计划或周期性进度段落</td>
+        </tr>
+      </table>
+    </div>
+    <p>
+      本次更新未授权正式产品实施；运行中计划修订、多计划、持久化恢复和真实调度仍按 PRD
+      的未验证边界处理。
+    </p>
+  </main>
+</html>

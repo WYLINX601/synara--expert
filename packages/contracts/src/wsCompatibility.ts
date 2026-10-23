@@ -51,6 +51,8 @@ export const WS_CONTEXT_V1_CAPABILITY = "context.v1";
 export const WS_TURN_DISPATCH_SETTLEMENT_CAPABILITY = "orchestration.turn-dispatch-settlement";
 export const WS_SERVER_RUNTIME_STATUS_CAPABILITY = "server.runtime-status";
 export const WS_GIT_ACTION_RECOVERY_CAPABILITY = "git.action-recovery";
+export const WS_HUB_COLLABORATION_CONFIG_CAPABILITY = "hubCollaboration.config";
+export const WS_HUB_COLLABORATION_PLAN_CAPABILITY = "hubCollaboration.plan";
 
 // Capabilities the current client refuses to run without. Kept separate from
 // the advertised server list so a newer client can still negotiate with an
@@ -76,6 +78,8 @@ export const WS_SERVER_CAPABILITIES = [
   WS_TURN_DISPATCH_SETTLEMENT_CAPABILITY,
   WS_GIT_ACTION_RECOVERY_CAPABILITY,
   WS_SERVER_RUNTIME_STATUS_CAPABILITY,
+  WS_HUB_COLLABORATION_CONFIG_CAPABILITY,
+  WS_HUB_COLLABORATION_PLAN_CAPABILITY,
   // Single-handshake connect: negotiation is available over plain HTTP at
   // WS_NEGOTIATE_HTTP_PATH, so a connect costs exactly one WebSocket upgrade.
   "transport.http-negotiate",

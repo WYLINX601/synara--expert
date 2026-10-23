@@ -49,6 +49,12 @@ import {
   type WorktreeSetupStep,
 } from "../../types";
 import { HubWorkItemCards } from "./group/HubWorkItemCard";
+import { PlanActionCard } from "~/features/hubCollaboration/PlanActionCard";
+import { useHubPlanTimeline } from "~/features/hubCollaboration/HubPlanTimelineContext";
+import {
+  isHubPlanControlEvent,
+  mergeHubPlanEventRows,
+} from "~/features/hubCollaboration/hubPlan.logic";
 import { AsyncUserInputCard } from "./AsyncUserInputCard";
 import ChatMarkdown from "../ChatMarkdown";
 import {
@@ -273,6 +279,8 @@ export interface MessagesTimelineController {
   setActiveFindMatch: (match: ThreadFindMatch | null) => void;
   /** Scrolls a work row (the subagent card) into view, unfolding its turn if needed. */
   scrollToWorkEntry: (entryId: string) => void;
+  /** Opens the existing plan operation card, including when its row is virtualized away. */
+  scrollToHubPlanEvent?: (planId: string, sequence: number) => void;
 }
 
 // Keeps the origin/steer marker visually attached to the whole sent-message stack.
@@ -871,7 +879,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   const presentedWorktreeSetup = useWorktreeSetupPresentation(worktreeSetup);
   const conversationOnly = conversationOnlyProp === true;
-  const rawRows = useMemo(
+  const hubPlanTimeline = useHubPlanTimeline();
+  const derivedRows = useMemo(
     () =>
       deriveMessagesTimelineRows({
         timelineEntries,
@@ -903,6 +912,20 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       conversationOnly,
     ],
   );
+  const rawRows = useMemo(
+    () =>
+      hubPlanTimeline?.events.length
+        ? mergeHubPlanEventRows(derivedRows, hubPlanTimeline.events)
+        : derivedRows,
+    [derivedRows, hubPlanTimeline],
+  );
+  const latestHubPlanTimelineEventSequence = hubPlanTimeline?.snapshot
+    ? hubPlanTimeline.events
+        .filter(
+          (event) => event.planId === hubPlanTimeline.snapshot?.id && isHubPlanControlEvent(event),
+        )
+        .reduce((latest, event) => Math.max(latest, event.sequence), 0) || null
+    : null;
   const rows = useStableRows(rawRows);
   const canRenderForkSourceDivider = forkSource !== null && onOpenThread !== undefined;
   const forkSourceDivider = useMemo(
@@ -1054,6 +1077,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       settledTurnCollapseTransitions,
       submittingEditedUserMessageId,
       toolGroupSummaryOverrides,
+      hubPlanTimeline,
     }),
     [
       hubWorkItemsByMessageId,
@@ -1075,6 +1099,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       settledTurnCollapseTransitions,
       submittingEditedUserMessageId,
       toolGroupSummaryOverrides,
+      hubPlanTimeline,
     ],
   );
   // Latest rows kept in a ref so the imperative scroll controller can look up a message's
@@ -1100,6 +1125,13 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     if (!controllerRef) {
       return;
     }
+    let planJumpFocusFrame: number | null = null;
+    const cancelPlanJumpFocus = () => {
+      if (planJumpFocusFrame !== null) {
+        window.cancelAnimationFrame(planJumpFocusFrame);
+        planJumpFocusFrame = null;
+      }
+    };
     const scrollToMessage = (
       messageId: MessageId,
       segmentIndex?: number,
@@ -1207,7 +1239,47 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       findFineScrollFrameRef.current = window.requestAnimationFrame(tick);
     };
     const controller: MessagesTimelineController = {
+      scrollToHubPlanEvent: (planId, sequence) => {
+        cancelPlanJumpFocus();
+        const index = rowsRef.current.findIndex(
+          (row) =>
+            row.kind === "hub-plan-event" &&
+            row.event.planId === planId &&
+            row.event.sequence === sequence,
+        );
+        if (index < 0) return;
+        onNavigate?.();
+        const selector = `[data-hub-plan-id="${cssAttributeSelectorValue(planId)}"][data-hub-plan-event="${sequence}"]`;
+        const mounted = timelineRootRef.current?.querySelector(selector);
+        const animated = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (mounted instanceof HTMLElement) {
+          mounted.scrollIntoView({
+            block: "center",
+            inline: "nearest",
+            behavior: animated ? "smooth" : "auto",
+          });
+        } else {
+          scrollLegendListToIndex(resolvedListRef, { index, animated, viewPosition: 0.3 });
+        }
+        // Wait for a virtualized card to mount and for the capsule's focus restoration.
+        const deadlineMs = getMonotonicTimeMs() + FIND_FINE_SCROLL_RETRY_TIMEOUT_MS;
+        let attempts = 0;
+        const focusCard = () => {
+          planJumpFocusFrame = null;
+          const card = timelineRootRef.current?.querySelector(selector);
+          if (card instanceof HTMLElement) {
+            card.focus({ preventScroll: true });
+            return;
+          }
+          attempts += 1;
+          if (getMonotonicTimeMs() <= deadlineMs && attempts < FIND_FINE_SCROLL_MAX_RETRY_FRAMES) {
+            planJumpFocusFrame = window.requestAnimationFrame(focusCard);
+          }
+        };
+        planJumpFocusFrame = window.requestAnimationFrame(focusCard);
+      },
       scrollToMessage: (messageId, options) => {
+        cancelPlanJumpFocus();
         cancelPendingFindFineScroll();
         const target = scrollToMessage(messageId, options?.segmentIndex);
         if (!target) {
@@ -1224,6 +1296,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         applyActiveFindMatch();
       },
       scrollToWorkEntry: (entryId) => {
+        cancelPlanJumpFocus();
         const target = resolveWorkEntryJumpTarget(rowsRef.current, entryId);
         if (!target) return;
         onNavigate?.();
@@ -1251,6 +1324,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
     controllerRef.current = controller;
     return () => {
+      cancelPlanJumpFocus();
       if (controllerRef.current === controller) {
         controllerRef.current = null;
       }
@@ -3032,6 +3106,20 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           />
         </div>
       )}
+
+      {row.kind === "hub-plan-event" && hubPlanTimeline ? (
+        <div className="min-w-0 py-0.5">
+          <PlanActionCard
+            event={row.event}
+            currentPlan={hubPlanTimeline.snapshot}
+            latestTimelineEventSequence={latestHubPlanTimelineEventSequence}
+            connected={hubPlanTimeline.connected}
+            onAction={hubPlanTimeline.onAction}
+            onBeginInputReply={hubPlanTimeline.onBeginInputReply}
+            onOpenThread={hubPlanTimeline.onOpenThread}
+          />
+        </div>
+      ) : null}
 
       {row.kind === "inline-visual" && threadId ? (
         <>

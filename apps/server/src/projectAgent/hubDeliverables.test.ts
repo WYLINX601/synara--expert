@@ -13,7 +13,7 @@ import {
 } from "@synara/contracts";
 import { Effect, Layer } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ServerConfig } from "../config.ts";
 import { GitCore } from "../git/Services/GitCore.ts";
@@ -28,6 +28,11 @@ import {
 } from "./hubDeliverables.ts";
 import { commitLibraryChange } from "./libraryGit.ts";
 
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  return { ...actual, realpath: vi.fn(actual.realpath) };
+});
+
 const HUB_A = ProjectId.makeUnsafe("hub-deliverables-a");
 const HUB_B = ProjectId.makeUnsafe("hub-deliverables-b");
 const WORKER_A = ThreadId.makeUnsafe("hub-worker-a");
@@ -35,6 +40,9 @@ const WORKER_B = ThreadId.makeUnsafe("hub-worker-b");
 
 const directories: string[] = [];
 afterEach(async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  vi.mocked(fs.realpath).mockReset();
+  vi.mocked(fs.realpath).mockImplementation(actual.realpath as typeof fs.realpath);
   await Promise.all(
     directories.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })),
   );
@@ -816,6 +824,82 @@ describe("Hub deliverables service", () => {
           ),
         );
         assert.equal(failure(wrongHubScope).code, "unavailable");
+      }),
+    );
+  });
+
+  it.each(["file", "parent"] as const)(
+    "rejects a %s replaced by an outside symlink after source containment validation",
+    async (replacement) => {
+      const harness = await makeHarness();
+      const workspace = harness.workspaces.get(WORKER_A)!;
+      await writeWorkspaceFiles(harness, WORKER_A, { "docs/plan.md": "public bytes" });
+      const outsideDirectory = path.join(harness.root, "private");
+      const outsideFile = path.join(outsideDirectory, "plan.md");
+      await fs.mkdir(outsideDirectory);
+      await fs.writeFile(outsideFile, "secret bytes");
+      // The source resolver canonicalizes the worker root (for example /var to
+      // /private/var on macOS), so inject the race at that same canonical path.
+      const source = path.join(await fs.realpath(workspace), "docs", "plan.md");
+      const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+      let replaced = false;
+      vi.mocked(fs.realpath).mockImplementation((async (...args) => {
+        const encoding = typeof args[1] === "string" ? args[1] : args[1]?.encoding;
+        const resolved =
+          encoding === "buffer"
+            ? await actual.realpath(args[0], "buffer")
+            : await actual.realpath(args[0], { encoding });
+        if (args[0] === source && !replaced) {
+          replaced = true;
+          if (replacement === "file") {
+            await fs.unlink(source);
+            await fs.symlink(outsideFile, source);
+          } else {
+            await fs.rename(path.dirname(source), path.join(workspace, "original-docs"));
+            await fs.symlink(outsideDirectory, path.dirname(source), "dir");
+          }
+        }
+        return resolved;
+      }) as typeof fs.realpath);
+
+      await run(
+        Effect.gen(function* () {
+          const service = yield* makeService(harness);
+          const result = yield* Effect.result(
+            service.publish(
+              workerIdentity(),
+              publishInput("source-race", 0, [{ path: "docs/plan.md" }]),
+            ),
+          );
+          assert.ok(replaced, "The replacement must occur at the source validation boundary.");
+          assert.equal(
+            result._tag,
+            "Failure",
+            "An outside file must never become a Hub deliverable.",
+          );
+          assert.equal((yield* service.list(userIdentity(), {})).length, 0);
+        }),
+      );
+    },
+  );
+
+  it("continues to publish a stable symlink whose target stays inside the worker workspace", async () => {
+    const harness = await makeHarness();
+    await writeWorkspaceFiles(harness, WORKER_A, { "docs/plan.md": "in-scope bytes" });
+    const workspace = harness.workspaces.get(WORKER_A)!;
+    await fs.symlink(path.join(workspace, "docs", "plan.md"), path.join(workspace, "alias.md"));
+    await run(
+      Effect.gen(function* () {
+        const service = yield* makeService(harness);
+        yield* service.publish(
+          workerIdentity(),
+          publishInput("inside-link", 0, [{ path: "alias.md" }]),
+        );
+        const result = yield* service.read(userIdentity(), {
+          ownerThreadId: WORKER_A,
+          path: "alias.md",
+        });
+        assert.deepEqual(result.content, { encoding: "utf-8", text: "in-scope bytes" });
       }),
     );
   });

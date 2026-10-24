@@ -1,0 +1,331 @@
+# Synara 代码与 Hub V0.8 技术方案审计报告
+
+审计日期：2026-10-23。对象：[WYLINX601/synara--expert](https://github.com/WYLINX601/synara--expert)。
+
+源码固定基线：`93c751172091495c3b26991b92624cd6571a92fb`。方案对象：用户提供的《Hub 专家团与协作 Graph 技术方案 V0.8》，日期 2026-10-22，文档自述为“技术评审提案，尚未实施”。本文的源码行号均指原始基线，修复后的行号会变化。
+
+## 1. 审计结论
+
+当前代码存在可以复现的数据一致性、异步状态和安全问题，建议在继续实现 managed 协作计划之前优先修复。最重要的发现是：任务行与依赖边可能部分提交；SQLite CAS 会误报冲突；暂停或归档可能在外部动作失败后返回成功；成果发布存在检查后读取的竞态；MCP 自动重定向会转发自定义凭据；两种 TOML 解析依赖可分别造成原型污染与同步死循环。
+
+本次已形成完整源码修复候选、补丁和回归证据。修复范围包括持久化、Hub 生命周期、成果读取、MCP 客户端、技能包读取并发、前端请求隔离及 TOML 依赖。没有把 V0.8 新业务模块冒充成已实现功能。现有停止操作的持久补偿、其他依赖安全公告及真实 Provider 的停止与恢复仍是发布前需要处理的事项。
+
+### 范围与证据强度
+
+- 对仓库结构、契约、入口、依赖和规范进行扫描，重点深审 Hub / Goal / Task / HubWork、成果库、Expert / Skill / MCP、前端 Hook 与 V0.8 的相关接缝。仓库约 9,526 个跟踪文件，其中约 4,351 个 TS / TSX 文件；这不是对每个文件逐行审计的声明。
+- 结论区分“应用路径已复现”“代码可直接确定”“版本命中但尚未验证可利用”和“未来方案需要澄清”。依赖公告数量不等于项目中可利用漏洞数量。
+- 回归使用真实 SQLite、受控异步交错、临时目录、两个本地 HTTP 服务和真实 Chromium。Provider、远端 MCP 生产服务及真实用户数据库未用于测试。
+- P1 表示应优先阻断发布的数据、凭据或核心运行风险；P2 表示重要的正确性、可用性或规模问题。这是本项目修复优先级，不替代公告的 CVSS 等级。
+
+## 2. 已确认问题及修复清单
+
+| 编号 | 优先级 | 问题与影响 | 原始位置 | 本次处理 |
+| --- | --- | --- | --- | --- |
+| F01 | P1 | `RETURNING changes()` 误读前一条 DML 的变化数，已执行的更新被报为 revision 冲突 | [ProjectAgentRepository.ts:380–398、443–459][repository] | 改为 `RETURNING 1 AS changed` |
+| F02 | P1 | Task 行、revision、依赖边非原子保存，失败后残留部分数据 | [ProjectAgentRepository.ts:958–993][repository] | 在共享 SqlClient 上包裹事务；入口拒绝重复依赖 |
+| F03 | P2 | 两个 Task 并发各自加依赖，可共同形成环 | [ProjectAgentService.ts:4601–4734][service] | 同 Hub 锁覆盖图校验与保存 |
+| F04 | P1 | Hub 暂停、归档、取消归档吞掉线程命令失败；保存成功回执后无法正确补做 | [ProjectAgentService.ts:2262–2280、3765–4030][service] | 失败向上传播、不写成功回执；按实际线程状态重试 |
+| F05 | P2 | 停止 Goal 只遍历前 100 条任务，较老 Worker 漏中断 | [ProjectAgentService.ts:7093–7115][service] | 按 `createdAt + id` 游标读完全部页 |
+| F06 | P2 | 依赖解锁只扫描最新 100 条任务，较老后继不能由该完成事件自动转为就绪 | [ProjectAgentService.ts:7006–7037][service] | 从完整依赖边定位直接后继，再读取任务 |
+| F07 | P2 | `stopped → paused → active` 绕过 Goal 终态 | [ProjectAgentService.ts:7069–7073][service] | 拒绝 stopped 到任何非 stopped 状态 |
+| F08 | P1 | 成果文件在路径校验后被替换，可把工作区外字节纳入成果 | [hubDeliverables.ts:769–795][deliverables] | 文件描述符读取、身份复核、硬字节上限及关闭句柄 |
+| F09 | P1 | MCP HTTP 307 / 308 重定向泄露自定义凭据和请求体 | [ExpertMcpClient.ts:178–196][mcp-client] | transport 的 fetch 强制 `redirect: "error"` |
+| F10 | P1 | `toml@3.0.0` 在 MCP 配置导入入口污染 `Object.prototype` | [McpConfigSource.ts:12–13、315–326][mcp-source] | 更新到 `toml@5.0.1`，加入应用入口回归 |
+| F11 | P1 | `smol-toml@1.7.0` 解析极短异常文本陷入死循环，阻塞事件循环 | [codexTextGenerationIsolation.ts:308][codex-isolation] / [codexProcessEnv.ts:262][codex-env] | 更新到 `smol-toml@1.9.0`，子进程超时回归 |
+| F12 | P2 | 技能列表无界并发读取、校验全部包，瞬时内存和 I/O 随版本数增长 | [SkillPackageStore.ts:848–856][skills] | 按稳定顺序逐包验证，保留完整性检查 |
+| F13 | P2 | 迟到列表覆盖读取期间收到的新任务、文档等实时事件 | [useProjectAgent.ts:90–105、225–234][hook] | 按接收顺序重放读取期间的事件，并保护可用 revision |
+| F14 | P2 | 重连只恢复 overview，任务、文档、活动和成员列表保持旧状态 | [useProjectAgent.ts:169–171][hook] | snapshot 后重新获取相关列表 |
+| F15 | P2 | 前端仅读取默认前 50 条任务，丢失较老任务及线程映射 | [useProjectAgent.ts:95–101][hook] | 消费 nextCursor，拒绝不前进的游标 |
+| F16 | P2 | disable、换 Hub、A→B→A 的迟到响应串扰；并发操作使 busy 锁死或提前清除 | [useProjectAgent.ts:74–75、152–157、299–310][hook] | 每次生命周期独立 scope，mutation 在途计数 |
+| F17 | P2（测试） | 隔离测试只等 activity 写入，就断言另一异步命令产生的 session.lastError，导致间歇性失败 | [ProviderCommandReactor.test.ts:7821–7842][reactor-test] | 等待同一既有 session 条件，保留原断言与超时 |
+
+### F01–F03：持久化与并发
+
+**CAS 误报不是普通版本冲突。** SQLite 的 `changes()` 表示同连接上最近已完成的 INSERT / UPDATE / DELETE 的变化数。在当前 UPDATE 的 RETURNING 表达式中，它不能作为当前行是否更新的可靠判据。本次用“上一条 DELETE 命中 0 行，随后以正确 revision 更新”的真实 SQLite 场景复现了误报。[SQLite 官方语义][sqlite-changes]
+
+修复保留 `WHERE id = ? AND revision = ?`，每个实际修改行固定返回 1，由是否得到返回行判断 CAS。对同仓库其他 `RETURNING changes()` 的使用进行了区分：AutomationRepository 判断的是返回行数，不消费 `changed` 数字，不能仅按文本相同就判为同一 Bug。
+
+**任务保存需要以一组事实为单位提交。** 原实现先 insert / update Task，再删除旧依赖、逐条插入新依赖。输入两个相同依赖 ID 时，第二条边触发唯一约束，但任务行、revision 或前一条边已经落库。新代码用 `sql.withTransaction` 包住完整保存，同时在服务入口拒绝重复 ID。事务不是依靠“调用方通常会包一层”的假设。
+
+**行级 CAS 不保护整个 DAG。** A 和 B 分别读取旧图，同时提交 A→B 与 B→A；它们更新不同的行，因此两个 revision 条件都可成功。本次用受控异步交错和真实数据库复现。修复只对 `updateTask` 的图校验与提交使用已有项目锁，不对所有入口随意加锁，以避免内部事务再申请项目锁造成锁顺序反转。当前保证范围是同一服务实例；若未来多个进程共享写入数据库，需要把该并发协议升级为数据库层可强制的事务规则。
+
+### F04–F07：生命周期、完整集合与状态机
+
+暂停是两个动作：先阻止新的工作准入，再请求在途线程停止。原实现写入 pausedAt 后吞掉 interrupt 错误，并记录成功回执。同 requestId 再来时只能读到成功，无法补做停止。
+
+本次让暂停、归档及取消归档的线程命令失败显式返回；未完成时不写成功回执；即便 Hub 控制字段已经改过，也会重查线程状态，补做尚未完成的动作。归档命令本身不是幂等操作，因此重试前还需跳过已到目标状态的 Coordinator、成员或被父线程级联改变的子线程。
+
+该修复不把 `pausedAt` 解释为“Provider 已确认停止”。没有新增持久 outbox、pausing 状态或跨重启补偿。**`stopGoal` 内部的 interrupt 错误仍有吞掉路径，这是明确的剩余问题，详见第 4 节。**
+
+停止和依赖解锁中的 `limit: 100` 属于业务完整性问题。停止分支应完整遍历当前 Goal 中未归档、已分配线程且非 done / cancelled 的任务；依赖解锁应检查所有未归档且为 planned / blocked 的直接后继。新增同时间戳分页场景，避免只用 createdAt 游标时跳过同一时刻创建的记录。
+
+Goal 终态修复针对服务状态转换本身。旧代码只拒绝 stopped→active，先 pause 再 resume 可以绕过。此次拒绝 stopped 的所有非终态迁移。服务层测试包括 user 和 Coordinator principal；当前 Agent Gateway 并未暴露任意 Goal pause / resume 工具，因此不将它描述为已证实的远程 Agent 越权攻击。
+
+### F08：成果读取竞态
+
+原流程先 `realpath` 检查源路径位于工作区内，再 `stat`，最后按路径 `readFile`。能修改源文件或父目录的 Worker 或同权限进程若在检查后把文件或父目录换成符号链接，读取会跟随新目标。只比较读取前后的字节数无法拦住同尺寸替换。本次通过真实成果发布入口复现了文件替换和父目录替换两条路径。
+
+新读取过程固定文件描述符，并比较 dev / ino / size / mtime / ctime；POSIX 使用 O_NOFOLLOW / O_NONBLOCK，读取最多为已验证大小加一个哨兵字节，读取后再次核对路径和文件身份，finally 关闭句柄。合法且稳定的工作区内符号链接仍可使用。读取字节上限和 finally 关闭句柄已做代码核验；本轮未单独编写文件持续增长和句柄关闭的故障注入测试。
+
+这些测试证明修复阻断了已复现路径，不是对所有文件系统竞态的形式证明。Windows reparse point 和跨平台文件系统行为仍需专项测试。若安全边界要求抵御能够持续修改整个目录树的同 UID 恶意进程，应使用操作系统提供的目录句柄约束打开能力或更强的进程权限隔离，不能仅把多次路径检查当作沙箱。目标成果库写入路径还有检查后写入的结构，本次没有复现可利用链，因此列为后续核验项，不与已复现源读取漏洞混记。
+
+### F09：MCP 重定向泄露
+
+锁定的 `@modelcontextprotocol/sdk@1.29.0` 默认跟随重定向。测试中本地 MCP 服务返回 307 / 308 后，另一 origin 收到 `X-API-Key`；POST 还携带 initialize JSON-RPC 请求体。SSE GET 同样泄露自定义凭据。该行为与维护者的 [GHSA-6prh-2h8m-c8cw][mcp-advisory] 一致；不能据此泛称所有运行时都会跨站转发 Authorization，现代 fetch 对它有另外的处理。
+
+修复放在 transport 的 fetch 注入点，覆盖 POST、GET 与其他请求。只写 `requestInit.redirect` 不够，因为该 SDK 的 SSE GET 没有使用该设置。回归包含 POST / SSE GET × 307 / 308 四种情况，修复后第二个服务收到 0 个请求。
+
+兼容变化：该客户端拒绝所有自动跳转，包含同 origin 跳转；配置应填写最终 MCP endpoint。这里只针对实际使用路径加防护，没有声称消除了 SDK 的全部公告。后续仍应评估升级 SDK 至覆盖全部相关公告的版本。
+
+### F10–F11：TOML 解析依赖
+
+两项均通过真实应用入口核验，而非只比较包版本。
+
+- `readMcpSourceEntries` 读取特制本地 / 导入 Codex 配置后，后续普通对象继承了注入的属性。导入结果过滤发生在 parse 之后，1 MiB 文件上限无法阻止短文本原型污染。[维护者公告][toml-pollution]
+- `buildCodexTextGenerationConfig` 处理畸形数组注释文本后不返回，外部子进程超时才能终止。同步解析的死循环不能由普通 try/catch 或包裹 Promise 的超时恢复。[维护者公告][smol-dos]
+
+入口要求受影响的本地文件或被用户导入的配置；本次没有证实未认证远程攻击或 RCE。针对这两种直接解析入口，修复选择 `toml@5.0.1` 与 `smol-toml@1.9.0`，也覆盖同一轮审计命中的递归、长整数、表数组和键解析复杂度公告，不只升到最早修复上述两个样例的版本。Effect 保留的旧传递依赖见第 4.2 节。[smol-toml 复杂度修复][smol-quadratic]
+
+两包均无新增运行时子依赖。保留现有 parse / stringify 接口。toml 新版本默认拒绝超安全整数，避免旧行为中的静默舍入；应用没有启用 bigint 选项，因此不会主动引入 BigInt 到 JSON 摘要中。新增子进程回归避免漏洞复发时挂死测试运行器。
+
+### F12：技能列表的资源消耗
+
+包读取会读取并校验文件内容。单包上限可到 100 MiB，而原列表通过 Promise.all 同时读取所有历史包。单包上限不能限制整个列表调用的在途内存。回归用两个实际导入包观测并发：旧实现峰值 2，修复后峰值 1；篡改内容仍会返回 package_corrupt。
+
+本次采用串行验证，降低峰值资源占用，代价是大列表的总耗时可能增加。没有做 RSS / OOM 压测，因此不报告虚构的内存降幅。后续可以设计有界并发或带完整性证明的清单索引；不建议为了速度长期缓存“曾经校验通过”的内容而忽略磁盘后续变化。
+
+### F13–F16：前端异步一致性
+
+旧 Hook 对列表加载、事件更新、项目切换和 mutation 分别使用不同守卫，造成多种竞态。修复以请求 scope 隔离生命周期；列表读取期间记录事件，在列表落地后重放，并对可用实体 revision 做保护。重连 snapshot 重新补读列表；任务读完所有页；切换与关闭会失效旧请求；busy 由当前 scope 内在途操作数决定。
+
+任务分页不是显示偏好。ProjectPanel 使用 `agent.tasks` 构造 `taskByThreadId` 和成员线程集合，遗漏历史页会影响关联功能。[ProjectPanel.ts:175–183、266–270][panel]
+
+新增 8 个回归在临时 React Hook 适配环境中验证了修复前全部失败、修复后全部通过；随后使用真实 Chromium 153.0.0 执行包含原有 3 个 DOM 场景的完整 Hook browser 文件，11 个测试通过。RPC 是测试替身，这不是实际 Provider / WebSocket 端到端验证。没有修改产品布局、可见文案或新增 UI 交互。
+
+### F17：既有回归测试的同步条件
+
+完整回归发现一个隔离测试在 `session.lastError` 为 null 时断言失败。生产路径先提交失败 activity，再经过线程与 Provider 查询，提交 session 错误；前一个 activity 可见并不保证后一个命令已经完成。[ProviderCommandReactor.ts:8065–8078、1630–1673][reactor]
+
+独立原始 HEAD 配合原始 toml 3.0.0 / smol-toml 1.7.0，对同一用例出现一次通过、一次相同断言失败，确认原有测试的调度敏感同步缺口。此次仅在测试中用既有 waitFor 等待同一摘要条件，再执行原 expect；没有改变生产逻辑、默认 2 秒超时、后续重启或 replay 流程。修正后 live / restart 两个分支通过。同批另一个独立线程调度用例仍有超时，见第 4.4 节。
+
+## 3. 安全审查：已核实防线与误报控制
+
+以下结果仅覆盖本次检查的路径，不是全仓安全认证。
+
+| 检查项 | 核实结果 | 结论 |
+| --- | --- | --- |
+| SQL 注入 | 相关仓储使用 SqlClient 参数化插值；确认的 CAS 问题是计数语义，不是拼接注入 | 未确认相关入口存在 SQL 注入 |
+| XSS | ChatMarkdown 的 authored HTML 路径使用 `rehype-sanitize` 及显式 schema | 不能仅看到 raw HTML 插件就判为 XSS；本轮未复现绕过 |
+| CSRF / WebSocket Origin | 存在会话认证和 trusted origin 检查；聚焦认证测试通过 | 不将“有本地 WebSocket”直接视为未授权访问 |
+| Expert / Skill / MCP 管理 | `requireLoopbackOwner` 与 workbench expert RPC 的 owner 检查已存在 | 未确认这些管理入口可被普通未认证请求调用 |
+| Worker 身份 | 成果发布经认证 Gateway 解析身份，不能单靠工具参数声称自己是其他 Worker | 保留现有身份校验 |
+| 技能完整性 | 不可变包、摘要、导入前后验证及数量 / 大小限制已存在 | 本次修复并发资源消耗时保留这些校验 |
+| 敏感信息 | 对重点目录常见凭据格式的扫描未发现可确认的硬编码密钥 | 不等于完整历史 secret scan，不输出或虚构凭据 |
+
+证据：[WS owner 接缝][ws-owner]、[Expert RPC][expert-rpc]、[trustedOrigins.ts][origins]、[ChatMarkdown.tsx][markdown]。
+
+## 4. 尚未关闭的风险
+
+### 4.1 stopGoal 的中断补偿仍需持久机制
+
+虽然已修复超过 100 条任务的漏处理，`updateGoalStatus` 的停止分支仍会捕获并忽略线程中断命令的 dispatch 错误。Goal 写成 stopped 不能证明在途外部副作用已停止。[原始停止分支][service]
+
+不能简单让每次 stopped 重试都中断当前 Coordinator：同一 Hub 可能已经启动新的 Goal，共享线程已承载新工作，旧停止请求会误伤它。可靠修复需要持久 operation / admission generation、目标 turn / attempt 绑定、稳定命令 ID 和重启后的对账。V0.8 已提出中断 outbox 与 pausing / cancelling，应把它当 T2 必须交付的能力。此次候选不新增 schema 以假装完成这套协议。
+
+### 4.2 依赖公告仍未清零
+
+原始 `bun audit --json` 命中 39 个包、173 条“包—公告”记录，按 GHSA 去重为 154 条：critical 10、high 66、moderate 60、low 18。这些数字包含开发工具、marketing 子应用和条件性受影响路径，**不能读成 154 个已证实的可利用漏洞**。
+
+本次只升级了已通过真实应用入口复现的 TOML 直接依赖，并在实际 MCP 客户端入口阻断自动跳转。升级后的审计仍命中 38 个包、171 条包—公告记录，GHSA 去重 152 条：critical 10、high 65、moderate 59、low 18。实际消失的是 smol-toml 的两项公告。
+
+`toml` 的五项公告仍保留：Effect 的既有约束是 `toml: ^3.0.0`，直接依赖升级后，锁文件把旧版单列为 `effect/toml@3.0.0`。应用的 MCP 导入入口已解析到 5.0.1；Effect 内部的 CLI Primitive 仍使用旧包，本轮未找到应用选择 TOML CLI 格式的调用。没有强制覆盖传递依赖的 major 约束来让扫描数字清零。其他依赖应按功能可达性分批升级验证。
+
+| 后续优先项 | 事实与需要核验的条件 | 建议 |
+| --- | --- | --- |
+| Electron 43.4.1 | 命中 sandboxed preload cache 公告；桌面内嵌浏览器可加载外部内容并使用 sandbox/preload。公告以已被攻陷的 renderer 为前提，本次未构造完整利用链 | 根据该版本线全部公告选修复版本，做三平台桌面回归；不能只依靠应用侧 workaround |
+| Next 16.3.0（marketing） | 多项条件性公告，源码确有 next/image；是否满足图像格式、部署平台、sharp 版本、OG / cache 等条件需分别判断 | 部署 marketing 前核对实际构建依赖和启用功能，升级并做构建与请求回归 |
+| MCP SDK 1.29.0 | 重定向路径已加防护；Expert 客户端未启用 SDK OAuth，但 mcpConnectors 使用 auth 和直接 refresh，issuer 绑定仍需核验（[OAuth 官方公告][mcp-oauth]）；未找到生产 SDK server / taskStore / bearer helper 触发点 | 升级并核对旧凭据、预注册 client 的 issuer 迁移与直接 refresh；不能把局部 wrapper 当作整个 SDK 已修复 |
+| Effect 的 toml 3.0.0 | 旧传递依赖仍有五项公告；已找到 CLI Primitive 中的库调用，未找到应用使用该 TOML 格式的入口 | 在确认 Effect 兼容性和实际可达性后升级或替换；保留风险登记 |
+| 其他工具和间接依赖 | 原始审计包含测试 / 构建工具及传递依赖 | 按运行时可达性、开发服务器暴露面和发布产物分别排期 |
+
+Electron 公告官网在 43.x 线上列出 43.4.2 修复 preload cache 问题，而此次 registry 审计范围写到 `<43.5.0`，两者元数据存在差异；本文不把 registry 范围机械当作维护者结论。且同一 Electron 版本还命中其他公告，升级目标应覆盖它们，不能仅选这一个最早补丁。[Electron 官方公告][electron-advisory]
+
+Next SVG 图像公告还给出升级 sharp 的条件性缓解，是否适用应基于实际解析依赖确认。本文没有在未复现应用利用的情况下把公告的 RCE 标题等同于已取得项目远程执行能力。[Next 官方公告][next-advisory]
+
+### 4.3 验证边界
+
+未进行真实 Provider 端到端运行、真实模型收费调用、Windows / macOS 文件系统与进程停止验证、大数据量压测、生产数据库升级恢复演练。当前补丁未新增迁移，迁移校验通过不等于已经演练 V0.8 新表的升级恢复。
+
+### 4.4 独立线程调度测试仍有未关闭的稳定性风险
+
+`starts an unrelated thread while another thread's message checkpoint is blocked` 在完整运行中超时，随后单独定向补跑通过，在最后三例组合补跑中又超时。错误指向公共 waitFor helper，尚不能确定是哪个等待点或具体原因。用例含阻塞 checkpoint、大量 progress / intent 与独立线程派发，需继续核验其调度行为及测试同步。
+
+该用例使用 Hub Service / Repository 的测试替身，实际调度模块未被本次修改；此次 F17 的 6 行修正也只位于另一个参数化用例内。这支持“尚无证据表明由 Hub 修复引入”，但不构成将该失败归为环境误报的证明。它仍是发布前必须关闭的验证事项，相关失败与通过日志均已保留，没有通过扩大超时或跳过测试来消除结果。
+
+## 5. 性能优化与可读性
+
+### 已修复的性能问题
+
+技能包列表的无界并发已改为有界读取。任务查全与依赖查全修复了错误，但增加了大 Hub 的数据读取量；后续应以业务所需索引替代“前端始终加载所有历史对象”，并保留完整的线程关系查询。
+
+### 建议纳入后续优化
+
+| 项目 | 证据与复杂度 | 改进建议 | 验证指标 |
+| --- | --- | --- | --- |
+| SkillPicker 候选描述 | `SkillPicker.tsx:180–211` 在遍历 catalog 时反复 find，构造过程 O(N²) | 预建 Map，以稳定键查描述；memo 依赖保持清晰 | 1k / 10k 项时构造耗时、交互长任务 |
+| Hub 周期对账 | AgentGateway 约每秒触发一次；gateway / service 扫描 Hub、历史 Work、线程和回执 | 活跃项索引、事件触发局部对账、低频全量兜底 | 空闲 CPU、每轮 SQL 数、历史增长后的 p95 |
+| Library 目录加载 | 客户端 Promise.all 请求目录，服务端按 root 串行，可能形成排队 | 按需展开，复用有界加载；只刷新受影响目录 | 排队长度、RPC 超时率、首屏耗时 |
+| 历史关系查询 | 全量 Task 用于线程映射会随历史增长 | 服务端提供完整而窄的 thread-task 索引，展示列表独立分页 | 返回字节数、加载页数、关联完整性 |
+
+这些优化建议来自静态复杂度与调用路径分析，没有基准压测，不虚报收益百分比。[SkillPicker][skill-picker]、[目录 Hook][group-library]、[HubWork gateway][hub-gateway]、[HubWork service][hub-service]
+
+### Clean Code 与规范
+
+项目使用 TypeScript / React / Effect，实际门禁是 oxfmt、oxlint、TypeScript 与 Vitest，PEP 8 不适用。整体已有清晰的契约类型、分层仓储、认证接缝和大量测试，不能笼统说“没有规范”。主要维护问题是：
+
+1. ProjectAgentService 同时承担权限、图变更、生命周期、文件系统协调、活动与回执，函数体过大。建议按 TaskGraphCommands、HubLifecycleCommands、GoalCommands 拆分内部模块，保留单一公共契约和共享事务 / 锁所有权，避免拆出第二套状态源。
+2. 外部动作失败、业务冲突和重试结果应有统一错误类型与 operation 标识。随处 `catch(() => void)` 让调用方无法判断“控制字段已写”还是“副作用已完成”。
+3. 全量业务集合不应使用看似合理的常量分页上限。封装 `iterateAllTasks` 或专用关系查询，让调用方显式选择列表页与完整业务集合。
+4. 前端读取与事件更新规则应集中。此次抽出无 RPC 副作用的事件应用逻辑，让正常订阅与读取后重放共用同一规则。
+5. 批量清理 lint 警告应独立提交。不要为审计补丁把数百处既有风格差异混入关键安全和事务改动。
+
+## 6. 对 Hub V0.8 方案的评审
+
+### 6.1 建议保留的架构决策
+
+复用原生 Task、Attempt、HubWork 和成果库；阶段出口有独立证据；一份已确认计划对应一个 Goal；首期保留单活跃计划；所有执行路径共享服务端准入；把数据库事实、外部副作用与 UI 投影分开。这些决策直接回应本次实际发现的事务、状态与恢复问题。
+
+V0.8 已明确 Task.done、用户阶段放行、Provider 工具审批是三种动作，并已提出 outbox、最终准入复核、revision / generation 和重放。不能把这些已写明的规则再次列作“方案完全缺失”。需要补充的是可执行的字段、约束和顺序。
+
+### 6.2 实施前必须写清的七条规则
+
+| 规则 | 需要落实或澄清的内容 | 建议补充 |
+| --- | --- | --- |
+| 事件序号的所有权 | §5 把 eventSequence 放在 hub_plans，§11 同时要求 Hub 内唯一递增；尚未明确计划行字段是 Hub 水位镜像还是序号分配源，且多草稿已允许并发 | 由 Hub 级 cursor 行在同一事务分配；唯一约束 `(hubId, sequence)`；snapshot 水位使用同一空间 |
+| 按计划过滤后的 gap | §12 按 plan 隔离缓存，但未明确服务端 feed 范围；若订阅 / 重放按 plan 过滤，再检查 Hub sequence，就会出现其他计划造成的合法间隔 | 明确 feed 范围与水位；可用全 Hub feed 后客户端过滤，或携带过滤后的前序 cursor；不能直接把数字不连续认作丢失 |
+| 全局命令的幂等域 | §7 的 team.save / archive 可以没有 hubId，但统一按 `(hubId, requestId)` 去重 | 使用 owner + 聚合类型 + 稳定聚合 scope + requestId；新建预设也需稳定创建域 |
+| 作者数量 | §14 T2 已规定单作者单审核，需要把文字约束落实为可验证契约，并明确 T3 并行审核是否继续保持单作者 | confirm / schema 校验每阶段 author 基数；只有后续开放多作者时，才扩展 Candidate 的 attempt 集合及聚合规则 |
+| carry-forward 字段迁移 | §10 已要求显式绑定并保留 originRevision；仍需明确新有效版本、授权代次的字段映射与在途迁移顺序 | 明确 originRevision 不变、effectiveRevision / 授权代次 / task binding 的更新表；分别定义在途、完成和待派发 |
+| 用户决定的威胁边界 | owner session 证明权限，未必证明真人；全权限 Agent 若可读取 owner 凭据或控制 UI，单纯不暴露工具不够 | 明确防御对象；若要隔离 Agent 与真人批准，需要凭据、进程或可信确认通道隔离 |
+| 鉴权与幂等次序、敏感载荷 | “幂等先于 CAS”正确，但仍需先校验当前可见性与权限；回执、事件、outbox 可能保存外部错误或输入 | 明确认证→当前权限/回执可见性→幂等→CAS；绑定原 principal；白名单字段、大小上限、摘要/引用和保留策略 |
+
+### 6.3 T2 的最低验收门槛
+
+- 同时批准 / 退回只能形成一个有效决定；同 requestId 同内容重放、不同内容冲突。
+- 同一业务命令涉及的任务提交、依赖、授权版本、决定、事件和 outbox 在一个共享事务内提交；中途失败全部回滚，事务不跨网络调用。
+- 批准与暂停并发时，最终 admission 以同一控制边界排序；已经发出的 Provider 命令按在途处理。
+- 创建线程后落库失败，先按原 workItem / attempt / dispatchKey 对账，不换 ID 重新启动。
+- 旧 candidate / generation 的结果只写历史；旧 UI 卡片不能批准新候选。
+- 服务重启先恢复原生执行事实，再处理 outbox 与 hold，最后开放新派发。
+- 真实 Provider 完整跑通一次作者→审核→人工放行→下游，并验证停止失败和重启；只用单元测试不能替代。
+
+这些是对用户方案的评审建议，本次交付没有实现 Graph、新计划表、人工批准命令或 outbox。
+
+## 7. 验证记录
+
+<!-- FINAL_VALIDATION_START -->
+**整体测试门禁没有全绿。** 完整工作区命令退出码为 1：Web 发生堆内存不足，Server 有失败；后续补验关闭了若干环境缺口并修正一个测试同步问题，但仍有系统环境限制和第 4.4 节的调度验证风险。
+
+本次完整工作区回归使用 `bun run test --concurrency=1 --continue`，让各工作区顺序执行并保留全部失败结果。以下聚焦回归和静态检查已经完成；各项计数不是同一套测试的可直接相加总数。
+
+| 验证项 | 已完成结果 | 说明 |
+| --- | --- | --- |
+| 格式检查 | 通过，5,002 个文件 | `fmt-final.log` |
+| lint 与服务端同步文件 I/O 预算 | 0 错误、1,040 条警告；预算检查通过 | 保留警告，没有为通过检查关闭规则 |
+| TypeScript | 7 / 7 工作区任务通过；最后 6 行测试修正后 Server 再次通过 | `typecheck-verified.log`、`server-typecheck-after-test-sync.log`；包括 desktop fixtures 和 scripts 子项目 |
+| Workbench 边界 | 通过，66 个源文件 | `boundaries-final.log` |
+| 迁移历史校验 | 通过 | 本次没有修改迁移文件 |
+| Repository + Hub Service 聚焦回归 | 20 + 115 = 135 / 135 通过 | 11 个新增回归在旧实现上先失败、修复后通过；这 135 项在完整回归中也再次通过 |
+| SkillPackageStore + 成果发布 | 47 + 19 = 66 / 66 通过 | 成果测试最后的 spy 类型修正后，19 项再次通过 |
+| Expert MCP HTTP | 14 / 14 通过 | 新增 4 项覆盖 POST / SSE GET 与 307 / 308；旧实现全部复现泄漏 |
+| TOML 相关四文件 | 96 / 97 通过，新增 5 项均通过 | 唯一失败是既有的目录写权限预期，见下文 |
+| Hook Chromium browser | 11 / 11 通过 | 包含新增 8 个竞态回归；RPC 使用测试替身 |
+| node-pty 环境恢复后补验 | 2 文件 / 17 用例通过 | 精确恢复锁定 1.1.0 的原生构件，重新运行 providerAuthentication 与 NodePTY；未改变源码、依赖版本或断言 |
+| Provider 隔离测试同步修正 | live / restart 两分支通过 | 同一批运行的 unrelated checkpoint 用例失败，因此该三例命令整体退出码仍为 1 |
+| Web 单元测试与 compiler 补验 | 合并覆盖 476 个通过文件、5,563 个通过用例；3 文件 / 3 用例跳过 | 首次完整命令 exit 1，不能记成一次全量通过，见下文 |
+| Shared | 104 文件通过；1,112 用例通过、4 跳过 | 完整工作区回归结果 |
+| Contracts | 29 文件 / 245 用例通过 | 完整工作区回归结果 |
+| Server 完整运行 | 613 文件通过、8 失败、8 跳过；8,997 用例通过、51 失败、32 跳过 | 原始 gate 失败；分类与定向补验见下文 |
+| Scripts | 43 文件通过、2 跳过；422 用例通过、13 跳过 | 本次完整工作区顺序运行通过 |
+| Desktop | 115 文件通过、3 跳过；1,443 用例通过、7 跳过 | 单元测试通过；不等同于三平台安装包或实际桌面端到端验收 |
+| 补丁应用检查 | 基线索引正向检查与修复目录反向检查均通过 | `patch-application.log`；没有改动索引 |
+
+**Web 的首次失败与补验。** 首次 web gate 完成 475 个测试文件、5,515 个用例，另有 3 个文件 / 3 个用例跳过；`chatHotPath.compiler.test.ts` 的 worker 在默认约 2 GB 堆上限下 OOM，导致该文件 48 个用例未完成，原命令 exit 1。随后只对该文件使用 Node 24.13.1、`NODE_OPTIONS=--max-old-space-size=4096` 和 `--maxWorkers=1` 补跑，48 / 48 通过，exit 0，耗时 186.63 秒。上述合并结果不含另行运行的 11 个 browser 用例，也没有修改源码或测试预期来绕过失败。
+
+**TOML 关联套件的权限前提。** `codexProcessEnv.test.ts` 有一个既有用例通过 `chmod(0500)` 期待 symlink 操作收到 EACCES / EPERM；本环境以 root 运行，操作仍成功，导致该用例失败。将 smol-toml 回退映射到旧版 1.7.0 后，同一单例仍失败，见 `toml-permission-baseline.log`。这是旧依赖对照，不等于完整原始 HEAD 基线已全部运行。非 root 单例尝试未在超时前返回测试结果，因此不记为通过。
+
+**Server 原始 51 个失败的分类及后续状态：**
+
+| 分类 | 原始失败数 | 证据与后续状态 |
+| --- | ---: | --- |
+| CodexTextGeneration 的系统配置前提 | 34 | 32 项直接记录因 `/etc/codex/config.toml` 而主动拒绝隔离运行；另外两项是提前失败及子进程资源清单未生成的连锁断言。对应调用在 TOML 解析前经过未修改的隔离检查。本轮没有在无系统配置的干净环境完成这 34 项 |
+| root 下的权限夹具 | 4 | keybindings、codexProcessEnv、WorkspaceFileSystem、IosSimulatorBackend 分别依赖 chmod 0500 / 0444 阻止写入；root 仍可写。本轮保留失败，没有关闭权限逻辑 |
+| node-pty 原生构件缺失 | 11 | providerAuthentication 10 项、NodePTY 1 项；按原版本离线构建后，两文件全部 17 项通过 |
+| 隔离错误状态的测试同步缺口 | 1 | 原 HEAD 单例也出现一绿一红；补上同一状态条件等待后，live / restart 两分支通过。修改仅 6 行测试代码 |
+| 独立线程调度等待 | 1 | 定向补跑曾通过，随后组合运行再次超时；保留为未关闭风险，见第 4.4 节 |
+| **合计** | **51** | 原始完整 gate 退出码 1；不能以补验结果覆写原始记录 |
+
+最终仍有 38 项尚受上述环境前提限制，以及 1 项独立线程调度的未关闭验证风险。最后增加的测试同步修正已通过文件级格式 / lint 检查（0 错误、5 条原有警告）和 Server 类型检查；没有再重复整个 31 分钟工作区套件。生产修复代码与完整工作区运行时一致。完整运行中的 Contracts、Shared、Scripts、Desktop 均通过，Turbo 汇总为 4 成功 / 6 任务，失败为 Web 与 Server。
+
+复跑完整验收建议使用普通用户、没有外部 Codex 系统配置的隔离环境，并确保 Electron 和 node-pty 原生构件齐备。保留生产隔离检查，再对剩余调度失败做明确的因果定位。
+
+完整源码包内 `_audit/verification/` 保留了失败的基线 / 环境尝试与最终检查日志，使用时应结合本节阅读，不能只依据日志文件名或退出码推断补丁造成的缺陷。
+<!-- FINAL_VALIDATION_END -->
+
+## 8. 完整修复代码与使用方式
+
+完整版本以同批交付的 `synara-fixed-source.zip` 提供。压缩包中的 `synara-fixed-93c7511/` 保留原仓库 9,526 个跟踪文件的完整内容，并叠加本次 18 个文件的修复及测试修改；审计资料单独位于同级 `_audit/`，避免进入源码目录的格式或测试扫描。不包含 `.git`、node_modules、个人数据、凭据或下载的测试运行时。它是可审阅源码候选，不是签名安装包，也不代表完成正式发布验收。
+
+同时提供 `synara-audit-fix.patch`。在基线提交的干净分支上先执行：
+
+```bash
+git apply --check /path/to/synara-audit-fix.patch
+git apply /path/to/synara-audit-fix.patch
+bun install --frozen-lockfile
+bun run fmt:check
+bun run lint
+bun run typecheck
+bun run test
+```
+
+浏览器回归使用仓库的 browser 测试配置，正常开发环境先安装匹配的 Chromium，再执行：
+
+```bash
+bun run --cwd apps/web test:browser:install
+bun run --cwd apps/web test:browser src/components/chat/project/useProjectAgent.browser.tsx
+```
+
+上述重现建议采用仓库固定的 Bun 1.4.2 与 Node 24.13.1。本次验证使用 Bun 1.4.2；最终完整工作区测试和前端编译器补验固定使用 Node 24.13.1，较早的聚焦回归、Chromium 回归及部分静态检查使用 Node 24.19.0。各次运行结果见第 7 节，不能将它们合称为同一环境下的一次全绿运行。完整包内 `_audit/` 目录包含报告、补丁、修改清单、摘要和验证日志；具体采用与发布仍需处理第 4 节剩余项。此次没有向远程仓库推送、创建发布或修改用户生产实例。
+
+## 参考证据
+
+源码链接均固定到本次审计提交。测试日志与回归代码属于本次直接观测证据；下列外部文档用于核实数据库或依赖语义。
+
+[repository]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/persistence/Layers/ProjectAgentRepository.ts
+[service]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/projectAgent/Layers/ProjectAgentService.ts
+[deliverables]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/projectAgent/hubDeliverables.ts
+[mcp-client]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/experts/ExpertMcpClient.ts
+[mcp-source]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/experts/McpConfigSource.ts
+[codex-isolation]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/git/Layers/codexTextGenerationIsolation.ts
+[codex-env]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/codexProcessEnv.ts
+[skills]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/experts/SkillPackageStore.ts
+[hook]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/project/useProjectAgent.ts
+[panel]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/project/ProjectPanel.tsx
+[reactor]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/orchestration/Layers/ProviderCommandReactor.ts
+[reactor-test]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
+[ws-owner]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/wsRpc.ts#L1342-L1376
+[expert-rpc]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/workbench/host/expertRpc.ts
+[origins]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/trustedOrigins.ts
+[markdown]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/ChatMarkdown.tsx#L1658
+[skill-picker]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/settings/SkillPicker.tsx
+[group-library]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/web/src/components/chat/group/useGroupLibrary.ts
+[hub-gateway]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/agentGateway/hubWorkGateway.ts
+[hub-service]: https://github.com/WYLINX601/synara--expert/blob/93c751172091495c3b26991b92624cd6571a92fb/apps/server/src/projectAgent/hubWorkService.ts
+[sqlite-changes]: https://www.sqlite.org/lang_corefunc.html#changes
+[mcp-advisory]: https://github.com/modelcontextprotocol/typescript-sdk/security/advisories/GHSA-6prh-2h8m-c8cw
+[mcp-oauth]: https://github.com/modelcontextprotocol/typescript-sdk/security/advisories/GHSA-6qxp-vccf-f47h
+[toml-pollution]: https://github.com/advisories/GHSA-v5mp-jgw5-2x6j
+[smol-dos]: https://github.com/advisories/GHSA-7w5x-hrqm-74c2
+[smol-quadratic]: https://github.com/advisories/GHSA-r4xh-jqrq-34v2
+[electron-advisory]: https://github.com/electron/electron/security/advisories/GHSA-qmv3-fv6v-rmhq
+[next-advisory]: https://github.com/vercel/next.js/security/advisories/GHSA-2464-fhr4-w9xw

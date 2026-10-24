@@ -1101,4 +1101,103 @@ layer("ProjectAgentRepository", (it) => {
       assert.equal(Option.isNone(missing), true);
     }),
   );
+
+  it.effect("rolls back Task rows and dependencies when dependency replacement fails", () =>
+    Effect.gen(function* () {
+      const repository = yield* ProjectAgentRepository;
+      const fixtureProjectId = ProjectId.makeUnsafe("project-task-atomic-save");
+      const goalId = ProjectGoalId.makeUnsafe("goal-task-atomic-save");
+      yield* repository.saveConfig(
+        {
+          projectId: fixtureProjectId,
+          coordinatorThreadId: ThreadId.makeUnsafe("thread-task-atomic-save"),
+          coordinatorName: "Atomic save test",
+          coordinatorModelSelection: { provider: "codex", model: "test-model" },
+          limits,
+          captureEnabled: true,
+          enabled: true,
+          automationId: null,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+          disabledAt: null,
+        },
+        null,
+      );
+      yield* repository.saveGoal(
+        {
+          id: goalId,
+          projectId: fixtureProjectId,
+          objective: "Task save transaction",
+          authorizationSource: "user",
+          scopeVersion: 1,
+          acceptanceCriteria: null,
+          limits,
+          status: "active",
+          continuationCount: 0,
+          workerCreationCount: 0,
+          authorizedAt: now,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+        },
+        null,
+      );
+      const task = (id: string, dependsOnTaskIds: ProjectTaskId[] = []) => ({
+        id: ProjectTaskId.makeUnsafe(id),
+        projectId: fixtureProjectId,
+        goalId,
+        title: "Original task",
+        description: null,
+        acceptanceCriteria: null,
+        status: "planned" as const,
+        dependsOnTaskIds,
+        assignedThreadId: null,
+        repairCount: 0,
+        archivedAt: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const originalPrerequisite = task("task-atomic-original-prerequisite");
+      const replacementPrerequisite = task("task-atomic-replacement-prerequisite");
+      yield* repository.saveTask(originalPrerequisite, null);
+      yield* repository.saveTask(replacementPrerequisite, null);
+      const original = task("task-atomic-target", [originalPrerequisite.id]);
+      yield* repository.saveTask(original, null);
+
+      const failedUpdate = yield* Effect.exit(
+        repository.saveTask(
+          {
+            ...original,
+            title: "Must roll back",
+            revision: 2,
+            dependsOnTaskIds: [replacementPrerequisite.id, replacementPrerequisite.id],
+          },
+          1,
+        ),
+      );
+      assert.isTrue(Exit.isFailure(failedUpdate));
+      const persisted = Option.getOrThrow(yield* repository.getTask(original.id));
+      assert.strictEqual(persisted.revision, 1);
+      assert.strictEqual(persisted.title, "Original task");
+      assert.deepStrictEqual(persisted.dependsOnTaskIds, [originalPrerequisite.id]);
+
+      const insertId = ProjectTaskId.makeUnsafe("task-atomic-insert");
+      const failedInsert = yield* Effect.exit(
+        repository.saveTask(
+          {
+            ...task(insertId),
+            id: insertId,
+            dependsOnTaskIds: [replacementPrerequisite.id, replacementPrerequisite.id],
+          },
+          null,
+        ),
+      );
+      assert.isTrue(Exit.isFailure(failedInsert));
+      assert.isTrue(Option.isNone(yield* repository.getTask(insertId)));
+      const edges = yield* repository.listTaskEdges(fixtureProjectId);
+      assert.isFalse(edges.has(insertId));
+    }),
+  );
 });

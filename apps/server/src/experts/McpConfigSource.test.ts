@@ -76,6 +76,43 @@ async function createCcSwitchDatabase(
 }
 
 describe("MCP config source reader", () => {
+  it.each([
+    '[a.b]\ny = 1\n[a.b.y.__proto__.__proto__]\nsynaraTomlAuditMarker = "polluted"\n',
+    'aa = 1\n[[a]]\n[aa.__proto__.__proto__]\nsynaraTomlAuditMarker = "polluted"\n',
+  ])(
+    "rejects prototype-chain TOML key paths without polluting the process: %s",
+    async (payload) => {
+      const prototype = Object.prototype as Record<string, unknown>;
+      try {
+        await withTempDirectory(async (root) => {
+          const sourcePath = path.join(root, "config.toml");
+          await writeFile(sourcePath, payload);
+          let failure: unknown;
+          try {
+            await readMcpSourceEntries({ kind: "codex", path: sourcePath });
+          } catch (error) {
+            failure = error;
+          }
+          expect(Object.hasOwn(prototype, "synaraTomlAuditMarker")).toBe(false);
+          expect(failure).toBeInstanceOf(McpSourceReadError);
+        });
+      } finally {
+        delete prototype.synaraTomlAuditMarker;
+      }
+    },
+  );
+
+  it("rejects TOML integers outside the JavaScript safe range before digesting entries", async () => {
+    await withTempDirectory(async (root) => {
+      const sourcePath = path.join(root, "config.toml");
+      await writeFile(
+        sourcePath,
+        '[mcp_servers.fixture]\ncommand = "fixture"\nstartup_timeout_sec = 9007199254740993\n',
+      );
+      await expectInvalidSource(() => readMcpSourceEntries({ kind: "codex", path: sourcePath }));
+    });
+  });
+
   it("reads Codex literal env and HTTP header fields without confusing host env names", async () => {
     await withTempDirectory(async (root) => {
       const sourcePath = path.join(root, "config.toml");

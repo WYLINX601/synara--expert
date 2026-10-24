@@ -177,11 +177,24 @@ export function SkillPicker({
   );
   const candidates = useMemo(() => {
     const map = new Map<string, Candidate>();
+    const descriptorsByKey = new Map<string, ProviderSkillDescriptor>();
+    for (const descriptor of catalog) {
+      const key = choiceKey({
+        kind: "path",
+        reference: { name: descriptor.name, path: descriptor.path },
+      });
+      if (!descriptorsByKey.has(key)) descriptorsByKey.set(key, descriptor);
+    }
+    const entriesByPackage = new Map<string, Map<string, SkillPackage["entries"][number]>>();
+    for (const pkg of packageMap.values()) {
+      entriesByPackage.set(
+        pkg.packageId,
+        new Map(pkg.entries.map((entry) => [entry.entryPath, entry])),
+      );
+    }
     const describe = (choice: SkillPickerChoice): Candidate => {
       if (choice.kind === "path") {
-        const descriptor = catalog.find(
-          (item) => choiceKey({ kind: "path", reference: item }) === choiceKey(choice),
-        );
+        const descriptor = descriptorsByKey.get(choiceKey(choice));
         return {
           choice,
           name: descriptor ? skillDisplayName(descriptor) : choice.reference.name,
@@ -192,7 +205,7 @@ export function SkillPicker({
         };
       }
       const pkg = packageMap.get(choice.selection.packageId),
-        entry = pkg?.entries.find((item) => item.entryPath === choice.selection.entryPath);
+        entry = entriesByPackage.get(choice.selection.packageId)?.get(choice.selection.entryPath);
       return {
         choice,
         name: entry?.name ?? choice.selection.entryPath,

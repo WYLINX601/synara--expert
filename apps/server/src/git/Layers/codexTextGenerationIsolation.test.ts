@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
+import { resolveExecutable } from "@synara/shared/executable";
 import { Deferred, Effect, Fiber, FileSystem } from "effect";
 import { parse as parseToml } from "smol-toml";
 import { expect } from "vitest";
@@ -58,6 +59,35 @@ function jwt(expirySeconds: number, extra: Record<string, unknown> = {}): string
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
   return `${encode({ alg: "none" })}.${encode({ exp: expirySeconds, ...extra })}.signature`;
 }
+
+it.each(["a = [1 #", "a = { b = 1 #"])(
+  "rejects an unterminated TOML comment without hanging the parser: %s",
+  (source) => {
+    const bun = resolveExecutable("bun");
+    expect(bun).not.toBeNull();
+    const moduleUrl = new URL("./codexTextGenerationIsolation.ts", import.meta.url).href;
+    // Run the real entry point outside Vitest: a parser regression must be
+    // killed by the OS timeout rather than blocking this test process forever.
+    const output = execFileSync(
+      bun!,
+      [
+        "--eval",
+        `
+      const { buildCodexTextGenerationConfig, CodexTextGenerationConfigError } = await import(${JSON.stringify(moduleUrl)});
+      try {
+        buildCodexTextGenerationConfig(${JSON.stringify(source)});
+        process.exitCode = 1;
+      } catch (error) {
+        if (!(error instanceof CodexTextGenerationConfigError)) throw error;
+        process.stdout.write("rejected");
+      }
+    `,
+      ],
+      { encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL" },
+    );
+    expect(output).toBe("rejected");
+  },
+);
 
 it.layer(NodeServices.layer)("Codex text-generation isolation", (it) => {
   it.effect("rebuilds only 0.105-compatible provider routing and credential env names", () =>

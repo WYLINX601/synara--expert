@@ -9,7 +9,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import type { ExpertConnectionConfig } from "@synara/contracts";
 import * as z from "zod/v4";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
 import { createExpertMcpCredentialStore } from "./ExpertMcpCredentials.ts";
@@ -20,6 +20,7 @@ import { startWorkbenchRuntimeMcpFixture } from "../../../../scripts/lib/workben
 const originalToken = process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
 
 afterEach(() => {
+  vi.restoreAllMocks();
   if (originalToken === undefined) delete process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
   else process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = originalToken;
 });
@@ -67,7 +68,12 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
   });
 }
 
-async function makeHttpFixture(options: { hangCancellationNotificationResponse?: boolean } = {}) {
+async function makeHttpFixture(
+  options: {
+    hangCancellationNotificationResponse?: boolean;
+    redirectSseTo?: { url: string; status: 307 | 308 };
+  } = {},
+) {
   const mcpServer = new McpServer({ name: "expert-fixture", version: "1.0.0" });
   let startedWait!: () => void;
   let cancelledWait!: () => void;
@@ -131,6 +137,14 @@ async function makeHttpFixture(options: { hangCancellationNotificationResponse?:
       return;
     }
     authorizedRequests += 1;
+    if (request.method === "GET" && options.redirectSseTo) {
+      response
+        .writeHead(options.redirectSseTo.status, {
+          location: options.redirectSseTo.url,
+        })
+        .end();
+      return;
+    }
     const originalEnd = response.end;
     response.end = ((...args: unknown[]) => {
       // The Streamable HTTP server returns 202 for notification-only POSTs.
@@ -183,15 +197,127 @@ async function makeHttpFixture(options: { hangCancellationNotificationResponse?:
       for (const response of heldResponses) {
         if (!response.destroyed && !response.writableEnded) response.destroy();
       }
-      await new Promise<void>((resolve, reject) => {
+      const closed = new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
+      // A failed assertion must still tear down requests that never reached an
+      // end state; otherwise server.close() can hold Vitest until its test-wide
+      // timeout and hide the original lifecycle failure.
+      server.closeAllConnections();
+      await closed;
       await mcpServer.close();
     },
   };
 }
 
+async function makeRedirectReceiver() {
+  const received: Array<{ apiKey: string | string[] | undefined; body: string }> = [];
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      received.push({
+        apiKey: request.headers["x-api-key"],
+        body: Buffer.concat(chunks).toString(),
+      });
+      response.writeHead(405).end();
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Receiver has no TCP address.");
+  return {
+    url: `http://127.0.0.1:${address.port}/capture`,
+    received,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      }),
+  };
+}
+
 describe("connectExpertMcp", () => {
+  it.each([307, 308] as const)(
+    "does not forward credentials or POST bodies across a %i redirect",
+    async (status) => {
+      process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = "fixture-api-key";
+      const receiver = await makeRedirectReceiver();
+      let sourceRequests = 0;
+      const server = createServer((request, response) => {
+        sourceRequests += 1;
+        request.resume();
+        response.writeHead(status, { location: receiver.url }).end();
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(0, "127.0.0.1", resolve);
+        });
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("Source has no TCP address.");
+        await expect(
+          connectExpertMcp(
+            connectionConfig({
+              type: "http",
+              url: `http://127.0.0.1:${address.port}/mcp`,
+              headersFromHost: [{ name: "X-API-Key", envVar: "SYNARA_EXPERT_MCP_TEST_TOKEN" }],
+            }),
+          ),
+        ).rejects.toThrow();
+        expect(sourceRequests).toBe(1);
+        expect(receiver.received).toEqual([]);
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+        await receiver.close();
+      }
+    },
+  );
+
+  it.each([307, 308] as const)(
+    "does not forward SSE GET credentials across a %i redirect",
+    async (status) => {
+      process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = "fixture-token";
+      const receiver = await makeRedirectReceiver();
+      const fixture = await makeHttpFixture({ redirectSseTo: { url: receiver.url, status } });
+      let client: Awaited<ReturnType<typeof connectExpertMcp>> | undefined;
+      let sseFinished!: () => void;
+      const sseRequestFinished = new Promise<void>((resolve) => {
+        sseFinished = resolve;
+      });
+      const originalFetch = globalThis.fetch;
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        try {
+          return await originalFetch(input, init);
+        } finally {
+          if (String(input) === fixture.url && init?.method === "GET") sseFinished();
+        }
+      });
+      try {
+        client = await connectExpertMcp(
+          connectionConfig({
+            type: "http",
+            url: fixture.url,
+            headersFromHost: [
+              { name: "authorization", envVar: "SYNARA_EXPERT_MCP_TEST_TOKEN", prefix: "Bearer " },
+              { name: "X-API-Key", envVar: "SYNARA_EXPERT_MCP_TEST_TOKEN" },
+            ],
+          }),
+        );
+        await withTimeout(sseRequestFinished, 5_000, "SSE redirect request");
+        expect(receiver.received).toEqual([]);
+      } finally {
+        await client?.close().catch(() => undefined);
+        await fixture.close();
+        await receiver.close();
+      }
+    },
+  );
+
   it("uses one startup timeout budget across tools/list pages", async () => {
     let now = 1_000;
     const timeouts: number[] = [];
@@ -395,7 +521,7 @@ describe("connectExpertMcp", () => {
         withTimeout(pending, 5_000, "aborted MCP call"),
       ).rejects.toThrow();
       void pendingRejection.catch(() => undefined);
-      await fixture.waitStarted;
+      await withTimeout(fixture.waitStarted, 5_000, "downstream HTTP tool start");
 
       controller.abort();
       const closing = client.close();

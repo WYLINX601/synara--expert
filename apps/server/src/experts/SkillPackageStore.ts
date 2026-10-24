@@ -848,12 +848,15 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
     list: () =>
       withSkillPackageLifecycle(stateDir, async () => {
         await recoverPendingRemovals();
-        return Promise.all(
-          (await fs.readdir(packagesDir))
-            .filter((id) => Schema.is(SkillPackageId)(id))
-            .toSorted(ordinal)
-            .map(read),
-        );
+        const packages: SkillPackage[] = [];
+        // read verifies the full content tree and retains up to MAX_BYTES of
+        // buffers. Bound that work independently of the number of saved versions.
+        for (const id of (await fs.readdir(packagesDir))
+          .filter((id) => Schema.is(SkillPackageId)(id))
+          .toSorted(ordinal)) {
+          packages.push(await read(id));
+        }
+        return packages;
       }),
     listSources: () =>
       withSkillPackageLifecycle(stateDir, async () => {

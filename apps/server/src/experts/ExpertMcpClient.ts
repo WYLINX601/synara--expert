@@ -178,6 +178,10 @@ export async function connectExpertMcp(
     }) as unknown as Transport;
   } else {
     transport = new CancellationDrainingHttpTransport(new URL(configTransport.url), {
+      // Custom credential headers and JSON-RPC bodies must not reach redirect
+      // targets. The SDK's SSE GET does not apply requestInit, so guard fetch.
+      // Configured URLs must point directly to the final MCP endpoint.
+      fetch: (input, init) => fetch(input, { ...init, redirect: "error" }),
       requestInit: {
         headers: { ...credentialValues.headers },
       },

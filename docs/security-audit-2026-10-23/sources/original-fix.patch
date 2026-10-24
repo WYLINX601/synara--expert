@@ -1,0 +1,2443 @@
+diff --git a/apps/server/package.json b/apps/server/package.json
+index cddcb429..da886505 100644
+--- a/apps/server/package.json
++++ b/apps/server/package.json
+@@ -41,8 +41,8 @@
+     "effect": "catalog:",
+     "node-pty": "^1.1.0",
+     "open": "^10.1.0",
+-    "smol-toml": "^1.7.0",
+-    "toml": "3.0.0",
++    "smol-toml": "1.9.0",
++    "toml": "5.0.1",
+     "ws": "^8.21.0",
+     "yaml": "^2.8.3",
+     "zod": "4.3.6"
+diff --git a/apps/server/src/experts/ExpertMcpClient.test.ts b/apps/server/src/experts/ExpertMcpClient.test.ts
+index 5fd14170..bb3a9ca3 100644
+--- a/apps/server/src/experts/ExpertMcpClient.test.ts
++++ b/apps/server/src/experts/ExpertMcpClient.test.ts
+@@ -9,7 +9,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+ import type { AnySchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+ import type { ExpertConnectionConfig } from "@synara/contracts";
+ import * as z from "zod/v4";
+-import { afterEach, describe, expect, it } from "vitest";
++import { afterEach, describe, expect, it, vi } from "vitest";
+ 
+ import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
+ import { createExpertMcpCredentialStore } from "./ExpertMcpCredentials.ts";
+@@ -20,6 +20,7 @@ import { startWorkbenchRuntimeMcpFixture } from "../../../../scripts/lib/workben
+ const originalToken = process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
+ 
+ afterEach(() => {
++  vi.restoreAllMocks();
+   if (originalToken === undefined) delete process.env.SYNARA_EXPERT_MCP_TEST_TOKEN;
+   else process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = originalToken;
+ });
+@@ -67,7 +68,12 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string):
+   });
+ }
+ 
+-async function makeHttpFixture(options: { hangCancellationNotificationResponse?: boolean } = {}) {
++async function makeHttpFixture(
++  options: {
++    hangCancellationNotificationResponse?: boolean;
++    redirectSseTo?: { url: string; status: 307 | 308 };
++  } = {},
++) {
+   const mcpServer = new McpServer({ name: "expert-fixture", version: "1.0.0" });
+   let startedWait!: () => void;
+   let cancelledWait!: () => void;
+@@ -131,6 +137,14 @@ async function makeHttpFixture(options: { hangCancellationNotificationResponse?:
+       return;
+     }
+     authorizedRequests += 1;
++    if (request.method === "GET" && options.redirectSseTo) {
++      response
++        .writeHead(options.redirectSseTo.status, {
++          location: options.redirectSseTo.url,
++        })
++        .end();
++      return;
++    }
+     const originalEnd = response.end;
+     response.end = ((...args: unknown[]) => {
+       // The Streamable HTTP server returns 202 for notification-only POSTs.
+@@ -191,7 +205,114 @@ async function makeHttpFixture(options: { hangCancellationNotificationResponse?:
+   };
+ }
+ 
++async function makeRedirectReceiver() {
++  const received: Array<{ apiKey: string | string[] | undefined; body: string }> = [];
++  const server = createServer((request, response) => {
++    const chunks: Buffer[] = [];
++    request.on("data", (chunk: Buffer) => chunks.push(chunk));
++    request.on("end", () => {
++      received.push({
++        apiKey: request.headers["x-api-key"],
++        body: Buffer.concat(chunks).toString(),
++      });
++      response.writeHead(405).end();
++    });
++  });
++  await new Promise<void>((resolve, reject) => {
++    server.once("error", reject);
++    server.listen(0, "127.0.0.1", resolve);
++  });
++  const address = server.address();
++  if (!address || typeof address === "string") throw new Error("Receiver has no TCP address.");
++  return {
++    url: `http://127.0.0.1:${address.port}/capture`,
++    received,
++    close: () =>
++      new Promise<void>((resolve, reject) => {
++        server.close((error) => (error ? reject(error) : resolve()));
++      }),
++  };
++}
++
+ describe("connectExpertMcp", () => {
++  it.each([307, 308] as const)(
++    "does not forward credentials or POST bodies across a %i redirect",
++    async (status) => {
++      process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = "fixture-api-key";
++      const receiver = await makeRedirectReceiver();
++      let sourceRequests = 0;
++      const server = createServer((request, response) => {
++        sourceRequests += 1;
++        request.resume();
++        response.writeHead(status, { location: receiver.url }).end();
++      });
++      try {
++        await new Promise<void>((resolve, reject) => {
++          server.once("error", reject);
++          server.listen(0, "127.0.0.1", resolve);
++        });
++        const address = server.address();
++        if (!address || typeof address === "string") throw new Error("Source has no TCP address.");
++        await expect(
++          connectExpertMcp(
++            connectionConfig({
++              type: "http",
++              url: `http://127.0.0.1:${address.port}/mcp`,
++              headersFromHost: [{ name: "X-API-Key", envVar: "SYNARA_EXPERT_MCP_TEST_TOKEN" }],
++            }),
++          ),
++        ).rejects.toThrow();
++        expect(sourceRequests).toBe(1);
++        expect(receiver.received).toEqual([]);
++      } finally {
++        await new Promise<void>((resolve, reject) => {
++          server.close((error) => (error ? reject(error) : resolve()));
++        });
++        await receiver.close();
++      }
++    },
++  );
++
++  it.each([307, 308] as const)(
++    "does not forward SSE GET credentials across a %i redirect",
++    async (status) => {
++      process.env.SYNARA_EXPERT_MCP_TEST_TOKEN = "fixture-token";
++      const receiver = await makeRedirectReceiver();
++      const fixture = await makeHttpFixture({ redirectSseTo: { url: receiver.url, status } });
++      let client: Awaited<ReturnType<typeof connectExpertMcp>> | undefined;
++      let sseFinished!: () => void;
++      const sseRequestFinished = new Promise<void>((resolve) => {
++        sseFinished = resolve;
++      });
++      const originalFetch = globalThis.fetch;
++      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
++        try {
++          return await originalFetch(input, init);
++        } finally {
++          if (String(input) === fixture.url && init?.method === "GET") sseFinished();
++        }
++      });
++      try {
++        client = await connectExpertMcp(
++          connectionConfig({
++            type: "http",
++            url: fixture.url,
++            headersFromHost: [
++              { name: "authorization", envVar: "SYNARA_EXPERT_MCP_TEST_TOKEN", prefix: "Bearer " },
++              { name: "X-API-Key", envVar: "SYNARA_EXPERT_MCP_TEST_TOKEN" },
++            ],
++          }),
++        );
++        await withTimeout(sseRequestFinished, 5_000, "SSE redirect request");
++        expect(receiver.received).toEqual([]);
++      } finally {
++        await client?.close().catch(() => undefined);
++        await fixture.close();
++        await receiver.close();
++      }
++    },
++  );
++
+   it("uses one startup timeout budget across tools/list pages", async () => {
+     let now = 1_000;
+     const timeouts: number[] = [];
+diff --git a/apps/server/src/experts/ExpertMcpClient.ts b/apps/server/src/experts/ExpertMcpClient.ts
+index dc0e39aa..6e2b8726 100644
+--- a/apps/server/src/experts/ExpertMcpClient.ts
++++ b/apps/server/src/experts/ExpertMcpClient.ts
+@@ -178,6 +178,10 @@ export async function connectExpertMcp(
+     }) as unknown as Transport;
+   } else {
+     transport = new CancellationDrainingHttpTransport(new URL(configTransport.url), {
++      // Custom credential headers and JSON-RPC bodies must not reach redirect
++      // targets. The SDK's SSE GET does not apply requestInit, so guard fetch.
++      // Configured URLs must point directly to the final MCP endpoint.
++      fetch: (input, init) => fetch(input, { ...init, redirect: "error" }),
+       requestInit: {
+         headers: { ...credentialValues.headers },
+       },
+diff --git a/apps/server/src/experts/McpConfigSource.test.ts b/apps/server/src/experts/McpConfigSource.test.ts
+index f6431532..f828badd 100644
+--- a/apps/server/src/experts/McpConfigSource.test.ts
++++ b/apps/server/src/experts/McpConfigSource.test.ts
+@@ -76,6 +76,43 @@ async function createCcSwitchDatabase(
+ }
+ 
+ describe("MCP config source reader", () => {
++  it.each([
++    '[a.b]\ny = 1\n[a.b.y.__proto__.__proto__]\nsynaraTomlAuditMarker = "polluted"\n',
++    'aa = 1\n[[a]]\n[aa.__proto__.__proto__]\nsynaraTomlAuditMarker = "polluted"\n',
++  ])(
++    "rejects prototype-chain TOML key paths without polluting the process: %s",
++    async (payload) => {
++      const prototype = Object.prototype as Record<string, unknown>;
++      try {
++        await withTempDirectory(async (root) => {
++          const sourcePath = path.join(root, "config.toml");
++          await writeFile(sourcePath, payload);
++          let failure: unknown;
++          try {
++            await readMcpSourceEntries({ kind: "codex", path: sourcePath });
++          } catch (error) {
++            failure = error;
++          }
++          expect(Object.hasOwn(prototype, "synaraTomlAuditMarker")).toBe(false);
++          expect(failure).toBeInstanceOf(McpSourceReadError);
++        });
++      } finally {
++        delete prototype.synaraTomlAuditMarker;
++      }
++    },
++  );
++
++  it("rejects TOML integers outside the JavaScript safe range before digesting entries", async () => {
++    await withTempDirectory(async (root) => {
++      const sourcePath = path.join(root, "config.toml");
++      await writeFile(
++        sourcePath,
++        '[mcp_servers.fixture]\ncommand = "fixture"\nstartup_timeout_sec = 9007199254740993\n',
++      );
++      await expectInvalidSource(() => readMcpSourceEntries({ kind: "codex", path: sourcePath }));
++    });
++  });
++
+   it("reads Codex literal env and HTTP header fields without confusing host env names", async () => {
+     await withTempDirectory(async (root) => {
+       const sourcePath = path.join(root, "config.toml");
+diff --git a/apps/server/src/experts/SkillPackageStore.test.ts b/apps/server/src/experts/SkillPackageStore.test.ts
+index 7a00acb6..dc6a607d 100644
+--- a/apps/server/src/experts/SkillPackageStore.test.ts
++++ b/apps/server/src/experts/SkillPackageStore.test.ts
+@@ -18,6 +18,7 @@ import * as path from "node:path";
+ import { afterEach, describe, expect, it, vi } from "vitest";
+ 
+ import { createSkillPackageStore } from "./SkillPackageStore.ts";
++import { expertResourceFiles } from "./ExpertStore.ts";
+ 
+ vi.mock("node:fs/promises", async () => {
+   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+@@ -57,6 +58,7 @@ async function unlock(entry: string): Promise<void> {
+ 
+ afterEach(async () => {
+   vi.useRealTimers();
++  vi.restoreAllMocks();
+   vi.mocked(rename).mockReset();
+   vi.mocked(rm).mockReset();
+   for (const root of roots.splice(0)) {
+@@ -75,6 +77,44 @@ function packageDir(stateDir: string, packageId: string): string {
+ }
+ 
+ describe("SkillPackageStore", () => {
++  it("bounds concurrent package content verification when listing the inventory", async () => {
++    const { source, stateDir, store } = await fixture();
++    const first = await importSource(store, source);
++    await writeFile(path.join(source, "modules", "config.yaml"), "language: en\n");
++    const second = await importSource(store, source);
++    const collect = expertResourceFiles.collect;
++    let active = 0;
++    let peak = 0;
++    const spy = vi.spyOn(expertResourceFiles, "collect").mockImplementation(async (...args) => {
++      active += 1;
++      peak = Math.max(peak, active);
++      try {
++        // Keep content buffers live long enough to expose an unbounded fan-out.
++        const resources = await collect(...args);
++        await new Promise<void>((resolve) => setTimeout(resolve, 10));
++        return resources;
++      } finally {
++        active -= 1;
++      }
++    });
++    const packages = await store.list();
++    expect(new Set(packages.map((entry) => entry.packageId))).toEqual(
++      new Set([first.package.packageId, second.package.packageId]),
++    );
++    expect(spy).toHaveBeenCalledTimes(2);
++    expect(peak).toBe(1);
++
++    const entry = path.join(
++      packageDir(stateDir, first.package.packageId),
++      "content",
++      "modules",
++      "config.yaml",
++    );
++    await chmod(entry, 0o600);
++    await writeFile(entry, "tampered\n");
++    await expect(store.list()).rejects.toMatchObject({ code: "package_corrupt" });
++  });
++
+   it("previews without publishing or executing, then preserves the complete package and relative dependencies", async () => {
+     const { root, source, stateDir, store } = await fixture();
+     const preview = await store.preview({ path: source });
+diff --git a/apps/server/src/experts/SkillPackageStore.ts b/apps/server/src/experts/SkillPackageStore.ts
+index e6508040..63911b56 100644
+--- a/apps/server/src/experts/SkillPackageStore.ts
++++ b/apps/server/src/experts/SkillPackageStore.ts
+@@ -848,12 +848,15 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
+     list: () =>
+       withSkillPackageLifecycle(stateDir, async () => {
+         await recoverPendingRemovals();
+-        return Promise.all(
+-          (await fs.readdir(packagesDir))
+-            .filter((id) => Schema.is(SkillPackageId)(id))
+-            .toSorted(ordinal)
+-            .map(read),
+-        );
++        const packages: SkillPackage[] = [];
++        // read verifies the full content tree and retains up to MAX_BYTES of
++        // buffers. Bound that work independently of the number of saved versions.
++        for (const id of (await fs.readdir(packagesDir))
++          .filter((id) => Schema.is(SkillPackageId)(id))
++          .toSorted(ordinal)) {
++          packages.push(await read(id));
++        }
++        return packages;
+       }),
+     listSources: () =>
+       withSkillPackageLifecycle(stateDir, async () => {
+diff --git a/apps/server/src/git/Layers/codexTextGenerationIsolation.test.ts b/apps/server/src/git/Layers/codexTextGenerationIsolation.test.ts
+index 5f842f30..ab479714 100644
+--- a/apps/server/src/git/Layers/codexTextGenerationIsolation.test.ts
++++ b/apps/server/src/git/Layers/codexTextGenerationIsolation.test.ts
+@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
+ 
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+ import { it } from "@effect/vitest";
++import { resolveExecutable } from "@synara/shared/executable";
+ import { Deferred, Effect, Fiber, FileSystem } from "effect";
+ import { parse as parseToml } from "smol-toml";
+ import { expect } from "vitest";
+@@ -59,6 +60,35 @@ function jwt(expirySeconds: number, extra: Record<string, unknown> = {}): string
+   return `${encode({ alg: "none" })}.${encode({ exp: expirySeconds, ...extra })}.signature`;
+ }
+ 
++it.each(["a = [1 #", "a = { b = 1 #"])(
++  "rejects an unterminated TOML comment without hanging the parser: %s",
++  (source) => {
++    const bun = resolveExecutable("bun");
++    expect(bun).not.toBeNull();
++    const moduleUrl = new URL("./codexTextGenerationIsolation.ts", import.meta.url).href;
++    // Run the real entry point outside Vitest: a parser regression must be
++    // killed by the OS timeout rather than blocking this test process forever.
++    const output = execFileSync(
++      bun!,
++      [
++        "--eval",
++        `
++      const { buildCodexTextGenerationConfig, CodexTextGenerationConfigError } = await import(${JSON.stringify(moduleUrl)});
++      try {
++        buildCodexTextGenerationConfig(${JSON.stringify(source)});
++        process.exitCode = 1;
++      } catch (error) {
++        if (!(error instanceof CodexTextGenerationConfigError)) throw error;
++        process.stdout.write("rejected");
++      }
++    `,
++      ],
++      { encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL" },
++    );
++    expect(output).toBe("rejected");
++  },
++);
++
+ it.layer(NodeServices.layer)("Codex text-generation isolation", (it) => {
+   it.effect("rebuilds only 0.105-compatible provider routing and credential env names", () =>
+     Effect.sync(() => {
+diff --git a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
+index 08c4d162..fb0cfa10 100644
+--- a/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
++++ b/apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts
+@@ -7837,6 +7837,12 @@ describe("ProviderCommandReactor", () => {
+         expect(
+           harness.sendTurn.mock.calls.filter(([request]) => request.threadId === threadId),
+         ).toHaveLength(0);
++        // The activity and session error are separate asynchronous commands.
++        await waitFor(async () =>
++          ((await readHarnessThread(harness))?.session?.lastError ?? "").includes(
++            PROVIDER_DELIVERY_BLOCK_SUMMARY,
++          ),
++        );
+         expect((await readHarnessThread(harness))?.session?.lastError).toContain(
+           PROVIDER_DELIVERY_BLOCK_SUMMARY,
+         );
+diff --git a/apps/server/src/persistence/Layers/ProjectAgentRepository.test.ts b/apps/server/src/persistence/Layers/ProjectAgentRepository.test.ts
+index fec4a3df..fee41290 100644
+--- a/apps/server/src/persistence/Layers/ProjectAgentRepository.test.ts
++++ b/apps/server/src/persistence/Layers/ProjectAgentRepository.test.ts
+@@ -782,3 +782,128 @@ layer("ProjectAgentRepository", (it) => {
+     }),
+   );
+ });
++
++layer("ProjectAgentRepository task consistency", (it) => {
++  const fixture = (suffix: string) =>
++    Effect.gen(function* () {
++      const repository = yield* ProjectAgentRepository;
++      const fixtureProjectId = ProjectId.makeUnsafe(`project-task-consistency-${suffix}`);
++      const goalId = ProjectGoalId.makeUnsafe(`goal-task-consistency-${suffix}`);
++      yield* repository.saveConfig(
++        {
++          projectId: fixtureProjectId,
++          coordinatorThreadId: ThreadId.makeUnsafe(`coordinator-task-consistency-${suffix}`),
++          coordinatorName: "Consistency test",
++          coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },
++          limits,
++          captureEnabled: true,
++          enabled: true,
++          automationId: null,
++          revision: 1,
++          createdAt: now,
++          updatedAt: now,
++          disabledAt: null,
++        },
++        null,
++      );
++      const goal = yield* repository.saveGoal(
++        {
++          id: goalId,
++          projectId: fixtureProjectId,
++          objective: "Task consistency",
++          authorizationSource: "user",
++          scopeVersion: 1,
++          acceptanceCriteria: null,
++          limits,
++          status: "active",
++          continuationCount: 0,
++          workerCreationCount: 0,
++          authorizedAt: now,
++          revision: 1,
++          createdAt: now,
++          updatedAt: now,
++        },
++        null,
++      );
++      const task = {
++        id: ProjectTaskId.makeUnsafe(`task-consistency-${suffix}`),
++        projectId: fixtureProjectId,
++        goalId,
++        title: "Original task",
++        description: null,
++        acceptanceCriteria: null,
++        status: "planned" as const,
++        dependsOnTaskIds: [] as ProjectTaskId[],
++        assignedThreadId: null,
++        repairCount: 0,
++        archivedAt: null,
++        revision: 1,
++        createdAt: now,
++        updatedAt: now,
++      };
++      return { repository, goal, task };
++    });
++
++  it.effect("accepts Goal and Task CAS writes after a zero-row SQL mutation", () =>
++    Effect.gen(function* () {
++      const { repository, goal, task } = yield* fixture("cas");
++      const sql = yield* SqlClient.SqlClient;
++      yield* repository.saveTask(task, null);
++      yield* sql`DELETE FROM project_agent_task_dependencies WHERE task_id = 'missing-task'`;
++      const updatedGoal = yield* repository.saveGoal({ ...goal, revision: 2 }, 1);
++      assert.strictEqual(updatedGoal.revision, 2);
++      yield* sql`DELETE FROM project_agent_task_dependencies WHERE task_id = 'missing-task'`;
++      const updatedTask = yield* repository.saveTask({ ...task, revision: 2 }, 1);
++      assert.strictEqual(updatedTask.revision, 2);
++      const stale = yield* Effect.exit(repository.saveTask({ ...task, revision: 3 }, 1));
++      assert.isTrue(Exit.isFailure(stale));
++      assert.strictEqual(Option.getOrThrow(yield* repository.getTask(task.id)).revision, 2);
++    }),
++  );
++
++  it.effect("rolls back a new task if its dependency insert fails", () =>
++    Effect.gen(function* () {
++      const { repository, task } = yield* fixture("insert-rollback");
++      const prerequisite = { ...task, id: ProjectTaskId.makeUnsafe("task-insert-prerequisite") };
++      yield* repository.saveTask(prerequisite, null);
++      const result = yield* Effect.exit(
++        repository.saveTask(
++          { ...task, dependsOnTaskIds: [prerequisite.id, prerequisite.id] },
++          null,
++        ),
++      );
++      assert.isTrue(Exit.isFailure(result));
++      assert.isTrue(Option.isNone(yield* repository.getTask(task.id)));
++      const edges = yield* repository.listTaskEdges(task.projectId);
++      assert.isFalse(edges.has(task.id));
++    }),
++  );
++
++  it.effect("rolls back a Task CAS and restores old dependencies on replacement failure", () =>
++    Effect.gen(function* () {
++      const { repository, task } = yield* fixture("update-rollback");
++      const first = { ...task, id: ProjectTaskId.makeUnsafe("task-original-prerequisite") };
++      const second = { ...task, id: ProjectTaskId.makeUnsafe("task-replacement-prerequisite") };
++      yield* repository.saveTask(first, null);
++      yield* repository.saveTask(second, null);
++      const original = { ...task, dependsOnTaskIds: [first.id] };
++      yield* repository.saveTask(original, null);
++      const result = yield* Effect.exit(
++        repository.saveTask(
++          {
++            ...original,
++            title: "Must roll back",
++            revision: 2,
++            dependsOnTaskIds: [second.id, second.id],
++          },
++          1,
++        ),
++      );
++      assert.isTrue(Exit.isFailure(result));
++      const persisted = Option.getOrThrow(yield* repository.getTask(task.id));
++      assert.strictEqual(persisted.revision, 1);
++      assert.strictEqual(persisted.title, "Original task");
++      assert.deepStrictEqual(persisted.dependsOnTaskIds, [first.id]);
++    }),
++  );
++});
+diff --git a/apps/server/src/persistence/Layers/ProjectAgentRepository.ts b/apps/server/src/persistence/Layers/ProjectAgentRepository.ts
+index ca2a258f..492f7e36 100644
+--- a/apps/server/src/persistence/Layers/ProjectAgentRepository.ts
++++ b/apps/server/src/persistence/Layers/ProjectAgentRepository.ts
+@@ -392,7 +392,7 @@ const makeProjectAgentRepository = Effect.gen(function* () {
+         revision = ${row.revision},
+         updated_at = ${row.updatedAt}
+       WHERE goal_id = ${row.id} AND revision = ${expectedRevision}
+-      RETURNING changes() AS changed
++      RETURNING 1 AS changed
+     `,
+   });
+ 
+@@ -455,7 +455,7 @@ const makeProjectAgentRepository = Effect.gen(function* () {
+         revision = ${row.revision},
+         updated_at = ${row.updatedAt}
+       WHERE task_id = ${row.id} AND revision = ${expectedRevision}
+-      RETURNING changes() AS changed
++      RETURNING 1 AS changed
+     `,
+   });
+ 
+@@ -972,25 +972,32 @@ const makeProjectAgentRepository = Effect.gen(function* () {
+         updatedAt: task.updatedAt,
+       };
+       const persistDeps = replaceDependencies(task.id, task.projectId, task.dependsOnTaskIds);
+-      if (expectedRevision === null) {
+-        return insertTask(row).pipe(
+-          Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveTask:insert")),
+-          Effect.andThen(persistDeps),
+-          Effect.as(task),
+-        );
+-      }
+-      return updateTask({ row, expectedRevision }).pipe(
+-        Effect.mapError(
+-          toPersistenceSqlOrDecodeError("ProjectAgentRepository.saveTask:update", "changed"),
+-        ),
+-        Effect.flatMap((result) =>
+-          result.changed === 1
+-            ? persistDeps.pipe(Effect.as(task))
+-            : Effect.fail(
+-                toPersistenceSqlError("ProjectAgentRepository.saveTask")(revisionMismatch("task")),
++      const persist =
++        expectedRevision === null
++          ? insertTask(row).pipe(
++              Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveTask:insert")),
++              Effect.andThen(persistDeps),
++              Effect.as(task),
++            )
++          : updateTask({ row, expectedRevision }).pipe(
++              Effect.mapError(
++                toPersistenceSqlOrDecodeError("ProjectAgentRepository.saveTask:update", "changed"),
+               ),
+-        ),
+-      );
++              Effect.flatMap((result) =>
++                result.changed === 1
++                  ? persistDeps.pipe(Effect.as(task))
++                  : Effect.fail(
++                      toPersistenceSqlError("ProjectAgentRepository.saveTask")(
++                        revisionMismatch("task"),
++                      ),
++                    ),
++              ),
++            );
++      return sql
++        .withTransaction(persist)
++        .pipe(
++          Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveTask:transaction")),
++        );
+     },
+     listTaskEdges: (projectId) =>
+       listDependencyRows({ projectId }).pipe(
+diff --git a/apps/server/src/projectAgent/Layers/ProjectAgentService.test.ts b/apps/server/src/projectAgent/Layers/ProjectAgentService.test.ts
+index a078603f..115a4bc0 100644
+--- a/apps/server/src/projectAgent/Layers/ProjectAgentService.test.ts
++++ b/apps/server/src/projectAgent/Layers/ProjectAgentService.test.ts
+@@ -7681,3 +7681,445 @@ it.effect(
+     }).pipe(Effect.provide(harness.layer));
+   },
+ );
++
++it.effect(
++  "rejects pausing a stopped goal so it cannot be resumed through an intermediate state",
++  () => {
++    const harness = makeTestLayer();
++    return Effect.gen(function* () {
++      const service = yield* ProjectAgentService;
++      const repository = yield* ProjectAgentRepository;
++      const overview = yield* configureTestGroup(service, "req-stopped-terminal-config");
++      const goal = yield* service.startGoal(
++        {
++          requestId: "req-stopped-terminal-start",
++          projectId: groupId,
++          objective: "Terminal scope",
++        },
++        { kind: "user" },
++      );
++      const stopped = yield* service.stopGoal(
++        {
++          requestId: "req-stopped-terminal-stop",
++          projectId: groupId,
++          goalId: goal.id,
++          expectedRevision: goal.revision,
++        },
++        { kind: "user" },
++      );
++      for (const principal of [
++        { kind: "user" as const },
++        coordinatorPrincipal(overview.config!.coordinatorThreadId),
++      ]) {
++        const input = {
++          requestId: `req-stopped-terminal-${principal.kind}`,
++          projectId: groupId,
++          goalId: goal.id,
++          expectedRevision: stopped.revision,
++        };
++        assert.isTrue(Exit.isFailure(yield* Effect.exit(service.pauseGoal(input, principal))));
++        assert.isTrue(Exit.isFailure(yield* Effect.exit(service.resumeGoal(input, principal))));
++        const persisted = Option.getOrThrow(yield* repository.getGoal(goal.id));
++        assert.strictEqual(persisted.status, "stopped");
++        assert.strictEqual(persisted.revision, stopped.revision);
++      }
++    }).pipe(Effect.provide(harness.layer));
++  },
++);
++
++it.effect("rejects repeated task dependency IDs before changing persisted state", () => {
++  const harness = makeTestLayer();
++  return Effect.gen(function* () {
++    const service = yield* ProjectAgentService;
++    yield* configureTestGroup(service, "req-duplicate-deps-config");
++    const goal = yield* service.startGoal(
++      { requestId: "req-duplicate-deps-goal", projectId: groupId, objective: "Dependencies" },
++      { kind: "user" },
++    );
++    const first = yield* service.createTask(
++      {
++        requestId: "req-duplicate-deps-first",
++        projectId: groupId,
++        goalId: goal.id,
++        title: "First",
++      },
++      { kind: "user" },
++    );
++    const second = yield* service.createTask(
++      {
++        requestId: "req-duplicate-deps-second",
++        projectId: groupId,
++        goalId: goal.id,
++        title: "Second",
++      },
++      { kind: "user" },
++    );
++    const failures = [
++      yield* Effect.exit(
++        service.createTask(
++          {
++            requestId: "req-duplicate-deps-create",
++            projectId: groupId,
++            goalId: goal.id,
++            title: "Invalid",
++            dependsOnTaskIds: [first.id, first.id],
++          },
++          { kind: "user" },
++        ),
++      ),
++      yield* Effect.exit(
++        service.updateTask(
++          {
++            requestId: "req-duplicate-deps-update",
++            projectId: groupId,
++            taskId: second.id,
++            expectedRevision: second.revision,
++            dependsOnTaskIds: [first.id, first.id],
++          },
++          { kind: "user" },
++        ),
++      ),
++    ];
++    for (const result of failures) {
++      assert.isTrue(Exit.isFailure(result));
++      if (Exit.isFailure(result)) {
++        const error = Option.getOrThrow(Cause.findErrorOption(result.cause));
++        assert.strictEqual(error.code, "invalid");
++      }
++    }
++    const { tasks } = yield* service.listTasks({ projectId: groupId }, { kind: "user" });
++    assert.strictEqual(tasks.length, 2);
++    assert.strictEqual(tasks.find((task) => task.id === second.id)?.revision, second.revision);
++  }).pipe(Effect.provide(harness.layer));
++});
++
++it.effect("surfaces a failed pause interrupt and retries it with the same request ID", () => {
++  const failCommandTypes: OrchestrationCommand["type"][] = ["thread.turn.interrupt"];
++  const harness = makeTestLayer({ failCommandTypes });
++  return Effect.gen(function* () {
++    const service = yield* ProjectAgentService;
++    const repository = yield* ProjectAgentRepository;
++    yield* configureTestGroup(service, "req-pause-retry-config");
++    yield* repository.upsertThreadIndex({
++      projectId: groupId,
++      threadId: groupMemberThreadId,
++      excluded: false,
++      archived: false,
++      summaryStatus: "pending",
++      lastUpdatedAt: now,
++      lastSummarizedAt: null,
++    });
++    harness.threadShells[groupMemberThreadId] = {
++      projectId: groupId,
++      title: "Running worker",
++      session: { status: "running", updatedAt: now, lastError: null },
++      latestTurn: { state: "running", startedAt: now },
++    };
++    const input = { requestId: "req-pause-retry", projectId: groupId };
++    const failed = yield* Effect.exit(service.pauseGroup(input, { kind: "user" }));
++    assert.isTrue(Exit.isFailure(failed));
++    assert.isNotNull(Option.getOrThrow(yield* repository.getConfig(groupId)).pausedAt);
++    assert.isTrue(Option.isNone(yield* repository.getReceipt(input)));
++    const countInterrupts = () =>
++      harness.dispatched.filter((command) => command.type === "thread.turn.interrupt").length;
++    const beforeRetry = countInterrupts();
++    failCommandTypes.length = 0;
++    yield* service.pauseGroup(input, { kind: "user" });
++    assert.isAbove(countInterrupts(), beforeRetry);
++    assert.isTrue(Option.isSome(yield* repository.getReceipt(input)));
++    const afterRetry = countInterrupts();
++    yield* service.pauseGroup(input, { kind: "user" });
++    assert.strictEqual(countInterrupts(), afterRetry);
++  }).pipe(Effect.provide(harness.layer));
++});
++
++it.effect("unblocks a dependent task older than the first 100 task rows", () => {
++  const harness = makeTestLayer();
++  return Effect.gen(function* () {
++    const service = yield* ProjectAgentService;
++    const repository = yield* ProjectAgentRepository;
++    yield* configureTestGroup(service, "req-old-dependent-config");
++    const goal = yield* service.startGoal(
++      { requestId: "req-old-dependent-goal", projectId: groupId, objective: "Old dependency" },
++      { kind: "user" },
++    );
++    const prerequisite = yield* service.createTask(
++      {
++        requestId: "req-old-dependent-prerequisite",
++        projectId: groupId,
++        goalId: goal.id,
++        title: "Prerequisite",
++      },
++      { kind: "user" },
++    );
++    const dependentId = ProjectTaskId.makeUnsafe("task-old-dependent");
++    yield* repository.saveTask(
++      {
++        ...prerequisite,
++        id: dependentId,
++        title: "Old dependent",
++        status: "planned",
++        dependsOnTaskIds: [prerequisite.id],
++      },
++      null,
++    );
++    for (let index = 0; index < 100; index++) {
++      yield* repository.saveTask(
++        {
++          ...prerequisite,
++          id: ProjectTaskId.makeUnsafe(`task-newer-${index}`),
++          createdAt: new Date(Date.parse(prerequisite.createdAt) + 1_000 + index).toISOString(),
++        },
++        null,
++      );
++    }
++    yield* service.reportResult(
++      {
++        requestId: "req-old-dependent-evidence",
++        projectId: groupId,
++        taskId: prerequisite.id,
++        summary: "Prerequisite checked",
++      },
++      { kind: "user" },
++    );
++    yield* service.updateTask(
++      {
++        requestId: "req-old-dependent-accept",
++        projectId: groupId,
++        taskId: prerequisite.id,
++        expectedRevision: prerequisite.revision,
++        accept: true,
++      },
++      { kind: "user" },
++    );
++    assert.strictEqual(Option.getOrThrow(yield* repository.getTask(dependentId)).status, "ready");
++  }).pipe(Effect.provide(harness.layer));
++});
++
++it.effect("serializes dependency graph validation across concurrent task updates", () => {
++  const harness = makeTestLayer();
++  return Effect.gen(function* () {
++    const service = yield* ProjectAgentService;
++    const repository = yield* ProjectAgentRepository;
++    yield* configureTestGroup(service, "req-concurrent-deps-config");
++    const goal = yield* service.startGoal(
++      {
++        requestId: "req-concurrent-deps-goal",
++        projectId: groupId,
++        objective: "Concurrent dependencies",
++      },
++      { kind: "user" },
++    );
++    const tasks = [];
++    for (const title of ["A", "B"]) {
++      tasks.push(
++        yield* service.createTask(
++          { requestId: `req-concurrent-deps-${title}`, projectId: groupId, goalId: goal.id, title },
++          { kind: "user" },
++        ),
++      );
++    }
++    const [first, second] = tasks;
++    const readEdges = repository.listTaskEdges;
++    // Suspend after each real SQLite snapshot. Without command serialization,
++    // both requests validate the same empty graph before either edge is saved.
++    Object.assign(repository, {
++      listTaskEdges: (projectId: ProjectId) =>
++        readEdges(projectId).pipe(Effect.tap(() => Effect.sleep("1 millis"))),
++    });
++    const updates = yield* Effect.all(
++      [
++        Effect.exit(
++          service.updateTask(
++            {
++              requestId: "req-concurrent-deps-update-a",
++              projectId: groupId,
++              taskId: first!.id,
++              expectedRevision: first!.revision,
++              dependsOnTaskIds: [second!.id],
++            },
++            { kind: "user" },
++          ),
++        ),
++        Effect.exit(
++          service.updateTask(
++            {
++              requestId: "req-concurrent-deps-update-b",
++              projectId: groupId,
++              taskId: second!.id,
++              expectedRevision: second!.revision,
++              dependsOnTaskIds: [first!.id],
++            },
++            { kind: "user" },
++          ),
++        ),
++      ],
++      { concurrency: "unbounded" },
++    ).pipe(Effect.forkChild);
++    yield* TestClock.adjust("10 millis");
++    yield* TestClock.adjust("10 millis");
++    const results = yield* Fiber.join(updates);
++    assert.strictEqual(results.filter(Exit.isSuccess).length, 1);
++    const failure = results.find(Exit.isFailure);
++    assert.isDefined(failure);
++    if (failure && Exit.isFailure(failure)) {
++      assert.strictEqual(Option.getOrThrow(Cause.findErrorOption(failure.cause)).code, "cycle");
++    }
++  }).pipe(Effect.provide(harness.layer));
++});
++
++it.effect("surfaces a failed archive command and retries it with the same request ID", () => {
++  const failCommandTypes: OrchestrationCommand["type"][] = ["thread.archive"];
++  const harness = makeTestLayer({ failCommandTypes });
++  return Effect.gen(function* () {
++    const service = yield* ProjectAgentService;
++    const repository = yield* ProjectAgentRepository;
++    const overview = yield* configureTestGroup(service, "req-archive-retry-config");
++    const coordinatorThreadId = overview.config!.coordinatorThreadId;
++    yield* repository.upsertThreadIndex({
++      projectId: groupId,
++      threadId: groupMemberThreadId,
++      excluded: false,
++      archived: false,
++      summaryStatus: "pending",
++      lastUpdatedAt: now,
++      lastSummarizedAt: null,
++    });
++    const input = { requestId: "req-archive-retry", projectId: groupId };
++    const failed = yield* Effect.exit(service.archiveGroup(input, { kind: "user" }));
++    assert.isTrue(Exit.isFailure(failed));
++    assert.isNotNull(Option.getOrThrow(yield* repository.getConfig(groupId)).archivedAt);
++    assert.isTrue(Option.isNone(yield* repository.getReceipt(input)));
++    const countArchives = () =>
++      harness.dispatched.filter((command) => command.type === "thread.archive").length;
++    const countCoordinatorArchives = () =>
++      harness.dispatched.filter(
++        (command) => command.type === "thread.archive" && command.threadId === coordinatorThreadId,
++      ).length;
++    const beforeRetry = countArchives();
++    const coordinatorAttempts = countCoordinatorArchives();
++    // Simulate a completed command whose acknowledgement was lost. The engine
++    // rejects archiving an already archived thread, so retry only unfinished work.
++    harness.threadShells[coordinatorThreadId] = {
++      projectId: groupId,
++      title: "Coordinator",
++      session: null,
++      archivedAt: now,
++    };
++    failCommandTypes.length = 0;
++    yield* service.archiveGroup(input, { kind: "user" });
++    assert.isAbove(countArchives(), beforeRetry);
++    assert.strictEqual(countCoordinatorArchives(), coordinatorAttempts);
++    assert.isTrue(Option.isSome(yield* repository.getReceipt(input)));
++    const afterRetry = countArchives();
++    yield* service.archiveGroup(input, { kind: "user" });
++    assert.strictEqual(countArchives(), afterRetry);
++  }).pipe(Effect.provide(harness.layer));
++});
++
++it.effect("surfaces a failed unarchive command and retries it with the same request ID", () => {
++  const failCommandTypes: OrchestrationCommand["type"][] = ["thread.unarchive"];
++  const harness = makeTestLayer({ failCommandTypes });
++  return Effect.gen(function* () {
++    const service = yield* ProjectAgentService;
++    const repository = yield* ProjectAgentRepository;
++    const overview = yield* configureTestGroup(service, "req-unarchive-retry-config");
++    const coordinatorThreadId = overview.config!.coordinatorThreadId;
++    yield* repository.upsertThreadIndex({
++      projectId: groupId,
++      threadId: groupMemberThreadId,
++      excluded: false,
++      archived: false,
++      summaryStatus: "pending",
++      lastUpdatedAt: now,
++      lastSummarizedAt: null,
++    });
++    yield* service.archiveGroup(
++      { requestId: "req-unarchive-retry-archive", projectId: groupId },
++      { kind: "user" },
++    );
++    harness.threadShells[groupMemberThreadId] = {
++      ...harness.threadShells[groupMemberThreadId]!,
++      archivedAt: now,
++    };
++    const input = { requestId: "req-unarchive-retry", projectId: groupId };
++    const failed = yield* Effect.exit(service.unarchiveGroup(input, { kind: "user" }));
++    assert.isTrue(Exit.isFailure(failed));
++    assert.isNull(Option.getOrThrow(yield* repository.getConfig(groupId)).archivedAt);
++    assert.isTrue(Option.isNone(yield* repository.getReceipt(input)));
++    const countUnarchives = () =>
++      harness.dispatched.filter((command) => command.type === "thread.unarchive").length;
++    const countCoordinatorUnarchives = () =>
++      harness.dispatched.filter(
++        (command) =>
++          command.type === "thread.unarchive" && command.threadId === coordinatorThreadId,
++      ).length;
++    const beforeRetry = countUnarchives();
++    const coordinatorAttempts = countCoordinatorUnarchives();
++    harness.threadShells[coordinatorThreadId] = {
++      projectId: groupId,
++      title: "Coordinator",
++      session: null,
++      archivedAt: null,
++    };
++    failCommandTypes.length = 0;
++    yield* service.unarchiveGroup(input, { kind: "user" });
++    assert.isAbove(countUnarchives(), beforeRetry);
++    assert.strictEqual(countCoordinatorUnarchives(), coordinatorAttempts);
++    assert.isTrue(Option.isSome(yield* repository.getReceipt(input)));
++    const afterRetry = countUnarchives();
++    yield* service.unarchiveGroup(input, { kind: "user" });
++    assert.strictEqual(countUnarchives(), afterRetry);
++  }).pipe(Effect.provide(harness.layer));
++});
++
++it.effect("stops workers on every goal task page when creation timestamps are equal", () => {
++  const harness = makeTestLayer();
++  return Effect.gen(function* () {
++    const service = yield* ProjectAgentService;
++    const repository = yield* ProjectAgentRepository;
++    yield* configureTestGroup(service, "req-stop-pages-config");
++    const goal = yield* service.startGoal(
++      { requestId: "req-stop-pages-goal", projectId: groupId, objective: "Stop all workers" },
++      { kind: "user" },
++    );
++    const template = yield* service.createTask(
++      {
++        requestId: "req-stop-pages-template",
++        projectId: groupId,
++        goalId: goal.id,
++        title: "Worker task template",
++      },
++      { kind: "user" },
++    );
++    const workerIds: ThreadId[] = [];
++    for (let index = 0; index < 101; index++) {
++      const suffix = String(index).padStart(3, "0");
++      const threadId = ThreadId.makeUnsafe(`thread-stop-pages-${suffix}`);
++      workerIds.push(threadId);
++      yield* repository.saveTask(
++        {
++          ...template,
++          id: ProjectTaskId.makeUnsafe(`task-stop-pages-${suffix}`),
++          assignedThreadId: threadId,
++          status: "running",
++        },
++        null,
++      );
++    }
++    yield* service.stopGoal(
++      {
++        requestId: "req-stop-pages-stop",
++        projectId: groupId,
++        goalId: goal.id,
++        expectedRevision: goal.revision,
++      },
++      { kind: "user" },
++    );
++    const interruptedWorkerIds = harness.dispatched
++      .filter((command) => command.type === "thread.turn.interrupt")
++      .map((command) => command.threadId)
++      .filter((threadId) => workerIds.includes(threadId));
++    assert.sameMembers(interruptedWorkerIds, workerIds);
++  }).pipe(Effect.provide(harness.layer));
++});
+diff --git a/apps/server/src/projectAgent/Layers/ProjectAgentService.ts b/apps/server/src/projectAgent/Layers/ProjectAgentService.ts
+index 9c1b64e5..516ca939 100644
+--- a/apps/server/src/projectAgent/Layers/ProjectAgentService.ts
++++ b/apps/server/src/projectAgent/Layers/ProjectAgentService.ts
+@@ -2267,12 +2267,28 @@ export const makeProjectAgentService = Effect.gen(function* () {
+     Effect.forEach(
+       threadIds,
+       (threadId) => {
+-        const dispatch = orchestrationEngine.dispatch({
+-          type,
+-          commandId: branded.command(),
+-          threadId,
+-          createdAt: isoNow(),
+-        } as OrchestrationCommand);
++        const dispatch = Effect.gen(function* () {
++          if (type === "thread.archive" || type === "thread.unarchive") {
++            // These commands reject threads already in the target state. Read
++            // immediately before dispatch: an earlier parent command may also
++            // have changed its subagent subtree, or a retry may be partially done.
++            const shell = yield* snapshotQuery.getThreadShellById(threadId);
++            if (
++              Option.isSome(shell) &&
++              (type === "thread.archive"
++                ? shell.value.archivedAt !== null
++                : shell.value.archivedAt === null)
++            ) {
++              return;
++            }
++          }
++          yield* orchestrationEngine.dispatch({
++            type,
++            commandId: branded.command(),
++            threadId,
++            createdAt: isoNow(),
++          } as OrchestrationCommand);
++        });
+         return options?.stopOnError === true
+           ? dispatch.pipe(Effect.mapError(toServiceError("Failed to update hub threads.")))
+           : dispatch.pipe(Effect.catch(() => Effect.void));
+@@ -3793,29 +3809,33 @@ export const makeProjectAgentService = Effect.gen(function* () {
+               )
+               .pipe(Effect.mapError(toServiceError("Failed to pause the hub.")));
+             yield* publish({ type: "config-upserted", config: saved });
+-            // Interrupt live turns on the coordinator and member threads so a
+-            // paused group stops producing work immediately.
+-            const { shells } = yield* listGroupThreadShells({
+-              projectId: input.projectId,
+-              coordinatorThreadId: config.coordinatorThreadId,
+-            });
+-            const liveThreadIds = shells
+-              .filter(
+-                (shell) =>
+-                  shell.latestTurn?.state === "running" ||
+-                  shell.session?.status === "running" ||
+-                  shell.session?.status === "starting",
+-              )
+-              .map((shell) => shell.id);
+-            const coordinator = yield* snapshotQuery
+-              .getThreadShellById(config.coordinatorThreadId)
+-              .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+-            const coordinatorLive =
+-              Option.isSome(coordinator) && coordinator.value.latestTurn?.state === "running";
+-            yield* dispatchGroupThreadCommand(
+-              coordinatorLive ? [config.coordinatorThreadId, ...liveThreadIds] : liveThreadIds,
+-              "thread.turn.interrupt",
+-            );
++          }
++          // Persist the admission stop first, but retry interrupts even when a
++          // previous pause already saved it. A failed interrupt must not leave
++          // a successful receipt that prevents the caller from retrying.
++          const { shells } = yield* listGroupThreadShells({
++            projectId: input.projectId,
++            coordinatorThreadId: config.coordinatorThreadId,
++          });
++          const liveThreadIds = shells
++            .filter(
++              (shell) =>
++                shell.latestTurn?.state === "running" ||
++                shell.session?.status === "running" ||
++                shell.session?.status === "starting",
++            )
++            .map((shell) => shell.id);
++          const coordinator = yield* snapshotQuery
++            .getThreadShellById(config.coordinatorThreadId)
++            .pipe(Effect.catch(() => Effect.succeed(Option.none())));
++          const coordinatorLive =
++            Option.isSome(coordinator) && coordinator.value.latestTurn?.state === "running";
++          yield* dispatchGroupThreadCommand(
++            coordinatorLive ? [config.coordinatorThreadId, ...liveThreadIds] : liveThreadIds,
++            "thread.turn.interrupt",
++            { stopOnError: true },
++          );
++          if (config.pausedAt === null) {
+             yield* appendActivity({
+               projectId: input.projectId,
+               kind: "config-updated",
+@@ -3919,23 +3939,26 @@ export const makeProjectAgentService = Effect.gen(function* () {
+               )
+               .pipe(Effect.mapError(toServiceError("Failed to archive the hub.")));
+             yield* publish({ type: "config-upserted", config: saved });
+-            const { shells } = yield* listGroupThreadShells({
+-              projectId: input.projectId,
+-              coordinatorThreadId: config.coordinatorThreadId,
+-            });
+-            // Only threads living IN the group project belong to the group —
+-            // linked-repo workers stay untouched.
+-            yield* dispatchGroupThreadCommand(
+-              [
+-                config.coordinatorThreadId,
+-                ...shells
+-                  .filter(
+-                    (shell) => shell.projectId === input.projectId && shell.archivedAt == null,
+-                  )
+-                  .map((shell) => shell.id),
+-              ],
+-              "thread.archive",
+-            );
++          }
++          // A previous attempt may have saved the hub state before a thread
++          // command failed. Retry unfinished commands before storing success.
++          const { shells } = yield* listGroupThreadShells({
++            projectId: input.projectId,
++            coordinatorThreadId: config.coordinatorThreadId,
++          });
++          // Only threads living IN the group project belong to the group —
++          // linked-repo workers stay untouched.
++          yield* dispatchGroupThreadCommand(
++            [
++              config.coordinatorThreadId,
++              ...shells
++                .filter((shell) => shell.projectId === input.projectId && shell.archivedAt == null)
++                .map((shell) => shell.id),
++            ],
++            "thread.archive",
++            { stopOnError: true },
++          );
++          if (config.archivedAt === null) {
+             yield* appendActivity({
+               projectId: input.projectId,
+               kind: "config-updated",
+@@ -3988,21 +4011,24 @@ export const makeProjectAgentService = Effect.gen(function* () {
+                 )
+                 .pipe(Effect.mapError(toServiceError("Failed to unarchive the hub.")));
+               yield* publish({ type: "config-upserted", config: saved });
+-              const { shells } = yield* listGroupThreadShells({
+-                projectId: input.projectId,
+-                coordinatorThreadId: config.coordinatorThreadId,
+-              });
+-              yield* dispatchGroupThreadCommand(
+-                [
+-                  config.coordinatorThreadId,
+-                  ...shells
+-                    .filter(
+-                      (shell) => shell.projectId === input.projectId && shell.archivedAt != null,
+-                    )
+-                    .map((shell) => shell.id),
+-                ],
+-                "thread.unarchive",
+-              );
++            }
++            const { shells } = yield* listGroupThreadShells({
++              projectId: input.projectId,
++              coordinatorThreadId: config.coordinatorThreadId,
++            });
++            yield* dispatchGroupThreadCommand(
++              [
++                config.coordinatorThreadId,
++                ...shells
++                  .filter(
++                    (shell) => shell.projectId === input.projectId && shell.archivedAt != null,
++                  )
++                  .map((shell) => shell.id),
++              ],
++              "thread.unarchive",
++              { stopOnError: true },
++            );
++            if (config.archivedAt !== null) {
+               yield* appendActivity({
+                 projectId: input.projectId,
+                 kind: "config-updated",
+@@ -4536,6 +4562,9 @@ export const makeProjectAgentService = Effect.gen(function* () {
+           .pipe(Effect.mapError(toServiceError("Failed to load task dependencies.")));
+         const taskId = branded.task();
+         const dependsOnTaskIds = input.dependsOnTaskIds ?? [];
++        if (new Set(dependsOnTaskIds).size !== dependsOnTaskIds.length) {
++          return yield* Effect.fail(fail("Task dependency identifiers must be unique.", "invalid"));
++        }
+         if (
+           detectProjectTaskDependencyCycle({
+             taskId,
+@@ -4599,6 +4628,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
+       }),
+ 
+     updateTask: (input, principal) =>
++      // CAS protects one row, not the dependency graph shared by different tasks.
++      // Keep graph validation and persistence in the same project critical section.
+       Effect.gen(function* () {
+         yield* requireProjectAccess(principal, input.projectId);
+         const existingReceipt = yield* replayReceipt(
+@@ -4659,6 +4690,11 @@ export const makeProjectAgentService = Effect.gen(function* () {
+         }
+         const dependsOnTaskIds = input.dependsOnTaskIds ?? current.dependsOnTaskIds;
+         if (input.dependsOnTaskIds) {
++          if (new Set(dependsOnTaskIds).size !== dependsOnTaskIds.length) {
++            return yield* Effect.fail(
++              fail("Task dependency identifiers must be unique.", "invalid"),
++            );
++          }
+           const edges = yield* repository
+             .listTaskEdges(input.projectId)
+             .pipe(Effect.mapError(toServiceError("Failed to load task dependencies.")));
+@@ -4731,7 +4767,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
+         });
+         yield* storeReceipt(input.requestId, input.projectId, "updateTask", saved);
+         return saved;
+-      }),
++      }).pipe((effect) => withProjectLock(input.projectId, effect)),
+ 
+     listActivity: (input, principal) =>
+       requireProjectAccess(principal, input.projectId).pipe(
+@@ -7005,14 +7041,17 @@ export const makeProjectAgentService = Effect.gen(function* () {
+ 
+   const unblockDependents = (accepted: ProjectTask) =>
+     Effect.gen(function* () {
+-      const tasks = yield* repository
+-        .listTasks({
+-          projectId: accepted.projectId,
+-          includeArchived: false,
+-          limit: 100,
+-        })
+-        .pipe(Effect.mapError(toServiceError("Failed to load dependent tasks.")));
+-      for (const task of tasks) {
++      const edges = yield* repository
++        .listTaskEdges(accepted.projectId)
++        .pipe(Effect.mapError(toServiceError("Failed to load dependent task edges.")));
++      for (const [taskId, dependencies] of edges) {
++        if (!dependencies.includes(accepted.id)) continue;
++        const current = yield* repository
++          .getTask(taskId)
++          .pipe(Effect.mapError(toServiceError("Failed to load dependent task.")));
++        if (Option.isNone(current)) continue;
++        const task = current.value;
++        if (task.projectId !== accepted.projectId || task.archivedAt !== null) continue;
+         if (task.status !== "planned" && task.status !== "blocked") continue;
+         if (!task.dependsOnTaskIds.includes(accepted.id)) continue;
+         const prerequisites = yield* Effect.forEach(task.dependsOnTaskIds, (id) =>
+@@ -7068,8 +7107,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
+       }
+       // A stopped goal is terminal: resuming it would silently reopen scope
+       // the user explicitly closed.
+-      if (status === "active" && current.status === "stopped") {
+-        return yield* Effect.fail(fail("A stopped goal cannot be resumed.", "invalid"));
++      if (current.status === "stopped" && status !== "stopped") {
++        return yield* Effect.fail(fail("A stopped goal cannot be paused or resumed.", "invalid"));
+       }
+       const updated: ProjectGoal = {
+         ...current,
+@@ -7090,25 +7129,33 @@ export const makeProjectAgentService = Effect.gen(function* () {
+             createdAt: isoNow(),
+           } as OrchestrationCommand)
+           .pipe(Effect.catch(() => Effect.void));
+-        const tasks = yield* repository
+-          .listTasks({
+-            projectId: input.projectId,
+-            goalId: saved.id,
+-            includeArchived: false,
+-            limit: 100,
+-          })
+-          .pipe(Effect.mapError(toServiceError("Failed to list managed workers.")));
+-        for (const task of tasks) {
+-          if (!task.assignedThreadId || task.status === "done" || task.status === "cancelled")
+-            continue;
+-          yield* orchestrationEngine
+-            .dispatch({
+-              type: "thread.turn.interrupt",
+-              commandId: branded.command(),
+-              threadId: task.assignedThreadId,
+-              createdAt: isoNow(),
+-            } as OrchestrationCommand)
+-            .pipe(Effect.catch(() => Effect.void));
++        let cursor: { createdAt: string; id: string } | undefined;
++        while (true) {
++          const tasks = yield* repository
++            .listTasks({
++              projectId: input.projectId,
++              goalId: saved.id,
++              includeArchived: false,
++              limit: 100,
++              ...(cursor ? { cursor } : {}),
++            })
++            .pipe(Effect.mapError(toServiceError("Failed to list managed workers.")));
++          for (const task of tasks) {
++            if (!task.assignedThreadId || task.status === "done" || task.status === "cancelled")
++              continue;
++            yield* orchestrationEngine
++              .dispatch({
++                type: "thread.turn.interrupt",
++                commandId: branded.command(),
++                threadId: task.assignedThreadId,
++                createdAt: isoNow(),
++              } as OrchestrationCommand)
++              .pipe(Effect.catch(() => Effect.void));
++          }
++          const lastTask = tasks.at(-1);
++          if (tasks.length < 100 || !lastTask) break;
++          // The ID is required when multiple tasks share a creation timestamp.
++          cursor = { createdAt: lastTask.createdAt, id: lastTask.id };
+         }
+       }
+       yield* publish({ type: "goal-upserted", goal: saved });
+diff --git a/apps/server/src/projectAgent/hubDeliverables.test.ts b/apps/server/src/projectAgent/hubDeliverables.test.ts
+index 6dabdcf8..f8272f6e 100644
+--- a/apps/server/src/projectAgent/hubDeliverables.test.ts
++++ b/apps/server/src/projectAgent/hubDeliverables.test.ts
+@@ -13,7 +13,7 @@ import {
+ } from "@synara/contracts";
+ import { Effect, Layer } from "effect";
+ import * as SqlClient from "effect/unstable/sql/SqlClient";
+-import { afterEach, describe, expect, it } from "vitest";
++import { afterEach, describe, expect, it, vi } from "vitest";
+ 
+ import { ServerConfig } from "../config.ts";
+ import { GitCore } from "../git/Services/GitCore.ts";
+@@ -28,6 +28,11 @@ import {
+ } from "./hubDeliverables.ts";
+ import { commitLibraryChange } from "./libraryGit.ts";
+ 
++vi.mock("node:fs/promises", async () => {
++  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
++  return { ...actual, realpath: vi.fn(actual.realpath) };
++});
++
+ const HUB_A = ProjectId.makeUnsafe("hub-deliverables-a");
+ const HUB_B = ProjectId.makeUnsafe("hub-deliverables-b");
+ const WORKER_A = ThreadId.makeUnsafe("hub-worker-a");
+@@ -35,6 +40,7 @@ const WORKER_B = ThreadId.makeUnsafe("hub-worker-b");
+ 
+ const directories: string[] = [];
+ afterEach(async () => {
++  vi.mocked(fs.realpath).mockReset();
+   await Promise.all(
+     directories.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })),
+   );
+@@ -820,6 +826,80 @@ describe("Hub deliverables service", () => {
+     );
+   });
+ 
++  it.each(["file", "parent"] as const)(
++    "rejects a %s replaced by an outside symlink after source containment validation",
++    async (replacement) => {
++      const harness = await makeHarness();
++      const workspace = harness.workspaces.get(WORKER_A)!;
++      await writeWorkspaceFiles(harness, WORKER_A, { "docs/plan.md": "public bytes" });
++      const outsideDirectory = path.join(harness.root, "private");
++      const outsideFile = path.join(outsideDirectory, "plan.md");
++      await fs.mkdir(outsideDirectory);
++      await fs.writeFile(outsideFile, "secret bytes");
++      const source = path.join(workspace, "docs", "plan.md");
++      const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
++      let replaced = false;
++      vi.mocked(fs.realpath).mockImplementation((async (...args) => {
++        const encoding = typeof args[1] === "string" ? args[1] : args[1]?.encoding;
++        const resolved =
++          encoding === "buffer"
++            ? await actual.realpath(args[0], "buffer")
++            : await actual.realpath(args[0], { encoding });
++        if (args[0] === source && !replaced) {
++          replaced = true;
++          if (replacement === "file") {
++            await fs.unlink(source);
++            await fs.symlink(outsideFile, source);
++          } else {
++            await fs.rename(path.dirname(source), path.join(workspace, "original-docs"));
++            await fs.symlink(outsideDirectory, path.dirname(source), "dir");
++          }
++        }
++        return resolved;
++      }) as typeof fs.realpath);
++
++      await run(
++        Effect.gen(function* () {
++          const service = yield* makeService(harness);
++          const result = yield* Effect.result(
++            service.publish(
++              workerIdentity(),
++              publishInput("source-race", 0, [{ path: "docs/plan.md" }]),
++            ),
++          );
++          assert.ok(replaced, "The replacement must occur at the source validation boundary.");
++          assert.equal(
++            result._tag,
++            "Failure",
++            "An outside file must never become a Hub deliverable.",
++          );
++          assert.equal((yield* service.list(userIdentity(), {})).length, 0);
++        }),
++      );
++    },
++  );
++
++  it("continues to publish a stable symlink whose target stays inside the worker workspace", async () => {
++    const harness = await makeHarness();
++    await writeWorkspaceFiles(harness, WORKER_A, { "docs/plan.md": "in-scope bytes" });
++    const workspace = harness.workspaces.get(WORKER_A)!;
++    await fs.symlink(path.join(workspace, "docs", "plan.md"), path.join(workspace, "alias.md"));
++    await run(
++      Effect.gen(function* () {
++        const service = yield* makeService(harness);
++        yield* service.publish(
++          workerIdentity(),
++          publishInput("inside-link", 0, [{ path: "alias.md" }]),
++        );
++        const result = yield* service.read(userIdentity(), {
++          ownerThreadId: WORKER_A,
++          path: "alias.md",
++        });
++        assert.deepEqual(result.content, { encoding: "utf-8", text: "in-scope bytes" });
++      }),
++    );
++  });
++
+   it("serializes concurrent expected-revision writes and treats request reuse as a conflict", async () => {
+     const harness = await makeHarness();
+     await writeWorkspaceFiles(harness, WORKER_A, { "left.md": "left", "right.md": "right" });
+diff --git a/apps/server/src/projectAgent/hubDeliverables.ts b/apps/server/src/projectAgent/hubDeliverables.ts
+index 42c829c4..f86083e9 100644
+--- a/apps/server/src/projectAgent/hubDeliverables.ts
++++ b/apps/server/src/projectAgent/hubDeliverables.ts
+@@ -1,4 +1,5 @@
+ import { createHash } from "node:crypto";
++import { constants as fsConstants } from "node:fs";
+ import * as fs from "node:fs/promises";
+ import * as os from "node:os";
+ import * as path from "node:path";
+@@ -730,6 +731,75 @@ const requireLibraryRepo = (git: GitCoreShape, root: string) =>
+       ),
+     );
+ 
++/** Read the validated inode with a hard byte bound, then recheck its path and contents. */
++const readSourceFile = async (
++  realWorkspaceRoot: string,
++  resolvedSource: string,
++): Promise<Buffer> => {
++  const changed = () =>
++    new HubDeliverablesError({
++      message: "Deliverable changed while it was being read.",
++      code: "conflict",
++    });
++  const before = await fs.lstat(resolvedSource);
++  if (!before.isFile() || before.isSymbolicLink()) throw changed();
++  if (before.size > HUB_DELIVERABLE_MAX_FILE_BYTES) {
++    throw new HubDeliverablesError({
++      message: `Deliverable exceeds the ${HUB_DELIVERABLE_MAX_FILE_BYTES}-byte limit.`,
++      code: "invalid",
++    });
++  }
++  const realBefore = await fs.realpath(resolvedSource);
++  if (realBefore !== resolvedSource || !isContainedPath(realWorkspaceRoot, realBefore))
++    throw changed();
++  const flags =
++    fsConstants.O_RDONLY |
++    (process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
++  const handle = await fs.open(resolvedSource, flags);
++  try {
++    const opened = await handle.stat();
++    if (
++      !opened.isFile() ||
++      opened.dev !== before.dev ||
++      opened.ino !== before.ino ||
++      opened.size !== before.size ||
++      opened.mtimeMs !== before.mtimeMs ||
++      opened.ctimeMs !== before.ctimeMs
++    )
++      throw changed();
++
++    // Read at most the validated size plus one sentinel byte, even if a writer
++    // keeps appending. A path-based readFile could follow a substituted link or
++    // allocate beyond the original stat bound.
++    const bytes = Buffer.allocUnsafe(opened.size + 1);
++    let length = 0;
++    while (length < bytes.length) {
++      const result = await handle.read(bytes, length, bytes.length - length, length);
++      if (result.bytesRead === 0) break;
++      length += result.bytesRead;
++    }
++    const after = await handle.stat();
++    const pathAfter = await fs.lstat(resolvedSource);
++    const realAfter = await fs.realpath(resolvedSource);
++    if (
++      length !== opened.size ||
++      after.size !== opened.size ||
++      after.mtimeMs !== opened.mtimeMs ||
++      after.ctimeMs !== opened.ctimeMs ||
++      !pathAfter.isFile() ||
++      pathAfter.isSymbolicLink() ||
++      pathAfter.dev !== opened.dev ||
++      pathAfter.ino !== opened.ino ||
++      realAfter !== resolvedSource ||
++      !isContainedPath(realWorkspaceRoot, realAfter)
++    )
++      throw changed();
++    return bytes.subarray(0, length);
++  } finally {
++    await handle.close();
++  }
++};
++
+ const prepareSourceFiles = (
+   worker: HubDeliverablesWorkerScope,
+   hubId: ProjectId,
+@@ -773,26 +843,7 @@ const prepareSourceFiles = (
+             code: "forbidden",
+           });
+         }
+-        const stat = await fs.stat(resolvedSource);
+-        if (!stat.isFile()) {
+-          throw new HubDeliverablesError({
+-            message: `Deliverable path "${sourcePath}" is not a file.`,
+-            code: "invalid",
+-          });
+-        }
+-        if (stat.size > HUB_DELIVERABLE_MAX_FILE_BYTES) {
+-          throw new HubDeliverablesError({
+-            message: `Deliverable "${sourcePath}" exceeds the ${HUB_DELIVERABLE_MAX_FILE_BYTES}-byte limit.`,
+-            code: "invalid",
+-          });
+-        }
+-        const bytes = await fs.readFile(resolvedSource);
+-        if (bytes.byteLength !== stat.size || bytes.byteLength > HUB_DELIVERABLE_MAX_FILE_BYTES) {
+-          throw new HubDeliverablesError({
+-            message: `Deliverable "${sourcePath}" changed while it was being read.`,
+-            code: "conflict",
+-          });
+-        }
++        const bytes = await readSourceFile(realWorkspaceRoot, resolvedSource);
+         totalBytes += bytes.byteLength;
+         if (totalBytes > HUB_DELIVERABLE_MAX_TOTAL_BYTES) {
+           throw new HubDeliverablesError({
+diff --git a/apps/web/src/components/chat/project/useProjectAgent.browser.tsx b/apps/web/src/components/chat/project/useProjectAgent.browser.tsx
+index 2c3d2914..d6258aad 100644
+--- a/apps/web/src/components/chat/project/useProjectAgent.browser.tsx
++++ b/apps/web/src/components/chat/project/useProjectAgent.browser.tsx
+@@ -20,7 +20,7 @@ import {
+ } from "@synara/contracts";
+ import { page } from "vitest/browser";
+ import { beforeEach, describe, expect, it, vi } from "vitest";
+-import { render } from "vitest-browser-react";
++import { render, renderHook } from "vitest-browser-react";
+ 
+ const PROJECT_ID = ProjectId.makeUnsafe("project-group-1");
+ 
+@@ -31,10 +31,11 @@ const harness = vi.hoisted(() => {
+     api: {
+       projectAgent: {
+         getOverview: vi.fn(),
+-        listTasks: vi.fn(async () => ({ tasks: [] })),
++        listTasks: vi.fn(),
+         listActivity: vi.fn(async () => ({ activity: [], nextCursor: null })),
+         listDocuments: vi.fn(async () => ({ documents: [] })),
+         listThreadIndex: vi.fn(async () => ({ threads: [] })),
++        startGoal: vi.fn(),
+         subscribe: vi.fn(async () => undefined),
+         unsubscribe: vi.fn(async () => undefined),
+         onEvent: vi.fn((listener: (event: unknown) => void) => {
+@@ -97,6 +98,33 @@ function emitProjectAgentEvent(event: ProjectAgentStreamEvent) {
+   harness.listeners.forEach((listener) => listener(event));
+ }
+ 
++function taskPayload(id = "task-1", revision = 1): ProjectTask {
++  return ProjectTask.makeUnsafe({
++    id: ProjectTaskId.makeUnsafe(id),
++    projectId: PROJECT_ID,
++    goalId: ProjectGoalId.makeUnsafe("goal-1"),
++    title: "write tests",
++    description: null,
++    acceptanceCriteria: null,
++    status: revision === 1 ? "running" : "review",
++    dependsOnTaskIds: [],
++    assignedThreadId: ThreadId.makeUnsafe("thread-worker-1"),
++    repairCount: 0,
++    archivedAt: null,
++    revision,
++    createdAt: "2026-09-01T00:00:00.000Z",
++    updatedAt: "2026-09-01T00:00:00.000Z",
++  });
++}
++
++function deferred<T>() {
++  let resolve!: (value: T) => void;
++  const promise = new Promise<T>((complete) => {
++    resolve = complete;
++  });
++  return { promise, resolve };
++}
++
+ function Probe({ enabled = true }: { enabled?: boolean }) {
+   const agent = useProjectAgent({ projectId: PROJECT_ID, enabled });
+   return (
+@@ -114,7 +142,11 @@ describe("useProjectAgent", () => {
+   beforeEach(() => {
+     vi.clearAllMocks();
+     harness.listeners.clear();
+-    harness.api.projectAgent.getOverview.mockResolvedValue(overview());
++    harness.api.projectAgent.getOverview.mockReset().mockResolvedValue(overview());
++    harness.api.projectAgent.listTasks
++      .mockReset()
++      .mockResolvedValue({ tasks: [], nextCursor: null });
++    harness.api.projectAgent.startGoal.mockReset().mockResolvedValue(undefined);
+   });
+ 
+   it("derives configured and loads the lists on the first config-upserted", async () => {
+@@ -199,4 +231,188 @@ describe("useProjectAgent", () => {
+     expect(harness.api.projectAgent.unsubscribe).toHaveBeenCalledTimes(2);
+     expect(harness.listeners.size).toBe(0);
+   });
++
++  it("keeps task updates received while an older list request is loading", async () => {
++    harness.api.projectAgent.getOverview.mockResolvedValue(
++      overview({ configured: true, config: configPayload(), coordinatorStatus: "idle" }),
++    );
++    harness.api.projectAgent.listTasks.mockResolvedValue({
++      tasks: [taskPayload()],
++      nextCursor: null,
++    });
++    const hook = await renderHook(() => useProjectAgent({ projectId: PROJECT_ID, enabled: true }));
++    try {
++      await vi.waitFor(() => expect(hook.result.current.tasks).toHaveLength(1));
++      const pending = deferred<{ tasks: ProjectTask[]; nextCursor: null }>();
++      harness.api.projectAgent.listTasks.mockReturnValueOnce(pending.promise);
++      const loading = hook.result.current.load();
++      await vi.waitFor(() => expect(harness.api.projectAgent.listTasks).toHaveBeenCalledTimes(2));
++      emitProjectAgentEvent({ type: "task-upserted", task: taskPayload("task-1", 2) });
++      emitProjectAgentEvent({ type: "task-upserted", task: taskPayload("task-2", 1) });
++      await vi.waitFor(() => expect(hook.result.current.tasks).toHaveLength(2));
++      pending.resolve({ tasks: [taskPayload()], nextCursor: null });
++      await loading;
++      await hook.rerender();
++      expect(hook.result.current.tasks.map((task) => [task.id, task.revision])).toEqual([
++        ["task-1", 2],
++        ["task-2", 1],
++      ]);
++    } finally {
++      await hook.unmount();
++    }
++  });
++
++  it("reloads task lists on a reconnect snapshot", async () => {
++    const currentOverview = overview({
++      configured: true,
++      config: configPayload(),
++      coordinatorStatus: "idle",
++    });
++    harness.api.projectAgent.getOverview.mockResolvedValue(currentOverview);
++    const hook = await renderHook(() => useProjectAgent({ projectId: PROJECT_ID, enabled: true }));
++    try {
++      await vi.waitFor(() => expect(harness.api.projectAgent.listTasks).toHaveBeenCalledOnce());
++      harness.api.projectAgent.listTasks.mockResolvedValue({
++        tasks: [taskPayload()],
++        nextCursor: null,
++      });
++      emitProjectAgentEvent({ type: "snapshot", overview: currentOverview });
++      await vi.waitFor(() => expect(hook.result.current.tasks).toHaveLength(1));
++    } finally {
++      await hook.unmount();
++    }
++  });
++
++  it("loads all task pages instead of dropping tasks after the first page", async () => {
++    harness.api.projectAgent.getOverview.mockResolvedValue(
++      overview({ configured: true, config: configPayload(), coordinatorStatus: "idle" }),
++    );
++    harness.api.projectAgent.listTasks
++      .mockResolvedValueOnce({ tasks: [taskPayload("task-new")], nextCursor: "page-2" })
++      .mockResolvedValueOnce({ tasks: [taskPayload("task-old")], nextCursor: null });
++    const hook = await renderHook(() => useProjectAgent({ projectId: PROJECT_ID, enabled: true }));
++    try {
++      await vi.waitFor(() => expect(hook.result.current.tasks).toHaveLength(2));
++      expect(harness.api.projectAgent.listTasks).toHaveBeenLastCalledWith(
++        expect.objectContaining({ projectId: PROJECT_ID, cursor: "page-2", includeArchived: true }),
++      );
++    } finally {
++      await hook.unmount();
++    }
++  });
++
++  it("does not repopulate a disabled hook from a late overview response", async () => {
++    const pending = deferred<ProjectAgentOverview>();
++    harness.api.projectAgent.getOverview.mockReturnValue(pending.promise);
++    const hook = await renderHook(
++      (props?: { enabled: boolean }) =>
++        useProjectAgent({ projectId: PROJECT_ID, enabled: props?.enabled ?? true }),
++      { initialProps: { enabled: true } },
++    );
++    try {
++      await vi.waitFor(() => expect(harness.api.projectAgent.getOverview).toHaveBeenCalledOnce());
++      await hook.rerender({ enabled: false });
++      pending.resolve(overview({ configured: true, config: configPayload() }));
++      await pending.promise;
++      await hook.rerender({ enabled: false });
++      expect(hook.result.current.overview).toBeNull();
++      expect(harness.api.projectAgent.listTasks).not.toHaveBeenCalled();
++    } finally {
++      await hook.unmount();
++    }
++  });
++
++  it("resets busy when switching projects during a pending mutation", async () => {
++    const pending = deferred<void>();
++    harness.api.projectAgent.startGoal.mockReturnValue(pending.promise);
++    const hook = await renderHook(
++      (props?: { projectId: ProjectId }) =>
++        useProjectAgent({ projectId: props?.projectId ?? PROJECT_ID, enabled: true }),
++      { initialProps: { projectId: PROJECT_ID } },
++    );
++    try {
++      const mutation = hook.result.current.startGoal("first project goal");
++      await vi.waitFor(() => expect(hook.result.current.busy).toBe(true));
++      await hook.rerender({ projectId: ProjectId.makeUnsafe("second-project") });
++      pending.resolve(undefined);
++      await mutation;
++      await hook.rerender({ projectId: ProjectId.makeUnsafe("second-project") });
++      expect(hook.result.current.busy).toBe(false);
++    } finally {
++      pending.resolve(undefined);
++      await hook.unmount();
++    }
++  });
++
++  it("keeps busy until every concurrent mutation in the current scope settles", async () => {
++    const first = deferred<void>();
++    const second = deferred<void>();
++    harness.api.projectAgent.startGoal
++      .mockReturnValueOnce(first.promise)
++      .mockReturnValueOnce(second.promise);
++    const hook = await renderHook(() => useProjectAgent({ projectId: PROJECT_ID, enabled: true }));
++    try {
++      const firstMutation = hook.result.current.startGoal("first");
++      const secondMutation = hook.result.current.startGoal("second");
++      first.resolve(undefined);
++      await firstMutation;
++      await hook.rerender();
++      expect(hook.result.current.busy).toBe(true);
++      second.resolve(undefined);
++      await secondMutation;
++      await hook.rerender();
++      expect(hook.result.current.busy).toBe(false);
++    } finally {
++      first.resolve(undefined);
++      second.resolve(undefined);
++      await hook.unmount();
++    }
++  });
++
++  it("ignores an old mutation when returning to the same project", async () => {
++    const old = deferred<void>();
++    const current = deferred<void>();
++    harness.api.projectAgent.startGoal
++      .mockReturnValueOnce(old.promise)
++      .mockReturnValueOnce(current.promise);
++    const hook = await renderHook(
++      (props?: { projectId: ProjectId }) =>
++        useProjectAgent({ projectId: props?.projectId ?? PROJECT_ID, enabled: true }),
++      { initialProps: { projectId: PROJECT_ID } },
++    );
++    try {
++      const oldMutation = hook.result.current.startGoal("old");
++      await hook.rerender({ projectId: ProjectId.makeUnsafe("second-project") });
++      await hook.rerender({ projectId: PROJECT_ID });
++      const newMutation = hook.result.current.startGoal("new");
++      old.resolve(undefined);
++      await oldMutation;
++      await hook.rerender({ projectId: PROJECT_ID });
++      expect(hook.result.current.busy).toBe(true);
++      current.resolve(undefined);
++      await newMutation;
++      await hook.rerender({ projectId: PROJECT_ID });
++      expect(hook.result.current.busy).toBe(false);
++    } finally {
++      old.resolve(undefined);
++      current.resolve(undefined);
++      await hook.unmount();
++    }
++  });
++
++  it("rejects a non-advancing task cursor instead of polling indefinitely", async () => {
++    harness.api.projectAgent.getOverview.mockResolvedValue(
++      overview({ configured: true, config: configPayload() }),
++    );
++    harness.api.projectAgent.listTasks.mockResolvedValue({ tasks: [], nextCursor: "same-page" });
++    const hook = await renderHook(() => useProjectAgent({ projectId: PROJECT_ID, enabled: true }));
++    try {
++      await vi.waitFor(() =>
++        expect(hook.result.current.error).toBe("Task pagination did not advance."),
++      );
++      expect(harness.api.projectAgent.listTasks).toHaveBeenCalledTimes(2);
++    } finally {
++      await hook.unmount();
++    }
++  });
+ });
+diff --git a/apps/web/src/components/chat/project/useProjectAgent.ts b/apps/web/src/components/chat/project/useProjectAgent.ts
+index 56c283f9..f3be008a 100644
+--- a/apps/web/src/components/chat/project/useProjectAgent.ts
++++ b/apps/web/src/components/chat/project/useProjectAgent.ts
+@@ -24,6 +24,12 @@ import {
+ } from "./projectAgentOverview.logic";
+ import { useProjectAgentSummariesStore } from "./useProjectAgentSummaries";
+ 
++type RequestScope = {
++  readonly projectId: ProjectId | null;
++  readonly enabled: boolean;
++  active: boolean;
++};
++
+ export function useProjectAgent(input: {
+   readonly projectId: ProjectId | null;
+   readonly enabled: boolean;
+@@ -65,103 +71,42 @@ export function useProjectAgent(input: {
+   const [busy, setBusy] = useState(false);
+   const projectIdRef = useRef(input.projectId);
+   const loadGeneration = useRef(0);
++  const scopeRef = useRef<RequestScope>({ ...input, active: true });
++  if (
++    scopeRef.current.projectId !== input.projectId ||
++    scopeRef.current.enabled !== input.enabled
++  ) {
++    scopeRef.current = { ...input, active: true };
++  }
++  const isCurrentScope = useCallback(
++    (scope: RequestScope) => scopeRef.current === scope && scope.active && scope.enabled,
++    [],
++  );
++  const loadEventsRef = useRef<ProjectAgentStreamEvent[] | null>(null);
++  const threadIndexEventVersion = useRef(0);
++  const mutationsRef = useRef<{ scope: RequestScope | null; count: number }>({
++    scope: null,
++    count: 0,
++  });
++  const beginMutation = useCallback(() => {
++    const scope = scopeRef.current;
++    if (mutationsRef.current.scope !== scope) mutationsRef.current = { scope, count: 0 };
++    const pending = mutationsRef.current;
++    pending.count += 1;
++    setBusy(true);
++    return () => {
++      pending.count -= 1;
++      if (isCurrentScope(scope)) setBusy(pending.count > 0);
++    };
++  }, [isCurrentScope]);
+   // Mirrors the rendered overview's configured flag so stream events can tell a
+   // first-configure transition (load the lists) from a relink (index refresh only).
+   const overviewConfiguredRef = useRef(false);
+   projectIdRef.current = input.projectId;
+   overviewConfiguredRef.current = projectAgentOverviewConfigured(overview);
+ 
+-  const stillCurrent = (projectId: ProjectId, generation: number) =>
+-    projectIdRef.current === projectId && loadGeneration.current === generation;
+-
+-  const load = useCallback(async () => {
+-    const api = readNativeApi();
+-    const projectId = projectIdRef.current;
+-    const generation = ++loadGeneration.current;
+-    if (!api?.projectAgent || !projectId) {
+-      setOverview(null);
+-      setTasks([]);
+-      setActivity([]);
+-      setDocuments([]);
+-      setThreads([]);
+-      return;
+-    }
+-    try {
+-      const next = await api.projectAgent.getOverview({ projectId });
+-      if (!stillCurrent(projectId, generation)) return;
+-      applyOverview(next);
+-      if (next.configured) {
+-        const [listed, activityPage, docs, index] = await Promise.all([
+-          api.projectAgent.listTasks({ projectId, includeArchived: true }),
+-          api.projectAgent.listActivity({ projectId }),
+-          api.projectAgent.listDocuments({ projectId }),
+-          api.projectAgent.listThreadIndex({ projectId }),
+-        ]);
+-        if (!stillCurrent(projectId, generation)) return;
+-        setTasks(listed.tasks);
+-        setActivity(activityPage.activity);
+-        setActivityCursor(activityPage.nextCursor);
+-        setDocuments(docs.documents);
+-        setThreads(index.threads);
+-      } else {
+-        setTasks([]);
+-        setActivity([]);
+-        setDocuments([]);
+-        setThreads([]);
+-      }
+-      reportError(null);
+-    } catch (cause) {
+-      if (!stillCurrent(projectId, generation)) return;
+-      reportError(cause instanceof Error ? cause.message : "Failed to load project coordinator.");
+-    }
+-  }, [reportError, applyOverview]);
+-
+-  // `thread-index-upserted` events patch membership directly; a full re-list
+-  // still runs when config links/unlinks or task upserts could change it.
+-  // One refresh in flight at a time; a burst coalesces into a single
+-  // follow-up listing.
+-  const threadIndexRefreshRef = useRef({ inFlight: false, queued: false });
+-  const refreshThreadIndex = useCallback(() => {
+-    const api = readNativeApi();
+-    const projectId = projectIdRef.current;
+-    if (!api?.projectAgent || !projectId) return;
+-    const pending = threadIndexRefreshRef.current;
+-    if (pending.inFlight) {
+-      pending.queued = true;
+-      return;
+-    }
+-    pending.inFlight = true;
+-    const generation = loadGeneration.current;
+-    void (async () => {
+-      try {
+-        const index = await api.projectAgent.listThreadIndex({ projectId });
+-        if (projectIdRef.current === projectId && loadGeneration.current === generation) {
+-          setThreads(index.threads);
+-        }
+-      } catch {
+-        // A dropped refresh keeps the last index — the next event retries it.
+-      }
+-      pending.inFlight = false;
+-      if (pending.queued) {
+-        pending.queued = false;
+-        refreshThreadIndex();
+-      }
+-    })();
+-  }, []);
+-
+-  useEffect(() => {
+-    if (!input.enabled || !input.projectId) {
+-      setOverview(null);
+-      setTasks([]);
+-      setActivity([]);
+-      return;
+-    }
+-    void load();
+-    const api = readNativeApi();
+-    const subscribedProjectId = input.projectId;
+-    if (!api?.projectAgent || !subscribedProjectId) return;
+-    void api.projectAgent.subscribe({ projectId: subscribedProjectId }).catch(() => undefined);
+-    const unsubscribeEvents = api.projectAgent.onEvent((event: ProjectAgentStreamEvent) => {
++  const applyStreamEvent = useCallback(
++    (event: ProjectAgentStreamEvent) => {
+       const current = projectIdRef.current;
+       if (!current) return;
+       // Events stream for every subscribed project on the client — apply only this
+@@ -186,26 +131,22 @@ export function useProjectAgent(input: {
+       }
+       if (event.type === "config-upserted") {
+         if (event.config.projectId === current) {
+-          const wasConfigured = overviewConfiguredRef.current;
+           setOverview((overview) =>
+-            overview && overview.projectId === current
++            overview &&
++            overview.projectId === current &&
++            (overview.config?.revision ?? -1) <= event.config.revision
+               ? projectAgentOverviewWithConfig(overview, event.config)
+               : overview,
+           );
+-          if (wasConfigured) {
+-            refreshThreadIndex();
+-          } else {
+-            // First configure while the panel is open: the task/activity/document/
+-            // thread lists behind the overview only exist once loaded.
+-            void load();
+-          }
+         }
+         return;
+       }
+       if (event.type === "goal-upserted") {
+         if (event.goal.projectId === current) {
+           setOverview((overview) =>
+-            overview && overview.projectId === current
++            overview &&
++            overview.projectId === current &&
++            !(overview.goal?.id === event.goal.id && overview.goal.revision > event.goal.revision)
+               ? { ...overview, goal: event.goal }
+               : overview,
+           );
+@@ -227,11 +168,11 @@ export function useProjectAgent(input: {
+           setTasks((tasks) => {
+             const index = tasks.findIndex((task) => task.id === event.task.id);
+             if (index === -1) return [...tasks, event.task];
++            if (event.task.revision < tasks[index]!.revision) return tasks;
+             const next = [...tasks];
+             next[index] = event.task;
+             return next;
+           });
+-          refreshThreadIndex();
+         }
+         return;
+       }
+@@ -260,7 +201,9 @@ export function useProjectAgent(input: {
+           setActivity((activity) =>
+             activity.some((entry) => entry.id === event.activity.id)
+               ? activity
+-              : [event.activity, ...activity],
++              : [event.activity, ...activity].toSorted(
++                  (left, right) => right.sequence - left.sequence,
++                ),
+           );
+         }
+         return;
+@@ -272,6 +215,7 @@ export function useProjectAgent(input: {
+               (document) => document.logicalPath === event.head.logicalPath,
+             );
+             if (index === -1) return [...documents, event.head];
++            if (event.head.revision < documents[index]!.revision) return documents;
+             const next = [...documents];
+             next[index] = event.head;
+             return next;
+@@ -279,12 +223,190 @@ export function useProjectAgent(input: {
+         }
+         return;
+       }
++    },
++    [applyOverview, mergeWorkItems],
++  );
++
++  const stillCurrent = useCallback(
++    (projectId: ProjectId, generation: number, scope: RequestScope) =>
++      isCurrentScope(scope) &&
++      projectIdRef.current === projectId &&
++      loadGeneration.current === generation,
++    [isCurrentScope],
++  );
++
++  const load = useCallback(async () => {
++    const api = readNativeApi();
++    const projectId = projectIdRef.current;
++    const scope = scopeRef.current;
++    if (!isCurrentScope(scope)) return;
++    const generation = ++loadGeneration.current;
++    // Replay only stream updates observed during this read, so a delayed list
++    // cannot overwrite newer task revisions or drop a newly created row.
++    const events: ProjectAgentStreamEvent[] = [];
++    loadEventsRef.current = events;
++    if (!api?.projectAgent || !projectId) {
++      loadEventsRef.current = null;
++      setOverview(null);
++      setTasks([]);
++      setActivity([]);
++      setDocuments([]);
++      setThreads([]);
++      return;
++    }
++    try {
++      const next = await api.projectAgent.getOverview({ projectId });
++      if (!stillCurrent(projectId, generation, scope)) return;
++      applyOverview(next);
++      for (const event of events) applyStreamEvent(event);
++      if (next.configured) {
++        const readTasks = async () => {
++          const tasks: ProjectTask[] = [];
++          const cursors = new Set<string>();
++          let cursor: string | null = null;
++          do {
++            const page = await api.projectAgent.listTasks({
++              projectId,
++              includeArchived: true,
++              ...(cursor ? { cursor } : {}),
++            });
++            if (!stillCurrent(projectId, generation, scope)) return tasks;
++            tasks.push(...page.tasks);
++            cursor = page.nextCursor;
++            if (cursor && cursors.has(cursor)) throw new Error("Task pagination did not advance.");
++            if (cursor) cursors.add(cursor);
++          } while (cursor);
++          return tasks;
++        };
++        const [listed, activityPage, docs, index] = await Promise.all([
++          readTasks(),
++          api.projectAgent.listActivity({ projectId }),
++          api.projectAgent.listDocuments({ projectId }),
++          api.projectAgent.listThreadIndex({ projectId }),
++        ]);
++        if (!stillCurrent(projectId, generation, scope)) return;
++        setTasks(listed);
++        setActivity(activityPage.activity);
++        setActivityCursor(activityPage.nextCursor);
++        setDocuments(docs.documents);
++        setThreads(index.threads);
++      } else {
++        setTasks([]);
++        setActivity([]);
++        setDocuments([]);
++        setThreads([]);
++        setActivityCursor(null);
++      }
++      for (const event of events) applyStreamEvent(event);
++      reportError(null);
++    } catch (cause) {
++      if (!stillCurrent(projectId, generation, scope)) return;
++      reportError(cause instanceof Error ? cause.message : "Failed to load project coordinator.");
++    } finally {
++      if (loadEventsRef.current === events) loadEventsRef.current = null;
++    }
++  }, [reportError, applyOverview, applyStreamEvent, isCurrentScope, stillCurrent]);
++
++  // `thread-index-upserted` events patch membership directly; a full re-list
++  // still runs when config links/unlinks or task upserts could change it.
++  // One refresh in flight at a time; a burst coalesces into a single
++  // follow-up listing.
++  const threadIndexRefreshRef = useRef({ inFlight: false, queued: false });
++  const refreshThreadIndex = useCallback(() => {
++    const api = readNativeApi();
++    const projectId = projectIdRef.current;
++    if (!api?.projectAgent || !projectId) return;
++    const pending = threadIndexRefreshRef.current;
++    if (pending.inFlight) {
++      pending.queued = true;
++      return;
++    }
++    pending.inFlight = true;
++    const generation = loadGeneration.current;
++    const scope = scopeRef.current;
++    const eventVersion = threadIndexEventVersion.current;
++    void (async () => {
++      try {
++        const index = await api.projectAgent.listThreadIndex({ projectId });
++        if (
++          stillCurrent(projectId, generation, scope) &&
++          threadIndexEventVersion.current === eventVersion
++        ) {
++          setThreads(index.threads);
++        }
++      } catch {
++        // A dropped refresh keeps the last index — the next event retries it.
++      }
++      pending.inFlight = false;
++      if (pending.queued && isCurrentScope(scope)) {
++        pending.queued = false;
++        refreshThreadIndex();
++      }
++    })();
++  }, [isCurrentScope, stillCurrent]);
++
++  useEffect(() => {
++    const scope = scopeRef.current;
++    scope.active = true;
++    loadGeneration.current += 1;
++    loadEventsRef.current = null;
++    workItemsRef.current = { projectId: input.projectId, items: [] };
++    threadIndexRefreshRef.current = { inFlight: false, queued: false };
++    overviewConfiguredRef.current = false;
++    setBusy(false);
++    setOverview(null);
++    setTasks([]);
++    setActivity([]);
++    setActivityCursor(null);
++    setDocuments([]);
++    setThreads([]);
++    reportError(null);
++    if (!input.enabled || !input.projectId) return;
++    void load();
++    const api = readNativeApi();
++    const subscribedProjectId = input.projectId;
++    if (!api?.projectAgent || !subscribedProjectId) return;
++    void api.projectAgent.subscribe({ projectId: subscribedProjectId }).catch(() => undefined);
++    const unsubscribeEvents = api.projectAgent.onEvent((event: ProjectAgentStreamEvent) => {
++      if (!isCurrentScope(scope)) return;
++      loadEventsRef.current?.push(event);
++      const wasConfigured = overviewConfiguredRef.current;
++      applyStreamEvent(event);
++      if (event.type === "snapshot" && event.overview.projectId === subscribedProjectId) {
++        // A reconnect snapshot contains only the overview, not the task,
++        // document, activity or membership lists missed while disconnected.
++        void load();
++      } else if (
++        event.type === "config-upserted" &&
++        event.config.projectId === subscribedProjectId
++      ) {
++        if (wasConfigured) refreshThreadIndex();
++        else void load();
++      } else if (event.type === "task-upserted" && event.task.projectId === subscribedProjectId) {
++        refreshThreadIndex();
++      } else if (
++        event.type === "thread-index-upserted" &&
++        event.projectId === subscribedProjectId
++      ) {
++        threadIndexEventVersion.current += 1;
++        if (threadIndexRefreshRef.current.inFlight) threadIndexRefreshRef.current.queued = true;
++      }
+     });
+     return () => {
++      scope.active = false;
++      loadGeneration.current += 1;
+       unsubscribeEvents();
+       void api.projectAgent.unsubscribe({ projectId: subscribedProjectId }).catch(() => undefined);
+     };
+-  }, [input.enabled, input.projectId, load, refreshThreadIndex, applyOverview, mergeWorkItems]);
++  }, [
++    input.enabled,
++    input.projectId,
++    load,
++    refreshThreadIndex,
++    applyStreamEvent,
++    isCurrentScope,
++    reportError,
++  ]);
+ 
+   const runMutation = useCallback(
+     async (
+@@ -296,21 +418,22 @@ export function useProjectAgent(input: {
+       const api = readNativeApi();
+       const projectId = projectIdRef.current;
+       if (!api?.projectAgent || !projectId) return false;
+-      setBusy(true);
++      const scope = scopeRef.current;
++      const finish = beginMutation();
+       try {
+         await work(api.projectAgent, projectId);
+-        if (projectIdRef.current === projectId) await load();
++        if (isCurrentScope(scope)) await load();
+         return true;
+       } catch (cause) {
+-        if (projectIdRef.current === projectId) {
++        if (isCurrentScope(scope)) {
+           reportError(cause instanceof Error ? cause.message : "Project action failed.");
+         }
+         return false;
+       } finally {
+-        if (projectIdRef.current === projectId) setBusy(false);
++        finish();
+       }
+     },
+-    [load, reportError],
++    [load, reportError, beginMutation, isCurrentScope],
+   );
+ 
+   const configure = useCallback(
+@@ -409,22 +532,23 @@ export function useProjectAgent(input: {
+     ) => {
+       const api = readNativeApi();
+       if (!api?.projectAgent) return null;
+-      setBusy(true);
++      const scope = scopeRef.current;
++      const finish = beginMutation();
+       try {
+         const overview = await call(api.projectAgent);
+         useProjectAgentSummariesStore.getState().applyOverview(overview);
+-        if (projectIdRef.current === projectId) await load();
++        if (isCurrentScope(scope) && projectIdRef.current === projectId) await load();
+         return overview;
+       } catch (cause) {
+-        if (projectIdRef.current === projectId) {
+-          setError(cause instanceof Error ? cause.message : "Hub action failed.");
++        if (isCurrentScope(scope) && projectIdRef.current === projectId) {
++          reportError(cause instanceof Error ? cause.message : "Hub action failed.");
+         }
+         return null;
+       } finally {
+-        if (projectIdRef.current === projectId) setBusy(false);
++        finish();
+       }
+     },
+-    [load],
++    [load, reportError, beginMutation, isCurrentScope],
+   );
+ 
+   const pauseGroup = useCallback(
+@@ -471,7 +595,8 @@ export function useProjectAgent(input: {
+     async (projectId: ProjectId, confirmName: string, options?: { requireEmpty?: boolean }) => {
+       const api = readNativeApi();
+       if (!api?.projectAgent) return null;
+-      setBusy(true);
++      const scope = scopeRef.current;
++      const finish = beginMutation();
+       try {
+         const result: ProjectAgentDeleteGroupResult = await api.projectAgent.deleteGroup({
+           requestId: crypto.randomUUID(),
+@@ -481,15 +606,15 @@ export function useProjectAgent(input: {
+         });
+         return result;
+       } catch (cause) {
+-        if (projectIdRef.current === projectId) {
+-          setError(cause instanceof Error ? cause.message : "Hub action failed.");
++        if (isCurrentScope(scope) && projectIdRef.current === projectId) {
++          reportError(cause instanceof Error ? cause.message : "Hub action failed.");
+         }
+         return null;
+       } finally {
+-        if (projectIdRef.current === projectId) setBusy(false);
++        finish();
+       }
+     },
+-    [],
++    [reportError, beginMutation, isCurrentScope],
+   );
+ 
+   const startGoal = useCallback(
+@@ -614,11 +739,15 @@ export function useProjectAgent(input: {
+     const api = readNativeApi();
+     const projectId = projectIdRef.current;
+     if (!api?.projectAgent || !projectId || !activityCursor) return;
++    const scope = scopeRef.current;
++    const generation = loadGeneration.current;
+     const page = await api.projectAgent.listActivity({ projectId, cursor: activityCursor });
+-    if (projectIdRef.current !== projectId) return;
+-    setActivity((current) => [...current, ...page.activity]);
++    if (!stillCurrent(projectId, generation, scope)) return;
++    setActivity((current) => [
++      ...new Map([...current, ...page.activity].map((entry) => [entry.id, entry])).values(),
++    ]);
+     setActivityCursor(page.nextCursor);
+-  }, [activityCursor]);
++  }, [activityCursor, stillCurrent]);
+ 
+   const excludeThread = useCallback(
+     async (threadId: ThreadId, excluded: boolean) =>
+@@ -743,7 +872,7 @@ export function useProjectAgent(input: {
+     readDocument,
+     writeDocument,
+     exportDocuments,
+-    setError,
++    setError: reportError,
+   };
+ }
+ 
+diff --git a/bun.lock b/bun.lock
+index d395bfab..00bb4d2a 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -99,8 +99,8 @@
+         "effect": "catalog:",
+         "node-pty": "^1.1.0",
+         "open": "^10.1.0",
+-        "smol-toml": "^1.7.0",
+-        "toml": "3.0.0",
++        "smol-toml": "1.9.0",
++        "toml": "5.0.1",
+         "ws": "^8.21.0",
+         "yaml": "^2.8.3",
+         "zod": "4.3.6",
+@@ -272,7 +272,7 @@
+     "postcss": "^8.5.10",
+     "protobufjs": "^7.6.3",
+     "qs": "^6.15.2",
+-    "smol-toml": "^1.6.1",
++    "smol-toml": "1.9.0",
+     "uuid": "^13.0.1",
+     "vite": "^8.1.4",
+     "ws": "^8.21.0",
+@@ -3196,7 +3196,7 @@
+ 
+     "smart-buffer": ["smart-buffer@4.2.0", "", {}, "sha512-94hK0Hh8rPqQl2xXc3HsaBoOXKV20MToPkcXvwbISWLEs+64sBq5kFgn2kJDHb1Pry9yrP0dxrCI9RRci7RXKg=="],
+ 
+-    "smol-toml": ["smol-toml@1.7.0", "", {}, "sha512-aqVvWoyO21L23mb+drl4RmMXbf6N7FdHjAhTRA9ZBL7apWBgfWC16KjrASI+1p9GAroljyMHj6fK67i0UiTNvQ=="],
++    "smol-toml": ["smol-toml@1.9.0", "", {}, "sha512-hpd+HLON7HdZXqYchMM/+LaTTbdK0AU3NngIJ4KVyWbY9bfQqdL9cD+4yf6dUoU2Ap4VsU0JkQi6FxAI1B2mXQ=="],
+ 
+     "socks": ["socks@2.8.9", "", { "dependencies": { "ip-address": "^10.1.1", "smart-buffer": "^4.2.0" } }, "sha512-LJhUYUvItdQ0LkJTmPeaEObWXAqFyfmP85x0tch/ez9cahmhlBBLbIqDFnvBnUJGagb0JbIQrkBs1wJ+yRYpEw=="],
+ 
+@@ -3324,7 +3324,7 @@
+ 
+     "toidentifier": ["toidentifier@1.0.1", "", {}, "sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA=="],
+ 
+-    "toml": ["toml@3.0.0", "", {}, "sha512-y/mWCZinnvxjTKYhJ+pYxwD0mRLVvOtdS2Awbgxln6iEnt4rk0yBxeSBHkGJcPucRiG0e55mwWp+g/05rsrd6w=="],
++    "toml": ["toml@5.0.1", "", {}, "sha512-EqYNA/YvUNndrA2B3O2ojzLQoTQrBxeZ9UIjQwk8t10oe6n7dwclBwd9IdZQTOKwe6vWX+AXtl6IntXRbepdxQ=="],
+ 
+     "totalist": ["totalist@3.0.1", "", {}, "sha512-sf4i37nQ2LBx4m3wB74y+ubopq6W/dIzXg0FDGjsYnZHVa1Da8FH853wlL2gtUhg+xJXjfk3kUZS3BRoQeoQBQ=="],
+ 
+@@ -4062,6 +4062,8 @@
+ 
+     "eciesjs/@noble/hashes": ["@noble/hashes@1.8.0", "", {}, "sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A=="],
+ 
++    "effect/toml": ["toml@3.0.0", "", {}, "sha512-y/mWCZinnvxjTKYhJ+pYxwD0mRLVvOtdS2Awbgxln6iEnt4rk0yBxeSBHkGJcPucRiG0e55mwWp+g/05rsrd6w=="],
++
+     "electron-builder/builder-util-runtime": ["builder-util-runtime@9.7.0", "", { "dependencies": { "debug": "^4.3.4", "sax": "^1.2.4" } }, "sha512-g/kR520giAFYkSXTzcmF3kqQq7wi8F6N6SzeDgZrqTBN+VHdmgWOyTdD1yD7AATDId/yXLvuP34CxW46/BwCdw=="],
+ 
+     "electron-builder/chalk": ["chalk@4.1.2", "", { "dependencies": { "ansi-styles": "^4.1.0", "supports-color": "^7.1.0" } }, "sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA=="],
+diff --git a/package.json b/package.json
+index 86845680..c4b1d6e8 100644
+--- a/package.json
++++ b/package.json
+@@ -100,7 +100,7 @@
+     "postcss": "^8.5.10",
+     "protobufjs": "^7.6.3",
+     "qs": "^6.15.2",
+-    "smol-toml": "^1.6.1",
++    "smol-toml": "1.9.0",
+     "uuid": "^13.0.1",
+     "vite": "^8.1.4",
+     "ws": "^8.21.0",

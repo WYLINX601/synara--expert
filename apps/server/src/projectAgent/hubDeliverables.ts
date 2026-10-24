@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -730,6 +731,75 @@ const requireLibraryRepo = (git: GitCoreShape, root: string) =>
       ),
     );
 
+/** Read the validated inode with a hard byte bound, then recheck its path and contents. */
+const readSourceFile = async (
+  realWorkspaceRoot: string,
+  resolvedSource: string,
+): Promise<Buffer> => {
+  const changed = () =>
+    new HubDeliverablesError({
+      message: "Deliverable changed while it was being read.",
+      code: "conflict",
+    });
+  const before = await fs.lstat(resolvedSource);
+  if (!before.isFile() || before.isSymbolicLink()) throw changed();
+  if (before.size > HUB_DELIVERABLE_MAX_FILE_BYTES) {
+    throw new HubDeliverablesError({
+      message: `Deliverable exceeds the ${HUB_DELIVERABLE_MAX_FILE_BYTES}-byte limit.`,
+      code: "invalid",
+    });
+  }
+  const realBefore = await fs.realpath(resolvedSource);
+  if (realBefore !== resolvedSource || !isContainedPath(realWorkspaceRoot, realBefore))
+    throw changed();
+  const flags =
+    fsConstants.O_RDONLY |
+    (process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  const handle = await fs.open(resolvedSource, flags);
+  try {
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      opened.size !== before.size ||
+      opened.mtimeMs !== before.mtimeMs ||
+      opened.ctimeMs !== before.ctimeMs
+    )
+      throw changed();
+
+    // Read at most the validated size plus one sentinel byte, even if a writer
+    // keeps appending. A path-based readFile could follow a substituted link or
+    // allocate beyond the original stat bound.
+    const bytes = Buffer.allocUnsafe(opened.size + 1);
+    let length = 0;
+    while (length < bytes.length) {
+      const result = await handle.read(bytes, length, bytes.length - length, length);
+      if (result.bytesRead === 0) break;
+      length += result.bytesRead;
+    }
+    const after = await handle.stat();
+    const pathAfter = await fs.lstat(resolvedSource);
+    const realAfter = await fs.realpath(resolvedSource);
+    if (
+      length !== opened.size ||
+      after.size !== opened.size ||
+      after.mtimeMs !== opened.mtimeMs ||
+      after.ctimeMs !== opened.ctimeMs ||
+      !pathAfter.isFile() ||
+      pathAfter.isSymbolicLink() ||
+      pathAfter.dev !== opened.dev ||
+      pathAfter.ino !== opened.ino ||
+      realAfter !== resolvedSource ||
+      !isContainedPath(realWorkspaceRoot, realAfter)
+    )
+      throw changed();
+    return bytes.subarray(0, length);
+  } finally {
+    await handle.close();
+  }
+};
+
 const prepareSourceFiles = (
   worker: HubDeliverablesWorkerScope,
   hubId: ProjectId,
@@ -773,26 +843,7 @@ const prepareSourceFiles = (
             code: "forbidden",
           });
         }
-        const stat = await fs.stat(resolvedSource);
-        if (!stat.isFile()) {
-          throw new HubDeliverablesError({
-            message: `Deliverable path "${sourcePath}" is not a file.`,
-            code: "invalid",
-          });
-        }
-        if (stat.size > HUB_DELIVERABLE_MAX_FILE_BYTES) {
-          throw new HubDeliverablesError({
-            message: `Deliverable "${sourcePath}" exceeds the ${HUB_DELIVERABLE_MAX_FILE_BYTES}-byte limit.`,
-            code: "invalid",
-          });
-        }
-        const bytes = await fs.readFile(resolvedSource);
-        if (bytes.byteLength !== stat.size || bytes.byteLength > HUB_DELIVERABLE_MAX_FILE_BYTES) {
-          throw new HubDeliverablesError({
-            message: `Deliverable "${sourcePath}" changed while it was being read.`,
-            code: "conflict",
-          });
-        }
+        const bytes = await readSourceFile(realWorkspaceRoot, resolvedSource);
         totalBytes += bytes.byteLength;
         if (totalBytes > HUB_DELIVERABLE_MAX_TOTAL_BYTES) {
           throw new HubDeliverablesError({

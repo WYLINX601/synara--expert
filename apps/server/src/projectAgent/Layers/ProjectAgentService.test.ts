@@ -169,7 +169,11 @@ function makeTestLayer(options?: {
       session: null,
     },
   };
+  const threadShellLookupErrors = new Set<ThreadId>();
   const getThreadShellById = (threadId: ThreadId) => {
+    if (threadShellLookupErrors.has(threadId)) {
+      return Effect.fail(new Error("thread shell unavailable"));
+    }
     const row = threadShells[threadId];
     if (!row) return Effect.succeed(Option.none());
     return Effect.succeed(
@@ -226,6 +230,7 @@ function makeTestLayer(options?: {
     }
   > = {};
   const dispatched: OrchestrationCommand[] = [];
+  let dispatchInterceptor: ((command: OrchestrationCommand) => Effect.Effect<void>) | null = null;
   const commandReceiptRows = new Map<string, unknown>();
   const recordCommandReceipt = (
     command: Extract<OrchestrationCommand, { type: "thread.turn.start" | "thread.turn.interrupt" }>,
@@ -471,6 +476,7 @@ function makeTestLayer(options?: {
     dispatch: (command: OrchestrationCommand) =>
       Effect.gen(function* () {
         dispatched.push(command);
+        if (dispatchInterceptor) yield* dispatchInterceptor(command);
         if (command.type === "thread.messages.import" && failFirstImport) {
           failFirstImport = false;
           return yield* Effect.fail(new Error("crash after thread"));
@@ -644,6 +650,15 @@ function makeTestLayer(options?: {
     digestGenerationInputs,
     threadShells,
     threadDetails,
+    setDispatchInterceptor: (
+      interceptor: ((command: OrchestrationCommand) => Effect.Effect<void>) | null,
+    ) => {
+      dispatchInterceptor = interceptor;
+    },
+    setThreadShellLookupError: (threadId: ThreadId, failed: boolean) => {
+      if (failed) threadShellLookupErrors.add(threadId);
+      else threadShellLookupErrors.delete(threadId);
+    },
     providerSessions,
     toolInFlightByThread,
     shellBatchCalls: () => shellBatchCalls,
@@ -7630,6 +7645,647 @@ it.effect(
     }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
   },
 );
+
+it.effect("rejects duplicate task dependencies and serializes cyclic graph updates", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    yield* configureTestGroup(service, "req-task-graph-config");
+    const goal = yield* service.startGoal(
+      { requestId: "req-task-graph-goal", projectId: groupId, objective: "Task graph" },
+      { kind: "user" },
+    );
+    const first = yield* service.createTask(
+      { requestId: "req-task-graph-first", projectId: groupId, goalId: goal.id, title: "A" },
+      { kind: "user" },
+    );
+    const second = yield* service.createTask(
+      { requestId: "req-task-graph-second", projectId: groupId, goalId: goal.id, title: "B" },
+      { kind: "user" },
+    );
+    const duplicateCreate = yield* Effect.exit(
+      service.createTask(
+        {
+          requestId: "req-task-graph-duplicate-create",
+          projectId: groupId,
+          goalId: goal.id,
+          title: "Invalid",
+          dependsOnTaskIds: [first.id, first.id],
+        },
+        { kind: "user" },
+      ),
+    );
+    const duplicateUpdate = yield* Effect.exit(
+      service.updateTask(
+        {
+          requestId: "req-task-graph-duplicate-update",
+          projectId: groupId,
+          taskId: second.id,
+          expectedRevision: second.revision,
+          dependsOnTaskIds: [first.id, first.id],
+        },
+        { kind: "user" },
+      ),
+    );
+    assert.isTrue(Exit.isFailure(duplicateCreate));
+    assert.isTrue(Exit.isFailure(duplicateUpdate));
+    assert.strictEqual(Option.getOrThrow(yield* repository.getTask(second.id)).revision, 1);
+
+    const readEdges = repository.listTaskEdges;
+    Object.assign(repository, {
+      listTaskEdges: (projectId: ProjectId) =>
+        readEdges(projectId).pipe(Effect.tap(() => Effect.sleep("1 millis"))),
+    });
+    const updates = yield* Effect.all(
+      [
+        Effect.exit(
+          service.updateTask(
+            {
+              requestId: "req-task-graph-cycle-a",
+              projectId: groupId,
+              taskId: first.id,
+              expectedRevision: first.revision,
+              dependsOnTaskIds: [second.id],
+            },
+            { kind: "user" },
+          ),
+        ),
+        Effect.exit(
+          service.updateTask(
+            {
+              requestId: "req-task-graph-cycle-b",
+              projectId: groupId,
+              taskId: second.id,
+              expectedRevision: second.revision,
+              dependsOnTaskIds: [first.id],
+            },
+            { kind: "user" },
+          ),
+        ),
+      ],
+      { concurrency: "unbounded" },
+    ).pipe(Effect.forkChild);
+    yield* TestClock.adjust("10 millis");
+    yield* TestClock.adjust("10 millis");
+    const results = yield* Fiber.join(updates);
+    assert.strictEqual(results.filter(Exit.isSuccess).length, 1);
+    const failure = results.find(Exit.isFailure);
+    assert.isDefined(failure);
+    if (failure && Exit.isFailure(failure)) {
+      assert.strictEqual(Option.getOrThrow(Cause.findErrorOption(failure.cause)).code, "cycle");
+    }
+  }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+});
+
+it.effect("retries a failed pause interrupt with the same request ID", () => {
+  const failCommandTypes: OrchestrationCommand["type"][] = ["thread.turn.interrupt"];
+  const harness = makeTestLayer({ failCommandTypes });
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    yield* configureTestGroup(service, "req-pause-retry-config");
+    yield* repository.upsertThreadIndex({
+      projectId: groupId,
+      threadId: groupMemberThreadId,
+      excluded: false,
+      archived: false,
+      summaryStatus: "pending",
+      lastUpdatedAt: now,
+      lastSummarizedAt: null,
+    });
+    harness.threadShells[groupMemberThreadId] = {
+      projectId: groupId,
+      title: "Running worker",
+      session: { status: "running", updatedAt: now, lastError: null },
+      latestTurn: { state: "running", startedAt: now },
+    };
+    const input = { requestId: "req-pause-retry", projectId: groupId };
+    assert.isTrue(Exit.isFailure(yield* Effect.exit(service.pauseGroup(input, { kind: "user" }))));
+    assert.isNotNull(Option.getOrThrow(yield* repository.getConfig(groupId)).pausedAt);
+    assert.isTrue(Option.isNone(yield* repository.getReceipt(input)));
+    const beforeRetry = harness.dispatched.filter(
+      (command) => command.type === "thread.turn.interrupt",
+    ).length;
+    failCommandTypes.length = 0;
+    yield* service.pauseGroup(input, { kind: "user" });
+    const afterRetry = harness.dispatched.filter(
+      (command) => command.type === "thread.turn.interrupt",
+    ).length;
+    assert.isAbove(afterRetry, beforeRetry);
+    assert.isTrue(Option.isSome(yield* repository.getReceipt(input)));
+    yield* service.pauseGroup(input, { kind: "user" });
+    assert.strictEqual(
+      harness.dispatched.filter((command) => command.type === "thread.turn.interrupt").length,
+      afterRetry,
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("does not record pause success when the coordinator snapshot cannot be read", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    const overview = yield* configureTestGroup(service, "req-pause-shell-read-config");
+    const coordinatorThreadId = overview.config!.coordinatorThreadId;
+    const input = { requestId: "req-pause-shell-read", projectId: groupId };
+    harness.setThreadShellLookupError(coordinatorThreadId, true);
+    const failed = yield* Effect.exit(service.pauseGroup(input, { kind: "user" }));
+    assert.isTrue(Exit.isFailure(failed));
+    assert.isNotNull(Option.getOrThrow(yield* repository.getConfig(groupId)).pausedAt);
+    assert.isTrue(Option.isNone(yield* repository.getReceipt(input)));
+    harness.setThreadShellLookupError(coordinatorThreadId, false);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect(
+  "retries failed archive and unarchive commands without repeating completed threads",
+  () => {
+    const failCommandTypes: OrchestrationCommand["type"][] = ["thread.archive"];
+    const harness = makeTestLayer({ failCommandTypes });
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const overview = yield* configureTestGroup(service, "req-archive-retry-config");
+      const coordinatorThreadId = overview.config!.coordinatorThreadId;
+      yield* repository.upsertThreadIndex({
+        projectId: groupId,
+        threadId: groupMemberThreadId,
+        excluded: false,
+        archived: false,
+        summaryStatus: "pending",
+        lastUpdatedAt: now,
+        lastSummarizedAt: null,
+      });
+      harness.threadShells[groupMemberThreadId] = {
+        projectId: groupId,
+        title: "Member",
+        session: null,
+        archivedAt: null,
+      };
+      const archiveInput = { requestId: "req-archive-retry", projectId: groupId };
+      assert.isTrue(
+        Exit.isFailure(yield* Effect.exit(service.archiveGroup(archiveInput, { kind: "user" }))),
+      );
+      assert.isTrue(Option.isNone(yield* repository.getReceipt(archiveInput)));
+      const coordinatorArchiveAttempts = () =>
+        harness.dispatched.filter(
+          (command) =>
+            command.type === "thread.archive" && command.threadId === coordinatorThreadId,
+        ).length;
+      const beforeCoordinatorRetry = coordinatorArchiveAttempts();
+      harness.threadShells[coordinatorThreadId] = {
+        projectId: groupId,
+        title: "Coordinator",
+        session: null,
+        archivedAt: now,
+      };
+      failCommandTypes[0] = "thread.unarchive";
+      yield* service.archiveGroup(archiveInput, { kind: "user" });
+      assert.strictEqual(coordinatorArchiveAttempts(), beforeCoordinatorRetry);
+      assert.isTrue(Option.isSome(yield* repository.getReceipt(archiveInput)));
+
+      // Prepare archived thread projections, then fail after the Hub state has
+      // been cleared so the retry has to finish the outstanding thread command.
+      harness.threadShells[groupMemberThreadId] = {
+        ...harness.threadShells[groupMemberThreadId]!,
+        archivedAt: now,
+      };
+      const unarchiveInput = { requestId: "req-unarchive-retry", projectId: groupId };
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(service.unarchiveGroup(unarchiveInput, { kind: "user" })),
+        ),
+      );
+      assert.isNull(Option.getOrThrow(yield* repository.getConfig(groupId)).archivedAt);
+      assert.isTrue(Option.isNone(yield* repository.getReceipt(unarchiveInput)));
+      failCommandTypes.length = 0;
+      harness.threadShells[coordinatorThreadId] = {
+        projectId: groupId,
+        title: "Coordinator",
+        session: null,
+        archivedAt: null,
+      };
+      const beforeUnarchiveRetry = harness.dispatched.filter(
+        (command) => command.type === "thread.unarchive",
+      ).length;
+      yield* service.unarchiveGroup(unarchiveInput, { kind: "user" });
+      const afterUnarchiveRetry = harness.dispatched.filter(
+        (command) => command.type === "thread.unarchive",
+      ).length;
+      assert.isAbove(afterUnarchiveRetry, beforeUnarchiveRetry);
+      assert.isTrue(Option.isSome(yield* repository.getReceipt(unarchiveInput)));
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("rejects pausing or resuming a stopped goal", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    const overview = yield* configureTestGroup(service, "req-stopped-terminal-config");
+    const goal = yield* service.startGoal(
+      {
+        requestId: "req-stopped-terminal-start",
+        projectId: groupId,
+        objective: "Terminal goal",
+      },
+      { kind: "user" },
+    );
+    const stopped = yield* service.stopGoal(
+      {
+        requestId: "req-stopped-terminal-stop",
+        projectId: groupId,
+        goalId: goal.id,
+        expectedRevision: goal.revision,
+      },
+      { kind: "user" },
+    );
+    for (const principal of [
+      { kind: "user" as const },
+      coordinatorPrincipal(overview.config!.coordinatorThreadId),
+    ]) {
+      const input = {
+        requestId: `req-stopped-terminal-${principal.kind}`,
+        projectId: groupId,
+        goalId: goal.id,
+        expectedRevision: stopped.revision,
+      };
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.pauseGoal(input, principal))));
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.resumeGoal(input, principal))));
+      const persisted = Option.getOrThrow(yield* repository.getGoal(goal.id));
+      assert.strictEqual(persisted.status, "stopped");
+      assert.strictEqual(persisted.revision, stopped.revision);
+    }
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("serializes starting a goal behind its previous goal's stop interrupt", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    const overview = yield* configureTestGroup(service, "req-stop-start-serial-config");
+    const oldGoal = yield* service.startGoal(
+      {
+        requestId: "req-stop-start-serial-old",
+        projectId: groupId,
+        objective: "Old goal",
+      },
+      { kind: "user" },
+    );
+    const interruptReached = yield* Deferred.make<void>();
+    const finishInterrupt = yield* Deferred.make<void>();
+    harness.setDispatchInterceptor((command) =>
+      command.type === "thread.turn.interrupt"
+        ? Deferred.succeed(interruptReached, void 0).pipe(
+            Effect.andThen(Deferred.await(finishInterrupt)),
+            Effect.asVoid,
+          )
+        : Effect.void,
+    );
+    const stopFiber = yield* service
+      .stopGoal(
+        {
+          requestId: "req-stop-start-serial-stop",
+          projectId: groupId,
+          goalId: oldGoal.id,
+          expectedRevision: oldGoal.revision,
+        },
+        { kind: "user" },
+      )
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(interruptReached);
+    assert.strictEqual(Option.getOrThrow(yield* repository.getGoal(oldGoal.id)).status, "stopped");
+    assert.isTrue(
+      harness.dispatched.some(
+        (command) =>
+          command.type === "thread.turn.interrupt" &&
+          command.threadId === overview.config!.coordinatorThreadId,
+      ),
+    );
+
+    const startFiber = yield* service
+      .startGoal(
+        {
+          requestId: "req-stop-start-serial-new",
+          projectId: groupId,
+          objective: "New goal",
+        },
+        { kind: "user" },
+      )
+      .pipe(Effect.forkChild);
+    const startBeforeInterruptFiber = yield* Effect.timeoutOption(
+      Fiber.join(startFiber),
+      "50 millis",
+    ).pipe(Effect.forkChild);
+    yield* TestClock.adjust("50 millis");
+    const startedBeforeInterruptFinished = yield* Fiber.join(startBeforeInterruptFiber);
+    yield* Deferred.succeed(finishInterrupt, void 0);
+    yield* Fiber.join(stopFiber);
+    const newGoal = Option.isSome(startedBeforeInterruptFinished)
+      ? startedBeforeInterruptFinished.value
+      : yield* Fiber.join(startFiber);
+    assert.isTrue(Option.isNone(startedBeforeInterruptFinished));
+    assert.notStrictEqual(newGoal.id, oldGoal.id);
+    assert.strictEqual(Option.getOrThrow(yield* repository.getActiveGoal(groupId)).id, newGoal.id);
+  }).pipe(Effect.provide(Layer.merge(harness.layer, TestClock.layer())));
+});
+
+it.effect(
+  "completes managed worker registration while a task mutation holds the project lock",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const repository = yield* ProjectAgentRepository;
+      const operations = yield* AgentGatewayOperationRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const overview = yield* configureTestGroup(service, "req-lock-order-config");
+      const coordinatorThreadId = overview.config!.coordinatorThreadId;
+      const goal = yield* service.startGoal(
+        { requestId: "req-lock-order-goal", projectId: groupId, objective: "Lock ordering" },
+        { kind: "user" },
+      );
+      const prerequisite = yield* service.createTask(
+        {
+          requestId: "req-lock-order-prerequisite",
+          projectId: groupId,
+          goalId: goal.id,
+          title: "Prerequisite",
+        },
+        { kind: "user" },
+      );
+      const task = yield* service.createTask(
+        {
+          requestId: "req-lock-order-task",
+          projectId: groupId,
+          goalId: goal.id,
+          title: "Task to update",
+        },
+        { kind: "user" },
+      );
+
+      const updateReachedGraphRead = yield* Deferred.make<void>();
+      const releaseGraphRead = yield* Deferred.make<void>();
+      const listTaskEdges = repository.listTaskEdges;
+      let blockNextGraphRead = true;
+      Object.assign(repository, {
+        listTaskEdges: (projectId: ProjectId) => {
+          if (!blockNextGraphRead) return listTaskEdges(projectId);
+          blockNextGraphRead = false;
+          return Effect.gen(function* () {
+            yield* Deferred.succeed(updateReachedGraphRead, void 0);
+            yield* Deferred.await(releaseGraphRead);
+            return yield* listTaskEdges(projectId);
+          });
+        },
+      });
+      const updateFiber = yield* service
+        .updateTask(
+          {
+            requestId: "req-lock-order-update",
+            projectId: groupId,
+            taskId: task.id,
+            expectedRevision: task.revision,
+            dependsOnTaskIds: [prerequisite.id],
+          },
+          { kind: "user" },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(updateReachedGraphRead);
+
+      const operationId = "lock-order-operation";
+      yield* operations.reserve({
+        operationId,
+        callerThreadId: coordinatorThreadId,
+        callerTurnId: "lock-order-turn",
+        operationKind: "create_threads",
+        requestId: "req-lock-order-registration",
+        fingerprint: "lock-order-fingerprint",
+        requestedCount: 1,
+        planJson: "[]",
+        now,
+      });
+      yield* operations.markDispatching({ operationId, now });
+      const transactionStarted = yield* Deferred.make<void>();
+      const registrationFiber = yield* operations
+        .complete(
+          { operationId, resultJson: "{}", now },
+          Effect.gen(function* () {
+            yield* sql`SELECT 1`;
+            yield* Deferred.succeed(transactionStarted, void 0);
+            yield* service.recordManagedWorkerThreads({
+              requestId: "req-lock-order-registration",
+              callerThreadId: coordinatorThreadId,
+              threadIds: [ThreadId.makeUnsafe("thread-lock-order-worker")],
+              titles: ["Registered worker"],
+            });
+          }),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(transactionStarted);
+      const registrationCheckFiber = yield* Effect.timeoutOption(
+        Fiber.join(registrationFiber),
+        "250 millis",
+      ).pipe(Effect.forkChild);
+      yield* TestClock.adjust("250 millis");
+      const registrationCompleted = yield* Fiber.join(registrationCheckFiber);
+      if (Option.isNone(registrationCompleted)) yield* Fiber.interrupt(registrationFiber);
+      yield* Deferred.succeed(releaseGraphRead, void 0);
+      const updateResult = yield* Fiber.await(updateFiber);
+      assert.isTrue(Exit.isSuccess(updateResult));
+      assert.isTrue(
+        Option.isSome(registrationCompleted),
+        "registration must not wait for the project lock while holding the completion transaction",
+      );
+    }).pipe(
+      Effect.provide(
+        AgentGatewayOperationRepositoryLive.pipe(
+          Layer.provideMerge(Layer.merge(harness.layer, TestClock.layer())),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect("does not replay a failed old stop against a newly started goal", () => {
+  const failCommandTypes: OrchestrationCommand["type"][] = ["thread.turn.interrupt"];
+  const harness = makeTestLayer({ failCommandTypes });
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    yield* configureTestGroup(service, "req-stop-replay-config");
+    const goal = yield* service.startGoal(
+      { requestId: "req-stop-replay-old-goal", projectId: groupId, objective: "Old goal" },
+      { kind: "user" },
+    );
+    const input = {
+      requestId: "req-stop-replay-old-stop",
+      projectId: groupId,
+      goalId: goal.id,
+      expectedRevision: goal.revision,
+    };
+    assert.isTrue(Exit.isFailure(yield* Effect.exit(service.stopGoal(input, { kind: "user" }))));
+    assert.isTrue(Option.isNone(yield* repository.getReceipt(input)));
+    assert.strictEqual(Option.getOrThrow(yield* repository.getGoal(goal.id)).status, "stopped");
+    const failedStopInterrupts = harness.dispatched.filter(
+      (command) => command.type === "thread.turn.interrupt",
+    ).length;
+
+    failCommandTypes.length = 0;
+    const nextGoal = yield* service.startGoal(
+      { requestId: "req-stop-replay-new-goal", projectId: groupId, objective: "New goal" },
+      { kind: "user" },
+    );
+    assert.notStrictEqual(nextGoal.id, goal.id);
+    const repeatedOldStop = yield* Effect.exit(service.stopGoal(input, { kind: "user" }));
+    assert.isTrue(Exit.isFailure(repeatedOldStop));
+    assert.strictEqual(
+      harness.dispatched.filter((command) => command.type === "thread.turn.interrupt").length,
+      failedStopInterrupts,
+      "replaying the old stop must not interrupt the coordinator or workers of the new goal",
+    );
+
+    const newStopInput = {
+      requestId: "req-stop-replay-new-stop",
+      projectId: groupId,
+      goalId: nextGoal.id,
+      expectedRevision: nextGoal.revision,
+    };
+    const stoppedNewGoal = yield* service.stopGoal(newStopInput, { kind: "user" });
+    assert.strictEqual(stoppedNewGoal.status, "stopped");
+    assert.isTrue(Option.isSome(yield* repository.getReceipt(newStopInput)));
+    const successfulStopInterrupts = harness.dispatched.filter(
+      (command) => command.type === "thread.turn.interrupt",
+    ).length;
+    const replayed = yield* service.stopGoal(newStopInput, { kind: "user" });
+    assert.strictEqual(replayed.id, nextGoal.id);
+    assert.strictEqual(
+      harness.dispatched.filter((command) => command.type === "thread.turn.interrupt").length,
+      successfulStopInterrupts,
+    );
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("interrupts workers across same-timestamp stopGoal pages", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    yield* configureTestGroup(service, "req-stop-pages-config");
+    const goal = yield* service.startGoal(
+      { requestId: "req-stop-pages-goal", projectId: groupId, objective: "Stop all workers" },
+      { kind: "user" },
+    );
+    const template = yield* service.createTask(
+      {
+        requestId: "req-stop-pages-template",
+        projectId: groupId,
+        goalId: goal.id,
+        title: "Worker task template",
+      },
+      { kind: "user" },
+    );
+    const workerIds: ThreadId[] = [];
+    for (let index = 0; index < 101; index++) {
+      const suffix = String(index).padStart(3, "0");
+      const threadId = ThreadId.makeUnsafe(`thread-stop-pages-${suffix}`);
+      workerIds.push(threadId);
+      yield* repository.saveTask(
+        {
+          ...template,
+          id: ProjectTaskId.makeUnsafe(`task-stop-pages-${suffix}`),
+          assignedThreadId: threadId,
+          status: "running",
+        },
+        null,
+      );
+    }
+    const input = {
+      requestId: "req-stop-pages-stop",
+      projectId: groupId,
+      goalId: goal.id,
+      expectedRevision: goal.revision,
+    };
+    yield* service.stopGoal(input, { kind: "user" });
+    const interruptedWorkerIds = harness.dispatched
+      .filter((command) => command.type === "thread.turn.interrupt")
+      .map((command) => command.threadId)
+      .filter((threadId) => workerIds.includes(threadId));
+    assert.sameMembers(interruptedWorkerIds, workerIds);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("unblocks a dependent task beyond the first 100 task rows", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    yield* configureTestGroup(service, "req-old-dependent-config");
+    const goal = yield* service.startGoal(
+      { requestId: "req-old-dependent-goal", projectId: groupId, objective: "Dependencies" },
+      { kind: "user" },
+    );
+    const prerequisite = yield* service.createTask(
+      {
+        requestId: "req-old-dependent-prerequisite",
+        projectId: groupId,
+        goalId: goal.id,
+        title: "Prerequisite",
+      },
+      { kind: "user" },
+    );
+    const dependentId = ProjectTaskId.makeUnsafe("task-old-dependent");
+    const oldDate = "2026-09-01T00:00:00.000Z";
+    yield* repository.saveTask(
+      {
+        ...prerequisite,
+        id: dependentId,
+        title: "Old dependent",
+        status: "planned",
+        dependsOnTaskIds: [prerequisite.id],
+        createdAt: oldDate,
+        updatedAt: oldDate,
+      },
+      null,
+    );
+    for (let index = 0; index < 100; index++) {
+      const createdAt = new Date(Date.parse(now) + 1_000 + index).toISOString();
+      yield* repository.saveTask(
+        {
+          ...prerequisite,
+          id: ProjectTaskId.makeUnsafe(`task-newer-dependent-${index}`),
+          createdAt,
+          updatedAt: createdAt,
+        },
+        null,
+      );
+    }
+    yield* service.reportResult(
+      {
+        requestId: "req-old-dependent-evidence",
+        projectId: groupId,
+        taskId: prerequisite.id,
+        summary: "Prerequisite checked",
+      },
+      { kind: "user" },
+    );
+    yield* service.updateTask(
+      {
+        requestId: "req-old-dependent-accept",
+        projectId: groupId,
+        taskId: prerequisite.id,
+        expectedRevision: prerequisite.revision,
+        accept: true,
+      },
+      { kind: "user" },
+    );
+    assert.strictEqual(Option.getOrThrow(yield* repository.getTask(dependentId)).status, "ready");
+  }).pipe(Effect.provide(harness.layer));
+});
 
 it.effect(
   "settles an abort on the re-dispatched turn instead of matching the old turn's ladder interrupt",

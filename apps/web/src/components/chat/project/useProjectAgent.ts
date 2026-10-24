@@ -24,6 +24,12 @@ import {
 } from "./projectAgentOverview.logic";
 import { useProjectAgentSummariesStore } from "./useProjectAgentSummaries";
 
+type RequestScope = {
+  readonly projectId: ProjectId | null;
+  readonly enabled: boolean;
+  active: boolean;
+};
+
 export function useProjectAgent(input: {
   readonly projectId: ProjectId | null;
   readonly enabled: boolean;
@@ -65,103 +71,42 @@ export function useProjectAgent(input: {
   const [busy, setBusy] = useState(false);
   const projectIdRef = useRef(input.projectId);
   const loadGeneration = useRef(0);
+  const scopeRef = useRef<RequestScope>({ ...input, active: true });
+  if (
+    scopeRef.current.projectId !== input.projectId ||
+    scopeRef.current.enabled !== input.enabled
+  ) {
+    scopeRef.current = { ...input, active: true };
+  }
+  const isCurrentScope = useCallback(
+    (scope: RequestScope) => scopeRef.current === scope && scope.active,
+    [],
+  );
+  const loadEventsRef = useRef<ProjectAgentStreamEvent[] | null>(null);
+  const threadIndexEventVersion = useRef(0);
+  const mutationsRef = useRef<{ scope: RequestScope | null; count: number }>({
+    scope: null,
+    count: 0,
+  });
+  const beginMutation = useCallback(() => {
+    const scope = scopeRef.current;
+    if (mutationsRef.current.scope !== scope) mutationsRef.current = { scope, count: 0 };
+    const pending = mutationsRef.current;
+    pending.count += 1;
+    setBusy(true);
+    return () => {
+      pending.count -= 1;
+      if (isCurrentScope(scope)) setBusy(pending.count > 0);
+    };
+  }, [isCurrentScope]);
   // Mirrors the rendered overview's configured flag so stream events can tell a
   // first-configure transition (load the lists) from a relink (index refresh only).
   const overviewConfiguredRef = useRef(false);
   projectIdRef.current = input.projectId;
   overviewConfiguredRef.current = projectAgentOverviewConfigured(overview);
 
-  const stillCurrent = (projectId: ProjectId, generation: number) =>
-    projectIdRef.current === projectId && loadGeneration.current === generation;
-
-  const load = useCallback(async () => {
-    const api = readNativeApi();
-    const projectId = projectIdRef.current;
-    const generation = ++loadGeneration.current;
-    if (!api?.projectAgent || !projectId) {
-      setOverview(null);
-      setTasks([]);
-      setActivity([]);
-      setDocuments([]);
-      setThreads([]);
-      return;
-    }
-    try {
-      const next = await api.projectAgent.getOverview({ projectId });
-      if (!stillCurrent(projectId, generation)) return;
-      applyOverview(next);
-      if (next.configured) {
-        const [listed, activityPage, docs, index] = await Promise.all([
-          api.projectAgent.listTasks({ projectId, includeArchived: true }),
-          api.projectAgent.listActivity({ projectId }),
-          api.projectAgent.listDocuments({ projectId }),
-          api.projectAgent.listThreadIndex({ projectId }),
-        ]);
-        if (!stillCurrent(projectId, generation)) return;
-        setTasks(listed.tasks);
-        setActivity(activityPage.activity);
-        setActivityCursor(activityPage.nextCursor);
-        setDocuments(docs.documents);
-        setThreads(index.threads);
-      } else {
-        setTasks([]);
-        setActivity([]);
-        setDocuments([]);
-        setThreads([]);
-      }
-      reportError(null);
-    } catch (cause) {
-      if (!stillCurrent(projectId, generation)) return;
-      reportError(cause instanceof Error ? cause.message : "Failed to load project coordinator.");
-    }
-  }, [reportError, applyOverview]);
-
-  // `thread-index-upserted` events patch membership directly; a full re-list
-  // still runs when config links/unlinks or task upserts could change it.
-  // One refresh in flight at a time; a burst coalesces into a single
-  // follow-up listing.
-  const threadIndexRefreshRef = useRef({ inFlight: false, queued: false });
-  const refreshThreadIndex = useCallback(() => {
-    const api = readNativeApi();
-    const projectId = projectIdRef.current;
-    if (!api?.projectAgent || !projectId) return;
-    const pending = threadIndexRefreshRef.current;
-    if (pending.inFlight) {
-      pending.queued = true;
-      return;
-    }
-    pending.inFlight = true;
-    const generation = loadGeneration.current;
-    void (async () => {
-      try {
-        const index = await api.projectAgent.listThreadIndex({ projectId });
-        if (projectIdRef.current === projectId && loadGeneration.current === generation) {
-          setThreads(index.threads);
-        }
-      } catch {
-        // A dropped refresh keeps the last index — the next event retries it.
-      }
-      pending.inFlight = false;
-      if (pending.queued) {
-        pending.queued = false;
-        refreshThreadIndex();
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    if (!input.enabled || !input.projectId) {
-      setOverview(null);
-      setTasks([]);
-      setActivity([]);
-      return;
-    }
-    void load();
-    const api = readNativeApi();
-    const subscribedProjectId = input.projectId;
-    if (!api?.projectAgent || !subscribedProjectId) return;
-    void api.projectAgent.subscribe({ projectId: subscribedProjectId }).catch(() => undefined);
-    const unsubscribeEvents = api.projectAgent.onEvent((event: ProjectAgentStreamEvent) => {
+  const applyStreamEvent = useCallback(
+    (event: ProjectAgentStreamEvent) => {
       const current = projectIdRef.current;
       if (!current) return;
       // Events stream for every subscribed project on the client — apply only this
@@ -186,26 +131,22 @@ export function useProjectAgent(input: {
       }
       if (event.type === "config-upserted") {
         if (event.config.projectId === current) {
-          const wasConfigured = overviewConfiguredRef.current;
           setOverview((overview) =>
-            overview && overview.projectId === current
+            overview &&
+            overview.projectId === current &&
+            (overview.config?.revision ?? -1) <= event.config.revision
               ? projectAgentOverviewWithConfig(overview, event.config)
               : overview,
           );
-          if (wasConfigured) {
-            refreshThreadIndex();
-          } else {
-            // First configure while the panel is open: the task/activity/document/
-            // thread lists behind the overview only exist once loaded.
-            void load();
-          }
         }
         return;
       }
       if (event.type === "goal-upserted") {
         if (event.goal.projectId === current) {
           setOverview((overview) =>
-            overview && overview.projectId === current
+            overview &&
+            overview.projectId === current &&
+            !(overview.goal?.id === event.goal.id && overview.goal.revision > event.goal.revision)
               ? { ...overview, goal: event.goal }
               : overview,
           );
@@ -227,11 +168,11 @@ export function useProjectAgent(input: {
           setTasks((tasks) => {
             const index = tasks.findIndex((task) => task.id === event.task.id);
             if (index === -1) return [...tasks, event.task];
+            if (event.task.revision < tasks[index]!.revision) return tasks;
             const next = [...tasks];
             next[index] = event.task;
             return next;
           });
-          refreshThreadIndex();
         }
         return;
       }
@@ -260,7 +201,9 @@ export function useProjectAgent(input: {
           setActivity((activity) =>
             activity.some((entry) => entry.id === event.activity.id)
               ? activity
-              : [event.activity, ...activity],
+              : [event.activity, ...activity].toSorted(
+                  (left, right) => right.sequence - left.sequence,
+                ),
           );
         }
         return;
@@ -272,6 +215,7 @@ export function useProjectAgent(input: {
               (document) => document.logicalPath === event.head.logicalPath,
             );
             if (index === -1) return [...documents, event.head];
+            if (event.head.revision < documents[index]!.revision) return documents;
             const next = [...documents];
             next[index] = event.head;
             return next;
@@ -279,12 +223,196 @@ export function useProjectAgent(input: {
         }
         return;
       }
+    },
+    [applyOverview, mergeWorkItems],
+  );
+
+  const stillCurrent = useCallback(
+    (projectId: ProjectId, generation: number, scope: RequestScope) =>
+      isCurrentScope(scope) &&
+      projectIdRef.current === projectId &&
+      loadGeneration.current === generation,
+    [isCurrentScope],
+  );
+
+  const load = useCallback(async () => {
+    const api = readNativeApi();
+    const projectId = projectIdRef.current;
+    const scope = scopeRef.current;
+    if (!isCurrentScope(scope) || !scope.enabled) return;
+    const generation = ++loadGeneration.current;
+    // Replay only stream updates observed during this read, so a delayed list
+    // cannot overwrite newer task revisions or drop a newly created row.
+    const events = [...(loadEventsRef.current ?? [])];
+    loadEventsRef.current = events;
+    const threadEventVersion = threadIndexEventVersion.current;
+    if (!api?.projectAgent || !projectId) {
+      loadEventsRef.current = null;
+      setOverview(null);
+      setTasks([]);
+      setActivity([]);
+      setDocuments([]);
+      setThreads([]);
+      return;
+    }
+    try {
+      const next = await api.projectAgent.getOverview({ projectId });
+      if (!stillCurrent(projectId, generation, scope)) return;
+      applyOverview(next);
+      for (const event of events) applyStreamEvent(event);
+      if (next.configured) {
+        const readTasks = async () => {
+          const tasks: ProjectTask[] = [];
+          const cursors = new Set<string>();
+          let cursor: string | null = null;
+          do {
+            const page = await api.projectAgent.listTasks({
+              projectId,
+              includeArchived: true,
+              ...(cursor ? { cursor } : {}),
+            });
+            if (!stillCurrent(projectId, generation, scope)) return tasks;
+            tasks.push(...page.tasks);
+            cursor = page.nextCursor;
+            if (cursor && cursors.has(cursor)) throw new Error("Task pagination did not advance.");
+            if (cursor) cursors.add(cursor);
+          } while (cursor);
+          return tasks;
+        };
+        const [listed, activityPage, docs, index] = await Promise.all([
+          readTasks(),
+          api.projectAgent.listActivity({ projectId }),
+          api.projectAgent.listDocuments({ projectId }),
+          api.projectAgent.listThreadIndex({ projectId }),
+        ]);
+        if (!stillCurrent(projectId, generation, scope)) return;
+        setTasks(listed);
+        setActivity(activityPage.activity);
+        setActivityCursor(activityPage.nextCursor);
+        setDocuments(docs.documents);
+        if (threadIndexEventVersion.current === threadEventVersion) setThreads(index.threads);
+      } else {
+        setTasks([]);
+        setActivity([]);
+        setDocuments([]);
+        setThreads([]);
+        setActivityCursor(null);
+      }
+      for (const event of events) applyStreamEvent(event);
+      reportError(null);
+    } catch (cause) {
+      if (!stillCurrent(projectId, generation, scope)) return;
+      reportError(cause instanceof Error ? cause.message : "Failed to load project coordinator.");
+    } finally {
+      if (loadEventsRef.current === events) loadEventsRef.current = null;
+    }
+  }, [reportError, applyOverview, applyStreamEvent, isCurrentScope, stillCurrent]);
+
+  // `thread-index-upserted` events patch membership directly; a full re-list
+  // still runs when config links/unlinks or task upserts could change it.
+  // One refresh in flight at a time; a burst coalesces into a single
+  // follow-up listing.
+  const threadIndexRefreshRef = useRef({ inFlight: false, queued: false });
+  const refreshThreadIndex = useCallback(() => {
+    const api = readNativeApi();
+    const projectId = projectIdRef.current;
+    if (!api?.projectAgent || !projectId) return;
+    const pending = threadIndexRefreshRef.current;
+    if (pending.inFlight) {
+      pending.queued = true;
+      return;
+    }
+    pending.inFlight = true;
+    const generation = loadGeneration.current;
+    const scope = scopeRef.current;
+    const eventVersion = threadIndexEventVersion.current;
+    void (async () => {
+      try {
+        const index = await api.projectAgent.listThreadIndex({ projectId });
+        if (
+          stillCurrent(projectId, generation, scope) &&
+          threadIndexEventVersion.current === eventVersion
+        ) {
+          setThreads(index.threads);
+        }
+      } catch {
+        // A dropped refresh keeps the last index — the next event retries it.
+      }
+      pending.inFlight = false;
+      if (pending.queued && isCurrentScope(scope)) {
+        pending.queued = false;
+        refreshThreadIndex();
+      }
+    })();
+  }, [isCurrentScope, stillCurrent]);
+
+  useEffect(() => {
+    const scope = scopeRef.current;
+    scope.active = true;
+    loadGeneration.current += 1;
+    loadEventsRef.current = null;
+    workItemsRef.current = { projectId: input.projectId, items: [] };
+    threadIndexRefreshRef.current = { inFlight: false, queued: false };
+    overviewConfiguredRef.current = false;
+    setBusy(false);
+    setOverview(null);
+    setTasks([]);
+    setActivity([]);
+    setActivityCursor(null);
+    setDocuments([]);
+    setThreads([]);
+    reportError(null);
+    if (!input.enabled || !input.projectId) return;
+    void load();
+    const api = readNativeApi();
+    const subscribedProjectId = input.projectId;
+    if (!api?.projectAgent || !subscribedProjectId) return;
+    void api.projectAgent.subscribe({ projectId: subscribedProjectId }).catch(() => undefined);
+    const unsubscribeEvents = api.projectAgent.onEvent((event: ProjectAgentStreamEvent) => {
+      if (!isCurrentScope(scope)) return;
+      // A snapshot is a refresh signal, not a delta. It is applied immediately
+      // and followed by a fresh overview read; replaying it after that read can
+      // replace newer API state with the older snapshot that triggered it.
+      if (event.type !== "snapshot") loadEventsRef.current?.push(event);
+      const wasConfigured = overviewConfiguredRef.current;
+      applyStreamEvent(event);
+      if (event.type === "snapshot" && event.overview.projectId === subscribedProjectId) {
+        // A reconnect snapshot contains only the overview, not the task,
+        // document, activity or membership lists missed while disconnected.
+        void load();
+      } else if (
+        event.type === "config-upserted" &&
+        event.config.projectId === subscribedProjectId
+      ) {
+        threadIndexEventVersion.current += 1;
+        if (wasConfigured) refreshThreadIndex();
+        else void load();
+      } else if (event.type === "task-upserted" && event.task.projectId === subscribedProjectId) {
+        threadIndexEventVersion.current += 1;
+        refreshThreadIndex();
+      } else if (
+        event.type === "thread-index-upserted" &&
+        event.projectId === subscribedProjectId
+      ) {
+        threadIndexEventVersion.current += 1;
+        if (threadIndexRefreshRef.current.inFlight) threadIndexRefreshRef.current.queued = true;
+      }
     });
     return () => {
+      scope.active = false;
+      loadGeneration.current += 1;
       unsubscribeEvents();
       void api.projectAgent.unsubscribe({ projectId: subscribedProjectId }).catch(() => undefined);
     };
-  }, [input.enabled, input.projectId, load, refreshThreadIndex, applyOverview, mergeWorkItems]);
+  }, [
+    input.enabled,
+    input.projectId,
+    load,
+    refreshThreadIndex,
+    applyStreamEvent,
+    isCurrentScope,
+    reportError,
+  ]);
 
   const runMutation = useCallback(
     async (
@@ -296,21 +424,22 @@ export function useProjectAgent(input: {
       const api = readNativeApi();
       const projectId = projectIdRef.current;
       if (!api?.projectAgent || !projectId) return false;
-      setBusy(true);
+      const scope = scopeRef.current;
+      const finish = beginMutation();
       try {
         await work(api.projectAgent, projectId);
-        if (projectIdRef.current === projectId) await load();
+        if (isCurrentScope(scope)) await load();
         return true;
       } catch (cause) {
-        if (projectIdRef.current === projectId) {
+        if (isCurrentScope(scope)) {
           reportError(cause instanceof Error ? cause.message : "Project action failed.");
         }
         return false;
       } finally {
-        if (projectIdRef.current === projectId) setBusy(false);
+        finish();
       }
     },
-    [load, reportError],
+    [load, reportError, beginMutation, isCurrentScope],
   );
 
   const configure = useCallback(
@@ -409,22 +538,23 @@ export function useProjectAgent(input: {
     ) => {
       const api = readNativeApi();
       if (!api?.projectAgent) return null;
-      setBusy(true);
+      const scope = scopeRef.current;
+      const finish = beginMutation();
       try {
         const overview = await call(api.projectAgent);
         useProjectAgentSummariesStore.getState().applyOverview(overview);
-        if (projectIdRef.current === projectId) await load();
+        if (isCurrentScope(scope) && projectIdRef.current === projectId) await load();
         return overview;
       } catch (cause) {
-        if (projectIdRef.current === projectId) {
-          setError(cause instanceof Error ? cause.message : "Hub action failed.");
+        if (isCurrentScope(scope) && projectIdRef.current === projectId) {
+          reportError(cause instanceof Error ? cause.message : "Hub action failed.");
         }
         return null;
       } finally {
-        if (projectIdRef.current === projectId) setBusy(false);
+        finish();
       }
     },
-    [load],
+    [load, reportError, beginMutation, isCurrentScope],
   );
 
   const pauseGroup = useCallback(
@@ -471,7 +601,8 @@ export function useProjectAgent(input: {
     async (projectId: ProjectId, confirmName: string, options?: { requireEmpty?: boolean }) => {
       const api = readNativeApi();
       if (!api?.projectAgent) return null;
-      setBusy(true);
+      const scope = scopeRef.current;
+      const finish = beginMutation();
       try {
         const result: ProjectAgentDeleteGroupResult = await api.projectAgent.deleteGroup({
           requestId: crypto.randomUUID(),
@@ -481,15 +612,15 @@ export function useProjectAgent(input: {
         });
         return result;
       } catch (cause) {
-        if (projectIdRef.current === projectId) {
-          setError(cause instanceof Error ? cause.message : "Hub action failed.");
+        if (isCurrentScope(scope) && projectIdRef.current === projectId) {
+          reportError(cause instanceof Error ? cause.message : "Hub action failed.");
         }
         return null;
       } finally {
-        if (projectIdRef.current === projectId) setBusy(false);
+        finish();
       }
     },
-    [],
+    [reportError, beginMutation, isCurrentScope],
   );
 
   const startGoal = useCallback(
@@ -614,11 +745,15 @@ export function useProjectAgent(input: {
     const api = readNativeApi();
     const projectId = projectIdRef.current;
     if (!api?.projectAgent || !projectId || !activityCursor) return;
+    const scope = scopeRef.current;
+    const generation = loadGeneration.current;
     const page = await api.projectAgent.listActivity({ projectId, cursor: activityCursor });
-    if (projectIdRef.current !== projectId) return;
-    setActivity((current) => [...current, ...page.activity]);
+    if (!stillCurrent(projectId, generation, scope)) return;
+    setActivity((current) => [
+      ...new Map([...current, ...page.activity].map((entry) => [entry.id, entry])).values(),
+    ]);
     setActivityCursor(page.nextCursor);
-  }, [activityCursor]);
+  }, [activityCursor, stillCurrent]);
 
   const excludeThread = useCallback(
     async (threadId: ThreadId, excluded: boolean) =>
@@ -743,7 +878,7 @@ export function useProjectAgent(input: {
     readDocument,
     writeDocument,
     exportDocuments,
-    setError,
+    setError: reportError,
   };
 }
 

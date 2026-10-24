@@ -993,25 +993,32 @@ const makeProjectAgentRepository = Effect.gen(function* () {
         updatedAt: task.updatedAt,
       };
       const persistDeps = replaceDependencies(task.id, task.projectId, task.dependsOnTaskIds);
-      if (expectedRevision === null) {
-        return insertTask(row).pipe(
-          Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveTask:insert")),
-          Effect.andThen(persistDeps),
-          Effect.as(task),
-        );
-      }
-      return updateTask({ row, expectedRevision }).pipe(
-        Effect.mapError(
-          toPersistenceSqlOrDecodeError("ProjectAgentRepository.saveTask:update", "changed"),
-        ),
-        Effect.flatMap((result) =>
-          Option.isSome(result)
-            ? persistDeps.pipe(Effect.as(task))
-            : Effect.fail(
-                toPersistenceSqlError("ProjectAgentRepository.saveTask")(revisionMismatch("task")),
+      const persist =
+        expectedRevision === null
+          ? insertTask(row).pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveTask:insert")),
+              Effect.andThen(persistDeps),
+              Effect.as(task),
+            )
+          : updateTask({ row, expectedRevision }).pipe(
+              Effect.mapError(
+                toPersistenceSqlOrDecodeError("ProjectAgentRepository.saveTask:update", "changed"),
               ),
-        ),
-      );
+              Effect.flatMap((result) =>
+                Option.isSome(result)
+                  ? persistDeps.pipe(Effect.as(task))
+                  : Effect.fail(
+                      toPersistenceSqlError("ProjectAgentRepository.saveTask")(
+                        revisionMismatch("task"),
+                      ),
+                    ),
+              ),
+            );
+      return sql
+        .withTransaction(persist)
+        .pipe(
+          Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveTask:transaction")),
+        );
     },
     listTaskEdges: (projectId) =>
       listDependencyRows({ projectId }).pipe(

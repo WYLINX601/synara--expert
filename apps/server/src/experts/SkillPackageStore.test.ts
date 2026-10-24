@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createSkillPackageStore } from "./SkillPackageStore.ts";
+import { expertResourceFiles } from "./ExpertStore.ts";
 
 vi.mock("node:fs/promises", async () => {
   const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
@@ -57,6 +58,7 @@ async function unlock(entry: string): Promise<void> {
 
 afterEach(async () => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.mocked(rename).mockReset();
   vi.mocked(rm).mockReset();
   for (const root of roots.splice(0)) {
@@ -75,6 +77,44 @@ function packageDir(stateDir: string, packageId: string): string {
 }
 
 describe("SkillPackageStore", () => {
+  it("bounds concurrent package content verification when listing the inventory", async () => {
+    const { source, stateDir, store } = await fixture();
+    const first = await importSource(store, source);
+    await writeFile(path.join(source, "modules", "config.yaml"), "language: en\n");
+    const second = await importSource(store, source);
+    const collect = expertResourceFiles.collect;
+    let active = 0;
+    let peak = 0;
+    const spy = vi.spyOn(expertResourceFiles, "collect").mockImplementation(async (...args) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      try {
+        // Keep content buffers live long enough to expose an unbounded fan-out.
+        const resources = await collect(...args);
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+        return resources;
+      } finally {
+        active -= 1;
+      }
+    });
+    const packages = await store.list();
+    expect(new Set(packages.map((entry) => entry.packageId))).toEqual(
+      new Set([first.package.packageId, second.package.packageId]),
+    );
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(peak).toBe(1);
+
+    const entry = path.join(
+      packageDir(stateDir, first.package.packageId),
+      "content",
+      "modules",
+      "config.yaml",
+    );
+    await chmod(entry, 0o600);
+    await writeFile(entry, "tampered\n");
+    await expect(store.list()).rejects.toMatchObject({ code: "package_corrupt" });
+  });
+
   it("previews without publishing or executing, then preserves the complete package and relative dependencies", async () => {
     const { root, source, stateDir, store } = await fixture();
     const preview = await store.preview({ path: source });

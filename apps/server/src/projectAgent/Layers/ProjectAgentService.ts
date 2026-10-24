@@ -3079,12 +3079,28 @@ export const makeProjectAgentService = Effect.gen(function* () {
     Effect.forEach(
       threadIds,
       (threadId) => {
-        const dispatch = orchestrationEngine.dispatch({
-          type,
-          commandId: branded.command(),
-          threadId,
-          createdAt: isoNow(),
-        } as OrchestrationCommand);
+        const dispatch = Effect.gen(function* () {
+          if (type === "thread.archive" || type === "thread.unarchive") {
+            // Archive commands reject threads already in the target state. A
+            // previous parent command or partial retry may have changed this
+            // thread before its own command is reached.
+            const shell = yield* snapshotQuery.getThreadShellById(threadId);
+            if (
+              Option.isSome(shell) &&
+              (type === "thread.archive"
+                ? shell.value.archivedAt !== null
+                : shell.value.archivedAt === null)
+            ) {
+              return;
+            }
+          }
+          yield* orchestrationEngine.dispatch({
+            type,
+            commandId: branded.command(),
+            threadId,
+            createdAt: isoNow(),
+          } as OrchestrationCommand);
+        });
         return options?.stopOnError === true
           ? dispatch.pipe(Effect.mapError(toServiceError("Failed to update hub threads.")))
           : dispatch.pipe(Effect.catch(() => Effect.void));
@@ -4677,29 +4693,33 @@ export const makeProjectAgentService = Effect.gen(function* () {
               )
               .pipe(Effect.mapError(toServiceError("Failed to pause the hub.")));
             yield* publish({ type: "config-upserted", config: saved });
-            // Interrupt live turns on the coordinator and member threads so a
-            // paused group stops producing work immediately.
-            const { shells } = yield* listGroupThreadShells({
-              projectId: input.projectId,
-              coordinatorThreadId: config.coordinatorThreadId,
-            });
-            const liveThreadIds = shells
-              .filter(
-                (shell) =>
-                  shell.latestTurn?.state === "running" ||
-                  shell.session?.status === "running" ||
-                  shell.session?.status === "starting",
-              )
-              .map((shell) => shell.id);
-            const coordinator = yield* snapshotQuery
-              .getThreadShellById(config.coordinatorThreadId)
-              .pipe(Effect.catch(() => Effect.succeed(Option.none())));
-            const coordinatorLive =
-              Option.isSome(coordinator) && coordinator.value.latestTurn?.state === "running";
-            yield* dispatchGroupThreadCommand(
-              coordinatorLive ? [config.coordinatorThreadId, ...liveThreadIds] : liveThreadIds,
-              "thread.turn.interrupt",
-            );
+          }
+          // The admission stop is durable before interruption. Recompute live
+          // threads on every retry so a failed command cannot be hidden by the
+          // already-persisted pausedAt value.
+          const { shells } = yield* listGroupThreadShells({
+            projectId: input.projectId,
+            coordinatorThreadId: config.coordinatorThreadId,
+          });
+          const liveThreadIds = shells
+            .filter(
+              (shell) =>
+                shell.latestTurn?.state === "running" ||
+                shell.session?.status === "running" ||
+                shell.session?.status === "starting",
+            )
+            .map((shell) => shell.id);
+          const coordinator = yield* snapshotQuery
+            .getThreadShellById(config.coordinatorThreadId)
+            .pipe(Effect.mapError(toServiceError("Failed to load hub coordinator thread.")));
+          const coordinatorLive =
+            Option.isSome(coordinator) && coordinator.value.latestTurn?.state === "running";
+          yield* dispatchGroupThreadCommand(
+            coordinatorLive ? [config.coordinatorThreadId, ...liveThreadIds] : liveThreadIds,
+            "thread.turn.interrupt",
+            { stopOnError: true },
+          );
+          if (config.pausedAt === null) {
             yield* appendActivity({
               projectId: input.projectId,
               kind: "config-updated",
@@ -4803,23 +4823,26 @@ export const makeProjectAgentService = Effect.gen(function* () {
               )
               .pipe(Effect.mapError(toServiceError("Failed to archive the hub.")));
             yield* publish({ type: "config-upserted", config: saved });
-            const { shells } = yield* listGroupThreadShells({
-              projectId: input.projectId,
-              coordinatorThreadId: config.coordinatorThreadId,
-            });
-            // Only threads living IN the group project belong to the group —
-            // linked-repo workers stay untouched.
-            yield* dispatchGroupThreadCommand(
-              [
-                config.coordinatorThreadId,
-                ...shells
-                  .filter(
-                    (shell) => shell.projectId === input.projectId && shell.archivedAt == null,
-                  )
-                  .map((shell) => shell.id),
-              ],
-              "thread.archive",
-            );
+          }
+          // A retry after persisting archivedAt must still finish commands
+          // that failed or were interrupted partway through the first pass.
+          const { shells } = yield* listGroupThreadShells({
+            projectId: input.projectId,
+            coordinatorThreadId: config.coordinatorThreadId,
+          });
+          // Only threads living IN the group project belong to the group —
+          // linked-repo workers stay untouched.
+          yield* dispatchGroupThreadCommand(
+            [
+              config.coordinatorThreadId,
+              ...shells
+                .filter((shell) => shell.projectId === input.projectId && shell.archivedAt == null)
+                .map((shell) => shell.id),
+            ],
+            "thread.archive",
+            { stopOnError: true },
+          );
+          if (config.archivedAt === null) {
             yield* appendActivity({
               projectId: input.projectId,
               kind: "config-updated",
@@ -4872,21 +4895,24 @@ export const makeProjectAgentService = Effect.gen(function* () {
                 )
                 .pipe(Effect.mapError(toServiceError("Failed to unarchive the hub.")));
               yield* publish({ type: "config-upserted", config: saved });
-              const { shells } = yield* listGroupThreadShells({
-                projectId: input.projectId,
-                coordinatorThreadId: config.coordinatorThreadId,
-              });
-              yield* dispatchGroupThreadCommand(
-                [
-                  config.coordinatorThreadId,
-                  ...shells
-                    .filter(
-                      (shell) => shell.projectId === input.projectId && shell.archivedAt != null,
-                    )
-                    .map((shell) => shell.id),
-                ],
-                "thread.unarchive",
-              );
+            }
+            const { shells } = yield* listGroupThreadShells({
+              projectId: input.projectId,
+              coordinatorThreadId: config.coordinatorThreadId,
+            });
+            yield* dispatchGroupThreadCommand(
+              [
+                config.coordinatorThreadId,
+                ...shells
+                  .filter(
+                    (shell) => shell.projectId === input.projectId && shell.archivedAt != null,
+                  )
+                  .map((shell) => shell.id),
+              ],
+              "thread.unarchive",
+              { stopOnError: true },
+            );
+            if (config.archivedAt !== null) {
               yield* appendActivity({
                 projectId: input.projectId,
                 kind: "config-updated",
@@ -5225,64 +5251,69 @@ export const makeProjectAgentService = Effect.gen(function* () {
         return overview;
       }),
 
+    // Serialize with stopGoal: its generic coordinator interrupt must finish
+    // before a newly authorized Goal can start on that same coordinator.
     startGoal: (input, principal) =>
-      Effect.gen(function* () {
-        if (!canStartGoal(principal)) {
-          return yield* Effect.fail(
-            fail("Goal authorization can originate only from a user action.", "forbidden"),
+      withProjectLock(
+        input.projectId,
+        Effect.gen(function* () {
+          if (!canStartGoal(principal)) {
+            return yield* Effect.fail(
+              fail("Goal authorization can originate only from a user action.", "forbidden"),
+            );
+          }
+          const existingReceipt = yield* replayReceipt(
+            input.requestId,
+            input.projectId,
+            (json) => JSON.parse(json) as ProjectGoal,
           );
-        }
-        const existingReceipt = yield* replayReceipt(
-          input.requestId,
-          input.projectId,
-          (json) => JSON.parse(json) as ProjectGoal,
-        );
-        if (existingReceipt) return existingReceipt;
-        yield* resolveGroupCoordinatorProject(input.projectId);
-        const config = yield* requireConfig(input.projectId);
-        const open = yield* repository
-          .getActiveGoal(input.projectId)
-          .pipe(Effect.mapError(toServiceError("Failed to load project goal.")));
-        if (Option.isSome(open)) {
-          return yield* Effect.fail(
-            fail("This project already has an active or paused goal.", "conflict"),
-          );
-        }
-        const now = isoNow();
-        const goal: ProjectGoal = {
-          id: branded.goal(),
-          projectId: input.projectId,
-          objective: input.objective,
-          authorizationSource: "user",
-          scopeVersion: 1,
-          acceptanceCriteria: input.acceptanceCriteria ?? null,
-          limits: input.limits ?? config.limits ?? { ...DEFAULT_PROJECT_AGENT_LIMITS },
-          status: "active",
-          continuationCount: 0,
-          workerCreationCount: 0,
-          authorizedAt: now,
-          revision: 1,
-          createdAt: now,
-          updatedAt: now,
-        };
-        const saved = yield* repository
-          .saveGoal(goal, null)
-          .pipe(Effect.mapError(toServiceError("Failed to start project goal.")));
-        yield* publish({ type: "goal-upserted", goal: saved });
-        yield* appendActivity({
-          projectId: input.projectId,
-          kind: "goal-started",
-          actorKind: "user",
-          actorThreadId: null,
-          goalId: saved.id,
-          taskId: null,
-          source: null,
-          summary: `Started goal: ${saved.objective}`,
-          createdAt: now,
-        });
-        yield* storeReceipt(input.requestId, input.projectId, "startGoal", saved);
-        return saved;
-      }),
+          if (existingReceipt) return existingReceipt;
+          yield* resolveGroupCoordinatorProject(input.projectId);
+          const config = yield* requireConfig(input.projectId);
+          const open = yield* repository
+            .getActiveGoal(input.projectId)
+            .pipe(Effect.mapError(toServiceError("Failed to load project goal.")));
+          if (Option.isSome(open)) {
+            return yield* Effect.fail(
+              fail("This project already has an active or paused goal.", "conflict"),
+            );
+          }
+          const now = isoNow();
+          const goal: ProjectGoal = {
+            id: branded.goal(),
+            projectId: input.projectId,
+            objective: input.objective,
+            authorizationSource: "user",
+            scopeVersion: 1,
+            acceptanceCriteria: input.acceptanceCriteria ?? null,
+            limits: input.limits ?? config.limits ?? { ...DEFAULT_PROJECT_AGENT_LIMITS },
+            status: "active",
+            continuationCount: 0,
+            workerCreationCount: 0,
+            authorizedAt: now,
+            revision: 1,
+            createdAt: now,
+            updatedAt: now,
+          };
+          const saved = yield* repository
+            .saveGoal(goal, null)
+            .pipe(Effect.mapError(toServiceError("Failed to start project goal.")));
+          yield* publish({ type: "goal-upserted", goal: saved });
+          yield* appendActivity({
+            projectId: input.projectId,
+            kind: "goal-started",
+            actorKind: "user",
+            actorThreadId: null,
+            goalId: saved.id,
+            taskId: null,
+            source: null,
+            summary: `Started goal: ${saved.objective}`,
+            createdAt: now,
+          });
+          yield* storeReceipt(input.requestId, input.projectId, "startGoal", saved);
+          return saved;
+        }),
+      ),
 
     updateGoal: (input, principal) =>
       Effect.gen(function* () {
@@ -5415,20 +5446,15 @@ export const makeProjectAgentService = Effect.gen(function* () {
             fail("Tasks can only be created for an active goal.", "invalid"),
           );
         }
-        const edges = yield* repository
-          .listTaskEdges(input.projectId)
-          .pipe(Effect.mapError(toServiceError("Failed to load task dependencies.")));
         const taskId = branded.task();
         const dependsOnTaskIds = input.dependsOnTaskIds ?? [];
-        if (
-          detectProjectTaskDependencyCycle({
-            taskId,
-            dependsOnTaskIds,
-            edges,
-          })
-        ) {
-          return yield* Effect.fail(fail("Task dependencies cannot form a cycle.", "cycle"));
+        if (new Set(dependsOnTaskIds).size !== dependsOnTaskIds.length) {
+          return yield* Effect.fail(fail("Task dependency identifiers must be unique.", "invalid"));
         }
+        // `taskId` is a fresh UUID, so no existing edge can point back to this
+        // new task. Its incoming dependencies cannot create a cycle; keeping
+        // createTask lock-free also lets it run inside the gateway completion
+        // transaction without inverting the project-lock / SQLite-lock order.
         for (const dependencyId of dependsOnTaskIds) {
           const dependency = yield* repository
             .getTask(dependencyId)
@@ -5542,7 +5568,12 @@ export const makeProjectAgentService = Effect.gen(function* () {
           }
         }
         const dependsOnTaskIds = input.dependsOnTaskIds ?? current.dependsOnTaskIds;
-        if (input.dependsOnTaskIds) {
+        if (input.dependsOnTaskIds !== undefined) {
+          if (new Set(dependsOnTaskIds).size !== dependsOnTaskIds.length) {
+            return yield* Effect.fail(
+              fail("Task dependency identifiers must be unique.", "invalid"),
+            );
+          }
           const edges = yield* repository
             .listTaskEdges(input.projectId)
             .pipe(Effect.mapError(toServiceError("Failed to load task dependencies.")));
@@ -5615,7 +5646,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
         });
         yield* storeReceipt(input.requestId, input.projectId, "updateTask", saved);
         return saved;
-      }),
+      }).pipe((effect) => withProjectLock(input.projectId, effect)),
 
     listActivity: (input, principal) =>
       requireProjectAccess(principal, input.projectId).pipe(
@@ -8248,16 +8279,18 @@ export const makeProjectAgentService = Effect.gen(function* () {
 
   const unblockDependents = (accepted: ProjectTask) =>
     Effect.gen(function* () {
-      const tasks = yield* repository
-        .listTasks({
-          projectId: accepted.projectId,
-          includeArchived: false,
-          limit: 100,
-        })
-        .pipe(Effect.mapError(toServiceError("Failed to load dependent tasks.")));
-      for (const task of tasks) {
+      const edges = yield* repository
+        .listTaskEdges(accepted.projectId)
+        .pipe(Effect.mapError(toServiceError("Failed to load dependent task edges.")));
+      for (const [taskId, dependencies] of edges) {
+        if (!dependencies.includes(accepted.id)) continue;
+        const current = yield* repository
+          .getTask(taskId)
+          .pipe(Effect.mapError(toServiceError("Failed to load dependent task.")));
+        if (Option.isNone(current)) continue;
+        const task = current.value;
+        if (task.projectId !== accepted.projectId || task.archivedAt !== null) continue;
         if (task.status !== "planned" && task.status !== "blocked") continue;
-        if (!task.dependsOnTaskIds.includes(accepted.id)) continue;
         const prerequisites = yield* Effect.forEach(task.dependsOnTaskIds, (id) =>
           repository
             .getTask(id)
@@ -8287,87 +8320,118 @@ export const makeProjectAgentService = Effect.gen(function* () {
     kind: ProjectActivity["kind"],
     summary: string,
   ) =>
-    Effect.gen(function* () {
-      if (!isUserPrincipal(principal) && !isCoordinatorPrincipal(principal, input.projectId)) {
-        return yield* Effect.fail(
-          fail("Goal controls require the user or coordinator.", "forbidden"),
+    withProjectLock(
+      input.projectId,
+      Effect.gen(function* () {
+        if (!isUserPrincipal(principal) && !isCoordinatorPrincipal(principal, input.projectId)) {
+          return yield* Effect.fail(
+            fail("Goal controls require the user or coordinator.", "forbidden"),
+          );
+        }
+        if (status === "stopped" && !isUserPrincipal(principal)) {
+          return yield* Effect.fail(fail("Stopping a goal is a user action.", "forbidden"));
+        }
+        if (status === "stopped") {
+          const receipt = yield* replayReceipt(
+            input.requestId,
+            input.projectId,
+            (json) => JSON.parse(json) as ProjectGoal,
+          );
+          if (receipt) return receipt;
+        }
+        yield* resolveGroupCoordinatorProject(input.projectId);
+        const current = yield* repository.getGoal(input.goalId).pipe(
+          Effect.mapError(toServiceError("Failed to load project goal.")),
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.fail(fail("Goal was not found.", "not-found")),
+              onSome: Effect.succeed,
+            }),
+          ),
         );
-      }
-      if (status === "stopped" && !isUserPrincipal(principal)) {
-        return yield* Effect.fail(fail("Stopping a goal is a user action.", "forbidden"));
-      }
-      yield* resolveGroupCoordinatorProject(input.projectId);
-      const current = yield* repository.getGoal(input.goalId).pipe(
-        Effect.mapError(toServiceError("Failed to load project goal.")),
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.fail(fail("Goal was not found.", "not-found")),
-            onSome: Effect.succeed,
-          }),
-        ),
-      );
-      if (current.projectId !== input.projectId) {
-        return yield* Effect.fail(fail("Goal does not belong to this project.", "forbidden"));
-      }
-      // A stopped goal is terminal: resuming it would silently reopen scope
-      // the user explicitly closed.
-      if (status === "active" && current.status === "stopped") {
-        return yield* Effect.fail(fail("A stopped goal cannot be resumed.", "invalid"));
-      }
-      const updated: ProjectGoal = {
-        ...current,
-        status,
-        revision: current.revision + 1,
-        updatedAt: isoNow(),
-      };
-      const saved = yield* repository
-        .saveGoal(updated, input.expectedRevision)
-        .pipe(Effect.mapError(toServiceError("Failed to update project goal.")));
-      if (status === "stopped" && current.status !== "stopped") {
-        const config = yield* requireConfig(input.projectId);
-        yield* orchestrationEngine
-          .dispatch({
-            type: "thread.turn.interrupt",
-            commandId: branded.command(),
-            threadId: config.coordinatorThreadId,
-            createdAt: isoNow(),
-          } as OrchestrationCommand)
-          .pipe(Effect.catch(() => Effect.void));
-        const tasks = yield* repository
-          .listTasks({
-            projectId: input.projectId,
-            goalId: saved.id,
-            includeArchived: false,
-            limit: 100,
-          })
-          .pipe(Effect.mapError(toServiceError("Failed to list managed workers.")));
-        for (const task of tasks) {
-          if (!task.assignedThreadId || task.status === "done" || task.status === "cancelled")
-            continue;
+        if (current.projectId !== input.projectId) {
+          return yield* Effect.fail(fail("Goal does not belong to this project.", "forbidden"));
+        }
+        // A stopped goal is terminal: resuming it would silently reopen scope
+        // the user explicitly closed.
+        if (current.status === "stopped" && status !== "stopped") {
+          return yield* Effect.fail(fail("A stopped goal cannot be paused or resumed.", "invalid"));
+        }
+        if (current.status === "stopped" && status === "stopped") {
+          return yield* Effect.fail(
+            fail(
+              "This goal is already stopped; its interruption request cannot be safely replayed.",
+              "conflict",
+            ),
+          );
+        }
+        const saved = yield* repository
+          .saveGoal(
+            {
+              ...current,
+              status,
+              revision: current.revision + 1,
+              updatedAt: isoNow(),
+            },
+            input.expectedRevision,
+          )
+          .pipe(Effect.mapError(toServiceError("Failed to update project goal.")));
+        if (status === "stopped") {
+          const config = yield* requireConfig(input.projectId);
           yield* orchestrationEngine
             .dispatch({
               type: "thread.turn.interrupt",
               commandId: branded.command(),
-              threadId: task.assignedThreadId,
+              threadId: config.coordinatorThreadId,
               createdAt: isoNow(),
             } as OrchestrationCommand)
-            .pipe(Effect.catch(() => Effect.void));
+            .pipe(Effect.mapError(toServiceError("Failed to interrupt the goal coordinator.")));
+          let cursor: { createdAt: string; id: ProjectTaskId } | undefined;
+          while (true) {
+            const tasks = yield* repository
+              .listTasks({
+                projectId: input.projectId,
+                goalId: saved.id,
+                includeArchived: false,
+                limit: 100,
+                ...(cursor ? { cursor } : {}),
+              })
+              .pipe(Effect.mapError(toServiceError("Failed to list managed workers.")));
+            for (const task of tasks) {
+              if (!task.assignedThreadId || task.status === "done" || task.status === "cancelled")
+                continue;
+              yield* orchestrationEngine
+                .dispatch({
+                  type: "thread.turn.interrupt",
+                  commandId: branded.command(),
+                  threadId: task.assignedThreadId,
+                  createdAt: isoNow(),
+                } as OrchestrationCommand)
+                .pipe(Effect.mapError(toServiceError("Failed to interrupt a goal worker.")));
+            }
+            const lastTask = tasks.at(-1);
+            if (tasks.length < 100 || !lastTask) break;
+            cursor = { createdAt: lastTask.createdAt, id: lastTask.id };
+          }
         }
-      }
-      yield* publish({ type: "goal-upserted", goal: saved });
-      yield* appendActivity({
-        projectId: input.projectId,
-        kind,
-        actorKind: principal.kind === "user" ? "user" : "coordinator",
-        actorThreadId: principal.kind === "user" ? null : principal.threadId,
-        goalId: saved.id,
-        taskId: null,
-        source: null,
-        summary,
-        createdAt: saved.updatedAt,
-      });
-      return saved;
-    });
+        yield* publish({ type: "goal-upserted", goal: saved });
+        yield* appendActivity({
+          projectId: input.projectId,
+          kind,
+          actorKind: principal.kind === "user" ? "user" : "coordinator",
+          actorThreadId: principal.kind === "user" ? null : principal.threadId,
+          goalId: saved.id,
+          taskId: null,
+          source: null,
+          summary,
+          createdAt: saved.updatedAt,
+        });
+        if (status === "stopped") {
+          yield* storeReceipt(input.requestId, input.projectId, "stopGoal", saved);
+        }
+        return saved;
+      }),
+    );
 
   if (Option.isNone(deliverablesSql)) return impl satisfies ProjectAgentServiceShape;
   const delivery = yield* makeHubDeliverablesService({

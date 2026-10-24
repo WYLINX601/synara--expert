@@ -191,7 +191,23 @@ tests("Hub plan execution", (test) => {
             requestId: "propose-integration-plan",
             planId: "integration-plan",
             expectedStateVersion: null,
-            definition,
+            definition: {
+              ...definition,
+              stages: [
+                ...definition.stages,
+                { key: "delivery", title: "Delivery", releasePolicy: "user" },
+              ],
+              nodes: [
+                ...definition.nodes,
+                {
+                  ...definition.nodes[0],
+                  key: "delivery-author",
+                  stageKey: "delivery",
+                  title: "Use the reviewed result",
+                  dependsOnNodeKeys: ["reviewer"],
+                },
+              ],
+            },
             sourceMessageIds: [sourceMessageId],
           },
           { kind: "user" },
@@ -988,6 +1004,29 @@ tests("Hub plan execution", (test) => {
         const firstReviewerWork = yield* work.get(firstReviewerBinding.workItemId);
         assert.isNotNull(firstReviewerWork);
         assert.strictEqual(firstReviewerWork.state, "queued");
+        assert.include(firstReviewerWork.creationSpec.prompt, "Direct task inputs");
+        assert.include(
+          firstReviewerWork.creationSpec.prompt,
+          candidate.graph.stages[0]!.candidateId!,
+        );
+        assert.include(
+          firstReviewerWork.creationSpec.prompt,
+          candidate.graph.stages[0]!.outputDigest!,
+        );
+        const fixedInputs = JSON.parse(
+          firstReviewerWork.creationSpec.prompt
+            .split("never substitute a newer publication:\n\n")[1]!
+            .split("\n\n")[0]!,
+        );
+        const fixedCandidate = fixedInputs.find(
+          (entry: { candidateId?: string }) =>
+            entry.candidateId === candidate.graph.stages[0]!.candidateId,
+        );
+        assert.deepStrictEqual(
+          fixedCandidate.deliverableRefs,
+          candidate.graph.stages[0]!.deliverableRefs,
+        );
+
         const reviewerStart = yield* work.claimNext(hubId, firstReviewerWork.id);
         assert.isNotNull(reviewerStart);
         const firstReviewerThread = ThreadId.makeUnsafe("hub-plan-execution-reviewer-first");
@@ -1406,12 +1445,39 @@ tests("Hub plan execution", (test) => {
           },
           { kind: "worker", hubId, threadId: repairReviewer.threadId },
         );
-        runningWorkers.delete(repairReviewer.threadId);
-        const repairReviewerSettled = yield* settleNativeTurn({
-          workItemId: repairReviewer.work.id,
-          threadId: repairReviewer.threadId,
-        });
-        assert.strictEqual(repairReviewerSettled.state, "completed");
+        // Stop after accepted review but before native settlement. Work has no
+        // result summary; the durable review remains the authoritative input.
+        yield* service.command(
+          {
+            action: "pause",
+            hubId,
+            planId: confirmed.id,
+            requestId: "pause-repaired-review",
+            expectedStateVersion: repairReview.stateVersion,
+            expectedRevision: repairReview.revision,
+          },
+          { kind: "user" },
+        );
+        yield* makeExecution(false).drain(hubId);
+        const stoppedRepairReview = yield* work.get(repairReviewer.work.id);
+        assert.strictEqual(stoppedRepairReview?.state, "cancelled");
+        assert.strictEqual(stoppedRepairReview?.resultSummary, null);
+        const pausedRepairPlan = yield* service.read(
+          { hubId, planId: confirmed.id },
+          { kind: "user" },
+        );
+        if (!pausedRepairPlan) throw new Error("Paused repaired review disappeared.");
+        yield* service.command(
+          {
+            action: "resume",
+            hubId,
+            planId: confirmed.id,
+            requestId: "resume-repaired-review",
+            expectedStateVersion: pausedRepairPlan.stateVersion,
+            expectedRevision: pausedRepairPlan.revision,
+          },
+          { kind: "user" },
+        );
         yield* makeExecution(false).drain(hubId);
         const repairReadyForUser = yield* service.read(
           { hubId, planId: confirmed.id },
@@ -1435,7 +1501,38 @@ tests("Hub plan execution", (test) => {
           },
           { kind: "user" },
         );
-        assert.strictEqual(released.controlState, "completed");
+        assert.strictEqual(released.controlState, "active");
+        assert.strictEqual(released.graph.releasedCount, 1);
+        yield* makeExecution(false).drain(hubId);
+        const downstreamBinding = (yield* store.listAttemptBindings({ planId: confirmed.id })).find(
+          (binding) => binding.nodeKey === "delivery-author",
+        );
+        assert.isDefined(downstreamBinding);
+        const downstreamWork = yield* work.get(downstreamBinding.workItemId);
+        assert.isNotNull(downstreamWork);
+        const downstreamInputs = JSON.parse(
+          downstreamWork.creationSpec.prompt
+            .split("never substitute a newer publication:\n\n")[1]!
+            .split("\n\n")[0]!,
+        );
+        const reviewedInput = downstreamInputs.find(
+          (entry: { nodeKey?: string }) => entry.nodeKey === "reviewer",
+        );
+        assert.strictEqual(reviewedInput.reviewAttemptId, repairReviewerBinding.attemptId);
+        assert.strictEqual(
+          reviewedInput.summary,
+          "Revised candidate includes the requested evidence.",
+        );
+        assert.strictEqual(reviewedInput.candidateId, repairCandidate.graph.stages[0]!.candidateId);
+        assert.strictEqual(
+          reviewedInput.outputDigest,
+          repairCandidate.graph.stages[0]!.outputDigest,
+        );
+        assert.deepStrictEqual(
+          reviewedInput.deliverableRefs,
+          repairCandidate.graph.stages[0]!.deliverableRefs,
+        );
+        assert.notStrictEqual(reviewedInput.candidateId, candidate.graph.stages[0]!.candidateId);
       }),
   );
 

@@ -83,7 +83,7 @@ export function gateProjectAgentServiceForStable(
     listThreadIndex: refuse,
     excludeThread: refuse,
     backfillSummaries: refuse,
-    formatContextPacketForTurn: () => Effect.succeed(""),
+    formatContextPacketForTurn: () => Effect.succeed({ text: "" }),
     authorizeManagedGoalCreation: () => Effect.void,
     recordManagedWorkerThreads: () => Effect.void,
     reconcilePendingWakes: () => Effect.void,

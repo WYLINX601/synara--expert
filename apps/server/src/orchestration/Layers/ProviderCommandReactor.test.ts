@@ -1,3 +1,7 @@
+import {
+  renderWorkerContext,
+  type WorkerContextSection,
+} from "../../projectAgent/workerTurnContext.ts";
 import { ProjectAgentServiceError } from "../../projectAgent/Errors.ts";
 // FILE: ProviderCommandReactor.test.ts
 // Purpose: Verifies provider intent orchestration, queueing, rollback, and transcript bootstrap flows.
@@ -402,6 +406,9 @@ describe("ProviderCommandReactor", () => {
         }
       | undefined;
     readonly formatContextPacket?: string;
+    readonly workerContextSections?: readonly WorkerContextSection[];
+    readonly workerInitialPrompt?: string;
+    readonly contextLifecycleGeneration?: string;
     readonly rejectHubExecution?: boolean;
     readonly assertGroupCoordinatorTurnAllowed?: (input: {
       readonly threadId: ThreadId;
@@ -420,6 +427,7 @@ describe("ProviderCommandReactor", () => {
     const { stateDir } = deriveServerPathsSync(baseDir, undefined);
     createdStateDirs.add(stateDir);
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
+    const contextLifecycleGeneration = input?.contextLifecycleGeneration;
     let nextSessionIndex = 1;
     const runtimeSessions: Array<ProviderSession> = [];
     const persistedResumeCursors = new Map<ThreadId, unknown>();
@@ -453,6 +461,7 @@ describe("ProviderCommandReactor", () => {
           ? ThreadId.makeUnsafe(input.threadId)
           : ThreadId.makeUnsafe(`thread-${sessionIndex}`);
       const session: ProviderSession = {
+        ...(contextLifecycleGeneration ? { lifecycleGeneration: contextLifecycleGeneration } : {}),
         provider: sessionModelSelection.provider,
         status: "ready" as const,
         runtimeMode:
@@ -791,7 +800,18 @@ describe("ProviderCommandReactor", () => {
           : input?.rejectHubExecution
             ? Effect.fail(new ProjectAgentServiceError({ message: "Hub plan is paused." }))
             : Effect.void,
-      formatContextPacketForTurn: () => Effect.succeed(input?.formatContextPacket ?? ""),
+      formatContextPacketForTurn: () =>
+        Effect.succeed(
+          input?.workerContextSections
+            ? {
+                text: renderWorkerContext(input.workerContextSections),
+                workerSections: input.workerContextSections,
+                ...(input.workerInitialPrompt
+                  ? { workerInitialPrompt: input.workerInitialPrompt }
+                  : {}),
+              }
+            : { text: input?.formatContextPacket ?? "" },
+        ),
     } as unknown as (typeof ProjectAgentService)["Service"]);
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionPipelineLive),
@@ -1801,6 +1821,107 @@ describe("ProviderCommandReactor", () => {
     expect(sentInput.input?.indexOf("MARKER-PACKET-42") ?? -1).toBeLessThan(
       sentInput.input?.indexOf("What happened?") ?? Number.POSITIVE_INFINITY,
     );
+  });
+
+  it("sends Worker deltas, preserves frozen input on runtime recovery and reloads after compaction", async () => {
+    const frozen = `${"Preserve task scope and user hard constraints. ".repeat(30)} owner=author path=result.md revision=2; attemptId=frozen-attempt`;
+    const sections = [
+      { label: "Instructions", text: "WORKER-ONLY-STABLE-RULE" },
+      { label: "Inputs", text: "fixed revision 2" },
+      { label: "Frozen assignment and sources", text: frozen },
+    ];
+    const harness = await createHarness({
+      workerContextSections: sections,
+      workerInitialPrompt: frozen,
+      contextLifecycleGeneration: "worker-test-generation",
+      ingestRuntimeEvents: true,
+    });
+    const dispatch = (id: string) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          commandId: CommandId.makeUnsafe(`worker-delta-${id}`),
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          message: {
+            messageId: MessageId.makeUnsafe(`worker-delta-${id}`),
+            role: "user",
+            text: id === "first" ? frozen : `Continue ${id}`,
+            attachments: [],
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    await dispatch("first");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0].input).toContain("WORKER-ONLY-STABLE-RULE");
+    expect(harness.sendTurn.mock.calls[0]?.[0].input?.split(frozen).length).toBe(2);
+    await emitHarnessTurnTerminal(harness, {
+      eventId: "worker-first-done",
+      provider: "codex",
+      type: "completed",
+    });
+    await harness.drain();
+    sections[1] = { label: "Inputs", text: "fixed revision 3" };
+    await dispatch("second");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.sendTurn.mock.calls[1]?.[0].input).not.toContain("WORKER-ONLY-STABLE-RULE");
+    expect(harness.sendTurn.mock.calls[1]?.[0].input).not.toContain(frozen);
+    expect(harness.sendTurn.mock.calls[1]?.[0].input).toContain("fixed revision 3");
+    await emitHarnessTurnTerminal(harness, {
+      eventId: "worker-second-done",
+      provider: "codex",
+      type: "completed",
+    });
+    await harness.drain();
+
+    // Model the real ProviderService recovery boundary: resolveRoutableSession
+    // can rotate the runtime after Reactor assembly, before beforeDispatch.
+    let rotate = true;
+    const consumed: string[] = [];
+    harness.sendTurn.mockImplementation((turn, options) =>
+      Effect.gen(function* () {
+        if (rotate) {
+          const sessions = yield* harness.listSessions();
+          (sessions as ProviderSession[])[0] = {
+            ...sessions[0]!,
+            lifecycleGeneration: "recovered-generation",
+          };
+          rotate = false;
+        }
+        if (options?.beforeDispatch) yield* options.beforeDispatch;
+        consumed.push(turn.input ?? "");
+        return { threadId: ThreadId.makeUnsafe("thread-1"), turnId: asTurnId("turn-1") };
+      }),
+    );
+    await dispatch("recovered");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 4);
+    await harness.drain();
+    expect(consumed).toHaveLength(1);
+    expect(consumed[0]).toContain("WORKER-ONLY-STABLE-RULE");
+    expect(consumed[0]).toContain(frozen);
+    await emitHarnessTurnTerminal(harness, {
+      eventId: "worker-recovered-done",
+      provider: "codex",
+      type: "completed",
+    });
+    await harness.drain();
+
+    await harness.emitRuntimeEvent({
+      eventId: asEventId("worker-compacted"),
+      provider: "codex",
+      threadId: ThreadId.makeUnsafe("thread-1"),
+      createdAt: new Date().toISOString(),
+      providerRefs: {},
+      type: "thread.state.changed",
+      payload: { state: "compacted" },
+    });
+    await harness.drain();
+    await dispatch("after-compact");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 5);
+    expect(consumed[1]).toContain("WORKER-ONLY-STABLE-RULE");
+    expect(consumed[1]).toContain(frozen);
   });
 
   describe("multi-folder projects", () => {

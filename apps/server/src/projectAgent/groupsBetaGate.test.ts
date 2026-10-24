@@ -41,7 +41,9 @@ describe("gateProjectAgentServiceForStable", () => {
 
   it("treats a hub thread's turn like any other thread's", async () => {
     const { gated } = gatedService();
-    await expect(Effect.runPromise(gated.formatContextPacketForTurn(THREAD_ID))).resolves.toBe("");
+    await expect(Effect.runPromise(gated.formatContextPacketForTurn(THREAD_ID))).resolves.toEqual({
+      text: "",
+    });
     await expect(
       Effect.runPromise(gated.assertGroupCoordinatorTurnAllowed({ threadId: THREAD_ID })),
     ).resolves.toBeUndefined();

@@ -194,7 +194,10 @@ import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
 import { createExpertStore } from "./experts/ExpertStore";
 import { readHubExpertCatalog } from "./agentGateway/hubExpertCatalog";
 import { buildAgentGatewayProviderAvailabilities } from "./agentGateway/providerAvailability";
-import { makeWorkbenchExpertRpcHandlers } from "./workbench/host/expertRpc.ts";
+import {
+  makeWorkbenchExpertRpcHandlers,
+  makeWorkbenchExpertDiscoveryHandlers,
+} from "./workbench/host/expertRpc.ts";
 import { createSkillPackageSwitchHost } from "./workbench/host/skillPackageSwitchHost.ts";
 import { makeWorkbenchContextRpcHandlers } from "./workbench/host/contextRpc.ts";
 import { readThreadContextDetails } from "./workbench/host/contextThreadDetails.ts";
@@ -593,6 +596,9 @@ const makeWsRpcHandlersLayer = () =>
         stateDir: config.stateDir,
         expertAppliedRuntimeRepository,
       });
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => workbenchExpertRuntime.skillLibrary.dispose()),
+      );
       const readOwnerThreadDiagnostics = makeOwnerThreadDiagnosticReader({
         eventStore,
         providerRuntimeEvents,
@@ -1373,8 +1379,26 @@ const makeWsRpcHandlersLayer = () =>
           "Connectors can be managed only on the computer running Synara.",
         );
       });
+      const requireSkillOwner = requireLoopbackOwner(
+        "Skill management is available only on a loopback-only instance.",
+      );
+      const workbenchExpertDiscovery = makeWorkbenchExpertDiscoveryHandlers({
+        requireOwner: requireSkillOwner,
+        loadThreadBinding: (threadId) =>
+          projectionReadModelQuery
+            .getThreadShellById(ThreadId.makeUnsafe(threadId))
+            .pipe(
+              Effect.map((thread) =>
+                Option.isSome(thread) ? (thread.value.expertBinding ?? null) : null,
+              ),
+            ),
+        readSnapshot: (snapshotId) => workbenchExpertRuntime.experts.readSnapshot(snapshotId),
+        listCommands: (request) => providerDiscoveryService.listCommands(request),
+        listSkills: (request) => providerDiscoveryService.listSkills(request),
+      });
       const workbenchExpertRpcHandlers = makeWorkbenchExpertRpcHandlers({
         runtime: workbenchExpertRuntime,
+        requireSkillOwner,
         previewProvider: (request, skills) =>
           providerService.previewExpert
             ? providerService.previewExpert({ ...request, skills })
@@ -2839,9 +2863,9 @@ const makeWsRpcHandlersLayer = () =>
         [WS_METHODS.providerCompactThread]: (input) =>
           rpcEffect(providerService.compactThread(input), "Failed to compact thread"),
         [WS_METHODS.providerListCommands]: (input) =>
-          rpcEffect(providerDiscoveryService.listCommands(input), "Failed to list commands"),
+          rpcEffect(workbenchExpertDiscovery.listCommands(input), "Failed to list commands"),
         [WS_METHODS.providerListSkills]: (input) =>
-          rpcEffect(providerDiscoveryService.listSkills(input), "Failed to list skills"),
+          rpcEffect(workbenchExpertDiscovery.listSkills(input), "Failed to list skills"),
         [WS_METHODS.providerListSkillsCatalog]: (input) =>
           rpcEffect(
             Effect.tryPromise(() =>

@@ -771,6 +771,7 @@ export function createWsNativeApi(): NativeApi {
       restoreExpert: (input) => transport.request(WS_METHODS.serverRestoreExpert, input),
       deleteExpert: (input) => transport.request(WS_METHODS.serverDeleteExpert, input),
       previewExpert: (input) => transport.request(WS_METHODS.serverPreviewExpert, input),
+      skillLibrary: (input) => transport.request(WS_METHODS.serverSkillLibrary, { request: input }),
       listSkillPackages: () => transport.request(WS_METHODS.serverListSkillPackages),
       listSkillPackageSources: () => transport.request(WS_METHODS.serverListSkillPackageSources),
       readSkillPackage: (input) => transport.request(WS_METHODS.serverReadSkillPackage, input),

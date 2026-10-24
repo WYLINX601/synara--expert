@@ -58,7 +58,10 @@ import {
   type AgentGatewaySessionLease,
 } from "../../agentGateway/sessionLease.ts";
 import { ServerConfig, type ServerConfigShape } from "../../config.ts";
-import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
+import {
+  createExpertSkillApplication,
+  isFixedExpertNativeCommandAllowed,
+} from "../expertSkillCatalog.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
 import { loadProviderPromptImageBlocks } from "../promptAttachments.ts";
 import { settleConcurrentTeardowns } from "../settleConcurrentTeardowns.ts";
@@ -207,6 +210,8 @@ interface PendingUserInput {
 }
 
 interface OmpSessionContext {
+  readonly verifyFixedSkills?: () => Effect.Effect<void, unknown>;
+  readonly fixedSkillCommands?: ReadonlyArray<string>;
   harnessPolicyDelivered?: boolean;
   readonly gatewaySessionLease?: AgentGatewaySessionLease;
   readonly threadId: ThreadId;
@@ -467,6 +472,7 @@ export function makeOmpAdapter(
       readonly cwd: string;
       readonly settings: OmpAcpRuntimeSettings;
       readonly expertSession?: ProviderAdapterSessionStartInput["expertSession"];
+      readonly lifecycleGeneration?: string;
       readonly contextSession?: ProviderAdapterSessionStartInput["contextSession"];
       readonly skills?: ReadonlyArray<ProviderSkillReference>;
     }) => {
@@ -476,6 +482,7 @@ export function makeOmpAdapter(
         cwd: input.cwd,
         env,
         ...(input.expertSession ? { expertSession: input.expertSession } : {}),
+        ...(input.lifecycleGeneration ? { lifecycleGeneration: input.lifecycleGeneration } : {}),
         ...(input.contextSession ? { contextSession: input.contextSession } : {}),
         ...(input.skills ? { skills: input.skills } : {}),
         runCli: (args, cwd, childEnv) =>
@@ -942,6 +949,9 @@ export function makeOmpAdapter(
               ? yield* prepareExpertProjection({
                   cwd,
                   settings: effectiveSettings,
+                  ...(input.lifecycleGeneration
+                    ? { lifecycleGeneration: input.lifecycleGeneration }
+                    : {}),
                   ...(input.expertSession ? { expertSession: input.expertSession } : {}),
                   ...(input.contextSession ? { contextSession: input.contextSession } : {}),
                 })
@@ -971,6 +981,9 @@ export function makeOmpAdapter(
             ...(expertPreparation
               ? {
                   expertSessionSpawn: {
+                    ...(input.expertSession?.skillPolicy?.discovery === "fixed"
+                      ? { disableExtensions: true }
+                      : {}),
                     ...(expertPreparation.configOverlayPath
                       ? { configOverlayPath: expertPreparation.configOverlayPath }
                       : {}),
@@ -1206,6 +1219,12 @@ export function makeOmpAdapter(
           };
 
           ctx = {
+            ...(expertPreparation?.verify
+              ? {
+                  verifyFixedSkills: expertPreparation.verify,
+                  fixedSkillCommands: expertPreparation.allowedSkillCommands ?? [],
+                }
+              : {}),
             threadId: input.threadId,
             ...(gatewaySessionLease ? { gatewaySessionLease } : {}),
             ...(input.lifecycleGeneration !== undefined
@@ -1674,6 +1693,34 @@ export function makeOmpAdapter(
             threadId: input.threadId,
           });
         }
+        if (ctx.verifyFixedSkills) {
+          // ACP handles built-in slash commands before a model turn. An advisor
+          // toggle changes its live session without changing the config overlay.
+          if (
+            !isFixedExpertNativeCommandAllowed(input.input, ctx.fixedSkillCommands, [
+              "settings",
+              "launch",
+            ])
+          )
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "turn/start",
+              detail: "This native command is unavailable in a fixed Expert Skill assembly.",
+            });
+        }
+        if (ctx.verifyFixedSkills)
+          yield* ctx.verifyFixedSkills().pipe(
+            Effect.catchCause(() =>
+              Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "turn/start",
+                  detail:
+                    "OMP fixed Skill configuration or resolved identities changed; restart this Expert runtime.",
+                }),
+              ),
+            ),
+          );
         const turnId = TurnId.makeUnsafe(crypto.randomUUID());
         const turnModelSelection =
           input.modelSelection?.provider === PROVIDER ? input.modelSelection : undefined;
@@ -2128,6 +2175,16 @@ export function makeOmpAdapter(
 
     const forkThread: NonNullable<OmpAdapterShape["forkThread"]> = (input) =>
       Effect.gen(function* () {
+        if (
+          input.expertSession?.skillPolicy ||
+          sessions.get(input.sourceThreadId)?.verifyFixedSkills
+        )
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "forkThread",
+            issue:
+              "Native OMP fork cannot attest the inherited fixed Skill assembly; rebuild from the retained transcript.",
+          });
         const sourceCwd = resolveOmpSessionCwd(input.sourceCwd ?? input.cwd, serverConfig);
         const targetCwd = resolveOmpSessionCwd(input.cwd ?? input.sourceCwd, serverConfig);
         if (!sourceCwd || !targetCwd) {
@@ -2362,6 +2419,11 @@ export function makeOmpAdapter(
     const listCommands: NonNullable<OmpAdapterShape["listCommands"]> = (input) =>
       discoveryLock.withPermits(1)(
         Effect.gen(function* () {
+          const ownSession = input.threadId
+            ? sessions.get(ThreadId.makeUnsafe(input.threadId))
+            : undefined;
+          if (ownSession?.verifyFixedSkills)
+            return { commands: [], source: "expert.fixed-snapshot", cached: false };
           const cwd = resolveOmpSessionCwd(input.cwd, serverConfig);
           if (!cwd) {
             return yield* new ProviderAdapterValidationError({

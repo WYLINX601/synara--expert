@@ -26,6 +26,7 @@ import {
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance";
 import { ProviderMentionReference, ProviderSkillReference } from "./providerDiscovery";
 import { ExpertSkillApplication, ResolvedExpertSkillEntry } from "./skillPackage";
+import { ExpertSkillPolicy } from "./skillLibrary";
 import { ContextSession } from "./context";
 
 const ProviderSessionStatus = Schema.Literals([
@@ -69,6 +70,7 @@ export const ProviderSession = Schema.Struct({
 export type ProviderSession = typeof ProviderSession.Type;
 
 export const ProviderExpertSession = Schema.Struct({
+  skillPolicy: Schema.optional(ExpertSkillPolicy),
   snapshotId: TrimmedNonEmptyString,
   expertId: Schema.optional(TrimmedNonEmptyString),
   revision: Schema.optional(PositiveInt),

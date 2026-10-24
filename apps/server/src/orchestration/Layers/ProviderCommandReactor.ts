@@ -2402,8 +2402,9 @@ const make = Effect.gen(function* () {
             .join("\n\n"),
           skillsRoot: expertSnapshot.skillsRoot,
           skills: expertSnapshot.skills,
-          ...(expertSnapshot.schemaVersion === 2
+          ...(expertSnapshot.schemaVersion === 2 || expertSnapshot.schemaVersion === 3
             ? {
+                ...(expertSnapshot.skillPolicy ? { skillPolicy: expertSnapshot.skillPolicy } : {}),
                 skillLoading: "index" as const,
                 skillEntries: expertSnapshot.skillEntries ?? [],
               }

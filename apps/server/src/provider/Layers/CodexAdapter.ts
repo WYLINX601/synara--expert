@@ -2047,6 +2047,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         return (
           options?.makeManager?.(services) ??
           new CodexAppServerManager(services, {
+            stateDir: serverConfig.stateDir,
             synaraSkillsDir: synaraSkillsDir(serverConfig.baseDir),
             ...(agentGatewayCredentials
               ? {

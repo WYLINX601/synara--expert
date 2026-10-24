@@ -11,6 +11,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   rmSync,
   symlinkSync,
@@ -20,6 +21,8 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import {
+  FIXED_EXPERT_SKILL_POLICY,
+  type ProviderExpertSession,
   ApprovalRequestId,
   BROWSER_TOOL_NAMES,
   DEFAULT_MODEL_BY_PROVIDER,
@@ -86,6 +89,12 @@ function createSyntheticCodexAppServer(options?: {
   readonly projectMcpServers?: Record<string, unknown>;
   readonly forceFullHistoryResponse?: boolean;
   readonly expertSkills?: ReadonlyArray<{ readonly name: string; readonly path: string }>;
+  readonly fixedNative?: {
+    readonly ambient: Array<{ name: string; path: string }>;
+    readonly wrongConfig?: boolean;
+    readonly impostor?: boolean;
+    readonly catalog?: (cwd: string, skills: unknown[]) => unknown;
+  };
   readonly gatewayRenewal?:
     | "supported"
     | "unsupported"
@@ -122,7 +131,12 @@ function createSyntheticCodexAppServer(options?: {
     );
   };
 
-  const spawnAppServer = (): ChildProcessWithoutNullStreams => {
+  const spawnInputs: Array<{ readonly strictSkillDisabledPaths?: ReadonlyArray<string> }> = [];
+  const spawnAppServer = (input?: {
+    readonly strictSkillDisabledPaths?: ReadonlyArray<string>;
+  }): ChildProcessWithoutNullStreams => {
+    spawnInputs.push(input ?? {});
+    let extraRoots: string[] = [];
     const stdin = new PassThrough();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -159,6 +173,7 @@ function createSyntheticCodexAppServer(options?: {
         } else if (request.method === "account/read") {
           respond({ account: { type: "apiKey" } });
         } else if (request.method === "skills/extraRoots/set") {
+          extraRoots = (request.params?.extraRoots as string[]) ?? [];
           respond({});
         } else if (request.method === "skills/list") {
           const cwd = String(
@@ -166,7 +181,34 @@ function createSyntheticCodexAppServer(options?: {
               (request.params?.cwds as string[] | undefined)?.[0] ??
               process.cwd(),
           );
-          respond({ data: [{ cwd, skills: options?.expertSkills ?? [] }] });
+          const projected = options?.fixedNative
+            ? extraRoots.flatMap((root) => {
+                const plugin = JSON.parse(
+                  readFileSync(path.join(path.dirname(root), ".claude-plugin/plugin.json"), "utf8"),
+                ) as { name: string };
+                return readdirSync(root).map((entry) => ({
+                  name: `${plugin.name}:${entry}`,
+                  path: path.join(root, entry, "SKILL.md"),
+                }));
+              })
+            : [];
+          const native = options?.fixedNative
+            ? [
+                ...projected,
+                ...options.fixedNative.ambient,
+                ...(options.fixedNative.impostor && spawnInputs.length > 1 && projected[0]
+                  ? [{ ...projected[0], path: `${projected[0].path}.impostor` }]
+                  : []),
+              ].map((skill) => ({
+                ...skill,
+                enabled: !input?.strictSkillDisabledPaths?.includes(skill.path),
+              }))
+            : (options?.expertSkills ?? []);
+          respond(
+            options?.fixedNative?.catalog
+              ? options.fixedNative.catalog(cwd, [...native])
+              : { data: [{ cwd, skills: native }] },
+          );
         } else if (request.method === "thread/unsubscribe") {
           if (options?.gatewayRenewal === "unsupported") {
             queueMicrotask(() =>
@@ -249,6 +291,16 @@ function createSyntheticCodexAppServer(options?: {
         } else if (request.method === "config/read") {
           respond({
             config: {
+              ...(options?.fixedNative
+                ? {
+                    features: {
+                      multi_agent: false,
+                      multi_agent_v2: options.fixedNative.wrongConfig ?? false,
+                    },
+                    agents: { enabled: false },
+                    skills: { include_instructions: false, bundled: { enabled: false } },
+                  }
+                : {}),
               mcp_servers: {
                 ...options?.mcpServers,
                 ...(typeof request.params?.cwd === "string" ? options?.projectMcpServers : {}),
@@ -274,6 +326,7 @@ function createSyntheticCodexAppServer(options?: {
     historyFingerprint,
     historySentinel,
     historicalResponses,
+    spawnInputs,
     transcriptSnapshot: () => structuredClone(persistedTranscript),
     requests,
     spawnAppServer,
@@ -335,9 +388,11 @@ function createSyntheticCodexManager(
   fake: ReturnType<typeof createSyntheticCodexAppServer>,
   services?: ConstructorParameters<typeof CodexAppServerManager>[0],
   gateway?: NonNullable<ConstructorParameters<typeof CodexAppServerManager>[1]>["agentGatewayMcp"],
+  stateDir?: string,
 ) {
   const teardownProcessTree = vi.fn(async () => ({ escalated: false, signalErrors: [] }));
   const manager = new CodexAppServerManager(services, {
+    ...(stateDir ? { stateDir } : {}),
     spawnAppServer: fake.spawnAppServer,
     teardownProcessTree,
     ...(gateway ? { agentGatewayMcp: gateway } : {}),
@@ -7599,4 +7654,254 @@ describe("collab child routing after the parent turn ends", () => {
     expect(harness.context.collabReceiverParents.has("child_provider_249")).toBe(true);
     expect(harness.context.collabReceiverParents.has("child_provider_0")).toBe(false);
   });
+});
+
+describe("Codex fixed native Skill wiring", () => {
+  function fixture(empty = false) {
+    const root = mkdtempSync(path.join(os.tmpdir(), "synara-codex-fixed-wiring-")),
+      stateDir = path.join(root, "state"),
+      file = path.join(root, "original", "SKILL.md");
+    mkdirSync(path.dirname(file), { recursive: true });
+    const body = "---\nname: selected\ndescription: Selected immutable Skill\n---\nInstructions\n";
+    writeFileSync(file, body);
+    const entries = empty
+      ? []
+      : [
+          {
+            name: "selected",
+            path: file,
+            sha256: createHash("sha256").update(body).digest("hex"),
+            packageId: `pkg_${"a".repeat(64)}`,
+            entryPath: "SKILL.md",
+            description: "Selected immutable Skill",
+            activation: "on-demand" as const,
+          },
+        ];
+    const expertSession: ProviderExpertSession = {
+      snapshotId: `exp_${"b".repeat(64)}`,
+      persona: "Fixed Expert",
+      skills: entries.map(({ name, path }) => ({ name, path })),
+      skillEntries: entries,
+      skillLoading: "index",
+      skillPolicy: FIXED_EXPERT_SKILL_POLICY,
+      references: [],
+    };
+    return { root, stateDir, file, expertSession };
+  }
+  it.each(["default", "account", "custom-home"] as const)(
+    "isolates probe lifecycle and owns projections independently of %s launch home",
+    async (mode) => {
+      const selected = fixture(),
+        ambient = [
+          { name: "selected", path: path.join(selected.root, "project-impostor/SKILL.md") },
+          { name: "global-c", path: path.join(selected.root, "global/SKILL.md") },
+        ];
+      const fake = createSyntheticCodexAppServer({ fixedNative: { ambient } }),
+        { manager } = createSyntheticCodexManager(fake, undefined, undefined, selected.stateDir),
+        events: { kind?: string; method?: string; threadId?: string }[] = [];
+      manager.on("event", (event) => events.push(event));
+      try {
+        const session = await manager.startSession({
+          threadId: asThreadId("fixed-wiring"),
+          cwd: selected.root,
+          runtimeMode: "full-access",
+          expertSession: selected.expertSession,
+          lifecycleGeneration: "fixed-generation",
+          agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+          ...(mode !== "default"
+            ? {
+                providerOptions: {
+                  codex: {
+                    homePath: path.join(selected.root, "custom-codex-home"),
+                    ...(mode === "account" ? { accountId: "isolated-account" } : {}),
+                  },
+                },
+              }
+            : {}),
+        });
+        expect(fake.spawnInputs).toHaveLength(2);
+        expect([...(fake.spawnInputs[1]?.strictSkillDisabledPaths ?? [])].toSorted()).toEqual(
+          ambient.map((item) => item.path).toSorted(),
+        );
+        expect(fake.requests.filter((request) => request.method === "thread/start")).toHaveLength(
+          1,
+        );
+        expect(
+          events.filter(
+            (event) =>
+              event.threadId === "fixed-wiring" &&
+              (event.kind === "session.exited" || event.method === "session/stopped"),
+          ),
+        ).toEqual([]);
+        expect(
+          fake.requests
+            .filter((request) => request.method === "skills/extraRoots/set")
+            .every((request) =>
+              (request.params?.extraRoots as string[]).every((root) =>
+                root.startsWith(selected.stateDir),
+              ),
+            ),
+        ).toBe(true);
+        expect(session.skillApplication).toMatchObject({
+          enforcement: "native-fixed",
+          nativeSubagents: "blocked",
+          lifecycleGeneration: "fixed-generation",
+          activeEntries: [
+            { path: selected.file, sha256: selected.expertSession.skillEntries![0]!.sha256 },
+          ],
+        });
+        const starts = fake.requests.filter((request) => request.method === "turn/start").length;
+        ambient.push({ name: "new-d", path: path.join(selected.root, "new/SKILL.md") });
+        await expect(
+          manager.sendTurn({ threadId: asThreadId("fixed-wiring"), input: "Never dispatch" }),
+        ).rejects.toThrow(/catalog|unselected/iu);
+        expect(fake.requests.filter((request) => request.method === "turn/start")).toHaveLength(
+          starts,
+        );
+      } finally {
+        await manager.stopAll();
+        rmSync(selected.root, { recursive: true, force: true });
+      }
+    },
+  );
+  it("refuses a native fork before discovery or lifecycle publication for a fixed assembly", async () => {
+    const selected = fixture(),
+      fake = createSyntheticCodexAppServer({ fixedNative: { ambient: [] } }),
+      { manager } = createSyntheticCodexManager(fake, undefined, undefined, selected.stateDir);
+    try {
+      await expect(
+        manager.forkThread({
+          threadId: asThreadId("fixed-child"),
+          sourceThreadId: asThreadId("fixed-parent"),
+          sourceResumeCursor: { threadId: "native-parent" },
+          cwd: selected.root,
+          runtimeMode: "full-access",
+          expertSession: selected.expertSession,
+          lifecycleGeneration: "child-generation",
+        }),
+      ).rejects.toThrow(/cannot yet attest/iu);
+      expect(fake.spawnInputs).toEqual([]);
+      expect(fake.requests).toEqual([]);
+    } finally {
+      await manager.stopAll();
+      rmSync(selected.root, { recursive: true, force: true });
+    }
+  });
+  it.each([
+    "missing",
+    "wrong-cwd",
+    "entries",
+    "enabled",
+    "errors",
+    "top-error",
+    "scoped-error",
+    "relative-path",
+    "malformed-data",
+  ] as const)("refuses a malformed %s native empty catalog before a thread", async (failure) => {
+    const selected = fixture(true),
+      fake = createSyntheticCodexAppServer({
+        fixedNative: {
+          ambient: [],
+          catalog: (cwd) =>
+            failure === "missing"
+              ? {}
+              : failure === "top-error"
+                ? { error: { message: "Native failure" }, data: [{ cwd, skills: [] }] }
+                : failure === "malformed-data"
+                  ? { data: { cwd, skills: [] } }
+                  : {
+                      data: [
+                        {
+                          cwd: failure === "wrong-cwd" ? "/other" : cwd,
+                          skills:
+                            failure === "entries"
+                              ? [null]
+                              : failure === "enabled"
+                                ? [{ name: "a", path: "/a/SKILL.md" }]
+                                : failure === "relative-path"
+                                  ? [{ name: "a", path: "relative/SKILL.md", enabled: false }]
+                                  : [],
+                          ...(failure === "scoped-error"
+                            ? { error: { message: "Native failure" } }
+                            : {}),
+                          ...(failure === "errors"
+                            ? { errors: [{ message: "Native loader failed" }] }
+                            : {}),
+                        },
+                      ],
+                    },
+        },
+      }),
+      { manager } = createSyntheticCodexManager(fake, undefined, undefined, selected.stateDir);
+    try {
+      await expect(
+        manager.startSession({
+          threadId: asThreadId("malformed-fixed"),
+          cwd: selected.root,
+          runtimeMode: "full-access",
+          expertSession: selected.expertSession,
+          lifecycleGeneration: "malformed-generation",
+          agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+        }),
+      ).rejects.toThrow(/catalog/iu);
+      expect(
+        fake.requests.some(
+          (request) => request.method === "thread/start" || request.method === "turn/start",
+        ),
+      ).toBe(false);
+    } finally {
+      await manager.stopAll();
+      rmSync(selected.root, { recursive: true, force: true });
+    }
+  });
+  it("empty assembly disables every ambient entry and returns an empty native receipt", async () => {
+    const selected = fixture(true),
+      fake = createSyntheticCodexAppServer({
+        fixedNative: { ambient: [{ name: "bundled", path: "/outside/SKILL.md" }] },
+      }),
+      { manager } = createSyntheticCodexManager(fake, undefined, undefined, selected.stateDir);
+    try {
+      const session = await manager.startSession({
+        threadId: asThreadId("fixed-empty"),
+        cwd: selected.root,
+        runtimeMode: "full-access",
+        expertSession: selected.expertSession,
+        lifecycleGeneration: "empty-generation",
+        agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+      });
+      expect(session.skillApplication?.activeEntries).toEqual([]);
+      expect(fake.spawnInputs[1]?.strictSkillDisabledPaths).toEqual(["/outside/SKILL.md"]);
+    } finally {
+      await manager.stopAll();
+      rmSync(selected.root, { recursive: true, force: true });
+    }
+  });
+  it.each(["impostor", "wrongConfig"] as const)(
+    "refuses %s before opening a native thread or minting a receipt",
+    async (failure) => {
+      const selected = fixture(),
+        fake = createSyntheticCodexAppServer({ fixedNative: { ambient: [], [failure]: true } }),
+        { manager } = createSyntheticCodexManager(fake, undefined, undefined, selected.stateDir);
+      try {
+        await expect(
+          manager.startSession({
+            threadId: asThreadId("fixed-rejected"),
+            cwd: selected.root,
+            runtimeMode: "full-access",
+            expertSession: selected.expertSession,
+            lifecycleGeneration: "rejected-generation",
+            agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+          }),
+        ).rejects.toThrow(/fixed|Skill|attest/iu);
+        expect(
+          fake.requests.some(
+            (request) => request.method === "thread/start" || request.method === "turn/start",
+          ),
+        ).toBe(false);
+      } finally {
+        await manager.stopAll();
+        rmSync(selected.root, { recursive: true, force: true });
+      }
+    },
+  );
 });

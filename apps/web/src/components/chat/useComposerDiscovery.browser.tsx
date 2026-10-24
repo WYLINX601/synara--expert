@@ -239,7 +239,7 @@ describe("useComposerDiscovery Expert snapshot Skills", () => {
     }
   });
 
-  it("uses the bound old snapshot and preserves native slash commands", async () => {
+  it("uses the bound snapshot without native command or plugin discovery", async () => {
     const threadId = ThreadId.makeUnsafe("expert-old-thread");
     harness.readExpertSnapshot.mockResolvedValue(
       snapshot("snapshot-old", [{ name: "Pinned Skill", path: "/snapshots/old/pinned" }]),
@@ -254,7 +254,7 @@ describe("useComposerDiscovery Expert snapshot Skills", () => {
     try {
       await vi.waitFor(() => {
         expect(hook.result.current.providerSkills).toHaveLength(1);
-        expect(hook.result.current.providerNativeCommands).toHaveLength(1);
+        expect(hook.result.current.providerNativeCommands).toHaveLength(0);
       });
       expect(hook.result.current.providerSkills[0]).toMatchObject({
         name: "Pinned Skill",
@@ -264,15 +264,70 @@ describe("useComposerDiscovery Expert snapshot Skills", () => {
       });
       expect(harness.readExpertSnapshot).toHaveBeenCalledWith({ snapshotId: "snapshot-old" });
       expect(harness.provider.listSkills).not.toHaveBeenCalled();
-      expect(harness.provider.listCommands).toHaveBeenCalledWith(
-        expect.objectContaining({ provider: "codex", threadId, cwd: "/workspace/project" }),
-      );
-      expect(hook.result.current.providerNativeCommands[0]?.name).toBe("review");
+      expect(harness.provider.listCommands).not.toHaveBeenCalled();
+      expect(harness.provider.listPlugins).not.toHaveBeenCalled();
+      expect(hook.result.current.isNativeCommandDiscoveryPending).toBe(false);
     } finally {
       await hook.unmount();
     }
   });
 
+  it("clears cached native commands and plugins when a draft Expert is selected, and restores ordinary discovery", async () => {
+    harness.provider.getComposerCapabilities.mockResolvedValue({
+      ...CAPABILITIES,
+      supportsPluginDiscovery: true,
+      supportsPluginMentions: true,
+    });
+    harness.provider.listPlugins.mockResolvedValue({
+      marketplaces: [
+        {
+          name: "native",
+          path: "/plugins",
+          plugins: [
+            {
+              id: "ambient-plugin",
+              name: "ambient-plugin",
+              enabled: true,
+              installPolicy: "AVAILABLE",
+              authPolicy: "ON_INSTALL",
+            },
+          ],
+        },
+      ],
+      marketplaceLoadErrors: [],
+      remoteSyncError: null,
+      featuredPluginIds: [],
+      source: "fixture",
+      cached: false,
+    });
+    const input = baseInput({
+        composerTrigger: { kind: "slash-command", query: "", rangeStart: 0, rangeEnd: 0 },
+      }),
+      hook = await mount(input);
+    try {
+      await vi.waitFor(() => {
+        expect(hook.result.current.providerNativeCommands).toHaveLength(1);
+        expect(hook.result.current.providerPlugins).toHaveLength(1);
+      });
+      const commandCalls = harness.provider.listCommands.mock.calls.length,
+        pluginCalls = harness.provider.listPlugins.mock.calls.length;
+      await hook.rerender({
+        ...input,
+        draftExpert: { preview: expertPreview([]), isFetching: false, isError: false },
+      });
+      expect(hook.result.current.providerNativeCommands).toEqual([]);
+      expect(hook.result.current.providerPlugins).toEqual([]);
+      expect(hook.result.current.providerArtifacts).toBeUndefined();
+      expect(hook.result.current.isNativeCommandDiscoveryPending).toBe(false);
+      expect(harness.provider.listCommands).toHaveBeenCalledTimes(commandCalls);
+      expect(harness.provider.listPlugins).toHaveBeenCalledTimes(pluginCalls);
+      await hook.rerender(input);
+      await vi.waitFor(() => expect(hook.result.current.providerNativeCommands).toHaveLength(1));
+      expect(hook.result.current.providerPlugins).toHaveLength(1);
+    } finally {
+      await hook.unmount();
+    }
+  });
   it("keeps all provider Skills for an ordinary unbound thread", async () => {
     harness.provider.listSkills.mockResolvedValue({
       skills: [

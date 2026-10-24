@@ -148,9 +148,25 @@
         "apps/server/src/workbench/host/skillPackageSwitchHost.ts",
         "apps/server/src/wsRpc.ts",
         "scripts/expert-p0/skill-package-switch.ts",
-        "apps/server/src/orchestration/Layers/OrchestrationEngine.ts"
+        "apps/server/src/orchestration/Layers/OrchestrationEngine.ts",
+        "packages/contracts/src/skillLibrary.ts",
+        "packages/contracts/src/expert.ts",
+        "packages/contracts/src/provider.ts",
+        "packages/contracts/src/wsCompatibility.ts",
+        "packages/shared/src/binaryTransfer.ts",
+        "apps/server/src/http.ts",
+        "apps/server/src/codexAppServerManager.ts",
+        "apps/server/src/provider/Layers/ProviderService.ts",
+        "apps/server/src/provider/Layers/ClaudeAdapter.ts",
+        "apps/server/src/provider/Layers/PiAdapter.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.ts",
+        "apps/server/src/provider/acp/OmpExpertSession.ts",
+        "apps/server/src/provider/fixedSkillProjection.ts",
+        "apps/web/src/components/settings/ExpertEditor.tsx",
+        "apps/web/src/components/chat/ExpertTaskControl.tsx",
+        "apps/server/src/provider/acp/OmpAcpSupport.ts"
       ],
-      "responsibility": "Expert-owned immutable packages and source pointers are accessed through owner RPC and the narrow ExpertClient. A shared in-process stateDir writer queue serializes package publication/removal with Expert revisions and task snapshot publication. Deletion scans all definitions, retained revisions and snapshots (including accepted Hub bindings), failing closed on unknown ownership. V2 snapshots pin selected entries without copying skills; references retain their original owner. Host provider lifecycle composes and verifies catalog instructions and persists submission receipts through expert ledger migration 6. The existing Settings parent and composer own navigation, subscriptions, draft promotion and permissions; draft skill identities are bound to the accepted snapshot before dispatch. BMad presets and workspace inspection stay outside generic storage. The existing Expert editor owns the unified skill picker draft; discovery and path preview use existing host capabilities. Apply validates and imports immutable packages before updating only the draft, while explicit Save retains Expert revision conflict checks. Reuse copies saved skill selections without mutating the source Expert; async completions are scoped to the active connection and dialog. The boundary check covers declared direct imports, not runtime permissions or transitive isolation. The one-time switch runs through authenticated owner RPC with a reviewed digest and durable backup/progress; native stop, cancel and delete own task history and eventual purge; the switch conservatively retains snapshots named in its reviewed plan and reports retained artifacts. Cleanup rechecks references under the lifecycle lock; Claude projections are scoped to managed metadata, while OMP temporary files remain adapter-owned. Expert task admission preflights the effective worktree or project workspace before binding a snapshot.",
+      "responsibility": "The managed Skill library owns stable identities and source/head revisions; SkillPackageStore owns immutable content, limits and reference protection. Library commits and package publication share the existing stateDir lifecycle lock; ExpertStore resolves current enabled bindings only at native task admission and publishes schema-3 fixed-policy snapshots. Accepted work and recovery retain those package hashes. Owner RPC and authenticated HTTP share one stateDir library instance and preview lifecycle; large resources use binary transport. The existing Settings parent, ExpertClient, CodeEditorPane and draft/connection guards own management and bidirectional bindings. Fixed Expert discovery reads the server snapshot; native command discovery is suppressed. Provider adapters own native source filtering, full resolved identity/hash verification, reload/turn gates and blocked unverifiable native subagents; lightweight projections point at original immutable resources. Native verification is required for fixed-enforcement receipts and does not prove model execution. Non-Expert behavior retains its native path. Historical switch tooling remains separately owned and is not invoked by this feature; old task data is preserved and unsupported policies fail closed. Static boundary coverage checks declared direct imports only, not native behavior, transitive isolation or an OS filesystem sandbox.",
       "tests": [
         "packages/contracts/src/skillPackage.test.ts",
         "apps/server/src/experts/SkillPackageStore.test.ts",
@@ -172,7 +188,23 @@
         "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts",
         "apps/server/src/persistence/MigrationBackup.test.ts",
         "apps/web/src/components/ChatView.browser.tsx",
-        "scripts/expert-p0/skill-package-switch.test.ts"
+        "scripts/expert-p0/skill-package-switch.test.ts",
+        "apps/server/src/experts/SkillLibraryStore.test.ts",
+        "apps/server/src/experts/skillLibraryArchive.test.ts",
+        "apps/server/src/provider/fixedExpertAssembly.test.ts",
+        "apps/server/src/codexAppServerManager.test.ts",
+        "apps/server/src/provider/Layers/ClaudeAdapter.test.ts",
+        "apps/server/src/provider/Layers/PiAdapter.lifecycle.test.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.fixedSkills.test.ts",
+        "apps/server/src/provider/acp/OmpExpertSession.test.ts",
+        "apps/server/src/provider/Layers/ProviderService.test.ts",
+        "apps/server/src/authEffectRoute.test.ts",
+        "apps/web/src/components/settings/SkillLibrarySettingsPanel.browser.tsx",
+        "apps/server/src/workbench/host/expertDiscovery.test.ts",
+        "apps/server/src/provider/acp/OmpAcpSupport.test.ts",
+        "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
+        "apps/web/src/components/chat/useComposerDiscovery.browser.tsx",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts"
       ],
       "featureFiles": [
         "apps/server/src/experts/skillPackageLifecycle.ts",
@@ -185,7 +217,11 @@
         "apps/web/src/components/settings/skillPickerModel.ts",
         "apps/web/src/components/settings/expertSkillPackagesSettingsModel.ts",
         "apps/web/src/lib/expertSkillInvocation.ts",
-        "apps/server/src/experts/SkillPackageSwitch.ts"
+        "apps/server/src/experts/SkillPackageSwitch.ts",
+        "apps/server/src/experts/SkillLibraryStore.ts",
+        "apps/server/src/experts/skillLibraryArchive.ts",
+        "apps/web/src/components/settings/SkillLibrarySettingsPanel.tsx",
+        "apps/web/src/components/settings/ExpertSkillBindingsEditor.tsx"
       ]
     },
     {

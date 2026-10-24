@@ -95,6 +95,7 @@ export function useComposerDiscovery({
   );
   const effectiveMentionQuery = mentionTriggerQuery.length > 0 ? debouncedPathQuery : "";
   const composerSkillCwd = providerModelDiscoveryCwd;
+  const hasExpertSkillSource = Boolean(expertBinding || draftExpert);
   const providerComposerCapabilitiesQuery = useQuery(
     providerComposerCapabilitiesQueryOptions(selectedProvider, selectedProviderInstanceId),
   );
@@ -125,6 +126,7 @@ export function useComposerDiscovery({
             ? ompAgentDir || null
             : null,
       enabled:
+        !hasExpertSkillSource &&
         (composerTriggerKind === "slash-command" ||
           composerTriggerKind === "slash-model" ||
           discoverNativeCompaction === true) &&
@@ -136,7 +138,6 @@ export function useComposerDiscovery({
     selectedProvider === "pi" ||
     selectedProvider === "omp" ||
     supportsSkillDiscovery(providerComposerCapabilitiesQuery.data);
-  const hasExpertSkillSource = Boolean(expertBinding || draftExpert);
   // Expert threads use the accepted snapshot, never the mutable template or the
   // harness-wide catalog. Load outside the picker too, so restored skill chips
   // keep resolving to the exact snapshot paths after refresh/provider changes.
@@ -177,6 +178,7 @@ export function useComposerDiscovery({
       cwd: composerSkillCwd,
       threadId,
       enabled:
+        !hasExpertSkillSource &&
         supportsPluginDiscovery(providerComposerCapabilitiesQuery.data) &&
         composerSkillCwd !== null,
     }),
@@ -194,19 +196,22 @@ export function useComposerDiscovery({
   // Keep plugin suggestions referentially stable so prompt-sync effects do not loop on rerender.
   const providerPlugins = useMemo(
     () =>
-      providerPluginsQuery.data?.marketplaces.flatMap((marketplace) =>
-        marketplace.plugins.map((plugin) => ({
-          plugin,
-          mention: {
-            name: plugin.name,
-            path: `plugin://${plugin.name}@${marketplace.name}`,
-          } satisfies ProviderMentionReference,
-        })),
-      ) ?? EMPTY_COMPOSER_PLUGIN_SUGGESTIONS,
-    [providerPluginsQuery.data],
+      hasExpertSkillSource
+        ? EMPTY_COMPOSER_PLUGIN_SUGGESTIONS
+        : (providerPluginsQuery.data?.marketplaces.flatMap((marketplace) =>
+            marketplace.plugins.map((plugin) => ({
+              plugin,
+              mention: {
+                name: plugin.name,
+                path: `plugin://${plugin.name}@${marketplace.name}`,
+              } satisfies ProviderMentionReference,
+            })),
+          ) ?? EMPTY_COMPOSER_PLUGIN_SUGGESTIONS),
+    [hasExpertSkillSource, providerPluginsQuery.data],
   );
-  const providerNativeCommands =
-    providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS;
+  const providerNativeCommands = hasExpertSkillSource
+    ? EMPTY_PROVIDER_NATIVE_COMMANDS
+    : (providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS);
   const providerNativeCommandNames = useMemo(
     () => providerNativeCommands.map((command) => command.name),
     [providerNativeCommands],
@@ -294,10 +299,12 @@ export function useComposerDiscovery({
       ((mentionTriggerQuery.length > 0 && composerPathQueryDebouncer.state.isPending) ||
         workspaceEntriesQuery.isLoading ||
         workspaceEntriesQuery.isFetching ||
-        providerPluginsQuery.isLoading ||
-        providerPluginsQuery.isFetching)) ||
+        (!hasExpertSkillSource &&
+          (providerPluginsQuery.isLoading || providerPluginsQuery.isFetching)))) ||
     (composerTriggerKind === "slash-command" &&
-      (providerCommandsQuery.isLoading || providerCommandsQuery.isFetching || skillsLoading)) ||
+      ((!hasExpertSkillSource &&
+        (providerCommandsQuery.isLoading || providerCommandsQuery.isFetching)) ||
+        skillsLoading)) ||
     (composerTriggerKind === "skill" &&
       (providerComposerCapabilitiesQuery.isLoading ||
         providerComposerCapabilitiesQuery.isFetching ||
@@ -307,7 +314,7 @@ export function useComposerDiscovery({
     isLocalFolderBrowserOpen,
     providerPlugins,
     providerNativeCommands,
-    providerArtifacts: providerCommandsQuery.data?.artifacts,
+    providerArtifacts: hasExpertSkillSource ? undefined : providerCommandsQuery.data?.artifacts,
     providerSkills,
     workspaceEntries,
     effectiveComposerTrigger,
@@ -317,9 +324,10 @@ export function useComposerDiscovery({
     composerDiscoveryError,
     canCompactThread: supportsThreadCompaction(providerComposerCapabilitiesQuery.data),
     isNativeCommandDiscoveryPending:
-      providerComposerCapabilitiesQuery.isPending ||
-      (supportsNativeSlashCommandDiscovery(providerComposerCapabilitiesQuery.data) &&
-        providerCommandsQuery.isPending) ||
-      providerCommandsQuery.isFetching,
+      !hasExpertSkillSource &&
+      (providerComposerCapabilitiesQuery.isPending ||
+        (supportsNativeSlashCommandDiscovery(providerComposerCapabilitiesQuery.data) &&
+          providerCommandsQuery.isPending) ||
+        providerCommandsQuery.isFetching),
   };
 }

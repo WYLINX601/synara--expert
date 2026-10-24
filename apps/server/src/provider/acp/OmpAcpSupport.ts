@@ -132,6 +132,7 @@ export interface OmpAcpRuntimeInput extends Omit<
 }
 
 export interface OmpAcpExpertSessionSpawnOptions {
+  readonly disableExtensions?: boolean;
   readonly configOverlayPath?: string;
   readonly appendSystemPromptPath?: string;
 }
@@ -272,6 +273,7 @@ export function buildOmpAcpSpawnInput(
   expertSessionSpawn?: OmpAcpExpertSessionSpawnOptions,
 ): AcpSpawnInput {
   const args = ["acp"];
+  if (expertSessionSpawn?.disableExtensions) args.push("--no-extensions");
   if (expertSessionSpawn?.configOverlayPath) {
     args.push("--config", expertSessionSpawn.configOverlayPath);
   }

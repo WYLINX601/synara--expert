@@ -10,10 +10,16 @@ import {
   type ExpertConnectionTestInput,
   type ExpertPreviewInput,
   type ProviderSkillReference,
+  type ProviderListCommandsInput,
+  type ProviderListCommandsResult,
+  type ProviderListSkillsInput,
+  type ProviderListSkillsResult,
+  type ExpertSnapshot,
   type ExpertReadInput,
   type ExpertRestoreInput,
   type ExpertSaveInput,
   type ExpertSnapshotReadInput,
+  type SkillLibraryRequest,
   type SkillPackageImportInput,
   type SkillPackagePreviewInput,
   type SkillPackageReadInput,
@@ -61,6 +67,7 @@ export function makeWorkbenchExpertRpcHandlers<R>(input: {
   ) => Effect.Effect<ReadonlyArray<string>, unknown>;
 
   readonly requireOwner: Effect.Effect<void, WsRpcError, R>;
+  readonly requireSkillOwner?: Effect.Effect<void, WsRpcError, R>;
   readonly rpcEffect: RpcEffect;
   readonly expertRpcEffect: ExpertRpcEffect;
   readonly loadProjectionThreads: () => Effect.Effect<
@@ -140,6 +147,23 @@ export function makeWorkbenchExpertRpcHandlers<R>(input: {
             ),
           );
         }),
+      ),
+    [WS_METHODS.serverSkillLibrary]: ({ request }: { request: SkillLibraryRequest }) =>
+      expertRpcEffect(
+        input.requireSkillOwner ?? requireOwner,
+        async () => {
+          if (
+            (request.action === "save" &&
+              request.changes.some((change) => (change.content?.length ?? 0) > 1_398_104)) ||
+            (request.action === "create" && Buffer.byteLength(request.body) > 1024 * 1024)
+          )
+            throw new Error("Large Skill files must use the authenticated HTTP upload endpoint.");
+          const result = await runtime.skillLibrary.execute(request);
+          if ((result.file?.content.length ?? 0) > 1_398_104)
+            throw new Error("Large Skill files must use the authenticated HTTP download endpoint.");
+          return result;
+        },
+        "Skill library operation failed",
       ),
     [WS_METHODS.serverListSkillPackages]: () =>
       expertRpcEffect(
@@ -312,5 +336,65 @@ export function makeWorkbenchExpertRpcHandlers<R>(input: {
         () => runtime.importMcpConnections(input),
         "Failed to import MCP connections",
       ),
+  };
+}
+
+/** Thread-specific discovery uses the authoritative accepted snapshot. It must
+ * not open a second provider process with ambient discovery settings. */
+export function makeWorkbenchExpertDiscoveryHandlers<R>(input: {
+  readonly requireOwner: Effect.Effect<void, WsRpcError, R>;
+  readonly loadThreadBinding: (
+    threadId: string,
+  ) => Effect.Effect<{ readonly snapshotId: string } | null, unknown, R>;
+  readonly readSnapshot: (snapshotId: string) => Promise<ExpertSnapshot>;
+  readonly listCommands: (
+    request: ProviderListCommandsInput,
+  ) => Effect.Effect<ProviderListCommandsResult, unknown, R>;
+  readonly listSkills: (
+    request: ProviderListSkillsInput,
+  ) => Effect.Effect<ProviderListSkillsResult, unknown, R>;
+}) {
+  const fixedSnapshot = (threadId: string | undefined) =>
+    Effect.gen(function* () {
+      if (!threadId) return null;
+      const binding = yield* input.loadThreadBinding(threadId);
+      if (!binding) return null;
+      yield* input.requireOwner;
+      const snapshot = yield* Effect.tryPromise(() => input.readSnapshot(binding.snapshotId));
+      if (snapshot.schemaVersion !== 3 || snapshot.skillPolicy?.discovery !== "fixed")
+        return yield* Effect.fail(
+          new Error("This historical Expert task has no supported fixed Skill policy."),
+        );
+      return snapshot;
+    });
+  return {
+    listCommands: (request: ProviderListCommandsInput) =>
+      Effect.gen(function* () {
+        if (yield* fixedSnapshot(request.threadId))
+          return { commands: [], source: "expert.fixed-snapshot", cached: false };
+        return yield* input.listCommands(request);
+      }),
+    listSkills: (request: ProviderListSkillsInput) =>
+      Effect.gen(function* () {
+        const snapshot = yield* fixedSnapshot(request.threadId);
+        if (!snapshot) return yield* input.listSkills(request);
+        return {
+          skills: (snapshot.skillEntries ?? [])
+            .filter((entry) => entry.userInvocable !== false)
+            .map((entry) => ({
+              name: entry.name,
+              description: entry.description,
+              path: entry.path,
+              enabled: true,
+              expert: {
+                snapshotId: snapshot.snapshotId,
+                packageId: entry.packageId,
+                entryPath: entry.entryPath,
+              },
+            })),
+          source: "expert.fixed-snapshot",
+          cached: false,
+        };
+      }),
   };
 }

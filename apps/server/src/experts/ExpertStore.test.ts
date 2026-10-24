@@ -631,7 +631,7 @@ describe("ExpertStore", () => {
     },
   );
 
-  it("pins package selections in V2 snapshots without copying skills", async () => {
+  it("pins package selections in strict snapshots without copying skills", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
     const sourceRoot = path.join(root, "source", "writer");
@@ -677,11 +677,13 @@ describe("ExpertStore", () => {
         activation: "startup",
         name: "Writer",
         description: "Description for Writer.",
+        sha256: firstPackage.resources.find((resource) => resource.path === "content/SKILL.md")!
+          .sha256,
         path: expectedSkillPath,
       },
     ]);
     expect(snapshot).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       skillSelections: [
         {
           packageId: firstPackage.packageId,
@@ -714,7 +716,7 @@ describe("ExpertStore", () => {
       resources: Array<{ path: string }>;
     };
     expect(stored.snapshot).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       skills: [],
       skillSelections: snapshot.skillSelections,
     });

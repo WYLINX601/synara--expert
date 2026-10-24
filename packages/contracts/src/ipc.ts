@@ -1,3 +1,4 @@
+import { SkillLibraryRequest, SkillLibraryResponse } from "./skillLibrary";
 import type { HubPlansApi } from "./hubPlan";
 import type { HubTeamsApi } from "./hubCollaboration";
 import { Schema } from "effect";
@@ -1365,6 +1366,7 @@ export interface NativeApi {
     restoreExpert: (input: ExpertRestoreInput) => Promise<ExpertDefinition>;
     deleteExpert: (input: ExpertDeleteInput) => Promise<void>;
     previewExpert: (input: ExpertPreviewInput) => Promise<ExpertPreview>;
+    skillLibrary: (input: SkillLibraryRequest) => Promise<SkillLibraryResponse>;
     listSkillPackages: () => Promise<ReadonlyArray<SkillPackage>>;
     listSkillPackageSources: () => Promise<ReadonlyArray<SkillPackageSource>>;
     readSkillPackage: (input: SkillPackageReadInput) => Promise<SkillPackage>;

@@ -47,6 +47,11 @@ const SkillPackageRemovalRecord = Schema.Struct({
   sources: Schema.Array(SkillPackageSourceSchema),
 });
 type SkillPackageRemovalRecord = typeof SkillPackageRemovalRecord.Type;
+const SkillPackageImportRecord = Schema.Struct({
+  previewId: Schema.String,
+  state: Schema.optional(Schema.Literals(["pending", "complete"])),
+  result: SkillPackageImportResultSchema,
+});
 
 export class SkillPackageStoreError extends Error {
   constructor(
@@ -67,6 +72,17 @@ export class SkillPackageStoreError extends Error {
 }
 
 export interface SkillPackageStore {
+  /** Publish managed staging without retaining a mutable staging-source pointer. */
+  publishDirectory(
+    sourcePath: string,
+    retain?: (manifest: SkillPackage) => Promise<void>,
+  ): Promise<SkillPackage>;
+  publishPreview(
+    previewId: string,
+    retain?: (manifest: SkillPackage) => Promise<void>,
+  ): Promise<SkillPackage>;
+  materializePreview(previewId: string, destination: string): Promise<SkillPackage>;
+  cancelPreview(previewId: string): void;
   preview(input: typeof SkillPackagePreviewInput.Type): Promise<SkillPackagePreview>;
   previewUpdate(
     input: typeof SkillPackageUpdatePreviewInput.Type,
@@ -661,13 +677,91 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
             importedAt: new Date().toISOString(),
           };
     const result = { package: verified, source, reused };
-    await publish(result);
+    try {
+      await publish(result);
+    } catch (cause) {
+      if (!reused) {
+        try {
+          const references = await scanSkillPackageReferences(stateDir, verified.packageId);
+          for (const name of await fs.readdir(sourcesDir)) {
+            if (!/^src_[a-f0-9]{64}\.json$/u.test(name))
+              throw new Error("Unknown Skill source reference during publication rollback.");
+            const saved = await readSource(name.slice(0, -5));
+            if (!saved) throw new Error("Skill source disappeared during publication rollback.");
+            if (saved.packageId === verified.packageId) references.push(`Source ${saved.sourceId}`);
+          }
+          for (const name of await fs.readdir(importsDir)) {
+            if (!/^[a-f0-9]{64}\.json$/u.test(name))
+              throw new Error("Unknown Skill import reference during publication rollback.");
+            const receipt = Schema.decodeUnknownSync(SkillPackageImportRecord)(
+              JSON.parse(
+                (await expertResourceFiles.read(path.join(importsDir, name))).toString("utf8"),
+              ),
+            );
+            if (receipt.result.package.packageId === verified.packageId)
+              references.push(`Import ${name}`);
+          }
+          if (references.length === 0) {
+            await expertResourceFiles.removeStaging(finalPath);
+            await syncDirectoryEntry(packagesDir);
+          }
+        } catch (rollbackCause) {
+          throw new AggregateError(
+            [cause, rollbackCause],
+            "Skill retention failed; package rollback could not prove safe removal.",
+          );
+        }
+      }
+      throw cause;
+    }
     previews.delete(input.previewId);
     return result;
   };
 
   return {
+    publishDirectory: async (sourcePath, retain) => {
+      const staged = await preview({ path: sourcePath });
+      try {
+        return await withSkillPackageLifecycle(
+          stateDir,
+          async () =>
+            (
+              await importPackage({ previewId: staged.previewId }, async (result) => {
+                await retain?.(result.package);
+              })
+            ).package,
+        );
+      } finally {
+        previews.delete(staged.previewId);
+      }
+    },
+    materializePreview: async (previewId, destination) => {
+      const pending = previews.get(previewId);
+      if (!pending || pending.expiresAt <= Date.now())
+        throw new SkillPackageStoreError("Skill preview expired.", "preview_expired");
+      const collected = await collectSource(pending.sourcePath);
+      if (
+        collected.realRoot !== pending.realRoot ||
+        collected.package.packageId !== pending.packageId
+      )
+        throw new SkillPackageStoreError("Skill preview changed.", "preview_stale");
+      await expertResourceFiles.copy(destination, collected.resources);
+      return collected.package;
+    },
     preview,
+    cancelPreview: (previewId) => {
+      previews.delete(previewId);
+    },
+    publishPreview: (previewId, retain) =>
+      withSkillPackageLifecycle(
+        stateDir,
+        async () =>
+          (
+            await importPackage({ previewId }, async (result) => {
+              await retain?.(result.package);
+            })
+          ).package,
+      ),
     previewUpdate: (rawInput) =>
       withSkillPackageLifecycle(stateDir, async () => {
         await recoverPendingRemovals();
@@ -730,11 +824,7 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
           importsDir,
           `${expertResourceFiles.hashJson(input.idempotencyKey ?? input.previewId)}.json`,
         );
-        const Receipt = Schema.Struct({
-          previewId: Schema.String,
-          state: Schema.optional(Schema.Literals(["pending", "complete"])),
-          result: SkillPackageImportResultSchema,
-        });
+        const Receipt = SkillPackageImportRecord;
         const finish = async (receipt: typeof Receipt.Type) => {
           if (receipt.previewId !== input.previewId)
             throw new SkillPackageStoreError(
@@ -920,6 +1010,9 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
           ...selection,
           name: entry.name,
           description: entry.description,
+          sha256: manifest.resources.find(
+            (resource) => resource.path === `content/${selection.entryPath}`,
+          )!.sha256,
           ...(entry.disableModelInvocation !== undefined
             ? { disableModelInvocation: entry.disableModelInvocation }
             : {}),

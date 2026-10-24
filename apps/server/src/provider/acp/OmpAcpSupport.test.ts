@@ -73,6 +73,22 @@ describe("buildOmpAcpSpawnInput", () => {
     expect(spawn.cwd).toBe("/tmp/project");
   });
 
+  it("disables ambient extension loading only for fixed Expert spawns while preserving explicit projection flags", () => {
+    const fixed = buildOmpAcpSpawnInput({ binaryPath: "/usr/local/bin/omp" }, "/tmp/project", {
+      disableExtensions: true,
+      configOverlayPath: "/owned/config.yml",
+      appendSystemPromptPath: "/owned/APPEND_SYSTEM.md",
+    });
+    expect(fixed.args).toEqual([
+      "acp",
+      "--no-extensions",
+      "--config",
+      "/owned/config.yml",
+      "--append-system-prompt",
+      "/owned/APPEND_SYSTEM.md",
+    ]);
+    expect(buildOmpAcpSpawnInput(undefined, "/tmp/project").args).toEqual(["acp"]);
+  });
   it("passes a configured agent dir through PI_CODING_AGENT_DIR", () => {
     const spawn = buildOmpAcpSpawnInput({ agentDir: "/profiles/work" }, "/tmp/project");
     expect(spawn.env?.PI_CODING_AGENT_DIR).toBe("/profiles/work");

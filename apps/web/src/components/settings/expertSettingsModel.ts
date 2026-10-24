@@ -10,6 +10,7 @@ export type ExpertDraftField =
   | "preferredProvider"
   | "skills"
   | "skillSelections"
+  | "skillBindings"
   | "references"
   | "connections";
 
@@ -60,6 +61,9 @@ export function expertDraftFromDefinition(expert?: ExpertDefinition): ExpertSave
     persona: expert?.persona ?? "",
     outputRequirements: expert?.outputRequirements ?? "",
     skills: expert?.skills.map((skill) => ({ ...skill })) ?? [],
+    ...(!expert || expert.skillBindings !== undefined
+      ? { skillBindings: expert?.skillBindings?.map((binding) => ({ ...binding })) ?? [] }
+      : {}),
     ...(expert?.skillSelections === undefined
       ? {}
       : { skillSelections: expert.skillSelections.map((selection) => ({ ...selection })) }),
@@ -85,6 +89,9 @@ export function expertSaveInputForDraft(
       draft.skillSelections === undefined
         ? draft.skills.map((skill) => ({ name: skill.name.trim(), path: skill.path.trim() }))
         : [],
+    ...(draft.skillBindings === undefined
+      ? {}
+      : { skillBindings: draft.skillBindings.map((binding) => ({ ...binding })) }),
     ...(draft.skillSelections === undefined
       ? {}
       : { skillSelections: draft.skillSelections.map((selection) => ({ ...selection })) }),
@@ -109,6 +116,7 @@ export function expertDraftsEqual(a: ExpertSaveInput, b: ExpertSaveInput): boole
     a.preferredProvider === b.preferredProvider &&
     JSON.stringify(a.skills) === JSON.stringify(b.skills) &&
     JSON.stringify(a.skillSelections) === JSON.stringify(b.skillSelections) &&
+    JSON.stringify(a.skillBindings) === JSON.stringify(b.skillBindings) &&
     JSON.stringify(a.references) === JSON.stringify(b.references) &&
     JSON.stringify(a.connections) === JSON.stringify(b.connections)
   );
@@ -137,6 +145,20 @@ export function validateExpertDraft(draft: ExpertSaveInput): ExpertDraftIssue[] 
 
   if (draft.skills.length > 100) {
     issues.push({ field: "skills", code: "too_many", message: "最多可配置 100 项技能。" });
+  }
+  if (draft.skillBindings !== undefined) {
+    if (
+      draft.skillBindings.length > 100 ||
+      new Set(draft.skillBindings.map((binding) => binding.skillId)).size !==
+        draft.skillBindings.length ||
+      draft.skillBindings.filter((binding) => binding.enabled && binding.activation === "startup")
+        .length > 1
+    )
+      issues.push({
+        field: "skillBindings",
+        code: "invalid",
+        message: "技能绑定须唯一，最多100个，且最多启用一个启动技能。",
+      });
   }
   if (draft.skillSelections !== undefined) {
     if (draft.skillSelections.length > 100) {

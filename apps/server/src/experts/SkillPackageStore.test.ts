@@ -77,6 +77,77 @@ function packageDir(stateDir: string, packageId: string): string {
 }
 
 describe("SkillPackageStore", () => {
+  it.each(["directory", "preview"] as const)(
+    "rolls back only a new unretained %s publication and cleans staging",
+    async (mode) => {
+      const { source, stateDir, store } = await fixture();
+      const retain = async () => {
+        throw new Error("injected retention failure");
+      };
+      const preview = await store.preview({ path: source });
+      await expect(
+        mode === "directory"
+          ? store.publishDirectory(source, retain)
+          : store.publishPreview(preview.previewId, retain),
+      ).rejects.toThrow("injected retention failure");
+      expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([]);
+      const published = await store.publishDirectory(source);
+      await expect(store.publishDirectory(source, retain)).rejects.toThrow(
+        "injected retention failure",
+      );
+      expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([
+        published.packageId,
+      ]);
+      expect(await store.read(published.packageId)).toEqual(published);
+    },
+  );
+  it.each(["referenced", "unknown"] as const)(
+    "preserves a newly published package when references are %s after retention fails",
+    async (reference) => {
+      const { source, stateDir, store } = await fixture();
+      let packageId = "";
+      await expect(
+        store.publishDirectory(source, async (manifest) => {
+          packageId = manifest.packageId;
+          if (reference === "unknown")
+            await writeFile(path.join(stateDir, "experts", "skill-library.json"), "invalid");
+          else {
+            const definitions = path.join(stateDir, "experts", "definitions");
+            await mkdir(definitions, { recursive: true });
+            await writeFile(
+              path.join(definitions, "retained.json"),
+              JSON.stringify({
+                id: "retained",
+                name: "Retained",
+                description: "",
+                useCases: "",
+                persona: "",
+                outputRequirements: "",
+                skills: [],
+                skillSelections: [
+                  {
+                    packageId: manifest.packageId,
+                    entryPath: manifest.entries[0]!.entryPath,
+                    activation: "startup",
+                  },
+                ],
+                references: [],
+                connections: [],
+                revision: 1,
+                archived: false,
+                updatedAt: "2026-10-25T00:00:00.000Z",
+              }),
+            );
+          }
+          throw new Error("injected retention failure");
+        }),
+      ).rejects.toThrow(
+        reference === "unknown" ? /rollback could not prove safe/ : /injected retention failure/,
+      );
+      expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([packageId]);
+      expect((await store.read(packageId)).packageId).toBe(packageId);
+    },
+  );
   it("bounds concurrent package content verification when listing the inventory", async () => {
     const { source, stateDir, store } = await fixture();
     const first = await importSource(store, source);
@@ -240,6 +311,9 @@ describe("SkillPackageStore", () => {
         activation: "startup",
         name: "bmad-pm",
         description: "PM role",
+        sha256: result.package.resources.find(
+          (resource) => resource.path === "content/skills/pm/SKILL.md",
+        )!.sha256,
         path: path.join(
           packageDir(stateDir, result.package.packageId),
           "content",
@@ -646,6 +720,9 @@ describe("SkillPackageStore", () => {
     await expect(store.import({ previewId: preview.previewId })).rejects.toThrow(
       "injected source write failure",
     );
+    expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([
+      preview.package.packageId,
+    ]);
     expect(await store.listSources()).toEqual([]);
     vi.mocked(rename).mockImplementation(actual.rename);
     const result = await createSkillPackageStore(stateDir).import({ previewId: preview.previewId });
@@ -654,7 +731,7 @@ describe("SkillPackageStore", () => {
   });
 
   it("retains a retryable preview when the import journal cannot be published", async () => {
-    const { source, store } = await fixture();
+    const { source, stateDir, store } = await fixture();
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     vi.mocked(rename).mockImplementation(async (from, to) => {
       if (String(to).includes("/skill-imports/")) throw new Error("journal unavailable");
@@ -664,10 +741,11 @@ describe("SkillPackageStore", () => {
     await expect(store.import({ previewId: preview.previewId })).rejects.toThrow(
       "journal unavailable",
     );
+    expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([]);
     expect(await store.listSources()).toEqual([]);
     vi.mocked(rename).mockImplementation(actual.rename);
     const result = await store.import({ previewId: preview.previewId });
-    expect(result.reused).toBe(true);
+    expect(result.reused).toBe(false);
     expect(result.source.revision).toBe(1);
   });
 

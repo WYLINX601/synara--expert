@@ -30,6 +30,11 @@ export async function scanSkillPackageReferences(
 ): Promise<string[]> {
   Schema.decodeUnknownSync(SkillPackageId)(packageId);
   const references: string[] = [];
+  const { readSkillLibraryDefinitions } = await import("./SkillLibraryStore");
+  const library = await readSkillLibraryDefinitions(stateDir);
+  for (const skill of library.filter((item) => !item.deleted))
+    if (skill.packageId === packageId || skill.source.packageId === packageId)
+      references.push(`Skill ${skill.name} (${skill.skillId})`);
   const root = path.join(stateDir, "experts");
   await directoryEntries(root);
   const inspectDefinition = async (file: string, id: string, revision?: number) => {

@@ -1,3 +1,4 @@
+import { SkillLibraryRpcInput, SkillLibraryResponse } from "./skillLibrary";
 import {
   HubPlanListInputSchema,
   HubPlanReadInputSchema,
@@ -1547,6 +1548,12 @@ export const WsServerPreviewExpertRpc = Rpc.make(WS_METHODS.serverPreviewExpert,
   error: WsRpcError,
 });
 
+export const WsServerSkillLibraryRpc = Rpc.make(WS_METHODS.serverSkillLibrary, {
+  payload: SkillLibraryRpcInput,
+  success: SkillLibraryResponse,
+  error: WsRpcError,
+});
+
 export const WsServerListSkillPackagesRpc = Rpc.make(WS_METHODS.serverListSkillPackages, {
   payload: Schema.Struct({}),
   success: Schema.Array(SkillPackage),
@@ -2474,6 +2481,7 @@ const WS_FEATURE_RPC_GROUP_3 = RpcGroup.make(
   WsServerRestoreExpertRpc,
   WsServerDeleteExpertRpc,
   WsServerPreviewExpertRpc,
+  WsServerSkillLibraryRpc,
   WsServerListSkillPackagesRpc,
   WsServerListSkillPackageSourcesRpc,
   WsServerReadSkillPackageRpc,

@@ -138,6 +138,7 @@ export const ResolvedExpertSkillEntry = Schema.Struct({
   name: TrimmedNonEmptyString,
   description: Schema.String,
   path: TrimmedNonEmptyString,
+  sha256: Schema.optional(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   disableModelInvocation: Schema.optional(Schema.Boolean),
   userInvocable: Schema.optional(Schema.Boolean),
 });
@@ -152,5 +153,15 @@ export const ExpertSkillApplication = Schema.Struct({
   instructionsHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
   startupEntryIds: Schema.Array(TrimmedNonEmptyString),
   lifecycleGeneration: TrimmedNonEmptyString,
+  enforcement: Schema.optional(Schema.Literal("native-fixed")),
+  activeEntries: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        path: TrimmedNonEmptyString,
+        sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+      }),
+    ),
+  ),
+  nativeSubagents: Schema.optional(Schema.Literal("blocked")),
 });
 export type ExpertSkillApplication = typeof ExpertSkillApplication.Type;

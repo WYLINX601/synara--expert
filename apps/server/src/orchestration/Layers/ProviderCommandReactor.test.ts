@@ -29,6 +29,7 @@ import {
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
+  FIXED_EXPERT_SKILL_POLICY,
   MessageId,
   ProjectTaskAttemptId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
@@ -13950,6 +13951,8 @@ describe("ProviderCommandReactor", () => {
     expect(boundThread?.expertBinding).toMatchObject({ expertId, revision: 1 });
     const binding = boundThread!.expertBinding!;
     const snapshot = await expertStore.readSnapshot(binding.snapshotId);
+    expect(snapshot.schemaVersion).toBe(3);
+    expect(snapshot.skillPolicy).toEqual(FIXED_EXPERT_SKILL_POLICY);
     await expertStore.save({
       ...expertDefinition,
       expectedRevision: 1,
@@ -13990,6 +13993,7 @@ describe("ProviderCommandReactor", () => {
       skillsRoot: snapshot.skillsRoot,
       skills: snapshot.skills,
       skillLoading: "index",
+      skillPolicy: FIXED_EXPERT_SKILL_POLICY,
       skillEntries: snapshot.skillEntries ?? [],
       references: snapshot.references,
     };

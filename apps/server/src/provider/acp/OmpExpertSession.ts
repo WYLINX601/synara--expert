@@ -14,6 +14,8 @@ import type { ProviderExpertSession, ProviderSkillReference } from "@synara/cont
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { Effect, Result } from "effect";
 import { stringify as stringifyYaml } from "yaml";
+import { createFixedSkillProjection, verifyProjectedSkillAssembly } from "../fixedSkillProjection";
+import { invalidateNativeSkillAssemblyVerification } from "../expertSkillCatalog";
 
 export const OMP_EXPERT_PROJECTION_VERSION = "omp-acp-native-v1" as const;
 export const OMP_EXPERT_SUPPORTED_CLI_VERSION = "18.12.1" as const;
@@ -36,6 +38,7 @@ export interface OmpExpertSessionPreparationInput {
   readonly env: NodeJS.ProcessEnv;
   readonly runCli: OmpExpertCliRunner;
   readonly expertSession?: ProviderExpertSession;
+  readonly lifecycleGeneration?: string;
   readonly contextSession?: ContextSession;
   /** Used by preview, which receives skill references without the full snapshot. */
   readonly skills?: ReadonlyArray<ProviderSkillReference>;
@@ -53,6 +56,8 @@ export interface OmpExpertSessionPreparation {
   readonly configOverlayPath?: string;
   readonly appendSystemPromptPath?: string;
   readonly cleanup: () => Effect.Effect<void>;
+  readonly verify?: () => Effect.Effect<void, unknown>;
+  readonly allowedSkillCommands?: ReadonlyArray<string>;
 }
 
 interface EffectiveOmpConfig {
@@ -406,6 +411,7 @@ function hasSkillWarningForPath(warnings: ReadonlyArray<unknown>, skillPath: str
 export function prepareOmpExpertSession(
   input: OmpExpertSessionPreparationInput,
 ): Effect.Effect<OmpExpertSessionPreparation> {
+  if (input.expertSession?.skillPolicy) return prepareFixedOmpExpertSession(input);
   let tempPath: string | undefined;
   let preserveTempPath = false;
   let verifiedCliVersion: string | undefined;
@@ -685,4 +691,144 @@ export function prepareOmpExpertSession(
   });
 
   return operation.pipe(Effect.onExit(() => (preserveTempPath ? Effect.void : cleanup())));
+}
+
+function prepareFixedOmpExpertSession(
+  input: OmpExpertSessionPreparationInput,
+): Effect.Effect<OmpExpertSessionPreparation> {
+  const session = input.expertSession!;
+  const baseInstructions =
+    composeProviderBaseInstructions({
+      expertPersona: session.persona,
+      contextInstructions: input.contextSession?.hasContent ? input.contextSession.text : undefined,
+    }) ?? "";
+  let temp: string | undefined;
+  const cleanup = () =>
+    Effect.promise(async () => {
+      if (temp) await rm(temp, { recursive: true, force: true });
+      temp = undefined;
+    });
+  const failure = (message: string): OmpExpertSessionPreparation => ({
+    issues: [message],
+    instructionsHash: sha256(baseInstructions),
+    loadedSkills: [],
+    cleanup,
+  });
+  return Effect.gen(function* () {
+    const lifecycleGeneration = input.lifecycleGeneration;
+    if (!lifecycleGeneration)
+      throw new Error("Fixed native verification requires a lifecycle generation.");
+    const version = yield* input.runCli(["--version"], input.cwd, input.env);
+    const cliVersion = parseCliVersion(version.stdout);
+    if (version.exitCode !== 0 || cliVersion !== OMP_EXPERT_SUPPORTED_CLI_VERSION)
+      throw new Error("OMP has no verified fixed Skill assembly contract for this CLI version.");
+    const originalConfigResult = yield* input.runCli(
+      ["config", "list", "--json"],
+      input.cwd,
+      input.env,
+    );
+    const originalConfig =
+      originalConfigResult.exitCode === 0
+        ? parseConfigList(originalConfigResult.stdout)
+        : undefined;
+    if (!originalConfig) throw new Error("OMP could not resolve its native instruction sources.");
+    const nativeAppend = yield* Effect.promise(() =>
+      readNativeAppendSystemPrompt(input.cwd, input.env, originalConfig),
+    );
+    const projectedInstructions = [nativeAppend?.text, baseInstructions]
+      .filter(Boolean)
+      .join("\n\n");
+    temp = yield* Effect.promise(() =>
+      mkdtemp(nodePath.join(input.tempDirectory ?? nodeOs.tmpdir(), OMP_EXPERT_TEMP_PREFIX)),
+    );
+    const projection = yield* Effect.promise(() => createFixedSkillProjection(temp!, session));
+    const configOverlayPath = nodePath.join(temp, "config.yml"),
+      appendSystemPromptPath = nodePath.join(temp, "APPEND_SYSTEM.md");
+    const skills = {
+      enabled: true,
+      enableCodexUser: false,
+      enableClaudeUser: false,
+      enableClaudeProject: false,
+      enablePiUser: false,
+      enablePiProject: false,
+      enableAgentsUser: false,
+      enableAgentsProject: false,
+      customDirectories: [nodePath.join(projection.root, "skills")],
+      includeSkills: projection.entries.length
+        ? projection.entries.map((entry) => entry.name)
+        : ["__synara_empty_fixed_assembly__"],
+      ignoredSkills: [],
+    };
+    const overlay = stringifyYaml(
+      { skills, task: { maxRecursionDepth: 0 }, advisor: { enabled: false } },
+      { lineWidth: 0 },
+    );
+    yield* Effect.promise(async () => {
+      await writeFile(configOverlayPath, overlay, { mode: 0o400 });
+      await writeFile(appendSystemPromptPath, projectedInstructions, { mode: 0o400 });
+    });
+    const env = {
+      ...input.env,
+      PI_CONFIG_FILES: [input.env.PI_CONFIG_FILES, configOverlayPath]
+        .filter(Boolean)
+        .join(nodePath.delimiter),
+    };
+    const verify = () =>
+      Effect.gen(function* () {
+        invalidateNativeSkillAssemblyVerification(session);
+        const configResult = yield* input.runCli(["config", "list", "--json"], input.cwd, env);
+        if (configResult.exitCode !== 0)
+          throw new Error("OMP could not verify the fixed Skill configuration.");
+        const config = JSON.parse(configResult.stdout) as Record<string, { value?: unknown }>;
+        for (const key of [
+          "enableCodexUser",
+          "enableClaudeUser",
+          "enableClaudeProject",
+          "enablePiUser",
+          "enablePiProject",
+          "enableAgentsUser",
+          "enableAgentsProject",
+        ])
+          if (config[`skills.${key}`]?.value !== false)
+            throw new Error(`OMP did not disable ambient Skill source ${key}.`);
+        if (
+          config["task.maxRecursionDepth"]?.value !== 0 ||
+          config["advisor.enabled"]?.value !== false ||
+          config["skills.enabled"]?.value !== true ||
+          JSON.stringify(config["skills.customDirectories"]?.value) !==
+            JSON.stringify(skills.customDirectories) ||
+          JSON.stringify(config["skills.includeSkills"]?.value) !==
+            JSON.stringify(skills.includeSkills)
+        )
+          throw new Error("OMP did not attest the fixed assembly and blocked native subagents.");
+        const result = yield* input.runCli(["skill", "list", input.cwd, "--json"], input.cwd, env),
+          parsed = result.exitCode === 0 ? parseNativeSkillList(result.stdout) : undefined;
+        if (!parsed || parsed.warnings.length)
+          throw new Error("OMP could not resolve the exact fixed Skill assembly without warnings.");
+        yield* Effect.promise(async () => {
+          await verifyReadOnlyTempFile(configOverlayPath, overlay);
+          await verifyReadOnlyTempFile(appendSystemPromptPath, projectedInstructions);
+        });
+        yield* Effect.promise(() =>
+          verifyProjectedSkillAssembly(
+            session,
+            projection,
+            parsed.skills.map((skill) => ({ name: skill.name, path: skill.filePath })),
+            lifecycleGeneration,
+          ),
+        );
+      });
+    yield* verify();
+    return {
+      issues: [],
+      cliVersion,
+      instructionsHash: sha256(baseInstructions),
+      loadedSkills: session.skills,
+      configOverlayPath,
+      appendSystemPromptPath,
+      cleanup,
+      verify,
+      allowedSkillCommands: projection.entries.map((entry) => entry.name),
+    };
+  }).pipe(Effect.catchCause((cause) => cleanup().pipe(Effect.as(failure(String(cause))))));
 }

@@ -47,7 +47,11 @@ import {
 } from "@synara/shared/processRuntime";
 import { stripTerminalControlSequences } from "@synara/shared/text";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
-import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
+import {
+  createExpertSkillApplication,
+  recordVerifiedNativeSkillAssembly,
+  invalidateNativeSkillAssemblyVerification,
+} from "../expertSkillCatalog.ts";
 import { Effect, FileSystem, Layer, Option, Queue, Stream } from "effect";
 
 import {
@@ -231,7 +235,23 @@ export function piResourceLoaderOptionsForSession(input: {
     return undefined;
   }
   return {
-    ...(input.noExtensions ? { noExtensions: true } : {}),
+    ...(input.noExtensions || input.expertSession?.skillPolicy ? { noExtensions: true } : {}),
+    ...(input.expertSession?.skillPolicy
+      ? {
+          noSkills: true,
+          additionalSkillPaths: input.expertSession.skills.map((skill) => skill.path),
+          skillsOverride: (base) => ({
+            skills: base.skills.filter((skill) =>
+              input.expertSession!.skills.some(
+                (selected) =>
+                  selected.name === skill.name &&
+                  path.resolve(selected.path) === path.resolve(skill.filePath),
+              ),
+            ),
+            diagnostics: base.diagnostics,
+          }),
+        }
+      : {}),
     ...(input.expertSession || input.contextSession?.hasContent
       ? {
           appendSystemPrompt: [
@@ -433,6 +453,7 @@ const loadPiCodingAgentModule: () => Promise<PiCodingAgentModule> = lazyModule(
 );
 
 interface PiSessionContext {
+  readonly fixedExpertSession?: ProviderExpertSession;
   harnessPolicyDelivered?: boolean;
   readonly enableComputerControl?: boolean;
   /**
@@ -1005,6 +1026,15 @@ function makeSessionSnapshot(
       : {}),
     ...(context.lifecycleGeneration !== undefined
       ? { lifecycleGeneration: context.lifecycleGeneration }
+      : {}),
+    ...(context.session.skillApplication
+      ? { skillApplication: context.session.skillApplication }
+      : {}),
+    ...(context.session.expertApplication
+      ? { expertApplication: context.session.expertApplication }
+      : {}),
+    ...(context.session.contextAppliedSnapshotId
+      ? { contextAppliedSnapshotId: context.session.contextAppliedSnapshotId }
       : {}),
     threadId: context.session.threadId,
     createdAt: context.session.createdAt,
@@ -3248,6 +3278,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       processSupervisor: PiBashProcessSupervisor;
       gatewayTools?: ReadonlyArray<ToolDefinition>;
       expertSession?: Parameters<PiAdapterShape["startSession"]>[0]["expertSession"];
+      lifecycleGeneration?: string;
       contextSession?: Parameters<PiAdapterShape["startSession"]>[0]["contextSession"];
       signal?: AbortSignal;
       noExtensions?: boolean;
@@ -3278,6 +3309,15 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           modelRuntime,
           ...(resourceLoaderOptions ? { resourceLoaderOptions } : {}),
         });
+        if (input.expertSession?.skillPolicy) {
+          await recordVerifiedNativeSkillAssembly(
+            input.expertSession,
+            services.resourceLoader
+              .getSkills()
+              .skills.map((skill) => ({ name: skill.name, path: skill.filePath })),
+            input.lifecycleGeneration!,
+          );
+        }
         if (input.expertSession?.skillLoading !== "index" && input.expertSession?.skills.length) {
           const loadedSkills = services.resourceLoader.getSkills().skills;
           for (const required of input.expertSession.skills) {
@@ -3503,6 +3543,9 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             try: (signal) =>
               createSdkRuntime({
                 signal,
+                ...(input.lifecycleGeneration
+                  ? { lifecycleGeneration: input.lifecycleGeneration }
+                  : {}),
                 sdk: piSdk,
                 cwd,
                 agentDir,
@@ -3570,6 +3613,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           ...(resumeCursor ? { resumeCursor } : {}),
         };
         const context: PiSessionContext = {
+          ...(input.expertSession?.skillPolicy ? { fixedExpertSession: input.expertSession } : {}),
           enableComputerControl: input.enableComputerControl === true,
           gatewayCapabilityInput: captureAgentGatewayCapabilityInput(input),
           ...(input.lifecycleGeneration !== undefined
@@ -3600,7 +3644,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           stopped: false,
           lastKnownTokenUsage: undefined,
           unsubscribe: undefined,
-          extensionsEnabled: !noExtensions,
+          extensionsEnabled: !noExtensions && !input.expertSession?.skillPolicy,
         };
         context.unsubscribe = runtime.session.subscribe((event) =>
           handleSessionEvent(context, event),
@@ -3777,6 +3821,26 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
         input.threadId,
         Effect.gen(function* () {
           const context = yield* requireSession(input.threadId);
+          if (context.fixedExpertSession)
+            yield* Effect.tryPromise({
+              try: () => {
+                invalidateNativeSkillAssemblyVerification(context.fixedExpertSession!);
+                return recordVerifiedNativeSkillAssembly(
+                  context.fixedExpertSession!,
+                  context.runtime.session.resourceLoader
+                    .getSkills()
+                    .skills.map((skill) => ({ name: skill.name, path: skill.filePath })),
+                  context.lifecycleGeneration!,
+                );
+              },
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "turn/start",
+                  detail: "Fixed Pi Skill assembly could not be verified.",
+                  cause,
+                }),
+            });
           // Snapshot the session's computer-control fact for the turn being
           // dispatched. Credential rotation at completion consumes this stashed
           // value, not the start snapshot and not a fresh derivation. Turns

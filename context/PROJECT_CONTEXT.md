@@ -1,6 +1,6 @@
 # Linx / Synara Expert 项目上下文
 
-更新日期：2026-10-24
+更新日期：2026-10-25
 
 范围：以 Linx V2.0 组织长期方向管理、专业任务执行与能力进化，并在现有 Synara Expert / MCP / 工作台适配层上增量推进。本文只负责项目路由、设计边界与当前状态；产品、技术和验收细节以链接的权威文档为准。
 
@@ -66,6 +66,10 @@ Personal Workbench 已更新为 0.1.5，源码 `8f7143cf6f001aa495d57f0e3867a91c
 ## Hub 可靠性与技能装配分批修复（历史候选）
 
 2026-10-21 至 22 的候选范围、决定和检查见[分批执行与验收记录](../docs/hub-reliability-2026-10-21-acceptance.md)。这是专项历史进度；是否包含在当前 main 和安装版，须按当前提交核对，不由该记录推断。
+
+## 统一 Skill 管理与固定装配（本轮候选）
+
+2026-10-25，用户确认参考 Multica 的统一管理方案并要求实施：Expert 只使用固定装配，空装配为零；普通任务沿用 harness；编辑/来源刷新自动影响新任务，已接受任务固定旧包；无法证明子代理继承则阻断，不建设旧任务兼容/转换层或清理历史数据。当前架构见[固定装配方案](../docs/expert-skill-package-design.md#current-skill-management)，实际检查、运行缺口与交付状态见[本轮验收记录](../docs/skill-management-2026-10-25-acceptance.md)。候选位于 `codex/feature-skill-management` 的独立 worktree，已完成实现、独立审查补强、全库与所列本地门禁及隔离预览验证，等待用户评审；本地提交不代表 main、安装应用或发布已更新。
 
 ## 历史验收：专家技能索引与共享版本包
 
@@ -165,7 +169,7 @@ Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的�
 - 换专家或跨 Provider 继续工作沿用派生任务与 handoff，不在活跃会话中热替换配置。
 - Codex 和 Pi 保留各自协议行为；Provider 专属投影留在 Adapter，跨进程 Schema 留在 `packages/contracts`。
 - 第三方工具统一经过 Synara Gateway。`tools/list` 与 `tools/call` 都按已验证的会话身份和固定快照授权，不能信任工具参数中的 Expert 或 thread 标识。
-- Provider 自带的环境 Skill 可能继续出现；产品只声明专家提供的固定技能来源，不把专家技能清单描述为严格工具沙箱。
+- 2026-10-25 当前已确认边界：Expert 只允许固定装配的 Skill，普通任务使用 harness 原生 Skill；这限制发现、上下文和调用，不是任意 Read/Bash 的操作系统沙箱。具体机制和候选验收见上方本轮入口；旧版本“环境 Skill 可能继续出现”不再作为新方案要求。
 
 ## 2026-09-29 实现记录（历史基线）
 

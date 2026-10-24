@@ -4,6 +4,7 @@ import { IsoDateTime, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./bas
 import { ExpertMcpBindingSchema, McpConfigSourceReferenceSchema, McpConnectionId } from "./mcp";
 import { ProviderSkillReference } from "./providerDiscovery";
 import { ProviderInstanceId } from "./providerInstance";
+import { ExpertSkillBinding, ExpertSkillPolicy } from "./skillLibrary";
 import {
   ExpertSkillApplication,
   ExpertSkillSelection,
@@ -147,6 +148,7 @@ export const ExpertDefinition = Schema.Struct({
   persona: Schema.String,
   outputRequirements: Schema.String,
   skills: Schema.Array(ProviderSkillReference),
+  skillBindings: Schema.optional(Schema.Array(ExpertSkillBinding).check(Schema.isMaxLength(100))),
   skillSelections: Schema.optional(
     Schema.Array(ExpertSkillSelection).check(Schema.isMaxLength(100)),
   ),
@@ -168,6 +170,7 @@ export const ExpertSaveInput = Schema.Struct({
   persona: Schema.String,
   outputRequirements: Schema.String,
   skills: Schema.Array(ProviderSkillReference),
+  skillBindings: Schema.optional(Schema.Array(ExpertSkillBinding).check(Schema.isMaxLength(100))),
   skillSelections: Schema.optional(
     Schema.Array(ExpertSkillSelection).check(Schema.isMaxLength(100)),
   ),
@@ -216,7 +219,8 @@ export type ExpertPreview = typeof ExpertPreview.Type;
 
 export const ExpertSnapshot = Schema.Struct({
   snapshotId: TrimmedNonEmptyString,
-  schemaVersion: Schema.optional(Schema.Literal(2)),
+  schemaVersion: Schema.optional(Schema.Literals([2, 3])),
+  skillPolicy: Schema.optional(ExpertSkillPolicy),
   expertId: TrimmedNonEmptyString,
   displayName: TrimmedNonEmptyString,
   revision: PositiveInt,

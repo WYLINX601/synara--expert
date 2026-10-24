@@ -44,6 +44,7 @@ import {
   type ProviderInstanceId,
   type ProviderRuntimeEvent,
   type ProviderSkillReference,
+  type ProviderMentionReference,
   type ProviderSession,
   ContextSession,
   type ContextSession as ContextSessionType,
@@ -1105,17 +1106,15 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             )
           : Effect.succeed(undefined);
       }
-      if (expertSession.skillLoading !== "index") {
-        if (skillPackageStore && expertSession.skills.length > 0) {
-          return Effect.fail(
-            toValidationError(
-              input.operation,
-              "This persisted Expert snapshot uses legacy skill paths; convert the Expert before starting or recovering it.",
-            ),
-          );
-        }
-        return Effect.succeed(
-          appendExpertRuntimeInstructions(expertSession, runtimeNoticeInstructions),
+      if (
+        expertSession.skillLoading !== "index" ||
+        expertSession.skillPolicy?.discovery !== "fixed"
+      ) {
+        return Effect.fail(
+          toValidationError(
+            input.operation,
+            "This Expert task snapshot has no supported fixed Skill policy. Its historical data is preserved; start a new task from an Expert with a fixed assembly.",
+          ),
         );
       }
       if (!skillPackageStore || !expertStore || !Array.isArray(expertSession.skillEntries)) {
@@ -1129,11 +1128,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       return Effect.tryPromise({
         try: async () => {
           const snapshot = await expertStore.readSnapshot(expertSession.snapshotId);
-          if (snapshot.schemaVersion !== 2) {
+          if (snapshot.schemaVersion !== 3 || snapshot.skillPolicy?.discovery !== "fixed") {
             throw new Error("The pinned Expert snapshot does not use the skill-index schema.");
           }
           const expectedBaseSession: ProviderExpertSession = {
             snapshotId: snapshot.snapshotId,
+            skillPolicy: snapshot.skillPolicy,
             expertId: snapshot.expertId,
             revision: snapshot.revision,
             displayName: snapshot.displayName,
@@ -1232,12 +1232,23 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     const prepareExpertSkillInvocations = (input: {
       readonly expertSession: ProviderExpertSession | undefined;
       readonly skills: ReadonlyArray<ProviderSkillReference> | undefined;
+      readonly mentions?: ReadonlyArray<ProviderMentionReference> | undefined;
       readonly text: string | undefined;
       readonly operation: string;
     }): Effect.Effect<
       { readonly skills?: ReadonlyArray<ProviderSkillReference>; readonly input?: string },
       ProviderValidationError
     > => {
+      if (
+        input.expertSession?.skillPolicy?.discovery === "fixed" &&
+        input.mentions?.some((mention) => /^plugin:\/\//iu.test(mention.path.trim()))
+      )
+        return Effect.fail(
+          toValidationError(
+            input.operation,
+            "Native plugin references are unavailable in a fixed Expert Skill assembly.",
+          ),
+        );
       if (input.expertSession?.skillLoading !== "index" || !input.skills?.length) {
         return Effect.succeed({
           ...(input.skills !== undefined ? { skills: input.skills } : {}),
@@ -5210,6 +5221,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             const skillInvocation = yield* prepareExpertSkillInvocations({
               expertSession: verifiedExpertSession,
               skills: input.skills,
+              mentions: input.mentions,
               text: input.input,
               operation: "ProviderService.sendTurn",
             });
@@ -5315,6 +5327,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             const skillInvocation = yield* prepareExpertSkillInvocations({
               expertSession: verifiedExpertSession,
               skills: input.skills,
+              mentions: input.mentions,
               text: input.input,
               operation: "ProviderService.steerTurn",
             });
@@ -5669,6 +5682,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               const skillInvocation = yield* prepareExpertSkillInvocations({
                 expertSession: verifiedExpertSession,
                 skills: input.skills,
+                mentions: input.mentions,
                 text: input.input,
                 operation: "ProviderService.steerSubagent",
               });

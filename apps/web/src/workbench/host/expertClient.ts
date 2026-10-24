@@ -12,6 +12,7 @@ export type ExpertClient = Pick<
   | "restoreExpert"
   | "deleteExpert"
   | "previewExpert"
+  | "skillLibrary"
   | "listSkillPackages"
   | "listSkillPackageSources"
   | "readSkillPackage"

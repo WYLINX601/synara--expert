@@ -6,7 +6,7 @@
 import type { ProviderUserInputAnswers, UserInputQuestion } from "@synara/contracts";
 import type * as Acp from "@agentclientprotocol/sdk";
 
-type FormElicitationRequest = Acp.ElicitationFormMode & {
+export type FormElicitationRequest = Acp.ElicitationFormMode & {
   readonly mode: "form";
   readonly message: string;
   readonly _meta?: Record<string, unknown> | null;

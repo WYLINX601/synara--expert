@@ -127,11 +127,9 @@ import {
 import { OMP_EXPERT_PROJECTION_VERSION, prepareOmpExpertSession } from "../acp/OmpExpertSession.ts";
 import { makeSessionTeardownGate } from "../acp/SessionTeardownGate.ts";
 import { cancelTurnAndWait } from "../acp/TurnCancellation.ts";
-import {
-  elicitationQuestionsFromRequest,
-  elicitationResponseFromAnswers,
-  isFormElicitationRequest,
-} from "../acp/AcpElicitationSupport.ts";
+import { isFormElicitationRequest } from "../acp/AcpElicitationSupport.ts";
+import { prepareOmpElicitation } from "../acp/OmpElicitationSupport.ts";
+import { AcpRequestError } from "../acp/AcpErrors.ts";
 import { OmpAdapter, type OmpAdapterShape } from "../Services/OmpAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { createLogger } from "../../logger.ts";
@@ -204,6 +202,7 @@ interface PendingApproval {
 
 interface PendingUserInput {
   readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
+  readonly encode: ReturnType<typeof prepareOmpElicitation>["encode"];
 }
 
 interface OmpSessionContext {
@@ -1098,40 +1097,50 @@ export function makeOmpAdapter(
                 if (!isFormElicitationRequest(params)) {
                   return { action: "decline" as const };
                 }
-                const questions = elicitationQuestionsFromRequest(params);
+                const prepared = yield* Effect.try({
+                  try: () => prepareOmpElicitation(params),
+                  catch: (cause) =>
+                    new AcpRequestError({
+                      code: -32602,
+                      errorMessage:
+                        cause instanceof Error ? cause.message : "Invalid OMP question form.",
+                    }),
+                });
+                const { questions } = prepared;
                 if (questions.length === 0) {
                   return { action: "decline" as const };
                 }
                 const requestId = ApprovalRequestId.makeUnsafe(crypto.randomUUID());
                 const runtimeRequestId = RuntimeRequestId.makeUnsafe(requestId);
                 const answers = yield* Deferred.make<ProviderUserInputAnswers>();
-                pendingUserInputs.set(requestId, { answers });
-                yield* offerRuntimeEvent(input.lifecycleGeneration, {
-                  type: "user-input.requested",
-                  ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId: ctx?.activeTurnId,
-                  requestId: runtimeRequestId,
-                  payload: { questions },
-                  raw: {
-                    source: "acp.jsonrpc",
-                    method: "session/elicitation",
-                    payload: params,
-                  },
-                });
-                const resolved = yield* Deferred.await(answers);
-                pendingUserInputs.delete(requestId);
-                yield* offerRuntimeEvent(input.lifecycleGeneration, {
-                  type: "user-input.resolved",
-                  ...(yield* makeEventStamp()),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId: ctx?.activeTurnId,
-                  requestId: runtimeRequestId,
-                  payload: { answers: resolved },
-                });
-                return elicitationResponseFromAnswers(params, resolved);
+                pendingUserInputs.set(requestId, { answers, encode: prepared.encode });
+                return yield* Effect.gen(function* () {
+                  yield* offerRuntimeEvent(input.lifecycleGeneration, {
+                    type: "user-input.requested",
+                    ...(yield* makeEventStamp()),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId: ctx?.activeTurnId,
+                    requestId: runtimeRequestId,
+                    payload: { questions },
+                    raw: {
+                      source: "acp.jsonrpc",
+                      method: "session/elicitation",
+                      payload: params,
+                    },
+                  });
+                  const resolved = yield* Deferred.await(answers);
+                  yield* offerRuntimeEvent(input.lifecycleGeneration, {
+                    type: "user-input.resolved",
+                    ...(yield* makeEventStamp()),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId: ctx?.activeTurnId,
+                    requestId: runtimeRequestId,
+                    payload: { answers: resolved },
+                  });
+                  return prepared.encode(resolved);
+                }).pipe(Effect.ensuring(Effect.sync(() => pendingUserInputs.delete(requestId))));
               }),
             );
             const startedOption = yield* acp
@@ -2045,7 +2054,25 @@ export function makeOmpAdapter(
             detail: `Unknown pending user-input request: ${requestId}`,
           });
         }
-        yield* Deferred.succeed(pending.answers, answers);
+        // Validate before resolving the request: a conflicting legacy answer
+        // must leave the same question available for a corrected submission.
+        yield* Effect.try({
+          try: () => pending.encode(answers),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/elicitation",
+              detail: cause instanceof Error ? cause.message : "Invalid OMP answer.",
+              cause,
+            }),
+        });
+        if (!(yield* Deferred.succeed(pending.answers, answers))) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session/elicitation",
+            detail: `Unknown pending user-input request: ${requestId}`,
+          });
+        }
       });
 
     const readThread: OmpAdapterShape["readThread"] = (threadId) =>

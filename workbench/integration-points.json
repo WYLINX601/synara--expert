@@ -2,6 +2,33 @@
   "version": 1,
   "integrationPoints": [
     {
+      "id": "provider.omp-user-input",
+      "surface": "provider-session",
+      "entryFiles": [
+        "apps/server/src/provider/Layers/OmpAdapter.ts",
+        "apps/server/src/provider/acp/OmpElicitationSupport.ts",
+        "packages/contracts/src/providerRuntime.ts",
+        "apps/web/src/workLog.ts",
+        "apps/web/src/pendingUserInput.ts",
+        "apps/web/src/components/chat/UserInputQuestionForm.tsx",
+        "apps/web/src/components/chat/useChatPendingInteractions.ts",
+        "apps/web/src/components/chat/useChatComposerEditing.ts",
+        "apps/web/src/components/chat/useChatTurnSubmission.ts"
+      ],
+      "responsibility": "The OMP adapter owns its paired askDialog field convention and validates answers before completing the session-owned request. The provider-neutral question contract exposes an optional combined multi-select/custom capability; activity normalization, saved drafts and the existing composer preserve it. Ordinary ACP and Droid conventions retain their existing mapping. Gateway send failures preserve the requested target and structured non-dispatch reasons without relaxing cross-thread authority.",
+      "tests": [
+        "apps/server/src/provider/acp/OmpElicitationSupport.test.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.elicitation.test.ts",
+        "apps/server/src/provider/acp/AcpElicitationSupport.test.ts",
+        "apps/server/src/agentGateway/Layers/AgentGateway.test.ts",
+        "packages/contracts/src/providerRuntime.test.ts",
+        "apps/web/src/pendingUserInput.test.ts",
+        "apps/web/src/workLog.test.ts",
+        "apps/web/src/components/chat/UserInputQuestionForm.browser.tsx",
+        "apps/web/src/components/ChatView.browser.tsx"
+      ]
+    },
+    {
       "id": "web.expert-settings-navigation",
       "surface": "web",
       "entryFiles": [

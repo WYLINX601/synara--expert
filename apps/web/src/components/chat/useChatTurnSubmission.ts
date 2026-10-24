@@ -368,6 +368,7 @@ export function useChatTurnSubmission({
                 [activeQuestion.id]: setPendingUserInputCustomAnswer(
                   currentDraftAnswer,
                   livePendingAnswerText,
+                  activeQuestion,
                 ),
               }
             : undefined;

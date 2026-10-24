@@ -5256,6 +5256,15 @@ describe("AgentGateway", () => {
       });
       assert.isTrue(isToolError(response.result));
       assert.include(toolErrorText(response.result), "full-access");
+      assert.include(toolErrorText(response.result), "No action was dispatched");
+      const failure = toolResultJson(response.result).error as {
+        code: string;
+        details: Record<string, unknown>;
+      };
+      assert.equal(failure.code, "thread_drive_privilege_blocked");
+      assert.equal(failure.details.targetThreadId, "thread-full-access");
+      assert.equal(failure.details.dispatched, false);
+      assert.equal(failure.details.reason, "higher-privileged-target");
       assert.equal(harness.dispatched.length, 0);
     }).pipe(Effect.provide(gatewayLayer));
   });
@@ -5318,6 +5327,14 @@ describe("AgentGateway", () => {
       });
       assert.isTrue(isToolError(response.result));
       assert.include(toolErrorText(response.result), "local");
+      const failure = toolResultJson(response.result).error as {
+        code: string;
+        details: Record<string, unknown>;
+      };
+      assert.equal(failure.code, "thread_drive_isolation_blocked");
+      assert.equal(failure.details.targetThreadId, "thread-local");
+      assert.equal(failure.details.dispatched, false);
+      assert.equal(failure.details.reason, "local-target-from-worktree");
       assert.equal(harness.dispatched.length, 0);
     }).pipe(Effect.provide(gatewayLayer));
   });

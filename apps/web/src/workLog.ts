@@ -1613,6 +1613,9 @@ export function parseUserInputQuestions(
         question: question.question,
         options,
         ...(question.multiSelect === true ? { multiSelect: true } : {}),
+        ...(question.allowCustomAnswerWithOptions === true
+          ? { allowCustomAnswerWithOptions: true }
+          : {}),
       };
     })
     .filter((question): question is UserInputQuestion => question !== null);

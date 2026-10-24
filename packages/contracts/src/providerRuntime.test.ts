@@ -1,9 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { Schema } from "effect";
 
-import { ProviderRuntimeEvent } from "./providerRuntime";
+import { ProviderRuntimeEvent, UserInputQuestion } from "./providerRuntime";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
+
+it("keeps opt-in multi-select custom answer semantics in the question contract", () => {
+  const question = {
+    id: "q0",
+    header: "Targets",
+    question: "Which targets?",
+    options: [],
+    multiSelect: true,
+    allowCustomAnswerWithOptions: true,
+  };
+  expect(Schema.decodeUnknownSync(UserInputQuestion)(question)).toEqual(question);
+  expect(() =>
+    Schema.decodeUnknownSync(UserInputQuestion)({
+      ...question,
+      allowCustomAnswerWithOptions: "true",
+    }),
+  ).toThrow();
+});
 
 describe("ProviderRuntimeEvent", () => {
   it("decodes user-input.requested with structured questions", () => {

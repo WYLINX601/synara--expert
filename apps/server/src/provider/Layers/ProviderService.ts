@@ -89,6 +89,8 @@ import {
   type SkillPackageStore,
 } from "../../experts/SkillPackageStore.ts";
 import { inspectBmadWorkspace } from "../../experts/bmadSkillPreset.ts";
+import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore";
+import { expertSnapshotSession } from "../../experts/expertSnapshotSession";
 import {
   buildExpertSkillInstructions,
   createExpertSkillApplication,
@@ -1131,30 +1133,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           if (snapshot.schemaVersion !== 3 || snapshot.skillPolicy?.discovery !== "fixed") {
             throw new Error("The pinned Expert snapshot does not use the skill-index schema.");
           }
-          const expectedBaseSession: ProviderExpertSession = {
-            snapshotId: snapshot.snapshotId,
-            skillPolicy: snapshot.skillPolicy,
-            expertId: snapshot.expertId,
-            revision: snapshot.revision,
-            displayName: snapshot.displayName,
-            persona: [
-              `Expert: ${snapshot.displayName}`,
-              snapshot.persona,
-              snapshot.outputRequirements
-                ? `Output requirements:\n${snapshot.outputRequirements}`
-                : "",
-              snapshot.references.length > 0
-                ? `Reference files:\n${snapshot.references.map((reference) => `- ${reference}`).join("\n")}`
-                : "",
-            ]
-              .filter(Boolean)
-              .join("\n\n"),
-            skillsRoot: snapshot.skillsRoot,
-            skills: snapshot.skills,
-            skillLoading: "index",
-            skillEntries: snapshot.skillEntries ?? [],
-            references: snapshot.references,
-          };
+          const expectedBaseSession = expertSession.skillAssemblyId
+            ? await createRunSkillAssemblyStore(options!.stateDir!).verifySession(expertSession)
+            : expertSnapshotSession(snapshot);
           if (!isDeepStrictEqual(expertSession, expectedBaseSession)) {
             throw new Error(
               "Persisted Expert V2 identity, persona, references, or skill selections do not match the pinned snapshot.",
@@ -1167,7 +1148,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             entryPath,
             activation,
           }));
-          const resolved = await skillPackageStore.resolveSelections(selections);
+          const resolved = (await skillPackageStore.resolveSelections(selections)).map((entry) => {
+            const managedSkillId = entries.find(
+              (selected) =>
+                selected.packageId === entry.packageId && selected.entryPath === entry.entryPath,
+            )?.managedSkillId;
+            return { ...entry, ...(managedSkillId ? { managedSkillId } : {}) };
+          });
           if (!isDeepStrictEqual(resolved, entries)) {
             throw new Error(
               "Persisted Expert V2 entry metadata or paths do not match its packages.",
@@ -1271,12 +1258,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 `Expert skill '${reference.name}' belongs to a different or pending snapshot.`,
               );
             }
-            const entry = selectedEntries.find(
-              (candidate) =>
-                candidate.packageId === reference.expert!.packageId &&
-                candidate.entryPath === reference.expert!.entryPath,
+            const entry = selectedEntries.find((candidate) =>
+              reference.expert!.skillId
+                ? candidate.managedSkillId === reference.expert!.skillId
+                : candidate.packageId === reference.expert!.packageId &&
+                  candidate.entryPath === reference.expert!.entryPath,
             );
-            if (!entry || entry.name !== reference.name) {
+            if (!entry || (!reference.expert.skillId && entry.name !== reference.name)) {
               throw new Error(
                 `Expert skill '${reference.name}' is not selected in the fixed snapshot.`,
               );
@@ -1293,6 +1281,22 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           if (expertSkills.length === 0) {
             return {
               skills: [],
+              ...(input.text !== undefined ? { input: input.text } : {}),
+            };
+          }
+
+          if (input.expertSession!.skillPolicy?.version === 2) {
+            return {
+              skills: expertSkills.map((entry) => ({
+                name: entry.name,
+                path: entry.path,
+                expert: {
+                  snapshotId: input.expertSession!.snapshotId,
+                  packageId: entry.packageId,
+                  entryPath: entry.entryPath,
+                  ...(entry.managedSkillId ? { skillId: entry.managedSkillId } : {}),
+                },
+              })),
               ...(input.text !== undefined ? { input: input.text } : {}),
             };
           }
@@ -4028,10 +4032,17 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 input.resumeCursor !== undefined ||
                 hasResumeCursor(retiredSession?.resumeCursor) ||
                 hasResumeCursor(persistedBinding?.resumeCursor);
-              const continuationResetRequested =
+              const expertAssemblyChanged =
+                input.expertSession?.skillAssemblyId !== undefined &&
                 persistedBinding !== undefined &&
-                readPersistedContinuationResetRequested(persistedBinding.runtimePayload);
+                readPersistedExpertSession(persistedBinding.runtimePayload)?.skillAssemblyId !==
+                  input.expertSession.skillAssemblyId;
+              const continuationResetRequested =
+                expertAssemblyChanged ||
+                (persistedBinding !== undefined &&
+                  readPersistedContinuationResetRequested(persistedBinding.runtimePayload));
               const canReusePersistedResumeCursor =
+                !expertAssemblyChanged &&
                 persistedBinding !== undefined &&
                 hasResumeCursor(persistedBinding.resumeCursor) &&
                 continuationCompatible;
@@ -4056,7 +4067,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 );
               }
               const effectiveResumeCursor =
-                input.forkSourceResumeCursor !== undefined
+                expertAssemblyChanged || input.forkSourceResumeCursor !== undefined
                   ? undefined
                   : (input.resumeCursor ??
                     // A replacement retired for another account or endpoint must
@@ -4199,6 +4210,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     ? (adapter.didResumeSession?.(resolvedAdapterStartInput, session) ?? true)
                     : false;
                 const priorTranscriptBootstrapPending =
+                  expertAssemblyChanged ||
                   persistedPriorTranscriptBootstrapPending ||
                   staleDevinFallbackOccurred ||
                   (outcomeOptions?.registerPriorTranscriptBootstrapOnFreshStart === true &&

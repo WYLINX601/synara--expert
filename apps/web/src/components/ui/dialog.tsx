@@ -74,11 +74,15 @@ const dialogPanelFieldClassName =
 function DialogPopup({
   className,
   children,
+  closeButtonClassName,
+  closeButtonLabel = "Close",
   showCloseButton: showCloseButtonProp,
   bottomStickOnMobile: bottomStickOnMobileProp,
   ...props
 }: DialogPrimitive.Popup.Props & {
   showCloseButton?: boolean;
+  closeButtonClassName?: string;
+  closeButtonLabel?: string;
   bottomStickOnMobile?: boolean;
 }) {
   const showCloseButton = showCloseButtonProp ?? true;
@@ -102,9 +106,9 @@ function DialogPopup({
           {children}
           {showCloseButton && (
             <DialogPrimitive.Close
-              aria-label="Close"
+              aria-label={closeButtonLabel}
               className="absolute end-2 top-2"
-              render={<Button size="icon-sm" variant="ghost" />}
+              render={<Button size="icon-sm" variant="ghost" className={closeButtonClassName} />}
             >
               <XIcon />
             </DialogPrimitive.Close>
@@ -176,11 +180,12 @@ function DialogDescription({ className, ...props }: DialogPrimitive.Description.
 function DialogPanel({
   className,
   scrollFade: scrollFadeProp,
+  viewportTabIndex,
   ...props
-}: React.ComponentProps<"div"> & { scrollFade?: boolean }) {
+}: React.ComponentProps<"div"> & { scrollFade?: boolean; viewportTabIndex?: number }) {
   const scrollFade = scrollFadeProp ?? true;
   return (
-    <ScrollArea scrollFade={scrollFade}>
+    <ScrollArea scrollFade={scrollFade} viewportTabIndex={viewportTabIndex}>
       <div
         className={cn(
           "px-4 pb-4 pt-1 in-[[data-slot=dialog-popup]:has([data-slot=dialog-header])]:pt-0 in-[[data-slot=dialog-popup]:has(>[data-slot=dialog-footer])]:pb-3",

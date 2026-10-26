@@ -15,6 +15,8 @@ const verifiedNativeAssemblies = new WeakMap<
 const assemblyIdentity = (session: ProviderExpertSession) =>
   JSON.stringify({
     snapshotId: session.snapshotId,
+    skillAssemblyId: session.skillAssemblyId,
+    skillRootRunId: session.skillRootRunId,
     entries: session.skillEntries,
     policy: session.skillPolicy,
   });
@@ -145,6 +147,8 @@ export function createExpertSkillApplication(input: {
   }
   return {
     mode: "catalog",
+    ...(input.session.skillAssemblyId ? { skillAssemblyId: input.session.skillAssemblyId } : {}),
+    ...(input.session.skillRootRunId ? { skillRootRunId: input.session.skillRootRunId } : {}),
     snapshotId: input.session.snapshotId,
     packageIds: [...new Set(entries.map((entry) => entry.packageId))].toSorted(),
     catalogHash: sha256Utf8(renderExpertSkillCatalog(input.session.snapshotId, entries)),
@@ -157,7 +161,7 @@ export function createExpertSkillApplication(input: {
       ? {
           enforcement: "native-fixed" as const,
           activeEntries: entries.map((entry) => ({ path: entry.path, sha256: entry.sha256! })),
-          nativeSubagents: "blocked" as const,
+          nativeSubagents: input.session.skillPolicy.nativeSubagents,
         }
       : {}),
   };
@@ -172,7 +176,8 @@ export async function verifyFixedExpertAssembly(
 ): Promise<void> {
   if (
     session.skillPolicy?.discovery !== "fixed" ||
-    session.skillPolicy.nativeSubagents !== "blocked"
+    (session.skillPolicy.version === 1 && session.skillPolicy.nativeSubagents !== "blocked") ||
+    (session.skillPolicy.version === 2 && session.skillPolicy.nativeSubagents !== "inherit")
   )
     throw new Error("Unsupported Expert Skill policy.");
   const entries = session.skillEntries ?? [];

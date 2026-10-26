@@ -111,6 +111,8 @@ import {
 import { PersistenceDecodeError } from "../../persistence/Errors.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
+import { createSkillLibraryStore } from "../../experts/SkillLibraryStore.ts";
+import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore.ts";
 import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
 import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
 
@@ -11469,10 +11471,18 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
           ],
         });
         const submittedTurn = expertV2Runtime.codex.sendTurn.mock.calls.at(-1)?.[0];
-        assert.deepEqual(submittedTurn?.skills, []);
-        assert.ok(submittedTurn?.input?.includes("PLAN BODY"));
-        assert.ok(submittedTurn?.input?.includes(planEntry.path));
-        assert.ok(!submittedTurn?.input?.includes("/untrusted/client/path"));
+        assert.deepEqual(submittedTurn?.skills, [
+          {
+            name: planEntry.name,
+            path: planEntry.path,
+            expert: {
+              snapshotId: fixture.session.snapshotId,
+              packageId: planEntry.packageId,
+              entryPath: planEntry.entryPath,
+            },
+          },
+        ]);
+        assert.equal(submittedTurn?.input, "Please follow the planning workflow.");
 
         const sendCallsBeforeRejectedMention = expertV2Runtime.codex.sendTurn.mock.calls.length;
         const unselectedMention = yield* Effect.exit(
@@ -11625,6 +11635,115 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
           expertV2Runtime.codex.startSession.mock.calls.length,
           startsBeforeSubstitution,
         );
+      }),
+  );
+  it.effect(
+    "normalizes queued managed Skill references to the next Run head and rejects unbound IDs",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => expertV2FixturePromise);
+        const library = createSkillLibraryStore(fixture.stateDir);
+        const skill = (yield* Effect.promise(() =>
+          library.execute({
+            action: "create",
+            name: "managed-queue",
+            body: "---\nname: managed-queue\ndescription: Managed\n---\nFirst\n",
+            tags: [],
+          }),
+        )).skill!;
+        const experts = createExpertStore(fixture.stateDir);
+        const definition = yield* Effect.promise(() =>
+          experts.save({
+            name: "Managed queued",
+            description: "",
+            useCases: "",
+            persona: "Keep this pinned",
+            outputRequirements: "",
+            skills: [],
+            references: [],
+            connections: [],
+            skillBindings: [{ skillId: skill.skillId, enabled: true, activation: "on-demand" }],
+          }),
+        );
+        const binding = yield* Effect.promise(() => experts.prepareSnapshot(definition.id));
+        const assemblies = createRunSkillAssemblyStore(fixture.stateDir);
+        const threadId = asThreadId("expert-managed-queue");
+        const first = yield* Effect.promise(() =>
+          assemblies.prepare({
+            threadId,
+            rootRunId: "run:managed-A",
+            baseSnapshotId: binding.snapshotId,
+            createdAt: "2026-10-26T10:00:00.000Z",
+          }),
+        );
+        const reference = {
+          name: skill.name,
+          path: "/client/untrusted/SKILL.md",
+          expert: {
+            snapshotId: binding.snapshotId,
+            packageId: skill.packageId,
+            entryPath: skill.entryPath,
+            skillId: skill.skillId,
+          },
+        };
+        yield* Effect.promise(() =>
+          library.execute({
+            action: "save",
+            skillId: skill.skillId,
+            expectedRevision: skill.revision,
+            name: skill.name,
+            tags: [],
+            changes: [
+              {
+                path: "SKILL.md",
+                content: Buffer.from(
+                  "---\nname: managed-renamed\ndescription: Managed new\n---\nSecond\n",
+                ).toString("base64"),
+              },
+            ],
+          }),
+        );
+        const second = yield* Effect.promise(() =>
+          assemblies.prepare({
+            threadId,
+            rootRunId: "run:managed-B",
+            baseSnapshotId: binding.snapshotId,
+            createdAt: "2026-10-26T11:00:00.000Z",
+          }),
+        );
+        assert.notEqual(first.assemblyId, second.assemblyId);
+        const service = yield* ProviderService;
+        yield* service.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          runtimeMode: "full-access",
+          expertSession: second.session,
+        });
+        yield* service.sendTurn({
+          threadId,
+          input: "Use the selected workflow.",
+          attachments: [],
+          skills: [reference],
+        });
+        const nativeInput = expertV2Runtime.codex.sendTurn.mock.calls.at(-1)?.[0];
+        assert.equal(nativeInput?.input, "Use the selected workflow.");
+        assert.equal(nativeInput?.skills?.[0]?.name, "managed-renamed");
+        assert.equal(nativeInput?.skills?.[0]?.path, second.session.skillEntries?.[0]?.path);
+        const before = expertV2Runtime.codex.sendTurn.mock.calls.length;
+        const rejected = yield* Effect.exit(
+          service.sendTurn({
+            threadId,
+            input: "Use missing",
+            attachments: [],
+            skills: [
+              { ...reference, expert: { ...reference.expert, skillId: `skl_${"0".repeat(32)}` } },
+            ],
+          }),
+        );
+        assert.isTrue(Exit.isFailure(rejected));
+        assert.equal(expertV2Runtime.codex.sendTurn.mock.calls.length, before);
+        yield* service.stopSession({ threadId });
+        yield* Effect.promise(() => library.dispose());
       }),
   );
 });

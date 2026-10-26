@@ -6,6 +6,8 @@ import { parseComputerInvocation } from "@synara/shared/computerInvocation";
 import { AgentGatewaySessionRegistry } from "../../agentGateway/Services/AgentGatewaySessionRegistry";
 import { preflightExpertConnections } from "../../experts/ExpertGatewayTools.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
+import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore";
+import { expertSnapshotSession } from "../../experts/expertSnapshotSession";
 import { ContextRepository } from "../../context/ContextRepository.ts";
 import { contextExecutionInputDigest } from "../contextDispatchEvidence.ts";
 import { ComputerService } from "../../computer/Services/ComputerService";
@@ -994,6 +996,8 @@ const make = Effect.gen(function* () {
   const managedAttachments = yield* ManagedAttachmentRepository;
   const serverConfig = yield* ServerConfig;
   const expertStore = createExpertStore(serverConfig.stateDir);
+  const runSkillAssemblies = createRunSkillAssemblyStore(serverConfig.stateDir);
+  const threadSkillAssemblyIds = new Map<ThreadId, string>();
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
     timeToLive: HANDLED_TURN_START_KEY_TTL,
@@ -2163,6 +2167,11 @@ const make = Effect.gen(function* () {
       readonly runtimeMode?: RuntimeMode;
       readonly turnStartAuthorization?: ProjectAgentTurnStartAuthorization;
       readonly registerPriorTranscriptBootstrapOnFreshStart?: boolean;
+      readonly skillRun?: {
+        readonly rootRunId: string;
+        readonly continuationKey?: string;
+        readonly requireExisting?: boolean;
+      };
     },
   ) {
     const thread = yield* resolveThread(threadId);
@@ -2171,6 +2180,8 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${threadId}' was not found in projection state.`),
       );
     }
+    let preserveExpertSkillRun = false;
+    let managedSkillRunKey: string | undefined;
     if (Option.isSome(projectAgentService)) {
       const planTurnAuthorization = yield* projectAgentService.value
         .assertGroupCoordinatorTurnAllowed({
@@ -2200,6 +2211,8 @@ const make = Effect.gen(function* () {
       // frozen target/settings, and native admission reservation.
       const isPlanWorkerRecoveryResume = planTurnAuthorization === "plan-recovery";
       const isPlanWorkerRecoverySteer = planTurnAuthorization === "plan-recovery-steer";
+      preserveExpertSkillRun =
+        isDirectedHubInputResponse || isPlanWorkerRecoveryResume || isPlanWorkerRecoverySteer;
       if (isDirectedHubInputResponse || isPlanWorkerRecoveryResume || isPlanWorkerRecoverySteer) {
         const pending = yield* pendingInteractions.getPendingCountsByThreadId({ threadId });
         const liveTurn = yield* hasLiveProviderTurn(threadId);
@@ -2219,6 +2232,20 @@ const make = Effect.gen(function* () {
           );
         }
       }
+    }
+    if (thread.expertBinding && Option.isSome(projectAgentRepository)) {
+      const worker = yield* projectAgentRepository.value.findManagedWorkerByThread(threadId).pipe(
+        Effect.mapError(
+          (error) =>
+            new ProviderAdapterValidationError({
+              provider: thread.modelSelection.provider,
+              operation: "skill.run",
+              issue: error.message,
+            }),
+        ),
+      );
+      if (Option.isSome(worker) && worker.value.settledAt === null)
+        managedSkillRunKey = `hub-work:${worker.value.projectId}:${worker.value.requestId}`;
     }
     const contextSession = yield* admitContextForExecution(threadId, createdAt);
 
@@ -2382,36 +2409,57 @@ const make = Effect.gen(function* () {
             }),
         })
       : undefined;
-    const expertSession = expertSnapshot
-      ? {
-          snapshotId: expertSnapshot.snapshotId,
-          expertId: expertSnapshot.expertId,
-          revision: expertSnapshot.revision,
-          displayName: expertSnapshot.displayName,
-          persona: [
-            `Expert: ${expertSnapshot.displayName}`,
-            expertSnapshot.persona,
-            expertSnapshot.outputRequirements
-              ? `Output requirements:\n${expertSnapshot.outputRequirements}`
-              : "",
-            expertSnapshot.references.length > 0
-              ? `Reference files:\n${expertSnapshot.references.map((path) => `- ${path}`).join("\n")}`
-              : "",
-          ]
-            .filter(Boolean)
-            .join("\n\n"),
-          skillsRoot: expertSnapshot.skillsRoot,
-          skills: expertSnapshot.skills,
-          ...(expertSnapshot.schemaVersion === 2 || expertSnapshot.schemaVersion === 3
-            ? {
-                ...(expertSnapshot.skillPolicy ? { skillPolicy: expertSnapshot.skillPolicy } : {}),
-                skillLoading: "index" as const,
-                skillEntries: expertSnapshot.skillEntries ?? [],
-              }
-            : {}),
-          references: expertSnapshot.references,
-        }
+    const runSkillAssembly = expertSnapshot
+      ? yield* Effect.tryPromise({
+          try: async () => {
+            const current = await runSkillAssemblies.current(threadId);
+            const currentMatchesWork =
+              !managedSkillRunKey || current?.rootRunId === `run:${threadId}:${managedSkillRunKey}`;
+            if (preserveExpertSkillRun && current && currentMatchesWork) return current;
+            if (
+              (!current || !currentMatchesWork) &&
+              (preserveExpertSkillRun || options?.skillRun?.requireExisting || !options?.skillRun)
+            ) {
+              const managedContinuation = managedSkillRunKey
+                ? await runSkillAssemblies.continuation(threadId, managedSkillRunKey, true)
+                : undefined;
+              if (!managedContinuation)
+                throw new Error(
+                  "This recovery has no durable Run Skill assembly. Its historical snapshot is preserved; send a new user request to begin a new Run, or restore the original Run record before continuing.",
+                );
+            }
+            if (managedSkillRunKey || options?.skillRun) {
+              return runSkillAssemblies.prepare({
+                threadId,
+                rootRunId: managedSkillRunKey
+                  ? `run:${threadId}:${managedSkillRunKey}`
+                  : options!.skillRun!.rootRunId,
+                ...(managedSkillRunKey ? { inheritContinuation: true } : {}),
+                ...((managedSkillRunKey ?? options?.skillRun?.continuationKey)
+                  ? { continuationKey: (managedSkillRunKey ?? options?.skillRun?.continuationKey)! }
+                  : {}),
+                baseSnapshotId: expertSnapshot.snapshotId,
+                createdAt,
+              });
+            }
+            return current;
+          },
+          catch: (cause) =>
+            new ProviderAdapterValidationError({
+              provider: preferredProvider,
+              operation: "thread.turn.start",
+              issue: `Could not prepare this Run's Skill assembly: ${String(cause instanceof Error ? cause.message : cause)}`,
+            }),
+        })
       : undefined;
+    const expertSession =
+      runSkillAssembly?.session ??
+      (expertSnapshot ? expertSnapshotSession(expertSnapshot) : undefined);
+    const skillAssemblyChanged =
+      runSkillAssembly !== undefined &&
+      activeSessionBeforeEnsure !== undefined &&
+      (activeSessionBeforeEnsure.skillApplication?.skillAssemblyId ??
+        threadSkillAssemblyIds.get(threadId)) !== runSkillAssembly.assemblyId;
     const effectiveCwd = yield* resolveProjectedThreadWorkspaceCwd(thread);
     const workspaceState = resolveThreadWorkspaceState({
       envMode: thread.envMode,
@@ -2522,7 +2570,18 @@ const make = Effect.gen(function* () {
           ...(preferredProvider ? { provider: preferredProvider } : {}),
           ...(resumeCursor !== undefined ? { resumeCursor } : {}),
         };
-        return yield* providerService.startSessionWithOutcome
+        const initializationAttempt = runSkillAssembly
+          ? yield* Effect.tryPromise({
+              try: () => runSkillAssemblies.beginInitialization(runSkillAssembly.rootRunId),
+              catch: (cause) =>
+                new ProviderAdapterValidationError({
+                  provider: preferredProvider,
+                  operation: "skill.initialize",
+                  issue: String(cause),
+                }),
+            })
+          : undefined;
+        const nativeStart = providerService.startSessionWithOutcome
           ? providerService.startSessionWithOutcome(threadId, startInput, {
               registerPriorTranscriptBootstrapOnFreshStart,
             })
@@ -2534,6 +2593,42 @@ const make = Effect.gen(function* () {
                 priorTranscriptBootstrapPending: registerPriorTranscriptBootstrapOnFreshStart,
               })),
             );
+        const sessionOutcome = yield* nativeStart.pipe(
+          Effect.onError((cause) =>
+            runSkillAssembly && initializationAttempt
+              ? Effect.tryPromise(() =>
+                  runSkillAssemblies.finishInitialization(
+                    runSkillAssembly.rootRunId,
+                    initializationAttempt,
+                    Cause.pretty(cause),
+                  ),
+                ).pipe(
+                  Effect.catch((error) =>
+                    Effect.logError("Could not persist failed Skill initialization", { error }),
+                  ),
+                )
+              : Effect.void,
+          ),
+        );
+        if (runSkillAssembly && initializationAttempt)
+          yield* Effect.tryPromise({
+            try: () =>
+              runSkillAssemblies.finishInitialization(
+                runSkillAssembly.rootRunId,
+                initializationAttempt,
+              ),
+            catch: (cause) =>
+              new ProviderAdapterValidationError({
+                provider: preferredProvider,
+                operation: "skill.initialize",
+                issue: String(cause),
+              }),
+          });
+        yield* Effect.sync(() => {
+          if (runSkillAssembly) threadSkillAssemblyIds.set(threadId, runSkillAssembly.assemblyId);
+          else threadSkillAssemblyIds.delete(threadId);
+        });
+        return sessionOutcome;
       });
 
     const bindSessionToThread = (session: ProviderSession) =>
@@ -2654,7 +2749,8 @@ const make = Effect.gen(function* () {
         !shouldRestartForModelSelectionChange &&
         !computerControlChanged &&
         !autoApproveSynaraToolsChanged &&
-        !providerOptionsChanged
+        !providerOptionsChanged &&
+        !skillAssemblyChanged
       ) {
         return {
           activeSessionBeforeEnsure,
@@ -2685,7 +2781,8 @@ const make = Effect.gen(function* () {
         !providerOptionsChanged &&
         !shouldRestartForModelChange &&
         !shouldRestartForModelSelectionChange &&
-        !autoApproveSynaraToolsChanged;
+        !autoApproveSynaraToolsChanged &&
+        !skillAssemblyChanged;
       const deferComputerControlRestart = {
         activeSessionBeforeEnsure,
         activeSession: reusableSession,
@@ -2712,6 +2809,7 @@ const make = Effect.gen(function* () {
       // takes effect on resume and dropping history would lose fidelity for
       // nothing.
       const resumeCursor =
+        skillAssemblyChanged ||
         providerChanged ||
         providerInstanceChanged ||
         shouldRestartForModelChange ||
@@ -2751,7 +2849,10 @@ const make = Effect.gen(function* () {
       // keeps its history in the new session's first turn.
       const restartedOutcome = yield* startProviderSessionWithOutcome(
         resumeCursor,
-        (workspaceChanged || providerChanged || shouldRestartForModelChange) &&
+        (skillAssemblyChanged ||
+          workspaceChanged ||
+          providerChanged ||
+          shouldRestartForModelChange) &&
           shouldRegisterContextBootstrap,
       ).pipe(
         // The live-turn check above sees only turns. The adapter also refuses
@@ -3515,6 +3616,40 @@ const make = Effect.gen(function* () {
     const registerPriorTranscriptBootstrapOnFreshStart =
       selectedProvider === "opencode" &&
       listPriorTranscriptMessages(thread, transcriptBoundaryMessageId).length > 0;
+    const skillContinuationKey = thread.goalStartedAt
+      ? `goal:${thread.id}:${thread.goalStartedAt}`
+      : undefined;
+    const inheritedSkillRun =
+      thread.expertBinding &&
+      (input.turnKind === "goal-continuation" || input.dispatchMode === "steer")
+        ? yield* Effect.tryPromise({
+            try: async () => {
+              if (input.turnKind === "goal-continuation" && skillContinuationKey) {
+                const goalRun = await runSkillAssemblies.continuation(
+                  thread.id,
+                  skillContinuationKey,
+                );
+                if (goalRun) return goalRun;
+              }
+              return runSkillAssemblies.current(thread.id);
+            },
+            catch: (cause) =>
+              new ProviderAdapterValidationError({
+                provider: input.modelSelection?.provider ?? thread.modelSelection.provider,
+                operation: "skill.continue",
+                issue: String(cause),
+              }),
+          })
+        : undefined;
+    const skillRun = thread.expertBinding
+      ? {
+          rootRunId: inheritedSkillRun?.rootRunId ?? `run:${thread.id}:${input.messageId}`,
+          ...(input.turnKind === "goal-continuation" || input.dispatchMode === "steer"
+            ? { requireExisting: true }
+            : {}),
+          ...(skillContinuationKey ? { continuationKey: skillContinuationKey } : {}),
+        }
+      : undefined;
     const {
       activeSessionBeforeEnsure,
       activeSession,
@@ -3525,6 +3660,7 @@ const make = Effect.gen(function* () {
       forkComputerControl,
     } = yield* awaitClaudeCompactionPreparation(
       ensureSessionForThread(input.threadId, input.createdAt, {
+        ...(skillRun ? { skillRun } : {}),
         ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
         ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {}),
         ...(input.dispatchMode === "steer" ? {} : { enableComputerControl }),
@@ -4243,6 +4379,7 @@ const make = Effect.gen(function* () {
         pendingContextBootstrapAttempts.set(input.threadId, pendingContextBootstrapAttempt);
       }
       const ensureSessionForStaleRetry = ensureSessionForThread(input.threadId, input.createdAt, {
+        ...(skillRun ? { skillRun } : {}),
         ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
         ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {}),
         enableComputerControl,
@@ -4990,12 +5127,17 @@ const make = Effect.gen(function* () {
           createdAt: event.payload.createdAt,
         });
       }
-      if (!isNativeSteer && hasLiveTurn) {
+      const waitsForExpertBackgroundTasks =
+        !isNativeSteer &&
+        Boolean(thread.expertBinding) &&
+        providerService.hasLiveRuntimeTasks !== undefined &&
+        (yield* providerService.hasLiveRuntimeTasks({ threadId: event.payload.threadId }));
+      if (!isNativeSteer && (hasLiveTurn || waitsForExpertBackgroundTasks)) {
         yield* enqueueQueuedTurnStart(event);
         // The promotion raced another live turn and was re-queued. Release
         // only when that exact blocking turn settles, not on any late
         // terminal event for the shared provider session.
-        yield* bindPendingQueuedDispatchToTurn(liveTurnId);
+        if (liveTurnId) yield* bindPendingQueuedDispatchToTurn(liveTurnId);
         if (event.payload.dispatchMode === "steer") {
           // Preserve steer semantics: jump the queue (enqueue unshifts steers)
           // and ask the live turn to stop so the steer dispatches next.
@@ -5799,7 +5941,14 @@ const make = Effect.gen(function* () {
   // Promote the next queued message only after the active provider turn settles.
   const drainQueuedTurnsForThread = Effect.fnUntraced(function* (threadId: ThreadId) {
     const sessionThreadId = (yield* resolveProviderSessionThread(threadId))?.id ?? threadId;
-    if ((yield* resolveThread(sessionThreadId))?.claudeCacheReview) return;
+    const queuedThread = yield* resolveThread(sessionThreadId);
+    if (queuedThread?.claudeCacheReview) return;
+    if (
+      queuedThread?.expertBinding &&
+      providerService.hasLiveRuntimeTasks &&
+      (yield* providerService.hasLiveRuntimeTasks({ threadId: sessionThreadId }))
+    )
+      return;
     if (
       deferredClaudeCompactionQueueDrains.has(sessionThreadId) ||
       drainingQueuedTurns.has(threadId) ||
@@ -9671,6 +9820,31 @@ const make = Effect.gen(function* () {
           Effect.andThen(recoverActiveThreadGoals),
         ),
         Stream.runForEach(providerService.streamEvents, (event) => {
+          if (
+            event.type === "task.completed" ||
+            (event.type === "task.updated" &&
+              ["completed", "failed", "killed", "paused"].includes(event.payload.status ?? ""))
+          ) {
+            return Effect.gen(function* () {
+              const sessionThreadId =
+                (yield* resolveProviderSessionThread(event.threadId))?.id ?? event.threadId;
+              const thread = yield* resolveThread(sessionThreadId);
+              if (!thread?.expertBinding || (yield* hasLiveProviderTurn(sessionThreadId))) return;
+              yield* drainQueuedTurnsForSession(sessionThreadId);
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.failCause(cause)
+                  : Effect.logWarning(
+                      "provider command reactor failed to drain after native task settlement",
+                      {
+                        threadId: event.threadId,
+                        cause: Cause.pretty(cause),
+                      },
+                    ),
+              ),
+            );
+          }
           if (event.type !== "turn.completed" && event.type !== "turn.aborted") {
             return Effect.void;
           }

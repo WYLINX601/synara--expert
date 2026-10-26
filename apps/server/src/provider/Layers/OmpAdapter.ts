@@ -127,6 +127,12 @@ import {
   type OmpAccountBoundary,
   type OmpAcpRuntimeSettings,
 } from "../acp/OmpAcpSupport.ts";
+import {
+  makeOmpAcpIdleTaskCompatArgs,
+  OMP_ACP_IDLE_TASK_COMPAT_MARKER_TIMEOUT_MS,
+  prepareOmpAcpIdleTaskCompat,
+  verifyOmpAcpIdleTaskCompatProbe,
+} from "../acp/OmpAcpIdleTaskCompat.ts";
 import { OMP_EXPERT_PROJECTION_VERSION, prepareOmpExpertSession } from "../acp/OmpExpertSession.ts";
 import { makeSessionTeardownGate } from "../acp/SessionTeardownGate.ts";
 import { cancelTurnAndWait } from "../acp/TurnCancellation.ts";
@@ -209,6 +215,8 @@ interface PendingUserInput {
   readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
 }
 
+type OmpNestedTaskLifecycleState = "active" | "active-async" | "completed";
+
 interface OmpSessionContext {
   readonly verifyFixedSkills?: () => Effect.Effect<void, unknown>;
   readonly fixedSkillCommands?: ReadonlyArray<string>;
@@ -233,11 +241,10 @@ interface OmpSessionContext {
   // Epoch-ms of the last inbound ACP activity for the active turn; drives the
   // idle-progress watchdog that force-fails a silently hung turn.
   lastTurnActivityAt: number | undefined;
-  // Provider tool-call ids seen during the most recent turn, mapped to that
-  // turn. A backlogged consumer can process a queued ToolCallUpdated after the
-  // prompt response cleared activeTurnId; this keeps the event attributed to
-  // its originating turn instead of dropping it as an orphan. Cleared when the
-  // next turn dispatches.
+  // Provider tool-call ids seen during a turn, mapped to that turn. A
+  // backlogged consumer can process a queued ToolCallUpdated after the prompt
+  // response clears activeTurnId; active native Task calls keep their original
+  // mapping across later turns until the provider reports their terminal state.
   readonly turnToolCallIds: Map<string, TurnId>;
   // Most recently settled turn (prompt success or failure; never an interrupt
   // cancel). A notification can still be in flight in the runtime dispatcher
@@ -253,7 +260,7 @@ interface OmpSessionContext {
   // Omp executes `Task` subagents outside the parent ACP event stream. Track
   // their parent tool rows so the watchdog can use a longer, still-finite cap.
   readonly activeNestedTaskToolCallIds: Set<string>;
-  readonly nestedTaskLifecycleByToolCallId: Map<string, "active" | "completed">;
+  readonly nestedTaskLifecycleByToolCallId: Map<string, OmpNestedTaskLifecycleState>;
   resumeReplayReady: Deferred.Deferred<void> | undefined;
   resumeReplayLastSuppressedAt: number | undefined;
   // Pending until startSession has applied the requested model/effort config.
@@ -314,12 +321,142 @@ export function isOmpNestedTaskToolCall(toolCall: AcpToolCallState): boolean {
     return true;
   }
   const rawInput = toolCall.data.rawInput;
-  return (
-    typeof rawInput === "object" &&
-    rawInput !== null &&
-    "subagent_type" in rawInput &&
-    typeof rawInput.subagent_type === "string"
+  if (!isRecord(rawInput)) return false;
+  if ("subagent_type" in rawInput && typeof rawInput.subagent_type === "string") {
+    return true;
+  }
+  if (toolCall.kind !== "other" || !Array.isArray(rawInput.tasks) || rawInput.tasks.length === 0) {
+    return false;
+  }
+  return rawInput.tasks.every(
+    (task) =>
+      isRecord(task) &&
+      typeof task.agent === "string" &&
+      task.agent.trim().length > 0 &&
+      typeof task.task === "string" &&
+      task.task.trim().length > 0,
   );
+}
+
+function readOmpAsyncTaskState(toolCall: AcpToolCallState): {
+  readonly present: boolean;
+  readonly state: string | undefined;
+} {
+  const rawOutput = toolCall.data.rawOutput;
+  if (!isRecord(rawOutput) || !isRecord(rawOutput.details)) {
+    return { present: false, state: undefined };
+  }
+  const details = rawOutput.details;
+  if (!Object.hasOwn(details, "async")) {
+    return { present: false, state: undefined };
+  }
+  const asyncDetails = details.async;
+  if (
+    !isRecord(asyncDetails) ||
+    asyncDetails.type !== "task" ||
+    typeof asyncDetails.jobId !== "string" ||
+    asyncDetails.jobId.trim().length === 0 ||
+    typeof asyncDetails.state !== "string"
+  ) {
+    return { present: true, state: undefined };
+  }
+  return {
+    present: true,
+    state: asyncDetails.state,
+  };
+}
+
+type OmpNestedTaskLifecycleTransition =
+  | { readonly kind: "none" | "started" }
+  | { readonly kind: "completed"; readonly status: "completed" | "failed" | "stopped" };
+
+/**
+ * Apply one OMP Task tool update to the shared nested-task state. OMP reports a
+ * background Task call as ACP-completed while its native async job is still
+ * running; only the later details.async terminal state settles that task.
+ */
+export function updateOmpNestedTaskLifecycle(
+  toolCall: AcpToolCallState,
+  activeTaskToolCallIds: Set<string>,
+  lifecycleByToolCallId: Map<string, OmpNestedTaskLifecycleState>,
+): OmpNestedTaskLifecycleTransition {
+  const previous = lifecycleByToolCallId.get(toolCall.toolCallId);
+  if (previous === "completed" || (previous === undefined && !isOmpNestedTaskToolCall(toolCall))) {
+    return { kind: "none" };
+  }
+
+  const asyncUpdate = readOmpAsyncTaskState(toolCall);
+  const nativeAsyncTerminal =
+    asyncUpdate.state === "completed" ||
+    asyncUpdate.state === "failed" ||
+    asyncUpdate.state === "cancelled";
+  if (asyncUpdate.present && !nativeAsyncTerminal) {
+    activeTaskToolCallIds.add(toolCall.toolCallId);
+    lifecycleByToolCallId.set(toolCall.toolCallId, "active-async");
+    return previous === undefined ? { kind: "started" } : { kind: "none" };
+  }
+
+  // Once OMP has told us this is an async task, ACP status alone cannot settle
+  // it. Sparse or malformed updates must leave it active until a native
+  // terminal async state arrives.
+  if (previous === "active-async" && !nativeAsyncTerminal) {
+    activeTaskToolCallIds.add(toolCall.toolCallId);
+    return { kind: "none" };
+  }
+
+  const acpTerminal = toolCall.status === "completed" || toolCall.status === "failed";
+  if (nativeAsyncTerminal || acpTerminal) {
+    activeTaskToolCallIds.delete(toolCall.toolCallId);
+    lifecycleByToolCallId.set(toolCall.toolCallId, "completed");
+    const status =
+      asyncUpdate.state === "cancelled"
+        ? "stopped"
+        : asyncUpdate.state === "failed"
+          ? "failed"
+          : asyncUpdate.state === "completed"
+            ? "completed"
+            : toolCall.status === "failed"
+              ? "failed"
+              : "completed";
+    return { kind: "completed", status };
+  }
+
+  activeTaskToolCallIds.add(toolCall.toolCallId);
+  if (previous !== undefined) {
+    return { kind: "none" };
+  }
+  lifecycleByToolCallId.set(toolCall.toolCallId, "active");
+  return { kind: "started" };
+}
+
+/**
+ * Preserve nested Task identities and original-turn ownership for the native
+ * session lifetime; sparse or delayed native updates can arrive after a turn.
+ */
+export function retainOmpNestedTaskTracking(
+  lifecycleByToolCallId: Map<string, OmpNestedTaskLifecycleState>,
+  turnToolCallIds: Map<string, TurnId>,
+): void {
+  for (const toolCallId of turnToolCallIds.keys()) {
+    if (!lifecycleByToolCallId.has(toolCallId)) turnToolCallIds.delete(toolCallId);
+  }
+}
+
+/** Backdate late updates from a still-tracked native Task to the turn that spawned it. */
+export function resolveOmpLateToolCallTurnId(input: {
+  readonly resumeReplayPending: boolean;
+  readonly activeTurnId: TurnId | undefined;
+  readonly originalTurnId: TurnId | undefined;
+  readonly isTrackedNestedTask: boolean;
+}): TurnId | undefined {
+  if (input.resumeReplayPending || input.originalTurnId === undefined) return undefined;
+  if (
+    input.activeTurnId === undefined ||
+    (input.isTrackedNestedTask && input.originalTurnId !== input.activeTurnId)
+  ) {
+    return input.originalTurnId;
+  }
+  return undefined;
 }
 
 // A turn-specific stop is valid only while that exact turn is active. During
@@ -477,7 +614,13 @@ export function makeOmpAdapter(
       readonly skills?: ReadonlyArray<ProviderSkillReference>;
     }) => {
       const env = buildOmpProcessEnv(input.settings);
-      const binaryPath = resolveOmpCliBinaryPath(input.settings.binaryPath);
+      const inheritNativeTasks =
+        input.expertSession?.skillPolicy?.version === 2 &&
+        input.expertSession.skillPolicy.discovery === "fixed" &&
+        input.expertSession.skillPolicy.nativeSubagents === "inherit";
+      const binaryPath = inheritNativeTasks
+        ? resolveOmpCliBinaryPath(input.settings.binaryPath, { env, cwd: input.cwd })
+        : resolveOmpCliBinaryPath(input.settings.binaryPath);
       return prepareOmpExpertSession({
         cwd: input.cwd,
         env,
@@ -618,17 +761,12 @@ export function makeOmpAdapter(
       turnId: TurnId,
     ) =>
       Effect.gen(function* () {
-        if (!isOmpNestedTaskToolCall(toolCall)) {
-          return;
-        }
-        const previous = ctx.nestedTaskLifecycleByToolCallId.get(toolCall.toolCallId);
-        const terminal = toolCall.status === "completed" || toolCall.status === "failed";
-        if (terminal) {
-          ctx.activeNestedTaskToolCallIds.delete(toolCall.toolCallId);
-          if (previous === "completed") {
-            return;
-          }
-          ctx.nestedTaskLifecycleByToolCallId.set(toolCall.toolCallId, "completed");
+        const transition = updateOmpNestedTaskLifecycle(
+          toolCall,
+          ctx.activeNestedTaskToolCallIds,
+          ctx.nestedTaskLifecycleByToolCallId,
+        );
+        if (transition.kind === "completed") {
           yield* offerRuntimeEvent(ctx.lifecycleGeneration, {
             type: "task.completed",
             ...(yield* makeEventStamp()),
@@ -637,18 +775,15 @@ export function makeOmpAdapter(
             turnId,
             payload: {
               taskId: RuntimeTaskId.makeUnsafe(toolCall.toolCallId),
-              status: toolCall.status === "failed" ? "failed" : "completed",
+              status: transition.status,
               ...(toolCall.detail ? { summary: toolCall.detail } : {}),
             },
           });
           return;
         }
-
-        ctx.activeNestedTaskToolCallIds.add(toolCall.toolCallId);
-        if (previous !== undefined) {
+        if (transition.kind !== "started") {
           return;
         }
-        ctx.nestedTaskLifecycleByToolCallId.set(toolCall.toolCallId, "active");
         const rawInput = toolCall.data.rawInput;
         const description =
           typeof rawInput === "object" &&
@@ -967,6 +1102,74 @@ export function makeOmpAdapter(
             yield* Scope.addFinalizer(sessionScope, expertPreparation.cleanup());
           }
 
+          const inheritNativeTasks =
+            input.expertSession?.skillPolicy?.version === 2 &&
+            input.expertSession.skillPolicy.discovery === "fixed" &&
+            input.expertSession.skillPolicy.nativeSubagents === "inherit";
+          let idleTaskCompat: Awaited<ReturnType<typeof prepareOmpAcpIdleTaskCompat>> | undefined;
+          if (inheritNativeTasks) {
+            if (!expertPreparation?.ownedTempDirectory) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/start",
+                detail:
+                  "OMP fixed Skill assembly cannot prepare the private native task compatibility files.",
+              });
+            }
+            const compatEnv = buildOmpProcessEnv(effectiveSettings);
+            const selectedCli = resolveOmpCliBinaryPath(effectiveSettings.binaryPath, {
+              env: compatEnv,
+              cwd,
+            });
+            idleTaskCompat = yield* Effect.tryPromise({
+              try: () =>
+                prepareOmpAcpIdleTaskCompat({
+                  cliBinaryPath: selectedCli,
+                  cwd,
+                  env: compatEnv,
+                  privateTempDirectory: expertPreparation.ownedTempDirectory!,
+                }),
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/start",
+                  detail:
+                    cause instanceof Error
+                      ? cause.message
+                      : "OMP fixed native task compatibility could not be verified.",
+                }),
+            });
+            const compatProbe = yield* runOmpAcpCliCommand({
+              childProcessSpawner,
+              binaryPath: idleTaskCompat.bunExecutable,
+              args: [...makeOmpAcpIdleTaskCompatArgs(idleTaskCompat, ["--version"])],
+              cwd,
+              env: compatEnv,
+            }).pipe(
+              Effect.mapError(
+                () =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/start",
+                    detail: "OMP fixed native task compatibility version probe failed.",
+                  }),
+              ),
+            );
+            if (
+              !verifyOmpAcpIdleTaskCompatProbe({
+                ...compatProbe,
+                expectedMarker: idleTaskCompat.expectedMarker,
+              })
+            ) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/start",
+                detail:
+                  "OMP fixed native task compatibility did not prove the expected CLI version and preload marker.",
+              });
+            }
+          }
+
           yield* Effect.logInfo("omp.acp.start", {
             marker: OMP_ACP_TRANSPORT_DEBUG_MARKER,
             debugEnv: OMP_ACP_DEBUG_ENV,
@@ -975,6 +1178,13 @@ export function makeOmpAdapter(
             resume: resumeSessionId !== undefined,
             binaryPath: effectiveSettings.binaryPath ?? "omp",
           });
+
+          let idleTaskCompatMarkerResolve: (() => void) | undefined;
+          const idleTaskCompatMarkerPromise = idleTaskCompat
+            ? new Promise<void>((resolve) => {
+                idleTaskCompatMarkerResolve = resolve;
+              })
+            : Promise.resolve();
 
           const acp = yield* makeOmpAcpRuntime({
             ompSettings: effectiveSettings,
@@ -990,6 +1200,7 @@ export function makeOmpAdapter(
                     ...(expertPreparation.appendSystemPromptPath
                       ? { appendSystemPromptPath: expertPreparation.appendSystemPromptPath }
                       : {}),
+                    ...(idleTaskCompat ? { idleTaskCompat } : {}),
                   },
                 }
               : {}),
@@ -998,6 +1209,16 @@ export function makeOmpAdapter(
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientCapabilities: { elicitation: { form: {} } },
             clientInfo: { name: "Synara", version: "0.0.0" },
+            ...acpRuntimeLoggers,
+            ...(idleTaskCompat
+              ? {
+                  onChildStderrLine: (line: string) => {
+                    if (line.trim() === idleTaskCompat!.expectedMarker) {
+                      idleTaskCompatMarkerResolve?.();
+                    }
+                  },
+                }
+              : {}),
             ...(agentGatewayCredentials
               ? {
                   buildMcpServers: (initializeResult: Acp.InitializeResponse) =>
@@ -1008,7 +1229,6 @@ export function makeOmpAdapter(
                     }),
                 }
               : {}),
-            ...acpRuntimeLoggers,
           }).pipe(
             Effect.provideService(Scope.Scope, sessionScope),
             Effect.mapError((cause) =>
@@ -1150,10 +1370,24 @@ export function makeOmpAdapter(
             const startedOption = yield* acp
               .start()
               .pipe(Effect.timeoutOption(OMP_ACP_REQUEST_TIMEOUT_MS));
-            return yield* Option.match(startedOption, {
+            const started = yield* Option.match(startedOption, {
               onNone: () => Effect.fail(ompAcpTimeoutError("session/start")),
               onSome: Effect.succeed,
             });
+            if (idleTaskCompat) {
+              const markerOption = yield* Effect.promise(() => idleTaskCompatMarkerPromise).pipe(
+                Effect.timeoutOption(OMP_ACP_IDLE_TASK_COMPAT_MARKER_TIMEOUT_MS),
+              );
+              if (Option.isNone(markerOption)) {
+                return yield* new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/start",
+                  detail:
+                    "OMP fixed native task compatibility marker was missing from the ACP child.",
+                });
+              }
+            }
+            return started;
           }).pipe(
             Effect.mapError((error) =>
               error instanceof ProviderAdapterRequestError
@@ -1367,10 +1601,14 @@ export function makeOmpAdapter(
                       // originating turn id so the existing tool row resolves in
                       // place instead of being dropped as an orphan. Resume
                       // replay stays suppressed like every other event.
-                      const lateTurnId =
-                        ctx.resumeReplayReady === undefined && ctx.activeTurnId === undefined
-                          ? ctx.turnToolCallIds.get(event.toolCall.toolCallId)
-                          : undefined;
+                      const lateTurnId = resolveOmpLateToolCallTurnId({
+                        resumeReplayPending: ctx.resumeReplayReady !== undefined,
+                        activeTurnId: ctx.activeTurnId,
+                        originalTurnId: ctx.turnToolCallIds.get(event.toolCall.toolCallId),
+                        isTrackedNestedTask: ctx.nestedTaskLifecycleByToolCallId.has(
+                          event.toolCall.toolCallId,
+                        ),
+                      });
                       if (lateTurnId !== undefined) {
                         yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                         yield* emitNestedTaskLifecycle(ctx, event.toolCall, lateTurnId);
@@ -1828,13 +2066,11 @@ export function makeOmpAdapter(
         ctx.activeTurnHadAssistantContent = false;
         ctx.activeAssistantItemsWithContent.clear();
         ctx.activeTurnFailedToolDetail = undefined;
-        // Late-event attribution only matters between turns; once a new turn
-        // dispatches, stragglers from older turns are stale enough to drop.
-        ctx.turnToolCallIds.clear();
+        // Keep attribution for native children that outlive their parent turn;
+        // their eventual terminal updates must settle the originating run.
+        retainOmpNestedTaskTracking(ctx.nestedTaskLifecycleByToolCallId, ctx.turnToolCallIds);
         ctx.lastSettledTurnId = undefined;
         ctx.lastSettledAssistantItemsWithContent.clear();
-        ctx.activeNestedTaskToolCallIds.clear();
-        ctx.nestedTaskLifecycleByToolCallId.clear();
         ctx.activeInteractionMode = interactionMode;
         ctx.lastPlanFingerprint = undefined;
         ctx.lastTurnActivityAt = Date.now();

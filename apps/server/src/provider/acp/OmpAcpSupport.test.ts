@@ -2,7 +2,7 @@
 // Purpose: Verifies OMP ACP spawn, auth, mode, model, and discovery behavior.
 // Layer: Provider ACP support tests
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -37,6 +37,26 @@ describe("resolveOmpCliBinaryPath", () => {
   it("resolves to the omp name when nothing is configured", () => {
     // Either a PATH-resolved absolute path or the bare "omp" name; both end in omp.
     expect(resolveOmpCliBinaryPath("")).toMatch(/omp$/);
+  });
+
+  it("resolves a relative PATH entry against the requested native child cwd", () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "omp-cli-relative-path-"));
+    try {
+      const relativeExecutable = path.join(cwd, "tools", "omp");
+      mkdirSync(path.dirname(relativeExecutable));
+      writeFileSync(relativeExecutable, "#!/bin/sh\nexit 0\n");
+      chmodSync(relativeExecutable, 0o700);
+
+      expect(
+        resolveOmpCliBinaryPath(undefined, {
+          env: { PATH: "tools" },
+          cwd,
+          platform: "linux",
+        }),
+      ).toBe(path.join("tools", "omp"));
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 });
 
@@ -89,6 +109,36 @@ describe("buildOmpAcpSpawnInput", () => {
     ]);
     expect(buildOmpAcpSpawnInput(undefined, "/tmp/project").args).toEqual(["acp"]);
   });
+
+  it("uses only the verified private Bun launcher when idle-task compatibility is supplied", () => {
+    const launch = {
+      bunExecutable: "/tool path/бин/bun",
+      cliEntrypoint: "/tool path/omp/cli.js",
+      preloadPath: "/private/tmp/项目 space/preload.mjs",
+      expectedMarker: "SYNARA_OMP_ACP_IDLE_TASK_COMPAT test",
+    };
+    const spawn = buildOmpAcpSpawnInput({ binaryPath: "/selected/omp" }, "/tmp/project", {
+      disableExtensions: true,
+      configOverlayPath: "/owned/config.yml",
+      appendSystemPromptPath: "/owned/APPEND_SYSTEM.md",
+      idleTaskCompat: launch,
+    });
+
+    expect(spawn.command).toBe(launch.bunExecutable);
+    expect(spawn.args).toEqual([
+      "--preload",
+      launch.preloadPath,
+      launch.cliEntrypoint,
+      "acp",
+      "--no-extensions",
+      "--config",
+      "/owned/config.yml",
+      "--append-system-prompt",
+      "/owned/APPEND_SYSTEM.md",
+    ]);
+    expect(spawn.env).toBeDefined();
+  });
+
   it("passes a configured agent dir through PI_CODING_AGENT_DIR", () => {
     const spawn = buildOmpAcpSpawnInput({ agentDir: "/profiles/work" }, "/tmp/project");
     expect(spawn.env?.PI_CODING_AGENT_DIR).toBe("/profiles/work");

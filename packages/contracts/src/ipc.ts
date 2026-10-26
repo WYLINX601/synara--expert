@@ -1,4 +1,10 @@
 import { SkillLibraryRequest, SkillLibraryResponse } from "./skillLibrary";
+import type {
+  SkillManagementAccess,
+  SkillManagementCredentialRevokeInput,
+  SkillManagementCredentialSummary,
+  SkillManagementPairingResult,
+} from "./skillManagementAuth";
 import type { HubPlansApi } from "./hubPlan";
 import type { HubTeamsApi } from "./hubCollaboration";
 import { Schema } from "effect";
@@ -1367,6 +1373,12 @@ export interface NativeApi {
     deleteExpert: (input: ExpertDeleteInput) => Promise<void>;
     previewExpert: (input: ExpertPreviewInput) => Promise<ExpertPreview>;
     skillLibrary: (input: SkillLibraryRequest) => Promise<SkillLibraryResponse>;
+    readSkillManagementAccess: () => Promise<SkillManagementAccess>;
+    createSkillManagementPairing: () => Promise<SkillManagementPairingResult>;
+    listSkillManagementCredentials: () => Promise<ReadonlyArray<SkillManagementCredentialSummary>>;
+    revokeSkillManagementCredential: (
+      input: SkillManagementCredentialRevokeInput,
+    ) => Promise<{ readonly revoked: boolean }>;
     listSkillPackages: () => Promise<ReadonlyArray<SkillPackage>>;
     listSkillPackageSources: () => Promise<ReadonlyArray<SkillPackageSource>>;
     readSkillPackage: (input: SkillPackageReadInput) => Promise<SkillPackage>;

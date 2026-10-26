@@ -1,6 +1,6 @@
 # Linx / Synara Expert 项目上下文
 
-更新日期：2026-10-25
+更新日期：2026-10-26
 
 范围：以 Linx V2.0 组织长期方向管理、专业任务执行与能力进化，并在现有 Synara Expert / MCP / 工作台适配层上增量推进。本文只负责项目路由、设计边界与当前状态；产品、技术和验收细节以链接的权威文档为准。
 
@@ -68,6 +68,8 @@ Personal Workbench 已更新为 0.1.5，源码 `8f7143cf6f001aa495d57f0e3867a91c
 2026-10-21 至 22 的候选范围、决定和检查见[分批执行与验收记录](../docs/hub-reliability-2026-10-21-acceptance.md)。这是专项历史进度；是否包含在当前 main 和安装版，须按当前提交核对，不由该记录推断。
 
 ## 统一 Skill 管理与固定装配（本轮候选）
+
+2026-10-26 后续需求已收敛，用户已授权完成五个开发阶段，开发与本轮可执行验证已完成，Claude 真实模型按用户选择保留认证阻塞：解决 G1、对齐 G4 筛选排序/G6 前后端批量装配/G7 管理 CLI/G11 原生元数据装配；仅四端，不做浏览器目录上传、Markdown 预览、市场检索、工作区或机器扫描，不创建默认管理 Agent。用户确认更新从下一次 Run 生效：当前运行及恢复保持旧装配，未启动排队与同任务后续 Run 解析最新版本。原生字段不再作为装配拒绝条件；原生执行、相对资源和子运行继承需一并研发验证。见[产品范围](../docs/skill-management-product-discussion-v0.1.md#iteration-20261026)与[研发修订方案](../docs/expert-skill-package-design.md#iteration-plan-20261026)。本轮实际进度和验证见[实施记录](../docs/skill-management-2026-10-26-acceptance.md)，不继承 `bc29ed9bf` 的通过结论；下段保留上一候选原结果。
 
 2026-10-25，用户确认参考 Multica 的统一管理方案并要求实施：Expert 只使用固定装配，空装配为零；普通任务沿用 harness；编辑/来源刷新自动影响新任务，已接受任务固定旧包；无法证明子代理继承则阻断，不建设旧任务兼容/转换层或清理历史数据。当前架构见[固定装配方案](../docs/expert-skill-package-design.md#current-skill-management)，实际检查、运行缺口与交付状态见[本轮验收记录](../docs/skill-management-2026-10-25-acceptance.md)。候选位于 `codex/feature-skill-management` 的独立 worktree，已完成实现、独立审查补强、全库与所列本地门禁及隔离预览验证，等待用户评审；本地提交不代表 main、安装应用或发布已更新。
 

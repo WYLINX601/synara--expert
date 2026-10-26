@@ -1540,7 +1540,7 @@ it.each([false, true])(
         const session = (await Effect.runPromise(adapter.listSessions()))[0]!;
         expect(session.skillApplication).toMatchObject({
           enforcement: "native-fixed",
-          nativeSubagents: "blocked",
+          nativeSubagents: "inherit",
           lifecycleGeneration: "pi-fixed-generation",
         });
         expect(session.skillApplication?.activeEntries).toHaveLength(entries.length);
@@ -1551,7 +1551,6 @@ it.each([false, true])(
           true,
         );
         expect(captured.modelTools[0]!.some((tool) => tool.name === "computer_run")).toBe(true);
-        expect(captured.modelTools[0]!.some((tool) => tool.name === "subagent")).toBe(false);
         if (!empty) {
           writeFileSync(file, "tampered Skill");
           await expect(send(adapter)).rejects.toThrow(/fixed Pi Skill/iu);

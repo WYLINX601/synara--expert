@@ -101,23 +101,34 @@ describe("Skill archive boundary", () => {
           ],
         })
       ).skills![0]!;
-      const refreshed = (
-        await store.execute({
-          action: "previewRefresh",
-          skillId: replacement.skillId,
-          expectedRevision: replacement.revision,
-        })
-      ).preview!;
-      expect(refreshed.package.packageId).toBe(first.packageId);
-      expect(refreshed.resourceChanges).toEqual([]);
-      const current = (
-        await store.execute({
-          action: "refresh",
-          skillId: replacement.skillId,
-          expectedRevision: replacement.revision,
-          previewId: refreshed.previewId,
-        })
-      ).skill!;
+      let current = replacement;
+      if (source === "local") {
+        await expect(
+          store.execute({
+            action: "previewRefresh",
+            skillId: replacement.skillId,
+            expectedRevision: replacement.revision,
+          }),
+        ).rejects.toThrow("Only GitHub, Skills.sh, and ClawHub sources can be refreshed in place");
+      } else {
+        const refreshed = (
+          await store.execute({
+            action: "previewRefresh",
+            skillId: replacement.skillId,
+            expectedRevision: replacement.revision,
+          })
+        ).preview!;
+        expect(refreshed.package.packageId).toBe(first.packageId);
+        expect(refreshed.resourceChanges).toEqual([]);
+        current = (
+          await store.execute({
+            action: "refresh",
+            skillId: replacement.skillId,
+            expectedRevision: replacement.revision,
+            previewId: refreshed.previewId,
+          })
+        ).skill!;
+      }
       expect(current.packageId).toBe(first.packageId);
       expect(current.source.packageId).toBe(first.packageId);
       expect(

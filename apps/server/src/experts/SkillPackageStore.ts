@@ -40,6 +40,12 @@ const MAX_ENTRIES = 5_000;
 const PREVIEW_TTL_MS = 15 * 60 * 1_000;
 const MAX_PREVIEWS = 100;
 const ordinal = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
+const LEGACY_NATIVE_METADATA_REASON =
+  "Provider-native context, agent, model or hooks semantics are unsupported by the unified index.";
+const LEGACY_INVALID_YAML_NATIVE_REASON =
+  "Provider-native execution metadata is unsupported by the unified index.";
+const LEGACY_INVALID_YAML_ISSUE =
+  "Invalid YAML frontmatter; scalar metadata uses the existing discovery parser.";
 const SkillPackageRemovalRecord = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   packageId: SkillPackageId,
@@ -163,23 +169,6 @@ function manifestFromResources(
     if (!description) issues.push("Missing frontmatter description.");
     const frontmatterBlock =
       /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\s|$)/u.exec(resource.bytes!.toString("utf8"))?.[1] ?? "";
-    let incompatibleReason: string | undefined;
-    try {
-      const parsed: unknown = YAML.parse(frontmatterBlock, { logLevel: "error" });
-      if (
-        parsed &&
-        typeof parsed === "object" &&
-        ["context", "agent", "model", "hooks"].some((key) => Object.hasOwn(parsed, key))
-      )
-        incompatibleReason =
-          "Provider-native context, agent, model or hooks semantics are unsupported by the unified index.";
-    } catch {
-      issues.push("Invalid YAML frontmatter; scalar metadata uses the existing discovery parser.");
-      if (/^["']?(?:context|agent|model|hooks)["']?\s*:/mu.test(frontmatterBlock))
-        incompatibleReason =
-          "Provider-native execution metadata is unsupported by the unified index.";
-    }
-    if (incompatibleReason) issues.push(incompatibleReason);
     if (/^allowed-tools\s*:/mu.test(frontmatterBlock))
       issues.push(
         "allowed-tools grants no permissions; host approval and access rules still apply.",
@@ -201,7 +190,6 @@ function manifestFromResources(
       ...(typeof metadata["user-invocable"] === "boolean"
         ? { userInvocable: metadata["user-invocable"] }
         : {}),
-      ...(incompatibleReason ? { incompatibleReason } : {}),
     });
   }
   resources.sort((left, right) => ordinal(left.path, right.path));
@@ -221,6 +209,64 @@ function manifestFromResources(
     fileCount,
     totalBytes,
   });
+}
+
+/**
+ * Older package manifests persisted these derived incompatibility diagnostics.
+ * Normalize only an exact diagnostic that the old derivation would have emitted
+ * for the current immutable SKILL.md bytes; every other manifest field remains
+ * an exact-match integrity input.
+ */
+function historicalNativeMetadataDiagnostic(
+  content: string,
+): { readonly reason: string; readonly invalidYaml?: true } | undefined {
+  const frontmatter = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\s|$)/u.exec(content)?.[1] ?? "";
+  try {
+    const parsed: unknown = YAML.parse(frontmatter, { logLevel: "error" });
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      ["context", "agent", "model", "hooks"].some((key) => Object.hasOwn(parsed, key))
+    )
+      return { reason: LEGACY_NATIVE_METADATA_REASON };
+  } catch {
+    if (/^["']?(?:context|agent|model|hooks)["']?\s*:/mu.test(frontmatter))
+      return { reason: LEGACY_INVALID_YAML_NATIVE_REASON, invalidYaml: true };
+  }
+  return undefined;
+}
+
+function normalizeHistoricalManifest(
+  stored: SkillPackage,
+  resources: ReadonlyArray<CollectedExpertResource>,
+): SkillPackage {
+  const contentByEntry = new Map(
+    resources
+      .filter(
+        (resource) => resource.kind === "file" && path.posix.basename(resource.path) === "SKILL.md",
+      )
+      .map((resource) => [
+        resource.path.slice("content/".length),
+        resource.bytes!.toString("utf8"),
+      ]),
+  );
+  const entries = stored.entries.map((entry) => {
+    const content = contentByEntry.get(entry.entryPath);
+    const diagnostic = content ? historicalNativeMetadataDiagnostic(content) : undefined;
+    if (!diagnostic || entry.incompatibleReason !== diagnostic.reason) return entry;
+    const issues = [...entry.issues];
+    const reasonIndex = issues.indexOf(diagnostic.reason);
+    if (reasonIndex < 0) return entry;
+    issues.splice(reasonIndex, 1);
+    if (diagnostic.invalidYaml) {
+      const invalidYamlIndex = issues.indexOf(LEGACY_INVALID_YAML_ISSUE);
+      if (invalidYamlIndex < 0) return entry;
+      issues.splice(invalidYamlIndex, 1);
+    }
+    const { incompatibleReason: _legacyReason, ...current } = entry;
+    return { ...current, issues };
+  });
+  return { ...stored, entries };
 }
 
 async function collectSource(selectedPath: string): Promise<{
@@ -329,9 +375,10 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
         );
       }
       const actual = manifestFromResources(stored.rootName, collected);
+      const compatibleStored = normalizeHistoricalManifest(stored, collected);
       if (
         actual.packageId !== packageId ||
-        expertResourceFiles.stableJson(actual) !== expertResourceFiles.stableJson(stored)
+        expertResourceFiles.stableJson(actual) !== expertResourceFiles.stableJson(compatibleStored)
       )
         throw new Error("Package manifest/content mismatch.");
       return actual;
@@ -987,11 +1034,6 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
         if (!entry)
           throw new SkillPackageStoreError(
             `Skill entry is not in package ${selection.packageId}: ${selection.entryPath}`,
-            "invalid_input",
-          );
-        if (entry.incompatibleReason)
-          throw new SkillPackageStoreError(
-            `Incompatible skill ${entry.name}: ${entry.incompatibleReason}`,
             "invalid_input",
           );
         if (entry.disableModelInvocation && selection.activation === "startup")

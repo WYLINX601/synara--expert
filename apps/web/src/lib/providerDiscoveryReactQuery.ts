@@ -283,7 +283,11 @@ export const providerDiscoveryQueryKeys = {
     agentDir: string | null,
     instanceId: ProviderInstanceId | null = null,
   ) => ["provider-discovery", "skills", provider, instanceId, cwd, agentDir] as const,
-  skillsCatalog: (cwd: string | null) => ["provider-discovery", "skills-catalog", cwd] as const,
+  skillsCatalog: (
+    cwd: string | null,
+    provider: ProviderKind | null = null,
+    generation: string | null = null,
+  ) => ["provider-discovery", "skills-catalog", cwd, provider, generation] as const,
   plugins: (
     provider: ProviderKind,
     cwd: string | null,
@@ -382,12 +386,15 @@ export function providerSkillsQueryOptions(input: {
   enabled?: boolean;
 }) {
   return queryOptions({
-    queryKey: providerDiscoveryQueryKeys.skills(
-      input.provider,
-      input.cwd,
-      input.agentDir ?? null,
-      input.instanceId ?? null,
-    ),
+    queryKey: [
+      ...providerDiscoveryQueryKeys.skills(
+        input.provider,
+        input.cwd,
+        input.agentDir ?? null,
+        input.instanceId ?? null,
+      ),
+      input.threadId ?? null,
+    ],
     queryFn: async () => {
       const api = ensureNativeApi();
       if (!input.cwd) {
@@ -410,13 +417,27 @@ export function providerSkillsQueryOptions(input: {
 // Unified cross-provider skills catalog (settings page); not filtered by toggles.
 // Keep prior data during refetches so Settings does not flicker back to "Scanning..."
 // while the server refreshes filesystem discovery in the background.
-export function skillsCatalogQueryOptions(input?: { cwd?: string | null; enabled?: boolean }) {
+export function skillsCatalogQueryOptions(input?: {
+  cwd?: string | null;
+  provider?: ProviderKind | null;
+  enabled?: boolean;
+  forceReload?: boolean;
+  connectionGeneration?: string | null;
+}) {
   const cwd = input?.cwd ?? null;
   return queryOptions({
-    queryKey: providerDiscoveryQueryKeys.skillsCatalog(cwd),
+    queryKey: providerDiscoveryQueryKeys.skillsCatalog(
+      cwd,
+      input?.provider ?? null,
+      input?.connectionGeneration ?? null,
+    ),
     queryFn: async (): Promise<ProviderSkillsCatalogResult> => {
       const api = ensureNativeApi();
-      return api.provider.listSkillsCatalog(cwd ? { cwd } : {});
+      return api.provider.listSkillsCatalog({
+        ...(cwd ? { cwd } : {}),
+        ...(input?.provider ? { provider: input.provider } : {}),
+        ...(input?.forceReload ? { forceReload: true } : {}),
+      });
     },
     enabled: input?.enabled ?? true,
     staleTime: 30_000,

@@ -3,6 +3,8 @@ import type { Editor } from "@pierre/diffs/edit";
 export type PierreEditor = Editor<undefined>;
 
 export interface CodeEditHistoryControls {
+  /** Read the live document when saving or leaving an editor before React publishes it. */
+  getText?: () => string;
   undo: () => void;
   redo: () => void;
   revertTo: (value: string) => void;
@@ -33,6 +35,7 @@ export function resetPierreEditLoad(): void {
 
 export function createCodeEditHistoryControls(editor: PierreEditor): CodeEditHistoryControls {
   return {
+    getText: () => editor.getText(),
     undo: () => {
       editor.undo();
     },

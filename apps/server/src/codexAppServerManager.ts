@@ -933,6 +933,7 @@ function spawnCodexAppServer(input: {
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly strictSkillDisabledPaths?: ReadonlyArray<string>;
+  readonly fixedNativeSubagents?: boolean;
 }): ChildProcessWithoutNullStreams {
   const sourceHomePath = input.env.CODEX_SQLITE_HOME?.trim();
   if (!sourceHomePath) {
@@ -945,20 +946,10 @@ function spawnCodexAppServer(input: {
       "--config",
       "thread_unload_delay_secs=0",
       ...(input.strictSkillDisabledPaths !== undefined
-        ? [
-            "--config",
-            "skills.include_instructions=false",
-            "--config",
-            "skills.bundled.enabled=false",
-            "--config",
-            "features.multi_agent=false",
-            "--config",
-            "features.multi_agent_v2=false",
-            "--config",
-            "agents.enabled=false",
-            "--config",
-            `skills.config=[${input.strictSkillDisabledPaths.map((skillPath) => `{path=${JSON.stringify(skillPath)},enabled=false}`).join(",")}]`,
-          ]
+        ? buildFixedNativeCodexConfigOverrides(
+            input.strictSkillDisabledPaths,
+            input.fixedNativeSubagents === true,
+          )
         : []),
     ],
     {
@@ -969,6 +960,29 @@ function spawnCodexAppServer(input: {
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
+}
+
+/** CLI overrides are applied after user, project, cloud-managed and system config. */
+export function buildFixedNativeCodexConfigOverrides(
+  strictSkillDisabledPaths: ReadonlyArray<string>,
+  nativeSubagents: boolean,
+): readonly string[] {
+  return [
+    "--config",
+    "features.plugins=false",
+    "--config",
+    "skills.include_instructions=false",
+    "--config",
+    "skills.bundled.enabled=false",
+    "--config",
+    `features.multi_agent=${nativeSubagents}`,
+    "--config",
+    `features.multi_agent_v2=${nativeSubagents}`,
+    "--config",
+    `agents.enabled=${nativeSubagents}`,
+    "--config",
+    `skills.config=[${strictSkillDisabledPaths.map((skillPath) => `{path=${JSON.stringify(skillPath)},enabled=false}`).join(",")}]`,
+  ];
 }
 
 export function normalizeCodexModelSlug(
@@ -1430,9 +1444,11 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   private async buildSessionProcessEnv(
     codexOptions: CodexDiscoveryOptions | undefined,
     expectedCodexContinuationGeneration?: string,
+    fixedExpertNativeDiscovery = false,
   ) {
     const processEnvInput = {
       ...codexProcessEnvInputForOptions(codexOptions),
+      ...(fixedExpertNativeDiscovery ? { fixedExpertNativeDiscovery: true } : {}),
       ...(expectedCodexContinuationGeneration
         ? { expectedSharedContinuationGeneration: expectedCodexContinuationGeneration }
         : {}),
@@ -1462,7 +1478,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       const projection = context.fixedSkillProjection;
       if (!projection) throw new Error("Fixed Codex Skill projection is missing.");
       await this.sendRequest(context, "skills/extraRoots/set", {
-        extraRoots: [nodePath.join(projection.root, "skills")],
+        extraRoots: [...projection.skillRoots],
       });
       const cwd = context.session.cwd ?? process.cwd();
       const response = await this.sendRequest<Record<string, unknown>>(context, "skills/list", {
@@ -1515,8 +1531,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
             (skill) =>
               !projection.entries.some(
                 (entry) =>
-                  (entry.name === skill.name ||
-                    `${projection.pluginName}:${entry.name}` === skill.name) &&
+                  (entry.name === skill.name || entry.nativeName === skill.name) &&
                   nodePath.resolve(entry.path) === nodePath.resolve(skill.path),
               ),
           )
@@ -1534,14 +1549,15 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         skills = this.readObject(configuration, "skills"),
         bundled = this.readObject(skills, "bundled");
       if (
-        features?.multi_agent !== false ||
-        features.multi_agent_v2 !== false ||
-        agents?.enabled !== false ||
+        features?.plugins !== false ||
+        features?.multi_agent !== (expertSession.skillPolicy.nativeSubagents === "inherit") ||
+        features.multi_agent_v2 !== (expertSession.skillPolicy.nativeSubagents === "inherit") ||
+        agents?.enabled !== (expertSession.skillPolicy.nativeSubagents === "inherit") ||
         skills?.include_instructions !== false ||
         bundled?.enabled !== false
       )
         throw new Error(
-          "Codex did not attest fixed Skill discovery and disabled native subagents.",
+          "Codex did not attest fixed Skill/plugin discovery and the fixed native subagent policy.",
         );
       if (!context.lifecycleGeneration)
         throw new Error("Fixed native verification requires a lifecycle generation.");
@@ -1730,6 +1746,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       const processLaunch = await this.buildSessionProcessEnv(
         normalizedCodexOptions,
         input.expectedCodexContinuationGeneration,
+        input.expertSession?.skillPolicy !== undefined,
       );
       if (
         input.expertSession?.skillPolicy &&
@@ -1768,7 +1785,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         cwd: resolvedCwd,
         env: processLaunch.env,
         ...(input.expertSession?.skillPolicy
-          ? { strictSkillDisabledPaths: strictSkillDisabledPaths ?? [] }
+          ? {
+              strictSkillDisabledPaths: strictSkillDisabledPaths ?? [],
+              fixedNativeSubagents: input.expertSession.skillPolicy.nativeSubagents === "inherit",
+            }
           : {}),
       });
 
@@ -2855,6 +2875,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       const processLaunch = await this.buildSessionProcessEnv(
         normalizedCodexOptions,
         input.expectedCodexContinuationGeneration,
+        input.expertSession?.skillPolicy !== undefined,
       );
       signal?.throwIfAborted();
       const launchAuthFingerprint = processLaunch.authFingerprint;
@@ -4396,7 +4417,11 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ? { environment: normalizedCodexOptions.environment }
         : {}),
     });
-    const processLaunch = await this.buildSessionProcessEnv(normalizedCodexOptions, undefined);
+    const processLaunch = await this.buildSessionProcessEnv(
+      normalizedCodexOptions,
+      undefined,
+      fixed !== undefined,
+    );
     const launchAuthFingerprint = processLaunch.authFingerprint;
     if (launchAuthFingerprint !== expectedAuthFingerprint) {
       throw new Error("Codex authentication changed before discovery launch; retry the request.");
@@ -4406,7 +4431,12 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       binaryPath: codexBinaryPath,
       cwd: normalizedCwd,
       env: processLaunch.env,
-      ...(fixed ? { strictSkillDisabledPaths: [] } : {}),
+      ...(fixed
+        ? {
+            strictSkillDisabledPaths: [],
+            fixedNativeSubagents: fixed.session.skillPolicy?.nativeSubagents === "inherit",
+          }
+        : {}),
     });
     const context: CodexSessionContext = {
       ...(fixed

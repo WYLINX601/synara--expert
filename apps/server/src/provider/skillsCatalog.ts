@@ -374,6 +374,8 @@ export interface SkillsCatalogDiscoveryInput {
   readonly synaraBaseDir: string;
   /** Provider whose native copies should win when the same skill exists in several roots. */
   readonly provider?: ProviderKind | null;
+  /** Runtime import reads only this provider's roots, without cross-provider fallback. */
+  readonly nativeOnly?: boolean;
   /** Settings needs every origin; composer/provider pickers keep one winner by name. */
   readonly includeDuplicateOrigins?: boolean;
   /** Bypass the short-lived discovery cache. */
@@ -640,6 +642,7 @@ export async function discoverSkillsCatalog(
     input.synaraBaseDir,
     input.agentDir?.trim() ?? "",
     input.includeDuplicateOrigins ? "all-origins" : "deduped",
+    input.nativeOnly ? "native-only" : "portable-catalog",
   ].join("\u0000");
 
   if (!input.forceReload) {
@@ -655,13 +658,17 @@ export async function discoverSkillsCatalog(
   }
 
   const scan = (async () => {
-    await ensureSynaraSkillsDir(input.synaraBaseDir);
+    if (input.nativeOnly && !input.provider)
+      throw new Error("A runtime is required for native discovery.");
+    if (!input.nativeOnly) await ensureSynaraSkillsDir(input.synaraBaseDir);
     const roots = [
-      ...skillsCatalogRoots(input),
-      ...(await discoverClaudePluginSkillRoots({
-        homeDir: input.homeDir,
-        ...(input.cwd ? { cwd: input.cwd } : {}),
-      })),
+      ...(input.nativeOnly ? providerNativeSkillRoots(input) : skillsCatalogRoots(input)),
+      ...(!input.nativeOnly || input.provider === "claudeAgent"
+        ? await discoverClaudePluginSkillRoots({
+            homeDir: input.homeDir,
+            ...(input.cwd ? { cwd: input.cwd } : {}),
+          })
+        : []),
     ];
     const skills = input.includeDuplicateOrigins
       ? await collectSkillDescriptorsFromRoots(roots)

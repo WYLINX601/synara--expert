@@ -21,6 +21,8 @@ export interface CodeEditorPaneProps {
   value: string;
   valueVersion: number;
   fileName: string;
+  /** Isolate independent package editors that use the same relative file name. */
+  cacheKeyPrefix?: string;
   resolvedTheme: "light" | "dark";
   onChange: (value: string) => void;
   onSave: () => void;
@@ -108,9 +110,9 @@ export function CodeEditorPane(props: CodeEditorPaneProps) {
     () => ({
       name: props.fileName,
       contents: valueRef.current,
-      cacheKey: `edit:${props.fileName}:${props.valueVersion}`,
+      cacheKey: `${props.cacheKeyPrefix ?? "edit"}:${props.fileName}:${props.valueVersion}`,
     }),
-    [props.fileName, props.valueVersion],
+    [props.cacheKeyPrefix, props.fileName, props.valueVersion],
   );
   const editorOptions = useCodeEditorSessionOptions({
     onChange: props.onChange,

@@ -294,6 +294,62 @@ describe("SkillPackageStore", () => {
     expect(result.package.fileCount).toBe(1);
   });
 
+  it("imports and resolves native execution metadata without rewriting the original Skill", async () => {
+    const { source, stateDir, store } = await fixture();
+    const skillPath = path.join(source, "skills", "pm", "SKILL.md");
+    const original = [
+      "---",
+      "name: bmad-pm",
+      "description: PM role",
+      "context: fork",
+      "agent: reviewer",
+      "model: sonnet",
+      "hooks:",
+      "  PreToolUse:",
+      "    - matcher: Bash",
+      "      hooks:",
+      "        - type: command",
+      "          command: ./scripts/check.sh",
+      "---",
+      "Use ./scripts/check.sh and ../../modules/config.yaml.",
+      "",
+    ].join("\n");
+    await writeFile(skillPath, original);
+    await mkdir(path.join(source, "skills", "pm", "scripts"), { recursive: true });
+    await writeFile(path.join(source, "skills", "pm", "scripts", "check.sh"), "exit 0\n");
+
+    const preview = await store.preview({ path: source });
+    const entry = preview.package.entries.find(
+      (candidate) => candidate.entryPath === "skills/pm/SKILL.md",
+    )!;
+    expect(entry.incompatibleReason).toBeUndefined();
+    expect(entry.issues.join("\n")).not.toContain("Provider-native");
+
+    const imported = await store.import({ previewId: preview.previewId });
+    const [resolved] = await store.resolveSelections([
+      {
+        packageId: imported.package.packageId,
+        entryPath: entry.entryPath,
+        activation: "on-demand",
+      },
+    ]);
+    expect(resolved).toBeDefined();
+    expect(await readFile(resolved!.path, "utf8")).toBe(original);
+    expect(
+      await readFile(
+        path.join(
+          packageDir(stateDir, imported.package.packageId),
+          "content",
+          "skills",
+          "pm",
+          "scripts",
+          "check.sh",
+        ),
+        "utf8",
+      ),
+    ).toBe("exit 0\n");
+  });
+
   it("selects only requested entries without projecting or renaming siblings", async () => {
     const { source, stateDir, store } = await fixture();
     const result = await importSource(store, source);
@@ -325,6 +381,89 @@ describe("SkillPackageStore", () => {
     ]);
     expect(await store.resolveSelections([])).toEqual([]);
   });
+
+  it.each([
+    {
+      kind: "valid native metadata",
+      body: [
+        "---",
+        "name: bmad-pm",
+        "description: PM role",
+        "context: fork",
+        "agent: reviewer",
+        "model: inherit",
+        "hooks:",
+        "  PreToolUse: []",
+        "---",
+        "Use the provider-native metadata.",
+        "",
+      ].join("\n"),
+      reason:
+        "Provider-native context, agent, model or hooks semantics are unsupported by the unified index.",
+      previousIssues: [],
+    },
+    {
+      kind: "malformed native metadata",
+      body: [
+        "---",
+        "name: bmad-pm",
+        "description: PM role",
+        "context: [fork",
+        "---",
+        "Use the provider-native metadata.",
+        "",
+      ].join("\n"),
+      reason: "Provider-native execution metadata is unsupported by the unified index.",
+      previousIssues: [
+        "Invalid YAML frontmatter; scalar metadata uses the existing discovery parser.",
+      ],
+    },
+  ])(
+    "reads and reuses a baseline package with exact historical diagnostics ($kind)",
+    async ({ body, reason, previousIssues }) => {
+      const { source, stateDir, store } = await fixture();
+      await writeFile(path.join(source, "skills", "pm", "SKILL.md"), body);
+      const originalPreview = await store.preview({ path: source });
+      const originalImport = await store.import({ previewId: originalPreview.previewId });
+      const directory = packageDir(stateDir, originalImport.package.packageId);
+      const manifestPath = path.join(directory, "package.json");
+      await chmod(manifestPath, 0o600);
+      const baselineManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      baselineManifest.entries[0].incompatibleReason = reason;
+      baselineManifest.entries[0].issues.push(...previousIssues, reason);
+      await writeFile(manifestPath, `${JSON.stringify(baselineManifest)}\n`);
+      await chmod(manifestPath, 0o400);
+
+      expect(await store.list()).toHaveLength(1);
+      const [resolved] = await store.resolveSelections([
+        {
+          packageId: originalImport.package.packageId,
+          entryPath: "skills/pm/SKILL.md",
+          activation: "on-demand",
+        },
+      ]);
+      expect(resolved?.name).toBe("bmad-pm");
+      expect(resolved?.path).toContain(originalImport.package.packageId);
+
+      const reusedPreview = await store.preview({ path: source });
+      const reused = await store.import({ previewId: reusedPreview.previewId });
+      expect(reused.reused).toBe(true);
+      expect(reused.package.packageId).toBe(originalImport.package.packageId);
+      expect(reused.package.entries[0]?.incompatibleReason).toBeUndefined();
+      expect(reused.package.entries[0]?.issues).not.toContain(reason);
+      for (const issue of previousIssues)
+        expect(reused.package.entries[0]?.issues).not.toContain(issue);
+
+      await chmod(manifestPath, 0o600);
+      const tampered = JSON.parse(await readFile(manifestPath, "utf8"));
+      tampered.entries[0].description = "unrelated manifest damage";
+      await writeFile(manifestPath, `${JSON.stringify(tampered)}\n`);
+      await chmod(manifestPath, 0o400);
+      await expect(store.read(originalImport.package.packageId)).rejects.toMatchObject({
+        code: "package_corrupt",
+      });
+    },
+  );
 
   it("allows one startup entry and many on-demand entries, but rejects two startup entries", async () => {
     const { source, store } = await fixture();

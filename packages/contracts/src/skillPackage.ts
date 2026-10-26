@@ -134,6 +134,7 @@ export const SkillPackageImportResult = Schema.Struct({
 export type SkillPackageImportResult = typeof SkillPackageImportResult.Type;
 
 export const ResolvedExpertSkillEntry = Schema.Struct({
+  managedSkillId: Schema.optional(TrimmedNonEmptyString),
   ...ExpertSkillSelection.fields,
   name: TrimmedNonEmptyString,
   description: Schema.String,
@@ -146,6 +147,8 @@ export type ResolvedExpertSkillEntry = typeof ResolvedExpertSkillEntry.Type;
 
 /** Evidence of catalog submission, not evidence that a model executed a skill. */
 export const ExpertSkillApplication = Schema.Struct({
+  skillAssemblyId: Schema.optional(TrimmedNonEmptyString),
+  skillRootRunId: Schema.optional(TrimmedNonEmptyString),
   mode: Schema.Literal("catalog"),
   snapshotId: TrimmedNonEmptyString,
   packageIds: Schema.Array(SkillPackageId),
@@ -162,6 +165,6 @@ export const ExpertSkillApplication = Schema.Struct({
       }),
     ),
   ),
-  nativeSubagents: Schema.optional(Schema.Literal("blocked")),
+  nativeSubagents: Schema.optional(Schema.Literals(["blocked", "inherit"])),
 });
 export type ExpertSkillApplication = typeof ExpertSkillApplication.Type;

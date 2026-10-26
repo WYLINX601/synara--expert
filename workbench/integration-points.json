@@ -79,7 +79,7 @@
         "apps/server/src/provider/claudeExpertSession.ts",
         "apps/server/src/provider/acp/OmpExpertSession.ts"
       ],
-      "responsibility": "Resume reuses the persisted provider runtime payload and the thread's pinned Expert snapshot. It does not resolve the current Expert definition when restoring an existing session; provider-specific application remains owned by each adapter. Claude and OMP verify immutable native projections and return application receipts. Cursor-only native forks remain stopped with the inherited snapshots until their first start; only a verified running generation may persist applied records.",
+      "responsibility": "Recovery reuses the durable root Run Skill assembly and pinned task Persona/MCP identity. A new execution intent resolves current saved Skill bindings and heads before native initialization; a changed assembly rebuilds native continuation with prior-transcript bootstrap. Provider adapters own their protocol, discovery proof and native loading. Unknown initialization effects block automatic replay. Runtime receipts identify assembly and generation; they do not prove model execution.",
       "tests": [
         "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
         "apps/server/src/provider/Layers/ProviderService.test.ts",
@@ -164,9 +164,18 @@
         "apps/server/src/provider/fixedSkillProjection.ts",
         "apps/web/src/components/settings/ExpertEditor.tsx",
         "apps/web/src/components/chat/ExpertTaskControl.tsx",
-        "apps/server/src/provider/acp/OmpAcpSupport.ts"
+        "apps/server/src/provider/acp/OmpAcpSupport.ts",
+        "packages/contracts/src/runSkillAssembly.ts",
+        "packages/contracts/src/providerDiscovery.ts",
+        "apps/server/src/experts/RunSkillAssemblyStore.ts",
+        "apps/server/src/experts/SkillLibraryOperations.ts",
+        "apps/server/src/experts/expertSnapshotSession.ts",
+        "apps/web/src/lib/providerDiscoveryReactQuery.ts",
+        "apps/server/src/codexHomePaths.ts",
+        "apps/server/src/codexProcessEnv.ts",
+        "apps/server/src/provider/acp/OmpAcpIdleTaskCompat.ts"
       ],
-      "responsibility": "The managed Skill library owns stable identities and source/head revisions; SkillPackageStore owns immutable content, limits and reference protection. Library commits and package publication share the existing stateDir lifecycle lock; ExpertStore resolves current enabled bindings only at native task admission and publishes schema-3 fixed-policy snapshots. Accepted work and recovery retain those package hashes. Owner RPC and authenticated HTTP share one stateDir library instance and preview lifecycle; large resources use binary transport. The existing Settings parent, ExpertClient, CodeEditorPane and draft/connection guards own management and bidirectional bindings. Fixed Expert discovery reads the server snapshot; native command discovery is suppressed. Provider adapters own native source filtering, full resolved identity/hash verification, reload/turn gates and blocked unverifiable native subagents; lightweight projections point at original immutable resources. Native verification is required for fixed-enforcement receipts and does not prove model execution. Non-Expert behavior retains its native path. Historical switch tooling remains separately owned and is not invoked by this feature; old task data is preserved and unsupported policies fail closed. Static boundary coverage checks declared direct imports only, not native behavior, transitive isolation or an OS filesystem sandbox.",
+      "responsibility": "The managed Skill library owns stable IDs, full immutable content heads, provenance, filters and per-Expert CAS binding operations. The lifecycle lock serializes publication and durable idempotency journals; multi-Expert commands report partial results. RunSkillAssemblyStore freezes latest saved bindings and content only at actual root execution; approvals/recovery/goal and same Hub work retain that root. Task Persona/MCP identity remains pinned. Run records retain package references. Owner RPC and authenticated binary HTTP share the same store. Composer discovery reads the running assembly or an unfrozen latest preview; stable managed IDs resolve again at actual start. Adapters own native exclusion, original-content views, hashes, invocation and subagent inheritance. Native receipts require proof and remain separate from model execution evidence. Ordinary harness behavior remains provider-native; historical records are preserved. Static boundary checks cover declared direct imports, not transitive runtime isolation or an OS filesystem sandbox. OMP async Task state remains active after dispatch until native terminal metadata, retaining task identity and deduplication across parent turns. Fixed OMP v2 inherited tasks use a private exact-bundle Bun preload to forward idle native Task updates; selected CLI bytes, preflight and actual ACP marker are verified before model execution. Unknown bundles fail closed. Fixed Codex home selection is separate from ordinary source adoption and image-root validation.",
       "tests": [
         "packages/contracts/src/skillPackage.test.ts",
         "apps/server/src/experts/SkillPackageStore.test.ts",
@@ -203,8 +212,18 @@
         "apps/server/src/workbench/host/expertDiscovery.test.ts",
         "apps/server/src/provider/acp/OmpAcpSupport.test.ts",
         "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
-        "apps/web/src/components/chat/useComposerDiscovery.browser.tsx",
-        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts"
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
+        "apps/server/src/experts/RunSkillAssemblyStore.test.ts",
+        "apps/web/src/lib/providerDiscoveryReactQuery.test.ts",
+        "apps/server/src/provider/fixedSkillProjection.test.ts",
+        "apps/server/src/provider/claudeExpertSession.test.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.test.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.live.test.ts",
+        "apps/server/src/codexHomePaths.test.ts",
+        "apps/server/src/codexProcessEnv.test.ts",
+        "apps/server/src/codexNestedOverlay.test.ts",
+        "apps/server/src/codexGeneratedImages.test.ts",
+        "apps/server/src/provider/acp/OmpAcpIdleTaskCompat.test.ts"
       ],
       "featureFiles": [
         "apps/server/src/experts/skillPackageLifecycle.ts",
@@ -221,7 +240,17 @@
         "apps/server/src/experts/SkillLibraryStore.ts",
         "apps/server/src/experts/skillLibraryArchive.ts",
         "apps/web/src/components/settings/SkillLibrarySettingsPanel.tsx",
-        "apps/web/src/components/settings/ExpertSkillBindingsEditor.tsx"
+        "apps/web/src/components/settings/SkillLibraryToolbar.tsx",
+        "apps/web/src/components/settings/SkillLibraryDetail.tsx",
+        "apps/web/src/components/settings/SkillResourceTree.tsx",
+        "apps/web/src/components/settings/SkillMarkdownPreview.tsx",
+        "apps/web/src/components/settings/skillLibraryFiles.ts",
+        "apps/web/src/lib/pathTree.ts",
+        "apps/web/src/components/settings/RuntimeSkillImportPanel.tsx",
+        "apps/web/src/components/settings/ExpertSkillBindingsEditor.tsx",
+        "apps/server/src/experts/RunSkillAssemblyStore.ts",
+        "apps/server/src/experts/SkillLibraryOperations.ts",
+        "apps/server/src/experts/expertSnapshotSession.ts"
       ]
     },
     {
@@ -725,6 +754,49 @@
         "apps/web/src/features/hubCollaboration/HubInputRequestReplyComposer.browser.tsx",
         "apps/server/src/workbench/host/hubPlanService.test.ts",
         "apps/server/src/projectAgent/hubWorkLifecycle.test.ts"
+      ]
+    },
+    {
+      "id": "skill-management-cli",
+      "surface": "management-command",
+      "entryFiles": [
+        "apps/server/src/main.ts",
+        "apps/server/src/http.ts",
+        "packages/contracts/src/skillManagementAuth.ts",
+        "packages/contracts/src/ws.ts",
+        "packages/contracts/src/rpc.ts",
+        "packages/contracts/src/ipc.ts",
+        "apps/server/src/wsRpc.ts",
+        "apps/server/src/workbench/host/skillManagementRpc.ts",
+        "apps/web/src/components/settings/AdvancedSettingsPanel.tsx",
+        "apps/web/src/components/settings/SkillManagementPairingSettingsPanel.tsx",
+        "apps/web/src/workbench/host/expertClient.ts",
+        "apps/server/src/workbench/host/skillManagementAuthorization.ts"
+      ],
+      "responsibility": "The product CLI discovers one explicit local instance and calls the same SkillLibraryStore commands as owner UI. Owner-only pairing issues a short-lived single-use code bound to instance/flavor; private capability credentials are separate from SessionRole and external MCP credentials. Every mutation rechecks expiry/revocation. Skill and Expert-binding capabilities do not authorize general Expert configuration. The existing Settings parent owns visibility; binary transfer shares the authenticated control boundary. No new management Agent or MCP tool is registered. Static checks do not prove credential runtime behavior or packaged desktop integration. Authentication is accessed through a host capability returning only verified role/credential-source facts; the command module never receives the native auth service.",
+      "tests": [
+        "apps/server/src/managementCli/cli.test.ts",
+        "apps/server/src/managementCli/execute.test.ts",
+        "apps/server/src/managementCli/managementAuth.test.ts",
+        "apps/server/src/managementCli/httpRoute.e2e.test.ts",
+        "apps/server/src/workbench/host/skillManagementRpc.test.ts",
+        "apps/server/src/managementCli/parserBoundary.e2e.test.ts",
+        "apps/web/src/wsNativeApi.test.ts",
+        "apps/web/src/components/settings/SkillManagementPairingSettingsPanel.browser.tsx",
+        "packages/contracts/src/rpc.test.ts",
+        "apps/server/src/managementCli/requestEnvelope.test.ts"
+      ],
+      "featureFiles": [
+        "apps/server/src/managementCli/cli.ts",
+        "apps/server/src/managementCli/execute.ts",
+        "apps/server/src/managementCli/transport.ts",
+        "apps/server/src/managementCli/credential.ts",
+        "apps/server/src/managementCli/managementAuth.ts",
+        "apps/server/src/managementCli/httpRoute.ts",
+        "apps/server/src/managementCli/exitCodes.ts",
+        "apps/server/src/managementCli/requestEnvelope.ts",
+        "apps/web/src/components/settings/SkillManagementPairingSettingsPanel.tsx",
+        "apps/web/src/wsNativeApi.ts"
       ]
     }
   ]

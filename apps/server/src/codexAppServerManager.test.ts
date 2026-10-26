@@ -23,6 +23,7 @@ import { PassThrough } from "node:stream";
 import {
   FIXED_EXPERT_SKILL_POLICY,
   type ProviderExpertSession,
+  type ResolvedExpertSkillEntry,
   ApprovalRequestId,
   BROWSER_TOOL_NAMES,
   DEFAULT_MODEL_BY_PROVIDER,
@@ -39,6 +40,7 @@ import {
   readCodexSharedContinuationGeneration,
 } from "./codexProcessEnv";
 import {
+  buildFixedNativeCodexConfigOverrides,
   buildCodexCollaborationMode,
   buildCodexThreadOpenRequest,
   resolveCodexThreadOpenMinimumVersion,
@@ -75,6 +77,7 @@ import {
   MINIMUM_CODEX_EXCLUDE_TURNS_CLI_VERSION,
   CODEX_CLI_UNPARSEABLE_VERSION_MESSAGE,
 } from "./provider/codexCliVersion.ts";
+import { createSkillPackageStore } from "./experts/SkillPackageStore.ts";
 
 const asThreadId = (value: string): ThreadId => ThreadId.makeUnsafe(value);
 
@@ -92,6 +95,7 @@ function createSyntheticCodexAppServer(options?: {
   readonly fixedNative?: {
     readonly ambient: Array<{ name: string; path: string }>;
     readonly wrongConfig?: boolean;
+    readonly wrongPlugins?: boolean;
     readonly impostor?: boolean;
     readonly catalog?: (cwd: string, skills: unknown[]) => unknown;
   };
@@ -294,10 +298,11 @@ function createSyntheticCodexAppServer(options?: {
               ...(options?.fixedNative
                 ? {
                     features: {
-                      multi_agent: false,
-                      multi_agent_v2: options.fixedNative.wrongConfig ?? false,
+                      plugins: options.fixedNative.wrongPlugins === true,
+                      multi_agent: !options.fixedNative.wrongConfig,
+                      multi_agent_v2: !options.fixedNative.wrongConfig,
                     },
-                    agents: { enabled: false },
+                    agents: { enabled: !options.fixedNative.wrongConfig },
                     skills: { include_instructions: false, bundled: { enabled: false } },
                   }
                 : {}),
@@ -399,19 +404,19 @@ function createSyntheticCodexManager(
   });
   const internals = manager as unknown as {
     assertSupportedCodexCliVersion: () => Promise<string | undefined>;
-    buildSessionProcessEnv: () => Promise<{
+    buildSessionProcessEnv: (...args: unknown[]) => Promise<{
       env: NodeJS.ProcessEnv;
       authTracking: undefined;
       authFingerprint: undefined;
     }>;
   };
   vi.spyOn(internals, "assertSupportedCodexCliVersion").mockResolvedValue("9.9.9");
-  vi.spyOn(internals, "buildSessionProcessEnv").mockResolvedValue({
+  const buildSessionProcessEnv = vi.spyOn(internals, "buildSessionProcessEnv").mockResolvedValue({
     env: {},
     authTracking: undefined,
     authFingerprint: undefined,
   });
-  return { manager, teardownProcessTree };
+  return { manager, teardownProcessTree, buildSessionProcessEnv };
 }
 
 const fullAccessTurnOverrides = {
@@ -7657,26 +7662,41 @@ describe("collab child routing after the parent turn ends", () => {
 });
 
 describe("Codex fixed native Skill wiring", () => {
-  function fixture(empty = false) {
+  it("places plugin-engine disable at the fixed-process CLI override layer", () => {
+    expect(buildFixedNativeCodexConfigOverrides([], true)).toContain("features.plugins=false");
+    expect(buildFixedNativeCodexConfigOverrides(["/selected/SKILL.md"], false)).toEqual(
+      expect.arrayContaining([
+        "features.plugins=false",
+        "features.multi_agent=false",
+        "features.multi_agent_v2=false",
+        "agents.enabled=false",
+        'skills.config=[{path="/selected/SKILL.md",enabled=false}]',
+      ]),
+    );
+  });
+
+  async function fixture(empty = false) {
     const root = mkdtempSync(path.join(os.tmpdir(), "synara-codex-fixed-wiring-")),
       stateDir = path.join(root, "state"),
-      file = path.join(root, "original", "SKILL.md");
-    mkdirSync(path.dirname(file), { recursive: true });
+      packageSource = path.join(root, "package");
+    mkdirSync(path.join(packageSource, "skills", "selected"), { recursive: true });
     const body = "---\nname: selected\ndescription: Selected immutable Skill\n---\nInstructions\n";
-    writeFileSync(file, body);
-    const entries = empty
-      ? []
-      : [
-          {
-            name: "selected",
-            path: file,
-            sha256: createHash("sha256").update(body).digest("hex"),
-            packageId: `pkg_${"a".repeat(64)}`,
-            entryPath: "SKILL.md",
-            description: "Selected immutable Skill",
-            activation: "on-demand" as const,
-          },
-        ];
+    writeFileSync(path.join(packageSource, "skills", "selected", "SKILL.md"), body);
+    const entries: ResolvedExpertSkillEntry[] = [];
+    if (!empty) {
+      const store = createSkillPackageStore(stateDir);
+      const preview = await store.preview({ path: packageSource });
+      const imported = await store.import({ previewId: preview.previewId });
+      const resolved = await store.resolveSelections([
+        {
+          packageId: imported.package.packageId,
+          entryPath: "skills/selected/SKILL.md",
+          activation: "on-demand",
+        },
+      ]);
+      entries.push(...resolved);
+    }
+    const file = entries[0]?.path ?? path.join(packageSource, "skills", "selected", "SKILL.md");
     const expertSession: ProviderExpertSession = {
       snapshotId: `exp_${"b".repeat(64)}`,
       persona: "Fixed Expert",
@@ -7688,16 +7708,33 @@ describe("Codex fixed native Skill wiring", () => {
     };
     return { root, stateDir, file, expertSession };
   }
+
+  function removeFixedFixture(root: string): void {
+    const makeDirectoriesWritable = (directory: string): void => {
+      const stat = lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+      chmodSync(directory, 0o700);
+      for (const name of readdirSync(directory))
+        makeDirectoriesWritable(path.join(directory, name));
+    };
+    makeDirectoriesWritable(root);
+    rmSync(root, { recursive: true, force: true });
+  }
   it.each(["default", "account", "custom-home"] as const)(
     "isolates probe lifecycle and owns projections independently of %s launch home",
     async (mode) => {
-      const selected = fixture(),
+      const selected = await fixture(),
         ambient = [
           { name: "selected", path: path.join(selected.root, "project-impostor/SKILL.md") },
           { name: "global-c", path: path.join(selected.root, "global/SKILL.md") },
         ];
       const fake = createSyntheticCodexAppServer({ fixedNative: { ambient } }),
-        { manager } = createSyntheticCodexManager(fake, undefined, undefined, selected.stateDir),
+        { manager, buildSessionProcessEnv } = createSyntheticCodexManager(
+          fake,
+          undefined,
+          undefined,
+          selected.stateDir,
+        ),
         events: { kind?: string; method?: string; threadId?: string }[] = [];
       manager.on("event", (event) => events.push(event));
       try {
@@ -7720,6 +7757,7 @@ describe("Codex fixed native Skill wiring", () => {
             : {}),
         });
         expect(fake.spawnInputs).toHaveLength(2);
+        expect(buildSessionProcessEnv.mock.calls.some((call) => call[2] === true)).toBe(true);
         expect([...(fake.spawnInputs[1]?.strictSkillDisabledPaths ?? [])].toSorted()).toEqual(
           ambient.map((item) => item.path).toSorted(),
         );
@@ -7744,7 +7782,7 @@ describe("Codex fixed native Skill wiring", () => {
         ).toBe(true);
         expect(session.skillApplication).toMatchObject({
           enforcement: "native-fixed",
-          nativeSubagents: "blocked",
+          nativeSubagents: "inherit",
           lifecycleGeneration: "fixed-generation",
           activeEntries: [
             { path: selected.file, sha256: selected.expertSession.skillEntries![0]!.sha256 },
@@ -7760,14 +7798,19 @@ describe("Codex fixed native Skill wiring", () => {
         );
       } finally {
         await manager.stopAll();
-        rmSync(selected.root, { recursive: true, force: true });
+        removeFixedFixture(selected.root);
       }
     },
   );
   it("refuses a native fork before discovery or lifecycle publication for a fixed assembly", async () => {
-    const selected = fixture(),
+    const selected = await fixture(),
       fake = createSyntheticCodexAppServer({ fixedNative: { ambient: [] } }),
-      { manager } = createSyntheticCodexManager(fake, undefined, undefined, selected.stateDir);
+      { manager, buildSessionProcessEnv } = createSyntheticCodexManager(
+        fake,
+        undefined,
+        undefined,
+        selected.stateDir,
+      );
     try {
       await expect(
         manager.forkThread({
@@ -7784,7 +7827,7 @@ describe("Codex fixed native Skill wiring", () => {
       expect(fake.requests).toEqual([]);
     } finally {
       await manager.stopAll();
-      rmSync(selected.root, { recursive: true, force: true });
+      removeFixedFixture(selected.root);
     }
   });
   it.each([
@@ -7798,7 +7841,7 @@ describe("Codex fixed native Skill wiring", () => {
     "relative-path",
     "malformed-data",
   ] as const)("refuses a malformed %s native empty catalog before a thread", async (failure) => {
-    const selected = fixture(true),
+    const selected = await fixture(true),
       fake = createSyntheticCodexAppServer({
         fixedNative: {
           ambient: [],
@@ -7851,15 +7894,20 @@ describe("Codex fixed native Skill wiring", () => {
       ).toBe(false);
     } finally {
       await manager.stopAll();
-      rmSync(selected.root, { recursive: true, force: true });
+      removeFixedFixture(selected.root);
     }
   });
   it("empty assembly disables every ambient entry and returns an empty native receipt", async () => {
-    const selected = fixture(true),
+    const selected = await fixture(true),
       fake = createSyntheticCodexAppServer({
         fixedNative: { ambient: [{ name: "bundled", path: "/outside/SKILL.md" }] },
       }),
-      { manager } = createSyntheticCodexManager(fake, undefined, undefined, selected.stateDir);
+      { manager, buildSessionProcessEnv } = createSyntheticCodexManager(
+        fake,
+        undefined,
+        undefined,
+        selected.stateDir,
+      );
     try {
       const session = await manager.startSession({
         threadId: asThreadId("fixed-empty"),
@@ -7870,16 +7918,17 @@ describe("Codex fixed native Skill wiring", () => {
         agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
       });
       expect(session.skillApplication?.activeEntries).toEqual([]);
+      expect(buildSessionProcessEnv.mock.calls.some((call) => call[2] === true)).toBe(true);
       expect(fake.spawnInputs[1]?.strictSkillDisabledPaths).toEqual(["/outside/SKILL.md"]);
     } finally {
       await manager.stopAll();
-      rmSync(selected.root, { recursive: true, force: true });
+      removeFixedFixture(selected.root);
     }
   });
-  it.each(["impostor", "wrongConfig"] as const)(
+  it.each(["impostor", "wrongConfig", "wrongPlugins"] as const)(
     "refuses %s before opening a native thread or minting a receipt",
     async (failure) => {
-      const selected = fixture(),
+      const selected = await fixture(),
         fake = createSyntheticCodexAppServer({ fixedNative: { ambient: [], [failure]: true } }),
         { manager } = createSyntheticCodexManager(fake, undefined, undefined, selected.stateDir);
       try {
@@ -7900,7 +7949,7 @@ describe("Codex fixed native Skill wiring", () => {
         ).toBe(false);
       } finally {
         await manager.stopAll();
-        rmSync(selected.root, { recursive: true, force: true });
+        removeFixedFixture(selected.root);
       }
     },
   );

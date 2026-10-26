@@ -10,6 +10,7 @@ import {
   type ExpertConnectionTestInput,
   type ExpertPreviewInput,
   type ProviderSkillReference,
+  type ProviderExpertSession,
   type ProviderListCommandsInput,
   type ProviderListCommandsResult,
   type ProviderListSkillsInput,
@@ -149,20 +150,32 @@ export function makeWorkbenchExpertRpcHandlers<R>(input: {
         }),
       ),
     [WS_METHODS.serverSkillLibrary]: ({ request }: { request: SkillLibraryRequest }) =>
-      expertRpcEffect(
-        input.requireSkillOwner ?? requireOwner,
-        async () => {
-          if (
-            (request.action === "save" &&
-              request.changes.some((change) => (change.content?.length ?? 0) > 1_398_104)) ||
-            (request.action === "create" && Buffer.byteLength(request.body) > 1024 * 1024)
-          )
-            throw new Error("Large Skill files must use the authenticated HTTP upload endpoint.");
-          const result = await runtime.skillLibrary.execute(request);
-          if ((result.file?.content.length ?? 0) > 1_398_104)
-            throw new Error("Large Skill files must use the authenticated HTTP download endpoint.");
-          return result;
-        },
+      rpcEffect(
+        Effect.gen(function* () {
+          yield* input.requireSkillOwner ?? requireOwner;
+          const principal = yield* CurrentManagedAttachmentPrincipal;
+          return yield* Effect.tryPromise({
+            try: async () => {
+              if (
+                (request.action === "save" &&
+                  request.changes.some((change) => (change.content?.length ?? 0) > 1_398_104)) ||
+                (request.action === "create" && Buffer.byteLength(request.body) > 1024 * 1024)
+              )
+                throw new Error(
+                  "Large Skill files must use the authenticated HTTP upload endpoint.",
+                );
+              const result = await runtime.skillLibrary.execute(request, {
+                actor: principal.ownerId,
+              });
+              if ((result.file?.content.length ?? 0) > 1_398_104)
+                throw new Error(
+                  "Large Skill files must use the authenticated HTTP download endpoint.",
+                );
+              return result;
+            },
+            catch: (cause) => cause,
+          });
+        }),
         "Skill library operation failed",
       ),
     [WS_METHODS.serverListSkillPackages]: () =>
@@ -347,6 +360,10 @@ export function makeWorkbenchExpertDiscoveryHandlers<R>(input: {
     threadId: string,
   ) => Effect.Effect<{ readonly snapshotId: string } | null, unknown, R>;
   readonly readSnapshot: (snapshotId: string) => Promise<ExpertSnapshot>;
+  readonly readSkillSession?: (
+    threadId: string,
+    snapshot: ExpertSnapshot,
+  ) => Effect.Effect<ProviderExpertSession, unknown, R>;
   readonly listCommands: (
     request: ProviderListCommandsInput,
   ) => Effect.Effect<ProviderListCommandsResult, unknown, R>;
@@ -378,8 +395,12 @@ export function makeWorkbenchExpertDiscoveryHandlers<R>(input: {
       Effect.gen(function* () {
         const snapshot = yield* fixedSnapshot(request.threadId);
         if (!snapshot) return yield* input.listSkills(request);
+        const session =
+          input.readSkillSession && request.threadId
+            ? yield* input.readSkillSession(request.threadId, snapshot)
+            : snapshot;
         return {
-          skills: (snapshot.skillEntries ?? [])
+          skills: (session.skillEntries ?? [])
             .filter((entry) => entry.userInvocable !== false)
             .map((entry) => ({
               name: entry.name,
@@ -390,6 +411,7 @@ export function makeWorkbenchExpertDiscoveryHandlers<R>(input: {
                 snapshotId: snapshot.snapshotId,
                 packageId: entry.packageId,
                 entryPath: entry.entryPath,
+                ...(entry.managedSkillId ? { skillId: entry.managedSkillId } : {}),
               },
             })),
           source: "expert.fixed-snapshot",

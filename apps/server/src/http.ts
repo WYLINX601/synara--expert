@@ -116,6 +116,7 @@ import {
   VOICE_UPLOAD_CAPACITY_ERROR_MESSAGE,
   voiceUploadAdmissionGate,
 } from "./voiceUploadAdmission";
+import { skillManagementCliEffectRouteLayer } from "./managementCli/httpRoute";
 
 const PROJECT_FAVICON_CACHE_CONTROL = "public, max-age=3600";
 const SITE_FAVICON_CACHE_CONTROL_SUCCESS = "public, max-age=86400"; // 24 h
@@ -247,6 +248,7 @@ export function makeEffectHttpRouteLayer(
     editorIconEffectRouteLayer,
     localImageEffectRouteLayer,
     binaryUploadEffectRouteLayer,
+    skillManagementCliEffectRouteLayer,
     attachmentsEffectRouteLayer,
     staticAndDevEffectRouteLayer,
   );
@@ -1084,6 +1086,9 @@ const binaryUploadEffectHandler = Effect.gen(function* () {
           skillId,
           expectedRevision: Number(url.searchParams.get("expectedRevision")),
           name: url.searchParams.get("skillName") ?? current.name,
+          ...(url.searchParams.has("description")
+            ? { description: url.searchParams.get("description")! }
+            : {}),
           tags: url.searchParams.has("tags")
             ? JSON.parse(url.searchParams.get("tags")!)
             : current.tags,

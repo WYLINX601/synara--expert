@@ -69,6 +69,12 @@ import { Server } from "./effectServer";
 import { ServerLoggerLive } from "./serverLogger";
 import { ServerSettingsService } from "./serverSettings";
 import { formatHostForUrl, isLoopbackHost, isWildcardHost } from "./startupAccess";
+import {
+  managementCliArguments,
+  managementCliFlags,
+  type ManagementCliFlagValues,
+} from "./managementCli/cli";
+import { executeManagementCliArgs } from "./managementCli/execute";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
 import { startThreadRetentionJob } from "./threadRetention";
 import {
@@ -779,9 +785,92 @@ const mcpCommand = Command.make("mcp").pipe(
   Command.withSubcommands([mcpServeCommand, mcpPairCommand]),
 );
 
+const managementCommandOptions = {
+  ...managementCliFlags,
+  arguments: managementCliArguments,
+};
+
+function managementCliFlagsFromCommand(
+  input: typeof managementCommandOptions extends never ? never : Record<string, unknown>,
+): ManagementCliFlagValues {
+  const value = input as Record<string, unknown>;
+  const readOption = <A>(key: string) => Option.getOrUndefined(value[key] as Option.Option<A>);
+  return {
+    json: value.json as boolean,
+    content: readOption<string>("content"),
+    contentFile: readOption<string>("contentFile"),
+    stdin: value.stdin as boolean,
+    codeStdin: value.codeStdin as boolean,
+    file: readOption<string>("file"),
+    url: readOption<string>("url"),
+    path: readOption<string>("path"),
+    name: readOption<string>("name"),
+    description: readOption<string>("description"),
+    search: readOption<string>("search"),
+    usage: readOption<"used" | "unused">("usage"),
+    source: value.source as ReadonlyArray<string>,
+    tag: value.tag as ReadonlyArray<string>,
+    expertId: value.expertId as ReadonlyArray<string>,
+    expertIds: readOption<string>("expertIds"),
+    skillId: value.skillId as ReadonlyArray<string>,
+    skillIds: readOption<string>("skillIds"),
+    createdBy: readOption<string>("createdBy"),
+    sort: readOption<"name" | "used-by" | "created" | "updated">("sort"),
+    direction: readOption<"asc" | "desc">("direction"),
+    expectedRevision: readOption<number>("expectedRevision"),
+    requestId: readOption<string>("requestId"),
+    dryRun: value.dryRun as boolean,
+    clear: value.clear as boolean,
+    yes: value.yes as boolean,
+    overwriteLocalEdits: value.overwriteLocalEdits as boolean,
+    entry: readOption<string>("entry"),
+    duplicate: readOption<"skip" | "rename" | "replace">("duplicate"),
+    activation: readOption<"startup" | "on-demand">("activation"),
+    instanceId: readOption<string>("instanceId"),
+    flavor: readOption<ManagementCliFlagValues["flavor"]>("flavor"),
+  };
+}
+
+const skillManagementCommand = Command.make("skill", managementCommandOptions, (input) =>
+  Effect.gen(function* () {
+    const parent = yield* baseServerCommand;
+    const parsedFlags = managementCliFlagsFromCommand(input);
+    yield* Effect.promise(() =>
+      executeManagementCliArgs({
+        namespace: "skill",
+        args: input.arguments,
+        flags: parsedFlags,
+        baseDir: resolveExternalMcpBaseDir(Option.getOrUndefined(parent.synaraHome)),
+      }),
+    );
+  }),
+).pipe(
+  Command.withDescription("Manage Skills using the paired local Synara management credential."),
+);
+
+const expertSkillManagementCommand = Command.make("expert", managementCommandOptions, (input) =>
+  Effect.gen(function* () {
+    const parent = yield* baseServerCommand;
+    const parsedFlags = managementCliFlagsFromCommand(input);
+    yield* Effect.promise(() =>
+      executeManagementCliArgs({
+        namespace: "expert",
+        args: input.arguments,
+        flags: parsedFlags,
+        baseDir: resolveExternalMcpBaseDir(Option.getOrUndefined(parent.synaraHome)),
+      }),
+    );
+  }),
+).pipe(Command.withDescription("Manage Expert Skill bindings using the local Synara CLI."));
+
 const serverCommand = baseServerCommand.pipe(
   Command.withHandler((input) => makeServerProgram(input)),
-  Command.withSubcommands([serverToolsCommand, mcpCommand]),
+  Command.withSubcommands([
+    serverToolsCommand,
+    mcpCommand,
+    skillManagementCommand,
+    expertSkillManagementCommand,
+  ]),
 );
 
 export const synaraCli = serverCommand;

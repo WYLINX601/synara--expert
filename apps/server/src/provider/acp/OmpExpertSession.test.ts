@@ -4,13 +4,17 @@
 
 import {
   chmod,
+  lstat,
+  link,
   mkdtemp,
   mkdir,
   readFile,
   readdir,
   realpath,
   rm,
+  rmdir,
   stat,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -21,21 +25,35 @@ import {
   FIXED_EXPERT_SKILL_POLICY,
   type ProviderExpertSession,
   type ProviderSkillReference,
+  type SkillPackageResource,
 } from "@synara/contracts";
 import { Effect } from "effect";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import { createExpertSkillApplication } from "../expertSkillCatalog";
+import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
 
 import {
   OMP_EXPERT_PROJECTION_VERSION,
   prepareOmpExpertSession,
+  removeFixedProjectionStaging,
   type OmpExpertCliResult,
   type OmpExpertSessionPreparationInput,
 } from "./OmpExpertSession.ts";
 
 const tempRoots: string[] = [];
+
+async function makeTreeWritable(target: string): Promise<void> {
+  const info = await lstat(target).catch(() => undefined);
+  if (!info || info.isSymbolicLink()) return;
+  if (info.isDirectory()) {
+    await chmod(target, 0o700);
+    for (const name of await readdir(target)) await makeTreeWritable(path.join(target, name));
+    return;
+  }
+  if (info.isFile()) await chmod(target, 0o600);
+}
 
 async function makeRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "omp-expert-test-"));
@@ -44,7 +62,12 @@ async function makeRoot(): Promise<string> {
 }
 
 afterEach(async () => {
-  await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    tempRoots.splice(0).map(async (root) => {
+      await makeTreeWritable(root);
+      await rm(root, { recursive: true, force: true });
+    }),
+  );
 });
 
 function nativeConfig(overrides: Record<string, unknown> = {}) {
@@ -490,20 +513,31 @@ describe("prepareOmpExpertSession", () => {
 describe("OMP fixed native Skill preparation", () => {
   async function fixedFixture(empty = false) {
     const root = await makeRoot(),
-      skill = await createSkill(root),
-      body = await readFile(skill.path);
-    const entries = empty
-      ? []
-      : [
+      packageSource = path.join(root, "package"),
+      skillPath = path.join(packageSource, "skills", "reviewer", "SKILL.md");
+    await mkdir(path.join(path.dirname(skillPath), "assets"), { recursive: true });
+    await writeFile(
+      skillPath,
+      "---\nname: reviewer\ndescription: Review with care.\n---\nInstructions; read assets/guide.txt relative to this Skill.\n",
+    );
+    await writeFile(path.join(path.dirname(skillPath), "assets", "guide.txt"), "Fixture guide.\n");
+    const entries: Array<NonNullable<ProviderExpertSession["skillEntries"]>[number]> = [];
+    let resources: ReadonlyArray<SkillPackageResource> = [];
+    if (!empty) {
+      const store = createSkillPackageStore(path.join(root, "state"));
+      const preview = await store.preview({ path: packageSource });
+      const imported = await store.import({ previewId: preview.previewId });
+      resources = imported.package.resources;
+      entries.push(
+        ...(await store.resolveSelections([
           {
-            ...skill,
-            packageId: `pkg_${"a".repeat(64)}`,
+            packageId: imported.package.packageId,
             entryPath: "skills/reviewer/SKILL.md",
-            activation: "on-demand" as const,
-            description: "Review with care.",
-            sha256: createHash("sha256").update(body).digest("hex"),
+            activation: "on-demand",
           },
-        ];
+        ])),
+      );
+    }
     const session: ProviderExpertSession = {
       snapshotId: `exp_${"e".repeat(64)}`,
       persona: "Fixed Expert",
@@ -513,8 +547,50 @@ describe("OMP fixed native Skill preparation", () => {
       skillEntries: entries,
       references: [],
     };
-    return { root, session };
+    return { root, session, resources };
   }
+  it("keeps temp and shared package inode untouched when leaf unlink reports EPERM", async () => {
+    const root = await makeRoot();
+    const packageFile = path.join(root, "package", "SKILL.md");
+    const staging = path.join(root, "synara-omp-expert-staging");
+    const projectionFile = path.join(staging, "entry", "SKILL.md");
+    await mkdir(path.dirname(packageFile), { recursive: true });
+    await mkdir(path.dirname(projectionFile), { recursive: true });
+    await writeFile(packageFile, "immutable source\n");
+    await chmod(packageFile, 0o400);
+    await link(packageFile, projectionFile);
+    await chmod(path.dirname(projectionFile), 0o500);
+    await chmod(staging, 0o500);
+    const [beforeInfo, beforeBytes] = await Promise.all([stat(packageFile), readFile(packageFile)]);
+    const fileSystem: NonNullable<Parameters<typeof removeFixedProjectionStaging>[1]> = {
+      lstat,
+      readdir,
+      chmod,
+      unlink: async (target) => {
+        if (target === projectionFile) {
+          throw Object.assign(new Error("simulated Windows read-only unlink"), { code: "EPERM" });
+        }
+        await unlink(target);
+      },
+      rmdir,
+    };
+
+    await expect(removeFixedProjectionStaging(staging, fileSystem)).rejects.toMatchObject({
+      code: "EPERM",
+    });
+    await expect(stat(projectionFile)).resolves.toBeDefined();
+    await expect(stat(staging)).resolves.toBeDefined();
+    const [afterInfo, afterBytes] = await Promise.all([stat(packageFile), readFile(packageFile)]);
+    expect({ dev: afterInfo.dev, ino: afterInfo.ino, mode: afterInfo.mode & 0o777 }).toEqual({
+      dev: beforeInfo.dev,
+      ino: beforeInfo.ino,
+      mode: 0o400,
+    });
+    expect(createHash("sha256").update(afterBytes).digest("hex")).toEqual(
+      createHash("sha256").update(beforeBytes).digest("hex"),
+    );
+    await removeFixedProjectionStaging(staging);
+  });
   function fixedRunner(control: {
     foreign?: boolean;
     subagents?: boolean;
@@ -538,7 +614,7 @@ describe("OMP fixed native Skill preparation", () => {
             for (const [key, value] of Object.entries(config.skills))
               values[`skills.${key}`] = { value };
             values["task.maxRecursionDepth"] = {
-              value: control.subagents ? 1 : config.task.maxRecursionDepth,
+              value: control.subagents ? 0 : config.task.maxRecursionDepth,
             };
             values["advisor.enabled"] = { value: control.advisor ? true : config.advisor.enabled };
             if (control.ambientSource) values["skills.enableAgentsProject"] = { value: true };
@@ -588,7 +664,7 @@ describe("OMP fixed native Skill preparation", () => {
         advisor: { enabled: boolean };
       };
       expect(config.advisor.enabled).toBe(false);
-      expect(config.task.maxRecursionDepth).toBe(0);
+      expect(config.task.maxRecursionDepth).toBe(1);
       for (const key of [
         "enableCodexUser",
         "enableClaudeUser",
@@ -629,7 +705,7 @@ describe("OMP fixed native Skill preparation", () => {
     },
   );
   it("preserves the effective native append instructions while fixing Skills", async () => {
-    const { root, session } = await fixedFixture();
+    const { root, session, resources } = await fixedFixture();
     await mkdir(path.join(root, ".omp"));
     await writeFile(path.join(root, ".omp", "APPEND_SYSTEM.md"), "Native project instructions.");
     const preparation = await Effect.runPromise(
@@ -646,7 +722,47 @@ describe("OMP fixed native Skill preparation", () => {
     const prompt = await readFile(preparation.appendSystemPromptPath!, "utf8");
     expect(prompt).toContain("Native project instructions.");
     expect(prompt).toContain("Fixed Expert");
+    const entry = session.skillEntries![0]!;
+    const packageRoot = path.join(
+      root,
+      "state",
+      "experts",
+      "skill-packages",
+      entry.packageId,
+      "content",
+    );
+    const immutableFiles = await Promise.all(
+      resources
+        .filter((resource) => resource.kind === "file")
+        .map(async (resource) => {
+          const filePath = path.join(
+            packageRoot,
+            ...resource.path.slice("content/".length).split("/"),
+          );
+          const [info, bytes] = await Promise.all([stat(filePath), readFile(filePath)]);
+          return {
+            filePath,
+            dev: info.dev,
+            ino: info.ino,
+            mode: info.mode & 0o777,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+          };
+        }),
+    );
+    expect(immutableFiles).toHaveLength(2);
+    expect(immutableFiles.every((file) => file.mode === 0o400)).toBe(true);
+    const tempRoot = path.dirname(preparation.configOverlayPath!);
     await Effect.runPromise(preparation.cleanup());
+    await expect(stat(tempRoot)).rejects.toThrow();
+    for (const before of immutableFiles) {
+      const [after, bytes] = await Promise.all([stat(before.filePath), readFile(before.filePath)]);
+      expect({ dev: after.dev, ino: after.ino, mode: after.mode & 0o777 }).toEqual({
+        dev: before.dev,
+        ino: before.ino,
+        mode: before.mode,
+      });
+      expect(createHash("sha256").update(bytes).digest("hex")).toBe(before.sha256);
+    }
   });
   it.each(["configOverlayPath", "appendSystemPromptPath"] as const)(
     "revokes prior native proof when the read-only %s changes",

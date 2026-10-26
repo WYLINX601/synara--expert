@@ -1,4 +1,13 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -45,6 +54,7 @@ import { TestClock } from "effect/testing";
 import { afterEach, beforeEach, vi } from "vitest";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
+import { expertResourceFiles } from "../../experts/ExpertStore.ts";
 import { SYNARA_HARNESS_POLICY_MARKER } from "../../agentGateway/harnessPolicy.ts";
 import {
   AgentGatewayCredentials,
@@ -755,6 +765,13 @@ const temporaryExpertDirectories: string[] = [];
 
 afterEach(() => {
   for (const directory of temporaryExpertDirectories.splice(0)) {
+    const makeDirectoriesWritable = (current: string): void => {
+      const stat = lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+      chmodSync(current, 0o700);
+      for (const name of readdirSync(current)) makeDirectoriesWritable(path.join(current, name));
+    };
+    makeDirectoriesWritable(directory);
     rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -16596,22 +16613,61 @@ describe("Claude subagent tracking", () => {
 
 describe("Claude fixed native Skill wiring", () => {
   function fixture(empty = false) {
-    const base = makeClaudeExpertFixture(),
-      entries = empty
-        ? []
-        : [
-            {
-              name: "reviewer",
-              path: base.skillPath,
-              description: "Review safely",
-              packageId: `pkg_${"a".repeat(64)}`,
-              entryPath: "skills/reviewer/SKILL.md",
-              activation: "on-demand" as const,
-              sha256: createHash("sha256").update(readFileSync(base.skillPath)).digest("hex"),
-            },
-          ];
+    const base = makeClaudeExpertFixture();
+    let entries: NonNullable<ProviderExpertSession["skillEntries"]> = [];
+    if (!empty) {
+      const content = readFileSync(base.skillPath),
+        relativePath = "content/skills/reviewer/SKILL.md",
+        resource = {
+          path: relativePath,
+          kind: "file" as const,
+          size: content.byteLength,
+          sha256: createHash("sha256").update(content).digest("hex"),
+        },
+        rootName = "claude-fixed-fixture",
+        packageId = `pkg_${expertResourceFiles.hashJson({
+          schemaVersion: 1,
+          rootName,
+          resources: [resource],
+        })}`,
+        packageRoot = path.join(base.root, "state", "experts", "skill-packages", packageId),
+        sourcePath = path.join(packageRoot, relativePath);
+      mkdirSync(path.dirname(sourcePath), { recursive: true });
+      writeFileSync(sourcePath, content, { mode: 0o400 });
+      const manifest = {
+        schemaVersion: 1,
+        packageId,
+        rootName,
+        resources: [resource],
+        entries: [
+          {
+            entryPath: "skills/reviewer/SKILL.md",
+            name: "reviewer",
+            description: "Review code changes for correctness and safety.",
+            issues: [],
+          },
+        ],
+        fileCount: 1,
+        totalBytes: content.byteLength,
+      };
+      writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify(manifest)}\n`, {
+        mode: 0o400,
+      });
+      entries = [
+        {
+          name: "reviewer",
+          path: sourcePath,
+          description: manifest.entries[0]!.description,
+          packageId,
+          entryPath: manifest.entries[0]!.entryPath,
+          activation: "on-demand",
+          sha256: resource.sha256,
+        },
+      ];
+    }
     const session: ProviderExpertSession = {
       snapshotId: `exp_${"d".repeat(64)}`,
+      skillAssemblyId: `assembly-${empty ? "empty" : "selected"}`,
       persona: "Fixed reviewer",
       skillLoading: "index",
       skillPolicy: FIXED_EXPERT_SKILL_POLICY,
@@ -16621,14 +16677,26 @@ describe("Claude fixed native Skill wiring", () => {
     };
     return { ...base, session };
   }
-  function provenance(options: ClaudeQueryOptions): SDKControlReloadPluginsResponse {
-    const plugin = options.plugins!.find((item) => item.type === "local")!;
-    const root = (plugin as { path: string }).path,
-      manifest = JSON.parse(
-        readFileSync(path.join(root, ".claude-plugin/plugin.json"), "utf8"),
-      ) as { name: string };
+  function provenance(
+    options: ClaudeQueryOptions,
+    relativePluginPaths = false,
+  ): SDKControlReloadPluginsResponse {
+    const plugins = (options.plugins ?? [])
+      .filter((item) => item.type === "local")
+      .map((plugin) => {
+        const root = (plugin as { path: string }).path,
+          manifest = JSON.parse(
+            readFileSync(path.join(root, ".claude-plugin/plugin.json"), "utf8"),
+          ) as { name: string };
+        return {
+          name: manifest.name,
+          path: relativePluginPaths
+            ? path.relative(path.resolve(root, "../../../../"), root)
+            : root,
+        };
+      });
     return {
-      plugins: [{ name: manifest.name, path: root }],
+      plugins,
       commands: [],
       agents: [],
       mcpServers: [],
@@ -16660,7 +16728,7 @@ describe("Claude fixed native Skill wiring", () => {
   }
   for (const empty of [false, true])
     it.effect(
-      `verifies exact native context (empty=${empty}), blocks native skill/subagent escapes and rechecks reloads`,
+      `verifies exact native context (empty=${empty}), allows only selected native Skills and rechecks reloads`,
       () => {
         const selected = fixture(empty);
         let names: string[] = [];
@@ -16670,14 +16738,18 @@ describe("Claude fixed native Skill wiring", () => {
           readClaudeCliVersion: async () => "2.1.296",
           onCreate: (options) => {
             names = Array.isArray(options.skills) ? options.skills : [];
+            const { plugins_applied: _previous, ...initialization } =
+              harness.query.initializationResponse;
             harness.query.initializationResponse = {
-              ...harness.query.initializationResponse,
+              ...initialization,
               claude_code_version: "2.1.296",
-              plugins_applied: true,
+              ...(empty ? {} : { plugins_applied: true }),
               commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
             };
-            harness.query.reloadPluginsResponse = provenance(options);
-            harness.query.setContextUsageResponse(contextUsage(names));
+            harness.query.reloadPluginsResponse = provenance(options, !empty);
+            const usage = contextUsage(names);
+            if (empty) delete usage.skills;
+            harness.query.setContextUsageResponse(usage);
           },
         });
         return Effect.gen(function* () {
@@ -16694,17 +16766,25 @@ describe("Claude fixed native Skill wiring", () => {
           assert.equal(session.skillApplication?.activeEntries?.length, empty ? 0 : 1);
           const options = harness.getLastCreateQueryInput()!.options;
           assert.deepEqual(options.skills, names);
-          assert.deepEqual(options.disallowedTools, ["Agent", "Task"]);
+          assert.deepEqual(options.disallowedTools, undefined);
+          assert.deepEqual(options.settingSources, []);
           assert.equal(
             (options.settings as { disableBundledSkills?: boolean }).disableBundledSkills,
             true,
+          );
+          assert.deepEqual(
+            (options.settings as { enabledPlugins?: Record<string, unknown> }).enabledPlugins,
+            {
+              "agents-md@builtin": false,
+              "telemetry@builtin": false,
+              "plugin-authoring@builtin": false,
+            },
           );
           assert.isUndefined(options.agents);
           const callback = options.hooks!.PreToolUse![0]!.hooks[0]!;
           for (const tool of [
             { tool_name: "Agent", tool_input: {} },
             { tool_name: "Task", tool_input: {} },
-            { tool_name: "Skill", tool_input: { skill: "reviewer" } },
             { tool_name: "Skill", tool_input: { skill: "ambient-c" } },
             { tool_name: "reload_skills", tool_input: {} },
           ]) {
@@ -16726,6 +16806,55 @@ describe("Claude fixed native Skill wiring", () => {
               (result as { hookSpecificOutput?: { permissionDecision?: string } })
                 .hookSpecificOutput?.permissionDecision,
               "deny",
+            );
+          }
+          for (const [toolName, subagentType] of [
+            ["Agent", "Explore"],
+            ["Task", "Plan"],
+            ["Agent", "general-purpose"],
+          ] as const) {
+            const result = yield* Effect.promise(() =>
+              callback(
+                {
+                  hook_event_name: "PreToolUse",
+                  session_id: "test",
+                  transcript_path: "",
+                  cwd: selected.cwd,
+                  tool_use_id: `managed-${subagentType}`,
+                  tool_name: toolName,
+                  tool_input: { subagent_type: subagentType },
+                } as HookInput,
+                `managed-${subagentType}`,
+                { signal: new AbortController().signal },
+              ),
+            );
+            assert.equal(
+              (result as { hookSpecificOutput?: { permissionDecision?: string } })
+                .hookSpecificOutput?.permissionDecision,
+              undefined,
+              `${subagentType} should be available under the fixed inherited child policy`,
+            );
+          }
+          if (names[0]) {
+            const selectedSkill = yield* Effect.promise(() =>
+              callback(
+                {
+                  hook_event_name: "PreToolUse",
+                  session_id: "test",
+                  transcript_path: "",
+                  cwd: selected.cwd,
+                  tool_use_id: "selected-skill",
+                  tool_name: "Skill",
+                  tool_input: { skill: names[0] },
+                } as HookInput,
+                "selected-skill",
+                { signal: new AbortController().signal },
+              ),
+            );
+            assert.equal(
+              (selectedSkill as { hookSpecificOutput?: { permissionDecision?: string } })
+                .hookSpecificOutput?.permissionDecision,
+              undefined,
             );
           }
           for (const input of ["/ambient-c", "/reload-plugins", "/reload_skills", "/advisor:on"]) {
@@ -16766,6 +16895,118 @@ describe("Claude fixed native Skill wiring", () => {
         }).pipe(Effect.provide(harness.layer), Effect.scoped);
       },
     );
+
+  it.effect(
+    "uses the SDK-bundled CLI for the persisted default and dispatches a selected Skill natively",
+    () => {
+      const selected = fixture();
+      let versionProbeCalls = 0;
+      let names: string[] = [];
+      const harness = makeHarness({
+        cwd: selected.cwd,
+        baseDir: path.join(selected.root, "state"),
+        readClaudeCliVersion: async () => {
+          versionProbeCalls += 1;
+          return "2.1.92";
+        },
+        onCreate: (options) => {
+          names = Array.isArray(options.skills) ? options.skills : [];
+          harness.query.initializationResponse = {
+            ...harness.query.initializationResponse,
+            claude_code_version: "2.1.296",
+            plugins_applied: true,
+            commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
+          };
+          harness.query.reloadPluginsResponse = provenance(options);
+          harness.query.setContextUsageResponse(contextUsage(names));
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: "claudeAgent",
+          cwd: selected.cwd,
+          runtimeMode: "full-access",
+          lifecycleGeneration: "sdk-bundled-default",
+          providerOptions: {
+            claudeAgent: {
+              binaryPath: "claude",
+              environment: { HOME: selected.root, PATH: process.env.PATH ?? "" },
+            },
+          },
+          expertSession: selected.session,
+        });
+        const options = harness.getLastCreateQueryInput()!.options;
+        assert.equal(options.pathToClaudeCodeExecutable, undefined);
+        assert.equal(versionProbeCalls, 0);
+        assert.deepEqual(options.settingSources, []);
+        assert.equal(
+          (options.settings as { disableBundledSkills?: boolean }).disableBundledSkills,
+          true,
+        );
+        assert.deepEqual(
+          (options.settings as { enabledPlugins?: Record<string, unknown> }).enabledPlugins,
+          {
+            "agents-md@builtin": false,
+            "telemetry@builtin": false,
+            "plugin-authoring@builtin": false,
+          },
+        );
+        assert.equal(names.length, 1);
+        const reference = selected.session.skills[0]!;
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "Review only with the selected Skill.",
+          skills: [reference],
+        });
+        const prompt = yield* Effect.promise(() =>
+          harness.getLastCreateQueryInput()!.prompt[Symbol.asyncIterator]().next(),
+        );
+        const content = prompt.value?.message.content ?? [];
+        assert.include(
+          JSON.stringify(content),
+          `/${names[0]} Review only with the selected Skill.`,
+        );
+        yield* adapter.stopSession(THREAD_ID);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    },
+  );
+
+  it.effect(
+    "honors an explicit fixed Expert CLI path and rejects an unprobed plugin protocol version",
+    () => {
+      const selected = fixture();
+      let probedBinaryPath: string | undefined;
+      const harness = makeHarness({
+        cwd: selected.cwd,
+        baseDir: path.join(selected.root, "state"),
+        readClaudeCliVersion: async ({ binaryPath }) => {
+          probedBinaryPath = binaryPath;
+          return "2.1.297";
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const failure = yield* adapter
+          .startSession({
+            threadId: THREAD_ID,
+            provider: "claudeAgent",
+            cwd: selected.cwd,
+            runtimeMode: "full-access",
+            lifecycleGeneration: "custom-cli-protocol",
+            providerOptions: { claudeAgent: { binaryPath: "/operator/claude" } },
+            expertSession: selected.session,
+          })
+          .pipe(Effect.flip);
+        assert.equal(probedBinaryPath, "/operator/claude");
+        assert.match(failure.message, /requires the verified SDK-paired CLI 2\.1\.296/u);
+        assert.isUndefined(harness.getLastCreateQueryInput());
+        assert.isFalse(yield* adapter.hasSession(THREAD_ID));
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    },
+  );
+
   for (const empty of [false, true])
     for (const failure of [
       "missing",
@@ -16779,6 +17020,7 @@ describe("Claude fixed native Skill wiring", () => {
       "duplicate",
       "duplicate-root",
       "no-category",
+      "no-category-with-extra-plugin",
       "no-count",
       "invalid-count",
       "malformed-entry",
@@ -16802,6 +17044,7 @@ describe("Claude fixed native Skill wiring", () => {
                 ...harness.query.initializationResponse,
                 plugins_applied: true,
                 claude_code_version: "2.1.296",
+                commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
               };
               harness.query.reloadPluginsResponse =
                 failure === "missing"
@@ -16818,8 +17061,31 @@ describe("Claude fixed native Skill wiring", () => {
                             ],
                           }
                         : failure === "duplicate"
-                          ? { ...native, plugins: [...native.plugins, ...native.plugins] }
+                          ? {
+                              ...native,
+                              plugins:
+                                native.plugins.length > 0
+                                  ? [...native.plugins, ...native.plugins]
+                                  : [
+                                      {
+                                        name: "unexpected-plugin",
+                                        path: path.join(selected.root, "unexpected-plugin"),
+                                      },
+                                    ],
+                            }
                           : native;
+              if (failure === "no-category-with-extra-plugin") {
+                harness.query.reloadPluginsResponse = {
+                  ...native,
+                  plugins: [
+                    ...native.plugins,
+                    {
+                      name: "unexpected-plugin",
+                      path: path.join(selected.root, "unexpected-plugin"),
+                    },
+                  ],
+                };
+              }
               if (failure === "unavailable")
                 Object.defineProperty(harness.query, "reloadPlugins", { value: undefined });
               if (failure === "null-response") harness.query.reloadPluginsResponse = null;
@@ -16835,7 +17101,9 @@ describe("Claude fixed native Skill wiring", () => {
                   plugins: [...native.plugins, { ...native.plugins[0]!, name: "other-namespace" }],
                 };
               const usage = contextUsage(names);
-              if (failure === "no-category") delete usage.skills;
+              if (failure === "no-category" && empty) usage.skills = null as never;
+              else if (failure === "no-category" || failure === "no-category-with-extra-plugin")
+                delete usage.skills;
               else if (failure === "no-count")
                 delete (usage.skills as unknown as Record<string, unknown>).includedSkills;
               else if (failure === "invalid-count") usage.skills!.totalSkills = -1;
@@ -16912,6 +17180,7 @@ describe("Claude fixed native Skill wiring", () => {
               ...harness.query.initializationResponse,
               plugins_applied: true,
               claude_code_version: "2.1.296",
+              commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
             };
             const usage = contextUsage(names);
             usage.skills!.skillFrontmatter = usage.skills!.skillFrontmatter.map((entry) => ({
@@ -16989,7 +17258,7 @@ describe("Claude fixed native Skill wiring", () => {
       },
     );
   for (const empty of [false, true])
-    for (const pluginsApplied of [undefined, false]) {
+    for (const pluginsApplied of empty ? [false] : [undefined, false]) {
       it.effect(
         `rejects plugins_applied=${String(pluginsApplied)} before fixed context or receipt verification (empty=${empty})`,
         () => {
@@ -17049,13 +17318,15 @@ describe("Claude fixed native Skill wiring", () => {
         baseDir: path.join(selected.root, "state"),
         readClaudeCliVersion: async () => "2.1.296",
         onCreate: (options) => {
+          const names = Array.isArray(options.skills) ? options.skills : [];
           harness.query.initializationResponse = {
             ...harness.query.initializationResponse,
             claude_code_version: "2.1.296",
             plugins_applied: true,
+            commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
           };
           harness.query.reloadPluginsResponse = provenance(options);
-          harness.query.setContextUsageResponse(contextUsage(["reviewer", "native-c"]));
+          harness.query.setContextUsageResponse(contextUsage([...names, "native-c"]));
         },
       });
       return Effect.gen(function* () {

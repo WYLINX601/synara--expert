@@ -350,24 +350,37 @@ function ComboboxChips({
   );
 }
 
-function ComboboxChip({ children, ...props }: ComboboxPrimitive.Chip.Props) {
+function ComboboxChip({
+  children,
+  className,
+  removeButtonProps,
+  ...props
+}: ComboboxPrimitive.Chip.Props & {
+  removeButtonProps?: ComboboxPrimitive.ChipRemove.Props;
+}) {
   return (
     <ComboboxPrimitive.Chip
-      className="flex items-center rounded-[calc(var(--radius-md)-1px)] bg-[var(--color-background-elevated-secondary)] ps-2 font-medium text-[var(--color-text-foreground)] text-ui outline-none sm:text-ui-sm [&_svg:not([class*='size-'])]:size-4 sm:[&_svg:not([class*='size-'])]:size-3.5"
+      className={cn(
+        "flex items-center rounded-[calc(var(--radius-md)-1px)] bg-[var(--color-background-elevated-secondary)] ps-2 font-medium text-[var(--color-text-foreground)] text-ui outline-none sm:text-ui-sm [&_svg:not([class*='size-'])]:size-4 sm:[&_svg:not([class*='size-'])]:size-3.5",
+        className,
+      )}
       data-slot="combobox-chip"
       {...props}
     >
       {children}
-      <ComboboxChipRemove />
+      <ComboboxChipRemove {...removeButtonProps} />
     </ComboboxPrimitive.Chip>
   );
 }
 
-function ComboboxChipRemove(props: ComboboxPrimitive.ChipRemove.Props) {
+function ComboboxChipRemove({ className, ...props }: ComboboxPrimitive.ChipRemove.Props) {
   return (
     <ComboboxPrimitive.ChipRemove
       aria-label="Remove"
-      className="h-full shrink-0 cursor-pointer px-1.5 opacity-80 hover:opacity-100 [&_svg:not([class*='size-'])]:size-4 sm:[&_svg:not([class*='size-'])]:size-3.5"
+      className={cn(
+        "h-full shrink-0 cursor-pointer px-1.5 opacity-80 hover:opacity-100 [&_svg:not([class*='size-'])]:size-4 sm:[&_svg:not([class*='size-'])]:size-3.5",
+        className,
+      )}
       data-slot="combobox-chip-remove"
       {...props}
     >

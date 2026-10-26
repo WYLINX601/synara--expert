@@ -490,6 +490,81 @@ describe("buildCodexProcessEnv", () => {
     }
   });
 
+  it("isolates fixed Expert discovery in a private overlay without changing the regular overlay", async () => {
+    const codexHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-fixed-discovery-"));
+    const runtimeHome = mkdtempSync(path.join(os.tmpdir(), "synara-runtime-fixed-discovery-"));
+    writeFileSync(
+      path.join(codexHome, "config.toml"),
+      [
+        'model = "gpt-6.1-codex"',
+        "",
+        '[plugins."cloud-environment@openai-curated"]',
+        "enabled = true",
+        "",
+        '[plugins."operator-local@local"]',
+        "enabled = true",
+      ].join("\n"),
+      "utf8",
+    );
+    writeFileSync(path.join(codexHome, "auth.json"), '{"auth":"test"}\n', "utf8");
+    mkdirSync(path.join(codexHome, "skills"), { recursive: true });
+    mkdirSync(path.join(codexHome, "plugins", "cache"), { recursive: true });
+    writeFileSync(path.join(codexHome, "skills", "ambient.md"), "ambient skill", "utf8");
+    writeFileSync(path.join(codexHome, "plugins", "cache", "ambient.json"), "{}", "utf8");
+    const baseInput = {
+      env: { SYNARA_HOME: runtimeHome },
+      homePath: codexHome,
+      platform: "win32" as const,
+    };
+
+    try {
+      const regularEnv = await buildCodexProcessEnv(baseInput);
+      const fixedEnv = await buildCodexProcessEnv({
+        ...baseInput,
+        fixedExpertNativeDiscovery: true,
+        appendConfigToml: buildCodexMcpConfigToml("http://127.0.0.1:61240/mcp"),
+      });
+      const regularHome = regularEnv.CODEX_HOME!;
+      const fixedHome = fixedEnv.CODEX_HOME!;
+      expect(fixedHome).toBe(path.join(runtimeHome, "codex-home-overlay", "fixed-expert-native"));
+      expect(fixedHome).not.toBe(regularHome);
+      expect(lstatSync(path.join(regularHome, "skills")).isSymbolicLink()).toBe(true);
+      expect(lstatSync(path.join(regularHome, "plugins")).isSymbolicLink()).toBe(true);
+      expect(existsSync(path.join(fixedHome, "skills"))).toBe(false);
+      expect(existsSync(path.join(fixedHome, "plugins"))).toBe(false);
+      expect(lstatSync(path.join(fixedHome, "sessions")).isSymbolicLink()).toBe(true);
+      expect(path.resolve(readlinkSync(path.join(fixedHome, "auth.json")))).toBe(
+        path.resolve(path.join(codexHome, "auth.json")),
+      );
+      expect(readFileSync(path.join(fixedHome, "config.toml"), "utf8")).toContain(
+        'model = "gpt-6.1-codex"',
+      );
+      const regularConfig = parseToml(readFileSync(path.join(regularHome, "config.toml"), "utf8"));
+      const fixedConfig = parseToml(readFileSync(path.join(fixedHome, "config.toml"), "utf8"));
+      expect(regularConfig.plugins).toMatchObject({
+        "cloud-environment@openai-curated": { enabled: true },
+        "operator-local@local": { enabled: true },
+      });
+      expect(fixedConfig.plugins).toMatchObject({
+        "cloud-environment@openai-curated": { enabled: false },
+        "operator-local@local": { enabled: false },
+      });
+      expect(fixedConfig.mcp_servers).toMatchObject({
+        synara: { url: "http://127.0.0.1:61240/mcp" },
+      });
+      expect(fixedEnv.CODEX_SQLITE_HOME).toBe(codexHome);
+      expect(resolveActiveCodexHomeWritePath({ env: fixedEnv })).toBe(fixedHome);
+      expect(existsSync(path.join(codexHome, "skills", "ambient.md"))).toBe(true);
+      expect(existsSync(path.join(codexHome, "plugins", "cache", "ambient.json"))).toBe(true);
+      expect(readFileSync(path.join(codexHome, "config.toml"), "utf8")).toContain(
+        '[plugins."cloud-environment@openai-curated"]\nenabled = true',
+      );
+    } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+      rmSync(runtimeHome, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a config sqlite_home that escapes the source Codex home", async () => {
     const codexHome = mkdtempSync(path.join(os.tmpdir(), "synara-codex-sqlite-config-"));
     const runtimeHome = mkdtempSync(path.join(os.tmpdir(), "synara-runtime-home-"));

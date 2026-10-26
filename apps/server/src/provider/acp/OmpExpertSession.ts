@@ -4,7 +4,19 @@
  * @module OmpExpertSession
  */
 import { createHash } from "node:crypto";
-import { access, chmod, lstat, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  lstat,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rmdir,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import * as nodeOs from "node:os";
 import * as nodePath from "node:path";
@@ -20,6 +32,55 @@ import { invalidateNativeSkillAssemblyVerification } from "../expertSkillCatalog
 export const OMP_EXPERT_PROJECTION_VERSION = "omp-acp-native-v1" as const;
 export const OMP_EXPERT_SUPPORTED_CLI_VERSION = "18.12.1" as const;
 const OMP_EXPERT_TEMP_PREFIX = "synara-omp-expert-";
+
+interface FixedProjectionCleanupFileSystem {
+  readonly lstat: typeof lstat;
+  readonly readdir: typeof readdir;
+  readonly chmod: typeof chmod;
+  readonly unlink: typeof unlink;
+  readonly rmdir: typeof rmdir;
+}
+
+const fixedProjectionCleanupFileSystem: FixedProjectionCleanupFileSystem = {
+  lstat,
+  readdir,
+  chmod,
+  unlink,
+  rmdir,
+};
+
+/** Internal cleanup seam; it is not re-exported from the server package. */
+export async function removeFixedProjectionStaging(
+  directory: string,
+  fileSystem: FixedProjectionCleanupFileSystem = fixedProjectionCleanupFileSystem,
+): Promise<void> {
+  const remove = async (target: string): Promise<void> => {
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await fileSystem.lstat(target);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw cause;
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      try {
+        await fileSystem.unlink(target);
+      } catch (cause) {
+        if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+      }
+      return;
+    }
+
+    await fileSystem.chmod(target, 0o700);
+    for (const name of await fileSystem.readdir(target)) await remove(nodePath.join(target, name));
+    try {
+      await fileSystem.rmdir(target);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== "ENOENT") throw cause;
+    }
+  };
+  await remove(directory);
+}
 
 export interface OmpExpertCliResult {
   readonly stdout: string;
@@ -55,6 +116,8 @@ export interface OmpExpertSessionPreparation {
   readonly loadedSkills: ReadonlyArray<ProviderSkillReference>;
   readonly configOverlayPath?: string;
   readonly appendSystemPromptPath?: string;
+  /** Private owned directory for narrowly scoped native launch helpers. */
+  readonly ownedTempDirectory?: string;
   readonly cleanup: () => Effect.Effect<void>;
   readonly verify?: () => Effect.Effect<void, unknown>;
   readonly allowedSkillCommands?: ReadonlyArray<string>;
@@ -705,7 +768,7 @@ function prepareFixedOmpExpertSession(
   let temp: string | undefined;
   const cleanup = () =>
     Effect.promise(async () => {
-      if (temp) await rm(temp, { recursive: true, force: true });
+      if (temp) await removeFixedProjectionStaging(temp);
       temp = undefined;
     });
   const failure = (message: string): OmpExpertSessionPreparation => ({
@@ -753,14 +816,15 @@ function prepareFixedOmpExpertSession(
       enablePiProject: false,
       enableAgentsUser: false,
       enableAgentsProject: false,
-      customDirectories: [nodePath.join(projection.root, "skills")],
+      customDirectories: [...projection.skillRoots],
       includeSkills: projection.entries.length
         ? projection.entries.map((entry) => entry.name)
         : ["__synara_empty_fixed_assembly__"],
       ignoredSkills: [],
     };
+    const maxRecursionDepth = session.skillPolicy?.nativeSubagents === "inherit" ? 1 : 0;
     const overlay = stringifyYaml(
-      { skills, task: { maxRecursionDepth: 0 }, advisor: { enabled: false } },
+      { skills, task: { maxRecursionDepth }, advisor: { enabled: false } },
       { lineWidth: 0 },
     );
     yield* Effect.promise(async () => {
@@ -792,7 +856,7 @@ function prepareFixedOmpExpertSession(
           if (config[`skills.${key}`]?.value !== false)
             throw new Error(`OMP did not disable ambient Skill source ${key}.`);
         if (
-          config["task.maxRecursionDepth"]?.value !== 0 ||
+          config["task.maxRecursionDepth"]?.value !== maxRecursionDepth ||
           config["advisor.enabled"]?.value !== false ||
           config["skills.enabled"]?.value !== true ||
           JSON.stringify(config["skills.customDirectories"]?.value) !==
@@ -800,7 +864,7 @@ function prepareFixedOmpExpertSession(
           JSON.stringify(config["skills.includeSkills"]?.value) !==
             JSON.stringify(skills.includeSkills)
         )
-          throw new Error("OMP did not attest the fixed assembly and blocked native subagents.");
+          throw new Error("OMP did not attest the fixed assembly and native task depth.");
         const result = yield* input.runCli(["skill", "list", input.cwd, "--json"], input.cwd, env),
           parsed = result.exitCode === 0 ? parseNativeSkillList(result.stdout) : undefined;
         if (!parsed || parsed.warnings.length)
@@ -826,6 +890,7 @@ function prepareFixedOmpExpertSession(
       loadedSkills: session.skills,
       configOverlayPath,
       appendSystemPromptPath,
+      ownedTempDirectory: temp,
       cleanup,
       verify,
       allowedSkillCommands: projection.entries.map((entry) => entry.name),

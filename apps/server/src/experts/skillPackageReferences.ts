@@ -79,6 +79,11 @@ export async function scanSkillPackageReferences(
     if (snapshot.skillSelections?.some((entry) => entry.packageId === packageId))
       references.push(`Snapshot ${snapshot.snapshotId}`);
   }
+  const { listRunSkillAssemblies } = await import("./RunSkillAssemblyStore");
+  for (const record of await listRunSkillAssemblies(stateDir)) {
+    if (record.session.skillEntries?.some((entry) => entry.packageId === packageId))
+      references.push(`Run ${record.rootRunId} (${record.assemblyId})`);
+  }
   return [...new Set(references)];
 }
 

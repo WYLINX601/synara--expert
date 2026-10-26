@@ -122,7 +122,7 @@ export function ExpertSkillBindingsEditor({
       layout="compact"
     >
       <p className="pb-2 text-ui-sm text-muted-foreground">
-        新任务使用已启用技能的最新保存版本；已接受任务保留固定版本。最多一个启动技能。空装配启用零个技能。
+        下一次运行使用已启用技能的最新保存版本；当前运行及其恢复保持原版本。最多一个启动技能。空装配启用零个技能。
       </p>
       {query.isError ? (
         <p role="alert" className="text-ui-sm text-destructive">

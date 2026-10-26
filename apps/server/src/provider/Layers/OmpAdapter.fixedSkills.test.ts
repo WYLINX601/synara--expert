@@ -18,6 +18,9 @@ const preparation = vi.hoisted(() => ({
   runtimeCreations: 0,
   prompts: 0,
   spawnInputs: [] as unknown[],
+  compatChildMarker: true,
+  resolveCalls: [] as Array<{ binaryPath?: string | null; options?: unknown }>,
+  compatPreparations: 0,
 }));
 vi.mock("../acp/OmpExpertSession.ts", async (original) => ({
   ...(await original<typeof import("../acp/OmpExpertSession.ts")>()),
@@ -28,9 +31,19 @@ vi.mock("../acp/OmpExpertSession.ts", async (original) => ({
         issues: ["Fixed native catalog contains an unselected Skill"],
         instructionsHash: "a".repeat(64),
         loadedSkills: [],
+        ownedTempDirectory: "/private/omp-fixed-test",
         cleanup: () => Effect.void,
       });
-    const session = (input as { expertSession: ProviderExpertSession }).expertSession;
+    const session = (input as { expertSession?: ProviderExpertSession }).expertSession;
+    if (!session) {
+      return Effect.succeed({
+        issues: [],
+        instructionsHash: "b".repeat(64),
+        loadedSkills: [],
+        ownedTempDirectory: "/private/omp-context-test",
+        cleanup: () => Effect.void,
+      });
+    }
     return Effect.promise(() =>
       recordVerifiedNativeSkillAssembly(
         session,
@@ -42,6 +55,7 @@ vi.mock("../acp/OmpExpertSession.ts", async (original) => ({
         issues: [],
         instructionsHash: "a".repeat(64),
         loadedSkills: session.skills,
+        ownedTempDirectory: "/private/omp-fixed-test",
         cleanup: () => Effect.void,
         allowedSkillCommands: ["entry-selected"],
         verify: () =>
@@ -54,9 +68,24 @@ vi.mock("../acp/OmpExpertSession.ts", async (original) => ({
 }));
 vi.mock("../acp/OmpAcpSupport.ts", async (original) => ({
   ...(await original<typeof import("../acp/OmpAcpSupport.ts")>()),
+  resolveOmpCliBinaryPath: (binaryPath?: string | null, options?: unknown) => {
+    preparation.resolveCalls.push({
+      ...(binaryPath !== undefined ? { binaryPath } : {}),
+      ...(options !== undefined ? { options } : {}),
+    });
+    return binaryPath?.trim() || "/bin/omp";
+  },
+  runOmpAcpCliCommand: () =>
+    Effect.succeed({
+      stdout: "omp/18.12.1",
+      stderr:
+        "SYNARA_OMP_ACP_IDLE_TASK_COMPAT v1 sha256=c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d",
+      exitCode: 0,
+    }),
   makeOmpAcpRuntime: (input: {
     resumeSessionId?: string;
     expertSessionSpawn?: { disableExtensions?: boolean };
+    onChildStderrLine?: (line: string) => void;
   }) => {
     preparation.spawnInputs.push(input);
     preparation.runtimeCreations++;
@@ -64,12 +93,19 @@ vi.mock("../acp/OmpAcpSupport.ts", async (original) => ({
       handleRequestPermission: () => Effect.void,
       handleElicitation: () => Effect.void,
       start: () =>
-        Effect.succeed({
-          sessionId: input.resumeSessionId ?? "native-fixed",
-          sessionSetupMethod: input.resumeSessionId ? "resume" : "new",
-          initializeResult: { protocolVersion: 1, agentCapabilities: {} },
-          sessionSetupResult: { sessionId: "native-fixed" },
-          modelConfigId: undefined,
+        Effect.sync(() => {
+          if (preparation.compatChildMarker) {
+            input.onChildStderrLine?.(
+              "SYNARA_OMP_ACP_IDLE_TASK_COMPAT v1 sha256=c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d",
+            );
+          }
+          return {
+            sessionId: input.resumeSessionId ?? "native-fixed",
+            sessionSetupMethod: input.resumeSessionId ? "resume" : "new",
+            initializeResult: { protocolVersion: 1, agentCapabilities: {} },
+            sessionSetupResult: { sessionId: "native-fixed" },
+            modelConfigId: undefined,
+          };
         }),
       awaitExit: Effect.never,
       getEvents: () => Stream.never,
@@ -90,6 +126,20 @@ vi.mock("../acp/OmpAcpSupport.ts", async (original) => ({
           return { stopReason: "end_turn" };
         }),
     });
+  },
+}));
+vi.mock("../acp/OmpAcpIdleTaskCompat.ts", async (original) => ({
+  ...(await original<typeof import("../acp/OmpAcpIdleTaskCompat.ts")>()),
+  OMP_ACP_IDLE_TASK_COMPAT_MARKER_TIMEOUT_MS: 5,
+  prepareOmpAcpIdleTaskCompat: async () => {
+    preparation.compatPreparations++;
+    return {
+      bunExecutable: "/bin/bun",
+      cliEntrypoint: "/bin/omp/cli.js",
+      preloadPath: "/private/omp-fixed-test/compat.mjs",
+      expectedMarker:
+        "SYNARA_OMP_ACP_IDLE_TASK_COMPAT v1 sha256=c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d",
+    };
   },
 }));
 import { makeOmpAdapterLive } from "./OmpAdapter";
@@ -152,6 +202,9 @@ describe("OMP adapter fixed Skill admission", () => {
       preparation.reloadChanged = false;
       preparation.runtimeCreations = 0;
       preparation.prompts = 0;
+      preparation.compatChildMarker = true;
+      preparation.resolveCalls.length = 0;
+      preparation.compatPreparations = 0;
       const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fixed-runtime-")),
         file = path.join(root, "SKILL.md"),
         bytes = Buffer.from(
@@ -197,12 +250,33 @@ describe("OMP adapter fixed Skill admission", () => {
               runtimeMode: "full-access",
               lifecycleGeneration: "fixed-live-generation",
               expertSession: session,
+              providerOptions: { omp: { environment: { PATH: "/selected/omp-account-bin" } } },
               ...(resume ? { resumeCursor: { schemaVersion: 1, sessionId: "native-prior" } } : {}),
             });
             expect(started.skillApplication?.enforcement).toBe("native-fixed");
             expect(preparation.spawnInputs.at(-1)).toMatchObject({
-              expertSessionSpawn: { disableExtensions: true },
+              expertSessionSpawn: {
+                disableExtensions: true,
+                idleTaskCompat: {
+                  bunExecutable: "/bin/bun",
+                  cliEntrypoint: "/bin/omp/cli.js",
+                  preloadPath: "/private/omp-fixed-test/compat.mjs",
+                },
+              },
             });
+            const resolvedPaths = preparation.resolveCalls.filter(
+              (call) => call.binaryPath === process.execPath,
+            );
+            expect(resolvedPaths.length).toBeGreaterThan(0);
+            expect(
+              resolvedPaths.every((call) => {
+                const options = call.options as
+                  | { cwd?: string; env?: NodeJS.ProcessEnv }
+                  | undefined;
+                return options?.cwd === root && options.env?.PATH === "/selected/omp-account-bin";
+              }),
+            ).toBe(true);
+            expect(preparation.compatPreparations).toBe(1);
             const commands = yield* adapter.listCommands!({ provider: "omp", cwd: root, threadId });
             expect(commands.commands).toEqual([]);
             expect(preparation.runtimeCreations).toBe(1);
@@ -243,4 +317,139 @@ describe("OMP adapter fixed Skill admission", () => {
       }
     },
   );
+
+  it.each(["legacy", "context"] as const)(
+    "keeps ordinary expert preparation lookup for %s sessions",
+    async (kind) => {
+      preparation.reject = false;
+      preparation.resolveCalls.length = 0;
+      preparation.compatPreparations = 0;
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-noninherited-path-"));
+      const spawner = ChildProcessSpawner.make(() =>
+        Effect.die("The mocked ACP seam owns this test; no process should spawn"),
+      );
+      const layer = makeOmpAdapterLive({ binaryPath: process.execPath }).pipe(
+        Layer.provideMerge(ServerConfig.layerTest(root, path.join(root, "state"))),
+        Layer.provideMerge(NodeServices.layer),
+        Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+      );
+      try {
+        await Effect.runPromise(
+          Effect.gen(function* () {
+            const adapter = yield* OmpAdapter;
+            const threadId = ThreadId.makeUnsafe(`omp-noninherited-${kind}`);
+            yield* adapter.startSession(
+              kind === "legacy"
+                ? {
+                    threadId,
+                    provider: "omp",
+                    cwd: root,
+                    runtimeMode: "full-access",
+                    lifecycleGeneration: "legacy-fixed-generation",
+                    expertSession: {
+                      snapshotId: `exp_${"f".repeat(64)}`,
+                      persona: "Legacy Fixed Expert",
+                      skills: [],
+                      skillEntries: [],
+                      skillLoading: "index",
+                      skillPolicy: {
+                        version: 1,
+                        discovery: "fixed",
+                        nativeSubagents: "blocked",
+                      },
+                      references: [],
+                    },
+                  }
+                : {
+                    threadId,
+                    provider: "omp",
+                    cwd: root,
+                    runtimeMode: "full-access",
+                    contextSession: {
+                      snapshotId: "context-snapshot",
+                      snapshotHash: "a".repeat(64),
+                      text: "Project context",
+                      hasContent: true,
+                    },
+                  },
+            );
+
+            expect(preparation.resolveCalls).toHaveLength(1);
+            expect(preparation.resolveCalls[0]?.options).toBeUndefined();
+            expect(preparation.compatPreparations).toBe(0);
+            yield* adapter.stopSession(threadId);
+          }).pipe(Effect.provide(layer), Effect.scoped),
+        );
+      } finally {
+        preparation.reject = true;
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("fails fixed inherited-task startup when the actual ACP child omits the compatibility marker", async () => {
+    preparation.reject = false;
+    preparation.reloadChanged = false;
+    preparation.compatChildMarker = false;
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-fixed-marker-"));
+    const file = path.join(root, "SKILL.md");
+    await fs.writeFile(
+      file,
+      "---\nname: selected\ndescription: Selected only\n---\nInstructions.\n",
+    );
+    const spawner = ChildProcessSpawner.make(() =>
+      Effect.die(new Error("The mocked ACP seam owns this test; CLI probing must stay mocked")),
+    );
+    const layer = makeOmpAdapterLive({ binaryPath: process.execPath }).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(root, path.join(root, "state"))),
+      Layer.provideMerge(NodeServices.layer),
+      Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+    );
+    const session: ProviderExpertSession = {
+      snapshotId: `exp_${"d".repeat(64)}`,
+      persona: "Fixed Expert",
+      skills: [{ name: "selected", path: file }],
+      skillEntries: [
+        {
+          name: "selected",
+          path: file,
+          description: "Selected only",
+          packageId: `pkg_${"e".repeat(64)}`,
+          entryPath: "SKILL.md",
+          activation: "on-demand",
+          sha256: createHash("sha256")
+            .update(await fs.readFile(file))
+            .digest("hex"),
+        },
+      ],
+      skillLoading: "index",
+      skillPolicy: FIXED_EXPERT_SKILL_POLICY,
+      references: [],
+    };
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const adapter = yield* OmpAdapter;
+          const outcome = yield* Effect.result(
+            adapter.startSession({
+              threadId: ThreadId.makeUnsafe("omp-fixed-missing-marker"),
+              provider: "omp",
+              cwd: root,
+              runtimeMode: "full-access",
+              lifecycleGeneration: "fixed-marker-generation",
+              expertSession: session,
+            }),
+          );
+          expect(outcome._tag).toBe("Failure");
+          if (outcome._tag === "Failure") {
+            expect(String(outcome.failure)).toContain("marker was missing");
+          }
+        }).pipe(Effect.provide(layer), Effect.scoped),
+      );
+    } finally {
+      preparation.compatChildMarker = true;
+      preparation.reject = true;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -1866,7 +1866,7 @@ function SettingsRouteView() {
                   </div>
                   {activeSection === "shortcuts" ? (
                     <KeyboardShortcutsResetButton />
-                  ) : (
+                  ) : activeSection !== "skills" ? (
                     <Button
                       size="xs"
                       variant="outline"
@@ -1877,7 +1877,7 @@ function SettingsRouteView() {
                       <ResetIcon className="size-3.5" />
                       Restore defaults
                     </Button>
-                  )}
+                  ) : null}
                 </div>
               ) : null}
 

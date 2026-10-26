@@ -20,7 +20,7 @@ import { Schema } from "effect";
 import { ensurePrivateDirectorySync, syncDirectoryEntry } from "../privatePathPermissions";
 import { inspectBmadWorkspace } from "./bmadSkillPreset.ts";
 import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
-import { resolveSkillBindings } from "./SkillLibraryStore";
+import { readSkillDefinition, resolveSkillBindings } from "./SkillLibraryStore";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle.ts";
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
@@ -1469,6 +1469,20 @@ export function createExpertStore(stateDir: string): ExpertStore {
             ? await resolveSkillBindings(stateDir, definition.skillBindings)
             : definition.skillSelections!,
         );
+        if (definition.skillBindings) {
+          const managed = await Promise.all(
+            definition.skillBindings
+              .filter((binding) => binding.enabled)
+              .map((binding) => readSkillDefinition(stateDir, binding.skillId)),
+          );
+          skillEntries = skillEntries.map((entry) => {
+            const skill = managed.find(
+              (candidate) =>
+                candidate.packageId === entry.packageId && candidate.entryPath === entry.entryPath,
+            );
+            return { ...entry, ...(skill ? { managedSkillId: skill.skillId } : {}) };
+          });
+        }
       } catch (cause) {
         incompatible = true;
         issues.push(

@@ -36,6 +36,17 @@ describe("WS RPC contracts", () => {
     expect(WsFeatureRpcGroup.requests.has(WS_METHODS.serverDeleteExpert)).toBe(true);
   });
 
+  it("registers the four narrow Skill management owner RPCs", () => {
+    for (const method of [
+      WS_METHODS.serverReadSkillManagementAccess,
+      WS_METHODS.serverCreateSkillManagementPairing,
+      WS_METHODS.serverListSkillManagementCredentials,
+      WS_METHODS.serverRevokeSkillManagementCredential,
+    ]) {
+      expect(WsFeatureRpcGroup.requests.has(method)).toBe(true);
+    }
+  });
+
   it("registers the fixed expert connection state and references RPCs", () => {
     expect(WsFeatureRpcGroup.requests.has("server.getExpertConnectionState")).toBe(true);
     expect(WsFeatureRpcGroup.requests.has("server.setExpertConnectionState")).toBe(true);

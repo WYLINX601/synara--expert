@@ -18,6 +18,7 @@ import {
   CLAUDE_EXPERT_PROJECTION_VERSION,
   createClaudeExpertProjection,
   inspectClaudeExpertSkills,
+  readClaudeSettingsEnvironment,
 } from "./claudeExpertSession.ts";
 
 const temporaryDirectories: string[] = [];
@@ -35,6 +36,30 @@ afterEach(() => {
 });
 
 describe("Claude Expert skill projection", () => {
+  it("extracts only auth, endpoint and model environment from the selected settings file", async () => {
+    const root = makeDirectory();
+    writeFileSync(
+      path.join(root, "settings.json"),
+      JSON.stringify({
+        env: {
+          ANTHROPIC_AUTH_TOKEN: "private-token",
+          ANTHROPIC_BASE_URL: "https://gateway.invalid",
+          ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-custom",
+          CLAUDE_CODE_SUBAGENT_MODEL: "inherit",
+          CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+        },
+        enabledPlugins: { "ambient@marketplace": true },
+      }),
+    );
+
+    await expect(readClaudeSettingsEnvironment(root)).resolves.toEqual({
+      ANTHROPIC_AUTH_TOKEN: "private-token",
+      ANTHROPIC_BASE_URL: "https://gateway.invalid",
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-custom",
+      CLAUDE_CODE_SUBAGENT_MODEL: "inherit",
+    });
+  });
+
   it("projects only snapshot skills, preserves executable bits, and reuses an intact projection", async () => {
     const root = makeDirectory();
     const skillsRoot = path.join(root, "snapshot", "skills");

@@ -149,6 +149,7 @@ export function useComposerDiscovery({
       return ensureExpertClient().readExpertSnapshot({ snapshotId: expertBinding.snapshotId });
     },
   });
+  const usesRunSkills = Boolean(expertBinding && expertSnapshotQuery.data?.schemaVersion === 3);
   const providerSkillsQuery = useQuery(
     providerSkillsQueryOptions({
       provider: selectedProvider,
@@ -162,12 +163,12 @@ export function useComposerDiscovery({
             ? ompAgentDir || null
             : null,
       enabled:
-        !hasExpertSkillSource &&
+        (usesRunSkills || !hasExpertSkillSource) &&
         (isSkillTrigger ||
           composerTriggerKind === "slash-command" ||
           selectedProvider === "pi" ||
           selectedProvider === "omp") &&
-        canDiscoverProviderSkills &&
+        (usesRunSkills || canDiscoverProviderSkills) &&
         composerSkillCwd !== null,
     }),
   );
@@ -252,29 +253,35 @@ export function useComposerDiscovery({
   const providerSkills = useMemo(
     () =>
       hasExpertSkillSource
-        ? expertEntries
-          ? expertEntries
-              .filter((entry) => entry.userInvocable !== false)
-              .map((entry) => ({
-                name: entry.name,
-                description: entry.description || undefined,
-                path: `synara-expert-skill:${entry.packageId}#${entry.entryPath}`,
+        ? usesRunSkills
+          ? providerSkillsQuery.data?.source === "expert.fixed-snapshot"
+            ? providerSkillsQuery.data.skills.map((entry) => ({ ...entry, scope: "expert" }))
+            : EMPTY_PROVIDER_SKILLS
+          : expertEntries
+            ? expertEntries
+                .filter((entry) => entry.userInvocable !== false)
+                .map((entry) => ({
+                  name: entry.name,
+                  description: entry.description || undefined,
+                  path: `synara-expert-skill:${entry.packageId}#${entry.entryPath}`,
+                  enabled: true,
+                  scope: "expert",
+                  expert: {
+                    snapshotId: expertBinding?.snapshotId ?? PENDING_EXPERT_SKILL_SNAPSHOT,
+                    packageId: entry.packageId,
+                    entryPath: entry.entryPath,
+                    ...(entry.managedSkillId ? { skillId: entry.managedSkillId } : {}),
+                  },
+                }))
+            : (legacyExpertSkills?.map((skill) => ({
+                ...skill,
                 enabled: true,
                 scope: "expert",
-                expert: {
-                  snapshotId: expertBinding?.snapshotId ?? PENDING_EXPERT_SKILL_SNAPSHOT,
-                  packageId: entry.packageId,
-                  entryPath: entry.entryPath,
-                },
-              }))
-          : (legacyExpertSkills?.map((skill) => ({
-              ...skill,
-              enabled: true,
-              scope: "expert",
-            })) ?? EMPTY_PROVIDER_SKILLS)
+              })) ?? EMPTY_PROVIDER_SKILLS)
         : (providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS),
     [
       hasExpertSkillSource,
+      usesRunSkills,
       expertEntries,
       expertBinding?.snapshotId,
       legacyExpertSkills,
@@ -282,13 +289,21 @@ export function useComposerDiscovery({
     ],
   );
   const skillsLoading = expertBinding
-    ? expertSnapshotQuery.isLoading || expertSnapshotQuery.isFetching
+    ? expertSnapshotQuery.isLoading ||
+      expertSnapshotQuery.isFetching ||
+      (usesRunSkills && (providerSkillsQuery.isLoading || providerSkillsQuery.isFetching))
     : draftExpert
       ? draftExpert.isFetching
       : providerSkillsQuery.isLoading || providerSkillsQuery.isFetching;
   const composerDiscoveryError =
     (isSkillTrigger || composerTriggerKind === "slash-command") &&
-    (expertBinding ? expertSnapshotQuery.isError : draftExpert?.isError)
+    (expertBinding
+      ? expertSnapshotQuery.isError ||
+        (usesRunSkills &&
+          (providerSkillsQuery.isError ||
+            (providerSkillsQuery.data !== undefined &&
+              providerSkillsQuery.data.source !== "expert.fixed-snapshot")))
+      : draftExpert?.isError)
       ? expertBinding
         ? "无法读取此对话绑定的专家技能，请重试。"
         : "无法读取所选专家的技能，请重试。"

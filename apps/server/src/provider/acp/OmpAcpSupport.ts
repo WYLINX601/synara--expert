@@ -35,6 +35,10 @@ import {
   findSelectConfig,
   flattenConfigOptions,
 } from "./AcpConfigOptions.ts";
+import {
+  makeOmpAcpIdleTaskCompatArgs,
+  type OmpAcpIdleTaskCompatLaunch,
+} from "./OmpAcpIdleTaskCompat.ts";
 
 export interface OmpAcpRuntimeSettings extends OmpAccountBoundary {
   readonly binaryPath?: string;
@@ -135,6 +139,7 @@ export interface OmpAcpExpertSessionSpawnOptions {
   readonly disableExtensions?: boolean;
   readonly configOverlayPath?: string;
   readonly appendSystemPromptPath?: string;
+  readonly idleTaskCompat?: OmpAcpIdleTaskCompatLaunch;
 }
 
 export interface OmpAcpCliCommandResult {
@@ -238,6 +243,7 @@ const OMP_AGENT_AUTH_METHOD_ID = "agent";
 export interface OmpCliResolutionOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly platform?: NodeJS.Platform;
+  readonly cwd?: string;
   readonly homeDir?: string;
   readonly pathExists?: (path: string) => boolean;
 }
@@ -254,7 +260,11 @@ export function resolveOmpCliBinaryPath(
   const name = "omp";
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
-  const resolved = resolveExecutable(name, { platform, env });
+  const resolved = resolveExecutable(name, {
+    platform,
+    env,
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+  });
   if (resolved) {
     return resolved;
   }
@@ -272,17 +282,18 @@ export function buildOmpAcpSpawnInput(
   cwd: string,
   expertSessionSpawn?: OmpAcpExpertSessionSpawnOptions,
 ): AcpSpawnInput {
-  const args = ["acp"];
-  if (expertSessionSpawn?.disableExtensions) args.push("--no-extensions");
+  const cliArgs = ["acp"];
+  if (expertSessionSpawn?.disableExtensions) cliArgs.push("--no-extensions");
   if (expertSessionSpawn?.configOverlayPath) {
-    args.push("--config", expertSessionSpawn.configOverlayPath);
+    cliArgs.push("--config", expertSessionSpawn.configOverlayPath);
   }
   if (expertSessionSpawn?.appendSystemPromptPath) {
-    args.push("--append-system-prompt", expertSessionSpawn.appendSystemPromptPath);
+    cliArgs.push("--append-system-prompt", expertSessionSpawn.appendSystemPromptPath);
   }
+  const idleTaskCompat = expertSessionSpawn?.idleTaskCompat;
   return {
-    command: resolveOmpCliBinaryPath(ompSettings?.binaryPath),
-    args,
+    command: idleTaskCompat?.bunExecutable ?? resolveOmpCliBinaryPath(ompSettings?.binaryPath),
+    args: idleTaskCompat ? [...makeOmpAcpIdleTaskCompatArgs(idleTaskCompat, cliArgs)] : cliArgs,
     cwd,
     env: buildOmpProcessEnv(ompSettings ?? {}),
   };

@@ -205,6 +205,40 @@ describe("useComposerDiscovery Expert snapshot Skills", () => {
     }
   });
 
+  it("uses the authoritative Run catalog for schema-3 tasks and carries managed identity", async () => {
+    const packageId = `pkg_${"a".repeat(64)}`;
+    const skillId = `skl_${"b".repeat(32)}`;
+    harness.readExpertSnapshot.mockResolvedValue({
+      ...snapshot("accepted-current", []),
+      schemaVersion: 3,
+    });
+    harness.provider.listSkills.mockResolvedValue({
+      skills: [
+        {
+          name: "latest-managed",
+          path: "/verified/new/SKILL.md",
+          enabled: true,
+          expert: { snapshotId: "accepted-current", packageId, entryPath: "SKILL.md", skillId },
+        },
+      ],
+      source: "expert.fixed-snapshot",
+      cached: false,
+    });
+    const hook = await mount(baseInput({ expertBinding: binding("accepted-current") }));
+    try {
+      await vi.waitFor(() =>
+        expect(hook.result.current.providerSkills[0]?.name).toBe("latest-managed"),
+      );
+      expect(hook.result.current.providerSkills[0]?.expert?.skillId).toBe(skillId);
+      expect(harness.provider.listSkills).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: "discovery-thread" }),
+      );
+      expect(harness.provider.listCommands).not.toHaveBeenCalled();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   it("carries draft V2 entry identity until an accepted snapshot replaces it", async () => {
     const packageId = `pkg_${"b".repeat(64)}`;
     const entry = {

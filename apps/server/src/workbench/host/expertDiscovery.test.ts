@@ -6,6 +6,7 @@ import { Effect } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import { createExpertStore, expertResourceFiles } from "../../experts/ExpertStore";
 import { createSkillLibraryStore } from "../../experts/SkillLibraryStore";
+import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore";
 import { makeWorkbenchExpertDiscoveryHandlers } from "./expertRpc";
 
 describe("fixed Expert discovery RPC host wiring", () => {
@@ -34,6 +35,13 @@ describe("fixed Expert discovery RPC host wiring", () => {
         connections: [],
       });
       const binding = await experts.prepareSnapshot(definition.id);
+      const assemblies = createRunSkillAssemblyStore(root);
+      const active = await assemblies.prepare({
+        threadId: "accepted",
+        rootRunId: "run:active",
+        baseSnapshotId: binding.snapshotId,
+        createdAt: "2026-10-26T10:00:00.000Z",
+      });
       await store.execute({
         action: "save",
         skillId: skill.skillId,
@@ -86,6 +94,28 @@ describe("fixed Expert discovery RPC host wiring", () => {
       expect(skills.skills[0]!.expert?.packageId).toBe(skill.packageId);
       expect(nativeCommands).not.toHaveBeenCalled();
       expect(nativeSkills).not.toHaveBeenCalled();
+      const currentHandlers = makeWorkbenchExpertDiscoveryHandlers({
+        requireOwner: Effect.void,
+        loadThreadBinding: () => Effect.succeed(binding),
+        readSnapshot,
+        readSkillSession: (threadId, snapshot) =>
+          Effect.tryPromise(async () =>
+            threadId === "accepted" ? active.session : assemblies.preview(snapshot.snapshotId),
+          ),
+        listCommands: nativeCommands,
+        listSkills: nativeSkills,
+      });
+      const selected = await Effect.runPromise(
+        currentHandlers.listSkills({ provider: "codex", cwd: root, threadId: "accepted" }),
+      );
+      const next = await Effect.runPromise(
+        currentHandlers.listSkills({ provider: "codex", cwd: root, threadId: "queued" }),
+      );
+      expect(selected.skills[0]!.expert?.packageId).toBe(skill.packageId);
+      expect(next.skills[0]!.expert?.packageId).not.toBe(skill.packageId);
+      expect(next.skills[0]!.expert?.skillId).toBe(skill.skillId);
+      expect(next.skills[0]!.name).toBe("new-head");
+      expect(await assemblies.current("queued")).toBeUndefined();
       const empty = await experts.save({
         ...definition,
         expectedRevision: definition.revision,

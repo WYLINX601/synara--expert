@@ -62,6 +62,78 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
+describe("explicit runtime import discovery", () => {
+  it.each(["codex", "claudeAgent", "pi", "omp"] as const)(
+    "reads only %s native roots and keeps its cache separate from the portable catalog",
+    async (provider) => {
+      for (const [origin, relative] of [
+        ["codex", ".codex"],
+        ["claude", ".claude"],
+        ["pi", ".pi/agent"],
+        ["omp", ".omp/agent"],
+        ["agents", ".agents"],
+      ] as const)
+        await writeSkill(
+          path.join(homeDir, relative, "skills", origin),
+          origin,
+          "Native runtime Skill",
+        );
+      const input = { homeDir, synaraBaseDir, provider, includeDuplicateOrigins: true };
+      const native = await discoverSkillsCatalog({ ...input, nativeOnly: true });
+      const origin = provider === "claudeAgent" ? "claude" : provider;
+      expect(native.map((skill) => skill.name).sort()).toEqual(
+        (provider === "claudeAgent" ? [origin] : [origin, "agents"]).sort(),
+      );
+      await expect(access(path.join(synaraBaseDir, "skills"))).rejects.toThrow();
+      const catalog = await discoverSkillsCatalog(input);
+      expect(catalog.length).toBeGreaterThan(native.length);
+      expect(await discoverSkillsCatalog({ ...input, nativeOnly: true })).toEqual(native);
+    },
+  );
+
+  it("uses the selected Pi profile and refreshes only when explicitly requested", async () => {
+    const agentDir = path.join(root, "custom-pi-profile");
+    await writeSkill(
+      path.join(homeDir, ".pi", "agent", "skills", "default"),
+      "Default profile",
+      "Not selected",
+    );
+    await writeSkill(path.join(agentDir, "skills", "first"), "Custom first", "Selected profile");
+    const input = { homeDir, synaraBaseDir, provider: "pi" as const, nativeOnly: true, agentDir };
+    expect((await discoverSkillsCatalog(input)).map((skill) => skill.name)).toEqual([
+      "Custom first",
+    ]);
+    await writeSkill(path.join(agentDir, "skills", "second"), "Custom second", "Newly installed");
+    expect((await discoverSkillsCatalog(input)).map((skill) => skill.name)).toEqual([
+      "Custom first",
+    ]);
+    expect(
+      (await discoverSkillsCatalog({ ...input, forceReload: true }))
+        .map((skill) => skill.name)
+        .sort(),
+    ).toEqual(["Custom first", "Custom second"]);
+  });
+
+  it("does not scan Claude plugin Skills when importing from another runtime", async () => {
+    const installPath = claudePluginInstallPath("market", "plugin", "1");
+    await writeSkill(
+      path.join(installPath, "skills", "plugin-skill"),
+      "Plugin skill",
+      "Claude only",
+    );
+    await writeClaudePluginManifest({
+      "plugin@market": [{ scope: "user", installPath, version: "1" }],
+    });
+    const input = { homeDir, synaraBaseDir, nativeOnly: true };
+    expect(await discoverSkillsCatalog({ ...input, provider: "pi" })).toEqual([]);
+    expect(
+      (await discoverSkillsCatalog({ ...input, provider: "claudeAgent" })).map(
+        (skill) => skill.name,
+      ),
+    ).toEqual(["plugin:Plugin skill"]);
+  });
+});
+
 describe("parseSkillFrontmatter", () => {
   it("parses scalar Agent Skill metadata", () => {
     expect(

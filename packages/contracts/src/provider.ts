@@ -70,6 +70,9 @@ export const ProviderSession = Schema.Struct({
 export type ProviderSession = typeof ProviderSession.Type;
 
 export const ProviderExpertSession = Schema.Struct({
+  /** Durable per-run Skill assembly; the base Expert identity remains pinned. */
+  skillAssemblyId: Schema.optional(TrimmedNonEmptyString),
+  skillRootRunId: Schema.optional(TrimmedNonEmptyString),
   skillPolicy: Schema.optional(ExpertSkillPolicy),
   snapshotId: TrimmedNonEmptyString,
   expertId: Schema.optional(TrimmedNonEmptyString),

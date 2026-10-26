@@ -106,23 +106,22 @@ describe("skill package lifecycle", () => {
     ).rejects.toThrow("already used");
   });
 
-  it("rejects native execution semantics and applies invocation metadata", async () => {
+  it("preserves native execution metadata and applies invocation controls", async () => {
     const { source, packages } = await fixture();
-    await fs.writeFile(
-      path.join(source, "SKILL.md"),
-      "---\nname: role\ndescription: Test\nhooks:\n  PreToolUse: []\n---\nBody",
-    );
+    const nativeContent = "---\nname: role\ndescription: Test\nhooks:\n  PreToolUse: []\n---\nBody";
+    await fs.writeFile(path.join(source, "SKILL.md"), nativeContent);
     const preview = await packages.preview({ path: source });
     const imported = await packages.import({ previewId: preview.previewId });
-    await expect(
-      packages.resolveSelections([
-        {
-          packageId: imported.package.packageId,
-          entryPath: "SKILL.md",
-          activation: "on-demand",
-        },
-      ]),
-    ).rejects.toThrow("Incompatible");
+    const resolved = await packages.resolveSelections([
+      {
+        packageId: imported.package.packageId,
+        entryPath: "SKILL.md",
+        activation: "on-demand",
+      },
+    ]);
+    expect(resolved[0]).toMatchObject({ name: "role", activation: "on-demand" });
+    expect(imported.package.entries[0]?.incompatibleReason).toBeUndefined();
+    expect(await fs.readFile(resolved[0]!.path, "utf8")).toBe(nativeContent);
     await fs.writeFile(
       path.join(source, "SKILL.md"),
       "---\nname: role\ndescription: Test\ndisable-model-invocation: true\nuser-invocable: false\n---\nBody",

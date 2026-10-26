@@ -138,7 +138,7 @@ export function ExpertEditor({
           <DialogHeader>
             <DialogTitle>确认替换原装配</DialogTitle>
             <DialogDescription>
-              以下入口将从当前草稿移除。随后从技能库重新绑定；保存专家前不会更改已保存定义，已有任务保持固定内容。
+              以下入口将从当前草稿移除。随后从技能库重新绑定；保存后从下一次运行生效，当前运行及其恢复保持原版本。
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>

@@ -50,7 +50,15 @@ describe("fixed native Expert assembly", () => {
     await expect(
       verifyProjectedSkillAssembly(
         session,
-        { root: "/not-used", pluginName: "probe", entries: [] },
+        {
+          root: "/not-used",
+          pluginName: "probe",
+          plugins: [],
+          skillRoots: [],
+          agents: {},
+          allowedSubagentTypes: [],
+          entries: [],
+        },
         [{ name: "ambient", path: "/outside/SKILL.md" }],
         "generation-2",
       ),

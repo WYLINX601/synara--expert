@@ -64,6 +64,8 @@ describe("Expert skill index rendering", () => {
     expect(result.catalogHash).toBe(sha256Utf8(result.catalogText));
 
     const session = {
+      skillAssemblyId: "assembly-run-a",
+      skillRootRunId: "root-run-a",
       snapshotId: "snapshot-fixed",
       persona: "Reviewer",
       skills: [],
@@ -79,6 +81,8 @@ describe("Expert skill index rendering", () => {
 
     expect(receipt).toMatchObject({
       mode: "catalog",
+      skillAssemblyId: "assembly-run-a",
+      skillRootRunId: "root-run-a",
       snapshotId: "snapshot-fixed",
       packageIds: [packageId],
       catalogHash: result.catalogHash,

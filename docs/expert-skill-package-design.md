@@ -1,5 +1,256 @@
 # Synara 专家技能索引与共享版本包研发方案
 
+<a id="iteration-plan-20261026"></a>
+
+## 2026-10-26 研发修订方案：四端可用、管理效率与按运行更新
+
+状态：用户已授权进入开发并完成阶段 1–5，五阶段开发及本轮可执行验证已完成，Claude 真实模型按用户选择保留认证阻塞。源码基线为 `bc29ed9bf3f490d29e98a23488392c7848865c16`；使用现有隔离工作树。产品行为与退出条件以下文为准，实际完成情况见[本轮实施记录](./skill-management-2026-10-26-acceptance.md)。本轮不合入、推送、安装或发布，不升级全局 CLI 或改写日用认证。
+
+产品范围以[本轮产品方案](./skill-management-product-discussion-v0.1.md#iteration-20261026)为准：G1/G4/G6/G7/G11 和更新机制；仅 Codex/Claude/Pi/OMP。不增加浏览器目录上传、市场搜索、工作区或跨机器扫描，也不创建默认管理 Agent。用户随后提供详情参考图，已将 Markdown 预览和对应的界面增量纳入，见下方管理闭环与本轮产品方案的详情补充。
+
+本节修订下方 2026-10-25 候选的三个契约：任务终身固定改为每个 Run 固定；原生字段拒绝改为允许装配并交给原生解释；原生子运行需要适配继承，不能通过一概禁用宣称原生 Skill 已兼容。其余完整包、稳定身份、普通任务使用 harness、Expert 排他装配和 owner 边界保留。
+
+### 1. 现状与需要替换的接缝
+
+| 实施前基线事实                                                          | 源码入口                                                                                 | 本轮改变                                                    |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `SkillDefinition` 只有更新时间，list 不附带 Expert 使用摘要             | `packages/contracts/src/skillLibrary.ts`、`apps/server/src/experts/SkillLibraryStore.ts` | 补列表读模型，不在前端伪造创建时间/使用数                   |
+| 单 Expert 保存有 CAS 和生命周期队列，没有 N × M 管理契约                | `ExpertStore.ts`、`workbench/host/expertRpc.ts`                                          | 服务端封装批量增量绑定，复用原保存与验证                    |
+| CLI 主要是 server/MCP 启动和配对，没有 Skill 管理客户端                 | `apps/server/src/main.ts`、`externalMcp/bridge.ts`                                       | 增加管理子命令与独立传输客户端，复用服务端命令能力          |
+| 线程的 Expert 快照持有 Skill 内容版本                                   | `orchestration/Layers/ProviderCommandReactor.ts`、`provider/Layers/ProviderService.ts`   | 分离任务身份快照与每 Run 的 Skill 装配                      |
+| 字段不兼容检查在索引和装配两层执行                                      | `experts/SkillPackageStore.ts`                                                           | 移除基于 `context/agent/model/hooks` 出现与否的装配拒绝     |
+| 共用 wrapper 只保留少量 frontmatter，原文由模型另读                     | `provider/fixedSkillProjection.ts`                                                       | 原生加载视图保留原始元数据/正文及相对资源语义，不能只删校验 |
+| Claude 当前显式选 PATH 或配置二进制，固定分支缺少对应的精确启动兼容门槛 | `provider/Layers/ClaudeAdapter.ts`                                                       | CLI/SDK 协同选择与原生能力探测，覆盖 index 分支             |
+
+### 2. 数据所有权与模块边界
+
+跨进程 schema 放在 `packages/contracts`；存储/写入由 server 管理能力持有；Provider 适配器只负责自己的加载和原生语义；不在 contracts 中放执行编排。继续复用既有平台/进程边界、数据 home 隔离及生命周期锁。
+
+| 对象/能力                      | 归属与规则                                                                                                                                                                                                       |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SkillDefinition` 扩展         | 增加可缺省的 `createdAt/createdBy` 等元数据；新记录按真实调用上下文写入，旧记录未知，不从更新时间猜测；创建者不引入工作区用户表                                                                                  |
+| `SkillListQuery/SkillListItem` | 服务端聚合 Skill、来源细类及 Expert 绑定摘要；返回匹配的库/Expert revision 信息；桌面与 CLI 使用同一谓词、统计和排序口径                                                                                         |
+| `SkillBindingBatchPlan/Result` | N 个 Skill/M 个 Expert、目标 revision、计划新增/已存在/需转换项及逐目标执行结果；服务端拥有计划校验和提交                                                                                                        |
+| `RunSkillAssembly`             | 根 Run 的执行准备记录，含 rootRunId、assemblyId、基础 Expert snapshot ID、绑定来源 Expert revision、初始化意图/状态及已解析 session；session 固定稳定 Skill ID、packageId/entryPath/内容 hash、原生语义/策略版本 |
+| 现有不可变包                   | 继续存储完整内容，不直接修改旧包；手工编辑和来源刷新发布新包，只原子切换稳定头引用                                                                                                                               |
+| 管理命令能力                   | 服务端统一执行业务规则，桌面/RPC、CLI 及将来管理 Agent 共用；本轮不增加新的自动管理 Agent 或 MCP 授权范围                                                                                                        |
+
+不把创建者筛选变成 G8：当前可信 owner 调用可标为本人；历史为 unknown。后续 Agent 身份只有来自可信执行上下文才可用于归因，不能将客户端自报 actor 当权限依据。
+
+### 3. G1/G11：原生兼容与排他装配
+
+#### 3.1 Claude CLI 与空装配
+
+默认固定 Expert 运行优先使用与应用 SDK 配套的应用私有 CLI。已核查本地 SDK `0.3.296` 随附 CLI `2.1.296`；SDK 在不指定 `pathToClaudeCodeExecutable` 时选择随附二进制，而现有应用始终显式指定。用户显式指定的 binaryPath 仍须尊重，启动前报告其兼容性，不静默替换；不升级全局 CLI 或改写认证配置。
+
+启动前探测必须覆盖实际使用的初始化协议、插件交付、空/非空 Skill 过滤能力和实际版本，不能拿其他功能的最低版本门槛代替。私有 CLI 的打包、可执行分发和平台解析经过现有 process/platform 边界；版本支持范围由实际探测冻结。
+
+空装配重新建立版本限定的证明：区分“已发现命令”“模型上下文中的 Skill”“Skill 工具可调用集合”，不再以 `reloadSkills()` 返回 16 项命令直接判断泄漏；显式空 allowlist、原生初始化/上下文和实际调用拒绝需要组合验证。`getContextUsage.skills` 本身是可选字段，不能对所有 CLI 一律将缺失当零，也不能因此永远拒绝合法空集。先用配套 CLI 验证其缺省语义和正/负对照，再将有证据的规范化规则写进特定版本适配器；若现有 API 不足，补应用私有兼容适配后再放行，不生成伪造零集合回执。
+
+#### 3.2 保留原生 Skill，而非提示代理
+
+- 移除字段黑名单与 `incompatibleReason` 引起的通用准入拒绝。合法文件可导入、保存、绑定；路径、包完整性和资源容量校验继续适用。
+- Codex/Claude/OMP 的 wrapper 不能继续只保留 name/description 和两项布尔字段。优先使用原始入口的原生显式加载能力；需要投影的端构建可复用只读原生视图，完整保留 frontmatter/正文和包内相对资源，不依赖“请另读原文”实现 native hooks/fork。
+- 名称如需原生命名空间化，由适配器保留 original/native 名称映射；除明确必要的标识变换，未知元数据原样保留。hooks 相对命令、原生 Skill 目录变量、脚本 cwd、跨目录资源必须有专门的保真用例。
+- 原始内容与原生视图各有清单/hash；缓存按 provider + assemblyId + 投影版本命名，不能继续仅以线程 Expert snapshot ID 复用。共享不可变资源，不为每个 Run 全包复制，也不改上游源文件。
+- 不承诺 Pi/Codex/OMP 会执行 Claude 特有字段。每端记录“原生支持 / 原生忽略 / 原生拒绝”的实际结果；Synara 不因字段名字禁止装配，不静默宣称已应用不存在的语义。
+- startup 不能只拼正文就声称原生执行已发生。其激活要么通过该端真实原生调用，要么如实保持该端原有文本加载语义；回执区分已加载与原生行为已执行，不重复触发初始化 hooks。
+
+#### 3.3 原生子运行
+
+SDK 的主会话 Skill allowlist 不自动等于子代理排他继承；已核查 `initialize.skills` 只作用于 main session，`AgentDefinition.skills` 的 preload 声明也不证明排他。G11 的 `context:fork/agent` 需要单独验证，不能简单移除 `Agent/Task` 拒绝就交付。
+
+研发先验证各端原生父/子会话的配置根、插件/入口集合和继承结果：能原生维持同装配的端走原生继承；需要宿主接管创建的端通过同一 Run 的已验证装配创建受管理子运行。不得静默把 fork 改成主会话文本执行。具体原生接缝在阶段 1 用真实对照固定后实施；G11 验收前必须证明实际支持行为，不能用 blanket block 通过。
+
+父/子装配相同或为子集，父运行的 Skill 版本不能在子运行期间漂移；后台子运行继续持有相应包引用。普通未选 Expert 的子代理行为保持原范围。宿主已有授权继续适用，不因 Skill 中存在 hooks/allowed-tools/model 而移除审批、允许额外模型或读取凭据。
+
+本轮沿用同一 native session 的共享任务门禁：旧后台子运行仍活跃时，新的换版 Run 继续排队，等待其自然结束或用户显式停止；等待期间不提前冻结库头，真正启动时解析最新版。不得为重建主会话销毁旧子运行的进程/消费者，也不增加同 session 并行换版承诺。此项和原生继承都列为阶段 1 验证前提。
+
+### 4. 按 Run 解析最新 Skill
+
+“下一次运行”定义见[产品生效表](./skill-management-product-discussion-v0.1.md#iteration-20261026)，不将审批、steering 或进程重启算成新 Run。
+
+1. 排队阶段保存 Expert/调用意图；在共享 native 任务门禁放行后、任何可能执行 Skill 副作用的原生初始化/激活之前，在既有生命周期保护下读取当前已保存 Skill 绑定、enabled/activation 和各 Skill 最新头，构造独立 `RunSkillAssembly`。Persona/MCP/模型等仍按原任务契约，不混入其最新未采纳修改；绑定来源 revision 单独记录，避免将混合版本伪装成同一个完整 Expert revision。
+2. 先发布不可变装配资源，再在既有执行记录中持久化该根 Run 的 assemblyId/准备状态及底层 turn 映射，之后才允许可能执行副作用的原生初始化、startup 或 Provider prompt。引用提交失败时不启动；重放幂等，不把孤立暂存资源当成功。初始化意图/尝试/完成单独留证，若初始化后、prompt 前崩溃且副作用是否完成不明，则恢复原装配并报告 uncertain，不自动重跑非幂等启动动作。普通按工具事件触发的 hooks 仍遵循原生契约，不将所有 hook 错误合并为“只执行一次”。
+3. 同一 Run 发送重投、恢复、审批继续和子运行均读取已落盘装配。明确结束后用户重试属于新 Run，重新解析；无法确定是否已发送的自动重投仍沿用原 Run，不能追随库头。
+4. Provider 会话复用前比较 assemblyId、元数据、加载语义和策略版本。变化时重建原生会话；保留用户/助手/工具历史，但不重放旧的宿主 Skill 目录/启动注入或有副作用的 hooks，不重置用户任务。
+5. 解析中请求的 Skill/Expert 缺失、归档或并发失联时，不默默退回旧头、普通模式或默认 Skill；按真实对象状态返回可操作错误。正常解绑后得到空集合是有效零装配，不作为缺失错误。正在运行和恢复中的既有装配仍受引用保护，不被删除/GC 破坏。
+6. 历史快照和历史验收不重写。对具有可验证 Expert 身份与当前定义的新 Run 按新策略准备；无法建立身份或旧策略不兼容的记录报告缺失项，不在后台批量转换或清理旧任务。
+
+需要同步 `ProviderExpertSession`、装配 identity、native proof 和 receipt 的 assemblyId 归属，避免新内容错误命中旧线程的投影/证明缓存。持久化新增字段走现有扩展存储与恢复机制；具体迁移若有，按架构标准使用相应 ledger 并运行 migrations 检查。
+
+根 Run 映射必须由执行意图/工作项标识落盘：同一请求的 goal 自动续跑即使产生新 turn，也继承原装配；同一 Hub 工作项的续跑/投递重试相同。独立 Hub 工作项或已结束后的新请求/显式重试创建新根 Run，原生子代理则继承父装配。内容/启停/加载语义/策略决定装配有效指纹；标签、时间和仅用于归因的 revision 不应单独导致 native 会话重建，仍在每 Run 审计记录中保存。
+
+### 5. 来源刷新和内容迭代
+
+桌面、CLI、后续 Agent 共用一条更新通道：保存/下载 → 完整资源校验 → 新不可变包 → revision CAS 切换头 → 读回结果。保留稳定 Skill ID、创建信息、标签、Expert 绑定及其启停/加载方式；保留不属于来源内容的用户配置。名称、说明、正文、完整支持文件和来源解析版本一起替换。
+
+交互对齐 Multica：详情/列表菜单的一次“更新”和批量工具栏可执行来源更新；普通无本地编辑的条目不强迫先进入独立预览弹窗。底层仍可复用 prepare/preview 暂存和校验；本地修改覆盖时只针对明确目标确认，资源差异作为可选详情。CLI dry-run 输出同一变更计划，写入必须带 revision；旧计划失效拒绝，不覆盖新编辑。
+
+只有可验证的 GitHub/Skills.sh/ClawHub 托管来源参加 refresh；manual/local/archive/runtime 走编辑或重新导入并替换稳定 ID。原有本地来源信息保留作来源记录，不转换成后台监听。分支跟踪与显式 commit/tag 固定严格按原来源；不能为找“最新”擅自换分支或仓库。无需定时器，不隐式调用外部脚本。
+
+批量每项独立提交：`updated/unchanged/skipped/conflict/failed`，无托管源为 skipped，源内容相同为 unchanged；下载、内容校验、名称冲突及 CAS 失败不改变旧头或绑定。发布失败复用既有新包回滚和引用保护，不删除其他任务依赖的资源。更新在下一 Run 使用，当前运行没有热替换。
+
+### 6. G4/G6：统一查询与批量绑定服务
+
+查询将 Skill 库与当前 Expert 保存态聚合，统一输出被绑定的 distinct Expert 数及 enabled 数；“已使用”不等于启用。来源细类在服务端规范化；过滤维度间 AND/维度内 OR。时间未知项始终排后，排序最后追加名称/稳定 ID，避免 UI/CLI 不一致。维持已有文字搜索范围，本轮不顺带建设分页/搜索服务。
+
+新增批量追加命令，不仅前端循环保存：输入确定 Skill ID 集合、目标 Expert revision 和 requestId；dry-run 与 apply 均由同一服务端规则生成计划。已有绑定跳过，不重启 disabled；新绑定 enabled + on-demand；保留单 Expert startup 约束与所有无关字段。
+
+每个 Expert 的新增集合在现有 ExpertStore 的 CAS/队列内一次提交，多 Expert 逐项执行而非宣称跨对象事务。全部先做结构校验；每个提交点重验目标、Skill 存在与 revision；冲突不覆盖其他会话更改。重试相同 requestId 幂等，部分成功重试只处理未完成项。旧式绑定需要显式转换时返回 `needs_conversion`，不清空旧选择。
+
+结果至少含 `expertId/status/oldRevision/newRevision/addedSkillIds/skippedSkillIds/error`；状态区分 applied/unchanged/conflict/needs_conversion/failed。桌面确认页、批量结果和 CLI 使用相同结果对象，刷新双方缓存及使用统计。筛选变化不改变已确认的批量目标集合。
+
+### 7. G7：CLI 与未来管理 Agent 接口
+
+复用 `synara` 现有命令树，不把 `apps/server/scripts/cli.ts` 的构建发布脚本误当产品 CLI。增加独立管理 transport client，通过所选本机实例的现有 owner 授权能力调用服务端；不直接写 JSON/SQLite/内容包，不为了 CLI 开启 publicUrl 或新增跨机发现。
+
+管理命令范围（实际实现与验证以本轮实施记录为准）：
+
+```text
+synara skill list|get|create|update|delete
+synara skill import --url ... | --path ... | --file ...
+synara skill refresh <id> | --skill-ids ...
+synara skill files list|read|write|delete
+synara skill tags set <id> ...
+synara expert skills list|add|set|remove|enable|disable
+synara expert skills add --expert-ids ... --skill-ids ...
+```
+
+list 支持与桌面相同过滤/排序；content 支持互斥的参数/stdin/本地文件输入；文件内容支持二进制传输。`--json` 输出版本化 envelope 与逐项结果，诊断只进 stderr；write 支持 expected revision、dry-run、requestId，删除/覆盖本地编辑需要明确的本次操作确认参数。成功、部分成功、参数错误、冲突、未授权和运行失败有稳定可测试错误码；读回返回持久化新 revision。
+
+CLI 鉴权增加明确的本机 management 配对用途，不能只复用现有默认 client 的外部 MCP 配对：owner 在已登录桌面发起并确认一次性、短时、绑定 instanceId/flavor 的授权；CLI 交换得到可过期/撤销的管理凭据，单独私存。授予 `skill.manage` 与 `expert.skillBindings.manage` 对应的窄命令能力，不把普通 client 升成通用 owner，不允许借绑定接口改 Persona/MCP/模型等字段；服务端每次调用核验能力。原外部 MCP 凭据不隐式获得这些能力，本轮不新增 MCP tools。
+
+实例用显式 profile/home/endpoint 及可信实例描述选择，保存/交换时校验 instanceId，CLI 使用 stdin 或私有凭据引用，不把 token 放进参数/日志。默认不启动新 server、不读写其他 app flavor 的 home；过期/撤销/错实例返回确定错误，回到 owner 明确授权的配对流程，不自动提权或重试登录。无认证的受信 loopback owner 路径按既有策略保留；未来 Agent 的实际委托与启用仍是后续任务，不因本轮有了管理凭据而自动获得授权。
+
+服务端结构化命令能力为将来的管理 Agent 留出直接复用点；它可通过 CLI（后续若授权再接专用 tool）完成查询、预演、写入、读回。外部导入 Skill 不得把内容变成控制面指令或更换 CLI 目标实例。
+
+### 8. 落地顺序与退出条件
+
+| 阶段                  | 工作及主要责任模块                                                         | 退出条件                                                                                                                          |
+| --------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 0 范围与契约          | 本文/产品方案；明确只做四端、Run 生效时点、G11 不按字段拒绝                | 用户需求可追溯；接口草案与场景一致；不把方案写成实现                                                                              |
+| 1 四端兼容验证        | ClaudeAdapter、PiAdapter、OmpExpertSession、Codex manager、native 投影视图 | 配套 CLI 空/非空、原文/相对路径、native fork/hooks、旧子运行活跃时新 Run 排队切版有真实对照；锁定适配路径后才能宣称 G1/G11 可完成 |
+| 2 存储与 Run 生命周期 | contracts、Expert/Skill stores、Reactor/ProviderService、执行持久化        | r3→r4 排队/运行/恢复行为正确；更新/部分失败/引用保留可证明                                                                        |
+| 3 管理服务与桌面      | 列表读模型、批量绑定命令、Settings/ExpertClient/查询缓存                   | G4/G6 前后端一致；并发/旧式配置/部分重试通过，复用现有控件与字体 token                                                            |
+| 4 管理 CLI            | 产品命令树、管理 client、owner 配对/窄命令授权、共享命令能力               | 首次授权/私存/过期撤销与实例绑定、JSON/stdin/二进制/错误码通过；能由脚本完成导入→绑定→更新→读回                                   |
+| 5 集成与实际验收      | 独立审查、门禁、隔离桌面、四端真实运行                                     | 完整矩阵对应固定源码；发布/安装按后续授权单独处理                                                                                 |
+
+阶段 1 与 2 是关键依赖；阶段 3/4 在服务端契约稳定后可分文件并行实现，主会话保留产品与架构决定。阶段 1 的 SDK/子运行证明必须按实际结果记录，不能以“删除黑名单/取消零集合校验”缩减退出条件，也不把功能补齐交付成仅展示状态的页面。
+
+### 9. 验收矩阵与检查选择
+
+| 场景         | 必须证明的结果                                                                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 四端空/非空  | 环境存在同名/多余 Skill；Expert 空集仍可运行且无越界原生调用；普通模式仍保留环境行为                                                                    |
+| G11 原生内容 | 带各字段的合法 Skill 可保存/装配；该端原生支持的 hooks/fork/model/agent 行为实际发生；不支持的字段不被 Synara 先行删除/拒绝；脚本目录和相对资源正确     |
+| 子运行/后台  | 实际子运行继承同装配或子集；旧共享子运行活跃时换版 Run 排队，不强杀；旧子运行结束后新 Run 取当时最新版；资源不被 GC 提前回收                            |
+| 更新时序     | A 用 r3；更新为 r4；A 审批/恢复/自动 goal/同工作项 Hub 续跑仍 r3，未启动 B 和新根 Run C 用 r4；初始化后、prompt 前崩溃不换版/不自动重复未知副作用       |
+| 更新原子性   | 名称/正文/支持文件同版；ID/标签/绑定保留；本地编辑覆盖确认；固定来源、不变、无源、损坏、同名和 CAS 冲突均有确定结果                                     |
+| G4           | 每个筛选维度、AND/OR、disabled 计数、未知创建信息、同值排序、筛选外选择及 CLI 一致性                                                                    |
+| G6           | N×M 追加、重复调用、已有 disabled、startup 不变、CAS 冲突、部分成功重试及 legacy needs_conversion                                                       |
+| G7           | owner 首次授权、普通 MCP/client 无管理权、配对私存/过期撤销/错实例、窄绑定权限、JSON 无日志污染、退出码、stdin/文件、二进制、dry-run 无写入和无脚本执行 |
+
+开发时先跑受影响 Vitest/真实编辑器与管理流程回归；最终 fmt:check、lint、typecheck、完整 bun run test、受影响 Chromium 和 boundary 检查。涉及进程边界运行 windows-runtime:check；涉及迁移运行 migrations:check。同步 integration-points 清单及架构标准中的实际宿主能力接缝，不复制整份规范到功能模块。
+
+桌面为主要验收条件；共同前端仍执行既有浏览器自动化，但不新增浏览器功能设计。真实模型/原生工具执行与静态/SDK 初始化分别留证；Linux/Windows 实机、打包安装未验证时明确列缺口。沿用独立 preview home/端口与数据，不在日用中试写或清理历史快照。旧候选通过数量不转移到本方案。
+
+### 10. 依据与需要在阶段 1 解决的技术不确定性
+
+本轮 Multica 复核固定 `4fa40c502eec6a59eb1d0e7a13592b3867be6b58`：[来源更新](https://github.com/multica-ai/multica/blob/4fa40c502eec6a59eb1d0e7a13592b3867be6b58/server/internal/handler/skill_refresh.go#L55-L120)、[筛选](https://github.com/multica-ai/multica/blob/4fa40c502eec6a59eb1d0e7a13592b3867be6b58/packages/views/skills/components/skill-list-filter.ts)、[原生元数据保留](https://github.com/multica-ai/multica/blob/4fa40c502eec6a59eb1d0e7a13592b3867be6b58/server/internal/daemon/execenv/context.go#L443-L470)。参考其管理行为，不引入其 workspace/runtime 分发模型，不复制其所有端的能力承诺。
+
+本地 SDK 类型依据位于 `apps/server/node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts`：CLI 路径/初始化协议、main-only skills、可选 context category、plugin provenance；SDK 包版本见相邻 package.json。它们证明接口语义，不证明模型实际执行。空集合回执组合、原生子运行排他继承、hooks 的宿主审批与相对路径是阶段 1 的必做验证；不足时应修应用私有适配/依赖并追加实测，不能偷换“只使用装配 Skill”的目标。
+
+### 11. 本轮实现说明与验证边界
+
+- 固定装配使用策略 v2 和投影 v3，入口原文、frontmatter、相对目录资源保留；既有 v1 快照保留兼容分支。旧包仅兼容已知、可重新验证的派生元数据诊断，不放宽内容完整性校验。
+- Codex 私有 home 排除环境 Skill/插件链接，并在最高优先级启动参数关闭插件引擎；启动后必须读取到该有效配置。可信项目配置仍可存在，但不能重新启用 Expert 环境插件；普通 harness 不加这组限制。
+- Claude 默认空值或历史裸 `claude` 采用配套 CLI 2.1.296；用户自定义路径保持原值并核验版本。只在该精确版本、零插件来源已核验且空装配时，允许上下文省略 Skill 类别表示零集合；非空省略或畸形回执仍拒绝。插件 Agent 保留工具/maxTurns 与显式 Skill 子集，不扩大为整库。
+- `RunSkillAssemblyStore` 在实际启动时保存当前绑定和头版本；同 Run、自动 goal、恢复及同 Hub 工作项继续使用原装配。历史恢复缺少可验证 Run 记录时明确报错，不用当前库头补造旧运行。旧共享任务结束会唤醒排队入口，放行前不冻结新版本。
+- 初始化前记录意图和尝试；入口 hooks/startup 及包级 `hooks/hooks.json`、`.claude-plugin/plugin.json`、`.mcp.json` 均保守视为可能产生启动副作用。旧记录重新分类时，进行中或已有初始化错误转为 uncertain；同 Run 与跨 Worker 续跑均禁止自动重放未知副作用，不删除合法 hooks。
+- 桌面通过四个窄 owner WS RPC 读取本地授权、创建配对码、列举和吊销凭据；CLI 使用独立本地 HTTP 命令通道。凭据不提升为通用 owner，不注册默认管理 Agent。所有写入都有服务端有效 requestId；旧客户端未传 ID 时返回生成的 ID，新客户端在发送前生成，CLI 另私存首次提交信封以稳定 CAS 重试。
+- OMP 固定投影清理只修改临时目录权限，叶子只 unlink、目录逐级 rmdir；不会调用可能在 Windows 自动 chmod 文件的递归删除。删除受阻报告错误并保留未删临时资源；原不可变包的权限、inode 和内容保持不变。
+- OMP 18.12.1 的上游 ACP 仅在父 prompt 活跃时转发工具进度，父运行结束后的后台 Task 终态会丢失。本轮 fixed v2/inherit 使用私有 Bun preload，在相同 CLI 原文件的运行时视图中补充 idle Task 转发；不改全局安装、不替换模型或配置。只接受 SHA-256 `c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d`、17,638,974 字节、原 Bun shebang 与唯一处理器锚点。相同账户 PATH 解析 Bun，以独立 argv 传入 preload；版本预检和实际 ACP 子进程均须给出兼容层 marker，缺失或未知 bundle 明确拒绝，普通 harness/旧策略不使用该层。运行时 onLoad/argv 依据见 [Bun 插件](https://bun.com/docs/runtime/plugins)和 [preload](https://bun.com/docs/runtime)。
+- 该兼容分支直接启动已校验的 canonical sourcePath；preload 先检查 Bun.main，再检查当前 realpath，随后由 onLoad 复核路径、完整内容 hash、shebang 与锚点，防止启动前后改指绕过。idle 投递沿原生 catch/finally 记录错误并清理追踪，不把一次通知失败放大为未处理拒绝。账户环境与任务 cwd 的新解析仅用于此继承分支，其他会话保留与原启动一致的解析。无模型反例已覆盖这些替换时序；这不是同 UID 对抗隔离或 Windows 实机证明。
+
+实际模型、原生初始化、组件测试和独立审查分开记录于[本轮实施记录](./skill-management-2026-10-26-acceptance.md)。Claude 本轮真实模型请求返回 401 密钥过期；用户明确选择“本轮先记录 Claude 认证阻塞”，不再尝试模型、不改认证，也不以无模型初始化替代 fork/model 完成证明。Pi SDK 没有核心原生 subagent 工具，不据策略名声称新增该能力。Windows/Linux 实机及签名安装不属于本轮已验证结果。
+
+<a id="current-skill-management"></a>
+
+## 2026-10-25 已实现候选：统一 Skill 管理与固定装配
+
+来源与状态：用户在本次 Skill 管理讨论中明确要求参考 Multica、只使用装配的 Skill，并批准完整方案后要求实施。本节记录 2026-10-25 候选，取代更早历史方案中“仅通过指令提供目录”“环境技能仍参与专家任务”和“集中转换/清理旧任务”的规定。2026-10-26 修订要求以上方新方案为准，当前实施状态另见本轮记录；此节和[候选验收记录](./skill-management-2026-10-25-acceptance.md)保留原时点，不将历史结果转移给新方案。
+
+### 产品契约
+
+| 场景                   | 固定行为                                                                                     |
+| ---------------------- | -------------------------------------------------------------------------------------------- |
+| 选择 Expert            | 原生发现、自动使用和显式调用均限于该任务固定装配；未选入口、环境/项目/插件/内置 Skill 不参与 |
+| Expert 为空装配        | 零 Skill，不回退到 harness 默认 Skill                                                        |
+| 未选择 Expert          | 保留 harness 自身的原生 Skill 行为                                                           |
+| 修改或刷新受管理 Skill | 稳定身份与专家绑定保留；新任务自动使用最新头版本，已接受/排队/运行任务继续使用旧包           |
+| 原生子代理             | 只能继承相同装配或其子集；本轮无法证明继承的入口直接阻断                                     |
+| 历史任务               | 保留历史数据；没有固定装配策略的任务拒绝启动/恢复，不建设兼容或转换层，不执行历史清理        |
+
+本节限制 Skill 的发现、上下文与调用，不提供任意 Read/Bash 的操作系统文件沙箱。MCP 授权、凭据、Provider/model 选择和项目初始化仍由各自现有能力管理。
+
+### 稳定身份与不可变内容
+
+新增 `SkillDefinition`，用稳定 `skillId` 指向当前 `packageId + entryPath`，记录名称、说明、标签、来源、来源版本、本地编辑标记和 CAS revision。名称与说明以受管理 `SKILL.md` 为准；保存名称会生成重写该文件的新包。包仍由现有 `SkillPackageStore` 保存一次。
+
+Expert 使用 `ExpertSkillBinding { skillId, enabled, activation }`，最多一个启用的 startup 入口。保存绑定验证身份和冲突；原生任务接受时，在现有包生命周期锁内解析当前头版本。新 `ExpertSnapshot` 使用 schema 3，固定入口、内容哈希和 `skillPolicy { version: 1, discovery: "fixed", nativeSubagents: "blocked" }`。已接受 Hub 工作继续使用接受时的快照，重试与恢复不重新解析最新头版本。
+
+新增文件是 `<stateDir>/experts/skill-library.json`，预览暂存属于同一 stateDir 的 `skill-library-staging/`。Stable、Beta、Workbench 不跨数据目录。库写入沿用服务端串行队列；发布包和提交库引用在同一包生命周期临界区完成，防止无引用回收竞态。删除前确认受影响 Expert ID，解除绑定后再次在临界区复核；逻辑删除不绕过快照、保留 revision 和包引用保护。
+
+### 管理闭环
+
+唯一入口仍为 Settings → Agent skills。复用 Settings 父布局、Dialog、CodeEditorPane、草稿离开保护、连接 generation、查询缓存和现有 ExpertClient，不新增顶级页面。
+
+2026-10-26 详情对齐增量：列表打开 `SkillLibraryDetail`，用“概览 / 文件”组织同一份草稿。概览管理名称、描述、标签和专家绑定；文件页复用编辑器、文件图标、行样式和 Collapsible，主文件优先，附属文件分层展示。通用 `buildPathTree` 同时服务已有 review 文件树；HTTP 文件访问与错误处理由 `skillLibraryFiles` 共享，不复制第二套存储或通信逻辑。
+
+随后按用户视觉规格与最终宽度批注，详情两页统一 920px 上限、浅色原生边框，继续使用现有 Dialog 的固定头尾与滚动区。标签编辑复用 Combobox / Chips，不另建标签存储；已提交胶囊与待输入文本共同组成保存草稿，新增、去重、移除以及关闭保护都归前端原草稿流程。Badge、Alert 和现有图标分别承担来源/计数、持久说明和危险操作。DialogPopup 的关闭按钮样式/标签、ComboboxChip 的移除按钮属性、ScrollArea 的 viewportTabIndex 为可选扩展，原调用方默认行为保持；仅技能概览跳过滚动容器的额外 Tab 停靠点。未增加依赖、网络接口或运行装配逻辑。
+
+`save.description` 为可选字符串，最多 20,000 字符；二进制资源上传可附带同一描述。服务端在拥有的 staging 包内与资源变更一起重写所选入口的 YAML frontmatter，经原有包校验、CAS 和落盘流程发布。省略 description 时以文件原文为准，不用旧表单值覆盖源码编辑；保持既有调用兼容。
+
+静态 Markdown 预览复用 ReactMarkdown / GFM 依赖，禁用 raw HTML 和自动远端图片请求；包内链接经当前目录解析并限定于已登记资源。独立包编辑实例使用 cacheKeyPrefix，预览/编辑重新挂载刷新版本，保存从编辑器公开的 getText 读取当前文档。新文本初始提供一个空行，避免虚拟编辑器零行渲染；不改写已有资源的空文件字节。上述编辑状态留在前端，不进入运行装配或 Provider 配置。
+
+- 手动创建，编辑 `SKILL.md` 和支持文本资源；二进制资源保留原始字节，支持上传、替换和下载。
+- 从目录、`SKILL.md`、`.zip`、`.skill`、运行时/项目清单复制导入；外部来源保持只读。复杂包保留完整相对目录，只登记选中的入口。
+- 2026-10-26 用户追加的交互确认：运行时清单收进“导入技能 → 从运行时复制”，不在技能设置页常驻发现；由用户选择现有四个运行时后按需发现，取消项目路径输入。复用 `provider.listSkillsCatalog` 的可选 provider / forceReload 字段；指定 provider 时只读 `providerNativeSkillRoots`，仅 Claude 包含自身已安装插件目录，Pi/OMP 使用当前配置的 agentDir，不扫描其他运行时或创建 Synara 技能目录。旧调用不带 provider 时保留原统一清单语义。
+- 运行时复制复用既有 previewImport / import / cancel，逐项只登记根 `SKILL.md`，同名跳过，完整资源包保留；失败不阻断其他项，并释放失败预览、保留失败选择供重试。运行时与连接代次隔离查询缓存，切换清空选择、旧发现结果不进入新运行时。复制期间不允许关闭或切换，连接变更中止后续项；不改变 Expert 装配或原生运行行为。
+- 支持公开 GitHub、Skills.sh 和 ClawHub URL。先解析固定来源 revision，再下载到拥有的暂存目录；Skills.sh 必须唯一命中指定 slug，以其所在目录为完整包边界，目标目录内的链接仍拒绝。GitHub ref/path 歧义明确拒绝，不把整个仓库误当指定 Skill。ClawHub 按发布者与 slug 共同解析；其官方 API 同时提供托管 ZIP 与固定 GitHub 来源交接，见[接口依据](https://docs.openclaw.ai/clawhub/http-api)。
+- 导入预览支持选入口、同名跳过、改名或替换稳定身份。刷新预览列出资源差异和覆盖本地编辑的影响；来源入口消失或变得歧义时拒绝确认。
+- 搜索名称/说明/标签，按标签/来源过滤；批量标签、更新预览/确认、删除逐项报告结果。Skill 与 Expert 两端均可管理启用和加载时机。
+
+正文或二进制大文件使用经过 owner 鉴权的 HTTP 上传/下载，结构化操作使用 `server.skillLibrary` RPC；两者复用同一个库实例及预览生命周期，并保持既有 Expert 管理的仅 loopback 实例权限（无 publicUrl）。读取操作不额外套用写操作的 Cookie Origin 要求；不可信 Origin、非 owner 或远端可达实例仍拒绝。WebSocket protocol revision 为 7，客户端与服务端配套更新。现有回执 JSON 可容纳新增字段，本轮不改写历史迁移。
+
+已有包/路径选择的 Expert 保留原定义。改用技能库装配须展示原入口清单、确认替换，再仅更新专家草稿，既有 Save 才持久化；不能因在 Skill 侧点击绑定而静默清空原角色/工作流。新绑定 Expert 的双向管理共用同一控件和 CAS 保存。
+
+归档导入在写入前验证路径、普通文件、链接/设备、UTF-8 名称、规范化碰撞、CRC、扩容和资源限额。保留单文件 16 MiB、整包 100 MiB、5,000 条目上限；库注册表写入也不得超过其 16 MiB 读取上限。远端仅允许已支持的 HTTPS 来源及重定向目标，拒绝凭据和查询参数。取消、过期与失败清理由操作拥有的暂存目录负责。导入、编辑与预检均不自动运行脚本、安装依赖或执行 BMAD setup。
+
+### 四端执行
+
+保留原包资源，以固定路径和内容哈希验证实际原生目录。需要原生目录入口的 Provider 使用轻量只读 wrapper 指向固定原文；不改写上游来源，不把完整资源包复制到每个运行目录。wrapper 不授予工具权限。
+
+| Provider    | 固定装配机制                                                                                                                                   | 不可证明时的行为                                                                                      |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Codex       | 独立发现进程枚举环境入口，正式进程逐路径禁用外来入口；关闭 bundled Skill 和原生多代理配置；正式加载后及发送前核对完整活动集合                  | 配置未关闭、出现外来/同名异路径入口、版本能力不足或重载漂移均拒绝发送；发现探测不持有正式会话生命周期 |
+| Pi          | 会话 ResourceLoader 关闭环境 Skill/扩展扫描，仅提供固定入口与精确 override，真实 reload 后复验                                                 | 完整集合、路径或内容不符即失败；保留宿主显式注入的 Gateway/电脑工具                                   |
+| Claude Code | SDK 会话 Skill allowlist、禁用 bundled Skill、固定本地插件入口；原生插件路径回读与 context 结果共同核对，发送及 steering 共用门禁              | 不以 `supportedCommands()` 的名称列表证明装配；目录响应缺失、不兼容 CLI 或不可证明的操作失败关闭      |
+| oh-my-pi    | 私有配置 overlay 关闭环境来源，只启用固定目录/入口，ACP 关闭环境扩展发现；关闭 task/eval/workpool 递归和独立 Advisor；每轮复验配置、目录和文件 | ACP Advisor 切换、外来技能和重载命令在 prompt 前拒绝；仅凭递归深度不宣称已关闭 Advisor                |
+
+固定 Expert 的技能选择器读取服务端快照；原生命令选择器不调用未装配的发现进程。普通任务沿用原路径。所有恢复/派生继续通过 ProviderService 校验快照和包；支持的原生能力重新建立相同装配，无法核验则拒绝。
+
+`skillApplication` 增加 `enforcement: "native-fixed"`、实际核验的 `activeEntries` 路径/哈希和 `nativeSubagents: "blocked"`。必须先从原生结果核验完整集合，才可生成该回执。资源完整、原生装配、初始化成功和模型执行成功分别记录；回执不证明模型已执行每项 Skill。
+
+### 实施与交付边界
+
+实施顺序为稳定库/快照 → 原生隔离与反例 → HTTP/RPC 和完整界面 → 独立审查/全库检查/隔离预览。真实运行、平台和不兼容 CLI 的结果以本轮验收为准，不能继承下方旧候选的通过数字。主仓库和占用中的开发预览保持原状；本轮使用单独受管理 worktree、home、工作区和端口。合入、推送、应用安装、发布、全局 CLI/认证更新和历史数据清理均不包含在本轮实施中。
+
+## 2026-10-20 历史方案
+
+以下保留原决定与背景；与上方当前方案冲突的条款不再适用于本轮。
+
 ## 1. 方案摘要
 
 采用 **共享不可变技能包＋专家入口索引＋任务版本清单＋四端统一目录加载**。

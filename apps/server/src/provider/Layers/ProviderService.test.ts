@@ -1,14 +1,16 @@
+import { recordVerifiedNativeSkillAssembly, renderExpertSkillCatalog } from "../expertSkillCatalog";
 // FILE: ProviderService.test.ts
 // Purpose: Verifies cross-provider routing, persistence, recovery, and runtime lifecycle behavior.
 // Layer: Provider service integration tests
 // Depends on: ProviderServiceLive with in-memory adapter and SQLite fakes.
 
 import fs from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
 import type {
+  ProviderExpertSession,
   ExpertAppliedRuntimeRecord,
   ContextAppliedRuntimeRecord,
   ModelSelection,
@@ -109,6 +111,8 @@ import {
 import { PersistenceDecodeError } from "../../persistence/Errors.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
+import { createSkillLibraryStore } from "../../experts/SkillLibraryStore.ts";
+import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore.ts";
 import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
 import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
 
@@ -211,6 +215,86 @@ function requireSharedCodexFixtureGeneration(
   return generation;
 }
 
+const strictExpertTestRoot = fs.mkdtempSync(
+  path.join(os.tmpdir(), "synara-provider-fixed-experts-"),
+);
+const strictExpertTestState = path.join(strictExpertTestRoot, "state");
+afterAll(async () => {
+  await (
+    await import("../../experts/ExpertStore")
+  ).expertResourceFiles.removeStaging(strictExpertTestRoot);
+});
+async function makeStrictTestExpert(input: ProviderExpertSession): Promise<ProviderExpertSession> {
+  const directory = path.join(strictExpertTestRoot, `fixture-${randomUUID()}`);
+  await fs.promises.mkdir(directory);
+  let selections: NonNullable<ProviderExpertSession["skillEntries"]> = [];
+  if (input.skills.length) {
+    for (const [index, skill] of input.skills.entries()) {
+      const leaf = path.join(directory, `skill-${index}`);
+      await fs.promises.mkdir(leaf);
+      await fs.promises.writeFile(
+        path.join(leaf, "SKILL.md"),
+        `---\nname: ${JSON.stringify(skill.name)}\ndescription: Fixture Skill\n---\nFixture instructions.\n`,
+      );
+    }
+    const packages = createSkillPackageStore(strictExpertTestState),
+      preview = await packages.preview({ path: directory }),
+      imported = await packages.import({ previewId: preview.previewId });
+    selections = await packages.resolveSelections(
+      imported.package.entries.map((entry) => ({
+        packageId: imported.package.packageId,
+        entryPath: entry.entryPath,
+        activation: "on-demand" as const,
+      })),
+    );
+  }
+  const references: string[] = [];
+  for (const [index, value] of input.references.entries()) {
+    const target = path.join(directory, `reference-${index}.txt`);
+    await fs.promises.writeFile(target, value);
+    references.push(target);
+  }
+  const experts = createExpertStore(strictExpertTestState),
+    definition = await experts.save({
+      name: input.snapshotId,
+      description: "Current strict Expert test fixture",
+      useCases: "",
+      persona: input.persona,
+      outputRequirements: "",
+      skills: [],
+      skillSelections: selections.map(({ packageId, entryPath, activation }) => ({
+        packageId,
+        entryPath,
+        activation,
+      })),
+      references,
+      connections: [],
+    });
+  const binding = await experts.prepareSnapshot(definition.id),
+    snapshot = await experts.readSnapshot(binding.snapshotId);
+  return {
+    snapshotId: snapshot.snapshotId,
+    expertId: snapshot.expertId,
+    revision: snapshot.revision,
+    displayName: snapshot.displayName,
+    persona: [
+      `Expert: ${snapshot.displayName}`,
+      snapshot.persona,
+      snapshot.references.length
+        ? `Reference files:\n${snapshot.references.map((reference) => `- ${reference}`).join("\n")}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    skillsRoot: snapshot.skillsRoot,
+    skills: snapshot.skills,
+    skillLoading: "index",
+    skillPolicy: snapshot.skillPolicy,
+    skillEntries: snapshot.skillEntries ?? [],
+    references: snapshot.references,
+  };
+}
+
 const providerServiceSecretBytes = new Map<string, Uint8Array>();
 const ProviderServiceTestSecretStoreLayer = Layer.succeed(ServerSecretStore, {
   get: (name) => Effect.succeed(providerServiceSecretBytes.get(name) ?? null),
@@ -232,7 +316,7 @@ const ProviderServiceTestSecretStoreLayer = Layer.succeed(ServerSecretStore, {
     }),
 });
 const makeProviderServiceLive = (options?: Parameters<typeof makeProviderServiceLiveRaw>[0]) =>
-  makeProviderServiceLiveRaw(options).pipe(
+  makeProviderServiceLiveRaw({ stateDir: strictExpertTestState, ...options }).pipe(
     Layer.provide(makeContextRepositoryTestLayer()),
     Layer.provide(ProviderServiceTestSecretStoreLayer),
   );
@@ -328,6 +412,7 @@ async function makeExpertSkillPackageFixture(
       skillsRoot: snapshot.skillsRoot,
       skills: snapshot.skills,
       skillLoading: "index",
+      skillPolicy: snapshot.skillPolicy,
       skillEntries: snapshot.skillEntries ?? [],
       references: snapshot.references,
     },
@@ -457,7 +542,15 @@ function makeFakeCodexAdapter(
     (
       input: ProviderAdapterSessionStartInput,
     ): Effect.Effect<ProviderSession, ProviderAdapterError> =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
+        if (input.expertSession?.skillPolicy && options?.confirmSkillApplication !== false)
+          yield* Effect.promise(() =>
+            recordVerifiedNativeSkillAssembly(
+              input.expertSession!,
+              input.expertSession!.skills,
+              input.lifecycleGeneration!,
+            ),
+          );
         const now = new Date().toISOString();
         const session: ProviderSession = {
           provider,
@@ -465,7 +558,9 @@ function makeFakeCodexAdapter(
           runtimeMode: input.runtimeMode,
           runtimeComponent: provider === "pi" ? "pi-sdk" : `${provider}-cli`,
           runtimeVersion: "test-runtime-version",
-          ...(options?.confirmExpertApplication && input.expertSession
+          ...(options?.confirmExpertApplication &&
+          input.expertSession &&
+          !input.expertSession.skillPolicy
             ? {
                 expertApplication: {
                   snapshotId: input.expertSession.snapshotId,
@@ -484,7 +579,7 @@ function makeFakeCodexAdapter(
                 },
               }
             : {}),
-          ...(options?.confirmSkillApplication &&
+          ...(options?.confirmSkillApplication !== false &&
           input.expertSession?.skillLoading === "index" &&
           input.lifecycleGeneration
             ? {
@@ -788,7 +883,7 @@ function makeProviderServiceLayer(
   },
 ) {
   const codex = makeFakeCodexAdapter("codex", {
-    ...(providers?.confirmSkillApplication ? { confirmSkillApplication: true } : {}),
+    confirmSkillApplication: providers?.confirmSkillApplication !== false,
     ...(providers?.freshRuntimeEventDelivery
       ? { runtimeEventDelivery: "fresh-ids-once" as const }
       : {}),
@@ -798,9 +893,11 @@ function makeProviderServiceLayer(
   });
   const claude = makeFakeCodexAdapter("claudeAgent", {
     confirmExpertApplication: providers?.confirmExpertApplication === true,
+    confirmSkillApplication: providers?.confirmSkillApplication !== false,
   });
   const omp = makeFakeCodexAdapter("omp", {
     confirmExpertApplication: providers?.confirmExpertApplication === true,
+    confirmSkillApplication: providers?.confirmSkillApplication !== false,
   });
   const antigravity = makeFakeCodexAdapter("antigravity");
   const droid = makeFakeCodexAdapter("droid", { conversationRollback: "restart-session" });
@@ -862,7 +959,7 @@ function makeProviderServiceLayer(
   );
 
   const rawLayer = Layer.mergeAll(
-    makeProviderServiceLiveRaw(options).pipe(
+    makeProviderServiceLiveRaw({ stateDir: strictExpertTestState, ...options }).pipe(
       Layer.provide(providerAdapterLayer),
       Layer.provide(directoryLayer),
       Layer.provide(contextRepositoryLayer),
@@ -999,13 +1096,17 @@ const contextDispatchSession = makeTestContextSession(
   "context-dispatch",
   "## Project instructions\nPreserve source evidence boundaries.",
 );
-const contextDispatchExpert = {
+const contextDispatchExpert = await makeStrictTestExpert({
   snapshotId: "expert-dispatch",
   persona: "Use the frozen review persona.",
   skills: [],
   references: [],
-} satisfies NonNullable<ProviderSessionStartInput["expertSession"]>;
-const contextDispatchBase = `${contextDispatchExpert.persona}\n\n${contextDispatchSession.text}`;
+});
+const contextDispatchCompiledExpert = {
+  ...contextDispatchExpert,
+  persona: `${contextDispatchExpert.persona}\n\n${renderExpertSkillCatalog(contextDispatchExpert.snapshotId, contextDispatchExpert.skillEntries ?? [])}`,
+};
+const contextDispatchBase = `${contextDispatchCompiledExpert.persona}\n\n${contextDispatchSession.text}`;
 const contextDispatchOrder: string[] = [];
 contextDispatchRepository.setContext(contextDispatchThreadId, contextDispatchSession);
 contextDispatchRouting.layer("ProviderService Context V1.1", (it) => {
@@ -1023,7 +1124,7 @@ contextDispatchRouting.layer("ProviderService Context V1.1", (it) => {
         });
 
         const adapterInput = contextDispatchRouting.codex.startSession.mock.calls.at(-1)?.[0];
-        assert.deepEqual(adapterInput?.expertSession, contextDispatchExpert);
+        assert.deepEqual(adapterInput?.expertSession, contextDispatchCompiledExpert);
         assert.deepEqual(adapterInput?.contextSession, contextDispatchSession);
         const applied = contextDispatchRepository.applied.get(contextDispatchThreadId);
         assert.equal(applied?.snapshotId, contextDispatchSession.snapshotId);
@@ -4441,18 +4542,22 @@ routing.layer("ProviderServiceLive routing", (it) => {
         const provider = yield* ProviderService;
         const directory = yield* ProviderSessionDirectory;
         const threadId = asThreadId("thread-failed-codex-pi-replacement-snapshots");
-        const originalExpert = {
-          snapshotId: "snapshot-rollback-original",
-          persona: "Use the original reviewer persona.",
-          skills: [],
-          references: [],
-        };
-        const replacementExpert = {
-          snapshotId: "snapshot-rollback-replacement",
-          persona: "Use the replacement planner persona.",
-          skills: [],
-          references: [],
-        };
+        const originalExpert = yield* Effect.promise(() =>
+          makeStrictTestExpert({
+            snapshotId: "snapshot-rollback-original",
+            persona: "Use the original reviewer persona.",
+            skills: [],
+            references: [],
+          }),
+        );
+        const replacementExpert = yield* Effect.promise(() =>
+          makeStrictTestExpert({
+            snapshotId: "snapshot-rollback-replacement",
+            persona: "Use the replacement planner persona.",
+            skills: [],
+            references: [],
+          }),
+        );
         const originalContext = makeTestContextSession(
           "context-rollback-original",
           "Original frozen Context instructions.",
@@ -4518,7 +4623,10 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.isTrue(yield* replacementRollbackRouting.codex.hasSession(threadId));
         assert.isFalse(yield* replacementRollbackRouting.pi.hasSession(threadId));
         assert.equal(restoreCall?.resumeCursor, undefined);
-        assert.deepEqual(restoreCall?.expertSession, originalExpert);
+        assert.deepEqual(
+          { ...restoreCall?.expertSession, persona: originalExpert.persona },
+          originalExpert,
+        );
         assert.deepEqual(restoreCall?.contextSession, originalContext);
         assert.deepEqual(restoredRuntimePayload.expertSession, originalExpert);
         assert.deepEqual(restoredRuntimePayload.contextSession, originalContext);
@@ -4535,7 +4643,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(appliedContext?.snapshotHash, originalContext.snapshotHash);
         assert.equal(appliedContext?.provider, "codex");
         assert.equal(appliedContext?.lifecycleGeneration, restoredBinding.lifecycleGeneration);
-        const originalInstructions = `${originalExpert.persona}\n\n${originalContext.text}`;
+        const originalInstructions = `${originalExpert.persona}\n\n${renderExpertSkillCatalog(originalExpert.snapshotId, originalExpert.skillEntries ?? [])}\n\n${originalContext.text}`;
         assert.equal(appliedContext?.submittedInstructions, originalInstructions);
         assert.equal(
           appliedContext?.baseInstructionsHash,
@@ -4559,12 +4667,14 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const provider = yield* ProviderService;
       const directory = yield* ProviderSessionDirectory;
       const threadId = asThreadId("thread-failed-codex-pi-rollback-evidence");
-      const expertSession = {
-        snapshotId: "snapshot-rollback-evidence-failure",
-        persona: "Use the reviewer persona.",
-        skills: [],
-        references: [],
-      };
+      const expertSession = yield* Effect.promise(() =>
+        makeStrictTestExpert({
+          snapshotId: "snapshot-rollback-evidence-failure",
+          persona: "Use the reviewer persona.",
+          skills: [],
+          references: [],
+        }),
+      );
       const contextSession = makeTestContextSession(
         "context-rollback-evidence-failure",
         "Context for rollback evidence failure.",
@@ -4618,12 +4728,14 @@ routing.layer("ProviderServiceLive routing", (it) => {
       failReplacementRollbackExpertWrite = false;
       for (const field of ["expertSession", "contextSession"] as const) {
         const threadId = asThreadId(`thread-malformed-rollback-${field}`);
-        const expertSession = {
-          snapshotId: `snapshot-malformed-rollback-${field}`,
-          persona: "Use the reviewer persona.",
-          skills: [],
-          references: [],
-        };
+        const expertSession = yield* Effect.promise(() =>
+          makeStrictTestExpert({
+            snapshotId: `snapshot-malformed-rollback-${field}`,
+            persona: "Use the reviewer persona.",
+            skills: [],
+            references: [],
+          }),
+        );
         const contextSession = makeTestContextSession(
           `context-malformed-rollback-${field}`,
           "Context for malformed rollback snapshot.",
@@ -6357,18 +6469,20 @@ routing.layer("ProviderServiceLive routing", (it) => {
     Effect.gen(function* () {
       const provider = yield* ProviderService;
       const directory = yield* ProviderSessionDirectory;
-      const expertSession = {
-        snapshotId: "snapshot-recovery",
-        persona: "Use the immutable reviewer persona.",
-        skillsRoot: "/tmp/snapshot-recovery/skills",
-        skills: [
-          {
-            name: "reviewer",
-            path: "/tmp/snapshot-recovery/skills/reviewer/SKILL.md",
-          },
-        ],
-        references: ["handbook"],
-      };
+      const expertSession = yield* Effect.promise(() =>
+        makeStrictTestExpert({
+          snapshotId: "snapshot-recovery",
+          persona: "Use the immutable reviewer persona.",
+          skillsRoot: "/tmp/snapshot-recovery/skills",
+          skills: [
+            {
+              name: "reviewer",
+              path: "/tmp/snapshot-recovery/skills/reviewer/SKILL.md",
+            },
+          ],
+          references: ["handbook"],
+        }),
+      );
 
       const initial = yield* provider.startSession(asThreadId("thread-1"), {
         provider: "codex",
@@ -6409,7 +6523,10 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(startPayload.cwd, "/tmp/project-send-turn");
         assert.deepEqual(startPayload.resumeCursor, initial.resumeCursor);
         assert.equal(startPayload.threadId, initial.threadId);
-        assert.deepEqual(startPayload.expertSession, expertSession);
+        assert.deepEqual(startPayload.expertSession, {
+          ...expertSession,
+          persona: `${expertSession.persona}\n\n${renderExpertSkillCatalog(expertSession.snapshotId, expertSession.skillEntries ?? [])}`,
+        });
       }
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
     }),
@@ -6421,12 +6538,14 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const provider = yield* ProviderService;
       const directory = yield* ProviderSessionDirectory;
       const threadId = asThreadId("thread-applied-runtime-service");
-      const expertSession = {
-        snapshotId: "snapshot-applied-runtime-service",
-        persona: "Use the reviewer persona.",
-        skills: [],
-        references: [],
-      };
+      const expertSession = yield* Effect.promise(() =>
+        makeStrictTestExpert({
+          snapshotId: "snapshot-applied-runtime-service",
+          persona: "Use the reviewer persona.",
+          skills: [],
+          references: [],
+        }),
+      );
 
       yield* provider.startSession(threadId, {
         provider: "codex",
@@ -6487,12 +6606,14 @@ routing.layer("ProviderServiceLive routing", (it) => {
           provider.startSession(threadId, {
             provider: "codex",
             threadId,
-            expertSession: {
-              snapshotId: "snapshot-write-fails",
-              persona: "Use the reviewer persona.",
-              skills: [],
-              references: [],
-            },
+            expertSession: yield* Effect.promise(() =>
+              makeStrictTestExpert({
+                snapshotId: "snapshot-write-fails",
+                persona: "Use the reviewer persona.",
+                skills: [],
+                references: [],
+              }),
+            ),
             runtimeMode: "full-access",
           }),
         );
@@ -6508,7 +6629,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
               | { readonly snapshotId?: string }
               | undefined
           )?.snapshotId,
-          "snapshot-write-fails",
+          expertAppliedRuntimeFailureRouting.codex.startSession.mock.calls.at(-1)?.[0].expertSession
+            ?.snapshotId,
         );
         assert.isTrue(
           Cause.findErrorOption(Exit.isFailure(exit) ? exit.cause : Cause.empty).pipe(
@@ -6534,12 +6656,14 @@ routing.layer("ProviderServiceLive routing", (it) => {
             provider: "codex",
             threadId,
             runtimeMode: "full-access",
-            expertSession: {
-              snapshotId: "snapshot-expert-cleanup-timeout",
-              persona: "Use the reviewer persona.",
-              skills: [],
-              references: [],
-            },
+            expertSession: yield* Effect.promise(() =>
+              makeStrictTestExpert({
+                snapshotId: "snapshot-expert-cleanup-timeout",
+                persona: "Use the reviewer persona.",
+                skills: [],
+                references: [],
+              }),
+            ),
           })
           .pipe(Effect.exit, Effect.forkChild);
         yield* Deferred.await(enteredCleanup);
@@ -6556,7 +6680,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
               | { readonly snapshotId?: string }
               | undefined
           )?.snapshotId,
-          "snapshot-expert-cleanup-timeout",
+          expertAppliedRuntimeFailureRouting.codex.startSession.mock.calls.at(-1)?.[0].expertSession
+            ?.snapshotId,
         );
         const originalError = Cause.findErrorOption(
           Exit.isFailure(result) ? result.cause : Cause.empty,
@@ -6595,12 +6720,14 @@ routing.layer("ProviderServiceLive routing", (it) => {
             provider: "codex",
             threadId,
             runtimeMode: "full-access",
-            expertSession: {
-              snapshotId: "snapshot-expert-cleanup-fails",
-              persona: "Use the reviewer persona.",
-              skills: [],
-              references: [],
-            },
+            expertSession: yield* Effect.promise(() =>
+              makeStrictTestExpert({
+                snapshotId: "snapshot-expert-cleanup-fails",
+                persona: "Use the reviewer persona.",
+                skills: [],
+                references: [],
+              }),
+            ),
           }),
         );
 
@@ -6618,7 +6745,8 @@ routing.layer("ProviderServiceLive routing", (it) => {
               | { readonly snapshotId?: string }
               | undefined
           )?.snapshotId,
-          "snapshot-expert-cleanup-fails",
+          expertAppliedRuntimeFailureRouting.codex.startSession.mock.calls.at(-1)?.[0].expertSession
+            ?.snapshotId,
         );
         const originalError = Cause.findErrorOption(
           Exit.isFailure(result) ? result.cause : Cause.empty,
@@ -6657,12 +6785,14 @@ routing.layer("ProviderServiceLive routing", (it) => {
             provider: "codex",
             threadId,
             runtimeMode: "full-access",
-            expertSession: {
-              snapshotId: "snapshot-expert-new-generation",
-              persona: "Use the reviewer persona.",
-              skills: [],
-              references: [],
-            },
+            expertSession: yield* Effect.promise(() =>
+              makeStrictTestExpert({
+                snapshotId: "snapshot-expert-new-generation",
+                persona: "Use the reviewer persona.",
+                skills: [],
+                references: [],
+              }),
+            ),
           })
           .pipe(Effect.exit, Effect.forkChild);
         yield* Deferred.await(enteredCleanup);
@@ -11079,12 +11209,14 @@ for (const providerKind of ["claudeAgent", "omp"] as const) {
           "Frozen project context.",
         );
         repository.setContext(threadId, contextSession);
-        const expertSession = {
-          snapshotId: `expert-${providerKind}`,
-          persona: "Frozen reviewer.",
-          skills: [{ name: "review", path: "/snapshot/skills/review/SKILL.md" }],
-          references: [],
-        };
+        const expertSession = yield* Effect.promise(() =>
+          makeStrictTestExpert({
+            snapshotId: `expert-${providerKind}`,
+            persona: "Frozen reviewer.",
+            skills: [{ name: "review", path: "/snapshot/skills/review/SKILL.md" }],
+            references: [],
+          }),
+        );
         const initial = yield* service.startSession(threadId, {
           provider: providerKind,
           threadId,
@@ -11092,7 +11224,7 @@ for (const providerKind of ["claudeAgent", "omp"] as const) {
           expertSession,
           contextSession,
         });
-        assert.equal(initial.expertApplication?.snapshotId, expertSession.snapshotId);
+        assert.equal(initial.skillApplication?.snapshotId, expertSession.snapshotId);
         assert.equal(repository.applied.get(threadId)?.snapshotId, contextSession.snapshotId);
         const firstGeneration = appliedWrites.at(-1)?.lifecycleGeneration;
         const adapter = providerKind === "omp" ? verified.omp : verified.claude;
@@ -11104,14 +11236,8 @@ for (const providerKind of ["claudeAgent", "omp"] as const) {
           asRuntimePayloadRecord(binding.runtimePayload).expertSession,
           expertSession,
         );
-        assert.equal(
-          (
-            asRuntimePayloadRecord(binding.runtimePayload).expertApplication as {
-              snapshotId: string;
-            }
-          ).snapshotId,
-          expertSession.snapshotId,
-        );
+        assert.equal(appliedWrites.at(-1)?.skillApplication?.snapshotId, expertSession.snapshotId);
+        assert.equal(appliedWrites.at(-1)?.skillApplication?.enforcement, "native-fixed");
         yield* service.stopSession({ threadId });
       }),
     );
@@ -11127,12 +11253,14 @@ for (const providerKind of ["claudeAgent", "omp"] as const) {
         );
         repository.setContext(source, contextSession);
         repository.setContext(target, contextSession);
-        const expertSession = {
-          snapshotId: `fork-expert-${providerKind}`,
-          persona: "Frozen reviewer.",
-          skills: [],
-          references: [],
-        };
+        const expertSession = yield* Effect.promise(() =>
+          makeStrictTestExpert({
+            snapshotId: `fork-expert-${providerKind}`,
+            persona: "Frozen reviewer.",
+            skills: [],
+            references: [],
+          }),
+        );
         yield* service.startSession(source, {
           provider: providerKind,
           threadId: source,
@@ -11165,12 +11293,12 @@ for (const providerKind of ["claudeAgent", "omp"] as const) {
             start(input).pipe(
               Effect.map((session) => ({
                 ...session,
-                expertApplication: {
-                  ...session.expertApplication!,
+                skillApplication: {
+                  ...session.skillApplication!,
                   ...(invalid === "snapshot" ? { snapshotId: "wrong" } : {}),
                   ...(invalid === "instructions" ? { instructionsHash: "wrong" } : {}),
-                  ...(invalid === "skills" ? { skills: [] } : {}),
-                  ...(invalid === "shape" ? { skills: null as never } : {}),
+                  ...(invalid === "skills" ? { activeEntries: [] } : {}),
+                  ...(invalid === "shape" ? { activeEntries: null as never } : {}),
                 },
               })),
             ),
@@ -11182,12 +11310,14 @@ for (const providerKind of ["claudeAgent", "omp"] as const) {
               provider: providerKind,
               threadId,
               runtimeMode: "full-access",
-              expertSession: {
-                snapshotId: "expected-snapshot",
-                persona: "Frozen expert",
-                skills: [{ name: "required", path: "/snapshot/required/SKILL.md" }],
-                references: [],
-              },
+              expertSession: yield* Effect.promise(() =>
+                makeStrictTestExpert({
+                  snapshotId: "expected-snapshot",
+                  persona: "Frozen expert",
+                  skills: [{ name: "required", path: "/snapshot/required/SKILL.md" }],
+                  references: [],
+                }),
+              ),
             }),
           );
           assert.isTrue(Exit.isFailure(outcome));
@@ -11214,7 +11344,10 @@ for (const providerKind of ["claudeAgent", "omp"] as const) {
       }),
     );
   });
-  const unverified = makeProviderServiceLayer(undefined, { includeOmp: true });
+  const unverified = makeProviderServiceLayer(undefined, {
+    includeOmp: true,
+    confirmSkillApplication: false,
+  });
   unverified.layer(`ProviderService ${providerKind} unverified Expert`, (it) => {
     it.effect("retires a runtime that fails to verify the fixed resources", () =>
       Effect.gen(function* () {
@@ -11226,12 +11359,14 @@ for (const providerKind of ["claudeAgent", "omp"] as const) {
             provider: providerKind,
             threadId,
             runtimeMode: "full-access",
-            expertSession: {
-              snapshotId: "missing-receipt",
-              persona: "Reviewer",
-              skills: [],
-              references: [],
-            },
+            expertSession: yield* Effect.promise(() =>
+              makeStrictTestExpert({
+                snapshotId: "missing-receipt",
+                persona: "Reviewer",
+                skills: [],
+                references: [],
+              }),
+            ),
           }),
         );
         assert.isTrue(Exit.isFailure(exit));
@@ -11336,10 +11471,18 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
           ],
         });
         const submittedTurn = expertV2Runtime.codex.sendTurn.mock.calls.at(-1)?.[0];
-        assert.deepEqual(submittedTurn?.skills, []);
-        assert.ok(submittedTurn?.input?.includes("PLAN BODY"));
-        assert.ok(submittedTurn?.input?.includes(planEntry.path));
-        assert.ok(!submittedTurn?.input?.includes("/untrusted/client/path"));
+        assert.deepEqual(submittedTurn?.skills, [
+          {
+            name: planEntry.name,
+            path: planEntry.path,
+            expert: {
+              snapshotId: fixture.session.snapshotId,
+              packageId: planEntry.packageId,
+              entryPath: planEntry.entryPath,
+            },
+          },
+        ]);
+        assert.equal(submittedTurn?.input, "Please follow the planning workflow.");
 
         const sendCallsBeforeRejectedMention = expertV2Runtime.codex.sendTurn.mock.calls.length;
         const unselectedMention = yield* Effect.exit(
@@ -11366,6 +11509,28 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
           sendCallsBeforeRejectedMention,
         );
 
+        const pluginResult = yield* Effect.exit(
+          service.sendTurn({
+            threadId,
+            input: "Activate this native plugin",
+            attachments: [],
+            mentions: [{ name: "ambient-plugin", path: "plugin://ambient-plugin@native" }],
+          }),
+        );
+        assert.isTrue(Exit.isFailure(pluginResult));
+        assert.equal(
+          expertV2Runtime.codex.sendTurn.mock.calls.length,
+          sendCallsBeforeRejectedMention,
+        );
+        yield* service.sendTurn({
+          threadId,
+          input: "Read the ordinary file",
+          attachments: [],
+          mentions: [{ name: "brief", path: "/workspace/brief.md" }],
+        });
+        assert.deepEqual(expertV2Runtime.codex.sendTurn.mock.calls.at(-1)?.[0]?.mentions, [
+          { name: "brief", path: "/workspace/brief.md" },
+        ]);
         const firstGeneration = initial.skillApplication?.lifecycleGeneration;
         yield* expertV2Runtime.codex.stopAll();
         yield* service.sendTurn({
@@ -11460,10 +11625,125 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
           }),
         );
         assert.isTrue(Exit.isFailure(forgedPersonaResult));
+        if (Exit.isFailure(forgedPersonaResult)) {
+          assert.match(
+            Cause.pretty(forgedPersonaResult.cause),
+            /persona.*do not match the pinned snapshot/u,
+          );
+        }
         assert.equal(
           expertV2Runtime.codex.startSession.mock.calls.length,
           startsBeforeSubstitution,
         );
+      }),
+  );
+  it.effect(
+    "normalizes queued managed Skill references to the next Run head and rejects unbound IDs",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => expertV2FixturePromise);
+        const library = createSkillLibraryStore(fixture.stateDir);
+        const skill = (yield* Effect.promise(() =>
+          library.execute({
+            action: "create",
+            name: "managed-queue",
+            body: "---\nname: managed-queue\ndescription: Managed\n---\nFirst\n",
+            tags: [],
+          }),
+        )).skill!;
+        const experts = createExpertStore(fixture.stateDir);
+        const definition = yield* Effect.promise(() =>
+          experts.save({
+            name: "Managed queued",
+            description: "",
+            useCases: "",
+            persona: "Keep this pinned",
+            outputRequirements: "",
+            skills: [],
+            references: [],
+            connections: [],
+            skillBindings: [{ skillId: skill.skillId, enabled: true, activation: "on-demand" }],
+          }),
+        );
+        const binding = yield* Effect.promise(() => experts.prepareSnapshot(definition.id));
+        const assemblies = createRunSkillAssemblyStore(fixture.stateDir);
+        const threadId = asThreadId("expert-managed-queue");
+        const first = yield* Effect.promise(() =>
+          assemblies.prepare({
+            threadId,
+            rootRunId: "run:managed-A",
+            baseSnapshotId: binding.snapshotId,
+            createdAt: "2026-10-26T10:00:00.000Z",
+          }),
+        );
+        const reference = {
+          name: skill.name,
+          path: "/client/untrusted/SKILL.md",
+          expert: {
+            snapshotId: binding.snapshotId,
+            packageId: skill.packageId,
+            entryPath: skill.entryPath,
+            skillId: skill.skillId,
+          },
+        };
+        yield* Effect.promise(() =>
+          library.execute({
+            action: "save",
+            skillId: skill.skillId,
+            expectedRevision: skill.revision,
+            name: skill.name,
+            tags: [],
+            changes: [
+              {
+                path: "SKILL.md",
+                content: Buffer.from(
+                  "---\nname: managed-renamed\ndescription: Managed new\n---\nSecond\n",
+                ).toString("base64"),
+              },
+            ],
+          }),
+        );
+        const second = yield* Effect.promise(() =>
+          assemblies.prepare({
+            threadId,
+            rootRunId: "run:managed-B",
+            baseSnapshotId: binding.snapshotId,
+            createdAt: "2026-10-26T11:00:00.000Z",
+          }),
+        );
+        assert.notEqual(first.assemblyId, second.assemblyId);
+        const service = yield* ProviderService;
+        yield* service.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          runtimeMode: "full-access",
+          expertSession: second.session,
+        });
+        yield* service.sendTurn({
+          threadId,
+          input: "Use the selected workflow.",
+          attachments: [],
+          skills: [reference],
+        });
+        const nativeInput = expertV2Runtime.codex.sendTurn.mock.calls.at(-1)?.[0];
+        assert.equal(nativeInput?.input, "Use the selected workflow.");
+        assert.equal(nativeInput?.skills?.[0]?.name, "managed-renamed");
+        assert.equal(nativeInput?.skills?.[0]?.path, second.session.skillEntries?.[0]?.path);
+        const before = expertV2Runtime.codex.sendTurn.mock.calls.length;
+        const rejected = yield* Effect.exit(
+          service.sendTurn({
+            threadId,
+            input: "Use missing",
+            attachments: [],
+            skills: [
+              { ...reference, expert: { ...reference.expert, skillId: `skl_${"0".repeat(32)}` } },
+            ],
+          }),
+        );
+        assert.isTrue(Exit.isFailure(rejected));
+        assert.equal(expertV2Runtime.codex.sendTurn.mock.calls.length, before);
+        yield* service.stopSession({ threadId });
+        yield* Effect.promise(() => library.dispose());
       }),
   );
 });

@@ -5301,7 +5301,7 @@ it.effect("gives the coordinator thread its playbook packet on every turn", () =
     // Called once per dispatchTurnForThread — the coordinator must see its
     // playbook and watch state on every turn, not just the first.
     for (let turn = 0; turn < 2; turn += 1) {
-      const packet = yield* service.formatContextPacketForTurn(coordinatorThreadId);
+      const packet = (yield* service.formatContextPacketForTurn(coordinatorThreadId)).text;
       assert.equal(packet.includes("Hub context packet"), true);
       assert.equal(packet.includes("## Playbook\n# Hub coordinator playbook"), true);
       assert.equal(packet.includes("## Watch"), true);
@@ -5311,7 +5311,7 @@ it.effect("gives the coordinator thread its playbook packet on every turn", () =
     }
 
     // Member threads get the shared packet without the coordinator playbook.
-    const memberPacket = yield* service.formatContextPacketForTurn(groupMemberThreadId);
+    const memberPacket = (yield* service.formatContextPacketForTurn(groupMemberThreadId)).text;
     assert.equal(memberPacket.includes("Hub context packet"), true);
     assert.equal(memberPacket.includes("## Playbook"), false);
     assert.equal(memberPacket.includes("## Hub tools"), true);
@@ -5326,7 +5326,7 @@ it.effect("isolates coordinator instructions from member and worker packets", ()
     const overview = yield* configureTestGroup(service, "req-welcome-setup");
     const coordinatorThreadId = overview.config!.coordinatorThreadId!;
 
-    const coordinatorPacket = yield* service.formatContextPacketForTurn(coordinatorThreadId);
+    const coordinatorPacket = (yield* service.formatContextPacketForTurn(coordinatorThreadId)).text;
     assert.equal(
       coordinatorPacket.includes(
         "This thread opened with a welcome message from you; the user may be replying to it.",
@@ -5335,7 +5335,7 @@ it.effect("isolates coordinator instructions from member and worker packets", ()
     );
 
     // Member threads explain they are not the coordinator instead.
-    const memberPacket = yield* service.formatContextPacketForTurn(groupMemberThreadId);
+    const memberPacket = (yield* service.formatContextPacketForTurn(groupMemberThreadId)).text;
     assert.equal(memberPacket.includes("welcome message from you"), false);
     assert.equal(memberPacket.includes("member thread of this hub"), true);
 
@@ -5349,7 +5349,8 @@ it.effect("isolates coordinator instructions from member and worker packets", ()
       },
       { kind: "user" },
     );
-    const customCoordinatorPacket = yield* service.formatContextPacketForTurn(coordinatorThreadId);
+    const customCoordinatorPacket = (yield* service.formatContextPacketForTurn(coordinatorThreadId))
+      .text;
     assert.include(customCoordinatorPacket, "Coordinator-only custom instructions.");
 
     // Worker identity comes from its persisted assignment, not from prompt text.
@@ -5410,7 +5411,11 @@ it.effect("isolates coordinator instructions from member and worker packets", ()
         scopeKey: "hub-work-packet-scope",
         fingerprint: "hub-work-packet-plan",
         taskIndex: 0,
-        creationSpec: { prompt: "Fix the flaky suite", target: modelSelection },
+        creationSpec: {
+          prompt:
+            "Fix the flaky suite. FROZEN-SCOPE: only suite A; fixed input owner=author/path=result.md/revision=2; attemptId=pinned-attempt",
+          target: modelSelection,
+        },
         sourceMessages: [],
         slotHeld: true,
         admittedAt: now,
@@ -5423,7 +5428,24 @@ it.effect("isolates coordinator instructions from member and worker packets", ()
         updatedAt: now,
       },
     ]);
-    const workerPacket = yield* service.formatContextPacketForTurn(workerThreadId);
+    for (const logicalPath of [MEMORY_AUTO_DOCUMENT_PATH, "decisions.md"]) {
+      yield* service.writeDocument(
+        {
+          requestId: `worker-private-${logicalPath}`,
+          projectId: groupId,
+          logicalPath,
+          content: `UNRELATED-HUB-BODY-${logicalPath}`,
+        },
+        { kind: "user" },
+      );
+    }
+    const workerPacket = (yield* service.formatContextPacketForTurn(workerThreadId)).text;
+    assert.notInclude(workerPacket, "UNRELATED-HUB-BODY");
+    assert.include(workerPacket, "FROZEN-SCOPE: only suite A");
+    assert.include(workerPacket, "owner=author/path=result.md/revision=2");
+    assert.include(workerPacket, "attemptId=pinned-attempt");
+    assert.include(workerPacket, "MEMORY.md revision");
+
     assert.equal(workerPacket.includes("welcome message from you"), false);
     assert.include(workerPacket, "## Hub tools");
     assert.include(workerPacket, "## Hub memory index");
@@ -5444,6 +5466,17 @@ it.effect("isolates coordinator instructions from member and worker packets", ()
       assert.notInclude(packet, "Coordinator-only custom instructions.");
       assert.notInclude(packet, "You do not write application code yourself");
     }
+    for (const excluded of [
+      "## Tasks",
+      "## Decisions",
+      "## Memory\n",
+      "## Linked repositories",
+      "## Thread model default",
+      "Coordinator-only custom instructions.",
+    ]) {
+      assert.notInclude(workerPacket, excluded);
+    }
+    assert.include(workerPacket, "## Direct source references");
     assert.include(workerPacket, "worker thread of this hub");
     assert.include(workerPacket, "Carry out your assigned task");
   }).pipe(Effect.provide(harness.layer));
@@ -5459,7 +5492,7 @@ it.effect("shows the hub goal once when the active goal repeats it", () => {
     });
     const coordinatorThreadId = overview.config!.coordinatorThreadId!;
 
-    const beforeGoal = yield* service.formatContextPacketForTurn(coordinatorThreadId);
+    const beforeGoal = (yield* service.formatContextPacketForTurn(coordinatorThreadId)).text;
     assert.equal(beforeGoal.includes("## Objective\nShip the mobile app"), true);
     // No active goal — the fallback copy still shows under its own label.
     assert.equal(beforeGoal.includes("## Goal\nNone."), true);
@@ -5483,7 +5516,7 @@ it.effect("shows the hub goal once when the active goal repeats it", () => {
       },
       null,
     );
-    const packet = yield* service.formatContextPacketForTurn(coordinatorThreadId);
+    const packet = (yield* service.formatContextPacketForTurn(coordinatorThreadId)).text;
     assert.equal(packet.includes("## Objective\nShip the mobile app"), true);
     assert.equal(packet.includes("## Goal"), false);
     assert.equal(packet.split("Ship the mobile app").length - 1, 1);
@@ -5508,7 +5541,7 @@ it.effect("shows the hub goal once when the active goal repeats it", () => {
       },
       1,
     );
-    const updated = yield* service.formatContextPacketForTurn(coordinatorThreadId);
+    const updated = (yield* service.formatContextPacketForTurn(coordinatorThreadId)).text;
     assert.equal(updated.includes("## Objective\nShip the mobile app"), true);
     assert.equal(updated.includes("## Goal\nShip the mobile app to beta testers"), true);
   }).pipe(Effect.provide(harness.layer));
@@ -5554,7 +5587,7 @@ it.effect("keeps instructions and the memory index when the packet truncates", (
       user,
     );
 
-    const packet = yield* service.formatContextPacketForTurn(coordinatorThreadId);
+    const packet = (yield* service.formatContextPacketForTurn(coordinatorThreadId)).text;
     assert.equal(packet.includes("[truncated]"), true);
     // The highest-priority sections survive the budget cut intact.
     assert.equal(packet.includes(instructions), true);
@@ -9191,3 +9224,32 @@ it.effect(
     }).pipe(Effect.provide(harness.layer));
   },
 );
+
+it.effect("loads MEMORY.md only once when auto memory is enabled", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const overview = yield* service.configure(
+      {
+        requestId: "memory-dedup",
+        projectId: groupId,
+        coordinatorModelSelection: modelSelection,
+        autoMemoryEnabled: true,
+      },
+      { kind: "user" },
+    );
+    yield* service.writeDocument(
+      {
+        requestId: "memory-dedup-write",
+        projectId: groupId,
+        logicalPath: MEMORY_AUTO_DOCUMENT_PATH,
+        content: "UNIQUE-MEMORY-INDEX-CONTENT",
+      },
+      { kind: "user" },
+    );
+    const packet = (yield* service.formatContextPacketForTurn(
+      overview.config!.coordinatorThreadId!,
+    )).text;
+    assert.strictEqual(packet.split("UNIQUE-MEMORY-INDEX-CONTENT").length - 1, 1);
+  }).pipe(Effect.provide(harness.layer));
+});

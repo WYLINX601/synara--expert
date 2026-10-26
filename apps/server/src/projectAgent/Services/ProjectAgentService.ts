@@ -1,3 +1,5 @@
+import type { ProjectAgentTurnContext } from "../workerTurnContext.ts";
+
 import type {
   RuntimeTurnState,
   ProjectActivity,
@@ -295,7 +297,7 @@ export interface ProjectAgentServiceShape {
   ) => Effect.Effect<ProjectAgentOverview, ProjectAgentServiceError>;
   readonly formatContextPacketForTurn: (
     threadId: ThreadId,
-  ) => Effect.Effect<string, ProjectAgentServiceError>;
+  ) => Effect.Effect<ProjectAgentTurnContext, ProjectAgentServiceError>;
   readonly authorizeManagedGoalCreation: (input: {
     readonly callerThreadId: ThreadId;
     readonly requestedCount: number;

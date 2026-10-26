@@ -1,3 +1,7 @@
+import {
+  renderWorkerContext,
+  type WorkerContextSection,
+} from "../../projectAgent/workerTurnContext.ts";
 import { ProjectAgentServiceError } from "../../projectAgent/Errors.ts";
 // FILE: ProviderCommandReactor.test.ts
 // Purpose: Verifies provider intent orchestration, queueing, rollback, and transcript bootstrap flows.
@@ -29,6 +33,7 @@ import {
   DEFAULT_GIT_TEXT_GENERATION_MODEL,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
+  FIXED_EXPERT_SKILL_POLICY,
   MessageId,
   ProjectTaskAttemptId,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
@@ -79,6 +84,8 @@ import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { createExpertConnectionStore } from "../../experts/ExpertConnectionStore.ts";
 import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
+import { createSkillLibraryStore } from "../../experts/SkillLibraryStore.ts";
+import { listRunSkillAssemblies } from "../../experts/RunSkillAssemblyStore.ts";
 import { startWorkbenchRuntimeMcpFixture } from "../../../../../scripts/lib/workbench-runtime-mcp-fixture.ts";
 import { ContextRepository } from "../../context/ContextRepository.ts";
 import { GitCommandError, TextGenerationError } from "../../git/Errors.ts";
@@ -402,6 +409,9 @@ describe("ProviderCommandReactor", () => {
         }
       | undefined;
     readonly formatContextPacket?: string;
+    readonly workerContextSections?: readonly WorkerContextSection[];
+    readonly workerInitialPrompt?: string;
+    readonly contextLifecycleGeneration?: string;
     readonly rejectHubExecution?: boolean;
     readonly assertGroupCoordinatorTurnAllowed?: (input: {
       readonly threadId: ThreadId;
@@ -420,6 +430,7 @@ describe("ProviderCommandReactor", () => {
     const { stateDir } = deriveServerPathsSync(baseDir, undefined);
     createdStateDirs.add(stateDir);
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
+    const contextLifecycleGeneration = input?.contextLifecycleGeneration;
     let nextSessionIndex = 1;
     const runtimeSessions: Array<ProviderSession> = [];
     const persistedResumeCursors = new Map<ThreadId, unknown>();
@@ -453,6 +464,7 @@ describe("ProviderCommandReactor", () => {
           ? ThreadId.makeUnsafe(input.threadId)
           : ThreadId.makeUnsafe(`thread-${sessionIndex}`);
       const session: ProviderSession = {
+        ...(contextLifecycleGeneration ? { lifecycleGeneration: contextLifecycleGeneration } : {}),
         provider: sessionModelSelection.provider,
         status: "ready" as const,
         runtimeMode:
@@ -791,7 +803,18 @@ describe("ProviderCommandReactor", () => {
           : input?.rejectHubExecution
             ? Effect.fail(new ProjectAgentServiceError({ message: "Hub plan is paused." }))
             : Effect.void,
-      formatContextPacketForTurn: () => Effect.succeed(input?.formatContextPacket ?? ""),
+      formatContextPacketForTurn: () =>
+        Effect.succeed(
+          input?.workerContextSections
+            ? {
+                text: renderWorkerContext(input.workerContextSections),
+                workerSections: input.workerContextSections,
+                ...(input.workerInitialPrompt
+                  ? { workerInitialPrompt: input.workerInitialPrompt }
+                  : {}),
+              }
+            : { text: input?.formatContextPacket ?? "" },
+        ),
     } as unknown as (typeof ProjectAgentService)["Service"]);
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionPipelineLive),
@@ -804,6 +827,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(projectAgentLayer),
     );
     const projectAgentRepositoryLayer = Layer.succeed(ProjectAgentRepository, {
+      findManagedWorkerByThread: () => Effect.succeed(Option.none()),
       getConfigByCoordinatorThread: (threadId: ThreadId) =>
         Effect.succeed(
           (input?.coordinatorThreadIds ?? []).includes(threadId)
@@ -1801,6 +1825,107 @@ describe("ProviderCommandReactor", () => {
     expect(sentInput.input?.indexOf("MARKER-PACKET-42") ?? -1).toBeLessThan(
       sentInput.input?.indexOf("What happened?") ?? Number.POSITIVE_INFINITY,
     );
+  });
+
+  it("sends Worker deltas, preserves frozen input on runtime recovery and reloads after compaction", async () => {
+    const frozen = `${"Preserve task scope and user hard constraints. ".repeat(30)} owner=author path=result.md revision=2; attemptId=frozen-attempt`;
+    const sections = [
+      { label: "Instructions", text: "WORKER-ONLY-STABLE-RULE" },
+      { label: "Inputs", text: "fixed revision 2" },
+      { label: "Frozen assignment and sources", text: frozen },
+    ];
+    const harness = await createHarness({
+      workerContextSections: sections,
+      workerInitialPrompt: frozen,
+      contextLifecycleGeneration: "worker-test-generation",
+      ingestRuntimeEvents: true,
+    });
+    const dispatch = (id: string) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          commandId: CommandId.makeUnsafe(`worker-delta-${id}`),
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          message: {
+            messageId: MessageId.makeUnsafe(`worker-delta-${id}`),
+            role: "user",
+            text: id === "first" ? frozen : `Continue ${id}`,
+            attachments: [],
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    await dispatch("first");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0].input).toContain("WORKER-ONLY-STABLE-RULE");
+    expect(harness.sendTurn.mock.calls[0]?.[0].input?.split(frozen).length).toBe(2);
+    await emitHarnessTurnTerminal(harness, {
+      eventId: "worker-first-done",
+      provider: "codex",
+      type: "completed",
+    });
+    await harness.drain();
+    sections[1] = { label: "Inputs", text: "fixed revision 3" };
+    await dispatch("second");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.sendTurn.mock.calls[1]?.[0].input).not.toContain("WORKER-ONLY-STABLE-RULE");
+    expect(harness.sendTurn.mock.calls[1]?.[0].input).not.toContain(frozen);
+    expect(harness.sendTurn.mock.calls[1]?.[0].input).toContain("fixed revision 3");
+    await emitHarnessTurnTerminal(harness, {
+      eventId: "worker-second-done",
+      provider: "codex",
+      type: "completed",
+    });
+    await harness.drain();
+
+    // Model the real ProviderService recovery boundary: resolveRoutableSession
+    // can rotate the runtime after Reactor assembly, before beforeDispatch.
+    let rotate = true;
+    const consumed: string[] = [];
+    harness.sendTurn.mockImplementation((turn, options) =>
+      Effect.gen(function* () {
+        if (rotate) {
+          const sessions = yield* harness.listSessions();
+          (sessions as ProviderSession[])[0] = {
+            ...sessions[0]!,
+            lifecycleGeneration: "recovered-generation",
+          };
+          rotate = false;
+        }
+        if (options?.beforeDispatch) yield* options.beforeDispatch;
+        consumed.push(turn.input ?? "");
+        return { threadId: ThreadId.makeUnsafe("thread-1"), turnId: asTurnId("turn-1") };
+      }),
+    );
+    await dispatch("recovered");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 4);
+    await harness.drain();
+    expect(consumed).toHaveLength(1);
+    expect(consumed[0]).toContain("WORKER-ONLY-STABLE-RULE");
+    expect(consumed[0]).toContain(frozen);
+    await emitHarnessTurnTerminal(harness, {
+      eventId: "worker-recovered-done",
+      provider: "codex",
+      type: "completed",
+    });
+    await harness.drain();
+
+    await harness.emitRuntimeEvent({
+      eventId: asEventId("worker-compacted"),
+      provider: "codex",
+      threadId: ThreadId.makeUnsafe("thread-1"),
+      createdAt: new Date().toISOString(),
+      providerRefs: {},
+      type: "thread.state.changed",
+      payload: { state: "compacted" },
+    });
+    await harness.drain();
+    await dispatch("after-compact");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 5);
+    expect(consumed[1]).toContain("WORKER-ONLY-STABLE-RULE");
+    expect(consumed[1]).toContain(frozen);
   });
 
   describe("multi-folder projects", () => {
@@ -13950,6 +14075,8 @@ describe("ProviderCommandReactor", () => {
     expect(boundThread?.expertBinding).toMatchObject({ expertId, revision: 1 });
     const binding = boundThread!.expertBinding!;
     const snapshot = await expertStore.readSnapshot(binding.snapshotId);
+    expect(snapshot.schemaVersion).toBe(3);
+    expect(snapshot.skillPolicy).toEqual(FIXED_EXPERT_SKILL_POLICY);
     await expertStore.save({
       ...expertDefinition,
       expectedRevision: 1,
@@ -13978,6 +14105,8 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
 
     const expectedExpertSession = {
+      skillAssemblyId: expect.stringMatching(/^ska_[a-f0-9]{64}$/u),
+      skillRootRunId: `run:${threadId}:user-expert-binding-initial`,
       snapshotId: binding.snapshotId,
       expertId: snapshot.expertId,
       revision: snapshot.revision,
@@ -13990,6 +14119,7 @@ describe("ProviderCommandReactor", () => {
       skillsRoot: snapshot.skillsRoot,
       skills: snapshot.skills,
       skillLoading: "index",
+      skillPolicy: FIXED_EXPERT_SKILL_POLICY,
       skillEntries: snapshot.skillEntries ?? [],
       references: snapshot.references,
     };
@@ -14001,9 +14131,196 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSession.mock.calls.length === 2);
     await waitFor(() => harness.sendTurn.mock.calls.length === 2);
 
-    expect(harness.startSession.mock.calls[1]?.[1].expertSession).toEqual(expectedExpertSession);
+    expect(harness.startSession.mock.calls[1]?.[1].expertSession).toEqual({
+      ...expectedExpertSession,
+      skillRootRunId: `run:${threadId}:user-expert-binding-recovered`,
+    });
+    expect(harness.startSession.mock.calls[1]?.[1].expertSession?.skillAssemblyId).toBe(
+      harness.startSession.mock.calls[0]?.[1].expertSession?.skillAssemblyId,
+    );
+    expect((await readHarnessThread(harness, threadId))?.expertBinding).toEqual(binding);
+
+    const nextRoot = path.join(harness.stateDir, "expert-fixtures", "review-package-next");
+    fs.mkdirSync(path.join(nextRoot, "skills", "reviewer"), { recursive: true });
+    fs.writeFileSync(
+      path.join(nextRoot, "skills", "reviewer", "SKILL.md"),
+      "---\nname: reviewer\ndescription: updated review\n---\nReview version two.\n",
+    );
+    const nextPreview = await packageStore.preview({ path: nextRoot });
+    const nextPackage = await packageStore.import({ previewId: nextPreview.previewId });
+    await expertStore.save({
+      ...expertDefinition,
+      expectedRevision: 2,
+      persona: "The latest Persona must still not replace the task role.",
+      skillSelections: [
+        {
+          packageId: nextPackage.package.packageId,
+          entryPath: "skills/reviewer/SKILL.md",
+          activation: "startup",
+        },
+      ],
+    });
+    // A new user intent may change Skills while the thread's accepted role stays fixed.
+    await Effect.runPromise(harness.stopRuntimeSession({ threadId }));
+    await Effect.runPromise(startTurn("new-skill-head"));
+    await waitFor(() => harness.startSession.mock.calls.length === 3);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 3);
+    const latest = harness.startSession.mock.calls[2]?.[1].expertSession;
+    expect(latest?.skillRootRunId).toBe(`run:${threadId}:user-expert-binding-new-skill-head`);
+    expect(latest?.skillAssemblyId).not.toBe(
+      harness.startSession.mock.calls[0]?.[1].expertSession?.skillAssemblyId,
+    );
+    expect(latest?.skillEntries?.[0]?.packageId).toBe(nextPackage.package.packageId);
+    expect(latest?.persona).toBe(expectedExpertSession.persona);
     expect((await readHarnessThread(harness, threadId))?.expertBinding).toEqual(binding);
   });
+
+  it("does not migrate missing historical Run records while applying an idle runtime setting", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.makeUnsafe("historical-run-without-record");
+    const expert = await createExpertStore(harness.stateDir).save({
+      name: "Historical fixture",
+      description: "",
+      useCases: "",
+      persona: "Pinned",
+      outputRequirements: "",
+      skills: [],
+      skillBindings: [],
+      references: [],
+      connections: [],
+    });
+    const now = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("create-historical-run"),
+        threadId,
+        projectId: asProjectId("project-1"),
+        expertId: expert.id,
+        title: "Historical fixture",
+        modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("seed-historical-runtime"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.makeUnsafe("restore-historical-runtime"),
+        threadId,
+        modelSelection: { provider: "codex", model: "gpt-5.5-codex" },
+      }),
+    );
+    await harness.drain();
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(await listRunSkillAssemblies(harness.stateDir)).toEqual([]);
+  });
+
+  it.each(["task.completed", "task.updated"] as const)(
+    "releases an Expert queue on %s without freezing heads while background work is live",
+    async (eventType) => {
+      const harness = await createHarness();
+      const threadId = ThreadId.makeUnsafe(`expert-background-${eventType}`);
+      const experts = createExpertStore(harness.stateDir);
+      const expert = await experts.save({
+        name: "Background fixture",
+        description: "",
+        useCases: "",
+        persona: "Pinned",
+        outputRequirements: "",
+        skills: [],
+        skillBindings: [],
+        references: [],
+        connections: [],
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.makeUnsafe(`create-${eventType}`),
+          threadId,
+          projectId: asProjectId("project-1"),
+          expertId: expert.id,
+          title: "Background fixture",
+          modelSelection: { provider: "codex", model: "gpt-5-codex" },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          branch: null,
+          worktreePath: null,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      harness.hasLiveRuntimeTasks.mockReturnValue(Effect.succeed(true));
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe(`queue-${eventType}`),
+          threadId,
+          message: {
+            messageId: asMessageId(`queued-${eventType}`),
+            role: "user",
+            text: "Use the newest assembly after the child ends.",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await harness.drain();
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(await listRunSkillAssemblies(harness.stateDir)).toEqual([]);
+      const library = createSkillLibraryStore(harness.stateDir);
+      const skill = (
+        await library.execute({
+          action: "create",
+          name: "released-head",
+          body: "---\nname: released-head\ndescription: New after queue\n---\nUpdated.\n",
+          tags: [],
+        })
+      ).skill!;
+      await experts.save({
+        ...expert,
+        expectedRevision: expert.revision,
+        skillBindings: [{ skillId: skill.skillId, enabled: true, activation: "on-demand" }],
+      });
+      harness.hasLiveRuntimeTasks.mockReturnValue(Effect.succeed(false));
+      await harness.emitRuntimeEvent({
+        type: eventType,
+        eventId: asEventId(`settled-${eventType}`),
+        provider: "codex",
+        threadId,
+        createdAt: new Date().toISOString(),
+        providerRefs: {},
+        payload: { taskId: "native-child", status: "completed" },
+      } as ProviderRuntimeEvent);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      expect(
+        harness.startSession.mock.calls[0]?.[1].expertSession?.skillEntries?.[0]?.packageId,
+      ).toBe(skill.packageId);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      await library.dispose();
+    },
+  );
 
   it("preflights Expert connections before initial start and replacement while preserving live reuse", async () => {
     const harness = await createHarness();

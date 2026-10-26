@@ -95,6 +95,7 @@ export function useComposerDiscovery({
   );
   const effectiveMentionQuery = mentionTriggerQuery.length > 0 ? debouncedPathQuery : "";
   const composerSkillCwd = providerModelDiscoveryCwd;
+  const hasExpertSkillSource = Boolean(expertBinding || draftExpert);
   const providerComposerCapabilitiesQuery = useQuery(
     providerComposerCapabilitiesQueryOptions(selectedProvider, selectedProviderInstanceId),
   );
@@ -125,6 +126,7 @@ export function useComposerDiscovery({
             ? ompAgentDir || null
             : null,
       enabled:
+        !hasExpertSkillSource &&
         (composerTriggerKind === "slash-command" ||
           composerTriggerKind === "slash-model" ||
           discoverNativeCompaction === true) &&
@@ -136,7 +138,6 @@ export function useComposerDiscovery({
     selectedProvider === "pi" ||
     selectedProvider === "omp" ||
     supportsSkillDiscovery(providerComposerCapabilitiesQuery.data);
-  const hasExpertSkillSource = Boolean(expertBinding || draftExpert);
   // Expert threads use the accepted snapshot, never the mutable template or the
   // harness-wide catalog. Load outside the picker too, so restored skill chips
   // keep resolving to the exact snapshot paths after refresh/provider changes.
@@ -148,6 +149,7 @@ export function useComposerDiscovery({
       return ensureExpertClient().readExpertSnapshot({ snapshotId: expertBinding.snapshotId });
     },
   });
+  const usesRunSkills = Boolean(expertBinding && expertSnapshotQuery.data?.schemaVersion === 3);
   const providerSkillsQuery = useQuery(
     providerSkillsQueryOptions({
       provider: selectedProvider,
@@ -161,12 +163,12 @@ export function useComposerDiscovery({
             ? ompAgentDir || null
             : null,
       enabled:
-        !hasExpertSkillSource &&
+        (usesRunSkills || !hasExpertSkillSource) &&
         (isSkillTrigger ||
           composerTriggerKind === "slash-command" ||
           selectedProvider === "pi" ||
           selectedProvider === "omp") &&
-        canDiscoverProviderSkills &&
+        (usesRunSkills || canDiscoverProviderSkills) &&
         composerSkillCwd !== null,
     }),
   );
@@ -177,6 +179,7 @@ export function useComposerDiscovery({
       cwd: composerSkillCwd,
       threadId,
       enabled:
+        !hasExpertSkillSource &&
         supportsPluginDiscovery(providerComposerCapabilitiesQuery.data) &&
         composerSkillCwd !== null,
     }),
@@ -194,19 +197,22 @@ export function useComposerDiscovery({
   // Keep plugin suggestions referentially stable so prompt-sync effects do not loop on rerender.
   const providerPlugins = useMemo(
     () =>
-      providerPluginsQuery.data?.marketplaces.flatMap((marketplace) =>
-        marketplace.plugins.map((plugin) => ({
-          plugin,
-          mention: {
-            name: plugin.name,
-            path: `plugin://${plugin.name}@${marketplace.name}`,
-          } satisfies ProviderMentionReference,
-        })),
-      ) ?? EMPTY_COMPOSER_PLUGIN_SUGGESTIONS,
-    [providerPluginsQuery.data],
+      hasExpertSkillSource
+        ? EMPTY_COMPOSER_PLUGIN_SUGGESTIONS
+        : (providerPluginsQuery.data?.marketplaces.flatMap((marketplace) =>
+            marketplace.plugins.map((plugin) => ({
+              plugin,
+              mention: {
+                name: plugin.name,
+                path: `plugin://${plugin.name}@${marketplace.name}`,
+              } satisfies ProviderMentionReference,
+            })),
+          ) ?? EMPTY_COMPOSER_PLUGIN_SUGGESTIONS),
+    [hasExpertSkillSource, providerPluginsQuery.data],
   );
-  const providerNativeCommands =
-    providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS;
+  const providerNativeCommands = hasExpertSkillSource
+    ? EMPTY_PROVIDER_NATIVE_COMMANDS
+    : (providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS);
   const providerNativeCommandNames = useMemo(
     () => providerNativeCommands.map((command) => command.name),
     [providerNativeCommands],
@@ -247,29 +253,35 @@ export function useComposerDiscovery({
   const providerSkills = useMemo(
     () =>
       hasExpertSkillSource
-        ? expertEntries
-          ? expertEntries
-              .filter((entry) => entry.userInvocable !== false)
-              .map((entry) => ({
-                name: entry.name,
-                description: entry.description || undefined,
-                path: `synara-expert-skill:${entry.packageId}#${entry.entryPath}`,
+        ? usesRunSkills
+          ? providerSkillsQuery.data?.source === "expert.fixed-snapshot"
+            ? providerSkillsQuery.data.skills.map((entry) => ({ ...entry, scope: "expert" }))
+            : EMPTY_PROVIDER_SKILLS
+          : expertEntries
+            ? expertEntries
+                .filter((entry) => entry.userInvocable !== false)
+                .map((entry) => ({
+                  name: entry.name,
+                  description: entry.description || undefined,
+                  path: `synara-expert-skill:${entry.packageId}#${entry.entryPath}`,
+                  enabled: true,
+                  scope: "expert",
+                  expert: {
+                    snapshotId: expertBinding?.snapshotId ?? PENDING_EXPERT_SKILL_SNAPSHOT,
+                    packageId: entry.packageId,
+                    entryPath: entry.entryPath,
+                    ...(entry.managedSkillId ? { skillId: entry.managedSkillId } : {}),
+                  },
+                }))
+            : (legacyExpertSkills?.map((skill) => ({
+                ...skill,
                 enabled: true,
                 scope: "expert",
-                expert: {
-                  snapshotId: expertBinding?.snapshotId ?? PENDING_EXPERT_SKILL_SNAPSHOT,
-                  packageId: entry.packageId,
-                  entryPath: entry.entryPath,
-                },
-              }))
-          : (legacyExpertSkills?.map((skill) => ({
-              ...skill,
-              enabled: true,
-              scope: "expert",
-            })) ?? EMPTY_PROVIDER_SKILLS)
+              })) ?? EMPTY_PROVIDER_SKILLS)
         : (providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS),
     [
       hasExpertSkillSource,
+      usesRunSkills,
       expertEntries,
       expertBinding?.snapshotId,
       legacyExpertSkills,
@@ -277,13 +289,21 @@ export function useComposerDiscovery({
     ],
   );
   const skillsLoading = expertBinding
-    ? expertSnapshotQuery.isLoading || expertSnapshotQuery.isFetching
+    ? expertSnapshotQuery.isLoading ||
+      expertSnapshotQuery.isFetching ||
+      (usesRunSkills && (providerSkillsQuery.isLoading || providerSkillsQuery.isFetching))
     : draftExpert
       ? draftExpert.isFetching
       : providerSkillsQuery.isLoading || providerSkillsQuery.isFetching;
   const composerDiscoveryError =
     (isSkillTrigger || composerTriggerKind === "slash-command") &&
-    (expertBinding ? expertSnapshotQuery.isError : draftExpert?.isError)
+    (expertBinding
+      ? expertSnapshotQuery.isError ||
+        (usesRunSkills &&
+          (providerSkillsQuery.isError ||
+            (providerSkillsQuery.data !== undefined &&
+              providerSkillsQuery.data.source !== "expert.fixed-snapshot")))
+      : draftExpert?.isError)
       ? expertBinding
         ? "无法读取此对话绑定的专家技能，请重试。"
         : "无法读取所选专家的技能，请重试。"
@@ -294,10 +314,12 @@ export function useComposerDiscovery({
       ((mentionTriggerQuery.length > 0 && composerPathQueryDebouncer.state.isPending) ||
         workspaceEntriesQuery.isLoading ||
         workspaceEntriesQuery.isFetching ||
-        providerPluginsQuery.isLoading ||
-        providerPluginsQuery.isFetching)) ||
+        (!hasExpertSkillSource &&
+          (providerPluginsQuery.isLoading || providerPluginsQuery.isFetching)))) ||
     (composerTriggerKind === "slash-command" &&
-      (providerCommandsQuery.isLoading || providerCommandsQuery.isFetching || skillsLoading)) ||
+      ((!hasExpertSkillSource &&
+        (providerCommandsQuery.isLoading || providerCommandsQuery.isFetching)) ||
+        skillsLoading)) ||
     (composerTriggerKind === "skill" &&
       (providerComposerCapabilitiesQuery.isLoading ||
         providerComposerCapabilitiesQuery.isFetching ||
@@ -307,7 +329,7 @@ export function useComposerDiscovery({
     isLocalFolderBrowserOpen,
     providerPlugins,
     providerNativeCommands,
-    providerArtifacts: providerCommandsQuery.data?.artifacts,
+    providerArtifacts: hasExpertSkillSource ? undefined : providerCommandsQuery.data?.artifacts,
     providerSkills,
     workspaceEntries,
     effectiveComposerTrigger,
@@ -317,9 +339,10 @@ export function useComposerDiscovery({
     composerDiscoveryError,
     canCompactThread: supportsThreadCompaction(providerComposerCapabilitiesQuery.data),
     isNativeCommandDiscoveryPending:
-      providerComposerCapabilitiesQuery.isPending ||
-      (supportsNativeSlashCommandDiscovery(providerComposerCapabilitiesQuery.data) &&
-        providerCommandsQuery.isPending) ||
-      providerCommandsQuery.isFetching,
+      !hasExpertSkillSource &&
+      (providerComposerCapabilitiesQuery.isPending ||
+        (supportsNativeSlashCommandDiscovery(providerComposerCapabilitiesQuery.data) &&
+          providerCommandsQuery.isPending) ||
+        providerCommandsQuery.isFetching),
   };
 }

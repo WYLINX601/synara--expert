@@ -206,11 +206,20 @@ export function ExpertTaskControl(props: {
                       <dt>技能目录</dt>
                       <dd className="break-all">{snapshot.data.skillsRoot}</dd>
                     </div>
+                    {snapshot.data.skillPolicy ? (
+                      <div className="flex flex-wrap gap-x-2">
+                        <dt>技能策略</dt>
+                        <dd>
+                          固定装配 · {snapshot.data.skillEntries?.length ?? 0} 个技能 ·
+                          原生子代理阻断
+                        </dd>
+                      </div>
+                    ) : null}
                     <div className="flex flex-wrap gap-x-2">
                       <dt>资源</dt>
                       <dd>{snapshot.data.references.length} 份固定参考资料</dd>
                     </div>
-                    {snapshot.data.schemaVersion === 2 ? (
+                    {snapshot.data.schemaVersion === 2 || snapshot.data.schemaVersion === 3 ? (
                       <>
                         <div className="flex flex-wrap gap-x-2">
                           <dt>资源校验</dt>
@@ -225,6 +234,10 @@ export function ExpertTaskControl(props: {
                             <dd>
                               {entry.activation === "startup" ? "启动入口" : "按需技能"} ·{" "}
                               {entry.packageId.slice(4, 16)}
+                              <code className="block break-all text-ui-xs">
+                                {entry.path}
+                                {entry.sha256 ? ` · SHA-256 ${entry.sha256}` : ""}
+                              </code>
                             </dd>
                           </div>
                         ))}
@@ -358,9 +371,13 @@ export function ExpertTaskControl(props: {
                   {appliedRuntime.data.skillApplication?.snapshotId === props.binding.snapshotId ? (
                     <div className="flex flex-wrap gap-x-2">
                       <dt>技能目录</dt>
-                      <dd>目录已提交（不代表技能已执行）</dd>
+                      <dd>
+                        {appliedRuntime.data.skillApplication?.enforcement === "native-fixed"
+                          ? "原生固定装配已核对；原生子代理已阻断（不代表技能已执行）"
+                          : "目录已提交（不代表技能已执行）"}
+                      </dd>
                     </div>
-                  ) : snapshot.data?.schemaVersion === 2 ? (
+                  ) : snapshot.data?.schemaVersion === 2 || snapshot.data?.schemaVersion === 3 ? (
                     <div className="flex flex-wrap gap-x-2">
                       <dt>技能目录</dt>
                       <dd>尚无本版本的提交回执</dd>

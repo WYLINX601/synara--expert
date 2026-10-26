@@ -1,3 +1,10 @@
+import { SkillLibraryRpcInput, SkillLibraryResponse } from "./skillLibrary";
+import {
+  SkillManagementAccess,
+  SkillManagementCredentialRevokeInput,
+  SkillManagementCredentialSummary,
+  SkillManagementPairingResult,
+} from "./skillManagementAuth";
 import {
   HubPlanListInputSchema,
   HubPlanReadInputSchema,
@@ -1431,6 +1438,42 @@ export const WsServerGetRuntimeStatusRpc = Rpc.make(WS_METHODS.serverGetRuntimeS
   error: WsRpcError,
 });
 
+export const WsServerReadSkillManagementAccessRpc = Rpc.make(
+  WS_METHODS.serverReadSkillManagementAccess,
+  {
+    payload: Schema.Struct({}),
+    success: SkillManagementAccess,
+    error: WsRpcError,
+  },
+);
+
+export const WsServerCreateSkillManagementPairingRpc = Rpc.make(
+  WS_METHODS.serverCreateSkillManagementPairing,
+  {
+    payload: Schema.Struct({}),
+    success: SkillManagementPairingResult,
+    error: WsRpcError,
+  },
+);
+
+export const WsServerListSkillManagementCredentialsRpc = Rpc.make(
+  WS_METHODS.serverListSkillManagementCredentials,
+  {
+    payload: Schema.Struct({}),
+    success: Schema.Array(SkillManagementCredentialSummary),
+    error: WsRpcError,
+  },
+);
+
+export const WsServerRevokeSkillManagementCredentialRpc = Rpc.make(
+  WS_METHODS.serverRevokeSkillManagementCredential,
+  {
+    payload: SkillManagementCredentialRevokeInput,
+    success: Schema.Struct({ revoked: Schema.Boolean }),
+    error: WsRpcError,
+  },
+);
+
 export const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   payload: Schema.Struct({}),
   success: ServerConfig,
@@ -1544,6 +1587,12 @@ export const WsServerDeleteExpertRpc = Rpc.make(WS_METHODS.serverDeleteExpert, {
 export const WsServerPreviewExpertRpc = Rpc.make(WS_METHODS.serverPreviewExpert, {
   payload: ExpertPreviewInput,
   success: ExpertPreview,
+  error: WsRpcError,
+});
+
+export const WsServerSkillLibraryRpc = Rpc.make(WS_METHODS.serverSkillLibrary, {
+  payload: SkillLibraryRpcInput,
+  success: SkillLibraryResponse,
   error: WsRpcError,
 });
 
@@ -2474,6 +2523,11 @@ const WS_FEATURE_RPC_GROUP_3 = RpcGroup.make(
   WsServerRestoreExpertRpc,
   WsServerDeleteExpertRpc,
   WsServerPreviewExpertRpc,
+  WsServerSkillLibraryRpc,
+  WsServerReadSkillManagementAccessRpc,
+  WsServerCreateSkillManagementPairingRpc,
+  WsServerListSkillManagementCredentialsRpc,
+  WsServerRevokeSkillManagementCredentialRpc,
   WsServerListSkillPackagesRpc,
   WsServerListSkillPackageSourcesRpc,
   WsServerReadSkillPackageRpc,

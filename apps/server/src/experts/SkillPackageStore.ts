@@ -40,6 +40,12 @@ const MAX_ENTRIES = 5_000;
 const PREVIEW_TTL_MS = 15 * 60 * 1_000;
 const MAX_PREVIEWS = 100;
 const ordinal = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
+const LEGACY_NATIVE_METADATA_REASON =
+  "Provider-native context, agent, model or hooks semantics are unsupported by the unified index.";
+const LEGACY_INVALID_YAML_NATIVE_REASON =
+  "Provider-native execution metadata is unsupported by the unified index.";
+const LEGACY_INVALID_YAML_ISSUE =
+  "Invalid YAML frontmatter; scalar metadata uses the existing discovery parser.";
 const SkillPackageRemovalRecord = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   packageId: SkillPackageId,
@@ -47,6 +53,11 @@ const SkillPackageRemovalRecord = Schema.Struct({
   sources: Schema.Array(SkillPackageSourceSchema),
 });
 type SkillPackageRemovalRecord = typeof SkillPackageRemovalRecord.Type;
+const SkillPackageImportRecord = Schema.Struct({
+  previewId: Schema.String,
+  state: Schema.optional(Schema.Literals(["pending", "complete"])),
+  result: SkillPackageImportResultSchema,
+});
 
 export class SkillPackageStoreError extends Error {
   constructor(
@@ -67,6 +78,17 @@ export class SkillPackageStoreError extends Error {
 }
 
 export interface SkillPackageStore {
+  /** Publish managed staging without retaining a mutable staging-source pointer. */
+  publishDirectory(
+    sourcePath: string,
+    retain?: (manifest: SkillPackage) => Promise<void>,
+  ): Promise<SkillPackage>;
+  publishPreview(
+    previewId: string,
+    retain?: (manifest: SkillPackage) => Promise<void>,
+  ): Promise<SkillPackage>;
+  materializePreview(previewId: string, destination: string): Promise<SkillPackage>;
+  cancelPreview(previewId: string): void;
   preview(input: typeof SkillPackagePreviewInput.Type): Promise<SkillPackagePreview>;
   previewUpdate(
     input: typeof SkillPackageUpdatePreviewInput.Type,
@@ -147,23 +169,6 @@ function manifestFromResources(
     if (!description) issues.push("Missing frontmatter description.");
     const frontmatterBlock =
       /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\s|$)/u.exec(resource.bytes!.toString("utf8"))?.[1] ?? "";
-    let incompatibleReason: string | undefined;
-    try {
-      const parsed: unknown = YAML.parse(frontmatterBlock, { logLevel: "error" });
-      if (
-        parsed &&
-        typeof parsed === "object" &&
-        ["context", "agent", "model", "hooks"].some((key) => Object.hasOwn(parsed, key))
-      )
-        incompatibleReason =
-          "Provider-native context, agent, model or hooks semantics are unsupported by the unified index.";
-    } catch {
-      issues.push("Invalid YAML frontmatter; scalar metadata uses the existing discovery parser.");
-      if (/^["']?(?:context|agent|model|hooks)["']?\s*:/mu.test(frontmatterBlock))
-        incompatibleReason =
-          "Provider-native execution metadata is unsupported by the unified index.";
-    }
-    if (incompatibleReason) issues.push(incompatibleReason);
     if (/^allowed-tools\s*:/mu.test(frontmatterBlock))
       issues.push(
         "allowed-tools grants no permissions; host approval and access rules still apply.",
@@ -185,7 +190,6 @@ function manifestFromResources(
       ...(typeof metadata["user-invocable"] === "boolean"
         ? { userInvocable: metadata["user-invocable"] }
         : {}),
-      ...(incompatibleReason ? { incompatibleReason } : {}),
     });
   }
   resources.sort((left, right) => ordinal(left.path, right.path));
@@ -205,6 +209,64 @@ function manifestFromResources(
     fileCount,
     totalBytes,
   });
+}
+
+/**
+ * Older package manifests persisted these derived incompatibility diagnostics.
+ * Normalize only an exact diagnostic that the old derivation would have emitted
+ * for the current immutable SKILL.md bytes; every other manifest field remains
+ * an exact-match integrity input.
+ */
+function historicalNativeMetadataDiagnostic(
+  content: string,
+): { readonly reason: string; readonly invalidYaml?: true } | undefined {
+  const frontmatter = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\s|$)/u.exec(content)?.[1] ?? "";
+  try {
+    const parsed: unknown = YAML.parse(frontmatter, { logLevel: "error" });
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      ["context", "agent", "model", "hooks"].some((key) => Object.hasOwn(parsed, key))
+    )
+      return { reason: LEGACY_NATIVE_METADATA_REASON };
+  } catch {
+    if (/^["']?(?:context|agent|model|hooks)["']?\s*:/mu.test(frontmatter))
+      return { reason: LEGACY_INVALID_YAML_NATIVE_REASON, invalidYaml: true };
+  }
+  return undefined;
+}
+
+function normalizeHistoricalManifest(
+  stored: SkillPackage,
+  resources: ReadonlyArray<CollectedExpertResource>,
+): SkillPackage {
+  const contentByEntry = new Map(
+    resources
+      .filter(
+        (resource) => resource.kind === "file" && path.posix.basename(resource.path) === "SKILL.md",
+      )
+      .map((resource) => [
+        resource.path.slice("content/".length),
+        resource.bytes!.toString("utf8"),
+      ]),
+  );
+  const entries = stored.entries.map((entry) => {
+    const content = contentByEntry.get(entry.entryPath);
+    const diagnostic = content ? historicalNativeMetadataDiagnostic(content) : undefined;
+    if (!diagnostic || entry.incompatibleReason !== diagnostic.reason) return entry;
+    const issues = [...entry.issues];
+    const reasonIndex = issues.indexOf(diagnostic.reason);
+    if (reasonIndex < 0) return entry;
+    issues.splice(reasonIndex, 1);
+    if (diagnostic.invalidYaml) {
+      const invalidYamlIndex = issues.indexOf(LEGACY_INVALID_YAML_ISSUE);
+      if (invalidYamlIndex < 0) return entry;
+      issues.splice(invalidYamlIndex, 1);
+    }
+    const { incompatibleReason: _legacyReason, ...current } = entry;
+    return { ...current, issues };
+  });
+  return { ...stored, entries };
 }
 
 async function collectSource(selectedPath: string): Promise<{
@@ -313,9 +375,10 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
         );
       }
       const actual = manifestFromResources(stored.rootName, collected);
+      const compatibleStored = normalizeHistoricalManifest(stored, collected);
       if (
         actual.packageId !== packageId ||
-        expertResourceFiles.stableJson(actual) !== expertResourceFiles.stableJson(stored)
+        expertResourceFiles.stableJson(actual) !== expertResourceFiles.stableJson(compatibleStored)
       )
         throw new Error("Package manifest/content mismatch.");
       return actual;
@@ -661,13 +724,91 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
             importedAt: new Date().toISOString(),
           };
     const result = { package: verified, source, reused };
-    await publish(result);
+    try {
+      await publish(result);
+    } catch (cause) {
+      if (!reused) {
+        try {
+          const references = await scanSkillPackageReferences(stateDir, verified.packageId);
+          for (const name of await fs.readdir(sourcesDir)) {
+            if (!/^src_[a-f0-9]{64}\.json$/u.test(name))
+              throw new Error("Unknown Skill source reference during publication rollback.");
+            const saved = await readSource(name.slice(0, -5));
+            if (!saved) throw new Error("Skill source disappeared during publication rollback.");
+            if (saved.packageId === verified.packageId) references.push(`Source ${saved.sourceId}`);
+          }
+          for (const name of await fs.readdir(importsDir)) {
+            if (!/^[a-f0-9]{64}\.json$/u.test(name))
+              throw new Error("Unknown Skill import reference during publication rollback.");
+            const receipt = Schema.decodeUnknownSync(SkillPackageImportRecord)(
+              JSON.parse(
+                (await expertResourceFiles.read(path.join(importsDir, name))).toString("utf8"),
+              ),
+            );
+            if (receipt.result.package.packageId === verified.packageId)
+              references.push(`Import ${name}`);
+          }
+          if (references.length === 0) {
+            await expertResourceFiles.removeStaging(finalPath);
+            await syncDirectoryEntry(packagesDir);
+          }
+        } catch (rollbackCause) {
+          throw new AggregateError(
+            [cause, rollbackCause],
+            "Skill retention failed; package rollback could not prove safe removal.",
+          );
+        }
+      }
+      throw cause;
+    }
     previews.delete(input.previewId);
     return result;
   };
 
   return {
+    publishDirectory: async (sourcePath, retain) => {
+      const staged = await preview({ path: sourcePath });
+      try {
+        return await withSkillPackageLifecycle(
+          stateDir,
+          async () =>
+            (
+              await importPackage({ previewId: staged.previewId }, async (result) => {
+                await retain?.(result.package);
+              })
+            ).package,
+        );
+      } finally {
+        previews.delete(staged.previewId);
+      }
+    },
+    materializePreview: async (previewId, destination) => {
+      const pending = previews.get(previewId);
+      if (!pending || pending.expiresAt <= Date.now())
+        throw new SkillPackageStoreError("Skill preview expired.", "preview_expired");
+      const collected = await collectSource(pending.sourcePath);
+      if (
+        collected.realRoot !== pending.realRoot ||
+        collected.package.packageId !== pending.packageId
+      )
+        throw new SkillPackageStoreError("Skill preview changed.", "preview_stale");
+      await expertResourceFiles.copy(destination, collected.resources);
+      return collected.package;
+    },
     preview,
+    cancelPreview: (previewId) => {
+      previews.delete(previewId);
+    },
+    publishPreview: (previewId, retain) =>
+      withSkillPackageLifecycle(
+        stateDir,
+        async () =>
+          (
+            await importPackage({ previewId }, async (result) => {
+              await retain?.(result.package);
+            })
+          ).package,
+      ),
     previewUpdate: (rawInput) =>
       withSkillPackageLifecycle(stateDir, async () => {
         await recoverPendingRemovals();
@@ -730,11 +871,7 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
           importsDir,
           `${expertResourceFiles.hashJson(input.idempotencyKey ?? input.previewId)}.json`,
         );
-        const Receipt = Schema.Struct({
-          previewId: Schema.String,
-          state: Schema.optional(Schema.Literals(["pending", "complete"])),
-          result: SkillPackageImportResultSchema,
-        });
+        const Receipt = SkillPackageImportRecord;
         const finish = async (receipt: typeof Receipt.Type) => {
           if (receipt.previewId !== input.previewId)
             throw new SkillPackageStoreError(
@@ -899,11 +1036,6 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
             `Skill entry is not in package ${selection.packageId}: ${selection.entryPath}`,
             "invalid_input",
           );
-        if (entry.incompatibleReason)
-          throw new SkillPackageStoreError(
-            `Incompatible skill ${entry.name}: ${entry.incompatibleReason}`,
-            "invalid_input",
-          );
         if (entry.disableModelInvocation && selection.activation === "startup")
           throw new SkillPackageStoreError(
             `Skill ${entry.name} disables automatic invocation and cannot be a startup entry.`,
@@ -920,6 +1052,9 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
           ...selection,
           name: entry.name,
           description: entry.description,
+          sha256: manifest.resources.find(
+            (resource) => resource.path === `content/${selection.entryPath}`,
+          )!.sha256,
           ...(entry.disableModelInvocation !== undefined
             ? { disableModelInvocation: entry.disableModelInvocation }
             : {}),

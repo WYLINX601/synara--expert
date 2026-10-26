@@ -77,6 +77,77 @@ function packageDir(stateDir: string, packageId: string): string {
 }
 
 describe("SkillPackageStore", () => {
+  it.each(["directory", "preview"] as const)(
+    "rolls back only a new unretained %s publication and cleans staging",
+    async (mode) => {
+      const { source, stateDir, store } = await fixture();
+      const retain = async () => {
+        throw new Error("injected retention failure");
+      };
+      const preview = await store.preview({ path: source });
+      await expect(
+        mode === "directory"
+          ? store.publishDirectory(source, retain)
+          : store.publishPreview(preview.previewId, retain),
+      ).rejects.toThrow("injected retention failure");
+      expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([]);
+      const published = await store.publishDirectory(source);
+      await expect(store.publishDirectory(source, retain)).rejects.toThrow(
+        "injected retention failure",
+      );
+      expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([
+        published.packageId,
+      ]);
+      expect(await store.read(published.packageId)).toEqual(published);
+    },
+  );
+  it.each(["referenced", "unknown"] as const)(
+    "preserves a newly published package when references are %s after retention fails",
+    async (reference) => {
+      const { source, stateDir, store } = await fixture();
+      let packageId = "";
+      await expect(
+        store.publishDirectory(source, async (manifest) => {
+          packageId = manifest.packageId;
+          if (reference === "unknown")
+            await writeFile(path.join(stateDir, "experts", "skill-library.json"), "invalid");
+          else {
+            const definitions = path.join(stateDir, "experts", "definitions");
+            await mkdir(definitions, { recursive: true });
+            await writeFile(
+              path.join(definitions, "retained.json"),
+              JSON.stringify({
+                id: "retained",
+                name: "Retained",
+                description: "",
+                useCases: "",
+                persona: "",
+                outputRequirements: "",
+                skills: [],
+                skillSelections: [
+                  {
+                    packageId: manifest.packageId,
+                    entryPath: manifest.entries[0]!.entryPath,
+                    activation: "startup",
+                  },
+                ],
+                references: [],
+                connections: [],
+                revision: 1,
+                archived: false,
+                updatedAt: "2026-10-25T00:00:00.000Z",
+              }),
+            );
+          }
+          throw new Error("injected retention failure");
+        }),
+      ).rejects.toThrow(
+        reference === "unknown" ? /rollback could not prove safe/ : /injected retention failure/,
+      );
+      expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([packageId]);
+      expect((await store.read(packageId)).packageId).toBe(packageId);
+    },
+  );
   it("bounds concurrent package content verification when listing the inventory", async () => {
     const { source, stateDir, store } = await fixture();
     const first = await importSource(store, source);
@@ -223,6 +294,62 @@ describe("SkillPackageStore", () => {
     expect(result.package.fileCount).toBe(1);
   });
 
+  it("imports and resolves native execution metadata without rewriting the original Skill", async () => {
+    const { source, stateDir, store } = await fixture();
+    const skillPath = path.join(source, "skills", "pm", "SKILL.md");
+    const original = [
+      "---",
+      "name: bmad-pm",
+      "description: PM role",
+      "context: fork",
+      "agent: reviewer",
+      "model: sonnet",
+      "hooks:",
+      "  PreToolUse:",
+      "    - matcher: Bash",
+      "      hooks:",
+      "        - type: command",
+      "          command: ./scripts/check.sh",
+      "---",
+      "Use ./scripts/check.sh and ../../modules/config.yaml.",
+      "",
+    ].join("\n");
+    await writeFile(skillPath, original);
+    await mkdir(path.join(source, "skills", "pm", "scripts"), { recursive: true });
+    await writeFile(path.join(source, "skills", "pm", "scripts", "check.sh"), "exit 0\n");
+
+    const preview = await store.preview({ path: source });
+    const entry = preview.package.entries.find(
+      (candidate) => candidate.entryPath === "skills/pm/SKILL.md",
+    )!;
+    expect(entry.incompatibleReason).toBeUndefined();
+    expect(entry.issues.join("\n")).not.toContain("Provider-native");
+
+    const imported = await store.import({ previewId: preview.previewId });
+    const [resolved] = await store.resolveSelections([
+      {
+        packageId: imported.package.packageId,
+        entryPath: entry.entryPath,
+        activation: "on-demand",
+      },
+    ]);
+    expect(resolved).toBeDefined();
+    expect(await readFile(resolved!.path, "utf8")).toBe(original);
+    expect(
+      await readFile(
+        path.join(
+          packageDir(stateDir, imported.package.packageId),
+          "content",
+          "skills",
+          "pm",
+          "scripts",
+          "check.sh",
+        ),
+        "utf8",
+      ),
+    ).toBe("exit 0\n");
+  });
+
   it("selects only requested entries without projecting or renaming siblings", async () => {
     const { source, stateDir, store } = await fixture();
     const result = await importSource(store, source);
@@ -240,6 +367,9 @@ describe("SkillPackageStore", () => {
         activation: "startup",
         name: "bmad-pm",
         description: "PM role",
+        sha256: result.package.resources.find(
+          (resource) => resource.path === "content/skills/pm/SKILL.md",
+        )!.sha256,
         path: path.join(
           packageDir(stateDir, result.package.packageId),
           "content",
@@ -251,6 +381,89 @@ describe("SkillPackageStore", () => {
     ]);
     expect(await store.resolveSelections([])).toEqual([]);
   });
+
+  it.each([
+    {
+      kind: "valid native metadata",
+      body: [
+        "---",
+        "name: bmad-pm",
+        "description: PM role",
+        "context: fork",
+        "agent: reviewer",
+        "model: inherit",
+        "hooks:",
+        "  PreToolUse: []",
+        "---",
+        "Use the provider-native metadata.",
+        "",
+      ].join("\n"),
+      reason:
+        "Provider-native context, agent, model or hooks semantics are unsupported by the unified index.",
+      previousIssues: [],
+    },
+    {
+      kind: "malformed native metadata",
+      body: [
+        "---",
+        "name: bmad-pm",
+        "description: PM role",
+        "context: [fork",
+        "---",
+        "Use the provider-native metadata.",
+        "",
+      ].join("\n"),
+      reason: "Provider-native execution metadata is unsupported by the unified index.",
+      previousIssues: [
+        "Invalid YAML frontmatter; scalar metadata uses the existing discovery parser.",
+      ],
+    },
+  ])(
+    "reads and reuses a baseline package with exact historical diagnostics ($kind)",
+    async ({ body, reason, previousIssues }) => {
+      const { source, stateDir, store } = await fixture();
+      await writeFile(path.join(source, "skills", "pm", "SKILL.md"), body);
+      const originalPreview = await store.preview({ path: source });
+      const originalImport = await store.import({ previewId: originalPreview.previewId });
+      const directory = packageDir(stateDir, originalImport.package.packageId);
+      const manifestPath = path.join(directory, "package.json");
+      await chmod(manifestPath, 0o600);
+      const baselineManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      baselineManifest.entries[0].incompatibleReason = reason;
+      baselineManifest.entries[0].issues.push(...previousIssues, reason);
+      await writeFile(manifestPath, `${JSON.stringify(baselineManifest)}\n`);
+      await chmod(manifestPath, 0o400);
+
+      expect(await store.list()).toHaveLength(1);
+      const [resolved] = await store.resolveSelections([
+        {
+          packageId: originalImport.package.packageId,
+          entryPath: "skills/pm/SKILL.md",
+          activation: "on-demand",
+        },
+      ]);
+      expect(resolved?.name).toBe("bmad-pm");
+      expect(resolved?.path).toContain(originalImport.package.packageId);
+
+      const reusedPreview = await store.preview({ path: source });
+      const reused = await store.import({ previewId: reusedPreview.previewId });
+      expect(reused.reused).toBe(true);
+      expect(reused.package.packageId).toBe(originalImport.package.packageId);
+      expect(reused.package.entries[0]?.incompatibleReason).toBeUndefined();
+      expect(reused.package.entries[0]?.issues).not.toContain(reason);
+      for (const issue of previousIssues)
+        expect(reused.package.entries[0]?.issues).not.toContain(issue);
+
+      await chmod(manifestPath, 0o600);
+      const tampered = JSON.parse(await readFile(manifestPath, "utf8"));
+      tampered.entries[0].description = "unrelated manifest damage";
+      await writeFile(manifestPath, `${JSON.stringify(tampered)}\n`);
+      await chmod(manifestPath, 0o400);
+      await expect(store.read(originalImport.package.packageId)).rejects.toMatchObject({
+        code: "package_corrupt",
+      });
+    },
+  );
 
   it("allows one startup entry and many on-demand entries, but rejects two startup entries", async () => {
     const { source, store } = await fixture();
@@ -646,6 +859,9 @@ describe("SkillPackageStore", () => {
     await expect(store.import({ previewId: preview.previewId })).rejects.toThrow(
       "injected source write failure",
     );
+    expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([
+      preview.package.packageId,
+    ]);
     expect(await store.listSources()).toEqual([]);
     vi.mocked(rename).mockImplementation(actual.rename);
     const result = await createSkillPackageStore(stateDir).import({ previewId: preview.previewId });
@@ -654,7 +870,7 @@ describe("SkillPackageStore", () => {
   });
 
   it("retains a retryable preview when the import journal cannot be published", async () => {
-    const { source, store } = await fixture();
+    const { source, stateDir, store } = await fixture();
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     vi.mocked(rename).mockImplementation(async (from, to) => {
       if (String(to).includes("/skill-imports/")) throw new Error("journal unavailable");
@@ -664,10 +880,11 @@ describe("SkillPackageStore", () => {
     await expect(store.import({ previewId: preview.previewId })).rejects.toThrow(
       "journal unavailable",
     );
+    expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([]);
     expect(await store.listSources()).toEqual([]);
     vi.mocked(rename).mockImplementation(actual.rename);
     const result = await store.import({ previewId: preview.previewId });
-    expect(result.reused).toBe(true);
+    expect(result.reused).toBe(false);
     expect(result.source.revision).toBe(1);
   });
 

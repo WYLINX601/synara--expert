@@ -5,8 +5,15 @@ import path from "node:path";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { AuthSessionId } from "@synara/contracts";
 import {
+  AuthSessionId,
+  WS_METHODS,
+  WsRpcError,
+  type SkillLibraryResponse,
+} from "@synara/contracts";
+import {
+  SKILL_UPLOAD_ROUTE_PATH,
+  SKILL_DOWNLOAD_ROUTE_PATH,
   ATTACHMENT_CANCEL_ROUTE_PATH,
   ATTACHMENT_UPLOAD_ROUTE_PATH,
   LIBRARY_UPLOAD_ROUTE_PATH,
@@ -44,6 +51,11 @@ import {
   type ProviderAdapterRegistryShape,
 } from "./provider/Services/ProviderAdapterRegistry";
 import { ServerSettingsService } from "./serverSettings";
+
+import { expertResourceFiles } from "./experts/ExpertStore";
+import { skillZip } from "./experts/skillLibraryTestFixtures";
+import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer";
+import { makeWorkbenchExpertRpcHandlers } from "./workbench/host/expertRpc";
 
 const currentSessionId = AuthSessionId.makeUnsafe("11111111-1111-4111-8111-111111111111");
 const otherSessionId = AuthSessionId.makeUnsafe("22222222-2222-4222-8222-222222222222");
@@ -386,6 +398,169 @@ describe("authEffectRouteLayer", () => {
 });
 
 describe("binaryUploadEffectRouteLayer", () => {
+  it("shares authenticated HTTP archive previews with the owner RPC and transfers large binary bytes", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "synara-skill-http-rpc-"));
+    const config = {
+      host: "127.0.0.1",
+      publicUrl: undefined,
+      authToken: "desktop-secret",
+      stateDir,
+    } as ServerConfigShape;
+    const runtime = createWorkbenchExpertRuntime({
+      stateDir,
+      expertAppliedRuntimeRepository: { getByThreadId: () => Effect.succeed(Option.none()) },
+    });
+    const rpc = makeWorkbenchExpertRpcHandlers({
+      runtime,
+      requireOwner: Effect.void,
+      rpcEffect: (effect, message) =>
+        effect.pipe(Effect.mapError(() => new WsRpcError({ message }))),
+      expertRpcEffect: (authorization, operation, message) =>
+        authorization.pipe(
+          Effect.andThen(Effect.tryPromise(operation)),
+          Effect.mapError((cause) => new WsRpcError({ message, cause })),
+        ),
+      loadProjectionThreads: () => Effect.succeed([]),
+    });
+    try {
+      await withAuthEffectServer(
+        config,
+        makeServerAuth({ count: 0 }),
+        async (origin) => {
+          const headers = { Authorization: "Bearer bearer-token" };
+          const archive = skillZip([
+            {
+              name: "SKILL.md",
+              content:
+                "---\nname: http-managed\ndescription: HTTP imported Skill\n---\nFixed instructions.\n",
+            },
+          ]);
+          const response = await fetch(`${origin}${SKILL_UPLOAD_ROUTE_PATH}?name=selected.skill`, {
+            method: "POST",
+            headers,
+            body: new Uint8Array(archive),
+          });
+          expect(response.status).toBe(200);
+          const preview = ((await response.json()) as SkillLibraryResponse).preview!;
+          const imported = await Effect.runPromise(
+            rpc[WS_METHODS.serverSkillLibrary]({
+              request: {
+                action: "import",
+                previewId: preview.previewId,
+                choices: [{ entryPath: "SKILL.md", duplicate: "skip" }],
+              },
+            }),
+          );
+          const first = imported.skills![0]!,
+            bytes = new Uint8Array(2 * 1024 * 1024 + 13);
+          bytes[0] = 255;
+          bytes[bytes.length - 1] = 128;
+          const params = new URLSearchParams({
+            skillId: first.skillId,
+            expectedRevision: String(first.revision),
+            path: "assets/data.bin",
+            name: "data.bin",
+          });
+          const upload = await fetch(`${origin}${SKILL_UPLOAD_ROUTE_PATH}?${params}`, {
+            method: "POST",
+            headers,
+            body: bytes,
+          });
+          expect(upload.status).toBe(200);
+          const next = ((await upload.json()) as SkillLibraryResponse).skill!;
+          expect(next.packageId).not.toBe(first.packageId);
+          await expect(
+            Effect.runPromise(
+              rpc[WS_METHODS.serverSkillLibrary]({
+                request: { action: "readFile", skillId: next.skillId, path: "assets/data.bin" },
+              }),
+            ),
+          ).rejects.toThrow();
+          params.set("expectedRevision", String(next.revision));
+          // Same-origin GETs do not send Origin. An authenticated owner cookie
+          // must read bytes, while untrusted explicit origins remain forbidden.
+          const download = await fetch(`${origin}${SKILL_DOWNLOAD_ROUTE_PATH}?${params}`, {
+            headers: { Cookie: "synara_session=cookie-token" },
+          });
+          expect(download.status).toBe(200);
+          expect(new Uint8Array(await download.arrayBuffer())).toEqual(bytes);
+          expect(download.headers.get("x-content-type-options")).toBe("nosniff");
+          params.set("expectedRevision", String(first.revision));
+          expect(
+            (await fetch(`${origin}${SKILL_DOWNLOAD_ROUTE_PATH}?${params}`, { headers })).status,
+          ).toBe(400);
+          const foreign = await fetch(`${origin}${SKILL_DOWNLOAD_ROUTE_PATH}?${params}`, {
+            headers: { ...headers, Origin: "https://untrusted.example.test" },
+          });
+          expect(foreign.status).toBe(403);
+        },
+        binaryUploadEffectRouteLayer,
+      );
+    } finally {
+      await runtime.skillLibrary.dispose();
+      await expertResourceFiles.removeStaging(stateDir);
+    }
+  });
+
+  it.each([
+    { host: "0.0.0.0", publicUrl: undefined },
+    { host: "127.0.0.1", publicUrl: new URL("https://synara.example.test/") },
+  ])(
+    "retains the loopback-only Skill management boundary on $host with publicUrl=$publicUrl",
+    async ({ host, publicUrl }) => {
+      await withAuthEffectServer(
+        { host, publicUrl, authToken: "desktop-secret" } as ServerConfigShape,
+        makeServerAuth({ count: 0 }),
+        async (origin) => {
+          for (const route of [SKILL_UPLOAD_ROUTE_PATH, SKILL_DOWNLOAD_ROUTE_PATH]) {
+            const response = await fetch(`${origin}${route}`, {
+              method: route === SKILL_UPLOAD_ROUTE_PATH ? "POST" : "GET",
+              headers: { Authorization: "Bearer bearer-token" },
+            });
+            expect(response.status).toBe(403);
+            await expect(response.json()).resolves.toEqual({
+              error: "Skill management is available only on a loopback-only instance.",
+            });
+          }
+        },
+        binaryUploadEffectRouteLayer,
+      );
+    },
+  );
+
+  it("rejects Skill reads and writes before touching storage for non-owner or missing credentials", async () => {
+    const config = {
+      host: "127.0.0.1",
+      publicUrl: undefined,
+      authToken: "desktop-secret",
+    } as ServerConfigShape;
+    const auth = makeServerAuth({ count: 0 }),
+      clientAuth = {
+        ...auth,
+        authenticateHttpRequest: (
+          request: Parameters<ServerAuthShape["authenticateHttpRequest"]>[0],
+        ) =>
+          auth
+            .authenticateHttpRequest(request)
+            .pipe(Effect.map((session) => ({ ...session, role: "client" as const }))),
+      };
+    await withAuthEffectServer(
+      config,
+      clientAuth,
+      async (origin) => {
+        for (const route of [SKILL_UPLOAD_ROUTE_PATH, SKILL_DOWNLOAD_ROUTE_PATH]) {
+          const options = {
+            method: route === SKILL_UPLOAD_ROUTE_PATH ? "POST" : "GET",
+            headers: { Authorization: "Bearer bearer-token" },
+          };
+          expect((await fetch(`${origin}${route}`, options)).status).toBe(403);
+          expect((await fetch(`${origin}${route}`, { method: options.method })).status).toBe(401);
+        }
+      },
+      binaryUploadEffectRouteLayer,
+    );
+  });
+
   it.each([
     { origin: "synara-beta://app", authorized: true, status: 500 },
     { origin: "synara-beta://app", authorized: false, status: 401 },

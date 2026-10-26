@@ -1,9 +1,22 @@
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { ProviderListModelsResult } from "./providerDiscovery";
+import { ProviderListModelsResult, ProviderSkillsCatalogInput } from "./providerDiscovery";
 
 const decodeModels = Schema.decodeUnknownSync(ProviderListModelsResult);
+
+describe("ProviderSkillsCatalogInput", () => {
+  const decode = Schema.decodeUnknownSync(ProviderSkillsCatalogInput);
+  it("preserves legacy catalog calls and accepts an explicit runtime scan", () => {
+    expect(decode({})).toEqual({});
+    expect(decode({ provider: "pi", forceReload: true })).toEqual({
+      provider: "pi",
+      forceReload: true,
+    });
+    expect(() => decode({ provider: "unknown-runtime" })).toThrow();
+    expect(() => decode({ forceReload: "yes" })).toThrow();
+  });
+});
 
 describe("ProviderListModelsResult", () => {
   it.each([

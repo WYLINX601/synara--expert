@@ -1,3 +1,6 @@
+import { createSkillLibraryStore, readSkillDefinition } from "./experts/SkillLibraryStore";
+import { SKILL_FILE_LIMIT, SKILL_PACKAGE_LIMIT } from "./experts/skillLibraryArchive";
+import { SKILL_UPLOAD_ROUTE_PATH, SKILL_DOWNLOAD_ROUTE_PATH } from "@synara/shared/binaryTransfer";
 import { readEventLoopStatus } from "./eventLoopMonitor";
 import * as fs from "node:fs/promises";
 import nodePath from "node:path";
@@ -113,6 +116,7 @@ import {
   VOICE_UPLOAD_CAPACITY_ERROR_MESSAGE,
   voiceUploadAdmissionGate,
 } from "./voiceUploadAdmission";
+import { skillManagementCliEffectRouteLayer } from "./managementCli/httpRoute";
 
 const PROJECT_FAVICON_CACHE_CONTROL = "public, max-age=3600";
 const SITE_FAVICON_CACHE_CONTROL_SUCCESS = "public, max-age=86400"; // 24 h
@@ -244,6 +248,7 @@ export function makeEffectHttpRouteLayer(
     editorIconEffectRouteLayer,
     localImageEffectRouteLayer,
     binaryUploadEffectRouteLayer,
+    skillManagementCliEffectRouteLayer,
     attachmentsEffectRouteLayer,
     staticAndDevEffectRouteLayer,
   );
@@ -406,7 +411,7 @@ function trustedMutationCorsHeaders(input: {
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     Vary: "Origin",
   };
@@ -1008,16 +1013,100 @@ const binaryUploadEffectHandler = Effect.gen(function* () {
   if (request.method === "OPTIONS") {
     return HttpServerResponse.empty({ status: 204, headers: corsHeaders });
   }
-  if (request.method !== "POST") {
+  if (
+    request.method !== "POST" &&
+    !(url.pathname === SKILL_DOWNLOAD_ROUTE_PATH && request.method === "GET")
+  ) {
     return HttpServerResponse.text("Method Not Allowed", { status: 405, headers: corsHeaders });
   }
   const mutationSession = isLegacyTokenAuthorized({ config, url })
     ? null
-    : yield* requireAuthenticatedMutationRequest;
+    : yield* url.pathname === SKILL_DOWNLOAD_ROUTE_PATH && request.method === "GET"
+        ? Effect.gen(function* () {
+            const auth = yield* ServerAuth;
+            return yield* auth.authenticateHttpRequest(makeEffectAuthRequest(request));
+          })
+        : requireAuthenticatedMutationRequest;
   const attachmentPrincipal =
     mutationSession === null
       ? LOCAL_LOOPBACK_ATTACHMENT_PRINCIPAL
       : attachmentPrincipalForSession(mutationSession.sessionId);
+
+  if (url.pathname === SKILL_UPLOAD_ROUTE_PATH || url.pathname === SKILL_DOWNLOAD_ROUTE_PATH) {
+    if (mutationSession !== null && mutationSession.role !== "owner")
+      return HttpServerResponse.jsonUnsafe(
+        { error: "Skill management requires owner authorization." },
+        { status: 403, headers: corsHeaders },
+      );
+    if (!isLoopbackHost(config.host) || config.publicUrl !== undefined)
+      return HttpServerResponse.jsonUnsafe(
+        { error: "Skill management is available only on a loopback-only instance." },
+        { status: 403, headers: corsHeaders },
+      );
+    const library = createSkillLibraryStore(config.stateDir);
+    if (url.pathname === SKILL_DOWNLOAD_ROUTE_PATH) {
+      const result = yield* Effect.tryPromise({
+        try: () =>
+          library.execute({
+            action: "readFile",
+            skillId: url.searchParams.get("skillId") ?? "",
+            path: url.searchParams.get("path") ?? "",
+            ...(url.searchParams.has("expectedRevision")
+              ? { expectedRevision: Number(url.searchParams.get("expectedRevision")) }
+              : {}),
+          }),
+        catch: (cause) => ({
+          message: cause instanceof Error ? cause.message : String(cause),
+          status: 400,
+        }),
+      });
+      const file = result.file!;
+      return HttpServerResponse.uint8Array(Buffer.from(file.content, "base64"), {
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/octet-stream",
+          "Content-Disposition": attachmentContentDisposition(nodePath.basename(file.path)),
+          "X-Content-Type-Options": "nosniff",
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+    const skillId = url.searchParams.get("skillId"),
+      name = url.searchParams.get("name") ?? "package.zip";
+    const bytes = yield* readEffectBinary(
+      request,
+      skillId ? SKILL_FILE_LIMIT : SKILL_PACKAGE_LIMIT,
+    );
+    const result = yield* Effect.tryPromise({
+      try: async () => {
+        if (!skillId) return library.previewArchive(Buffer.from(bytes), name);
+        const current = await readSkillDefinition(config.stateDir, skillId);
+        return library.execute({
+          action: "save",
+          skillId,
+          expectedRevision: Number(url.searchParams.get("expectedRevision")),
+          name: url.searchParams.get("skillName") ?? current.name,
+          ...(url.searchParams.has("description")
+            ? { description: url.searchParams.get("description")! }
+            : {}),
+          tags: url.searchParams.has("tags")
+            ? JSON.parse(url.searchParams.get("tags")!)
+            : current.tags,
+          changes: [
+            {
+              path: url.searchParams.get("path") ?? name,
+              content: Buffer.from(bytes).toString("base64"),
+            },
+          ],
+        });
+      },
+      catch: (cause) => ({
+        message: cause instanceof Error ? cause.message : String(cause),
+        status: 400,
+      }),
+    });
+    return HttpServerResponse.jsonUnsafe(result, { headers: corsHeaders });
+  }
 
   if (url.pathname === ATTACHMENT_UPLOAD_ROUTE_PATH) {
     const type = url.searchParams.get("type");
@@ -1369,6 +1458,8 @@ export const binaryUploadEffectRouteLayer = Layer.mergeAll(
   HttpRouter.add("*", ATTACHMENT_CANCEL_ROUTE_PATH, binaryUploadEffectHandler),
   HttpRouter.add("*", VOICE_TRANSCRIPTION_UPLOAD_ROUTE_PATH, binaryUploadEffectHandler),
   HttpRouter.add("*", LIBRARY_UPLOAD_ROUTE_PATH, binaryUploadEffectHandler),
+  HttpRouter.add("*", SKILL_UPLOAD_ROUTE_PATH, binaryUploadEffectHandler),
+  HttpRouter.add("*", SKILL_DOWNLOAD_ROUTE_PATH, binaryUploadEffectHandler),
 );
 
 export const attachmentsEffectRouteLayer = HttpRouter.add(

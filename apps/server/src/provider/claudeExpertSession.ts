@@ -1,15 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 
 import type { ProviderSkillReference } from "@synara/contracts";
+import { CLAUDE_ACCOUNT_ISOLATION_ENV_KEYS } from "./claudeProcessEnv.ts";
 
 export const CLAUDE_EXPERT_PROJECTION_VERSION = "claude-skills-v1";
 export const CLAUDE_EXPERT_PLUGIN_NAME = "synara-expert";
 
 const MAX_SKILL_FILES = 4096;
 const MAX_SKILL_BYTES = 50 * 1024 * 1024;
+const CLAUDE_SETTINGS_MODEL_ENV =
+  /^(?:ANTHROPIC_(?:MODEL|DEFAULT_[A-Z0-9_]+_MODEL|SMALL_FAST_MODEL)|CLAUDE_CODE_(?:MODEL|SUBAGENT_MODEL|WORKFLOW_SUBAGENT_MODEL|AUTO_MODE_MODEL|BG_CLASSIFIER_MODEL|GATEWAY_MODEL))$/u;
+const CLAUDE_SETTINGS_ENV_KEYS = new Set<string>([
+  ...CLAUDE_ACCOUNT_ISOLATION_ENV_KEYS,
+  "CLAUDE_CODE_SUBAGENT_MODEL",
+]);
 
 interface ProjectedFile {
   readonly relativePath: string;
@@ -38,6 +46,40 @@ export interface ClaudeExpertProjection {
 
 function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+/**
+ * `settingSources: []` suppresses ambient settings and discovery for fixed
+ * Expert sessions. Carry only the selected user's auth/endpoint/model env to
+ * this process; do not copy the settings file or expose it in diagnostics.
+ */
+export async function readClaudeSettingsEnvironment(
+  configDirectory: string | undefined,
+): Promise<NodeJS.ProcessEnv> {
+  const settingsPath = path.join(
+    configDirectory?.trim() || path.join(os.homedir(), ".claude"),
+    "settings.json",
+  );
+  try {
+    const stat = await lstat(settingsPath);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 1024 * 1024) return {};
+    const root = JSON.parse(await readFile(settingsPath, "utf8")) as unknown;
+    if (!root || typeof root !== "object" || Array.isArray(root)) return {};
+    const env = (root as Record<string, unknown>).env;
+    if (!env || typeof env !== "object" || Array.isArray(env)) return {};
+    const selected: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(env)) {
+      if (
+        (CLAUDE_SETTINGS_ENV_KEYS.has(key) || CLAUDE_SETTINGS_MODEL_ENV.test(key)) &&
+        typeof value === "string"
+      ) {
+        selected[key] = value;
+      }
+    }
+    return selected;
+  } catch {
+    return {};
+  }
 }
 
 function isWithin(root: string, candidate: string): boolean {

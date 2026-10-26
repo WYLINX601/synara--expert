@@ -20,6 +20,7 @@ import {
 } from "../experts/ExpertConnectionStore.ts";
 import { readExpertMcpActiveSessionCount } from "../experts/ExpertGatewayTools.ts";
 import { createExpertStore } from "../experts/ExpertStore.ts";
+import { createSkillLibraryStore } from "../experts/SkillLibraryStore";
 import { createSkillPackageStore } from "../experts/SkillPackageStore.ts";
 import {
   createSkillPackageSwitchService,
@@ -38,6 +39,7 @@ export function createWorkbenchExpertRuntime(input: {
 }) {
   const experts = createExpertStore(input.stateDir);
   const skillPackages = createSkillPackageStore(input.stateDir);
+  const skillLibrary = createSkillLibraryStore(input.stateDir);
   const connections = createExpertConnectionStore(input.stateDir);
   const credentials = createExpertMcpCredentialStore(input.stateDir);
   const mcpDiscovery = createLocalMcpDiscovery({ connections, credentials });
@@ -46,6 +48,7 @@ export function createWorkbenchExpertRuntime(input: {
   return {
     experts,
     skillPackages,
+    skillLibrary,
     createSkillPackageSwitchService: (host: SkillPackageSwitchHost) =>
       createSkillPackageSwitchService({
         stateDir: input.stateDir,

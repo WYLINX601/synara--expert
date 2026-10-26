@@ -5,6 +5,7 @@ import * as path from "node:path";
 
 import {
   ExpertBinding,
+  FIXED_EXPERT_SKILL_POLICY,
   ExpertDefinition as ExpertDefinitionSchema,
   ExpertPreviewInput,
   ExpertSaveInput,
@@ -19,6 +20,7 @@ import { Schema } from "effect";
 import { ensurePrivateDirectorySync, syncDirectoryEntry } from "../privatePathPermissions";
 import { inspectBmadWorkspace } from "./bmadSkillPreset.ts";
 import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
+import { readSkillDefinition, resolveSkillBindings } from "./SkillLibraryStore";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle.ts";
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
@@ -495,8 +497,9 @@ function hashSnapshot(snapshot: ExpertSnapshot, resources: ReadonlyArray<Resourc
     preferredProvider: snapshot.preferredProvider ?? null,
     resources: [...resources].sort((left, right) => left.path.localeCompare(right.path)),
   };
-  if (snapshot.schemaVersion === 2) {
-    payload.schemaVersion = 2;
+  if (snapshot.schemaVersion === 2 || snapshot.schemaVersion === 3) {
+    payload.schemaVersion = snapshot.schemaVersion;
+    if (snapshot.skillPolicy) payload.skillPolicy = snapshot.skillPolicy;
     payload.skillSelections = snapshot.skillSelections;
   }
   // Older manifests had no MCP binding. Omitting the key entirely preserves
@@ -753,7 +756,7 @@ async function hydrateSnapshot(
     ...snapshot,
     skillsRoot: path.join(snapshotRoot, "skills"),
     skills:
-      snapshot.schemaVersion === 2
+      snapshot.schemaVersion === 2 || snapshot.schemaVersion === 3
         ? []
         : snapshot.skills.map((skill) => ({
             ...skill,
@@ -763,7 +766,7 @@ async function hydrateSnapshot(
       path.join(snapshotRoot, ...reference.split("/")),
     ),
   };
-  if (snapshot.schemaVersion !== 2) return hydrated;
+  if (snapshot.schemaVersion !== 2 && snapshot.schemaVersion !== 3) return hydrated;
   const stateDir = path.resolve(snapshotRoot, "..", "..", "..");
   const resolved = await resolvePackageSelections(stateDir, snapshot.skillSelections!);
   return {
@@ -809,7 +812,7 @@ export async function readVerifiedStoredExpertSnapshot(
     throw new ExpertStoreError("Snapshot manifest is invalid.", "snapshot_corrupt", { cause });
   }
   const snapshot = stored.snapshot;
-  const packageBased = snapshot.schemaVersion === 2;
+  const packageBased = snapshot.schemaVersion === 2 || snapshot.schemaVersion === 3;
   if (
     snapshot.snapshotId !== snapshotId ||
     !EXPERT_ID_PATTERN.test(snapshot.expertId) ||
@@ -1013,9 +1016,23 @@ export function createExpertStore(stateDir: string): ExpertStore {
         await ensureInitialized();
         const input = decodeSaveInput(rawInput);
         validateDefinitionInput(input);
-        if (input.skillSelections !== undefined) {
+        if (
+          input.skillBindings !== undefined &&
+          (input.skills.length || input.skillSelections?.length)
+        ) {
+          throw new ExpertStoreError(
+            "Stable bindings cannot be mixed with other Skill selections.",
+            "invalid_input",
+          );
+        }
+        if (input.skillSelections !== undefined || input.skillBindings !== undefined) {
           try {
-            await resolvePackageSelections(stateDir, input.skillSelections);
+            await resolvePackageSelections(
+              stateDir,
+              input.skillBindings !== undefined
+                ? await resolveSkillBindings(stateDir, input.skillBindings)
+                : input.skillSelections!,
+            );
           } catch (cause) {
             throw new ExpertStoreError(
               "Expert skill package selections are invalid or unavailable.",
@@ -1052,6 +1069,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
           persona: input.persona,
           outputRequirements: input.outputRequirements,
           skills: input.skills,
+          ...(input.skillBindings !== undefined ? { skillBindings: input.skillBindings } : {}),
           ...(input.skillSelections !== undefined
             ? { skillSelections: input.skillSelections }
             : {}),
@@ -1150,7 +1168,11 @@ export function createExpertStore(stateDir: string): ExpertStore {
     await ensureInitialized();
     const snapshotRoot = path.join(snapshotsDir, snapshotId);
     const snapshot = await readVerifiedStoredExpertSnapshot(snapshotRoot, snapshotId);
-    if (snapshot.schemaVersion !== 2 && snapshot.skills.length > 0) {
+    if (
+      snapshot.schemaVersion !== 2 &&
+      snapshot.schemaVersion !== 3 &&
+      snapshot.skills.length > 0
+    ) {
       throw new ExpertStoreError(
         "This task snapshot uses legacy skill paths; convert the Expert before starting it.",
         "invalid_resource",
@@ -1213,7 +1235,11 @@ export function createExpertStore(stateDir: string): ExpertStore {
             }
             throw cause;
           }
-          if (snapshot.schemaVersion === 2 || snapshot.skills.length === 0) {
+          if (
+            snapshot.schemaVersion === 2 ||
+            snapshot.schemaVersion === 3 ||
+            snapshot.skills.length === 0
+          ) {
             throw new ExpertStoreError(
               "Only verified legacy skill snapshots can be removed by migration cleanup.",
               "invalid_input",
@@ -1246,7 +1272,10 @@ export function createExpertStore(stateDir: string): ExpertStore {
           "invalid_resource",
         );
       }
-      const skillSelections = definition.skillSelections ?? [];
+      const skillSelections =
+        definition.skillBindings !== undefined
+          ? await resolveSkillBindings(stateDir, definition.skillBindings)
+          : (definition.skillSelections ?? []);
       try {
         await resolvePackageSelections(stateDir, skillSelections);
       } catch (cause) {
@@ -1328,7 +1357,8 @@ export function createExpertStore(stateDir: string): ExpertStore {
         useCases: definition.useCases,
         persona: definition.persona,
         outputRequirements: definition.outputRequirements,
-        schemaVersion: 2,
+        schemaVersion: 3,
+        skillPolicy: FIXED_EXPERT_SKILL_POLICY,
         skills: [],
         skillSelections,
         skillsRoot: "skills",
@@ -1431,9 +1461,28 @@ export function createExpertStore(stateDir: string): ExpertStore {
         );
       }
     };
-    if (definition.skillSelections !== undefined) {
+    if (definition.skillSelections !== undefined || definition.skillBindings !== undefined) {
       try {
-        skillEntries = await resolvePackageSelections(stateDir, definition.skillSelections);
+        skillEntries = await resolvePackageSelections(
+          stateDir,
+          definition.skillBindings !== undefined
+            ? await resolveSkillBindings(stateDir, definition.skillBindings)
+            : definition.skillSelections!,
+        );
+        if (definition.skillBindings) {
+          const managed = await Promise.all(
+            definition.skillBindings
+              .filter((binding) => binding.enabled)
+              .map((binding) => readSkillDefinition(stateDir, binding.skillId)),
+          );
+          skillEntries = skillEntries.map((entry) => {
+            const skill = managed.find(
+              (candidate) =>
+                candidate.packageId === entry.packageId && candidate.entryPath === entry.entryPath,
+            );
+            return { ...entry, ...(skill ? { managedSkillId: skill.skillId } : {}) };
+          });
+        }
       } catch (cause) {
         incompatible = true;
         issues.push(

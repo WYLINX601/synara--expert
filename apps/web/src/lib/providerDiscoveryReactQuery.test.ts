@@ -18,6 +18,7 @@ import {
   providerCommandsQueryOptions,
   providerDiscoveryQueryKeys,
   providerModelsQueryOptions,
+  skillsCatalogQueryOptions,
 } from "./providerDiscoveryReactQuery";
 import * as nativeApi from "../nativeApi";
 
@@ -30,6 +31,31 @@ function mockListModels(listModels: ReturnType<typeof vi.fn>) {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("runtime Skill import discovery", () => {
+  it("keeps provider and connection results separate and sends the selected runtime only", async () => {
+    const listSkillsCatalog = vi.fn().mockResolvedValue({ skills: [] });
+    vi.spyOn(nativeApi, "ensureNativeApi").mockReturnValue({
+      provider: { listSkillsCatalog },
+    } as unknown as NativeApi);
+    const client = new QueryClient();
+    const pi = skillsCatalogQueryOptions({
+      provider: "pi",
+      connectionGeneration: "host-a",
+      forceReload: true,
+    });
+    const omp = skillsCatalogQueryOptions({ provider: "omp", connectionGeneration: "host-a" });
+    expect(pi.queryKey).not.toEqual(omp.queryKey);
+    expect(pi.queryKey).not.toEqual(
+      skillsCatalogQueryOptions({ provider: "pi", connectionGeneration: "host-b" }).queryKey,
+    );
+    await client.fetchQuery(pi);
+    expect(listSkillsCatalog).toHaveBeenLastCalledWith({ provider: "pi", forceReload: true });
+    await client.fetchQuery(skillsCatalogQueryOptions());
+    expect(listSkillsCatalog).toHaveBeenLastCalledWith({});
+    client.clear();
+  });
 });
 
 describe("isInitialModelDiscoveryPending", () => {

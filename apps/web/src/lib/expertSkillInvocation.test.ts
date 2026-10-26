@@ -36,6 +36,22 @@ function fixture(userInvocable = true) {
 }
 
 describe("draft Expert skill binding", () => {
+  it("keeps a managed ID for authoritative startup resolution even if the saved head changed", async () => {
+    const api = fixture();
+    const skillId = `skl_${"c".repeat(32)}`;
+    const result = await bindDraftExpertSkillInvocations(api as unknown as NativeApi, threadId, [
+      {
+        ...draft,
+        expert: { ...draft.expert!, skillId, entryPath: "renamed/SKILL.md" },
+      },
+    ]);
+    expect(result[0]?.expert).toEqual({
+      ...draft.expert!,
+      snapshotId: "accepted",
+      skillId,
+      entryPath: "renamed/SKILL.md",
+    });
+  });
   it("binds only the selected package entry to the accepted task and discards client paths", async () => {
     const api = fixture();
     const result = await bindDraftExpertSkillInvocations(api as unknown as NativeApi, threadId, [

@@ -29,6 +29,7 @@ import type {
   SDKResultMessage,
   SDKControlGetContextUsageResponse,
   SDKControlInitializeResponse,
+  SDKControlReloadPluginsResponse,
   SDKSystemMessage,
   Settings,
   SettingSource,
@@ -90,7 +91,18 @@ import { assessClaudeCache } from "@synara/shared/claudeCache";
 import { approvalSessionGrantWidensSessionPolicy } from "@synara/shared/approvalSessionGrant";
 import { approvalRequestKindFromRequestType } from "@synara/shared/threadSummary";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
-import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
+import type { ProviderExpertSession } from "@synara/contracts";
+import {
+  createFixedSkillProjection,
+  verifyProjectedSkillAssembly,
+  type FixedSkillProjection,
+} from "../fixedSkillProjection";
+import {
+  createExpertSkillApplication,
+  invalidateNativeSkillAssemblyVerification,
+  FIXED_EXPERT_SAFE_NATIVE_COMMANDS,
+  isFixedExpertNativeCommandAllowed,
+} from "../expertSkillCatalog.ts";
 import { nonEmptyTrimmed } from "@synara/shared/text";
 import {
   claudeCacheContextTokens,
@@ -209,6 +221,7 @@ import {
   CLAUDE_EXPERT_PROJECTION_VERSION,
   createClaudeExpertProjection,
   inspectClaudeExpertSkills,
+  readClaudeSettingsEnvironment,
   type ClaudeExpertProjection,
 } from "../claudeExpertSession.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -221,7 +234,16 @@ import {
 export { claudeHomeEnvironment } from "../claudeEnvironment.ts";
 
 const PROVIDER = "claudeAgent" as const;
+const CLAUDE_SDK_BUNDLED_CLI_VERSION = "2.1.296";
 const MINIMUM_CLAUDE_EXPERT_PLUGIN_CLI_VERSION = "2.1.261";
+// Claude Code 2.1.296 loads these bundled plugins even with settingSources: [].
+// The settings override is scoped to the fixed Expert query; explicit local
+// plugin-dir entries remain loadable and are independently verified below.
+const FIXED_EXPERT_DISABLED_BUILTIN_PLUGINS = {
+  "agents-md@builtin": false,
+  "telemetry@builtin": false,
+  "plugin-authoring@builtin": false,
+} as const;
 const CLAUDE_DISCOVERY_THREAD_ID = ThreadId.makeUnsafe("claude:discovery");
 
 function sha256(value: string): string {
@@ -279,11 +301,11 @@ function validateClaudeExpertInitialization(
   // plugin was loaded from the launch-time plugin set. This is the only
   // pre-prompt evidence available on the supported CLI line; system/init may
   // not arrive until a user prompt is sent.
-  if (initialization.plugins_applied === undefined) {
+  if (initialization.plugins_applied === undefined && projection.nativeSkillNames.length > 0) {
     issues.push(
       `Claude Code cannot confirm the Expert plugin load from native initialization. Expert skills require Claude Code ${MINIMUM_CLAUDE_EXPERT_PLUGIN_CLI_VERSION} or newer.`,
     );
-  } else if (!initialization.plugins_applied) {
+  } else if (initialization.plugins_applied === false) {
     issues.push(
       "Claude Code native initialization reported that the Expert plugin was not loaded.",
     );
@@ -502,6 +524,9 @@ interface ClaudeSubagentRun {
 type ClaudeTokenUsageState = "current" | "skip-compaction-call" | "awaiting-fresh-assistant";
 
 interface ClaudeSessionContext {
+  readonly fixedExpertSession?: ProviderExpertSession;
+  readonly fixedSkillProjection?: FixedSkillProjection;
+  readonly cwd?: string;
   resultUsageBaseline?: ClaudeResultUsageBaseline;
   // Claude Code restores a resumed session's saved usage totals into the first
   // result of a new process. Until a baseline exists, a result is not one turn.
@@ -718,10 +743,158 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
     readonly detail?: "summary" | "full";
   }) => Promise<SDKControlGetContextUsageResponse>;
   readonly initializationResult?: () => Promise<SDKControlInitializeResponse>;
+  readonly reloadPlugins?: (options?: {
+    holdOnCacheImpact?: boolean;
+  }) => Promise<SDKControlReloadPluginsResponse>;
   readonly supportedCommands: () => Promise<SlashCommand[]>;
   readonly supportedModels: () => Promise<ModelInfo[]>;
   readonly supportedAgents: () => Promise<AgentInfo[]>;
   readonly close: () => void;
+}
+
+async function verifyFixedClaudeSkillContext(
+  session: ProviderExpertSession,
+  projection: FixedSkillProjection,
+  query: ClaudeQueryRuntime,
+  lifecycleGeneration: string,
+  pathContext?: { readonly cwd?: string; readonly claudeConfigDir?: string },
+): Promise<void> {
+  invalidateNativeSkillAssemblyVerification(session);
+  if (typeof query.reloadPlugins !== "function")
+    throw new Error("Claude native plugin-path provenance is unavailable.");
+  const reloaded = await query.reloadPlugins({ holdOnCacheImpact: true });
+  if (
+    !reloaded ||
+    Array.isArray(reloaded) ||
+    ("error" in reloaded && reloaded.error !== undefined) ||
+    ("errors" in reloaded && (!Array.isArray(reloaded.errors) || reloaded.errors.length > 0)) ||
+    reloaded.error_count !== 0 ||
+    typeof reloaded.held !== "boolean" ||
+    !Array.isArray(reloaded.plugins) ||
+    !Array.isArray(reloaded.commands) ||
+    !Array.isArray(reloaded.agents) ||
+    !Array.isArray(reloaded.mcpServers) ||
+    reloaded.plugins.some(
+      (plugin) =>
+        !plugin ||
+        Array.isArray(plugin) ||
+        typeof plugin.name !== "string" ||
+        !plugin.name.trim() ||
+        plugin.name !== plugin.name.trim() ||
+        typeof plugin.path !== "string" ||
+        !plugin.path.trim() ||
+        plugin.path.includes("\0"),
+    ) ||
+    [...reloaded.commands, ...reloaded.agents, ...reloaded.mcpServers].some(
+      (item) => !item || typeof item !== "object" || Array.isArray(item),
+    )
+  )
+    throw new Error("Claude native plugin provenance response is malformed or reports errors.");
+  if (
+    reloaded.held &&
+    (!reloaded.cache_impact ||
+      !Array.isArray(reloaded.cache_impact.mcp_servers_added) ||
+      !Array.isArray(reloaded.cache_impact.mcp_servers_removed) ||
+      [
+        ...reloaded.cache_impact.mcp_servers_added,
+        ...reloaded.cache_impact.mcp_servers_removed,
+      ].some((name) => typeof name !== "string") ||
+      ![null, "adds", "may-add", "removes", "may-remove"].includes(
+        reloaded.cache_impact.lsp_tool_change,
+      ))
+  )
+    throw new Error("Claude held plugin provenance response is malformed.");
+  const expectedPlugins = new Map(projection.plugins.map((plugin) => [plugin.name, plugin.path]));
+  const pathBases = [
+    pathContext?.cwd,
+    process.cwd(),
+    pathContext?.claudeConfigDir,
+    pathContext?.claudeConfigDir ? path.dirname(pathContext.claudeConfigDir) : undefined,
+    projection.root,
+    path.dirname(projection.root),
+    path.dirname(path.dirname(projection.root)),
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  const pluginPathMatches = (reportedPath: string, expectedPath: string): boolean => {
+    if (path.isAbsolute(reportedPath))
+      return path.resolve(reportedPath) === path.resolve(expectedPath);
+    return pathBases.some(
+      (base) => path.resolve(base, reportedPath) === path.resolve(expectedPath),
+    );
+  };
+  if (
+    reloaded.plugins.length !== expectedPlugins.size ||
+    reloaded.plugins.some(
+      (plugin) =>
+        expectedPlugins.get(plugin.name) === undefined ||
+        !pluginPathMatches(plugin.path, expectedPlugins.get(plugin.name)!),
+    )
+  )
+    throw new Error("Claude native fixed plugin namespace/path provenance is missing or collides.");
+  const usage = await query.getContextUsage({ detail: "summary" });
+  if (
+    !usage ||
+    ("error" in usage && usage.error !== undefined) ||
+    ("errors" in usage && (!Array.isArray(usage.errors) || usage.errors.length > 0))
+  )
+    throw new Error("Claude native Skill context reports errors.");
+  const visible = session.skillEntries?.filter((entry) => !entry.disableModelInvocation) ?? [];
+  const expected = projection.entries
+    .filter((entry) => visible.some((item) => item.path === entry.originalPath))
+    .map((entry) => entry.nativeName)
+    .toSorted();
+  const category = usage?.skills;
+  if (
+    category === undefined &&
+    expected.length === 0 &&
+    projection.plugins.length === 0 &&
+    reloaded.plugins.length === 0
+  ) {
+    // CLI 2.1.296 omits the skills usage category when disableBundledSkills is
+    // set, all bundled plugins are disabled, and the fixed plugin set is empty.
+    // Fixed startup pins that exact CLI and the preceding native reload proves
+    // the plugin set is empty. Other versions or non-empty assemblies still
+    // require an explicit category/count response.
+    await verifyProjectedSkillAssembly(
+      session,
+      projection,
+      projection.entries,
+      lifecycleGeneration,
+    );
+    return;
+  }
+  if (
+    !category ||
+    !Number.isInteger(category.totalSkills) ||
+    !Number.isInteger(category.includedSkills) ||
+    category.includedSkills < 0 ||
+    category.totalSkills < category.includedSkills ||
+    !Number.isFinite(category.tokens) ||
+    category.tokens < 0 ||
+    !Array.isArray(category.skillFrontmatter) ||
+    category.skillFrontmatter.some(
+      (entry) =>
+        !entry ||
+        Array.isArray(entry) ||
+        typeof entry.name !== "string" ||
+        !entry.name.trim() ||
+        entry.source !== "plugin" ||
+        ("pluginName" in entry &&
+          typeof entry.pluginName === "string" &&
+          !expectedPlugins.has(entry.pluginName)) ||
+        !Number.isFinite(entry.tokens) ||
+        entry.tokens < 0,
+    ) ||
+    category.skillFrontmatter.length !== category.includedSkills
+  )
+    throw new Error("Claude native Skill category/count is missing or malformed.");
+  const actual = category.skillFrontmatter.map((entry) => entry.name).toSorted();
+  if (
+    JSON.stringify(actual) !== JSON.stringify(expected) ||
+    category.includedSkills !== expected.length ||
+    (expected.length === 0 && category.totalSkills !== 0)
+  )
+    throw new Error("Claude's actual model context differs from the fixed Skill assembly.");
+  await verifyProjectedSkillAssembly(session, projection, projection.entries, lifecycleGeneration);
 }
 
 function cancellableClaudeMessageStream(
@@ -1737,7 +1910,15 @@ function isClaudeNativeSlashCommand(
 function buildPromptText(
   input: ProviderSendTurnInput,
   nativeCommandNames?: ReadonlySet<string>,
+  fixedNativeSkillNames: ReadonlyArray<string> = [],
 ): string {
+  if (fixedNativeSkillNames.length === 1) {
+    const selected = `/${fixedNativeSkillNames[0]}`;
+    const original = input.input?.trim();
+    return original && !original.startsWith("/") ? `${selected} ${original}` : selected;
+  }
+  if (fixedNativeSkillNames.length > 1)
+    throw new Error("One native Expert Skill may be explicitly invoked per provider turn.");
   // Native slash commands (`/compact`, `/design`, plugin commands) must start
   // the payload, including in Plan mode or with a prompt-based effort option.
   // A prefix turns them into model input, which the model cannot invoke.
@@ -1795,10 +1976,25 @@ function buildUserMessageEffect(
     readonly fileSystem: FileSystem.FileSystem;
     readonly attachmentsDir: string;
     readonly nativeCommandNames?: ReadonlySet<string> | undefined;
+    readonly fixedNativeSkillNames?: ReadonlyArray<string>;
   },
 ): Effect.Effect<SDKUserMessage, ProviderAdapterRequestError> {
   return Effect.gen(function* () {
-    const text = buildPromptText(input, dependencies.nativeCommandNames);
+    let text: string;
+    try {
+      text = buildPromptText(
+        input,
+        dependencies.nativeCommandNames,
+        dependencies.fixedNativeSkillNames ?? [],
+      );
+    } catch (cause) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "turn/start",
+        detail: toMessage(cause, "Could not compose the native Expert Skill invocation."),
+        cause,
+      });
+    }
     const sdkContent: Array<Record<string, unknown>> = [];
 
     if (text.length > 0) {
@@ -6777,14 +6973,35 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
       input: Parameters<ClaudeAdapterShape["startSession"]>[0],
     ) =>
       Effect.gen(function* () {
-        const claudeSdkEnv = yield* resolveClaudeSdkEnv(
+        const baseClaudeSdkEnv = yield* resolveClaudeSdkEnv(
           input.providerOptions?.claudeAgent?.homePath,
           input.providerOptions?.claudeAgent?.environment,
           input.providerInstanceId,
         );
-        const binaryPath = input.providerOptions?.claudeAgent?.binaryPath ?? "claude";
+        const fixedExpert = input.expertSession?.skillPolicy !== undefined;
+        const configuredEnvironment = input.providerOptions?.claudeAgent?.environment ?? {};
+        const settingsConfigDir =
+          baseClaudeSdkEnv.CLAUDE_CONFIG_DIR ??
+          (baseClaudeSdkEnv.HOME ? path.join(baseClaudeSdkEnv.HOME, ".claude") : undefined);
+        const settingsEnvironment = fixedExpert
+          ? yield* Effect.tryPromise({
+              try: () => readClaudeSettingsEnvironment(settingsConfigDir),
+              catch: () => ({}),
+            }).pipe(Effect.orElseSucceed(() => ({})))
+          : {};
+        const claudeSdkEnv = fixedExpert
+          ? { ...baseClaudeSdkEnv, ...settingsEnvironment, ...configuredEnvironment }
+          : baseClaudeSdkEnv;
+        const configuredBinaryPath = input.providerOptions?.claudeAgent?.binaryPath;
+        // `claude` is the persisted settings default, so it is not evidence of
+        // an operator-selected executable. Fixed Experts use the SDK-matched
+        // CLI unless a non-default path/command was explicitly configured.
+        const usesSdkBundledCli =
+          fixedExpert &&
+          (configuredBinaryPath === undefined || configuredBinaryPath.trim() === "claude");
+        const binaryPath = usesSdkBundledCli ? undefined : (configuredBinaryPath ?? "claude");
         const versionProbe = {
-          binaryPath,
+          binaryPath: binaryPath ?? "claude",
           ...(input.cwd ? { cwd: input.cwd } : {}),
           env: claudeSdkEnv,
         };
@@ -6794,20 +7011,44 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           input.contextSession?.hasContent === true;
         const installedVersion = !needsVersion
           ? undefined
-          : input.runtimeMode === "auto"
-            ? yield* Effect.tryPromise({
-                try: () => readClaudeCliVersion(versionProbe),
-                catch: (cause) =>
-                  new ProviderAdapterValidationError({
-                    provider: PROVIDER,
-                    operation: "startSession",
-                    issue: `Could not verify Auto mode support for Claude CLI at "${binaryPath}": ${toMessage(cause, "version probe failed")}`,
-                  }),
-              })
-            : yield* Effect.tryPromise({
-                try: () => readClaudeCliVersion(versionProbe),
-                catch: () => null,
-              }).pipe(Effect.orElseSucceed(() => null));
+          : usesSdkBundledCli
+            ? CLAUDE_SDK_BUNDLED_CLI_VERSION
+            : fixedExpert
+              ? yield* Effect.tryPromise({
+                  try: () => readClaudeCliVersion(versionProbe),
+                  catch: (cause) =>
+                    new ProviderAdapterValidationError({
+                      provider: PROVIDER,
+                      operation: "startSession",
+                      issue: `Could not verify the configured Claude CLI for fixed Expert startup: ${toMessage(cause, "version probe failed")}`,
+                    }),
+                })
+              : input.runtimeMode === "auto"
+                ? yield* Effect.tryPromise({
+                    try: () => readClaudeCliVersion(versionProbe),
+                    catch: (cause) =>
+                      new ProviderAdapterValidationError({
+                        provider: PROVIDER,
+                        operation: "startSession",
+                        issue: `Could not verify Auto mode support for Claude CLI${binaryPath ? ` at "${binaryPath}"` : ""}: ${toMessage(cause, "version probe failed")}`,
+                      }),
+                  })
+                : yield* Effect.tryPromise({
+                    try: () => readClaudeCliVersion(versionProbe),
+                    catch: () => null,
+                  }).pipe(Effect.orElseSucceed(() => null));
+        if (
+          fixedExpert &&
+          (!installedVersion ||
+            !parseGenericCliVersion(installedVersion) ||
+            installedVersion !== CLAUDE_SDK_BUNDLED_CLI_VERSION)
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: `Fixed Claude Expert requires the verified SDK-paired CLI ${CLAUDE_SDK_BUNDLED_CLI_VERSION}; received ${installedVersion ?? "no version"}.`,
+          });
+        }
         if (
           input.runtimeMode === "auto" &&
           !isClaudeAutoModeCliVersionSupported(installedVersion ?? null)
@@ -6817,8 +7058,8 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             operation: "startSession",
             issue:
               installedVersion === null
-                ? `Could not determine whether Claude CLI at "${binaryPath}" supports Auto mode.`
-                : `Claude CLI ${installedVersion} at "${binaryPath}" does not support Auto mode; upgrade to ${MINIMUM_CLAUDE_AUTO_MODE_CLI_VERSION} or newer.`,
+                ? `Could not determine whether Claude CLI${binaryPath ? ` at "${binaryPath}"` : ""} supports Auto mode.`
+                : `Claude CLI ${installedVersion}${binaryPath ? ` at "${binaryPath}"` : ""} does not support Auto mode; upgrade to ${MINIMUM_CLAUDE_AUTO_MODE_CLI_VERSION} or newer.`,
           });
         }
         return {
@@ -7163,7 +7404,51 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         // turns). Hook input `agent_id` equals the run's task_id. It fires on
         // every tool call, so the no-steer path must stay trivial; queued
         // messages are drained on the subagent's next tool call.
+        let fixedSkillProjection: FixedSkillProjection | undefined;
         const subagentSteerHook = async (hookInput: HookInput): Promise<HookJSONOutput> => {
+          if (input.expertSession?.skillPolicy && "tool_name" in hookInput) {
+            const toolName = hookInput.tool_name;
+            const skill =
+              "tool_input" in hookInput &&
+              hookInput.tool_input &&
+              typeof hookInput.tool_input === "object" &&
+              "skill" in hookInput.tool_input
+                ? hookInput.tool_input.skill
+                : undefined;
+            const toolInput =
+              "tool_input" in hookInput &&
+              hookInput.tool_input &&
+              typeof hookInput.tool_input === "object"
+                ? (hookInput.tool_input as Record<string, unknown>)
+                : {};
+            const requestedAgent = [
+              toolInput.subagent_type,
+              toolInput.agent_type,
+              toolInput.agent,
+              toolInput.type,
+            ].find((value): value is string => typeof value === "string");
+            const subagentAllowed =
+              input.expertSession?.skillPolicy?.nativeSubagents === "inherit" &&
+              typeof requestedAgent === "string" &&
+              fixedSkillProjection?.allowedSubagentTypes.includes(requestedAgent) === true;
+            const denied =
+              (["Agent", "Task"].includes(toolName) && !subagentAllowed) ||
+              ["reload_plugins", "reload_skills"].includes(toolName) ||
+              (toolName === "Skill" &&
+                !fixedSkillProjection?.entries.some(
+                  (entry) => skill === entry.nativeName || skill === entry.name,
+                ));
+            if (denied) {
+              return {
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse",
+                  permissionDecision: "deny",
+                  permissionDecisionReason:
+                    "This native invocation is outside the fixed Expert Skill assembly or cannot inherit it.",
+                },
+              };
+            }
+          }
           const agentId = "agent_id" in hookInput ? hookInput.agent_id : undefined;
           if (pendingSubagentSteers.size === 0 || typeof agentId !== "string") {
             return {};
@@ -7465,6 +7750,12 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           // resolution via server tuning, settings.json, and
           // CLAUDE_CODE_AUTO_COMPACT_WINDOW.
           autoCompactEnabled: true,
+          ...(input.expertSession?.skillPolicy
+            ? {
+                disableBundledSkills: true,
+                enabledPlugins: FIXED_EXPERT_DISABLED_BUILTIN_PLUGINS,
+              }
+            : {}),
           ...(requestedAutoCompactWindowTokens !== undefined
             ? { autoCompactWindow: requestedAutoCompactWindowTokens }
             : {}),
@@ -7477,12 +7768,47 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(fastMode ? { fastMode: true } : {}),
           ...(ultracode ? { ultracode: true } : {}),
         };
-        const claudeSubagents = buildClaudeSdkSubagents();
         const { claudeSdkEnv, snapshotSupported, detectedCliVersion } =
           preflight ?? (yield* resolveClaudeStartPreflight(input));
+        if (input.expertSession?.skillPolicy)
+          fixedSkillProjection = yield* Effect.tryPromise({
+            try: () =>
+              createFixedSkillProjection(
+                path.join(serverConfig.stateDir, "claude-fixed-skills"),
+                input.expertSession!,
+              ),
+            catch: (cause) =>
+              new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "startSession",
+                issue: `Fixed Claude Skill projection failed: ${String(cause)}`,
+              }),
+          });
+
+        const claudeSubagents: Record<string, AgentDefinition> = input.expertSession?.skillPolicy
+          ? input.expertSession.skillPolicy.nativeSubagents === "inherit"
+            ? Object.fromEntries(
+                Object.entries(fixedSkillProjection?.agents ?? {}).map(([name, agent]) => [
+                  name,
+                  {
+                    ...agent,
+                    skills: [...agent.skills],
+                    ...(agent.tools ? { tools: [...agent.tools] } : {}),
+                    ...(agent.disallowedTools
+                      ? { disallowedTools: [...agent.disallowedTools] }
+                      : {}),
+                  },
+                ]),
+              )
+            : {}
+          : buildClaudeSdkSubagents();
         let expertProjection: ClaudeExpertProjection | undefined;
         let expertCliVersion: string | undefined;
-        if (input.expertSession?.skillLoading !== "index" && input.expertSession?.skills.length) {
+        if (
+          !input.expertSession?.skillPolicy &&
+          input.expertSession?.skillLoading !== "index" &&
+          input.expertSession?.skills.length
+        ) {
           const expertSession = input.expertSession;
           const skillsRoot = expertSession.skillsRoot;
           if (!skillsRoot) {
@@ -7573,8 +7899,12 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(input.cwd ? { cwd: input.cwd } : {}),
           // Model identity and the spawn-fixed compaction override are separate settings.
           ...(apiModelId ? { model: apiModelId } : {}),
-          pathToClaudeCodeExecutable: providerOptions?.binaryPath ?? "claude",
-          settingSources: [...CLAUDE_SETTING_SOURCES],
+          ...(input.expertSession?.skillPolicy &&
+          (providerOptions?.binaryPath === undefined ||
+            providerOptions.binaryPath.trim() === "claude")
+            ? {}
+            : { pathToClaudeCodeExecutable: providerOptions?.binaryPath ?? "claude" }),
+          settingSources: input.expertSession?.skillPolicy ? [] : [...CLAUDE_SETTING_SOURCES],
           systemPrompt: {
             type: "preset",
             preset: "claude_code",
@@ -7587,6 +7917,19 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             ...(snapshotSupported ? { snapshot: true } : {}),
           },
           ...(Object.keys(claudeSubagents).length > 0 ? { agents: claudeSubagents } : {}),
+          ...(fixedSkillProjection
+            ? {
+                skills: fixedSkillProjection.entries.map((entry) => entry.nativeName),
+                ...(input.expertSession?.skillPolicy?.nativeSubagents === "blocked"
+                  ? { disallowedTools: ["Agent", "Task"] }
+                  : {}),
+                plugins: fixedSkillProjection.plugins.map((plugin) => ({
+                  type: "local" as const,
+                  path: plugin.path,
+                })),
+                pluginDelivery: "initialize" as const,
+              }
+            : {}),
           ...(expertProjection
             ? {
                 plugins: [{ type: "local" as const, path: expertProjection.pluginPath }],
@@ -7767,7 +8110,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             },
             createdAt: startedAt,
             updatedAt: startedAt,
-            ...(input.expertSession?.skillLoading === "index"
+            ...(input.expertSession?.skillLoading === "index" && !input.expertSession.skillPolicy
               ? {
                   skillApplication: createExpertSkillApplication({
                     session: input.expertSession,
@@ -7792,10 +8135,17 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           };
 
           const context: ClaudeSessionContext = {
+            ...(input.expertSession?.skillPolicy
+              ? {
+                  fixedExpertSession: input.expertSession,
+                  fixedSkillProjection: fixedSkillProjection!,
+                }
+              : {}),
             ...(initialCacheObservation ? { cacheObservation: initialCacheObservation } : {}),
             ...(existingResumeSessionId ? { resultUsageMayIncludeResumedTotals: true } : {}),
             ...(gatewaySessionLease ? { gatewaySessionLease } : {}),
             session,
+            ...(input.cwd ? { cwd: input.cwd } : {}),
             ...(expertProjection ? { expertProjection } : {}),
             ...(input.expertSession && expertPersonaHash
               ? {
@@ -7991,6 +8341,74 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                   ),
               }),
             );
+            if (installedContext.fixedExpertSession && installedContext.fixedSkillProjection) {
+              const expectedVersion = detectedCliVersion ?? CLAUDE_SDK_BUNDLED_CLI_VERSION;
+              if (initialization.claude_code_version !== expectedVersion) {
+                return yield* new ProviderAdapterValidationError({
+                  provider: PROVIDER,
+                  operation: "startSession",
+                  issue: `Claude native initialization reported CLI ${initialization.claude_code_version ?? "without a version"}; expected ${expectedVersion}.`,
+                });
+              }
+              const hasSelectedPlugins = installedContext.fixedSkillProjection.plugins.length > 0;
+              if (
+                initialization.plugins_applied === false ||
+                (hasSelectedPlugins && initialization.plugins_applied !== true)
+              ) {
+                return yield* new ProviderAdapterValidationError({
+                  provider: PROVIDER,
+                  operation: "startSession",
+                  issue:
+                    initialization.plugins_applied === false
+                      ? "Claude native initialization reported that the fixed Expert plugin was not applied."
+                      : "Claude native initialization did not confirm plugins_applied=true for the selected fixed Expert plugin.",
+                });
+              }
+              const expectedCommands = installedContext.fixedSkillProjection.entries
+                .filter((entry) => entry.userInvocable !== false)
+                .map((entry) => entry.nativeName);
+              const initialCommands = Array.isArray(initialization.commands)
+                ? initialization.commands
+                : [];
+              if (
+                expectedCommands.some(
+                  (name) => initialCommands.filter((command) => command.name === name).length !== 1,
+                )
+              ) {
+                return yield* new ProviderAdapterValidationError({
+                  provider: PROVIDER,
+                  operation: "startSession",
+                  issue:
+                    "Claude native initialization did not report each selected Skill command exactly once.",
+                });
+              }
+              yield* Effect.tryPromise({
+                try: async () => {
+                  const fixed = installedContext.fixedSkillProjection!;
+                  await verifyFixedClaudeSkillContext(
+                    installedContext.fixedExpertSession!,
+                    fixed,
+                    installedContext.query,
+                    input.lifecycleGeneration!,
+                    installedContext,
+                  );
+                  installedContext.session = {
+                    ...installedContext.session,
+                    skillApplication: createExpertSkillApplication({
+                      session: installedContext.fixedExpertSession!,
+                      instructions: baseInstructions,
+                      lifecycleGeneration: input.lifecycleGeneration!,
+                    }),
+                  };
+                },
+                catch: (cause) =>
+                  new ProviderAdapterValidationError({
+                    provider: PROVIDER,
+                    operation: "startSession",
+                    issue: `Claude fixed Skill enforcement could not be verified: ${String(cause)}`,
+                  }),
+              });
+            }
             if (installedContext.expertProjection) {
               const issues = validateClaudeExpertInitialization(
                 initialization,
@@ -8154,6 +8572,59 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         return effectiveInteractionMode;
       });
 
+    const verifyFixedInput = (context: ClaudeSessionContext, input: ProviderSendTurnInput) =>
+      Effect.gen(function* () {
+        if (context.fixedExpertSession && context.fixedSkillProjection) {
+          let explicitSkillNames: string[];
+          try {
+            const requestedSkills = input.skills ?? [];
+            if (requestedSkills.length > 1)
+              throw new Error(
+                "One native Expert Skill may be explicitly invoked per provider turn.",
+              );
+            explicitSkillNames = requestedSkills.map((skill) => {
+              const match = context.fixedSkillProjection!.entries.find(
+                (entry) =>
+                  entry.originalName === skill.name &&
+                  path.resolve(entry.originalPath) === path.resolve(skill.path),
+              );
+              if (!match)
+                throw new Error(`Native Expert Skill is outside this assembly: ${skill.name}`);
+              return match.nativeName;
+            });
+          } catch (cause) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: toMessage(cause, "Native Expert Skill reference is outside this assembly."),
+              cause,
+            });
+          }
+          if (
+            !isFixedExpertNativeCommandAllowed(
+              input.input,
+              context.fixedSkillProjection.entries.map((entry) => entry.nativeName),
+            )
+          )
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: "This native command is outside the fixed Expert Skill assembly.",
+            });
+          yield* Effect.tryPromise({
+            try: () =>
+              verifyFixedClaudeSkillContext(
+                context.fixedExpertSession!,
+                context.fixedSkillProjection!,
+                context.query,
+                context.lifecycleGeneration!,
+                context,
+              ),
+            catch: (cause) => toRequestError(input.threadId, "turn/verifyFixedSkills", cause),
+          });
+        }
+      });
+
     const sendTurnCore = (
       input: ProviderSendTurnInput,
       compactionTurnId?: TurnId,
@@ -8161,6 +8632,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
     ): ReturnType<ClaudeAdapterShape["sendTurn"]> =>
       Effect.gen(function* () {
         const context = yield* requireSession(input.threadId);
+        yield* verifyFixedInput(context, input);
         const isCompaction =
           compactionTurnId !== undefined || isClaudeCompactionCommand(input.input);
         if (isCompaction && (input.attachments?.length ?? 0) > 0) {
@@ -8504,6 +8976,19 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         const message = yield* buildUserMessageEffect(input, {
           fileSystem,
           attachmentsDir: serverConfig.attachmentsDir,
+          fixedNativeSkillNames:
+            context.fixedExpertSession && context.fixedSkillProjection
+              ? (input.skills ?? []).map((skill) => {
+                  const entry = context.fixedSkillProjection!.entries.find(
+                    (candidate) =>
+                      candidate.originalName === skill.name &&
+                      path.resolve(candidate.originalPath) === path.resolve(skill.path),
+                  );
+                  if (!entry)
+                    throw new Error("Native Expert Skill reference is outside this assembly.");
+                  return entry.nativeName;
+                })
+              : [],
           // Compaction already validated these commands before turn admission.
           nativeCommandNames:
             nativeCommandNames ?? (yield* resolveNativeCommandNames(context, input.input)),
@@ -8651,6 +9136,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             return yield* sendTurn(input);
           }
 
+          yield* verifyFixedInput(context, input);
           // Steering across an interaction-mode change (e.g. a plan follow-up
           // that starts implementing) must flip the CLI's permission mode even
           // though no new turn starts.
@@ -8669,6 +9155,19 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           const message = yield* buildUserMessageEffect(input, {
             fileSystem,
             attachmentsDir: serverConfig.attachmentsDir,
+            fixedNativeSkillNames:
+              context.fixedExpertSession && context.fixedSkillProjection
+                ? (input.skills ?? []).map((skill) => {
+                    const entry = context.fixedSkillProjection!.entries.find(
+                      (candidate) =>
+                        candidate.originalName === skill.name &&
+                        path.resolve(candidate.originalPath) === path.resolve(skill.path),
+                    );
+                    if (!entry)
+                      throw new Error("Native Expert Skill reference is outside this assembly.");
+                    return entry.nativeName;
+                  })
+                : [],
             nativeCommandNames: yield* resolveNativeCommandNames(context, input.input),
           });
           yield* Queue.offer(context.promptQueue, {
@@ -8861,6 +9360,16 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
 
     const forkThread: NonNullable<ClaudeAdapterShape["forkThread"]> = (input) =>
       Effect.gen(function* () {
+        if (
+          input.expertSession?.skillPolicy ||
+          sessions.get(input.sourceThreadId)?.fixedExpertSession
+        )
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "forkThread",
+            issue:
+              "Native Claude fork cannot attest the inherited fixed Skill assembly; rebuild from the retained transcript.",
+          });
         // Prefer the live session's cursor: the persisted binding may lag the
         // runtime by a turn.
         const liveSource = sessions.get(input.sourceThreadId);
@@ -9271,6 +9780,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               : [...sessions.values()].find(
                   (s) =>
                     !s.stopped &&
+                    !s.fixedSkillProjection &&
                     s.commandDiscoveryKey === discoveryKey &&
                     s.artifactsEnabled === enableArtifacts,
                 );
@@ -9280,17 +9790,43 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             try: () => context.query.supportedCommands(),
             catch: (cause) => toRequestError(context.session.threadId, "listCommands", cause),
           });
-          const result = mapSupportedCommands(
-            commands,
+          const visibleCommands = context.fixedSkillProjection
+            ? commands.filter(
+                (command) =>
+                  FIXED_EXPERT_SAFE_NATIVE_COMMANDS.has(command.name) ||
+                  context.fixedSkillProjection!.entries.some(
+                    (entry) => command.name === entry.nativeName,
+                  ),
+              )
+            : commands;
+          const mappedResult = mapSupportedCommands(
+            visibleCommands,
             resolveClaudeArtifactsState({
               artifactsEnabled: context.artifactsEnabled,
               commands,
               initToolNames: context.initToolNames,
             }),
           );
+          const result = context.fixedSkillProjection
+            ? {
+                ...mappedResult,
+                commands: mappedResult.commands.filter(
+                  (command) =>
+                    FIXED_EXPERT_SAFE_NATIVE_COMMANDS.has(command.name) ||
+                    context.fixedSkillProjection!.entries.some(
+                      (entry) => command.name === entry.nativeName,
+                    ),
+                ),
+              }
+            : mappedResult;
           // Cache under the flag this process was spawned with, not the current
           // setting, so a pre-toggle session cannot poison fresh discovery.
-          commandsCache = { result, key: discoveryKey, enableArtifacts: context.artifactsEnabled };
+          if (!context.fixedSkillProjection)
+            commandsCache = {
+              result,
+              key: discoveryKey,
+              enableArtifacts: context.artifactsEnabled,
+            };
           return result;
         }
 

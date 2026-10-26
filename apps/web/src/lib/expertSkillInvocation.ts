@@ -16,6 +16,10 @@ export async function bindDraftExpertSkillInvocations(
   const snapshot = await api.server.readExpertSnapshot({ snapshotId: binding.snapshotId });
   return skills.map((skill) => {
     if (skill.expert?.snapshotId !== PENDING_EXPERT_SKILL_SNAPSHOT) return skill;
+    if (skill.expert.skillId) {
+      // The server resolves this stable managed ID against the Run at actual start.
+      return { ...skill, expert: { ...skill.expert, snapshotId: snapshot.snapshotId } };
+    }
     const selected = snapshot.skillEntries?.find(
       (entry) =>
         entry.packageId === skill.expert?.packageId && entry.entryPath === skill.expert.entryPath,

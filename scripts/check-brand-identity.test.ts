@@ -70,6 +70,34 @@ describe("brand identity guard", () => {
     ).toEqual([]);
   });
 
+  it("distinguishes reviewed Hub delivery phases from retired branding", () => {
+    const stage = shortName.toUpperCase();
+    const path = "apps/server/src/hubCollaboration/planRevisionImpact.ts";
+    const phase = `${stage} proposal analysis, with no writes or execution authority.`;
+    expect(findBrandIdentityViolations([{ path, contents: phase }])).toEqual([]);
+    for (const contents of [
+      `${phase} ${firstName}`,
+      `${phase} ${stage}`,
+      phase.toLowerCase(),
+      `${stage} product`,
+      `${stage} Code`,
+    ]) {
+      expect(findBrandIdentityViolations([{ path, contents }])).toHaveLength(1);
+    }
+    expect(
+      findBrandIdentityViolations([{ path: "apps/server/src/other.ts", contents: phase }]),
+    ).toHaveLength(1);
+    expect(
+      findBrandIdentityViolations([
+        { path: "context/PROJECT_CONTEXT.md", contents: `保留 ${stage} 运行中修订的未验收边界。` },
+        {
+          path: "context/PROJECT_CONTEXT.md",
+          contents: `保留 ${stage} 运行中修订的未验收边界。${secondName}`,
+        },
+      ]),
+    ).toHaveLength(1);
+  });
+
   it("allows the exact legal attribution once in LICENSE", () => {
     expect(findBrandIdentityViolations([{ path: "LICENSE", contents: legalNotice }])).toEqual([]);
     expect(

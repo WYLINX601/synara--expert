@@ -38,6 +38,57 @@ const props = () => ({
 });
 
 describe("shared question form with blocking prompts", () => {
+  it("shows the header, full question, descriptions and active custom answer mode", async () => {
+    const callbacks = props();
+    const input = {
+      ...prompt,
+      questions: [
+        {
+          ...prompt.questions[0]!,
+          header: "Continuation",
+          question: "Where should this discussion continue?",
+          options: [
+            {
+              label: "Original thread",
+              description: "Keep the existing discussion and its history.",
+            },
+          ],
+        },
+      ],
+    };
+    const screen = await render(
+      <ComposerPendingUserInputPanel
+        {...callbacks}
+        pendingUserInputs={[input]}
+        answers={{ question: { customAnswer: "Discuss here" } }}
+      />,
+    );
+    await expect.element(screen.getByText("Continuation", { exact: true })).toBeVisible();
+    await expect
+      .element(screen.getByText(input.questions[0]!.question, { exact: true }))
+      .toBeVisible();
+    await expect
+      .element(screen.getByText("Keep the existing discussion and its history.", { exact: true }))
+      .toBeVisible();
+    await expect.element(screen.getByRole("status")).toHaveTextContent("Using custom answer.");
+    await screen.getByRole("button", { name: /Original thread/ }).click();
+    expect(callbacks.onToggleOption).toHaveBeenCalledExactlyOnceWith("question", "Original thread");
+  });
+
+  it("cancels pending option submission when the user switches to custom input", async () => {
+    const callbacks = props();
+    const screen = await render(<ComposerPendingUserInputPanel {...callbacks} />);
+    await screen.getByRole("button", { name: /Second/ }).click();
+    await screen.rerender(
+      <ComposerPendingUserInputPanel
+        {...callbacks}
+        answers={{ question: { customAnswer: "A different answer" } }}
+      />,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(callbacks.onAdvance).not.toHaveBeenCalled();
+    await expect.element(screen.getByRole("status")).toHaveTextContent("Using custom answer.");
+  });
   it("offers Cancel with choices and stops pending auto-advance", async () => {
     const callbacks = props();
     const screen = await render(<ComposerPendingUserInputPanel {...callbacks} />);

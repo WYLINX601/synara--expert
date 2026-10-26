@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -18,6 +19,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Effect, Layer, Schema, Stream } from "effect";
 import {
+  FIXED_EXPERT_SKILL_POLICY,
   ApprovalRequestId,
   ThreadId,
   ProviderRuntimeEvent,
@@ -178,6 +180,7 @@ async function withAdapter(
     readonly expertSession?: ProviderSessionStartInput["expertSession"];
     readonly contextSession?: ProviderSessionStartInput["contextSession"];
     readonly lifecycleGeneration?: string;
+    readonly prepareCwd?: (cwd: string) => void;
   },
   gatewayFetchOverride?: AgentGatewayMcpFetch,
 ) {
@@ -218,6 +221,7 @@ async function withAdapter(
         ],
       },
     });
+  startSessionOverrides?.prepareCwd?.(cwd);
   let layer = makePiAdapterLive({ agentGatewayFetch: gatewayFetchOverride ?? gatewayFetch }).pipe(
     Layer.provideMerge(ServerConfig.layerTest(cwd, path.join(cwd, "server"))),
     Layer.provideMerge(NodeServices.layer),
@@ -1488,3 +1492,89 @@ it("separates assistant and reasoning messages across a real SDK tool loop", asy
     }
   });
 });
+
+it.each([false, true])(
+  "enforces the native fixed Pi assembly (empty=%s) through reload while preserving host tools",
+  async (empty) => {
+    responses("success");
+    const root = mkdtempSync(path.join(tmpdir(), "synara-pi-fixed-wiring-"));
+    dirs.push(root);
+    const file = path.join(root, "SKILL.md"),
+      body = "---\nname: assembled-a\ndescription: Selected A\n---\nFixed instructions\n";
+    writeFileSync(file, body);
+    const entries = empty
+      ? []
+      : [
+          {
+            name: "assembled-a",
+            path: file,
+            packageId: `pkg_${"a".repeat(64)}`,
+            entryPath: "SKILL.md",
+            description: "Selected A",
+            activation: "on-demand" as const,
+            sha256: createHash("sha256").update(body).digest("hex"),
+          },
+        ];
+    const expertSession: NonNullable<ProviderSessionStartInput["expertSession"]> = {
+      snapshotId: `exp_${"c".repeat(64)}`,
+      persona: "Fixed Expert",
+      skillPolicy: FIXED_EXPERT_SKILL_POLICY,
+      skillLoading: "index",
+      skills: entries.map(({ name, path }) => ({ name, path })),
+      skillEntries: entries,
+      references: [],
+    };
+    await withAdapter(
+      async (adapter, events) => {
+        const sdkSession = captured.sessions[0]!;
+        expect(
+          sdkSession.resourceLoader
+            .getSkills()
+            .skills.map(({ name, filePath }) => ({ name, path: filePath })),
+        ).toEqual(expertSession.skills);
+        expect(sdkSession.resourceLoader.getExtensions().extensions).toHaveLength(0);
+        await sdkSession.reload();
+        expect(
+          sdkSession.resourceLoader.getSkills().skills.map(({ filePath }) => filePath),
+        ).toEqual(entries.map(({ path }) => path));
+        const session = (await Effect.runPromise(adapter.listSessions()))[0]!;
+        expect(session.skillApplication).toMatchObject({
+          enforcement: "native-fixed",
+          nativeSubagents: "inherit",
+          lifecycleGeneration: "pi-fixed-generation",
+        });
+        expect(session.skillApplication?.activeEntries).toHaveLength(entries.length);
+        await send(adapter);
+        await waitFor(() => expect(completions(events)).toHaveLength(1));
+        expect(captured.modelSystemPrompts[0]).not.toContain("ambient-c");
+        expect(captured.modelTools[0]!.some((tool) => tool.name === "synara_list_threads")).toBe(
+          true,
+        );
+        expect(captured.modelTools[0]!.some((tool) => tool.name === "computer_run")).toBe(true);
+        if (!empty) {
+          writeFileSync(file, "tampered Skill");
+          await expect(send(adapter)).rejects.toThrow(/fixed Pi Skill/iu);
+          expect(captured.modelSystemPrompts).toHaveLength(1);
+        }
+      },
+      100,
+      gatewayCredentials(),
+      {
+        expertSession,
+        lifecycleGeneration: "pi-fixed-generation",
+        enableComputerControl: true,
+        prepareCwd: (cwd) => {
+          const skill = path.join(cwd, ".pi/skills/ambient-c");
+          mkdirSync(skill, { recursive: true });
+          writeFileSync(path.join(skill, "SKILL.md"), body.replaceAll("assembled-a", "ambient-c"));
+          const extensions = path.join(cwd, ".pi/extensions");
+          mkdirSync(extensions, { recursive: true });
+          writeFileSync(
+            path.join(extensions, "unselected.ts"),
+            'throw new Error("Unselected native extension executed");',
+          );
+        },
+      },
+    );
+  },
+);

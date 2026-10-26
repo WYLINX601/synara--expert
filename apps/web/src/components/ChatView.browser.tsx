@@ -4199,7 +4199,7 @@ describe("ChatView transcript geometry (full app)", () => {
     }
   });
 
-  it.each(["manual", "auto-advance", "custom"] as const)(
+  it.each(["manual", "auto-advance", "custom", "omp-mixed"] as const)(
     "preserves three answers (%s) on transient failure and restores expired questions without sending a message",
     async (navigation) => {
       const requestId = ApprovalRequestId.makeUnsafe("question-recovery");
@@ -4210,6 +4210,7 @@ describe("ChatView transcript geometry (full app)", () => {
         header: `Question ${id}`,
         question: `Choose option ${id}?`,
         ...(navigation !== "auto-advance" ? { multiSelect: true } : {}),
+        ...(navigation === "omp-mixed" ? { allowCustomAnswerWithOptions: true } : {}),
         options: [{ label: `Choice ${id}`, description: "Selected answer" }],
       }));
       const snapshot = createSnapshotForTargetUser({
@@ -4311,9 +4312,16 @@ describe("ChatView transcript geometry (full app)", () => {
             }
           }
         }
-        if (navigation === "custom") {
+        if (navigation === "custom" || navigation === "omp-mixed") {
           await userEvent.click(await waitForComposerEditor());
           await userEvent.keyboard("Custom answer");
+        }
+        if (navigation === "omp-mixed") {
+          const choice = page.getByRole("button", { name: /Choice 3/ });
+          await choice.click();
+          await choice.click();
+          await userEvent.click(await waitForComposerEditor());
+          await userEvent.keyboard("{End} retained");
         }
         const submit = page.getByRole("button", { name: "Submit answers", exact: true });
         await expect.element(submit).toBeEnabled();
@@ -4335,7 +4343,9 @@ describe("ChatView transcript geometry (full app)", () => {
               String(id),
               navigation === "custom" && id === 3
                 ? { customAnswer: "Custom answer" }
-                : { customAnswer: "", selectedOptionLabels: [`Choice ${id}`] },
+                : navigation === "omp-mixed" && id === 3
+                  ? { customAnswer: "Custom answer retained", selectedOptionLabels: ["Choice 3"] }
+                  : { customAnswer: "", selectedOptionLabels: [`Choice ${id}`] },
             ]),
           ),
         });
@@ -4345,7 +4355,7 @@ describe("ChatView transcript geometry (full app)", () => {
         await expect.element(submit).not.toBeInTheDocument();
         await page.getByRole("button", { name: "Restore answers" }).click();
         expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
-          `Keep this existing draft.\n\nChoose option 1?\nChoice 1\n\nChoose option 2?\nChoice 2\n\nChoose option 3?\n${navigation === "custom" ? "Custom answer" : "Choice 3"}`,
+          `Keep this existing draft.\n\nChoose option 1?\nChoice 1\n\nChoose option 2?\nChoice 2\n\nChoose option 3?\n${navigation === "custom" ? "Custom answer" : navigation === "omp-mixed" ? "Choice 3, Custom answer retained" : "Choice 3"}`,
         );
         expect(dispatchCommand).toHaveBeenCalledTimes(2);
       } finally {

@@ -101,6 +101,8 @@ import { CheckpointDiffQuery } from "./checkpointing/Services/CheckpointDiffQuer
 import { resolveThreadWorkspaceCwd } from "./checkpointing/Utils";
 import { ServerConfig, type ServerConfigShape } from "./config";
 import { realpathNearestExisting } from "./realpathNearestExisting";
+import { createRunSkillAssemblyStore } from "./experts/RunSkillAssemblyStore";
+import { expertSnapshotSession } from "./experts/expertSnapshotSession";
 import { isGroupContainerKind } from "@synara/shared/projectContainers";
 import { PROJECT_FOLDERS_WORKTREE_ISSUE } from "@synara/shared/projectFolders";
 import { workspaceRootsEqual } from "@synara/shared/threadWorkspace";
@@ -194,9 +196,13 @@ import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
 import { createExpertStore } from "./experts/ExpertStore";
 import { readHubExpertCatalog } from "./agentGateway/hubExpertCatalog";
 import { buildAgentGatewayProviderAvailabilities } from "./agentGateway/providerAvailability";
-import { makeWorkbenchExpertRpcHandlers } from "./workbench/host/expertRpc.ts";
+import {
+  makeWorkbenchExpertRpcHandlers,
+  makeWorkbenchExpertDiscoveryHandlers,
+} from "./workbench/host/expertRpc.ts";
 import { createSkillPackageSwitchHost } from "./workbench/host/skillPackageSwitchHost.ts";
 import { makeWorkbenchContextRpcHandlers } from "./workbench/host/contextRpc.ts";
+import { makeSkillManagementRpcHandlers } from "./workbench/host/skillManagementRpc.ts";
 import { readThreadContextDetails } from "./workbench/host/contextThreadDetails.ts";
 import { ContextRepository, ContextRepositoryLive } from "./context/ContextRepository.ts";
 import { OrchestrationEventDeliveryRepository } from "./persistence/Services/OrchestrationEventDeliveries.ts";
@@ -593,6 +599,9 @@ const makeWsRpcHandlersLayer = () =>
         stateDir: config.stateDir,
         expertAppliedRuntimeRepository,
       });
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => workbenchExpertRuntime.skillLibrary.dispose()),
+      );
       const readOwnerThreadDiagnostics = makeOwnerThreadDiagnosticReader({
         eventStore,
         providerRuntimeEvents,
@@ -1373,8 +1382,53 @@ const makeWsRpcHandlersLayer = () =>
           "Connectors can be managed only on the computer running Synara.",
         );
       });
+      const requireSkillOwner = requireLoopbackOwner(
+        "Skill management is available only on a loopback-only instance.",
+      );
+      const workbenchExpertDiscovery = makeWorkbenchExpertDiscoveryHandlers({
+        requireOwner: requireSkillOwner,
+        loadThreadBinding: (threadId) =>
+          projectionReadModelQuery
+            .getThreadShellById(ThreadId.makeUnsafe(threadId))
+            .pipe(
+              Effect.map((thread) =>
+                Option.isSome(thread) ? (thread.value.expertBinding ?? null) : null,
+              ),
+            ),
+        readSnapshot: (snapshotId) => workbenchExpertRuntime.experts.readSnapshot(snapshotId),
+        readSkillSession: (threadId, snapshot) =>
+          Effect.gen(function* () {
+            const id = ThreadId.makeUnsafe(threadId);
+            const thread = yield* projectionReadModelQuery.getThreadShellById(id);
+            const sessions = yield* providerService.listSessions();
+            const live = sessions.find((session) => session.threadId === id);
+            const hasBackground = providerService.hasLiveRuntimeTasks
+              ? yield* providerService.hasLiveRuntimeTasks({ threadId: id })
+              : false;
+            const shell = Option.getOrUndefined(thread);
+            const running = Boolean(
+              live?.activeTurnId ||
+              live?.status === "connecting" ||
+              live?.status === "running" ||
+              shell?.hasPendingApprovals ||
+              shell?.hasPendingUserInput ||
+              shell?.session?.activeTurnId ||
+              shell?.session?.status === "starting" ||
+              hasBackground,
+            );
+            const assemblies = createRunSkillAssemblyStore(config.stateDir);
+            return yield* Effect.tryPromise(async () => {
+              if (!running) return assemblies.preview(snapshot.snapshotId);
+              const current = await assemblies.current(threadId);
+              return current?.session ?? expertSnapshotSession(snapshot);
+            });
+          }),
+        listCommands: (request) => providerDiscoveryService.listCommands(request),
+        listSkills: (request) => providerDiscoveryService.listSkills(request),
+      });
       const workbenchExpertRpcHandlers = makeWorkbenchExpertRpcHandlers({
         runtime: workbenchExpertRuntime,
+        requireSkillOwner,
         previewProvider: (request, skills) =>
           providerService.previewExpert
             ? providerService.previewExpert({ ...request, skills })
@@ -1406,6 +1460,13 @@ const makeWsRpcHandlersLayer = () =>
           }),
         loadProjectionThreads: () =>
           projectionReadModelQuery.getSnapshot().pipe(Effect.map((snapshot) => snapshot.threads)),
+      });
+      const skillManagementRpcHandlers = makeSkillManagementRpcHandlers({
+        config,
+        instanceId: serverEnvironment.getDescriptor.pipe(
+          Effect.map((descriptor) => descriptor.environmentId),
+        ),
+        requireSkillOwner,
       });
       const workbenchContextRpcHandlers = makeWorkbenchContextRpcHandlers({
         repository: contextRepository,
@@ -2464,6 +2525,7 @@ const makeWsRpcHandlersLayer = () =>
         [WS_METHODS.serverUpdateSettings]: (input) =>
           rpcEffect(serverSettings.updateSettingsView(input), "Failed to update server settings"),
         ...workbenchExpertRpcHandlers,
+        ...skillManagementRpcHandlers,
         ...makeHubPlanRpcHandlers({
           service: Option.getOrUndefined(hubPlanService),
           requireOwner: requireWsOwnerSession,
@@ -2839,24 +2901,33 @@ const makeWsRpcHandlersLayer = () =>
         [WS_METHODS.providerCompactThread]: (input) =>
           rpcEffect(providerService.compactThread(input), "Failed to compact thread"),
         [WS_METHODS.providerListCommands]: (input) =>
-          rpcEffect(providerDiscoveryService.listCommands(input), "Failed to list commands"),
+          rpcEffect(workbenchExpertDiscovery.listCommands(input), "Failed to list commands"),
         [WS_METHODS.providerListSkills]: (input) =>
-          rpcEffect(providerDiscoveryService.listSkills(input), "Failed to list skills"),
+          rpcEffect(workbenchExpertDiscovery.listSkills(input), "Failed to list skills"),
         [WS_METHODS.providerListSkillsCatalog]: (input) =>
           rpcEffect(
-            Effect.tryPromise(() =>
-              discoverSkillsCatalog({
-                cwd: input.cwd ?? null,
-                homeDir: config.homeDir,
-                synaraBaseDir: config.baseDir,
-                includeDuplicateOrigins: true,
-              }),
-            ).pipe(
-              Effect.map((skills) => ({
+            Effect.gen(function* () {
+              const settings = input.provider ? yield* serverSettings.getSettings : undefined;
+              const agentDir =
+                settings && (input.provider === "pi" || input.provider === "omp")
+                  ? settings.providers[input.provider].agentDir.trim()
+                  : undefined;
+              const skills = yield* Effect.tryPromise(() =>
+                discoverSkillsCatalog({
+                  cwd: input.cwd ?? null,
+                  homeDir: config.homeDir,
+                  synaraBaseDir: config.baseDir,
+                  includeDuplicateOrigins: true,
+                  ...(input.provider ? { provider: input.provider, nativeOnly: true } : {}),
+                  ...(agentDir ? { agentDir } : {}),
+                  ...(input.forceReload ? { forceReload: true } : {}),
+                }),
+              );
+              return {
                 skills,
                 synaraSkillsDir: synaraSkillsDir(config.baseDir),
-              })),
-            ),
+              };
+            }),
             "Failed to list the skills catalog",
           ),
         [WS_METHODS.providerListPlugins]: (input) =>

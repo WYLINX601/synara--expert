@@ -30,6 +30,8 @@ export type ProviderSkillInterface = typeof ProviderSkillInterface.Type;
 
 /** Fixed Expert snapshot identity; `path` is display/legacy data, never authority. */
 export const ProviderSkillExpertIdentity = Schema.Struct({
+  /** Stable managed identity follows its head when a queued root Run starts. */
+  skillId: Schema.optional(TrimmedNonEmptyString.check(Schema.isPattern(/^skl_[a-f0-9]{32}$/u))),
   snapshotId: TrimmedNonEmptyString,
   packageId: SkillPackageId,
   entryPath: SkillEntryPath,
@@ -107,6 +109,9 @@ export type ProviderListSkillsResult = typeof ProviderListSkillsResult.Type;
 // `scope` to carry the origin label ("synara", "codex", "claude", "cursor", ...).
 export const ProviderSkillsCatalogInput = Schema.Struct({
   cwd: Schema.optional(TrimmedNonEmptyString),
+  /** Restrict an explicit runtime import scan to that provider's native roots. */
+  provider: Schema.optional(ProviderDiscoveryKind),
+  forceReload: Schema.optional(Schema.Boolean),
 });
 export type ProviderSkillsCatalogInput = typeof ProviderSkillsCatalogInput.Type;
 

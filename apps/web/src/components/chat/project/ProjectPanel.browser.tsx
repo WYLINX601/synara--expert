@@ -85,7 +85,8 @@ const harness = vi.hoisted(() => {
   return { api, projectAgentListeners };
 });
 
-vi.mock("~/nativeApi", () => ({
+vi.mock("~/nativeApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/nativeApi")>()),
   readNativeApi: () => harness.api,
   ensureNativeApi: () => harness.api,
 }));

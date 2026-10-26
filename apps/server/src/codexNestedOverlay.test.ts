@@ -26,7 +26,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-async function fixture(withAuth = true) {
+async function fixture(withAuth = true, fixedParent = false, withNativeDiscoveryDirs = false) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "synara-nested-codex-")));
   roots.push(root);
   const sourceHome = path.join(root, "home");
@@ -35,12 +35,20 @@ async function fixture(withAuth = true) {
   fs.mkdirSync(sourceHome);
   const sourceConfig = 'profile = "work"\n[profiles.work]\nmodel = "gpt-5.6-sol"\n';
   fs.writeFileSync(path.join(sourceHome, "config.toml"), sourceConfig);
+  if (withNativeDiscoveryDirs) {
+    for (const name of ["plugins", "skills"]) {
+      const directory = path.join(sourceHome, name);
+      fs.mkdirSync(directory);
+      fs.writeFileSync(path.join(directory, "source.txt"), `${name} from source`);
+    }
+  }
   if (withAuth) {
     fs.writeFileSync(path.join(sourceHome, "auth.json"), '{"OPENAI_API_KEY":"dummy-default"}');
   }
   const parentEnv = await buildCodexProcessEnv({
     env: { CODEX_HOME: sourceHome, SYNARA_HOME: parentRuntime },
     platform: "win32",
+    ...(fixedParent ? { fixedExpertNativeDiscovery: true } : {}),
     appendConfigToml: buildCodexMcpConfigToml("http://127.0.0.1:61240/mcp"),
   });
   const parentOverlay = parentEnv.CODEX_HOME!;
@@ -117,6 +125,26 @@ describe("a nested default Codex source", () => {
     expect(launch.env.CODEX_SQLITE_HOME).toBe(f.sourceHome);
     expect(launch.authFingerprint).toBe('{"storeMode":"file","auth":{"state":"missing"}}');
     expect(fs.existsSync(path.join(launch.env.CODEX_HOME!, "auth.json"))).toBe(false);
+  });
+
+  it("recognizes a fixed Expert parent across runtimes without using its overlay for an ordinary child", async () => {
+    const f = await fixture(true, true, true);
+    expect(fs.existsSync(path.join(f.parentOverlay, "skills"))).toBe(false);
+    expect(fs.existsSync(path.join(f.parentOverlay, "plugins"))).toBe(false);
+
+    const launch = await buildCodexProcessLaunchContext(f.input);
+    const childOverlay = path.join(f.childRuntime, "codex-home-overlay");
+    expect(launch.env.CODEX_HOME).toBe(childOverlay);
+    expect(launch.env.CODEX_HOME).not.toBe(f.parentOverlay);
+    expect(launch.env.CODEX_HOME).not.toContain("fixed-expert-native");
+    for (const name of ["plugins", "skills"]) {
+      const childDirectory = path.join(childOverlay, name);
+      expect(fs.lstatSync(childDirectory).isSymbolicLink()).toBe(true);
+      expect(fs.realpathSync(childDirectory)).toBe(path.join(f.sourceHome, name));
+      expect(fs.readFileSync(path.join(childDirectory, "source.txt"), "utf8")).toBe(
+        `${name} from source`,
+      );
+    }
   });
 
   it("revalidates the inherited source without synchronous filesystem work", async () => {

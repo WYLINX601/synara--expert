@@ -89,6 +89,45 @@ describe("togglePendingUserInputOptionSelection", () => {
 });
 
 describe("buildPendingUserInputAnswers", () => {
+  it("keeps OMP multi-select choices with custom text only when explicitly supported", () => {
+    const question = {
+      id: "q0",
+      header: "Outputs",
+      question: "Which outputs?",
+      multiSelect: true,
+      allowCustomAnswerWithOptions: true,
+      options: [{ label: "CLI", description: "Command line" }],
+    };
+    const draft = setPendingUserInputCustomAnswer(
+      { selectedOptionLabels: ["CLI"] },
+      "Web",
+      question,
+    );
+    expect(buildPendingUserInputAnswers([question], { q0: draft })).toEqual({ q0: ["CLI", "Web"] });
+    expect(togglePendingUserInputOptionSelection(question, draft, "CLI")).toEqual({
+      customAnswer: "Web",
+    });
+    expect(
+      resolvePendingUserInputAnswer({ ...question, allowCustomAnswerWithOptions: false }, draft),
+    ).toBe("Web");
+  });
+
+  it("submits only the active answer when switching single-choice and custom modes", () => {
+    const question = {
+      id: "q0",
+      header: "Continue",
+      question: "Where?",
+      options: [{ label: "Original", description: "Original thread" }],
+    };
+    const custom = setPendingUserInputCustomAnswer(
+      { selectedOptionLabels: ["Original"] },
+      "Hub",
+      question,
+    );
+    expect(buildPendingUserInputAnswers([question], { q0: custom })).toEqual({ q0: "Hub" });
+    const selected = togglePendingUserInputOptionSelection(question, custom, "Original");
+    expect(buildPendingUserInputAnswers([question], { q0: selected })).toEqual({ q0: "Original" });
+  });
   it("returns a canonical answer map for complete prompts", () => {
     expect(
       buildPendingUserInputAnswers(

@@ -85,7 +85,13 @@ import {
   readRecordArg,
   readStringArg,
 } from "../toolInput.ts";
-import { WRITE_TOOL_ANNOTATIONS, type ToolContext, type ToolEntry } from "../toolRuntime.ts";
+import {
+  GatewayToolError,
+  gatewayToolErrorResult,
+  WRITE_TOOL_ANNOTATIONS,
+  type ToolContext,
+  type ToolEntry,
+} from "../toolRuntime.ts";
 import { makeAgentGatewayMcpTransport } from "../mcpTransport.ts";
 import { deliverGatewayCompletions } from "../completionDelivery.ts";
 import { recoverInterruptedAgentGatewayOperations } from "../startupRecovery.ts";
@@ -279,15 +285,33 @@ export const makeAgentGateway = Effect.gen(function* () {
     Effect.gen(function* () {
       if (runtimeModeEscalatesPrivilege(caller.runtimeMode, target.runtimeMode)) {
         return yield* Effect.fail(
-          new ToolInputError(
-            `Thread "${target.id}" runs in "${target.runtimeMode}" mode but your thread runs in "${caller.runtimeMode}"; you cannot drive higher-privileged threads. Ask the user to do this or to elevate your thread.`,
+          new GatewayToolError(
+            "thread_drive_privilege_blocked",
+            `Thread "${target.id}" runs in "${target.runtimeMode}" mode but your thread runs in "${caller.runtimeMode}"; you cannot drive higher-privileged threads. No action was dispatched. Preserve the user's chosen target and report this block; do not continue in another thread or change permissions automatically. Ask the user to continue in the target thread or decide the next step.`,
+            {
+              dispatched: false,
+              targetThreadId: target.id,
+              callerThreadId: caller.id,
+              callerRuntimeMode: caller.runtimeMode,
+              targetRuntimeMode: target.runtimeMode,
+              reason: "higher-privileged-target",
+            },
           ),
         );
       }
       if (caller.envMode === "worktree" && (target.envMode ?? "local") === "local") {
         return yield* Effect.fail(
-          new ToolInputError(
-            `Thread "${target.id}" runs on the shared local checkout but your thread is isolated in a worktree; you cannot drive local-checkout threads. Ask the user to do this from a local thread.`,
+          new GatewayToolError(
+            "thread_drive_isolation_blocked",
+            `Thread "${target.id}" runs on the shared local checkout but your thread is isolated in a worktree; you cannot drive local-checkout threads. No action was dispatched. Preserve the user's chosen target and report this block; do not continue in another thread or change isolation automatically. Ask the user to do this from a local thread.`,
+            {
+              dispatched: false,
+              targetThreadId: target.id,
+              callerThreadId: caller.id,
+              callerEnvMode: caller.envMode,
+              targetEnvMode: target.envMode ?? "local",
+              reason: "local-target-from-worktree",
+            },
           ),
         );
       }
@@ -987,7 +1011,15 @@ export const makeAgentGateway = Effect.gen(function* () {
           threadId: target.id,
           dispatched: dispatchMode,
         });
-      }).pipe(Effect.catch((error) => Effect.succeed(mcpToolResultError(errorText(error))))),
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.succeed(
+            error instanceof GatewayToolError
+              ? gatewayToolErrorResult(error)
+              : mcpToolResultError(errorText(error)),
+          ),
+        ),
+      ),
   };
 
   const interruptThread: ToolEntry = {

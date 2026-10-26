@@ -60,6 +60,13 @@ export function UserInputQuestionForm({
     };
   }, [activeQuestion?.id, isResponding, submissionVersion]);
 
+  useEffect(() => {
+    if (progress.usingCustomAnswer && autoAdvanceTimerRef.current !== null) {
+      window.clearTimeout(autoAdvanceTimerRef.current);
+      autoAdvanceTimerRef.current = null;
+    }
+  }, [progress.usingCustomAnswer]);
+
   const handleOptionSelection = (questionId: string, optionLabel: string) => {
     const nextDraftAnswer = onToggleOption(questionId, optionLabel);
     if (!autoAdvance || activeQuestion?.multiSelect) {
@@ -128,9 +135,14 @@ export function UserInputQuestionForm({
       onKeyDown={keyboardShortcuts === "local" ? handleShortcut : undefined}
     >
       <div className="flex items-start justify-between gap-3">
-        <p className="min-w-0 text-ui-lg font-medium leading-snug text-foreground/90">
-          {activeQuestion.question}
-        </p>
+        <div className="min-w-0">
+          {activeQuestion.header !== activeQuestion.question ? (
+            <p className="mb-1 text-ui-sm text-muted-foreground">{activeQuestion.header}</p>
+          ) : null}
+          <p className="text-ui-lg font-medium leading-snug text-foreground/90">
+            {activeQuestion.question}
+          </p>
+        </div>
         {showNavigation ? (
           <div className="flex shrink-0 items-center gap-0.5 pt-px text-muted-foreground/70">
             <button
@@ -159,6 +171,15 @@ export function UserInputQuestionForm({
       </div>
       {activeQuestion.multiSelect ? (
         <p className="mt-1 text-ui-sm text-muted-foreground/55">Select one or more.</p>
+      ) : null}
+      {progress.usingCustomAnswer ? (
+        <p role="status" className="mt-1 text-ui-sm text-muted-foreground">
+          {activeQuestion.multiSelect && activeQuestion.allowCustomAnswerWithOptions
+            ? "Custom answer included."
+            : activeQuestion.options.length > 0
+              ? "Using custom answer. Select an option to switch back."
+              : "Using custom answer."}
+        </p>
       ) : null}
       {activeQuestion.options.length > 0 ? (
         <div className="mt-2.5 space-y-0.5">

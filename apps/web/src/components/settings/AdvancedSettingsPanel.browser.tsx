@@ -25,6 +25,8 @@ vi.mock("@tanstack/react-query", () => ({
   useQuery: (options: { queryKey: readonly string[] }) => ({
     data: options.queryKey[0] === "config" ? harness.config : harness.auth,
   }),
+  useMutation: () => ({ isPending: false, mutate: vi.fn() }),
+  useQueryClient: () => ({ invalidateQueries: vi.fn() }),
 }));
 
 vi.mock("~/lib/serverReactQuery", () => ({

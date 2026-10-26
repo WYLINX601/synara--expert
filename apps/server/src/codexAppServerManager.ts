@@ -52,7 +52,15 @@ import {
 import { decodeSubagentReceiverThreadIds } from "@synara/shared/subagents";
 import { spawnProcess } from "@synara/shared/processRuntime";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
-import { createExpertSkillApplication } from "./provider/expertSkillCatalog.ts";
+import {
+  createFixedSkillProjection,
+  verifyProjectedSkillAssembly,
+  type FixedSkillProjection,
+} from "./provider/fixedSkillProjection";
+import {
+  createExpertSkillApplication,
+  invalidateNativeSkillAssemblyVerification,
+} from "./provider/expertSkillCatalog.ts";
 import { Effect, Semaphore, ServiceMap } from "effect";
 
 import {
@@ -213,6 +221,10 @@ type CodexSessionApprovalOverride = {
 export class CodexSessionAuthInvalidatedError extends Error {}
 
 interface CodexSessionContext {
+  readonly fixedExpertSession?: ProviderExpertSession;
+  readonly fixedSkillProjection?: FixedSkillProjection;
+  readonly strictSkillConfigurationFinal?: boolean;
+  strictDiscoveredDisabledPaths?: ReadonlyArray<string>;
   authInvalidation?: string;
   readonly autoApproveSynaraTools?: boolean;
   readonly enableComputerControl?: boolean;
@@ -920,6 +932,8 @@ function spawnCodexAppServer(input: {
   readonly binaryPath: string;
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
+  readonly strictSkillDisabledPaths?: ReadonlyArray<string>;
+  readonly fixedNativeSubagents?: boolean;
 }): ChildProcessWithoutNullStreams {
   const sourceHomePath = input.env.CODEX_SQLITE_HOME?.trim();
   if (!sourceHomePath) {
@@ -927,7 +941,17 @@ function spawnCodexAppServer(input: {
   }
   return spawnProcess(
     input.binaryPath,
-    [...buildCodexAppServerArgs(sourceHomePath), "--config", "thread_unload_delay_secs=0"],
+    [
+      ...buildCodexAppServerArgs(sourceHomePath),
+      "--config",
+      "thread_unload_delay_secs=0",
+      ...(input.strictSkillDisabledPaths !== undefined
+        ? buildFixedNativeCodexConfigOverrides(
+            input.strictSkillDisabledPaths,
+            input.fixedNativeSubagents === true,
+          )
+        : []),
+    ],
     {
       lowerPriority: input.lowerPriority,
       requireExecutable: true,
@@ -936,6 +960,29 @@ function spawnCodexAppServer(input: {
       stdio: ["pipe", "pipe", "pipe"],
     },
   );
+}
+
+/** CLI overrides are applied after user, project, cloud-managed and system config. */
+export function buildFixedNativeCodexConfigOverrides(
+  strictSkillDisabledPaths: ReadonlyArray<string>,
+  nativeSubagents: boolean,
+): readonly string[] {
+  return [
+    "--config",
+    "features.plugins=false",
+    "--config",
+    "skills.include_instructions=false",
+    "--config",
+    "skills.bundled.enabled=false",
+    "--config",
+    `features.multi_agent=${nativeSubagents}`,
+    "--config",
+    `features.multi_agent_v2=${nativeSubagents}`,
+    "--config",
+    `agents.enabled=${nativeSubagents}`,
+    "--config",
+    `skills.config=[${strictSkillDisabledPaths.map((skillPath) => `{path=${JSON.stringify(skillPath)},enabled=false}`).join(",")}]`,
+  ];
 }
 
 export function normalizeCodexModelSlug(
@@ -1314,6 +1361,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     | undefined;
   private readonly spawnAppServer: typeof spawnCodexAppServer;
   private readonly teardownProcessTree: typeof teardownProviderProcessTree;
+  private readonly fixedSkillProjectionRoot: string | undefined;
   private readonly taskCompleteFallbackGraceMs: number;
   private readonly discoverySessionIdleMs: number;
   private readonly authRevalidationTimeoutMs: number;
@@ -1359,6 +1407,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     services?: ServiceMap.ServiceMap<never>,
     options?: {
       readonly synaraSkillsDir?: string;
+      readonly stateDir?: string;
       readonly agentGatewayMcp?: {
         readonly endpointUrl: () => string;
         readonly acquireSessionLease: (
@@ -1376,6 +1425,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     super();
     this.runPromise = services ? Effect.runPromiseWith(services) : Effect.runPromise;
     this.synaraSkillsDir = options?.synaraSkillsDir;
+    this.fixedSkillProjectionRoot = options?.stateDir
+      ? nodePath.join(options.stateDir, "experts", "codex-fixed-skills")
+      : undefined;
     this.agentGatewayMcp = options?.agentGatewayMcp;
     this.spawnAppServer = options?.spawnAppServer ?? spawnCodexAppServer;
     this.teardownProcessTree = options?.teardownProcessTree ?? teardownProviderProcessTree;
@@ -1392,9 +1444,11 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   private async buildSessionProcessEnv(
     codexOptions: CodexDiscoveryOptions | undefined,
     expectedCodexContinuationGeneration?: string,
+    fixedExpertNativeDiscovery = false,
   ) {
     const processEnvInput = {
       ...codexProcessEnvInputForOptions(codexOptions),
+      ...(fixedExpertNativeDiscovery ? { fixedExpertNativeDiscovery: true } : {}),
       ...(expectedCodexContinuationGeneration
         ? { expectedSharedContinuationGeneration: expectedCodexContinuationGeneration }
         : {}),
@@ -1419,6 +1473,102 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     context: CodexSessionContext,
     expertSession?: ProviderExpertSession,
   ): Promise<void> {
+    if (expertSession?.skillPolicy) {
+      invalidateNativeSkillAssemblyVerification(expertSession);
+      const projection = context.fixedSkillProjection;
+      if (!projection) throw new Error("Fixed Codex Skill projection is missing.");
+      await this.sendRequest(context, "skills/extraRoots/set", {
+        extraRoots: [...projection.skillRoots],
+      });
+      const cwd = context.session.cwd ?? process.cwd();
+      const response = await this.sendRequest<Record<string, unknown>>(context, "skills/list", {
+        cwds: [cwd],
+        forceReload: true,
+      });
+      const record = this.readObject(response);
+      const data = record?.data;
+      if (
+        !record ||
+        record.error !== undefined ||
+        (record.errors !== undefined && (!Array.isArray(record.errors) || record.errors.length)) ||
+        !Array.isArray(data) ||
+        data.length !== 1
+      )
+        throw new Error("Codex fixed Skill catalog response is missing or malformed.");
+      const scoped = this.readObject(data[0]);
+      if (
+        !scoped ||
+        scoped.error !== undefined ||
+        scoped.cwd !== cwd ||
+        !Array.isArray(scoped.skills) ||
+        (scoped.errors !== undefined && (!Array.isArray(scoped.errors) || scoped.errors.length))
+      )
+        throw new Error("Codex fixed Skill catalog has an incorrect cwd or native errors.");
+      const strictSkills = scoped.skills.map((value) => {
+        const skill = this.readObject(value);
+        if (
+          !skill ||
+          Array.isArray(value) ||
+          typeof skill.name !== "string" ||
+          !skill.name.trim() ||
+          skill.name !== skill.name.trim() ||
+          typeof skill.path !== "string" ||
+          !nodePath.isAbsolute(skill.path) ||
+          skill.path.includes("\0") ||
+          typeof skill.enabled !== "boolean" ||
+          skill.error !== undefined ||
+          (skill.errors !== undefined &&
+            (!Array.isArray(skill.errors) || skill.errors.length > 0)) ||
+          (skill.description !== undefined && typeof skill.description !== "string")
+        )
+          throw new Error("Codex fixed Skill catalog contains a malformed entry.");
+        return { name: skill.name, path: skill.path, enabled: skill.enabled };
+      });
+      const active = strictSkills.filter((skill) => skill.enabled);
+      if (!context.strictSkillConfigurationFinal) {
+        context.strictDiscoveredDisabledPaths = active
+          .filter(
+            (skill) =>
+              !projection.entries.some(
+                (entry) =>
+                  (entry.name === skill.name || entry.nativeName === skill.name) &&
+                  nodePath.resolve(entry.path) === nodePath.resolve(skill.path),
+              ),
+          )
+          .map((skill) => skill.path);
+        return;
+      }
+      const configuration = this.readObject(
+        this.readObject(
+          await this.sendRequest(context, "config/read", { includeLayers: false, cwd }),
+        ),
+        "config",
+      );
+      const features = this.readObject(configuration, "features"),
+        agents = this.readObject(configuration, "agents"),
+        skills = this.readObject(configuration, "skills"),
+        bundled = this.readObject(skills, "bundled");
+      if (
+        features?.plugins !== false ||
+        features?.multi_agent !== (expertSession.skillPolicy.nativeSubagents === "inherit") ||
+        features.multi_agent_v2 !== (expertSession.skillPolicy.nativeSubagents === "inherit") ||
+        agents?.enabled !== (expertSession.skillPolicy.nativeSubagents === "inherit") ||
+        skills?.include_instructions !== false ||
+        bundled?.enabled !== false
+      )
+        throw new Error(
+          "Codex did not attest fixed Skill/plugin discovery and the fixed native subagent policy.",
+        );
+      if (!context.lifecycleGeneration)
+        throw new Error("Fixed native verification requires a lifecycle generation.");
+      await verifyProjectedSkillAssembly(
+        expertSession,
+        projection,
+        active,
+        context.lifecycleGeneration,
+      );
+      return;
+    }
     const roots = [
       ...new Set(
         [
@@ -1574,17 +1724,13 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       if (runtimeVersion !== undefined) {
         session = { ...session, runtimeVersion };
       }
-      gatewaySessionLease = this.agentGatewayMcp?.acquireSessionLease(
-        threadId,
-        input.agentGatewayCapabilityInput,
-      );
       const baseDeveloperInstructions = composeProviderBaseInstructions({
         expertPersona: input.expertSession?.persona,
         contextInstructions: input.contextSession?.hasContent
           ? input.contextSession.text
           : undefined,
       });
-      if (input.expertSession?.skillLoading === "index") {
+      if (input.expertSession?.skillLoading === "index" && !input.expertSession.skillPolicy) {
         if (!input.lifecycleGeneration) {
           throw new Error("Expert catalog submission requires a provider lifecycle generation.");
         }
@@ -1600,6 +1746,37 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       const processLaunch = await this.buildSessionProcessEnv(
         normalizedCodexOptions,
         input.expectedCodexContinuationGeneration,
+        input.expertSession?.skillPolicy !== undefined,
+      );
+      if (
+        input.expertSession?.skillPolicy &&
+        (!this.fixedSkillProjectionRoot || !input.lifecycleGeneration)
+      )
+        throw new Error(
+          "Fixed Codex assembly requires owned state storage and a lifecycle generation.",
+        );
+      const fixedSkillProjection = input.expertSession?.skillPolicy
+        ? await createFixedSkillProjection(this.fixedSkillProjectionRoot!, input.expertSession)
+        : undefined;
+      let strictSkillDisabledPaths: ReadonlyArray<string> | undefined;
+      if (fixedSkillProjection && input.expertSession) {
+        const discoveryKey = `fixed-skills:${randomUUID()}`;
+        const probe = await this.createDiscoverySession(
+          discoveryKey,
+          resolvedCwd,
+          normalizedCodexOptions,
+          processLaunch.authFingerprint!,
+          { session: input.expertSession, projection: fixedSkillProjection },
+        );
+        try {
+          strictSkillDisabledPaths = probe.strictDiscoveredDisabledPaths ?? [];
+        } finally {
+          await this.stopDiscoverySession(discoveryKey);
+        }
+      }
+      gatewaySessionLease = this.agentGatewayMcp?.acquireSessionLease(
+        threadId,
+        input.agentGatewayCapabilityInput,
       );
       const launchAuthFingerprint = processLaunch.authFingerprint;
       const child = this.spawnAppServer({
@@ -1607,9 +1784,22 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         binaryPath: codexBinaryPath,
         cwd: resolvedCwd,
         env: processLaunch.env,
+        ...(input.expertSession?.skillPolicy
+          ? {
+              strictSkillDisabledPaths: strictSkillDisabledPaths ?? [],
+              fixedNativeSubagents: input.expertSession.skillPolicy.nativeSubagents === "inherit",
+            }
+          : {}),
       });
 
       context = {
+        ...(input.expertSession?.skillPolicy
+          ? {
+              fixedExpertSession: input.expertSession,
+              fixedSkillProjection: fixedSkillProjection!,
+              strictSkillConfigurationFinal: true,
+            }
+          : {}),
         autoApproveSynaraTools: input.autoApproveSynaraTools === true,
         ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}),
         enableComputerControl:
@@ -1656,6 +1846,17 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
       await this.writeMessage(context, { method: "initialized" });
       await this.registerSessionSkillRoots(context, input.expertSession);
+      if (input.expertSession?.skillPolicy) {
+        context.session = {
+          ...context.session,
+          skillApplication: createExpertSkillApplication({
+            session: input.expertSession,
+            instructions: baseDeveloperInstructions ?? "",
+            lifecycleGeneration: input.lifecycleGeneration!,
+          }),
+        };
+        session = context.session;
+      }
       // Model discovery is lazy and cached by ProviderDiscoveryService. Keeping model/list
       // out of this serial cold-start path avoids an otherwise unused request
       // with its own 20-second deadline.
@@ -1879,6 +2080,8 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
   async sendTurn(input: CodexAppServerSendTurnInput): Promise<ProviderTurnStartResult> {
     const context = this.requireSession(input.threadId);
+    if (context.fixedExpertSession)
+      await this.registerSessionSkillRoots(context, context.fixedExpertSession);
     if (context.gatewayCredentialRetired === true) {
       throw new Error(
         "Codex session gateway authority is retired; resume the provider runtime before starting another turn.",
@@ -2563,6 +2766,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     input: ProviderAdapterForkThreadInput,
     signal?: AbortSignal,
   ): Promise<ProviderForkThreadResult> {
+    if (input.expertSession?.skillPolicy)
+      throw new Error(
+        "Native Codex fork cannot yet attest the inherited fixed Skill assembly; start a new Expert task.",
+      );
     const threadId = input.threadId;
     const now = new Date().toISOString();
     let context: CodexSessionContext | undefined;
@@ -2668,6 +2875,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       const processLaunch = await this.buildSessionProcessEnv(
         normalizedCodexOptions,
         input.expectedCodexContinuationGeneration,
+        input.expertSession?.skillPolicy !== undefined,
       );
       signal?.throwIfAborted();
       const launchAuthFingerprint = processLaunch.authFingerprint;
@@ -3672,6 +3880,19 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       authFingerprint,
     );
     this.assertDiscoveryAuthMatchesRequest(context, codexOptions, authFingerprint);
+    if (context.fixedExpertSession) {
+      await this.registerSessionSkillRoots(context, context.fixedExpertSession);
+      return {
+        skills: (context.fixedExpertSession.skillEntries ?? []).map((entry) => ({
+          name: entry.name,
+          description: entry.description,
+          path: entry.path,
+          enabled: !entry.disableModelInvocation,
+        })),
+        source: "expert.fixed-native-assembly",
+        cached: false,
+      };
+    }
     let response: Record<string, unknown>;
     try {
       response = await this.sendRequest<Record<string, unknown>>(context, "skills/list", {
@@ -4175,6 +4396,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     normalizedCwd: string,
     normalizedCodexOptions: CodexDiscoveryOptions | undefined,
     expectedAuthFingerprint: string,
+    fixed?: { readonly session: ProviderExpertSession; readonly projection: FixedSkillProjection },
   ): Promise<CodexSessionContext> {
     const existing = this.discoverySessions.get(discoveryKey);
     if (existing) {
@@ -4195,7 +4417,11 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         ? { environment: normalizedCodexOptions.environment }
         : {}),
     });
-    const processLaunch = await this.buildSessionProcessEnv(normalizedCodexOptions, undefined);
+    const processLaunch = await this.buildSessionProcessEnv(
+      normalizedCodexOptions,
+      undefined,
+      fixed !== undefined,
+    );
     const launchAuthFingerprint = processLaunch.authFingerprint;
     if (launchAuthFingerprint !== expectedAuthFingerprint) {
       throw new Error("Codex authentication changed before discovery launch; retry the request.");
@@ -4205,8 +4431,21 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       binaryPath: codexBinaryPath,
       cwd: normalizedCwd,
       env: processLaunch.env,
+      ...(fixed
+        ? {
+            strictSkillDisabledPaths: [],
+            fixedNativeSubagents: fixed.session.skillPolicy?.nativeSubagents === "inherit",
+          }
+        : {}),
     });
     const context: CodexSessionContext = {
+      ...(fixed
+        ? {
+            fixedExpertSession: fixed.session,
+            fixedSkillProjection: fixed.projection,
+            strictSkillConfigurationFinal: false,
+          }
+        : {}),
       session: {
         provider: "codex",
         status: "connecting",
@@ -4247,7 +4486,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       await this.sendRequest(context, "initialize", buildCodexInitializeParams());
       this.assertContextAuthCurrent(context);
       await this.writeMessage(context, { method: "initialized" });
-      await this.registerSessionSkillRoots(context);
+      await this.registerSessionSkillRoots(context, fixed?.session);
       try {
         const accountReadResponse = await this.sendRequest(context, "account/read", {});
         context.account = readCodexAccountSnapshot(accountReadResponse);

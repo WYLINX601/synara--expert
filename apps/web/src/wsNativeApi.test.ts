@@ -210,6 +210,53 @@ describe("wsNativeApi", () => {
     ]);
   });
 
+  it("routes Skill management settings through the authenticated WebSocket RPCs", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock.mockResolvedValueOnce({ canManage: false });
+    requestMock.mockResolvedValueOnce({ code: "once", flavor: "development" });
+    requestMock.mockResolvedValueOnce([]);
+    requestMock.mockResolvedValueOnce({ revoked: true });
+
+    await expect(api.server.readSkillManagementAccess()).resolves.toEqual({ canManage: false });
+    await expect(api.server.createSkillManagementPairing()).resolves.toMatchObject({
+      code: "once",
+    });
+    await expect(api.server.listSkillManagementCredentials()).resolves.toEqual([]);
+    await expect(
+      api.server.revokeSkillManagementCredential({ credentialId: "credential-id" }),
+    ).resolves.toEqual({ revoked: true });
+
+    expect(requestMock.mock.calls).toEqual([
+      [WS_METHODS.serverReadSkillManagementAccess],
+      [WS_METHODS.serverCreateSkillManagementPairing],
+      [WS_METHODS.serverListSkillManagementCredentials],
+      [WS_METHODS.serverRevokeSkillManagementCredential, { credentialId: "credential-id" }],
+    ]);
+  });
+
+  it("adds request ids only to Skill Library writes that omit one", async () => {
+    const { createWsNativeApi } = await import("./wsNativeApi");
+    const api = createWsNativeApi();
+    requestMock.mockResolvedValue(null);
+
+    await api.server.skillLibrary({ action: "create" } as never);
+    await api.server.skillLibrary({ action: "save", requestId: "caller-id" } as never);
+    await api.server.skillLibrary({ action: "refresh" } as never);
+    await api.server.skillLibrary({ action: "list" } as never);
+
+    const calls = requestMock.mock.calls;
+    expect(calls).toHaveLength(4);
+    const createEnvelope = calls[0]?.[1] as { request?: { requestId?: unknown } };
+    const saveEnvelope = calls[1]?.[1] as { request?: { requestId?: unknown } };
+    const refreshEnvelope = calls[2]?.[1] as { request?: { requestId?: unknown } };
+    expect(createEnvelope.request?.requestId).toEqual(expect.any(String));
+    expect(saveEnvelope.request?.requestId).toBe("caller-id");
+    expect(refreshEnvelope.request?.requestId).toEqual(expect.any(String));
+    expect(refreshEnvelope.request?.requestId).not.toBe(createEnvelope.request?.requestId);
+    expect(calls[3]).toEqual([WS_METHODS.serverSkillLibrary, { request: { action: "list" } }]);
+  });
+
   it("forwards revision-guarded expert restore through its server RPC", async () => {
     const { createWsNativeApi } = await import("./wsNativeApi");
     const api = createWsNativeApi();

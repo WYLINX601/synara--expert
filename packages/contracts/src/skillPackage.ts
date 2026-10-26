@@ -134,10 +134,12 @@ export const SkillPackageImportResult = Schema.Struct({
 export type SkillPackageImportResult = typeof SkillPackageImportResult.Type;
 
 export const ResolvedExpertSkillEntry = Schema.Struct({
+  managedSkillId: Schema.optional(TrimmedNonEmptyString),
   ...ExpertSkillSelection.fields,
   name: TrimmedNonEmptyString,
   description: Schema.String,
   path: TrimmedNonEmptyString,
+  sha256: Schema.optional(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
   disableModelInvocation: Schema.optional(Schema.Boolean),
   userInvocable: Schema.optional(Schema.Boolean),
 });
@@ -145,6 +147,8 @@ export type ResolvedExpertSkillEntry = typeof ResolvedExpertSkillEntry.Type;
 
 /** Evidence of catalog submission, not evidence that a model executed a skill. */
 export const ExpertSkillApplication = Schema.Struct({
+  skillAssemblyId: Schema.optional(TrimmedNonEmptyString),
+  skillRootRunId: Schema.optional(TrimmedNonEmptyString),
   mode: Schema.Literal("catalog"),
   snapshotId: TrimmedNonEmptyString,
   packageIds: Schema.Array(SkillPackageId),
@@ -152,5 +156,15 @@ export const ExpertSkillApplication = Schema.Struct({
   instructionsHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
   startupEntryIds: Schema.Array(TrimmedNonEmptyString),
   lifecycleGeneration: TrimmedNonEmptyString,
+  enforcement: Schema.optional(Schema.Literal("native-fixed")),
+  activeEntries: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        path: TrimmedNonEmptyString,
+        sha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+      }),
+    ),
+  ),
+  nativeSubagents: Schema.optional(Schema.Literals(["blocked", "inherit"])),
 });
 export type ExpertSkillApplication = typeof ExpertSkillApplication.Type;

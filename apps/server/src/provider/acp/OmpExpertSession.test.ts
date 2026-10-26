@@ -2,25 +2,58 @@
 // Purpose: Verifies fail-closed OMP-native Expert/Context projection.
 // Layer: Provider ACP tests
 
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  link,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  rmdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import type { ProviderExpertSession, ProviderSkillReference } from "@synara/contracts";
+import {
+  FIXED_EXPERT_SKILL_POLICY,
+  type ProviderExpertSession,
+  type ProviderSkillReference,
+  type SkillPackageResource,
+} from "@synara/contracts";
 import { Effect } from "effect";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { createExpertSkillApplication } from "../expertSkillCatalog";
+import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
 
 import {
   OMP_EXPERT_PROJECTION_VERSION,
   prepareOmpExpertSession,
+  removeFixedProjectionStaging,
   type OmpExpertCliResult,
   type OmpExpertSessionPreparationInput,
 } from "./OmpExpertSession.ts";
 
 const tempRoots: string[] = [];
+
+async function makeTreeWritable(target: string): Promise<void> {
+  const info = await lstat(target).catch(() => undefined);
+  if (!info || info.isSymbolicLink()) return;
+  if (info.isDirectory()) {
+    await chmod(target, 0o700);
+    for (const name of await readdir(target)) await makeTreeWritable(path.join(target, name));
+    return;
+  }
+  if (info.isFile()) await chmod(target, 0o600);
+}
 
 async function makeRoot(): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "omp-expert-test-"));
@@ -29,7 +62,12 @@ async function makeRoot(): Promise<string> {
 }
 
 afterEach(async () => {
-  await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await Promise.all(
+    tempRoots.splice(0).map(async (root) => {
+      await makeTreeWritable(root);
+      await rm(root, { recursive: true, force: true });
+    }),
+  );
 });
 
 function nativeConfig(overrides: Record<string, unknown> = {}) {
@@ -470,4 +508,300 @@ describe("prepareOmpExpertSession", () => {
     expect(preparation.issues.join(" ")).toContain("did not confirm the Expert skills overlay");
     expect(await readdir(tempDirectory)).toEqual([]);
   });
+});
+
+describe("OMP fixed native Skill preparation", () => {
+  async function fixedFixture(empty = false) {
+    const root = await makeRoot(),
+      packageSource = path.join(root, "package"),
+      skillPath = path.join(packageSource, "skills", "reviewer", "SKILL.md");
+    await mkdir(path.join(path.dirname(skillPath), "assets"), { recursive: true });
+    await writeFile(
+      skillPath,
+      "---\nname: reviewer\ndescription: Review with care.\n---\nInstructions; read assets/guide.txt relative to this Skill.\n",
+    );
+    await writeFile(path.join(path.dirname(skillPath), "assets", "guide.txt"), "Fixture guide.\n");
+    const entries: Array<NonNullable<ProviderExpertSession["skillEntries"]>[number]> = [];
+    let resources: ReadonlyArray<SkillPackageResource> = [];
+    if (!empty) {
+      const store = createSkillPackageStore(path.join(root, "state"));
+      const preview = await store.preview({ path: packageSource });
+      const imported = await store.import({ previewId: preview.previewId });
+      resources = imported.package.resources;
+      entries.push(
+        ...(await store.resolveSelections([
+          {
+            packageId: imported.package.packageId,
+            entryPath: "skills/reviewer/SKILL.md",
+            activation: "on-demand",
+          },
+        ])),
+      );
+    }
+    const session: ProviderExpertSession = {
+      snapshotId: `exp_${"e".repeat(64)}`,
+      persona: "Fixed Expert",
+      skillPolicy: FIXED_EXPERT_SKILL_POLICY,
+      skillLoading: "index",
+      skills: entries.map(({ name, path }) => ({ name, path })),
+      skillEntries: entries,
+      references: [],
+    };
+    return { root, session, resources };
+  }
+  it("keeps temp and shared package inode untouched when leaf unlink reports EPERM", async () => {
+    const root = await makeRoot();
+    const packageFile = path.join(root, "package", "SKILL.md");
+    const staging = path.join(root, "synara-omp-expert-staging");
+    const projectionFile = path.join(staging, "entry", "SKILL.md");
+    await mkdir(path.dirname(packageFile), { recursive: true });
+    await mkdir(path.dirname(projectionFile), { recursive: true });
+    await writeFile(packageFile, "immutable source\n");
+    await chmod(packageFile, 0o400);
+    await link(packageFile, projectionFile);
+    await chmod(path.dirname(projectionFile), 0o500);
+    await chmod(staging, 0o500);
+    const [beforeInfo, beforeBytes] = await Promise.all([stat(packageFile), readFile(packageFile)]);
+    const fileSystem: NonNullable<Parameters<typeof removeFixedProjectionStaging>[1]> = {
+      lstat,
+      readdir,
+      chmod,
+      unlink: async (target) => {
+        if (target === projectionFile) {
+          throw Object.assign(new Error("simulated Windows read-only unlink"), { code: "EPERM" });
+        }
+        await unlink(target);
+      },
+      rmdir,
+    };
+
+    await expect(removeFixedProjectionStaging(staging, fileSystem)).rejects.toMatchObject({
+      code: "EPERM",
+    });
+    await expect(stat(projectionFile)).resolves.toBeDefined();
+    await expect(stat(staging)).resolves.toBeDefined();
+    const [afterInfo, afterBytes] = await Promise.all([stat(packageFile), readFile(packageFile)]);
+    expect({ dev: afterInfo.dev, ino: afterInfo.ino, mode: afterInfo.mode & 0o777 }).toEqual({
+      dev: beforeInfo.dev,
+      ino: beforeInfo.ino,
+      mode: 0o400,
+    });
+    expect(createHash("sha256").update(afterBytes).digest("hex")).toEqual(
+      createHash("sha256").update(beforeBytes).digest("hex"),
+    );
+    await removeFixedProjectionStaging(staging);
+  });
+  function fixedRunner(control: {
+    foreign?: boolean;
+    subagents?: boolean;
+    advisor?: boolean;
+    ambientSource?: boolean;
+  }): OmpExpertSessionPreparationInput["runCli"] {
+    return (args, _cwd, env) =>
+      Effect.tryPromise({
+        try: async () => {
+          if (args[0] === "--version") return result("omp/18.12.1");
+          if (args[0] === "config" && !env.PI_CONFIG_FILES)
+            return result(JSON.stringify(nativeConfig()));
+          const file = env.PI_CONFIG_FILES!.split(path.delimiter).at(-1)!,
+            config = parseYaml(await readFile(file, "utf8")) as {
+              skills: Record<string, unknown>;
+              task: { maxRecursionDepth: number };
+              advisor: { enabled: boolean };
+            };
+          if (args[0] === "config") {
+            const values: Record<string, { value: unknown }> = {};
+            for (const [key, value] of Object.entries(config.skills))
+              values[`skills.${key}`] = { value };
+            values["task.maxRecursionDepth"] = {
+              value: control.subagents ? 0 : config.task.maxRecursionDepth,
+            };
+            values["advisor.enabled"] = { value: control.advisor ? true : config.advisor.enabled };
+            if (control.ambientSource) values["skills.enableAgentsProject"] = { value: true };
+            return result(JSON.stringify(values));
+          }
+          const skills = [];
+          for (const directory of config.skills.customDirectories as string[])
+            for (const name of await readdir(directory))
+              skills.push({
+                name,
+                description: "Selected Skill",
+                filePath: path.join(directory, name, "SKILL.md"),
+              });
+          if (control.foreign)
+            skills.push({
+              name: skills[0]?.name ?? "ambient-c",
+              description: "Unselected impostor",
+              filePath: "/outside/ambient/SKILL.md",
+            });
+          return result(JSON.stringify({ skills, warnings: [] }));
+        },
+        catch: (error) => error,
+      });
+  }
+  it.each([false, true])(
+    "fixes every source/filter and native subagent gate (empty=%s), then checks reloads",
+    async (empty) => {
+      const { root, session } = await fixedFixture(empty),
+        control: { foreign?: boolean } = {};
+      const preparation = await Effect.runPromise(
+        prepareOmpExpertSession({
+          cwd: root,
+          env: { HOME: root },
+          expertSession: session,
+          lifecycleGeneration: "fixed-preparation-generation",
+          tempDirectory: root,
+          runCli: fixedRunner(control),
+        }),
+      );
+      expect(preparation.issues).toEqual([]);
+      expect(preparation.loadedSkills).toEqual(session.skills);
+      expect(preparation.verify).toBeTypeOf("function");
+      await Effect.runPromise(preparation.verify!());
+      const config = parseYaml(await readFile(preparation.configOverlayPath!, "utf8")) as {
+        skills: Record<string, unknown>;
+        task: { maxRecursionDepth: number };
+        advisor: { enabled: boolean };
+      };
+      expect(config.advisor.enabled).toBe(false);
+      expect(config.task.maxRecursionDepth).toBe(1);
+      for (const key of [
+        "enableCodexUser",
+        "enableClaudeUser",
+        "enableClaudeProject",
+        "enablePiUser",
+        "enablePiProject",
+        "enableAgentsUser",
+        "enableAgentsProject",
+      ])
+        expect(config.skills[key]).toBe(false);
+      control.foreign = true;
+      await expect(Effect.runPromise(preparation.verify!())).rejects.toThrow(
+        /unselected|catalog/iu,
+      );
+      await Effect.runPromise(preparation.cleanup());
+      await expect(stat(preparation.configOverlayPath!)).rejects.toThrow();
+    },
+  );
+  it.each(["foreign", "subagents", "advisor", "ambientSource"] as const)(
+    "fails closed on native %s and cleans its owned projection",
+    async (failure) => {
+      const { root, session } = await fixedFixture();
+      const preparation = await Effect.runPromise(
+        prepareOmpExpertSession({
+          cwd: root,
+          env: { HOME: root },
+          expertSession: session,
+          lifecycleGeneration: "fixed-preparation-generation",
+          tempDirectory: root,
+          runCli: fixedRunner({ [failure]: true }),
+        }),
+      );
+      expect(preparation.issues.length).toBeGreaterThan(0);
+      expect(preparation.loadedSkills).toEqual([]);
+      expect((await readdir(root)).some((name) => name.startsWith("synara-omp-expert-"))).toBe(
+        false,
+      );
+    },
+  );
+  it("preserves the effective native append instructions while fixing Skills", async () => {
+    const { root, session, resources } = await fixedFixture();
+    await mkdir(path.join(root, ".omp"));
+    await writeFile(path.join(root, ".omp", "APPEND_SYSTEM.md"), "Native project instructions.");
+    const preparation = await Effect.runPromise(
+      prepareOmpExpertSession({
+        cwd: root,
+        env: { HOME: root },
+        expertSession: session,
+        lifecycleGeneration: "fixed-preparation-generation",
+        tempDirectory: root,
+        runCli: fixedRunner({}),
+      }),
+    );
+    expect(preparation.issues).toEqual([]);
+    const prompt = await readFile(preparation.appendSystemPromptPath!, "utf8");
+    expect(prompt).toContain("Native project instructions.");
+    expect(prompt).toContain("Fixed Expert");
+    const entry = session.skillEntries![0]!;
+    const packageRoot = path.join(
+      root,
+      "state",
+      "experts",
+      "skill-packages",
+      entry.packageId,
+      "content",
+    );
+    const immutableFiles = await Promise.all(
+      resources
+        .filter((resource) => resource.kind === "file")
+        .map(async (resource) => {
+          const filePath = path.join(
+            packageRoot,
+            ...resource.path.slice("content/".length).split("/"),
+          );
+          const [info, bytes] = await Promise.all([stat(filePath), readFile(filePath)]);
+          return {
+            filePath,
+            dev: info.dev,
+            ino: info.ino,
+            mode: info.mode & 0o777,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+          };
+        }),
+    );
+    expect(immutableFiles).toHaveLength(2);
+    expect(immutableFiles.every((file) => file.mode === 0o400)).toBe(true);
+    const tempRoot = path.dirname(preparation.configOverlayPath!);
+    await Effect.runPromise(preparation.cleanup());
+    await expect(stat(tempRoot)).rejects.toThrow();
+    for (const before of immutableFiles) {
+      const [after, bytes] = await Promise.all([stat(before.filePath), readFile(before.filePath)]);
+      expect({ dev: after.dev, ino: after.ino, mode: after.mode & 0o777 }).toEqual({
+        dev: before.dev,
+        ino: before.ino,
+        mode: before.mode,
+      });
+      expect(createHash("sha256").update(bytes).digest("hex")).toBe(before.sha256);
+    }
+  });
+  it.each(["configOverlayPath", "appendSystemPromptPath"] as const)(
+    "revokes prior native proof when the read-only %s changes",
+    async (fileKey) => {
+      const { root, session } = await fixedFixture();
+      const preparation = await Effect.runPromise(
+        prepareOmpExpertSession({
+          cwd: root,
+          env: { HOME: root },
+          expertSession: session,
+          lifecycleGeneration: "fixed-preparation-generation",
+          tempDirectory: root,
+          runCli: fixedRunner({}),
+        }),
+      );
+      expect(preparation.issues).toEqual([]);
+      const receipt = () =>
+        createExpertSkillApplication({
+          session,
+          instructions: "fixed",
+          lifecycleGeneration: "fixed-preparation-generation",
+        });
+      expect(receipt().enforcement).toBe("native-fixed");
+      const originalContent = await readFile(preparation[fileKey]!, "utf8");
+      await chmod(preparation[fileKey]!, 0o600);
+      await expect(Effect.runPromise(preparation.verify!())).rejects.toThrow(/read-only/iu);
+      expect(receipt).toThrow(/native verification/iu);
+      await chmod(preparation[fileKey]!, 0o400);
+      await Effect.runPromise(preparation.verify!());
+      expect(receipt().enforcement).toBe("native-fixed");
+      await chmod(preparation[fileKey]!, 0o600);
+      await writeFile(
+        preparation[fileKey]!,
+        `${originalContent}\n# Changed after native catalog resolution.\n`,
+      );
+      await chmod(preparation[fileKey]!, 0o400);
+      await expect(Effect.runPromise(preparation.verify!())).rejects.toThrow(/content changed/iu);
+      expect(receipt).toThrow(/native verification/iu);
+      await Effect.runPromise(preparation.cleanup());
+    },
+  );
 });

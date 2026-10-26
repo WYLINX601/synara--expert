@@ -30,6 +30,11 @@ export async function scanSkillPackageReferences(
 ): Promise<string[]> {
   Schema.decodeUnknownSync(SkillPackageId)(packageId);
   const references: string[] = [];
+  const { readSkillLibraryDefinitions } = await import("./SkillLibraryStore");
+  const library = await readSkillLibraryDefinitions(stateDir);
+  for (const skill of library.filter((item) => !item.deleted))
+    if (skill.packageId === packageId || skill.source.packageId === packageId)
+      references.push(`Skill ${skill.name} (${skill.skillId})`);
   const root = path.join(stateDir, "experts");
   await directoryEntries(root);
   const inspectDefinition = async (file: string, id: string, revision?: number) => {
@@ -73,6 +78,11 @@ export async function scanSkillPackageReferences(
     );
     if (snapshot.skillSelections?.some((entry) => entry.packageId === packageId))
       references.push(`Snapshot ${snapshot.snapshotId}`);
+  }
+  const { listRunSkillAssemblies } = await import("./RunSkillAssemblyStore");
+  for (const record of await listRunSkillAssemblies(stateDir)) {
+    if (record.session.skillEntries?.some((entry) => entry.packageId === packageId))
+      references.push(`Run ${record.rootRunId} (${record.assemblyId})`);
   }
   return [...new Set(references)];
 }

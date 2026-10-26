@@ -21,7 +21,7 @@ import {
   resolveBaseCodexHomePath,
   resolveCodexHomeOverlayAccountSegment,
   resolveSynaraCodexHomeOverlayPath,
-  SYNARA_CODEX_HOME_OVERLAY_DIR,
+  isSynaraCodexHomeOverlayPath,
 } from "./codexHomePaths.ts";
 import {
   codexAuthFs,
@@ -152,6 +152,8 @@ export interface CodexProcessEnvInput {
   readonly overlayEntryLinker?: CodexOverlayEntryLinker;
   readonly expectedSharedContinuationGeneration?: string;
   readonly allowLegacySharedContinuationMigration?: boolean;
+  /** Fixed Expert sessions use a private overlay without global Skills/plugins. */
+  readonly fixedExpertNativeDiscovery?: boolean;
 }
 
 type CodexSourceHomeInput = Pick<
@@ -814,9 +816,9 @@ function* resolveCodexProcessSourceEnvironmentIo(
   ) {
     return env;
   }
-  const overlayHomePath = resolveBaseCodexHomePath(env);
-  if (path.basename(overlayHomePath) !== SYNARA_CODEX_HOME_OVERLAY_DIR) return env;
   const sourceHomePath = resolveBaseCodexHomePath(env, sourceHint);
+  const overlayHomePath = resolveBaseCodexHomePath(env);
+  if (!isSynaraCodexHomeOverlayPath(env, sourceHomePath, overlayHomePath)) return env;
   try {
     if (yield* codexPathsReferenceSameLocationIo(overlayHomePath, sourceHomePath)) return env;
     const overlay = yield* bindCodexPreparedHomeSourceIo(overlayHomePath, {
@@ -985,11 +987,22 @@ function* prepareCodexAuthTrackingIo(
 }
 
 function isSafePluginSectionHeader(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length <= MAX_CONFIG_SUPPRESSION_HEADER_LENGTH &&
-    /^\[plugins\."[^"\r\n]+"\]$/.test(value)
-  );
+  if (typeof value !== "string" || value.length > MAX_CONFIG_SUPPRESSION_HEADER_LENGTH)
+    return false;
+  const normalized = normalizeTomlTableHeaderName(value);
+  if (normalized === undefined) return false;
+  try {
+    const parts: unknown = JSON.parse(normalized);
+    return (
+      Array.isArray(parts) &&
+      parts.length === 2 &&
+      parts[0] === "plugins" &&
+      typeof parts[1] === "string" &&
+      parts[1].length > 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 export async function readSynaraConfigSuppressions(markerPath: string): Promise<readonly string[]> {
@@ -2346,6 +2359,68 @@ function normalizeTomlTableHeaderName(line: string): string | undefined {
   return parts.length > 0 ? JSON.stringify(parts) : undefined;
 }
 
+/** Returns canonical top-level plugin sections, including parent sections for nested config. */
+function findCodexPluginSectionHeaders(config: string): readonly string[] {
+  const parsed = splitConfigLines(config);
+  const headers = new Set<string>();
+  for (const [index, rawLine] of parsed.lines.entries()) {
+    if (!parsed.structural[index]) continue;
+    const line = rawLine.trim();
+    const normalized = normalizeTomlTableHeaderName(rawLine);
+    if (normalized === undefined) {
+      if (/^\[+\s*plugins(?:\s|\.|\])/u.test(line))
+        throw new Error(
+          "Codex fixed Expert cannot attest an unrecognized plugin configuration table.",
+        );
+      continue;
+    }
+    let parts: unknown;
+    try {
+      parts = JSON.parse(normalized) as unknown;
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parts) || parts[0] !== "plugins") continue;
+    if (parts.length === 1) {
+      // `[plugins]` is only a safe namespace when it is empty and followed by
+      // scoped `[plugins.<name>]` tables. Any setting here has unknown global
+      // activation semantics and must be reviewed before a fixed run proceeds.
+      let hasAssignments = false;
+      for (
+        let candidateIndex = index + 1;
+        candidateIndex < parsed.lines.length;
+        candidateIndex += 1
+      ) {
+        const candidate = parsed.lines[candidateIndex] ?? "";
+        if (
+          parsed.structural[candidateIndex] &&
+          normalizeTomlTableHeaderName(candidate) !== undefined
+        )
+          break;
+        if (
+          parsed.structural[candidateIndex] &&
+          /^[\t ]*(?:[A-Za-z0-9_-]+|"(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*')[\t ]*=/u.test(candidate)
+        ) {
+          hasAssignments = true;
+          break;
+        }
+      }
+      if (hasAssignments)
+        throw new Error(
+          "Codex fixed Expert cannot attest settings in the unscoped [plugins] table.",
+        );
+      continue;
+    }
+    if (typeof parts[1] !== "string" || !parts[1])
+      throw new Error("Codex fixed Expert cannot attest a plugin table without a named plugin.");
+    const header = `[plugins.${JSON.stringify(parts[1])}]`;
+    if (!isSafePluginSectionHeader(header))
+      throw new Error("Codex fixed Expert cannot safely isolate a configured plugin.");
+    headers.add(header);
+  }
+  return [...headers];
+}
+
 interface TomlTableHeaderLocation {
   readonly index: number;
   readonly end: number;
@@ -2599,6 +2674,7 @@ async function prepareSynaraCodexHomeOverlayUnlocked(input: {
   readonly homePath?: string;
   readonly shadowHomePath?: string;
   readonly accountId?: string;
+  readonly fixedExpertNativeDiscovery?: boolean;
   readonly appendConfigToml?: string;
   readonly overlayEntryLinker?: CodexOverlayEntryLinker;
   readonly continuationSourcePolicy?: SharedContinuationSourcePolicy;
@@ -2665,6 +2741,7 @@ async function prepareSynaraCodexHomeOverlayUnlocked(input: {
     input.env,
     sourceHomePath,
     accountSegment,
+    input.fixedExpertNativeDiscovery,
   );
   if (path.resolve(sourceHomePath) === path.resolve(overlayHomePath)) {
     if (input.continuationSourcePolicy === "require-prepared") {
@@ -2704,7 +2781,8 @@ async function prepareSynaraCodexHomeOverlayUnlocked(input: {
         entry === SYNARA_SHARED_CONTINUATION_MARKER_FILE ||
         isSharedContinuationLockEntry(entry) ||
         isCodexSqliteStateEntry(entry) ||
-        isSharedContinuationEntry(entry)
+        isSharedContinuationEntry(entry) ||
+        (input.fixedExpertNativeDiscovery === true && (entry === "plugins" || entry === "skills"))
       ) {
         continue;
       }
@@ -2753,6 +2831,43 @@ async function prepareSynaraCodexHomeOverlayUnlocked(input: {
     }
   }
 
+  if (
+    input.fixedExpertNativeDiscovery &&
+    accountSegment &&
+    !shadowHomePath &&
+    !hasDedicatedAccountHome
+  ) {
+    const accountHomePath = resolveSynaraCodexHomeOverlayPath(
+      input.env,
+      sourceHomePath,
+      accountSegment,
+    );
+    for (const entry of CODEX_ACCOUNT_PRIVATE_STATE_FILES) {
+      const sourcePath = path.join(accountHomePath, entry);
+      let sourceStat: Awaited<ReturnType<typeof fs.lstat>>;
+      try {
+        sourceStat = await fs.lstat(sourcePath);
+      } catch {
+        continue;
+      }
+      if (sourceStat.isSymbolicLink()) {
+        throw new Error(
+          `Codex account private state at ${sourcePath} is a symlink; it must be a real file so accounts cannot alias each other's private state.`,
+        );
+      }
+      await ensureCodexOverlaySymlink(
+        {
+          entryName: entry,
+          sourcePath,
+          targetPath: path.join(overlayHomePath, entry),
+          type: sourceStat.isDirectory() ? "dir" : "file",
+          force: true,
+        },
+        input.overlayEntryLinker,
+      );
+    }
+  }
+
   if (shadowHomePath) {
     for (const entry of CODEX_ACCOUNT_PRIVATE_STATE_FILES) {
       const sourcePath = path.join(shadowHomePath, entry);
@@ -2786,13 +2901,22 @@ async function prepareSynaraCodexHomeOverlayUnlocked(input: {
   }
 
   const suppressionMarkerPath = path.join(overlayHomePath, SYNARA_CONFIG_SUPPRESSIONS_FILE);
-  const suppressedSections = [
+  const configuredPluginSections = input.fixedExpertNativeDiscovery
+    ? findCodexPluginSectionHeaders(sourceConfig)
+    : [];
+  const suppressionCandidates = [
     ...new Set([
       ...SYNARA_COMPETING_BROWSER_PLUGIN_SECTION_HEADERS,
       ...findConflictingLocalBrowserPluginSections(sourceConfig),
+      ...configuredPluginSections,
       ...(await readSynaraConfigSuppressions(suppressionMarkerPath)),
     ]),
-  ].slice(0, MAX_CONFIG_SUPPRESSION_SECTIONS);
+  ];
+  // A fixed assembly must suppress every configured plugin, even when an
+  // account has more than the legacy marker's bounded number of entries.
+  const suppressedSections = input.fixedExpertNativeDiscovery
+    ? suppressionCandidates
+    : suppressionCandidates.slice(0, MAX_CONFIG_SUPPRESSION_SECTIONS);
   const overlayConfigPath = path.join(overlayHomePath, "config.toml");
   // A development/Canary Synara can be launched from a terminal managed by
   // another Synara instance. In that case CODEX_HOME points at the parent
@@ -2834,6 +2958,7 @@ async function prepareSynaraCodexHomeOverlay(input: {
   readonly homePath?: string;
   readonly shadowHomePath?: string;
   readonly accountId?: string;
+  readonly fixedExpertNativeDiscovery?: boolean;
   readonly appendConfigToml?: string;
   readonly overlayEntryLinker?: CodexOverlayEntryLinker;
   readonly continuationSourcePolicy?: SharedContinuationSourcePolicy;
@@ -2851,6 +2976,7 @@ async function prepareSynaraCodexHomeOverlay(input: {
       ...(input.accountId ? { accountId: input.accountId } : {}),
       ...(shadowHomePath ? { shadowHomePath } : {}),
     }),
+    input.fixedExpertNativeDiscovery,
   );
   if (path.resolve(sourceHomePath) === path.resolve(overlayHomePath)) {
     if (input.continuationSourcePolicy === "require-prepared") {
@@ -2877,6 +3003,7 @@ type CodexHomeOverlayPreparationInput = Pick<
   | "homePath"
   | "shadowHomePath"
   | "accountId"
+  | "fixedExpertNativeDiscovery"
   | "appendConfigToml"
   | "overlayEntryLinker"
   | "expectedSharedContinuationGeneration"
@@ -2894,6 +3021,7 @@ async function prepareCodexHomeOverlayWithSourcePolicy(
     ...(input.homePath ? { homePath: input.homePath } : {}),
     ...(input.shadowHomePath ? { shadowHomePath: input.shadowHomePath } : {}),
     ...(input.accountId ? { accountId: input.accountId } : {}),
+    ...(input.fixedExpertNativeDiscovery ? { fixedExpertNativeDiscovery: true } : {}),
     ...(input.appendConfigToml ? { appendConfigToml: input.appendConfigToml } : {}),
     ...(input.overlayEntryLinker ? { overlayEntryLinker: input.overlayEntryLinker } : {}),
     continuationSourcePolicy,
@@ -2943,6 +3071,7 @@ export async function buildCodexProcessEnv(
     ...(input.homePath ? { homePath: input.homePath } : {}),
     ...(input.shadowHomePath ? { shadowHomePath: input.shadowHomePath } : {}),
     ...(input.accountId ? { accountId: input.accountId } : {}),
+    ...(input.fixedExpertNativeDiscovery ? { fixedExpertNativeDiscovery: true } : {}),
     ...(input.appendConfigToml ? { appendConfigToml: input.appendConfigToml } : {}),
     ...(input.overlayEntryLinker ? { overlayEntryLinker: input.overlayEntryLinker } : {}),
     ...(input.expectedSharedContinuationGeneration

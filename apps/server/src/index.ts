@@ -11,19 +11,33 @@ import { ServerLive } from "./effectServer";
 import { NetService } from "@synara/shared/Net";
 import { FetchHttpClient } from "effect/unstable/http";
 import { consumeDesktopParentInput, withDesktopParentLifetime } from "./desktopParentLifetime";
+import { parseManagementCliFlagFailure } from "./managementCli/cli";
 
 const desktopParentInput = consumeDesktopParentInput(process.env, () => process.stdin);
+const managementFlagFailure = parseManagementCliFlagFailure(process.argv.slice(2));
 
-const RuntimeLayer = Layer.empty.pipe(
-  Layer.provideMerge(CliConfig.layer),
-  Layer.provideMerge(ServerLive),
-  Layer.provideMerge(OpenLive),
-  Layer.provideMerge(NetService.layer),
-  Layer.provideMerge(NodeServices.layer),
-  Layer.provideMerge(FetchHttpClient.layer),
-);
+if (managementFlagFailure) {
+  process.stderr.write(
+    `${JSON.stringify({
+      version: 1,
+      ok: false,
+      command: managementFlagFailure.namespace,
+      error: { code: "usage_error", message: managementFlagFailure.message, exitCode: 2 },
+    })}\n`,
+  );
+  process.exitCode = 2;
+} else {
+  const RuntimeLayer = Layer.empty.pipe(
+    Layer.provideMerge(CliConfig.layer),
+    Layer.provideMerge(ServerLive),
+    Layer.provideMerge(OpenLive),
+    Layer.provideMerge(NetService.layer),
+    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(FetchHttpClient.layer),
+  );
 
-Command.run(synaraCli, { version })
-  .pipe(Effect.provide(RuntimeLayer))
-  .pipe((program) => withDesktopParentLifetime(program, desktopParentInput))
-  .pipe((program) => NodeRuntime.runMain(program as Effect.Effect<void, unknown, never>));
+  Command.run(synaraCli, { version })
+    .pipe(Effect.provide(RuntimeLayer))
+    .pipe((program) => withDesktopParentLifetime(program, desktopParentInput))
+    .pipe((program) => NodeRuntime.runMain(program as Effect.Effect<void, unknown, never>));
+}

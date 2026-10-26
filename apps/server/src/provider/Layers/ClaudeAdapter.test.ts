@@ -1,4 +1,13 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
@@ -13,10 +22,13 @@ import type {
   PermissionUpdate,
   SDKControlGetContextUsageResponse,
   SDKControlInitializeResponse,
+  SDKControlReloadPluginsResponse,
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
+  FIXED_EXPERT_SKILL_POLICY,
+  type ProviderExpertSession,
   ApprovalRequestId,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -42,6 +54,7 @@ import { TestClock } from "effect/testing";
 import { afterEach, beforeEach, vi } from "vitest";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
+import { expertResourceFiles } from "../../experts/ExpertStore.ts";
 import { SYNARA_HARNESS_POLICY_MARKER } from "../../agentGateway/harnessPolicy.ts";
 import {
   AgentGatewayCredentials,
@@ -64,6 +77,7 @@ import {
   type ClaudeOwnedProcess,
 } from "./ClaudeAdapter.ts";
 import { claudeIsolatedHomePath } from "../claudeEnvironment.ts";
+import * as expertSkillCatalog from "../expertSkillCatalog.ts";
 
 vi.mock("effect", async (importOriginal) => {
   const actual = await importOriginal<typeof import("effect")>();
@@ -94,6 +108,16 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
   public readonly applyFlagSettingsCalls: Array<Record<string, unknown>> = [];
+  public reloadPluginsResponse: unknown;
+  public reloadPluginsCalls: unknown[] = [];
+  readonly reloadPlugins = async (options?: {
+    holdOnCacheImpact?: boolean;
+  }): Promise<SDKControlReloadPluginsResponse> => {
+    this.reloadPluginsCalls.push(options);
+    if (this.reloadPluginsResponse === undefined)
+      throw new Error("Native plugin reload unavailable");
+    return this.reloadPluginsResponse as SDKControlReloadPluginsResponse;
+  };
   public getContextUsageCalls = 0;
   public getContextUsageDetails: Array<"summary" | "full" | undefined> = [];
   public iteratorNextCalls = 0;
@@ -741,6 +765,13 @@ const temporaryExpertDirectories: string[] = [];
 
 afterEach(() => {
   for (const directory of temporaryExpertDirectories.splice(0)) {
+    const makeDirectoriesWritable = (current: string): void => {
+      const stat = lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+      chmodSync(current, 0o700);
+      for (const name of readdirSync(current)) makeDirectoriesWritable(path.join(current, name));
+    };
+    makeDirectoriesWritable(directory);
     rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -16578,4 +16609,742 @@ describe("Claude subagent tracking", () => {
       Effect.provide(harness.layer),
     );
   });
+});
+
+describe("Claude fixed native Skill wiring", () => {
+  function fixture(empty = false) {
+    const base = makeClaudeExpertFixture();
+    let entries: NonNullable<ProviderExpertSession["skillEntries"]> = [];
+    if (!empty) {
+      const content = readFileSync(base.skillPath),
+        relativePath = "content/skills/reviewer/SKILL.md",
+        resource = {
+          path: relativePath,
+          kind: "file" as const,
+          size: content.byteLength,
+          sha256: createHash("sha256").update(content).digest("hex"),
+        },
+        rootName = "claude-fixed-fixture",
+        packageId = `pkg_${expertResourceFiles.hashJson({
+          schemaVersion: 1,
+          rootName,
+          resources: [resource],
+        })}`,
+        packageRoot = path.join(base.root, "state", "experts", "skill-packages", packageId),
+        sourcePath = path.join(packageRoot, relativePath);
+      mkdirSync(path.dirname(sourcePath), { recursive: true });
+      writeFileSync(sourcePath, content, { mode: 0o400 });
+      const manifest = {
+        schemaVersion: 1,
+        packageId,
+        rootName,
+        resources: [resource],
+        entries: [
+          {
+            entryPath: "skills/reviewer/SKILL.md",
+            name: "reviewer",
+            description: "Review code changes for correctness and safety.",
+            issues: [],
+          },
+        ],
+        fileCount: 1,
+        totalBytes: content.byteLength,
+      };
+      writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify(manifest)}\n`, {
+        mode: 0o400,
+      });
+      entries = [
+        {
+          name: "reviewer",
+          path: sourcePath,
+          description: manifest.entries[0]!.description,
+          packageId,
+          entryPath: manifest.entries[0]!.entryPath,
+          activation: "on-demand",
+          sha256: resource.sha256,
+        },
+      ];
+    }
+    const session: ProviderExpertSession = {
+      snapshotId: `exp_${"d".repeat(64)}`,
+      skillAssemblyId: `assembly-${empty ? "empty" : "selected"}`,
+      persona: "Fixed reviewer",
+      skillLoading: "index",
+      skillPolicy: FIXED_EXPERT_SKILL_POLICY,
+      skills: entries.map(({ name, path }) => ({ name, path })),
+      skillEntries: entries,
+      references: [],
+    };
+    return { ...base, session };
+  }
+  function provenance(
+    options: ClaudeQueryOptions,
+    relativePluginPaths = false,
+  ): SDKControlReloadPluginsResponse {
+    const plugins = (options.plugins ?? [])
+      .filter((item) => item.type === "local")
+      .map((plugin) => {
+        const root = (plugin as { path: string }).path,
+          manifest = JSON.parse(
+            readFileSync(path.join(root, ".claude-plugin/plugin.json"), "utf8"),
+          ) as { name: string };
+        return {
+          name: manifest.name,
+          path: relativePluginPaths
+            ? path.relative(path.resolve(root, "../../../../"), root)
+            : root,
+        };
+      });
+    return {
+      plugins,
+      commands: [],
+      agents: [],
+      mcpServers: [],
+      error_count: 0,
+      held: false,
+    };
+  }
+  function contextUsage(names: readonly string[]): SDKControlGetContextUsageResponse {
+    return {
+      isAutoCompactEnabled: true,
+      apiUsage: null,
+      categories: [],
+      totalTokens: 1,
+      maxTokens: 200000,
+      rawMaxTokens: 200000,
+      percentage: 0,
+      gridRows: [],
+      model: "test",
+      memoryFiles: [],
+      mcpTools: [],
+      agents: [],
+      skills: {
+        totalSkills: names.length,
+        includedSkills: names.length,
+        tokens: 1,
+        skillFrontmatter: names.map((name) => ({ name, source: "plugin", tokens: 1 })),
+      },
+    };
+  }
+  for (const empty of [false, true])
+    it.effect(
+      `verifies exact native context (empty=${empty}), allows only selected native Skills and rechecks reloads`,
+      () => {
+        const selected = fixture(empty);
+        let names: string[] = [];
+        const harness = makeHarness({
+          cwd: selected.cwd,
+          baseDir: path.join(selected.root, "state"),
+          readClaudeCliVersion: async () => "2.1.296",
+          onCreate: (options) => {
+            names = Array.isArray(options.skills) ? options.skills : [];
+            const { plugins_applied: _previous, ...initialization } =
+              harness.query.initializationResponse;
+            harness.query.initializationResponse = {
+              ...initialization,
+              claude_code_version: "2.1.296",
+              ...(empty ? {} : { plugins_applied: true }),
+              commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
+            };
+            harness.query.reloadPluginsResponse = provenance(options, !empty);
+            const usage = contextUsage(names);
+            if (empty) delete usage.skills;
+            harness.query.setContextUsageResponse(usage);
+          },
+        });
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const session = yield* adapter.startSession({
+            threadId: THREAD_ID,
+            provider: "claudeAgent",
+            cwd: selected.cwd,
+            runtimeMode: "full-access",
+            lifecycleGeneration: "claude-fixed-generation",
+            expertSession: selected.session,
+          });
+          assert.equal(session.skillApplication?.enforcement, "native-fixed");
+          assert.equal(session.skillApplication?.activeEntries?.length, empty ? 0 : 1);
+          const options = harness.getLastCreateQueryInput()!.options;
+          assert.deepEqual(options.skills, names);
+          assert.deepEqual(options.disallowedTools, undefined);
+          assert.deepEqual(options.settingSources, []);
+          assert.equal(
+            (options.settings as { disableBundledSkills?: boolean }).disableBundledSkills,
+            true,
+          );
+          assert.deepEqual(
+            (options.settings as { enabledPlugins?: Record<string, unknown> }).enabledPlugins,
+            {
+              "agents-md@builtin": false,
+              "telemetry@builtin": false,
+              "plugin-authoring@builtin": false,
+            },
+          );
+          assert.isUndefined(options.agents);
+          const callback = options.hooks!.PreToolUse![0]!.hooks[0]!;
+          for (const tool of [
+            { tool_name: "Agent", tool_input: {} },
+            { tool_name: "Task", tool_input: {} },
+            { tool_name: "Skill", tool_input: { skill: "ambient-c" } },
+            { tool_name: "reload_skills", tool_input: {} },
+          ]) {
+            const result = yield* Effect.promise(() =>
+              callback(
+                {
+                  hook_event_name: "PreToolUse",
+                  session_id: "test",
+                  transcript_path: "",
+                  cwd: selected.cwd,
+                  tool_use_id: "escape",
+                  ...tool,
+                } as HookInput,
+                "escape",
+                { signal: new AbortController().signal },
+              ),
+            );
+            assert.equal(
+              (result as { hookSpecificOutput?: { permissionDecision?: string } })
+                .hookSpecificOutput?.permissionDecision,
+              "deny",
+            );
+          }
+          for (const [toolName, subagentType] of [
+            ["Agent", "Explore"],
+            ["Task", "Plan"],
+            ["Agent", "general-purpose"],
+          ] as const) {
+            const result = yield* Effect.promise(() =>
+              callback(
+                {
+                  hook_event_name: "PreToolUse",
+                  session_id: "test",
+                  transcript_path: "",
+                  cwd: selected.cwd,
+                  tool_use_id: `managed-${subagentType}`,
+                  tool_name: toolName,
+                  tool_input: { subagent_type: subagentType },
+                } as HookInput,
+                `managed-${subagentType}`,
+                { signal: new AbortController().signal },
+              ),
+            );
+            assert.equal(
+              (result as { hookSpecificOutput?: { permissionDecision?: string } })
+                .hookSpecificOutput?.permissionDecision,
+              undefined,
+              `${subagentType} should be available under the fixed inherited child policy`,
+            );
+          }
+          if (names[0]) {
+            const selectedSkill = yield* Effect.promise(() =>
+              callback(
+                {
+                  hook_event_name: "PreToolUse",
+                  session_id: "test",
+                  transcript_path: "",
+                  cwd: selected.cwd,
+                  tool_use_id: "selected-skill",
+                  tool_name: "Skill",
+                  tool_input: { skill: names[0] },
+                } as HookInput,
+                "selected-skill",
+                { signal: new AbortController().signal },
+              ),
+            );
+            assert.equal(
+              (selectedSkill as { hookSpecificOutput?: { permissionDecision?: string } })
+                .hookSpecificOutput?.permissionDecision,
+              undefined,
+            );
+          }
+          for (const input of ["/ambient-c", "/reload-plugins", "/reload_skills", "/advisor:on"]) {
+            const result = yield* Effect.exit(adapter.sendTurn({ threadId: THREAD_ID, input }));
+            assert.isTrue(Exit.isFailure(result));
+          }
+          const rejectedFork = yield* adapter.forkThread!({
+            sourceThreadId: THREAD_ID,
+            threadId: RESUME_THREAD_ID,
+            cwd: selected.cwd,
+            runtimeMode: "full-access",
+            expertSession: selected.session,
+            lifecycleGeneration: "fork-generation",
+          }).pipe(Effect.flip);
+          assert.match(rejectedFork.message, /inherited fixed Skill/u);
+          assert.equal(harness.query.closeCalls, 0);
+          harness.query.supportedCommandList = [
+            { name: "ambient-c", description: "Unselected", argumentHint: "" },
+            { name: "reload-plugins", description: "Reload", argumentHint: "" },
+            { name: "help", description: "Safe help", argumentHint: "" },
+            ...names.map((name) => ({ name, description: "Selected", argumentHint: "" })),
+          ];
+          const commands = yield* adapter.listCommands!({
+            provider: "claudeAgent",
+            cwd: selected.cwd,
+            threadId: THREAD_ID,
+          });
+          assert.deepEqual(
+            commands.commands.map((command) => command.name).toSorted(),
+            ["help", ...names].toSorted(),
+          );
+          harness.query.setContextUsageResponse(contextUsage([...names, "ambient-c"]));
+          const changed = yield* Effect.exit(
+            adapter.sendTurn({ threadId: THREAD_ID, input: "Continue" }),
+          );
+          assert.isTrue(Exit.isFailure(changed));
+          yield* adapter.stopSession(THREAD_ID);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      },
+    );
+
+  it.effect(
+    "uses the SDK-bundled CLI for the persisted default and dispatches a selected Skill natively",
+    () => {
+      const selected = fixture();
+      let versionProbeCalls = 0;
+      let names: string[] = [];
+      const harness = makeHarness({
+        cwd: selected.cwd,
+        baseDir: path.join(selected.root, "state"),
+        readClaudeCliVersion: async () => {
+          versionProbeCalls += 1;
+          return "2.1.92";
+        },
+        onCreate: (options) => {
+          names = Array.isArray(options.skills) ? options.skills : [];
+          harness.query.initializationResponse = {
+            ...harness.query.initializationResponse,
+            claude_code_version: "2.1.296",
+            plugins_applied: true,
+            commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
+          };
+          harness.query.reloadPluginsResponse = provenance(options);
+          harness.query.setContextUsageResponse(contextUsage(names));
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: "claudeAgent",
+          cwd: selected.cwd,
+          runtimeMode: "full-access",
+          lifecycleGeneration: "sdk-bundled-default",
+          providerOptions: {
+            claudeAgent: {
+              binaryPath: "claude",
+              environment: { HOME: selected.root, PATH: process.env.PATH ?? "" },
+            },
+          },
+          expertSession: selected.session,
+        });
+        const options = harness.getLastCreateQueryInput()!.options;
+        assert.equal(options.pathToClaudeCodeExecutable, undefined);
+        assert.equal(versionProbeCalls, 0);
+        assert.deepEqual(options.settingSources, []);
+        assert.equal(
+          (options.settings as { disableBundledSkills?: boolean }).disableBundledSkills,
+          true,
+        );
+        assert.deepEqual(
+          (options.settings as { enabledPlugins?: Record<string, unknown> }).enabledPlugins,
+          {
+            "agents-md@builtin": false,
+            "telemetry@builtin": false,
+            "plugin-authoring@builtin": false,
+          },
+        );
+        assert.equal(names.length, 1);
+        const reference = selected.session.skills[0]!;
+        yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "Review only with the selected Skill.",
+          skills: [reference],
+        });
+        const prompt = yield* Effect.promise(() =>
+          harness.getLastCreateQueryInput()!.prompt[Symbol.asyncIterator]().next(),
+        );
+        const content = prompt.value?.message.content ?? [];
+        assert.include(
+          JSON.stringify(content),
+          `/${names[0]} Review only with the selected Skill.`,
+        );
+        yield* adapter.stopSession(THREAD_ID);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    },
+  );
+
+  it.effect(
+    "honors an explicit fixed Expert CLI path and rejects an unprobed plugin protocol version",
+    () => {
+      const selected = fixture();
+      let probedBinaryPath: string | undefined;
+      const harness = makeHarness({
+        cwd: selected.cwd,
+        baseDir: path.join(selected.root, "state"),
+        readClaudeCliVersion: async ({ binaryPath }) => {
+          probedBinaryPath = binaryPath;
+          return "2.1.297";
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const failure = yield* adapter
+          .startSession({
+            threadId: THREAD_ID,
+            provider: "claudeAgent",
+            cwd: selected.cwd,
+            runtimeMode: "full-access",
+            lifecycleGeneration: "custom-cli-protocol",
+            providerOptions: { claudeAgent: { binaryPath: "/operator/claude" } },
+            expertSession: selected.session,
+          })
+          .pipe(Effect.flip);
+        assert.equal(probedBinaryPath, "/operator/claude");
+        assert.match(failure.message, /requires the verified SDK-paired CLI 2\.1\.296/u);
+        assert.isUndefined(harness.getLastCreateQueryInput());
+        assert.isFalse(yield* adapter.hasSession(THREAD_ID));
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    },
+  );
+
+  for (const empty of [false, true])
+    for (const failure of [
+      "missing",
+      "unavailable",
+      "null-response",
+      "malformed",
+      "no-held-check",
+      "malformed-held",
+      "error",
+      "foreign-path",
+      "duplicate",
+      "duplicate-root",
+      "no-category",
+      "no-category-with-extra-plugin",
+      "no-count",
+      "invalid-count",
+      "malformed-entry",
+      "project-origin",
+      "user-origin",
+      "wrong-plugin-origin",
+    ] as const)
+      it.effect(
+        `refuses unverifiable native ${failure} before a fixed receipt (empty=${empty})`,
+        () => {
+          const selected = fixture(empty);
+          const receipt = vi.spyOn(expertSkillCatalog, "createExpertSkillApplication");
+          const harness = makeHarness({
+            cwd: selected.cwd,
+            baseDir: path.join(selected.root, "state"),
+            readClaudeCliVersion: async () => "2.1.296",
+            onCreate: (options) => {
+              const names = Array.isArray(options.skills) ? options.skills : [],
+                native = provenance(options);
+              harness.query.initializationResponse = {
+                ...harness.query.initializationResponse,
+                plugins_applied: true,
+                claude_code_version: "2.1.296",
+                commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
+              };
+              harness.query.reloadPluginsResponse =
+                failure === "missing"
+                  ? undefined
+                  : failure === "malformed"
+                    ? { plugins: [] }
+                    : failure === "error"
+                      ? { ...native, error_count: 1 }
+                      : failure === "foreign-path"
+                        ? {
+                            ...native,
+                            plugins: [
+                              { ...native.plugins[0]!, path: path.join(selected.root, "foreign") },
+                            ],
+                          }
+                        : failure === "duplicate"
+                          ? {
+                              ...native,
+                              plugins:
+                                native.plugins.length > 0
+                                  ? [...native.plugins, ...native.plugins]
+                                  : [
+                                      {
+                                        name: "unexpected-plugin",
+                                        path: path.join(selected.root, "unexpected-plugin"),
+                                      },
+                                    ],
+                            }
+                          : native;
+              if (failure === "no-category-with-extra-plugin") {
+                harness.query.reloadPluginsResponse = {
+                  ...native,
+                  plugins: [
+                    ...native.plugins,
+                    {
+                      name: "unexpected-plugin",
+                      path: path.join(selected.root, "unexpected-plugin"),
+                    },
+                  ],
+                };
+              }
+              if (failure === "unavailable")
+                Object.defineProperty(harness.query, "reloadPlugins", { value: undefined });
+              if (failure === "null-response") harness.query.reloadPluginsResponse = null;
+              if (failure === "no-held-check") {
+                const { held: _held, ...withoutHeld } = native;
+                harness.query.reloadPluginsResponse = withoutHeld;
+              }
+              if (failure === "malformed-held")
+                harness.query.reloadPluginsResponse = { ...native, held: true };
+              if (failure === "duplicate-root")
+                harness.query.reloadPluginsResponse = {
+                  ...native,
+                  plugins: [...native.plugins, { ...native.plugins[0]!, name: "other-namespace" }],
+                };
+              const usage = contextUsage(names);
+              if (failure === "no-category" && empty) usage.skills = null as never;
+              else if (failure === "no-category" || failure === "no-category-with-extra-plugin")
+                delete usage.skills;
+              else if (failure === "no-count")
+                delete (usage.skills as unknown as Record<string, unknown>).includedSkills;
+              else if (failure === "invalid-count") usage.skills!.totalSkills = -1;
+              else if (failure === "malformed-entry")
+                usage.skills!.skillFrontmatter = [null as never];
+              else if (
+                failure === "project-origin" ||
+                failure === "user-origin" ||
+                failure === "wrong-plugin-origin"
+              )
+                usage.skills!.skillFrontmatter = [
+                  {
+                    name: names[0] ?? "foreign",
+                    source:
+                      failure === "project-origin"
+                        ? "project"
+                        : failure === "user-origin"
+                          ? "user"
+                          : "plugin",
+                    tokens: 1,
+                    ...(failure === "wrong-plugin-origin" ? { pluginName: "foreign-plugin" } : {}),
+                  },
+                ];
+              harness.query.setContextUsageResponse(usage);
+            },
+          });
+          return Effect.gen(function* () {
+            const adapter = yield* ClaudeAdapter;
+            const rejected = yield* adapter
+              .startSession({
+                threadId: THREAD_ID,
+                provider: "claudeAgent",
+                cwd: selected.cwd,
+                runtimeMode: "full-access",
+                lifecycleGeneration: "native-rejected",
+                expertSession: selected.session,
+              })
+              .pipe(Effect.flip);
+            assert.match(rejected.message, /provenance|category|context|unavailable/iu);
+            assert.equal(receipt.mock.calls.length, 0);
+            assert.isFalse(yield* adapter.hasSession(THREAD_ID));
+            assert.isAtLeast(harness.query.closeCalls, 1);
+          }).pipe(
+            Effect.provide(harness.layer),
+            Effect.scoped,
+            Effect.ensuring(Effect.sync(() => receipt.mockRestore())),
+          );
+        },
+      );
+  for (const empty of [false, true])
+    it.effect(
+      `accepts held native provenance and guards an active steer queue (empty=${empty})`,
+      () => {
+        const selected = fixture(empty);
+        let names: string[] = [];
+        let native: SDKControlReloadPluginsResponse;
+        const harness = makeHarness({
+          cwd: selected.cwd,
+          baseDir: path.join(selected.root, "state"),
+          readClaudeCliVersion: async () => "2.1.296",
+          onCreate: (options) => {
+            names = Array.isArray(options.skills) ? options.skills : [];
+            native = {
+              ...provenance(options),
+              held: true,
+              cache_impact: {
+                mcp_servers_added: [],
+                mcp_servers_removed: [],
+                lsp_tool_change: null,
+              },
+            };
+            harness.query.reloadPluginsResponse = native;
+            harness.query.initializationResponse = {
+              ...harness.query.initializationResponse,
+              plugins_applied: true,
+              claude_code_version: "2.1.296",
+              commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
+            };
+            const usage = contextUsage(names);
+            usage.skills!.skillFrontmatter = usage.skills!.skillFrontmatter.map((entry) => ({
+              ...entry,
+              pluginName: native.plugins[0]!.name,
+            }));
+            harness.query.setContextUsageResponse(usage);
+          },
+        });
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const session = yield* adapter.startSession({
+            threadId: THREAD_ID,
+            provider: "claudeAgent",
+            cwd: selected.cwd,
+            runtimeMode: "full-access",
+            lifecycleGeneration: "native-held",
+            expertSession: selected.session,
+          });
+          assert.equal(session.skillApplication?.enforcement, "native-fixed");
+          yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Start", attachments: [] });
+          for (const input of ["/reload-plugins", "/ambient-c"]) {
+            assert.isTrue(
+              Exit.isFailure(
+                yield* Effect.exit(
+                  adapter.steerTurn({ threadId: THREAD_ID, input, attachments: [] }),
+                ),
+              ),
+            );
+          }
+          harness.query.reloadPluginsResponse = { ...native!, error_count: 1 };
+          assert.isTrue(
+            Exit.isFailure(
+              yield* Effect.exit(
+                adapter.steerTurn({
+                  threadId: THREAD_ID,
+                  input: "Blocked reload",
+                  attachments: [],
+                }),
+              ),
+            ),
+          );
+          harness.query.reloadPluginsResponse = native!;
+          harness.query.setContextUsageResponse(contextUsage([...names, "foreign"]));
+          assert.isTrue(
+            Exit.isFailure(
+              yield* Effect.exit(
+                adapter.steerTurn({
+                  threadId: THREAD_ID,
+                  input: "Blocked foreign",
+                  attachments: [],
+                }),
+              ),
+            ),
+          );
+          harness.query.setContextUsageResponse(contextUsage(names));
+          yield* adapter.steerTurn({
+            threadId: THREAD_ID,
+            input: "Allowed steer",
+            attachments: [],
+          });
+          const iterator = harness.getLastCreateQueryInput()!.prompt[Symbol.asyncIterator]();
+          const first = yield* Effect.promise(() => iterator.next()),
+            second = yield* Effect.promise(() => iterator.next());
+          assert.include(JSON.stringify(first.value), "Start");
+          assert.include(JSON.stringify(second.value), "Allowed steer");
+          assert.deepEqual(
+            harness.query.reloadPluginsCalls.map(() => true),
+            harness.query.reloadPluginsCalls.map(
+              (value) => JSON.stringify(value) === JSON.stringify({ holdOnCacheImpact: true }),
+            ),
+          );
+          yield* adapter.stopSession(THREAD_ID);
+        }).pipe(Effect.provide(harness.layer), Effect.scoped);
+      },
+    );
+  for (const empty of [false, true])
+    for (const pluginsApplied of empty ? [false] : [undefined, false]) {
+      it.effect(
+        `rejects plugins_applied=${String(pluginsApplied)} before fixed context or receipt verification (empty=${empty})`,
+        () => {
+          const selected = fixture(empty);
+          const receipt = vi.spyOn(expertSkillCatalog, "createExpertSkillApplication");
+          const harness = makeHarness({
+            cwd: selected.cwd,
+            baseDir: path.join(selected.root, "state"),
+            readClaudeCliVersion: async () => "2.1.296",
+            onCreate: (options) => {
+              const { plugins_applied: _previous, ...initialization } =
+                harness.query.initializationResponse;
+              const names = Array.isArray(options.skills) ? options.skills : [];
+              harness.query.initializationResponse = {
+                ...initialization,
+                claude_code_version: "2.1.296",
+                ...(pluginsApplied === undefined ? {} : { plugins_applied: pluginsApplied }),
+                commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
+              };
+              harness.query.reloadPluginsResponse = provenance(options);
+              harness.query.setContextUsageResponse(contextUsage(names));
+            },
+          });
+          return Effect.gen(function* () {
+            const adapter = yield* ClaudeAdapter;
+            const failure = yield* adapter
+              .startSession({
+                threadId: THREAD_ID,
+                provider: "claudeAgent",
+                cwd: selected.cwd,
+                runtimeMode: "full-access",
+                lifecycleGeneration: "unapplied-fixed-generation",
+                expertSession: selected.session,
+              })
+              .pipe(Effect.flip);
+            assert.match(failure.message, /plugins_applied|plugin.*not.*applied/iu);
+            assert.equal(harness.query.initializationResultCalls, 1);
+            assert.equal(harness.query.getContextUsageCalls, 0);
+            assert.equal(receipt.mock.calls.length, 0);
+            assert.isFalse(yield* adapter.hasSession(THREAD_ID));
+            assert.deepEqual(yield* adapter.listSessions(), []);
+            assert.isAtLeast(harness.query.closeCalls, 1);
+          }).pipe(
+            Effect.provide(harness.layer),
+            Effect.scoped,
+            Effect.ensuring(Effect.sync(() => receipt.mockRestore())),
+          );
+        },
+      );
+    }
+  it.effect(
+    "refuses an unrelated or same-name native context before returning a runtime receipt",
+    () => {
+      const selected = fixture();
+      const harness = makeHarness({
+        cwd: selected.cwd,
+        baseDir: path.join(selected.root, "state"),
+        readClaudeCliVersion: async () => "2.1.296",
+        onCreate: (options) => {
+          const names = Array.isArray(options.skills) ? options.skills : [];
+          harness.query.initializationResponse = {
+            ...harness.query.initializationResponse,
+            claude_code_version: "2.1.296",
+            plugins_applied: true,
+            commands: names.map((name) => ({ name, description: name, argumentHint: "" })),
+          };
+          harness.query.reloadPluginsResponse = provenance(options);
+          harness.query.setContextUsageResponse(contextUsage([...names, "native-c"]));
+        },
+      });
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const result = yield* Effect.exit(
+          adapter.startSession({
+            threadId: THREAD_ID,
+            provider: "claudeAgent",
+            cwd: selected.cwd,
+            runtimeMode: "full-access",
+            lifecycleGeneration: "rejected-generation",
+            expertSession: selected.session,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(result));
+        assert.isFalse(yield* adapter.hasSession(THREAD_ID));
+        assert.isAtLeast(harness.query.closeCalls, 1);
+      }).pipe(Effect.provide(harness.layer), Effect.scoped);
+    },
+  );
 });

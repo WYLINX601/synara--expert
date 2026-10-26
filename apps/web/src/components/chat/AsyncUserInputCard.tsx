@@ -157,6 +157,7 @@ export function AsyncUserInputCard({
                       const draft = setPendingUserInputCustomAnswer(
                         answers[activeQuestion.id],
                         event.target.value,
+                        activeQuestion,
                       );
                       setAnswers((current) => ({ ...current, [activeQuestion.id]: draft }));
                     }}

@@ -12,7 +12,12 @@ import {
 import { page } from "vitest/browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import type { HubTeamPreset, SkillPackage, SkillPackagePreview } from "@synara/contracts";
+import type {
+  HubTeamPreset,
+  SkillDefinition,
+  SkillPackage,
+  SkillPackagePreview,
+} from "@synara/contracts";
 
 const harness = vi.hoisted(() => {
   const makeExpert = (overrides: Record<string, unknown> = {}) => ({
@@ -94,6 +99,7 @@ const harness = vi.hoisted(() => {
     ],
   };
   const server = {
+    skillLibrary: vi.fn(async (): Promise<{ skills: SkillDefinition[] }> => ({ skills: [] })),
     listExperts: vi.fn(async () => data.experts),
     listSkillPackages: vi.fn(async () => data.skillPackages),
     listExpertConnections: vi.fn(async () => data.connections),
@@ -205,6 +211,7 @@ const harness = vi.hoisted(() => {
 
 vi.mock("~/nativeApi", () => ({
   ensureNativeApi: () => ({ server: harness.server, hubTeams: harness.hubTeams }),
+  readNativeApiServerCapabilityState: () => "supported",
 }));
 vi.mock("~/hooks/useNativeApiServerCapability", () => ({
   useNativeApiServerCapabilitySnapshot: () => ({
@@ -347,6 +354,7 @@ beforeEach(() => {
   ];
   for (const operation of Object.values(harness.server)) operation.mockReset();
   resetHubTeamsHarness();
+  harness.server.skillLibrary.mockResolvedValue({ skills: [] });
   harness.server.listExperts.mockImplementation(async () => harness.data.experts);
   harness.server.listSkillPackages.mockImplementation(async () => harness.data.skillPackages);
   harness.server.readSkillPackage.mockImplementation(
@@ -940,7 +948,26 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     await close();
   });
 
-  it("starts new experts in Settings, labels selects, locates name errors, and applies filtered skills", async () => {
+  it("starts new experts in Settings, locates name errors, and binds managed Skill identities", async () => {
+    const managed: SkillDefinition = {
+      skillId: `skl_${"d".repeat(32)}`,
+      name: "Planning framework",
+      description: "Plan work",
+      tags: [],
+      packageId: `pkg_${"a".repeat(64)}`,
+      entryPath: "planner/SKILL.md",
+      source: {
+        kind: "manual",
+        location: "",
+        packageId: `pkg_${"a".repeat(64)}`,
+        entryPath: "planner/SKILL.md",
+      },
+      locallyModified: false,
+      revision: 1,
+      deleted: false,
+      updatedAt: "2026-10-25T00:00:00.000Z",
+    };
+    harness.server.skillLibrary.mockResolvedValue({ skills: [managed] });
     const { close } = await mountPanel();
     await page.getByRole("button", { name: "新建专家" }).click();
 
@@ -971,21 +998,14 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     await expect
       .element(page.getByRole("tab", { name: "能力" }))
       .toHaveAttribute("aria-selected", "true");
-    await page.getByRole("button", { name: "添加技能", exact: true }).click();
-    const source = page.getByRole("combobox", { name: "按技能来源筛选" });
-    await expect.element(source).toHaveTextContent("全部来源");
-    await source.click();
-    await page.getByRole("option", { name: "Synara" }).click();
-    await expect.element(source).toHaveTextContent("Synara");
-    await page.getByRole("checkbox", { name: "Planning framework", exact: true }).click();
-    await page.getByRole("button", { name: /应用选择/ }).click();
+    await expect.element(page.getByText("Planning framework", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "绑定", exact: true }).click();
+    await expect.element(page.getByRole("switch", { name: "启用绑定技能" })).toBeChecked();
     await expect
-      .element(page.getByRole("button", { name: "查看技能 Imported skill", exact: true }))
-      .toBeVisible();
-    expect(harness.server.previewSkillPackage).toHaveBeenCalledWith({
-      path: "/skills/planning/SKILL.md",
-    });
-    expect(harness.server.importSkillPackage).toHaveBeenCalledTimes(1);
+      .element(page.getByRole("combobox", { name: "技能加载时机" }))
+      .toHaveTextContent("按需");
+    expect(harness.server.previewSkillPackage).not.toHaveBeenCalled();
+    expect(harness.server.importSkillPackage).not.toHaveBeenCalled();
     expect(harness.server.saveExpert).not.toHaveBeenCalled();
 
     await page.getByRole("button", { name: /请填写专家名称.*定位问题/ }).click();
@@ -1071,6 +1091,47 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     await close();
   });
 
+  it("requires a reviewed draft action before replacing an existing Expert assembly", async () => {
+    const oldSkills = [{ name: "Existing role", path: "/old/role/SKILL.md" }];
+    harness.data.experts = [
+      harness.makeExpert({
+        skills: oldSkills,
+        skillSelections: [
+          {
+            packageId: `pkg_${"a".repeat(64)}`,
+            entryPath: "planner/SKILL.md",
+            activation: "startup",
+          },
+        ],
+      }),
+    ];
+    const { close } = await mountPanel("/settings?expertId=planner");
+    await page.getByRole("button", { name: "改用技能库装配", exact: true }).click();
+    await expect
+      .element(page.getByText("Existing role · /old/role/SKILL.md", { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByText(/planner\/SKILL.md · 启动时/u)).toBeVisible();
+    await page.getByRole("button", { name: "保留原装配", exact: true }).click();
+    expect(harness.server.saveExpert).not.toHaveBeenCalled();
+    expect(harness.data.experts[0]?.skills).toEqual(oldSkills);
+    await page.getByRole("button", { name: "改用技能库装配", exact: true }).click();
+    await page.getByRole("button", { name: "确认更改草稿", exact: true }).click();
+    expect(harness.server.saveExpert).not.toHaveBeenCalled();
+    expect(harness.data.experts[0]?.skills).toEqual(oldSkills);
+    await expect.element(page.getByText(/在设置 → 技能中新建或导入技能/u)).toBeVisible();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
+    await expect.poll(() => harness.server.saveExpert.mock.calls.length).toBe(1);
+    expect(harness.server.saveExpert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "planner",
+        expectedRevision: 7,
+        skillBindings: [],
+        skills: [],
+        skillSelections: [],
+      }),
+    );
+    await close();
+  });
   it("keeps other legacy paths when removing a catalog choice, then converts the remaining path", async () => {
     harness.data.experts = [
       harness.makeExpert({

@@ -6,14 +6,25 @@ import {
 } from "@synara/contracts";
 import { isExpertProvider } from "@synara/shared/expertProviders";
 import { PROVIDER_DESCRIPTOR_BY_KIND } from "@synara/shared/providerMetadata";
-import type { KeyboardEvent, ReactNode } from "react";
+import { useState, type KeyboardEvent, type ReactNode } from "react";
 import type { ExpertDraftIssue, ExpertDraftField } from "./expertSettingsModel";
+import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { ExpertConnectionPermissions } from "./ExpertConnectionPermissions";
 import { ExpertReferencesEditor } from "./ExpertReferencesEditor";
 import { ExpertSkillsEditor } from "./ExpertSkillsEditor";
+import { ExpertSkillBindingsEditor } from "./ExpertSkillBindingsEditor";
 import { ExpertSkillPackagesEditor } from "./ExpertSkillPackagesEditor";
 import { SettingsCard, SettingsSectionShell, SettingsSelectPopup } from "./SettingsPanelPrimitives";
 
@@ -54,6 +65,7 @@ export function ExpertEditor({
   onChange: (patch: Partial<ExpertSaveInput>) => void;
   onOpenConnections: () => void;
 }) {
+  const [reassemblyOpen, setReassemblyOpen] = useState(false);
   const fieldIssue = (field: ExpertDraftField) =>
     issues.find((issue) => issue.field === field && issue.index === undefined);
   const textField = (
@@ -121,6 +133,48 @@ export function ExpertEditor({
         </div>
       </header>
       {status}
+      <Dialog open={reassemblyOpen} onOpenChange={setReassemblyOpen}>
+        <DialogPopup>
+          <DialogHeader>
+            <DialogTitle>确认替换原装配</DialogTitle>
+            <DialogDescription>
+              以下入口将从当前草稿移除。随后从技能库重新绑定；保存后从下一次运行生效，当前运行及其恢复保持原版本。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            <ul aria-label="将被替换的技能入口" className="space-y-2 break-all text-ui-sm">
+              {draft.skills.map((skill) => (
+                <li key={skill.path}>
+                  {skill.name} · {skill.path}
+                </li>
+              ))}
+              {draft.skillSelections?.map((selection) => (
+                <li key={`${selection.packageId}:${selection.entryPath}`}>
+                  {selection.packageId}#{selection.entryPath} ·{" "}
+                  {selection.activation === "startup" ? "启动时" : "按需"}
+                </li>
+              ))}
+              {!draft.skills.length && !draft.skillSelections?.length ? (
+                <li>当前为空装配。</li>
+              ) : null}
+            </ul>
+          </DialogPanel>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReassemblyOpen(false)}>
+              保留原装配
+            </Button>
+            <Button
+              disabled={readonly}
+              onClick={() => {
+                onChange({ skillBindings: [], skills: [], skillSelections: [] });
+                setReassemblyOpen(false);
+              }}
+            >
+              确认更改草稿
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
 
       {tab === "settings" ? (
         <div
@@ -283,19 +337,44 @@ export function ExpertEditor({
             </SettingsSectionShell>
           </SettingsCard>
           <SettingsCard className="px-4">
-            <ExpertSkillPackagesEditor
-              selections={draft.skillSelections}
-              legacySkills={draft.skills}
-              expertName={draft.name}
-              experts={experts}
-              catalog={catalog}
-              catalogLoading={catalogLoading}
-              catalogError={catalogError}
-              issues={issues}
-              disabled={readonly}
-              onChange={(skillSelections) => onChange({ skillSelections, skills: [] })}
-              onLegacyChange={(skills) => onChange({ skills })}
-            />
+            {draft.skillBindings === undefined ? (
+              <div className="space-y-2 border-b border-border py-3">
+                <p className="text-ui-sm text-muted-foreground">
+                  此专家保留原装配。改用技能库前请检查将被替换的入口；确认后仍需保存专家。
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={readonly}
+                  onClick={() => setReassemblyOpen(true)}
+                >
+                  改用技能库装配
+                </Button>
+              </div>
+            ) : null}
+            {draft.skillBindings !== undefined ? (
+              <ExpertSkillBindingsEditor
+                bindings={draft.skillBindings}
+                disabled={readonly}
+                onChange={(skillBindings) =>
+                  onChange({ skillBindings, skills: [], skillSelections: [] })
+                }
+              />
+            ) : (
+              <ExpertSkillPackagesEditor
+                selections={draft.skillSelections}
+                legacySkills={draft.skills}
+                expertName={draft.name}
+                experts={experts}
+                catalog={catalog}
+                catalogLoading={catalogLoading}
+                catalogError={catalogError}
+                issues={issues}
+                disabled={readonly}
+                onChange={(skillSelections) => onChange({ skillSelections, skills: [] })}
+                onLegacyChange={(skills) => onChange({ skills })}
+              />
+            )}
             <ExpertReferencesEditor
               references={draft.references}
               issues={issues}

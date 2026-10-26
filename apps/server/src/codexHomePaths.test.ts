@@ -8,6 +8,8 @@ import {
   resolveCodexHomeAllowlistCandidates,
   resolveSynaraCodexHomeOverlayPath,
   resolveActiveCodexHomeWritePath,
+  isSynaraCodexHomeOverlayPath,
+  SYNARA_CODEX_HOME_FIXED_EXPERT_DIR,
 } from "./codexHomePaths.ts";
 
 describe("Codex home paths", () => {
@@ -65,6 +67,70 @@ describe("Codex home paths", () => {
     );
   });
 
+  it("derives a separate fixed Expert overlay under the matching account scope", () => {
+    const segment = resolveCodexHomeOverlayAccountSegment({
+      accountId: "work",
+      homePath: "/users/me/.codex",
+    });
+    const fixedOverlay = resolveSynaraCodexHomeOverlayPath(
+      { SYNARA_HOME: "/synara/runtime" },
+      "/users/me/.codex",
+      segment,
+      true,
+    );
+    assert.equal(
+      fixedOverlay,
+      path.join(
+        "/synara/runtime",
+        "codex-home-overlay",
+        "accounts",
+        segment ?? "",
+        SYNARA_CODEX_HOME_FIXED_EXPERT_DIR,
+      ),
+    );
+    assert.equal(
+      isSynaraCodexHomeOverlayPath(
+        { SYNARA_HOME: "/synara/runtime" },
+        "/users/me/.codex",
+        fixedOverlay,
+      ),
+      true,
+    );
+    assert.equal(
+      isSynaraCodexHomeOverlayPath(
+        { SYNARA_HOME: "/synara/runtime" },
+        "/users/me/.codex",
+        path.join("/synara/runtime", "codex-home-overlay", "unrecognized"),
+      ),
+      false,
+    );
+  });
+
+  it("recognizes parent overlay roots across runtime homes by shape", () => {
+    const env = { SYNARA_HOME: "/child/runtime" };
+
+    assert.equal(
+      isSynaraCodexHomeOverlayPath(env, "/users/me/.codex", "/parent/runtime/codex-home-overlay"),
+      true,
+    );
+    assert.equal(
+      isSynaraCodexHomeOverlayPath(
+        env,
+        "/users/me/.codex",
+        "/parent/runtime/codex-home-overlay-archive",
+      ),
+      false,
+    );
+    assert.equal(
+      isSynaraCodexHomeOverlayPath(
+        env,
+        "/users/me/.codex",
+        "/parent/runtime/codex-home-overlay/unrecognized",
+      ),
+      false,
+    );
+  });
+
   it("does not create a nested account overlay for the explicit default account", () => {
     assert.equal(
       resolveCodexHomeOverlayAccountSegment({
@@ -81,7 +147,11 @@ describe("Codex home paths", () => {
         env: { SYNARA_HOME: "/synara/runtime" },
         homePath: "/users/me/.codex",
       }),
-      ["/users/me/.codex", path.join("/synara/runtime", "codex-home-overlay")],
+      [
+        "/users/me/.codex",
+        path.join("/synara/runtime", "codex-home-overlay"),
+        path.join("/synara/runtime", "codex-home-overlay", SYNARA_CODEX_HOME_FIXED_EXPERT_DIR),
+      ],
     );
   });
 
@@ -99,6 +169,13 @@ describe("Codex home paths", () => {
     assert.deepEqual(candidates, [
       "/users/me/.codex",
       path.join("/synara/runtime", "codex-home-overlay", "accounts", segment ?? ""),
+      path.join(
+        "/synara/runtime",
+        "codex-home-overlay",
+        "accounts",
+        segment ?? "",
+        SYNARA_CODEX_HOME_FIXED_EXPERT_DIR,
+      ),
       path.join("/synara/runtime", "codex-home-overlay"),
       "/users/me/.codex_work",
     ]);
@@ -117,6 +194,13 @@ describe("Codex home paths", () => {
     assert.deepEqual(candidates, [
       "/users/me/.codex",
       path.join("/synara/runtime", "codex-home-overlay", "accounts", segment ?? ""),
+      path.join(
+        "/synara/runtime",
+        "codex-home-overlay",
+        "accounts",
+        segment ?? "",
+        SYNARA_CODEX_HOME_FIXED_EXPERT_DIR,
+      ),
       path.join("/synara/runtime", "codex-home-overlay"),
     ]);
   });
@@ -138,6 +222,25 @@ describe("Codex home paths", () => {
         accountId: "codex_2",
       }),
       path.join("/synara/runtime", "codex-home-overlay", "accounts", segment ?? ""),
+    );
+  });
+
+  it("recognizes the active fixed Expert overlay from CODEX_SQLITE_HOME", () => {
+    const source = "/users/me/.codex";
+    const fixedOverlay = path.join(
+      "/synara/runtime",
+      "codex-home-overlay",
+      SYNARA_CODEX_HOME_FIXED_EXPERT_DIR,
+    );
+    assert.equal(
+      resolveActiveCodexHomeWritePath({
+        env: {
+          CODEX_HOME: fixedOverlay,
+          CODEX_SQLITE_HOME: source,
+          SYNARA_HOME: "/synara/runtime",
+        },
+      }),
+      fixedOverlay,
     );
   });
 

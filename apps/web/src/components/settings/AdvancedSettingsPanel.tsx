@@ -22,6 +22,7 @@ import { useStore } from "~/store";
 import { createAllThreadsMessagelessSelector, createThreadShellsSelector } from "~/storeSelectors";
 import { useSettingsRestoreSignal } from "./SettingControls";
 import { SettingsRow, SettingsSection } from "./SettingsPanelPrimitives";
+import { SkillManagementPairingSettingsPanel } from "./SkillManagementPairingSettingsPanel";
 
 export function AdvancedSettingsPanel(props: {
   active: boolean;
@@ -156,6 +157,8 @@ export function AdvancedSettingsPanel(props: {
           />
         </SettingsSection>
       ) : null}
+
+      <SkillManagementPairingSettingsPanel active={props.active} />
 
       <SettingsSection title="Developer tools">
         <SettingsRow

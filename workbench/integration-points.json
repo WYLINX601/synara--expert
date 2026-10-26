@@ -2,6 +2,33 @@
   "version": 1,
   "integrationPoints": [
     {
+      "id": "provider.omp-user-input",
+      "surface": "provider-session",
+      "entryFiles": [
+        "apps/server/src/provider/Layers/OmpAdapter.ts",
+        "apps/server/src/provider/acp/OmpElicitationSupport.ts",
+        "packages/contracts/src/providerRuntime.ts",
+        "apps/web/src/workLog.ts",
+        "apps/web/src/pendingUserInput.ts",
+        "apps/web/src/components/chat/UserInputQuestionForm.tsx",
+        "apps/web/src/components/chat/useChatPendingInteractions.ts",
+        "apps/web/src/components/chat/useChatComposerEditing.ts",
+        "apps/web/src/components/chat/useChatTurnSubmission.ts"
+      ],
+      "responsibility": "The OMP adapter owns its paired askDialog field convention and validates answers before completing the session-owned request. The provider-neutral question contract exposes an optional combined multi-select/custom capability; activity normalization, saved drafts and the existing composer preserve it. Ordinary ACP and Droid conventions retain their existing mapping. Gateway send failures preserve the requested target and structured non-dispatch reasons without relaxing cross-thread authority.",
+      "tests": [
+        "apps/server/src/provider/acp/OmpElicitationSupport.test.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.elicitation.test.ts",
+        "apps/server/src/provider/acp/AcpElicitationSupport.test.ts",
+        "apps/server/src/agentGateway/Layers/AgentGateway.test.ts",
+        "packages/contracts/src/providerRuntime.test.ts",
+        "apps/web/src/pendingUserInput.test.ts",
+        "apps/web/src/workLog.test.ts",
+        "apps/web/src/components/chat/UserInputQuestionForm.browser.tsx",
+        "apps/web/src/components/ChatView.browser.tsx"
+      ]
+    },
+    {
       "id": "web.expert-settings-navigation",
       "surface": "web",
       "entryFiles": [
@@ -661,9 +688,10 @@
       "featureFiles": [
         "apps/server/src/provider/hubReferenceProjection.ts",
         "apps/server/src/projectAgent/hubTarget.ts",
-        "packages/shared/src/hubReferences.ts"
+        "packages/shared/src/hubReferences.ts",
+        "apps/server/src/projectAgent/workerTurnContext.ts"
       ],
-      "responsibility": "Native project metadata and event replay own Hub Space membership; ContextRepository resolves explicit source Project or standalone Hub Space and freezes versioned snapshots without rewriting v1 history. The authenticated user RPC and coordinator catalogue resolve the explicit target, source project, or Hub in the same order as dispatch, check the creation allowlist, and return the effective target per Expert. Runtime terminal activities settle managed work independently of Git checkpoints; current durable work/result/inbox facts drive digest state, with typed source navigation. Committed publication/withdrawal/path maintenance emits deliverables-changed on the native Hub stream; Library and composer own reference-counted subscriptions and re-fetch on reconnect. ProviderCommandReactor supplies the authenticated current-thread capability to the Hub reference projector before Provider startup. The projector consumes reserved app references, validates same-Hub publication metadata and emits bounded read instructions without file bodies; ordinary provider mentions continue through native projection. HubWork source extraction copies references only from durable human messages. The existing work repository and immutable Expert store supply publication identity and work titles through a narrow resolver injected by ProjectAgentService. Static boundary coverage adds the pure URI parser and capability-driven projector; host lifecycle, SQL, native projection, and runtime authorization remain owned by their existing modules and require behavioral tests. Participant discovery reads only ProjectAgentConfig.expertIds; settings use the existing authenticated ExpertClient catalogue. Workbench migration expert/5 owns roster rows; ProjectAgentRepository replaces them transactionally with config revision. New Hub work acceptance rechecks revision and membership after replay lookup; accepted work keeps its frozen binding. The host-only resolveParticipatingExpert validates current Coordinator mentions and supplies trusted names. These seams grant no Agent roster-write capability.",
+      "responsibility": "Native project metadata and event replay own Hub Space membership; ContextRepository resolves explicit source Project or standalone Hub Space and freezes versioned snapshots without rewriting v1 history. The authenticated user RPC and coordinator catalogue resolve the explicit target, source project, or Hub in the same order as dispatch, check the creation allowlist, and return the effective target per Expert. Runtime terminal activities settle managed work independently of Git checkpoints; current durable work/result/inbox facts drive digest state, with typed source navigation. Committed publication/withdrawal/path maintenance emits deliverables-changed on the native Hub stream; Library and composer own reference-counted subscriptions and re-fetch on reconnect. ProviderCommandReactor supplies the authenticated current-thread capability to the Hub reference projector before Provider startup. The projector consumes reserved app references, validates same-Hub publication metadata and emits bounded read instructions without file bodies; ordinary provider mentions continue through native projection. HubWork source extraction copies references only from durable human messages. The existing work repository and immutable Expert store supply publication identity and work titles through a narrow resolver injected by ProjectAgentService. Static boundary coverage adds the pure URI parser and capability-driven projector; host lifecycle, SQL, native projection, and runtime authorization remain owned by their existing modules and require behavioral tests. Participant discovery reads only ProjectAgentConfig.expertIds; settings use the existing authenticated ExpertClient catalogue. Workbench migration expert/5 owns roster rows; ProjectAgentRepository replaces them transactionally with config revision. New Hub work acceptance rechecks revision and membership after replay lookup; accepted work keeps its frozen binding. The host-only resolveParticipatingExpert validates current Coordinator mentions and supplies trusted names. These seams grant no Agent roster-write capability. Worker context assembly uses an internal typed section envelope; the provider reactor owns generation-scoped delivery receipts and retires them on compaction, reset or failure. Fixed direct plan inputs are captured in HubWork creationSpec by the existing plan host. No context receipt authorizes tools or changes pinned Context/Expert bindings.",
       "tests": [
         "packages/shared/src/hubReferences.test.ts",
         "apps/server/src/provider/hubReferenceProjection.test.ts",
@@ -678,7 +706,8 @@
         "apps/server/src/persistence/Layers/ProjectAgentRepository.test.ts",
         "apps/server/src/persistence/Layers/HubWorkRepository.test.ts",
         "apps/server/src/projectAgent/hubWorkService.test.ts",
-        "apps/server/src/projectAgent/Layers/ProjectAgentService.test.ts"
+        "apps/server/src/projectAgent/Layers/ProjectAgentService.test.ts",
+        "apps/server/src/projectAgent/workerTurnContext.test.ts"
       ]
     },
     {

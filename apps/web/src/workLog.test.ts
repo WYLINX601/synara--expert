@@ -8,11 +8,29 @@ import {
   isFileChangeWorkLogEntry,
   isProviderFileEditWorkLogEntry,
   omitRoutedSubagentWorkEntries,
+  parseUserInputQuestions,
 } from "./workLog";
 import type { ChatMessage } from "./types";
 import { makeActivity } from "./storeTestFixtures";
 import { isComputerToolName } from "./lib/computerToolPresentation";
 import { isPlainRuntimeNoticeWorkEntry } from "./components/chat/agentActivity.logic";
+
+it("preserves the provider's opt-in for combined multi-select and custom answers", () => {
+  const question = {
+    id: "q0",
+    header: "Continue",
+    question: "Where?",
+    options: [],
+    multiSelect: true,
+    allowCustomAnswerWithOptions: true,
+  };
+  expect(parseUserInputQuestions({ questions: [question] })).toEqual([question]);
+  expect(
+    parseUserInputQuestions({
+      questions: [{ ...question, allowCustomAnswerWithOptions: "true" }],
+    })?.[0],
+  ).not.toHaveProperty("allowCustomAnswerWithOptions");
+});
 
 describe("deriveSubagentTaskEnds", () => {
   it("preserves settled invocations while a resumed task waits for its own completion", () => {

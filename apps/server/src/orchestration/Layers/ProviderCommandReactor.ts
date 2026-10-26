@@ -1,3 +1,8 @@
+import {
+  WorkerContextDelivery,
+  renderWorkerContext,
+  type ProjectAgentTurnContext,
+} from "../../projectAgent/workerTurnContext.ts";
 import { appendAppSnapPromptContext } from "../../provider/appSnapPromptContext.ts";
 import { isServerBetaFeatureEnabled } from "../../betaFeatureGate";
 import { MCP_CONNECTORS_BETA_FEATURE } from "@synara/shared/betaFeatures";
@@ -1111,6 +1116,7 @@ const make = Effect.gen(function* () {
   };
   const pendingQueuedDispatchBySessionThread = new Map<string, PendingQueuedDispatch>();
   const queuedTurnPromotionOwner = `provider-queued-turn:${crypto.randomUUID()}`;
+  const workerContextDelivery = new WorkerContextDelivery();
   const sidechatContextBootstrapThreadIds = new Set<string>();
   // Fresh sessions that cannot inherit native conversation state need one
   // transcript bootstrap (fork fallbacks and non-resumable Droid model changes).
@@ -1334,6 +1340,7 @@ const make = Effect.gen(function* () {
   // begin clean even if fork metadata would normally register a bootstrap.
   const suppressContextBootstrapOnNextStartThreadIds = new Set<string>();
   const clearPendingContextBootstraps = (threadId: string) => {
+    workerContextDelivery.forget(threadId);
     sidechatContextBootstrapThreadIds.delete(threadId);
     freshSessionContextBootstrapThreadIds.delete(threadId);
     forkFromEarlierTurnContextThreadIds.delete(threadId);
@@ -3406,11 +3413,18 @@ const make = Effect.gen(function* () {
               ),
             ),
           };
-    const projectContextPacket = yield* (
-      Option.isSome(projectAgentService)
-        ? projectAgentService.value.formatContextPacketForTurn(input.threadId)
-        : Effect.succeed("")
-    ).pipe(Effect.catch(() => Effect.succeed("")));
+    const projectContextPacket: ProjectAgentTurnContext = yield* Option.isSome(projectAgentService)
+      ? projectAgentService.value.formatContextPacketForTurn(input.threadId).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderValidationError({
+                operation: "context.dispatch",
+                issue: "Could not assemble Hub context; dispatch refused.",
+                cause,
+              }),
+          ),
+        )
+      : Effect.succeed({ text: "" });
     const threadProject = yield* resolveThreadWorkspaceProject(thread);
     const projectFoldersPreamble = threadProject
       ? buildProjectFoldersPreamble({
@@ -3418,7 +3432,19 @@ const make = Effect.gen(function* () {
           additionalFolders: threadProject.additionalFolders ?? [],
         })
       : null;
-    const projectContext = [projectContextPacket, projectFoldersPreamble ?? ""]
+    const workerProvidedText =
+      projectContextPacket.workerInitialPrompt === input.messageText
+        ? projectContextPacket.workerInitialPrompt
+        : undefined;
+    const packetText =
+      workerProvidedText !== undefined && projectContextPacket.workerSections
+        ? renderWorkerContext(
+            projectContextPacket.workerSections.filter(
+              (section) => section.text !== workerProvidedText,
+            ),
+          )
+        : projectContextPacket.text;
+    const projectContext = [packetText, projectFoldersPreamble ?? ""]
       .filter((block) => block.trim().length > 0)
       .join("\n\n");
     const debugPromptOverheadChars = debugModePromptOverheadChars(input.interactionMode);
@@ -3435,7 +3461,9 @@ const make = Effect.gen(function* () {
       : input.messageText;
     // The project packet is ambient context, not user words: it prefixes the
     // assembled provider input rather than joining `<latest_user_message>`.
-    const projectContextPrefix = projectContext.trim().length > 0 ? `${projectContext}\n\n` : "";
+    const fullProjectContextPrefix =
+      projectContext.trim().length > 0 ? `${projectContext}\n\n` : "";
+    let projectContextPrefix = fullProjectContextPrefix;
     const promptWithProjectContext = `${projectContextPrefix}${authoredMessageText}`;
     const hubReferenceProjection = yield* resolveHubReferencePromptProjection({
       mentions: input.mentions,
@@ -3678,6 +3706,38 @@ const make = Effect.gen(function* () {
     // stopped projected session can still name the old provider after a model
     // switch until the projection catches up with the newly started session.
     selectedProvider = activeSession.provider;
+    let workerDelivery: ReturnType<WorkerContextDelivery["prepare"]> | undefined;
+    let preparedWorkerSession: ProviderSession | undefined;
+    const prepareWorkerDelivery = (session: ProviderSession, reset: boolean) => {
+      if (!projectContextPacket.workerSections) return;
+      if (
+        input.dispatchMode === "steer" ||
+        input.reviewTarget !== undefined ||
+        /^\/compact(?:\s|$)/.test(input.messageText.trim())
+      ) {
+        workerContextDelivery.forget(input.threadId);
+        return;
+      }
+      preparedWorkerSession = { ...session };
+      workerDelivery = workerContextDelivery.prepare(
+        input.threadId,
+        session,
+        projectContextPacket.workerSections,
+        reset,
+        workerProvidedText,
+      );
+      const blocks = [workerDelivery.text, projectFoldersPreamble ?? ""].filter(
+        (block) => block.trim().length > 0,
+      );
+      projectContextPrefix = blocks.length > 0 ? `${blocks.join("\n\n")}\n\n` : "";
+    };
+    prepareWorkerDelivery(
+      activeSession,
+      nativeSessionRestarted ||
+        nativeResumeFailed ||
+        freshSessionContextBootstrapThreadIds.has(input.threadId) ||
+        rollbackContextBootstrapThreadIds.has(input.threadId),
+    );
     if (activeSession.provider === "claudeAgent" && input.dispatchMode !== "steer") {
       const latestThread = yield* resolveThread(input.threadId);
       const pendingReview = latestThread?.claudeCacheReview;
@@ -3824,7 +3884,13 @@ const make = Effect.gen(function* () {
       sidechatBoundary !== null
         ? `<sidechat_boundary>\n${sidechatBoundary}\n</sidechat_boundary>\n\n<latest_user_message>\n${authoredMessageText}\n</latest_user_message>`
         : authoredMessageText;
-    const bootstrapBudgetMessageText = `${projectContextPrefix}${boundaryMessageText}${mentionContextSuffix}`;
+    // Stale native-resume retry may need the full Worker packet after a delta
+    // was prepared. Reserve that larger prefix before allocating transcript space.
+    const budgetContextPrefix =
+      fullProjectContextPrefix.length > projectContextPrefix.length
+        ? fullProjectContextPrefix
+        : projectContextPrefix;
+    const bootstrapBudgetMessageText = `${budgetContextPrefix}${boundaryMessageText}${mentionContextSuffix}`;
     const shouldBootstrapHandoff =
       thread.handoff?.bootstrapStatus === "pending" &&
       !hasNativeAssistantMessagesBefore(thread, transcriptBoundaryMessageId);
@@ -4013,6 +4079,7 @@ const make = Effect.gen(function* () {
                 0,
                 PROVIDER_SEND_TURN_MAX_INPUT_CHARS -
                   providerInputWithMentionContext.length -
+                  Math.max(0, fullProjectContextPrefix.length - projectContextPrefix.length) -
                   PROVIDER_INPUT_SAFETY_MARGIN_CHARS,
               ),
             }),
@@ -4101,13 +4168,40 @@ const make = Effect.gen(function* () {
             providerWorkspaceCwd,
           )
         : effect;
+    let recoveredWorkerSession: ProviderSession | undefined;
     const turnDispatchOptions = {
-      ...(contextDispatchOptions ?? {}),
+      ...(projectContextPacket.workerSections
+        ? {
+            beforeDispatch: Effect.gen(function* () {
+              if (preparedWorkerSession?.lifecycleGeneration !== undefined) {
+                const live = (yield* providerService.listSessions()).find(
+                  (session) => session.threadId === activeSession.threadId,
+                );
+                if (
+                  !live ||
+                  live.provider !== preparedWorkerSession.provider ||
+                  live.providerInstanceId !== preparedWorkerSession.providerInstanceId ||
+                  live.lifecycleGeneration !== preparedWorkerSession.lifecycleGeneration
+                ) {
+                  recoveredWorkerSession = live;
+                  workerContextDelivery.forget(input.threadId);
+                  return yield* new ProviderValidationError({
+                    operation: "hub-context.dispatch-generation",
+                    issue:
+                      "Worker runtime changed after context preparation; full context is required.",
+                  });
+                }
+              }
+              if (contextDispatchOptions?.beforeDispatch)
+                yield* contextDispatchOptions.beforeDispatch;
+            }),
+          }
+        : (contextDispatchOptions ?? {})),
       ...(input.claudeCompactionCancellation
         ? { claudeCompactionCancellation: input.claudeCompactionCancellation }
         : {}),
     };
-    const sendQueuedProviderTurn = (messageText: string | undefined) =>
+    const sendQueuedProviderTurn = (bootstrap: BootstrapContextSelection | null) =>
       withProviderWorkspaceLease(
         Effect.gen(function* () {
           if (input.acceptedCacheReview && input.completionEventSequence !== undefined) {
@@ -4149,10 +4243,35 @@ const make = Effect.gen(function* () {
             );
             yield* requireClaudeCompactionPreparationActive(input.claudeCompactionCancellation);
           }
-          return yield* providerService.sendTurn(
-            { ...providerTurnInput, ...(messageText ? { input: messageText } : {}) },
-            turnDispatchOptions,
+          const dispatch = () =>
+            providerService
+              .sendTurn(
+                { ...providerTurnInput, input: finalizeProviderInput(bootstrap) },
+                turnDispatchOptions,
+              )
+              .pipe(Effect.onError(() => Effect.sync(() => workerDelivery?.failed())));
+          const sent = yield* dispatch().pipe(
+            Effect.catch((error) =>
+              Effect.gen(function* () {
+                const recovered = recoveredWorkerSession;
+                if (
+                  !(error instanceof ProviderValidationError) ||
+                  error.operation !== "hub-context.dispatch-generation" ||
+                  !recovered ||
+                  recovered.provider !== activeSession.provider ||
+                  recovered.providerInstanceId !== activeSession.providerInstanceId
+                ) {
+                  return yield* Effect.fail(error);
+                }
+                // beforeDispatch refused before adapter consumption. Retry once in
+                // the same target with a full packet; a second change fails closed.
+                prepareWorkerDelivery(recovered, true);
+                return yield* dispatch();
+              }),
+            ),
           );
+          workerDelivery?.accepted(sent.turnId);
+          return sent;
         }),
       );
 
@@ -4397,7 +4516,8 @@ const make = Effect.gen(function* () {
             cause,
             ...(preserveActiveRuntime ? { preserveActiveRuntime: true } : {}),
           });
-          yield* ensureSessionForStaleRetry;
+          const retrySession = yield* ensureSessionForStaleRetry;
+          prepareWorkerDelivery(retrySession.activeSession, true);
 
           const retryBootstrapText =
             priorTranscriptBootstrapAvailableChars > 0
@@ -4416,15 +4536,14 @@ const make = Effect.gen(function* () {
           if (interruptEscalation) {
             interruptEscalation.evidence = providerContextLifecycleEvidence;
           }
-          const retryNormalizedInput = finalizeProviderInput(
+          const retryBootstrap: BootstrapContextSelection | null =
             retryBootstrapText !== null
               ? {
                   tag: "thread_context",
                   contextText: retryBootstrapText,
                   wrapLatestUserMessage: true,
                 }
-              : null,
-          );
+              : null;
 
           yield* Effect.logWarning(
             "provider command reactor retrying claude turn after stale resume",
@@ -4434,9 +4553,9 @@ const make = Effect.gen(function* () {
               bootstrappedPriorTranscript: retryBootstrapText !== null,
             },
           );
-          return yield* sendQueuedProviderTurn(retryNormalizedInput);
+          return yield* sendQueuedProviderTurn(retryBootstrap);
         });
-      const sentTurn = yield* sendQueuedProviderTurn(normalizedInput).pipe(
+      const sentTurn = yield* sendQueuedProviderTurn(selectedBootstrapContext).pipe(
         Effect.catch((error) =>
           Effect.gen(function* () {
             if (selectedProvider !== "claudeAgent" || !isStaleClaudeResumeError(error)) {
@@ -4469,7 +4588,8 @@ const make = Effect.gen(function* () {
             yield* providerService
               .stopRuntimeSession({ threadId: input.threadId })
               .pipe(Effect.catch(() => Effect.void));
-            yield* ensureSessionForStaleRetry;
+            const retrySession = yield* ensureSessionForStaleRetry;
+            prepareWorkerDelivery(retrySession.activeSession, true);
             yield* Effect.logWarning(
               "provider command reactor retrying claude turn with native resume",
               {
@@ -4477,7 +4597,7 @@ const make = Effect.gen(function* () {
                 messageId: input.messageId,
               },
             );
-            return yield* sendQueuedProviderTurn(normalizedInput).pipe(
+            return yield* sendQueuedProviderTurn(selectedBootstrapContext).pipe(
               Effect.catch((retryError) =>
                 isStaleClaudeResumeError(retryError)
                   ? replayWithTranscriptBootstrap(retryError)
@@ -6385,6 +6505,14 @@ const make = Effect.gen(function* () {
   });
 
   const processQueueDrainEvent = Effect.fnUntraced(function* (event: ProviderQueueDrainEvent) {
+    if (event.type === "turn.completed" && event.payload.contextCompacted === true)
+      workerContextDelivery.forget(event.threadId);
+    workerContextDelivery.complete(
+      event.threadId,
+      event.turnId,
+      event.type === "turn.completed" && event.payload.state === "completed",
+      event,
+    );
     yield* processClaudeCompactionTerminal(event);
     yield* observePendingContextBootstrapTerminalEvent(event);
     yield* observeStaleClaudeResumeTerminal(event);
@@ -9820,6 +9948,12 @@ const make = Effect.gen(function* () {
           Effect.andThen(recoverActiveThreadGoals),
         ),
         Stream.runForEach(providerService.streamEvents, (event) => {
+          if (
+            (event.type === "thread.state.changed" && event.payload.state === "compacted") ||
+            (event.type === "item.completed" && event.payload.itemType === "context_compaction")
+          ) {
+            workerContextDelivery.forget(event.threadId);
+          }
           if (
             event.type === "task.completed" ||
             (event.type === "task.updated" &&

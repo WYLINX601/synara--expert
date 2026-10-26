@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -43,6 +43,57 @@ async function stopChild(child: ChildProcessWithoutNullStreams): Promise<void> {
   );
 }
 
+// Real local-server discovery may probe these listeners while the workspace
+// test runner is active. Only the fixture's own RPC routes accept POST bodies.
+function createGatewayFixture(
+  handle: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>,
+  paths: readonly string[] = ["/mcp"],
+) {
+  const pending = new Set<Promise<void>>();
+  const failures: unknown[] = [];
+  const failed = deferred<unknown>();
+  const server = createServer((request, response) => {
+    if (!paths.includes(request.url ?? "")) {
+      response.writeHead(404).end();
+      return;
+    }
+    if (request.method !== "POST") {
+      response.writeHead(405, { Allow: "POST" }).end();
+      return;
+    }
+    const task = Promise.resolve()
+      .then(() => handle(request, response))
+      .catch((error: unknown) => {
+        failures.push(error);
+        failed.resolve(error);
+        if (!response.destroyed && !response.writableEnded) {
+          response.statusCode = 500;
+          response.end();
+        }
+      });
+    pending.add(task);
+    void task.finally(() => pending.delete(task));
+  });
+  return {
+    server,
+    wait: <T>(promise: Promise<T>, timeoutMs?: number): Promise<T> =>
+      withTimeout(
+        Promise.race([
+          promise,
+          failed.promise.then((error) => {
+            throw error;
+          }),
+        ]),
+        timeoutMs,
+      ),
+    close: async () => {
+      await closeServer(server);
+      await Promise.all([...pending]);
+      if (failures.length > 0) throw failures[0];
+    },
+  };
+}
+
 describe("agent gateway stdio proxy", () => {
   it("forwards cancellation immediately and lets a later ping bypass a hung request", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "synara-stdio-proxy-"));
@@ -51,12 +102,13 @@ describe("agent gateway stdio proxy", () => {
     const slowAborted = deferred<void>();
     const cancellationReceived = deferred<void>();
     let slowRequestCount = 0;
+    let rpcRequestCount = 0;
     let duplicateAborted = false;
-    let server: Server | undefined;
+    let fixture: ReturnType<typeof createGatewayFixture> | undefined;
     let child: ChildProcessWithoutNullStreams | undefined;
 
     try {
-      server = createServer(async (request, response) => {
+      const gateway = (fixture = createGatewayFixture(async (request, response) => {
         const chunks: Buffer[] = [];
         for await (const chunk of request) chunks.push(Buffer.from(chunk));
         const message = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
@@ -64,6 +116,7 @@ describe("agent gateway stdio proxy", () => {
           method?: string;
           params?: { requestId?: string };
         };
+        rpcRequestCount += 1;
         if (message.id === "slow") {
           slowRequestCount += 1;
           if (slowRequestCount === 1) {
@@ -91,7 +144,8 @@ describe("agent gateway stdio proxy", () => {
         }
         response.statusCode = 500;
         response.end();
-      });
+      }));
+      const server = gateway.server;
       await new Promise<void>((resolve, reject) => {
         const onError = (error: Error) => reject(error);
         server!.once("error", onError);
@@ -140,7 +194,7 @@ describe("agent gateway stdio proxy", () => {
           params: { name: "browser_wait", arguments: { timeoutMs: 30_000 } },
         })}\n`,
       );
-      await withTimeout(slowStarted.promise);
+      await gateway.wait(slowStarted.promise);
       // A duplicate id must not steal the proxy's cancellation route from the
       // first call. This test intentionally leaves the duplicate open so
       // targeting the wrong fetch is visible.
@@ -152,7 +206,18 @@ describe("agent gateway stdio proxy", () => {
           params: { name: "browser_wait", arguments: { timeoutMs: 30_000 } },
         })}\n`,
       );
-      await withTimeout(duplicateStarted.promise);
+      await gateway.wait(duplicateStarted.promise);
+
+      // This is the same bodyless probe used by LocalServerMonitor. A full
+      // workspace run can expose the test listener through turbo ancestry.
+      const probeHeaders = { "User-Agent": "SynaraLocalServerMonitor/1.0", Accept: "text/html" };
+      const probeRoot = await fetch(`http://127.0.0.1:${address.port}/`, { headers: probeHeaders });
+      expect(probeRoot.status).toBe(404);
+      const probeRpc = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
+        headers: probeHeaders,
+      });
+      expect(probeRpc.status).toBe(405);
+      expect(probeRpc.headers.get("allow")).toBe("POST");
 
       child.stdin.write(
         `${JSON.stringify({
@@ -169,57 +234,90 @@ describe("agent gateway stdio proxy", () => {
         })}\n`,
       );
 
-      expect(await withTimeout(pingResponse.promise)).toEqual({
+      expect(await gateway.wait(pingResponse.promise)).toEqual({
         jsonrpc: "2.0",
         id: "ping-after-cancel",
         result: {},
       });
-      await withTimeout(cancellationReceived.promise);
-      await withTimeout(slowAborted.promise);
+      await gateway.wait(cancellationReceived.promise);
+      await gateway.wait(slowAborted.promise);
       expect(duplicateAborted).toBe(false);
       expect(stderr).toEqual([]);
+      expect(rpcRequestCount).toBe(4);
 
       child.stdin.end();
-      await withTimeout(new Promise<void>((resolve) => child!.once("exit", () => resolve())));
+      await gateway.wait(new Promise<void>((resolve) => child!.once("exit", () => resolve())));
     } finally {
-      if (child) await stopChild(child);
-      if (server) await closeServer(server);
-      rmSync(stateDir, { recursive: true, force: true });
+      try {
+        if (child) await stopChild(child);
+        if (fixture) await fixture.close();
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
     }
   });
+
+  it.each(["", "{"])(
+    "surfaces malformed RPC body %j through the fixture failure channel",
+    async (body) => {
+      const gateway = createGatewayFixture(async (request) => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      });
+      await new Promise<void>((resolve) => gateway.server.listen(0, "127.0.0.1", resolve));
+      const address = gateway.server.address();
+      if (!address || typeof address === "string") throw new Error("Missing test server address");
+      try {
+        const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+        expect(response.status).toBe(500);
+        await expect(gateway.wait(new Promise<never>(() => {}))).rejects.toThrow(SyntaxError);
+      } finally {
+        await expect(gateway.close()).rejects.toThrow(SyntaxError);
+      }
+    },
+  );
 
   it("exchanges an ambient one-shot bootstrap and keeps the bearer inside the proxy", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "synara-stdio-bootstrap-"));
     const bootstrapStarted = deferred<void>();
     let bootstrapExchanges = 0;
     let forwardedRequests = 0;
-    let server: Server | undefined;
+    let fixture: ReturnType<typeof createGatewayFixture> | undefined;
     let child: ChildProcessWithoutNullStreams | undefined;
 
     try {
-      server = createServer(async (request, response) => {
-        if (request.url === "/mcp/bootstrap") {
-          bootstrapExchanges += 1;
-          expect(request.headers.authorization).toBe("Bearer one-shot-bootstrap");
-          if (bootstrapExchanges > 1) {
-            response.statusCode = 401;
-            response.end();
+      const gateway = (fixture = createGatewayFixture(
+        async (request, response) => {
+          if (request.url === "/mcp/bootstrap") {
+            bootstrapExchanges += 1;
+            expect(request.headers.authorization).toBe("Bearer one-shot-bootstrap");
+            if (bootstrapExchanges > 1) {
+              response.statusCode = 401;
+              response.end();
+              return;
+            }
+            bootstrapStarted.resolve(undefined);
+            response.setHeader("Content-Type", "application/json");
+            response.end(JSON.stringify({ bearerToken: "private-session-bearer" }));
             return;
           }
-          bootstrapStarted.resolve(undefined);
+          expect(request.url).toBe("/mcp");
+          expect(request.headers.authorization).toBe("Bearer private-session-bearer");
+          const chunks: Buffer[] = [];
+          for await (const chunk of request) chunks.push(Buffer.from(chunk));
+          const message = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { id: string };
+          forwardedRequests += 1;
           response.setHeader("Content-Type", "application/json");
-          response.end(JSON.stringify({ bearerToken: "private-session-bearer" }));
-          return;
-        }
-        expect(request.url).toBe("/mcp");
-        expect(request.headers.authorization).toBe("Bearer private-session-bearer");
-        const chunks: Buffer[] = [];
-        for await (const chunk of request) chunks.push(Buffer.from(chunk));
-        const message = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { id: string };
-        forwardedRequests += 1;
-        response.setHeader("Content-Type", "application/json");
-        response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }));
-      });
+          response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: {} }));
+        },
+        ["/mcp", "/mcp/bootstrap"],
+      ));
+      const server = gateway.server;
       await new Promise<void>((resolve, reject) => {
         const onError = (error: Error) => reject(error);
         server!.once("error", onError);
@@ -261,7 +359,7 @@ describe("agent gateway stdio proxy", () => {
       // The exchange is eager: by the time a provider command descendant can
       // run, it inherits no real bearer and the ambient one-shot credential is
       // already spent.
-      await withTimeout(bootstrapStarted.promise);
+      await gateway.wait(bootstrapStarted.promise);
       const runProviderDescendant = async (): Promise<unknown> => {
         const descendant = spawn(
           process.execPath,
@@ -277,7 +375,9 @@ describe("agent gateway stdio proxy", () => {
         let output = "";
         descendant.stdout.setEncoding("utf8");
         descendant.stdout.on("data", (chunk: string) => (output += chunk));
-        await withTimeout(new Promise<void>((resolve) => descendant.once("exit", () => resolve())));
+        await gateway.wait(
+          new Promise<void>((resolve) => descendant.once("exit", () => resolve())),
+        );
         return JSON.parse(output) as unknown;
       };
       // Before the first MCP initialize/ping message, the proxy has already
@@ -288,7 +388,7 @@ describe("agent gateway stdio proxy", () => {
         const response = deferred<Record<string, unknown>>();
         responses.set(id, response);
         child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method: "ping" })}\n`);
-        expect(await withTimeout(response.promise)).toEqual({
+        expect(await gateway.wait(response.promise)).toEqual({
           jsonrpc: "2.0",
           id,
           result: {},
@@ -301,25 +401,32 @@ describe("agent gateway stdio proxy", () => {
       expect(bootstrapExchanges).toBe(3);
       expect(forwardedRequests).toBe(2);
       child.stdin.end();
-      await withTimeout(new Promise<void>((resolve) => child!.once("exit", () => resolve())));
+      await gateway.wait(new Promise<void>((resolve) => child!.once("exit", () => resolve())));
     } finally {
-      if (child) await stopChild(child);
-      if (server) await closeServer(server);
-      rmSync(stateDir, { recursive: true, force: true });
+      try {
+        if (child) await stopChild(child);
+        if (fixture) await fixture.close();
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
     }
   });
 
   it("aborts a hung eager bootstrap when stdin closes", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "synara-stdio-bootstrap-abort-"));
     const bootstrapStarted = deferred<void>();
-    let server: Server | undefined;
+    let fixture: ReturnType<typeof createGatewayFixture> | undefined;
     let child: ChildProcessWithoutNullStreams | undefined;
 
     try {
-      server = createServer((request) => {
-        if (request.url === "/mcp/bootstrap") bootstrapStarted.resolve(undefined);
-        // Intentionally never respond. Closing stdin must still stop the proxy.
-      });
+      const gateway = (fixture = createGatewayFixture(
+        (request) => {
+          if (request.url === "/mcp/bootstrap") bootstrapStarted.resolve(undefined);
+          // Intentionally never respond. Closing stdin must still stop the proxy.
+        },
+        ["/mcp/bootstrap"],
+      ));
+      const server = gateway.server;
       await new Promise<void>((resolve, reject) => {
         const onError = (error: Error) => reject(error);
         server!.once("error", onError);
@@ -343,16 +450,19 @@ describe("agent gateway stdio proxy", () => {
         stdio: ["pipe", "pipe", "pipe"],
       });
 
-      await withTimeout(bootstrapStarted.promise);
+      await gateway.wait(bootstrapStarted.promise);
       child.stdin.end();
-      await withTimeout(
+      await gateway.wait(
         new Promise<void>((resolve) => child!.once("exit", () => resolve())),
         1_000,
       );
     } finally {
-      if (child) await stopChild(child);
-      if (server) await closeServer(server);
-      rmSync(stateDir, { recursive: true, force: true });
+      try {
+        if (child) await stopChild(child);
+        if (fixture) await fixture.close();
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
     }
   });
 });

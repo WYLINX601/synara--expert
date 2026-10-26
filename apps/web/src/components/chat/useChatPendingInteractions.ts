@@ -399,8 +399,8 @@ export function useChatPendingInteractions({
         ...existing,
         [activePendingUserInputKey]: nextRequestAnswers,
       }));
-      promptRef.current = "";
-      setComposerCursor(0);
+      promptRef.current = nextDraftAnswer.customAnswer ?? "";
+      if (promptRef.current.length === 0) setComposerCursor(0);
       setComposerTrigger(null);
       return nextDraftAnswer;
     },
@@ -430,6 +430,7 @@ export function useChatPendingInteractions({
       const nextDraftAnswer = setPendingUserInputCustomAnswer(
         pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey]?.[questionId],
         value,
+        activePendingQuestion ?? undefined,
       );
       const nextRequestAnswers = {
         ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey],
@@ -453,6 +454,7 @@ export function useChatPendingInteractions({
       setComposerCursor,
       setComposerTrigger,
       activePendingUserInputKey,
+      activePendingQuestion,
       pendingUserInputAnswersByRequestIdRef,
       setPendingUserInputAnswersByRequestId,
     ],

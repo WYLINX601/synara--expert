@@ -95,6 +95,7 @@ export function useChatComposerEditing({
             activePendingQuestion.id
           ],
           next.text,
+          activePendingQuestion,
         );
         const nextRequestAnswers = {
           ...pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey],

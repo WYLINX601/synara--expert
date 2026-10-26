@@ -82,7 +82,7 @@ Personal Workbench 已更新为 0.1.5，源码 `8f7143cf6f001aa495d57f0e3867a91c
 
 2026-10-26 后续需求已收敛，用户已授权完成五个开发阶段，开发与本轮可执行验证已完成，Claude 真实模型按用户选择保留认证阻塞：解决 G1、对齐 G4 筛选排序/G6 前后端批量装配/G7 管理 CLI/G11 原生元数据装配；仅四端，不做浏览器目录上传、市场检索、工作区或机器扫描，不创建默认管理 Agent。用户确认更新从下一次 Run 生效：当前运行及恢复保持旧装配，未启动排队与同任务后续 Run 解析最新版本。原生字段不再作为装配拒绝条件；原生执行、相对资源和子运行继承需一并研发验证。见[产品范围](../docs/skill-management-product-discussion-v0.1.md#iteration-20261026)与[研发修订方案](../docs/expert-skill-package-design.md#iteration-plan-20261026)。本轮实际进度和验证见[实施记录](../docs/skill-management-2026-10-26-acceptance.md)，不继承 `bc29ed9bf` 的通过结论；下段保留上一候选原结果。
 
-随后用户补充 Multica 参考并授权详情阅读预览、按需运行时导入、筛选和编辑界面优化；两种详情视图统一 920px、使用浅色边框。2026-10-26 用户已要求合入 main 并推送，当前正在整合已有 main 的 Worker 上下文及 OMP 问答修复，合并后的检查与 Git 结果单独留证；不将其解释为更新日用应用或发布授权。
+随后用户补充 Multica 参考并授权详情阅读预览、按需运行时导入、筛选和编辑界面优化；两种详情视图统一 920px、使用浅色边框。2026-10-26 用户已要求合入 main 并推送，集成候选保留已有 main 的 Worker 上下文及 OMP 问答修复；合并后的检查与 Git 结果以对应 PR 为准，界面证据见[审查材料](../.github/pr-evidence/skill-management-20261026/README.md)。该授权不包含更新日用应用或发布。
 
 2026-10-25，用户确认参考 Multica 的统一管理方案并要求实施：Expert 只使用固定装配，空装配为零；普通任务沿用 harness；编辑/来源刷新自动影响新任务，已接受任务固定旧包；无法证明子代理继承则阻断，不建设旧任务兼容/转换层或清理历史数据。当前架构见[固定装配方案](../docs/expert-skill-package-design.md#current-skill-management)，实际检查、运行缺口与交付状态见[本轮验收记录](../docs/skill-management-2026-10-25-acceptance.md)。候选位于 `codex/feature-skill-management` 的独立 worktree，已完成实现、独立审查补强、全库与所列本地门禁及隔离预览验证，等待用户评审；本地提交不代表 main、安装应用或发布已更新。
 

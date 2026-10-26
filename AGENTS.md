@@ -55,6 +55,16 @@ Synara ships two desktop apps from the same `main`: **Synara** (Stable) and **Sy
 - Keep menus compact. Variants of one action (handoff targets, copy variants, fork targets, hub moves) share a single parent row that opens a submenu instead of each taking a top-level line. Imperative context menus get this from `children` on `ContextMenuItem` via [contextMenuGroup.ts](apps/web/src/lib/contextMenuGroup.ts), which renders a native submenu on desktop and a flyout in the browser; React menus use `MenuSub` from [menu.tsx](apps/web/src/components/ui/menu.tsx). A group with a single entry stays a plain row.
 - UI text must follow the font size the user chose in Settings. Use the `text-ui` tokens defined in the `@theme` block of [index.css](apps/web/src/index.css) and driven by [useAppTypography.ts](apps/web/src/hooks/useAppTypography.ts): `text-ui` for body copy, `text-ui-sm`/`text-ui-xs` for secondary text, `text-ui-lg` for emphasized lines and small panel titles, and `text-chat*` for transcript content. Inherit the UI font family. Do not use fixed Tailwind sizes such as `text-sm`, `text-xs`, or `text-[11px]`, or the long `text-[length:var(--app-font-size-…)]` form. Only dialog titles and large headings may use a fixed size; `apps/web/src/uiFontSize.test.ts` fails when fixed sizes are added.
 
+## Development environment lifecycle
+
+Follow the [environment and storage lifecycle](docs/workbench-development-workflow.md#environment-lifecycle) for environment creation, reuse, capacity checks, and task closure. It is the authoritative policy; documented planned tools are not implemented capabilities.
+
+- Reuse the main checkout and development preview. Create a temporary tree only for a documented isolation need within the policy budget, not automatically per chat or subagent.
+- Before switching, refreshing, or deleting, verify the owning task, tracked/untracked/ignored work, source history, data compatibility, and live process/file use. Serialize conflicting operations; expired ownership or a merged branch alone never permits deletion.
+- Treat resource closure as part of delivery. Preserve unique ignored data before native worktree archival, reclaim verified rebuildable resources, and report blocked paths and resumption conditions separately from code completion.
+- Check peak disk needs before large copies, dependency installs, or builds. Never meet a quota by deleting unique work, live user data, or required recovery points. Keep machine-specific budgets and runtime records in local operator configuration.
+- Verify complete replacement recovery sets and update references before retiring old sets. If automation is unavailable, perform the policy checks manually; do not claim safeguards merely because a configuration field exists.
+
 ## Local instance isolation
 
 Use a separate home directory and unused server/web ports when another Synara instance is running. Check the dev runner's dry-run output before starting an isolated instance; do not reset the user's database or reuse production state to make a test pass.

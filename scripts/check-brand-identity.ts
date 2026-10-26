@@ -197,6 +197,39 @@ const approvedFixtureBundleIdentityPatterns = new Map<string, RegExp>(
   ),
 );
 
+// Hub's numbered delivery stage is not a product identity. Only the reviewed
+// phase phrases at these paths may omit that token; all surrounding text and
+// all other identities still pass through the ordinary checks below.
+const approvedHubStageReferencePatterns = new Map<string, RegExp>(
+  (
+    [
+      ["apps/server/src/hubCollaboration/planRevisionImpact.ts", [" proposal analysis,"]],
+      [
+        "context/PROJECT_CONTEXT.md",
+        ["，沿用", " 实施记录", " 仍为纯修订影响分析", " 仅完成纯影响分析", " 运行中修订"],
+      ],
+      ["docs/hub-review-2026-10-22/Hub_技术方案_V0.8.md", [" 完整 V0.8 协作"]],
+      ["docs/hub-review-2026-10-22/README.md", ["；新增实现", " 实施记录", " 并行汇合"]],
+      ["docs/hub-review-2026-10-22/T1-T2-实施验收-2026-10-23.md", [" 并行汇合"]],
+      [
+        "docs/hub-review-2026-10-22/T2收尾与T3实施记录-2026-10-23.md",
+        [" 实施记录", " 未完成边界", " 首先补运行中修订", " 影响分析", " 既有基础", " 全部完成"],
+      ],
+      ["docs/security-audit-2026-10-23/README.md", [" 工作"]],
+      ["docs/security-audit-2026-10-23/sources/original-report.txt", [" 并行审核"]],
+      ["docs/workbench-adaptation-plan.md", [" 的 `planRevisionImpact`"]],
+      ["docs/workspace-consolidation-2026-10-24.md", [" 纯影响分析", " 运行中修订"]],
+      ["workbench/integration-points.json", [" revision impact analysis is preparatory"]],
+    ] satisfies readonly (readonly [string, readonly string[]])[]
+  ).map(([path, phrases]) => [
+    path,
+    new RegExp(
+      `\\b${escapeRegExp(retiredShortName.toUpperCase())}(?=${phrases.map(escapeRegExp).join("|")})`,
+      "g",
+    ),
+  ]),
+);
+
 // Raster images cannot be searched for embedded text. Keep the user-facing
 // screenshots behind reviewed digests so changing either one requires another
 // explicit visual identity audit instead of silently bypassing this guard.
@@ -257,12 +290,16 @@ export function findBrandIdentityViolations(
     }
     const consumedLines = new Set<number>();
     const approvedFixtureIdentity = approvedFixtureBundleIdentityPatterns.get(file.path);
+    const approvedHubStageReference = approvedHubStageReferencePatterns.get(file.path);
     let markdownSection: string | null = null;
     for (const [index, line] of file.contents.split(/\r?\n/).entries()) {
       if (/^#{1,2}\s+/.test(line)) markdownSection = line.trim();
-      const textToCheck = approvedFixtureIdentity
+      const fixtureText = approvedFixtureIdentity
         ? line.replace(approvedFixtureIdentity, "")
         : line;
+      const textToCheck = approvedHubStageReference
+        ? fixtureText.replace(approvedHubStageReference, "")
+        : fixtureText;
       if (!containsForbiddenIdentity(textToCheck)) continue;
       const approvedLine = findApprovedIdentityLine(
         file.path,

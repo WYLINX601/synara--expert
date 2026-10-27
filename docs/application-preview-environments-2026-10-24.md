@@ -1,6 +1,12 @@
 # 桌面日用应用与独立预览环境
 
-更新：2026-10-24，Asia/Shanghai。来源：用户确认以应用日用、在应用内浏览器批注预览，并明确允许最新版本打包及更新安装。流程规范见[开发规范](workbench-development-workflow.md#browser-daily-preview)。本记录取代此前三角色的运行分工；[旧浏览器环境记录](browser-environments-2026-10-24.md)保留为历史及回退依据。
+更新：2026-10-27，Asia/Shanghai。来源：用户确认以应用日用、在应用内浏览器批注预览，并明确允许最新版本打包及更新安装。流程规范见[开发规范](workbench-development-workflow.md#browser-daily-preview)。本记录取代此前三角色的运行分工；[旧浏览器环境记录](browser-environments-2026-10-24.md)保留为历史及回退依据。
+
+## 当前日用更新（2026-10-27）
+
+用户授权六项审核修复提交推送 main 并更新日用应用。`/Applications/Personal Workbench.app` 已安装启动 **0.1.6**，实际构建源为 `d189ce8af2c8eec6ab30515cdaaee3485867b9d4`；main 后续 `4337c7e6e` 仅修正浏览器测试的时序匹配，CI 已成功。日用 home/profile 保持原路径，32 线程、308 消息、3 Space 和 18 Project 的原始 ID 均保留，699 个用户配置/凭据/专家资源文件摘要不变。
+
+恢复点为私有 `skill-review-delivery-20261027/recovery-set/`；现行 `application/installation-receipt.json` 与 `application/latest-application-backup.json` 已指向本轮实际回执和完整恢复组合。原应用 Finder 元数据原样保留，并另有已严格核验的干净 0.1.5 回退应用。具体源码、数据保护、产物摘要与本机路径见[交付记录](skill-management-review-fixes-2026-10-27.md#delivery-20261027)。没有公开二进制发布，也没有刷新或接管独立预览；不据此次日用更新宣称预览已与日用源码对齐。下文保留此前配置和核对时点。
 
 ## 当前核对（2026-10-26）
 

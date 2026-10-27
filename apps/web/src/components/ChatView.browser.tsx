@@ -7927,17 +7927,30 @@ describe("ChatView transcript geometry (full app)", () => {
         },
         { timeout: 8_000, interval: 16 },
       );
-      const detailIndex = wsRequests.findLastIndex(
-        (request) => request._tag === ORCHESTRATION_WS_METHODS.getThreadDetailSnapshot,
-      );
-      const snapshotReadIndex = wsRequests.findIndex(
+      const turnIndex = wsRequests.findIndex((request) => {
+        const command = readDispatchedCommand(request);
+        return command?.type === "thread.turn.start" && command.threadId === THREAD_ID;
+      });
+      // Background catch-up can request detail again after sending. Match the
+      // accepted snapshot's preflight sequence instead of the latest global read.
+      const snapshotReadIndex = wsRequests.findLastIndex(
         (request, index) =>
-          index > detailIndex && request._tag === WS_METHODS.serverReadExpertSnapshot,
+          index < turnIndex &&
+          request._tag === WS_METHODS.serverReadExpertSnapshot &&
+          request.snapshotId === binding.snapshotId,
       );
-      const turnIndex = wsRequests.findIndex(
-        (request) => readDispatchedCommand(request)?.type === "thread.turn.start",
+      const detailIndex = wsRequests.findLastIndex(
+        (request, index) =>
+          index < snapshotReadIndex &&
+          request._tag === ORCHESTRATION_WS_METHODS.getThreadDetailSnapshot &&
+          request.threadId === THREAD_ID,
       );
-      expect(detailIndex).toBeGreaterThanOrEqual(0);
+      const createIndex = wsRequests.findIndex((request) => {
+        const command = readDispatchedCommand(request);
+        return command?.type === "thread.create" && command.threadId === THREAD_ID;
+      });
+      expect(createIndex).toBeGreaterThanOrEqual(0);
+      expect(detailIndex).toBeGreaterThan(createIndex);
       expect(snapshotReadIndex).toBeGreaterThan(detailIndex);
       expect(turnIndex).toBeGreaterThan(snapshotReadIndex);
     } finally {

@@ -53,9 +53,15 @@ export function SkillLibraryDetail({
     [tags, setTags] = useState(initial.tags.join(", "));
   const [resourcePath, setResourcePath] = useState(initial.entryPath),
     [loadedPath, setLoadedPath] = useState<string | null>(null),
-    [text, setText] = useState<string | null>(null),
+    [text, setTextState] = useState<string | null>(null),
     [savedText, setSavedText] = useState<string | null>(null),
     [version, setVersion] = useState(0);
+  const textRef = useRef<string | null>(null),
+    textVersion = useRef(0);
+  const setText = (value: string | null) => {
+    textRef.current = value;
+    setTextState(value);
+  };
   const [busy, setBusy] = useState(false),
     [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"overview" | "files">("overview");
@@ -73,10 +79,12 @@ export function SkillLibraryDetail({
   };
   const detailId = useId();
   const editorControls = useRef<CodeEditHistoryControls | null>(null);
-  const readDraftText = () =>
-    tab === "files" && mode === "edit" && loadedPath && text !== null
-      ? (editorControls.current?.getText?.() ?? text)
-      : text;
+  const readDraftText = () => {
+    const currentText = textRef.current;
+    return tab === "files" && mode === "edit" && loadedPath && currentText !== null
+      ? (editorControls.current?.getText?.() ?? currentText)
+      : currentText;
+  };
   const generation = useRef(connection.generation);
   generation.current = connection.generation;
   const pkg = useQuery({
@@ -129,6 +137,7 @@ export function SkillLibraryDetail({
   const accept = async (
     result: SkillLibraryResponse,
     canonicalPath: string | null = loadedPath,
+    submittedText?: { value: string | null; version: number },
   ) => {
     if (!result.skill) throw new Error("服务器未返回保存版本。");
     acceptedBase.current = result.skill;
@@ -138,24 +147,41 @@ export function SkillLibraryDetail({
     setTags(result.skill.tags.join(", "));
     setTagInput("");
     if (canonicalPath) {
-      editorControls.current = null;
-      setText(null);
-      setSavedText(null);
+      let canonicalText: string | null;
       try {
-        const canonical = await readResource(result.skill, canonicalPath);
-        setText(canonical);
-        setSavedText(canonical);
-        setVersion((current) => current + 1);
+        canonicalText = await readResource(result.skill, canonicalPath);
       } catch (cause) {
-        setLoadedPath(null);
+        if (submittedText) {
+          const preserveDraft = textVersion.current !== submittedText.version;
+          const currentDraft = preserveDraft ? readDraftText() : submittedText.value;
+          editorControls.current = null;
+          setText(currentDraft);
+          setSavedText(null);
+          setVersion((current) => current + 1);
+        } else {
+          editorControls.current = null;
+          setLoadedPath(null);
+          setText(null);
+          setSavedText(null);
+        }
+        await onChanged();
         throw cause;
       }
+      const preserveDraft =
+        submittedText !== undefined && textVersion.current !== submittedText.version;
+      const currentDraft = preserveDraft ? readDraftText() : null;
+      editorControls.current = null;
+      const acceptedText = preserveDraft ? currentDraft : canonicalText;
+      setText(acceptedText);
+      setSavedText(canonicalText);
+      setVersion((current) => current + 1);
     }
     await onChanged();
   };
   const save = () => {
     const draftText = readDraftText();
     if (draftText !== text) setText(draftText);
+    const submittedText = { value: draftText, version: textVersion.current };
     return run(async () => {
       let result: SkillLibraryResponse;
       const currentBase = acceptedBase.current;
@@ -183,7 +209,7 @@ export function SkillLibraryDetail({
             changes: [],
           }),
         );
-      await accept(result);
+      await accept(result, loadedPath, submittedText);
     });
   };
   const guard = useExpertDraftGuard({
@@ -724,7 +750,10 @@ export function SkillLibraryDetail({
                           value={text}
                           valueVersion={version}
                           resolvedTheme={resolvedTheme}
-                          onChange={setText}
+                          onChange={(value) => {
+                            textVersion.current += 1;
+                            setText(value);
+                          }}
                           onSave={() => {
                             if (!busy) void save();
                           }}

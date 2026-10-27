@@ -15,7 +15,7 @@ import {
   invalidateNativeSkillAssemblyVerification,
 } from "./expertSkillCatalog";
 
-const PROJECTION_VERSION = "native-skill-view-v3";
+const PROJECTION_VERSION = "native-skill-view-v4";
 
 export type FixedNativeAgentDefinition = Pick<
   AgentDefinition,
@@ -379,8 +379,43 @@ async function loadManagedSubagents(
   return { agents, allowedSubagentTypes: [...allowed].toSorted() };
 }
 
-function pluginMetadata(name: string): string {
-  return `${JSON.stringify({ name, version: "1.0.0", description: "Fixed Expert Skill assembly" })}\n`;
+async function readNativePluginManifest(
+  contentRoot: string,
+  resources: ReadonlyArray<{
+    readonly path: string;
+    readonly kind: "file" | "directory";
+    readonly sha256: string;
+  }>,
+): Promise<Record<string, unknown>> {
+  const manifest = resources.find(
+    (resource) => resource.path === ".claude-plugin/plugin.json" && resource.kind === "file",
+  );
+  if (!manifest) return {};
+  const bytes = await expertResourceFiles.read(
+    path.join(contentRoot, ".claude-plugin", "plugin.json"),
+  );
+  if (sha(bytes) !== manifest.sha256)
+    throw new Error("Immutable Claude plugin manifest changed before projection.");
+  const parsed: unknown = JSON.parse(bytes.toString("utf8"));
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    typeof (parsed as Record<string, unknown>).name !== "string" ||
+    !(parsed as Record<string, unknown>).name
+  ) {
+    throw new Error("Immutable Claude plugin manifest must have a non-empty name.");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function pluginMetadata(name: string, nativeManifest: Record<string, unknown>): string {
+  return `${JSON.stringify({
+    version: "1.0.0",
+    description: "Fixed Expert Skill assembly",
+    ...nativeManifest,
+    name,
+  })}\n`;
 }
 
 function addDirectory(expected: Map<string, ExpectedFile>, relative: string): void {
@@ -428,6 +463,9 @@ async function mirrorPackage(
   const rootSkill = input.entries.find((entry) => entry.entryPath === "SKILL.md");
   for (const resource of input.resources) {
     if (resource.kind !== "file") continue;
+    // This path is always rendered from host-controlled metadata. The imported
+    // manifest contributes metadata through pluginMetadata, but never its raw bytes.
+    if (resource.path === ".claude-plugin/plugin.json") continue;
     const isSkillEntry = path.posix.basename(resource.path) === "SKILL.md";
     const keepAtPluginRoot =
       !isSkillEntry || (selected.has(resource.path) && resource.path.startsWith("skills/"));
@@ -600,7 +638,8 @@ export async function createFixedSkillProjection(
     const pluginRelative = `plugins/${perPackagePlugin}`;
     const pluginPath = path.join(root, pluginRelative);
     const manifestRelative = `${pluginRelative}/.claude-plugin/plugin.json`;
-    const metadata = pluginMetadata(perPackagePlugin);
+    const nativeManifest = await readNativePluginManifest(view.contentRoot, view.resources);
+    const metadata = pluginMetadata(perPackagePlugin, nativeManifest);
     expected.set(manifestRelative, { sha256: sha(metadata), content: metadata });
     addDirectory(expected, `${pluginRelative}/.claude-plugin`);
     addDirectory(expected, pluginRelative);

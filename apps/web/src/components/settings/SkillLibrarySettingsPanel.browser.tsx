@@ -538,6 +538,59 @@ describe("Skill library management browser flows", () => {
       .toBeDisabled();
   });
 
+  it("preserves edits made during save and uses the accepted revision on the next save", async () => {
+    const resources = managedFiles();
+    const releaseFirstUpload = deferred<void>();
+    const originalFetch = resources.fetch.getMockImplementation()!;
+    let uploadCount = 0;
+    resources.fetch.mockImplementation(async (input, options) => {
+      const url = new URL(String(input), window.location.href);
+      if (url.pathname === "/api/skills/upload" && options?.method === "POST") {
+        uploadCount += 1;
+        if (uploadCount === 1) await releaseFirstUpload.promise;
+      }
+      return originalFetch(input, options);
+    });
+
+    await mountPanel();
+    await page.getByText("Alpha", { exact: true }).click();
+    await showFiles(true);
+    await replaceEditor(
+      "---{Enter}name: Alpha{Enter}description: Review Alpha{Enter}---{Enter}Submitted body.",
+    );
+    const save = page.getByRole("button", { name: "保存新版本", exact: true });
+    await save.click();
+    await expect.poll(() => uploadCount).toBe(1);
+
+    await replaceEditor(
+      "---{Enter}name: Alpha{Enter}description: Review Alpha{Enter}---{Enter}Typed while saving.",
+    );
+    releaseFirstUpload.resolve();
+    await expect.poll(() => resources.current().revision).toBe(3);
+    await expect.element(save).toBeEnabled();
+
+    const editor = page.getByRole("textbox", { name: "alpha/SKILL.md", exact: true });
+    await expect.element(editor).toHaveTextContent("Typed while saving.");
+    await expect.element(page.getByText("有未保存的更改", { exact: true })).toBeVisible();
+    expect(resources.files.get("alpha/SKILL.md")).toContain("Submitted body.");
+    expect(resources.current().revision).toBe(3);
+
+    await save.click();
+    await expect.poll(() => resources.current().revision).toBe(4);
+    expect(resources.files.get("alpha/SKILL.md")).toContain("Typed while saving.");
+    const uploads = resources.fetch.mock.calls.filter(
+      ([input, options]) =>
+        new URL(String(input), window.location.href).pathname === "/api/skills/upload" &&
+        options?.method === "POST",
+    );
+    expect(
+      uploads.map(([input]) =>
+        new URL(String(input), window.location.href).searchParams.get("expectedRevision"),
+      ),
+    ).toEqual(["2", "3"]);
+    await expect.element(save).toBeDisabled();
+  });
+
   it("edits tag chips without duplicates and preserves pending input when removing a chip", async () => {
     managedFiles();
     await mountPanel();
@@ -1446,6 +1499,7 @@ describe("Skill library management browser flows", () => {
     expect(applied).toMatchObject({
       requestId: previewCall?.action === "updateFromSource" ? previewCall.requestId : undefined,
       overwriteLocalEdits: true,
+      expectedPackageId: preview.package.packageId,
     });
   });
 
@@ -1473,6 +1527,7 @@ describe("Skill library management browser flows", () => {
             request.items.length === 1 &&
             request.items[0]?.operation === "updateFromSource" &&
             !!request.items[0]?.requestId &&
+            request.items[0]?.expectedPackageId === preview.package.packageId &&
             request.dryRun !== true,
         ),
       )

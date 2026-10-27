@@ -11391,7 +11391,7 @@ const expertV2Runtime = makeProviderServiceLayer(
         expertV2AppliedWrites.push(record);
       }),
   },
-  { confirmSkillApplication: true },
+  { confirmSkillApplication: true, includePi: true },
 );
 const expertV2ForkContextRepository = makeMutableContextRepository();
 const expertV2ForkRuntime = makeProviderServiceLayer(
@@ -11409,10 +11409,246 @@ const expertV2ForkRuntime = makeProviderServiceLayer(
 );
 
 expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
+  it.effect("marks failed Expert recovery uncertain and blocks its next native startup", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => expertV2FixturePromise);
+      const assemblies = createRunSkillAssemblyStore(fixture.stateDir);
+      const threadId = asThreadId("expert-v2-initialization-uncertain-recovery");
+      const rootRunId = `run:${threadId}:initial`;
+      const assembly = yield* Effect.promise(() =>
+        assemblies.prepare({
+          threadId,
+          rootRunId,
+          baseSnapshotId: fixture.session.snapshotId,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      const service = yield* ProviderService;
+      const adapter = expertV2Runtime.codex;
+      adapter.startSession.mockClear();
+      adapter.sendTurn.mockClear();
+      const startsBefore = adapter.startSession.mock.calls.length;
+      const sendsBefore = adapter.sendTurn.mock.calls.length;
+
+      yield* service.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+        expertSession: assembly.session,
+      });
+      assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "ready");
+      assert.equal(adapter.startSession.mock.calls.length, startsBefore + 1);
+
+      yield* adapter.stopSession(threadId);
+      let startupSideEffects = 0;
+      const failure = new ProviderAdapterSessionNotFoundError({ provider: "codex", threadId });
+      adapter.startSession.mockImplementationOnce(() =>
+        Effect.sync(() => {
+          startupSideEffects += 1;
+        }).pipe(Effect.andThen(Effect.fail(failure))),
+      );
+      const failedRecovery = yield* Effect.exit(
+        service.sendTurn({ threadId, input: "Recover once", attachments: [] }),
+      );
+      assert.isTrue(Exit.isFailure(failedRecovery));
+      assert.equal(startupSideEffects, 1);
+      assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "uncertain");
+      assert.equal(adapter.startSession.mock.calls.length, startsBefore + 2);
+
+      const blockedRecovery = yield* Effect.exit(
+        service.sendTurn({ threadId, input: "Do not replay", attachments: [] }),
+      );
+      assert.isTrue(Exit.isFailure(blockedRecovery));
+      assert.equal(adapter.startSession.mock.calls.length, startsBefore + 2);
+      assert.equal(adapter.sendTurn.mock.calls.length, sendsBefore);
+      assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "uncertain");
+    }),
+  );
+
+  it.effect("marks an interrupted Expert startup uncertain before blocking recovery replay", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => expertV2FixturePromise);
+      const assemblies = createRunSkillAssemblyStore(fixture.stateDir);
+      const threadId = asThreadId("expert-v2-initialization-interrupted-recovery");
+      const rootRunId = `run:${threadId}:initial`;
+      const assembly = yield* Effect.promise(() =>
+        assemblies.prepare({
+          threadId,
+          rootRunId,
+          baseSnapshotId: fixture.session.snapshotId,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      const service = yield* ProviderService;
+      const adapter = expertV2Runtime.codex;
+      adapter.startSession.mockClear();
+      adapter.sendTurn.mockClear();
+      yield* service.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+        expertSession: assembly.session,
+      });
+      assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "ready");
+      yield* adapter.stopSession(threadId);
+
+      const startupEntered = yield* Deferred.make<void>();
+      let startupSideEffects = 0;
+      adapter.startSession.mockImplementationOnce(() =>
+        Effect.gen(function* () {
+          startupSideEffects += 1;
+          yield* Deferred.succeed(startupEntered, undefined);
+          return yield* Effect.never;
+        }),
+      );
+      const recovery = yield* service
+        .sendTurn({ threadId, input: "Interrupt recovery", attachments: [] })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(startupEntered);
+      yield* Fiber.interrupt(recovery);
+
+      assert.equal(startupSideEffects, 1);
+      assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "uncertain");
+      const startsAfterInterruption = adapter.startSession.mock.calls.length;
+      const blockedRecovery = yield* Effect.exit(
+        service.sendTurn({ threadId, input: "Do not replay", attachments: [] }),
+      );
+      assert.isTrue(Exit.isFailure(blockedRecovery));
+      assert.equal(adapter.startSession.mock.calls.length, startsAfterInterruption);
+      assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "uncertain");
+    }),
+  );
+
+  it.effect("runs rollback restoration through the same Expert initialization boundary", () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(() => expertV2FixturePromise);
+      const assemblies = createRunSkillAssemblyStore(fixture.stateDir);
+      const threadId = asThreadId("expert-v2-initialization-rollback");
+      const rootRunId = `run:${threadId}:initial`;
+      const assembly = yield* Effect.promise(() =>
+        assemblies.prepare({
+          threadId,
+          rootRunId,
+          baseSnapshotId: fixture.session.snapshotId,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      const service = yield* ProviderService;
+      const adapter = expertV2Runtime.codex;
+      adapter.startSession.mockClear();
+      const initialStarts = adapter.startSession.mock.calls.length;
+      yield* service.startSession(threadId, {
+        provider: "codex",
+        threadId,
+        runtimeMode: "full-access",
+        expertSession: assembly.session,
+      });
+      assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "ready");
+      yield* service.clearSessionResumeCursor!({ threadId, preserveActiveRuntime: true });
+
+      const replacementFailure = new ProviderAdapterSessionNotFoundError({
+        provider: "pi",
+        threadId,
+      });
+      expertV2Runtime.pi.startSession.mockImplementationOnce(() => Effect.fail(replacementFailure));
+      const replacement = yield* Effect.exit(
+        service.startSession(threadId, {
+          provider: "pi",
+          threadId,
+          runtimeMode: "full-access",
+        }),
+      );
+
+      assert.isTrue(Exit.isFailure(replacement));
+      assert.equal(adapter.startSession.mock.calls.length, initialStarts + 2);
+      assert.isTrue(yield* adapter.hasSession(threadId));
+      assert.isFalse(yield* expertV2Runtime.pi.hasSession(threadId));
+      assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "ready");
+      yield* service.stopSession({ threadId });
+    }),
+  );
+
+  it.effect(
+    "blocks recovery after Expert rollback restoration fails with possible side effects",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => expertV2FixturePromise);
+        const assemblies = createRunSkillAssemblyStore(fixture.stateDir);
+        const threadId = asThreadId("expert-v2-initialization-rollback-uncertain");
+        const rootRunId = `run:${threadId}:initial`;
+        const assembly = yield* Effect.promise(() =>
+          assemblies.prepare({
+            threadId,
+            rootRunId,
+            baseSnapshotId: fixture.session.snapshotId,
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        const service = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const adapter = expertV2Runtime.codex;
+        adapter.startSession.mockClear();
+        adapter.sendTurn.mockClear();
+        yield* service.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          runtimeMode: "full-access",
+          expertSession: assembly.session,
+        });
+        assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "ready");
+        yield* service.clearSessionResumeCursor!({ threadId, preserveActiveRuntime: true });
+        yield* directory.upsert({
+          threadId,
+          provider: "codex",
+          runtimePayload: { [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: true },
+        });
+
+        const replacementFailure = new ProviderAdapterSessionNotFoundError({
+          provider: "pi",
+          threadId,
+        });
+        expertV2Runtime.pi.startSession.mockImplementationOnce(() =>
+          Effect.fail(replacementFailure),
+        );
+        let restoreSideEffects = 0;
+        const restoreFailure = new ProviderAdapterSessionNotFoundError({
+          provider: "codex",
+          threadId,
+        });
+        adapter.startSession.mockImplementationOnce(() =>
+          Effect.sync(() => {
+            restoreSideEffects += 1;
+          }).pipe(Effect.andThen(Effect.fail(restoreFailure))),
+        );
+        const replacement = yield* Effect.exit(
+          service.startSession(threadId, {
+            provider: "pi",
+            threadId,
+            runtimeMode: "full-access",
+          }),
+        );
+
+        assert.isTrue(Exit.isFailure(replacement));
+        assert.equal(restoreSideEffects, 1);
+        assert.equal(adapter.startSession.mock.calls.length, 2);
+        assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "uncertain");
+
+        const blockedRecovery = yield* Effect.exit(
+          service.sendTurn({ threadId, input: "Do not replay rollback startup", attachments: [] }),
+        );
+        assert.isTrue(Exit.isFailure(blockedRecovery));
+        assert.equal(adapter.startSession.mock.calls.length, 2);
+        assert.equal(adapter.sendTurn.mock.calls.length, 0);
+        assert.equal((yield* Effect.promise(() => assemblies.read(rootRunId)))?.phase, "uncertain");
+      }),
+  );
+
   it.effect(
     "submits selected startup catalog, resolves explicit entries, isolates selection, and recovers from pinned bytes",
     () =>
       Effect.gen(function* () {
+        expertV2Runtime.codex.startSession.mockClear();
+        expertV2Runtime.codex.sendTurn.mockClear();
         const fixture = yield* Effect.promise(() => expertV2FixturePromise);
         const service = yield* ProviderService;
         const legacySkillThread = asThreadId("expert-v2-legacy-skill-blocked");

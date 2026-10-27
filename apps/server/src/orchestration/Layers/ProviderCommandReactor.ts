@@ -2577,17 +2577,6 @@ const make = Effect.gen(function* () {
           ...(preferredProvider ? { provider: preferredProvider } : {}),
           ...(resumeCursor !== undefined ? { resumeCursor } : {}),
         };
-        const initializationAttempt = runSkillAssembly
-          ? yield* Effect.tryPromise({
-              try: () => runSkillAssemblies.beginInitialization(runSkillAssembly.rootRunId),
-              catch: (cause) =>
-                new ProviderAdapterValidationError({
-                  provider: preferredProvider,
-                  operation: "skill.initialize",
-                  issue: String(cause),
-                }),
-            })
-          : undefined;
         const nativeStart = providerService.startSessionWithOutcome
           ? providerService.startSessionWithOutcome(threadId, startInput, {
               registerPriorTranscriptBootstrapOnFreshStart,
@@ -2600,37 +2589,7 @@ const make = Effect.gen(function* () {
                 priorTranscriptBootstrapPending: registerPriorTranscriptBootstrapOnFreshStart,
               })),
             );
-        const sessionOutcome = yield* nativeStart.pipe(
-          Effect.onError((cause) =>
-            runSkillAssembly && initializationAttempt
-              ? Effect.tryPromise(() =>
-                  runSkillAssemblies.finishInitialization(
-                    runSkillAssembly.rootRunId,
-                    initializationAttempt,
-                    Cause.pretty(cause),
-                  ),
-                ).pipe(
-                  Effect.catch((error) =>
-                    Effect.logError("Could not persist failed Skill initialization", { error }),
-                  ),
-                )
-              : Effect.void,
-          ),
-        );
-        if (runSkillAssembly && initializationAttempt)
-          yield* Effect.tryPromise({
-            try: () =>
-              runSkillAssemblies.finishInitialization(
-                runSkillAssembly.rootRunId,
-                initializationAttempt,
-              ),
-            catch: (cause) =>
-              new ProviderAdapterValidationError({
-                provider: preferredProvider,
-                operation: "skill.initialize",
-                issue: String(cause),
-              }),
-          });
+        const sessionOutcome = yield* nativeStart;
         yield* Effect.sync(() => {
           if (runSkillAssembly) threadSkillAssemblyIds.set(threadId, runSkillAssembly.assemblyId);
           else threadSkillAssemblyIds.delete(threadId);

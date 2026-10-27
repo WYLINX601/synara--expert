@@ -238,7 +238,12 @@ function makeSkillLibraryStore(stateDir: string) {
     revision?: number;
   };
   const previews = new Map<string, Pending>();
-  const activePreviews = new Map<string, AbortController>();
+  const activePreviews = new Map<string, Set<AbortController>>();
+  const activeRequests = new Set<Promise<unknown>>();
+  const track = <T>(operation: Promise<T>): Promise<T> => {
+    activeRequests.add(operation);
+    return operation.finally(() => activeRequests.delete(operation));
+  };
   let disposal: Promise<void> | undefined;
   const lock = <T>(operation: () => Promise<T>): Promise<T> => {
     const key = path.resolve(stateDir),
@@ -285,18 +290,48 @@ function makeSkillLibraryStore(stateDir: string) {
       throw new Error("Skill revision changed; reload before saving.");
     return item;
   };
-  const commit = async (
+  const commit = (
     items: SkillDefinition[],
     lifecycleHeld = false,
     beforeMutation?: () => Promise<void>,
   ) => {
-    const current = await readSkillLibraryDefinitions(stateDir),
-      ids = new Set(items.map((item) => item.skillId));
-    await writeRegistry(
-      [...current.filter((item) => !ids.has(item.skillId)), ...items],
-      lifecycleHeld,
-      beforeMutation,
-    );
+    const publish = async () => {
+      const current = await readSkillLibraryDefinitions(stateDir),
+        ids = new Set(items.map((item) => item.skillId)),
+        next = [...current.filter((item) => !ids.has(item.skillId)), ...items],
+        nextById = new Map(next.map((item) => [item.skillId, item]));
+      for (const item of items) {
+        const previous = current.find((entry) => entry.skillId === item.skillId);
+        if ((previous?.revision ?? 0) !== item.revision - 1)
+          throw new ExpertStoreError(
+            "Skill revision changed; reload before publishing.",
+            "revision_conflict",
+          );
+      }
+      // Expert saves share this lifecycle lock. Validate the proposed head while
+      // both its package and the complete set of affected bindings are stable.
+      for (const expert of await createExpertStore(stateDir).list()) {
+        if (!expert.skillBindings?.some((binding) => binding.enabled && ids.has(binding.skillId)))
+          continue;
+        await packages.resolveSelections(
+          expert.skillBindings.flatMap((binding) => {
+            if (!binding.enabled) return [];
+            const skill = nextById.get(binding.skillId);
+            if (!skill || skill.deleted)
+              throw new Error(`Skill not found or deleted: ${binding.skillId}`);
+            return [
+              {
+                packageId: skill.packageId,
+                entryPath: skill.entryPath,
+                activation: binding.activation,
+              },
+            ];
+          }),
+        );
+      }
+      await writeRegistry(next, true, beforeMutation);
+    };
+    return lifecycleHeld ? publish() : withSkillPackageLifecycle(stateDir, publish);
   };
   const recoverPlannedSkills = async (
     plannedSkills: ReadonlyArray<SkillDefinition>,
@@ -466,6 +501,7 @@ function makeSkillLibraryStore(stateDir: string) {
         ),
         overwritesLocalEdits: current?.locallyModified ?? false,
       };
+      if (previews.size >= 100) throw new Error("Too many pending Skill previews.");
       previews.set(preview.previewId, {
         preview,
         packagePreviewId: result.previewId,
@@ -1184,6 +1220,7 @@ function makeSkillLibraryStore(stateDir: string) {
   const updateFromSource = async (
     request: Extract<SkillLibraryRequest, { action: "updateFromSource" }>,
     context: SkillLibraryExecutionContext,
+    sourcePreview: () => SkillLibraryPreview,
   ): Promise<SkillLibraryUpdateResult> => {
     const requestFingerprint = fingerprint({
       action: "updateFromSource",
@@ -1191,6 +1228,7 @@ function makeSkillLibraryStore(stateDir: string) {
       skillId: request.skillId,
       expectedRevision: request.expectedRevision,
       overwriteLocalEdits: request.overwriteLocalEdits ?? false,
+      expectedPackageId: request.expectedPackageId,
     });
     let prior: Awaited<ReturnType<typeof operations.begin>> | undefined;
     if (!request.dryRun) {
@@ -1284,7 +1322,7 @@ function makeSkillLibraryStore(stateDir: string) {
 
     let preview: SkillLibraryPreview | undefined;
     try {
-      preview = await previewSource(current.source.location, "url", current);
+      preview = sourcePreview();
       const candidate = makeItem({
         pkg: preview.package,
         entryPath: current.source.entryPath,
@@ -1292,7 +1330,21 @@ function makeSkillLibraryStore(stateDir: string) {
         previous: current,
         modified: false,
       });
+      if (request.expectedPackageId && candidate.packageId !== request.expectedPackageId) {
+        await cleanup(preview.previewId);
+        const result: SkillLibraryUpdateResult = {
+          skillId: current.skillId,
+          status: "conflict",
+          revision: current.revision,
+          error:
+            "The hosted source changed after preview; preview and confirm again with a new requestId.",
+        };
+        if (!request.dryRun)
+          await operations.recordUpdateResult(request.requestId, requestFingerprint, result);
+        return result;
+      }
       if (prior?.plannedSkill && candidate.packageId !== prior.plannedSkill.packageId) {
+        await cleanup(preview.previewId);
         const result: SkillLibraryUpdateResult = {
           skillId: current.skillId,
           status: "conflict",
@@ -1362,7 +1414,7 @@ function makeSkillLibraryStore(stateDir: string) {
       return result;
     }
   };
-  const execute = async (
+  const executeRequest = async (
     raw: SkillLibraryRequest,
     context: SkillLibraryExecutionContext = {},
   ): Promise<SkillLibraryResponse> => {
@@ -1374,16 +1426,31 @@ function makeSkillLibraryStore(stateDir: string) {
       request: SkillLibraryRequest = hasOptionalWriteRequestId(decodedRequest)
         ? { ...decodedRequest, requestId: generatedRequestId }
         : decodedRequest;
-    if (request.action === "cancel") activePreviews.get(request.previewId)?.abort();
+    if (request.action === "cancel")
+      for (const controller of activePreviews.get(request.previewId) ?? []) controller.abort();
     const previewRequestId =
-      request.action === "previewImport" ? (request.requestId ?? randomUUID()) : undefined;
+      request.action === "previewImport" || request.action === "updateFromSource"
+        ? (request.requestId ?? randomUUID())
+        : request.action === "previewRefresh" ||
+            (request.action === "batch" &&
+              request.items.some(
+                (item) =>
+                  item.operation === "previewRefresh" || item.operation === "updateFromSource",
+              ))
+          ? randomUUID()
+          : undefined;
     const controller = previewRequestId ? new AbortController() : undefined;
     if (
+      request.action === "previewImport" &&
       previewRequestId &&
       (activePreviews.has(previewRequestId) || previews.has(previewRequestId))
     )
       throw new Error("Skill preview request ID is already in use.");
-    if (previewRequestId) activePreviews.set(previewRequestId, controller!);
+    if (previewRequestId) {
+      const controllers = activePreviews.get(previewRequestId) ?? new Set<AbortController>();
+      controllers.add(controller!);
+      activePreviews.set(previewRequestId, controllers);
+    }
     const writeRequestId = generatedRequestId,
       writeOperation = hasOptionalWriteRequestId(request) ? request.action : undefined,
       responseRequestId =
@@ -1401,7 +1468,63 @@ function makeSkillLibraryStore(stateDir: string) {
             request: { ...request, dryRun: undefined },
           })
         : undefined;
-    return lock(async () => {
+    type Prepared = { preview: SkillLibraryPreview } | { error: unknown };
+    const prepared = new Map<string, Prepared>(),
+      ownedPreviews = new Set<string>();
+    const prepareRefresh = async (skillId: string, expectedRevision: number, key: string) => {
+      try {
+        const skill = await revision(skillId, expectedRevision);
+        if (!refreshableSource(skill))
+          throw new Error("This Skill has no supported hosted source.");
+        const preview = await previewSource(
+          skill.source.location,
+          "url",
+          skill,
+          controller?.signal,
+        );
+        prepared.set(key, { preview });
+        ownedPreviews.add(preview.previewId);
+      } catch (error) {
+        prepared.set(key, { error });
+      }
+    };
+    const prepareUpdate = async (
+      update: Extract<SkillLibraryRequest, { action: "updateFromSource" }>,
+      key: string,
+    ) => {
+      try {
+        if (!update.dryRun) {
+          const prior = await operations.read(update.requestId);
+          if (
+            prior?.updateResult &&
+            ["updated", "unchanged", "skipped"].includes(prior.updateResult.status)
+          )
+            return;
+          if (prior?.plannedSkill) {
+            try {
+              await packages.read(prior.plannedSkill.packageId);
+              return; // Recovery uses the durable candidate without downloading again.
+            } catch (error) {
+              if (!(error instanceof SkillPackageStoreError && error.code === "not_found"))
+                throw error;
+            }
+          }
+        }
+        const skill = await revision(update.skillId, update.expectedRevision);
+        if (!refreshableSource(skill) || (skill.locallyModified && !update.overwriteLocalEdits))
+          return;
+        await prepareRefresh(update.skillId, update.expectedRevision, key);
+      } catch (error) {
+        prepared.set(key, { error });
+      }
+    };
+    const preparedPreview = (key: string) => {
+      const source = prepared.get(key);
+      if (!source) throw new Error("Source update was not prepared; preview and retry.");
+      if ("error" in source) throw source.error;
+      return source.preview;
+    };
+    const runOperation = async () => {
       let writeJournal: Awaited<ReturnType<typeof operations.begin>> | undefined;
       if (writeRequestId && writeOperation && writeFingerprint) {
         await context.beforeMutation?.();
@@ -1705,7 +1828,9 @@ function makeSkillLibraryStore(stateDir: string) {
               throw new Error(
                 "Only GitHub, Skills.sh, and ClawHub sources can be refreshed in place.",
               );
-            return { preview: await previewSource(skill.source.location, "url", skill) };
+            return {
+              preview: await previewSource(skill.source.location, "url", skill, controller?.signal),
+            };
           }
           case "refresh": {
             if (writeJournal?.plannedSkill) {
@@ -1823,7 +1948,9 @@ function makeSkillLibraryStore(stateDir: string) {
             return bindExperts(request, context);
           case "updateFromSource":
             return {
-              updateResult: await updateFromSource(request, context),
+              updateResult: await updateFromSource(request, context, () =>
+                preparedPreview("source"),
+              ),
               ...(request.dryRun ? { dryRun: true } : {}),
             };
           case "batch": {
@@ -1895,7 +2022,7 @@ function makeSkillLibraryStore(stateDir: string) {
                   const current = await revision(item.skillId, item.expectedRevision);
                   if (!refreshableSource(current))
                     throw new Error("This Skill has no supported hosted source and was skipped.");
-                  const preview = await previewSource(current.source.location, "url", current);
+                  const preview = preparedPreview(String(index));
                   if (request.dryRun) await cleanup(preview.previewId);
                   await appendResult(index, {
                     skillId: item.skillId,
@@ -1906,6 +2033,7 @@ function makeSkillLibraryStore(stateDir: string) {
                       : "Review the source replacement before confirming.",
                     preview,
                   });
+                  if (!request.dryRun) ownedPreviews.delete(preview.previewId);
                   continue;
                 } else if (item.operation === "refresh") {
                   const current = await revision(item.skillId, item.expectedRevision),
@@ -1967,9 +2095,13 @@ function makeSkillLibraryStore(stateDir: string) {
                       ...(item.overwriteLocalEdits !== undefined
                         ? { overwriteLocalEdits: item.overwriteLocalEdits }
                         : {}),
+                      ...(item.expectedPackageId
+                        ? { expectedPackageId: item.expectedPackageId }
+                        : {}),
                       ...(request.dryRun ? { dryRun: true } : {}),
                     },
                     context,
+                    () => preparedPreview(String(index)),
                   );
                   const success = !["conflict", "failed"].includes(update.status);
                   await appendResult(index, {
@@ -2111,57 +2243,102 @@ function makeSkillLibraryStore(stateDir: string) {
           );
       }
       return response;
-    }).finally(() => {
-      if (previewRequestId) activePreviews.delete(previewRequestId);
-    });
+    };
+    try {
+      // Remote IO and independent validation never own the management commit
+      // queue. The operation below rechecks revisions, plans and authorization.
+      if (request.action === "updateFromSource") await prepareUpdate(request, "source");
+      if (request.action === "batch") {
+        const prior =
+          writeRequestId && !isDryRun ? await operations.read(writeRequestId) : undefined;
+        for (const [index, item] of request.items.entries()) {
+          if (prior?.batchResults?.some((entry) => entry.index === index && entry.result.success))
+            continue;
+          if (item.operation === "previewRefresh")
+            await prepareRefresh(item.skillId, item.expectedRevision, String(index));
+          if (item.operation === "updateFromSource" && item.requestId)
+            await prepareUpdate(
+              { ...item, action: "updateFromSource", requestId: item.requestId, dryRun: isDryRun },
+              String(index),
+            );
+        }
+      }
+      if (disposal) throw new Error("Skill library is closing; reconnect before continuing.");
+      const independent =
+        request.action === "list" ||
+        request.action === "read" ||
+        request.action === "readFile" ||
+        request.action === "previewImport" ||
+        request.action === "previewRefresh" ||
+        request.action === "previewDelete" ||
+        (request.action === "bindings" && request.operation === "list");
+      return await (independent ? runOperation() : lock(runOperation));
+    } finally {
+      for (const id of ownedPreviews) await cleanup(id);
+      if (previewRequestId) {
+        const controllers = activePreviews.get(previewRequestId);
+        controllers?.delete(controller!);
+        if (!controllers?.size) activePreviews.delete(previewRequestId);
+      }
+    }
   };
   return {
-    execute,
+    execute: (raw: SkillLibraryRequest, context?: SkillLibraryExecutionContext) =>
+      track(executeRequest(raw, context)),
     /** HTTP upload uses the same preview/commit flow and authenticated host ownership. */
     previewArchive: (bytes: Buffer, fileName: string): Promise<SkillLibraryResponse> =>
-      lock(async () => {
-        if (disposal) throw new Error("Skill library is closing; reconnect before continuing.");
-        assertSkillResourcePath(fileName);
-        if (fileName.includes("/")) throw new Error("Archive upload requires a file name.");
-        await expire();
-        if (previews.size >= 100) throw new Error("Too many pending Skill previews.");
-        const owned = await fs.mkdtemp(path.join(staging, "upload-"));
-        try {
-          const directory = path.join(owned, "package");
-          await fs.mkdir(directory, { mode: 0o700 });
-          await extractSkillArchive(bytes, directory);
-          const result = await packages.preview({ path: directory });
-          const preview: SkillLibraryPreview = {
-            previewId: randomUUID(),
-            package: result.package,
-            expiresAt: result.expiresAt,
-            source: {
-              kind: "archive",
-              location: fileName,
-              entryPath: result.package.entries[0]!.entryPath,
-              packageId: result.package.packageId,
-            },
-            resourceChanges: [],
-            overwritesLocalEdits: false,
-          };
-          previews.set(preview.previewId, {
-            preview,
-            packagePreviewId: result.previewId,
-            ownedRoot: owned,
-          });
-          return { preview };
-        } catch (error) {
-          await fs.rm(owned, { recursive: true, force: true });
-          throw error;
-        }
-      }),
+      track(
+        (async () => {
+          if (disposal) throw new Error("Skill library is closing; reconnect before continuing.");
+          assertSkillResourcePath(fileName);
+          if (fileName.includes("/")) throw new Error("Archive upload requires a file name.");
+          await expire();
+          if (previews.size >= 100) throw new Error("Too many pending Skill previews.");
+          const owned = await fs.mkdtemp(path.join(staging, "upload-"));
+          try {
+            const directory = path.join(owned, "package");
+            await fs.mkdir(directory, { mode: 0o700 });
+            await extractSkillArchive(bytes, directory);
+            const result = await packages.preview({ path: directory });
+            const preview: SkillLibraryPreview = {
+              previewId: randomUUID(),
+              package: result.package,
+              expiresAt: result.expiresAt,
+              source: {
+                kind: "archive",
+                location: fileName,
+                entryPath: result.package.entries[0]!.entryPath,
+                packageId: result.package.packageId,
+              },
+              resourceChanges: [],
+              overwritesLocalEdits: false,
+            };
+            if (previews.size >= 100) {
+              packages.cancelPreview(result.previewId);
+              throw new Error("Too many pending Skill previews.");
+            }
+            previews.set(preview.previewId, {
+              preview,
+              packagePreviewId: result.previewId,
+              ownedRoot: owned,
+            });
+            return { preview };
+          } catch (error) {
+            await fs.rm(owned, { recursive: true, force: true });
+            throw error;
+          }
+        })(),
+      ),
     dispose: () => {
       if (disposal) return disposal;
-      for (const controller of activePreviews.values()) controller.abort();
-      disposal = lock(async () => {
-        for (const id of [...previews.keys()]) await cleanup(id);
-        libraryInstances.delete(path.resolve(stateDir));
-      });
+      for (const controllers of activePreviews.values())
+        for (const controller of controllers) controller.abort();
+      disposal = Promise.allSettled(activeRequests).then(() =>
+        lock(async () => {
+          for (const id of [...previews.keys()]) await cleanup(id);
+          libraryInstances.delete(path.resolve(stateDir));
+        }),
+      );
       return disposal;
     },
   };

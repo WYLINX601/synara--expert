@@ -204,6 +204,7 @@ export const SkillLibraryRequest = Schema.Union([
         confirmExpertIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
         requestId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(200))),
         overwriteLocalEdits: Schema.optional(Schema.Boolean),
+        expectedPackageId: Schema.optional(SkillPackageId),
       }),
     ).check(Schema.isMaxLength(100)),
     dryRun: Schema.optional(Schema.Boolean),
@@ -241,6 +242,8 @@ export const SkillLibraryRequest = Schema.Union([
     expectedRevision: PositiveInt,
     requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
     overwriteLocalEdits: Schema.optional(Schema.Boolean),
+    /** Bind an explicit confirmation to the package shown by its dry-run. */
+    expectedPackageId: Schema.optional(SkillPackageId),
     dryRun: Schema.optional(Schema.Boolean),
   }),
 ]);

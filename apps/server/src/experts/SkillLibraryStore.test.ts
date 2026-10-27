@@ -7,6 +7,8 @@ import { expertResourceFiles, createExpertStore } from "./ExpertStore";
 import { createSkillPackageStore } from "./SkillPackageStore";
 import * as storage from "./ExpertMcpStorage";
 import { SKILL_FILE_LIMIT } from "./skillLibraryArchive";
+import { createRunSkillAssemblyStore } from "./RunSkillAssemblyStore";
+import type { SkillLibraryRequest } from "@synara/contracts";
 
 const roots: string[] = [];
 async function fixture() {
@@ -66,7 +68,385 @@ function storedZip(entries: ReadonlyArray<{ name: string; content: string }>): B
   end.writeUInt32LE(offset, 16);
   return Buffer.concat([...local, centralBytes, end]);
 }
+function hostedSource() {
+  const source = { sha: "1".repeat(40), body, wait: Promise.resolve() };
+  const fetch = vi.fn(async (input: unknown) => {
+    await source.wait;
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/git/matching-refs/heads/main"))
+      return Response.json([{ ref: "refs/heads/main" }]);
+    if (url.pathname.endsWith("/git/matching-refs/tags/main")) return Response.json([]);
+    if (url.pathname.endsWith("/commits/main")) return Response.json({ sha: source.sha });
+    if (url.hostname === "codeload.github.com") {
+      const archive = storedZip([
+        { name: `skills-${source.sha}/alpha/SKILL.md`, content: source.body },
+      ]);
+      return new Response(archive, { headers: { "content-length": String(archive.length) } });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+  vi.stubGlobal("fetch", fetch);
+  return { source, fetch, location: "https://github.com/acme/skills/tree/main/alpha" };
+}
+async function bindPair(
+  stateDir: string,
+  store: ReturnType<typeof createSkillLibraryStore>,
+  firstName = "alpha",
+) {
+  const first = (await store.execute({ action: "create", name: firstName, body, tags: [] })).skill!;
+  const second = (await store.execute({ action: "create", name: "beta", body, tags: [] })).skill!;
+  const experts = createExpertStore(stateDir);
+  const expert = await experts.save({
+    name: "Bound pair",
+    description: "",
+    useCases: "",
+    persona: "Expert",
+    outputRequirements: "",
+    skills: [],
+    references: [],
+    connections: [],
+    skillBindings: [first, second].map((skill) => ({
+      skillId: skill.skillId,
+      enabled: true,
+      activation: "on-demand" as const,
+    })),
+  });
+  return { first, second, experts, expert };
+}
 describe("managed Skill library", () => {
+  it.each(["cancel", "dispose"] as const)(
+    "aborts source preparation on %s and cleans staging before reopening the store",
+    async (action) => {
+      const { stateDir, store } = await fixture();
+      const hosted = hostedSource();
+      const preview = (
+        await store.execute({ action: "previewImport", kind: "url", location: hosted.location })
+      ).preview!;
+      const skill = (
+        await store.execute({
+          action: "import",
+          previewId: preview.previewId,
+          choices: [{ entryPath: "SKILL.md", duplicate: "skip" }],
+        })
+      ).skills![0]!;
+      let entered!: () => void;
+      let signal: AbortSignal | undefined;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_input: unknown, options: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal = options.signal!;
+              entered();
+              options.signal!.addEventListener(
+                "abort",
+                () => reject(new Error("Cancelled by caller")),
+                { once: true },
+              );
+            }),
+        ),
+      );
+      const pending = store.execute({
+        action: "updateFromSource",
+        skillId: skill.skillId,
+        expectedRevision: skill.revision,
+        requestId: "dispose-source",
+        dryRun: true,
+      });
+      const settled = pending.then(
+        (response) => ({ response }),
+        (error: unknown) => ({ error }),
+      );
+      await started;
+      try {
+        if (action === "cancel")
+          await store.execute({ action: "cancel", previewId: "dispose-source" });
+        else await store.dispose();
+        await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+        const result = await settled;
+        if (action === "cancel") {
+          expect("response" in result && result.response.updateResult).toMatchObject({
+            status: "failed",
+            error: expect.stringMatching(/cancelled/iu),
+          });
+        } else expect("error" in result && String(result.error)).toMatch(/closing/iu);
+      } finally {
+        await store.dispose();
+      }
+      expect(await fs.readdir(path.join(stateDir, "experts", "skill-library-staging"))).toEqual([]);
+      const reopened = createSkillLibraryStore(stateDir);
+      expect((await reopened.execute({ action: "read", skillId: skill.skillId })).skill).toEqual(
+        skill,
+      );
+      await reopened.dispose();
+    },
+  );
+  it.each(["single", "batch"] as const)(
+    "binds %s source confirmation to the previewed package and refuses source drift",
+    async (mode) => {
+      const { store } = await fixture();
+      const hosted = hostedSource();
+      const preview = (
+        await store.execute({ action: "previewImport", kind: "url", location: hosted.location })
+      ).preview!;
+      const initial = (
+        await store.execute({
+          action: "import",
+          previewId: preview.previewId,
+          choices: [{ entryPath: "SKILL.md", duplicate: "skip" }],
+        })
+      ).skills![0]!;
+      const edited = (
+        await store.execute({
+          action: "save",
+          skillId: initial.skillId,
+          expectedRevision: initial.revision,
+          name: initial.name,
+          tags: [],
+          changes: [
+            { path: "SKILL.md", content: Buffer.from(body + "Local draft.\n").toString("base64") },
+          ],
+        })
+      ).skill!;
+      hosted.source.sha = "2".repeat(40);
+      hosted.source.body = body + "Source version two.\n";
+      const request = {
+        action: "updateFromSource" as const,
+        skillId: edited.skillId,
+        expectedRevision: edited.revision,
+        requestId: "reviewed-source",
+        overwriteLocalEdits: true,
+      };
+      const reviewed = (await store.execute({ ...request, dryRun: true })).updateResult!.preview!;
+      hosted.source.sha = "3".repeat(40);
+      hosted.source.body = body + "Source version three.\n";
+      const confirmed = { ...request, expectedPackageId: reviewed.package.packageId };
+      const { action: _action, ...confirmedItem } = confirmed;
+      const response = await store.execute(
+        mode === "single"
+          ? confirmed
+          : { action: "batch", items: [{ ...confirmedItem, operation: "updateFromSource" }] },
+      );
+      const update =
+        mode === "single" ? response.updateResult : response.results?.[0]?.updateResult;
+      expect(update).toMatchObject({ status: "conflict", revision: edited.revision });
+      expect((await store.execute({ action: "read", skillId: edited.skillId })).skill).toEqual(
+        edited,
+      );
+      const refreshed = { ...request, requestId: "reviewed-new-source" };
+      const next = (await store.execute({ ...refreshed, dryRun: true })).updateResult!.preview!;
+      expect(
+        (await store.execute({ ...refreshed, expectedPackageId: next.package.packageId }))
+          .updateResult?.status,
+      ).toBe("updated");
+      expect(
+        (await store.execute({ action: "read", skillId: edited.skillId })).skill?.source
+          .resolvedRevision,
+      ).toBe(hosted.source.sha);
+    },
+  );
+
+  it.each([
+    ["alpha", "alpha"],
+    ["alpha", "ALPHA"],
+    ["café", "cafe\u0301"],
+  ])(
+    "rejects renaming a bound Skill from beta to %s / %s before changing its head",
+    async (firstName, conflictingName) => {
+      const { stateDir, store } = await fixture();
+      const { second, experts, expert } = await bindPair(stateDir, store, firstName);
+      const base = await experts.prepareSnapshot(expert.id);
+      const runs = createRunSkillAssemblyStore(stateDir);
+      const prepare = (rootRunId: string) =>
+        runs.prepare({
+          threadId: "conflict-thread",
+          rootRunId,
+          baseSnapshotId: base.snapshotId,
+          createdAt: "2026-10-27T00:00:00.000Z",
+        });
+      const pinned = await prepare("before-conflict");
+      await expect(
+        store.execute({
+          action: "save",
+          skillId: second.skillId,
+          expectedRevision: second.revision,
+          name: conflictingName,
+          tags: [],
+          changes: [],
+        }),
+      ).rejects.toThrow(/Duplicate selected skill name/u);
+      expect((await store.execute({ action: "read", skillId: second.skillId })).skill).toEqual(
+        second,
+      );
+      expect(
+        (await prepare("after-conflict")).session.skillEntries?.map((entry) => entry.name),
+      ).toEqual([firstName, "beta"]);
+      expect((await runs.read(pinned.rootRunId))?.session).toEqual(pinned.session);
+      // Names are scoped to effective Expert assemblies, not the whole library.
+      expect(
+        (await store.execute({ action: "create", name: conflictingName, body, tags: [] })).skill
+          ?.name,
+      ).toBe(conflictingName);
+    },
+  );
+
+  it.each(["replace", "refresh", "updateFromSource"] as const)(
+    "validates bound Expert assemblies for %s publication",
+    async (operation) => {
+      const { root, stateDir, store } = await fixture();
+      const { second } = await bindPair(stateDir, store);
+      let request: SkillLibraryRequest;
+      let prior = second;
+      if (operation === "replace") {
+        const source = path.join(root, "replacement");
+        await fs.mkdir(source);
+        await fs.writeFile(path.join(source, "SKILL.md"), body);
+        const preview = (
+          await store.execute({ action: "previewImport", kind: "local", location: source })
+        ).preview!;
+        request = {
+          action: "import",
+          previewId: preview.previewId,
+          choices: [
+            {
+              entryPath: "SKILL.md",
+              duplicate: "replace",
+              replaceSkillId: second.skillId,
+              expectedRevision: second.revision,
+            },
+          ],
+        };
+      } else {
+        const hosted = hostedSource();
+        const registry = path.join(stateDir, "experts", "skill-library.json");
+        const data = JSON.parse(await fs.readFile(registry, "utf8")) as {
+          skills: Array<typeof second>;
+        };
+        prior = { ...second, source: { ...second.source, kind: "url", location: hosted.location } };
+        data.skills = data.skills.map((skill) =>
+          skill.skillId === second.skillId ? prior : skill,
+        );
+        await fs.writeFile(registry, JSON.stringify(data));
+        if (operation === "refresh") {
+          const preview = (
+            await store.execute({
+              action: "previewRefresh",
+              skillId: second.skillId,
+              expectedRevision: second.revision,
+            })
+          ).preview!;
+          request = {
+            action: "refresh",
+            skillId: second.skillId,
+            expectedRevision: second.revision,
+            previewId: preview.previewId,
+          };
+        } else
+          request = {
+            action: "updateFromSource",
+            skillId: second.skillId,
+            expectedRevision: second.revision,
+            requestId: "conflicting-source",
+          };
+      }
+      if (operation === "updateFromSource")
+        expect((await store.execute(request)).updateResult).toMatchObject({
+          status: "failed",
+          error: expect.stringMatching(/Duplicate selected skill name/u),
+        });
+      else await expect(store.execute(request)).rejects.toThrow(/Duplicate selected skill name/u);
+      expect((await store.execute({ action: "read", skillId: second.skillId })).skill).toEqual(
+        prior,
+      );
+    },
+  );
+
+  it.each(["previewImport", "updateFromSource", "batch"] as const)(
+    "allows committed reads and unrelated writes while %s waits for a remote download",
+    async (action) => {
+      const { stateDir, store } = await fixture();
+      const hosted = hostedSource();
+      const preview = (
+        await store.execute({ action: "previewImport", kind: "url", location: hosted.location })
+      ).preview!;
+      const original = (
+        await store.execute({
+          action: "import",
+          previewId: preview.previewId,
+          choices: [{ entryPath: "SKILL.md", duplicate: "skip" }],
+        })
+      ).skills![0]!;
+      const unrelated = (
+        await store.execute({ action: "create", name: "unrelated", body, tags: [] })
+      ).skill!;
+      let release!: () => void;
+      hosted.source.wait = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const count = hosted.fetch.mock.calls.length;
+      const update = {
+        action: "updateFromSource" as const,
+        skillId: original.skillId,
+        expectedRevision: original.revision,
+        requestId: "slow-source",
+      };
+      const { action: _action, ...updateItem } = update;
+      const pending = store.execute(
+        action === "previewImport"
+          ? { action, kind: "url", location: hosted.location }
+          : action === "batch"
+            ? { action, items: [{ ...updateItem, operation: "updateFromSource" }] }
+            : update,
+      );
+      try {
+        await vi.waitFor(() => expect(hosted.fetch.mock.calls.length).toBeGreaterThan(count));
+        expect((await store.execute({ action: "list" })).skills).toHaveLength(2);
+        expect((await store.execute({ action: "read", skillId: original.skillId })).skill).toEqual(
+          original,
+        );
+        expect(
+          (
+            await store.execute({
+              action: "save",
+              skillId: unrelated.skillId,
+              expectedRevision: unrelated.revision,
+              name: unrelated.name,
+              tags: ["during-download"],
+              changes: [],
+            })
+          ).skill?.revision,
+        ).toBe(unrelated.revision + 1);
+        if (action !== "previewImport") {
+          await store.execute({
+            action: "save",
+            skillId: original.skillId,
+            expectedRevision: original.revision,
+            name: original.name,
+            tags: ["concurrent"],
+            changes: [],
+          });
+        }
+      } finally {
+        release();
+      }
+      const response = await pending;
+      if (action === "previewImport") {
+        await store.execute({ action: "cancel", previewId: response.preview!.previewId });
+      } else {
+        const result =
+          action === "batch" ? response.results?.[0]?.updateResult : response.updateResult;
+        expect(result?.status).toBe("conflict");
+        expect(
+          (await store.execute({ action: "read", skillId: original.skillId })).skill?.tags,
+        ).toEqual(["concurrent"]);
+      }
+      await store.dispose();
+      expect(await fs.readdir(path.join(stateDir, "experts", "skill-library-staging"))).toEqual([]);
+    },
+  );
   it("saves the description atomically with other resources and preserves raw metadata unless explicitly changed", async () => {
     const { store } = await fixture();
     const first = (

@@ -1052,6 +1052,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       ? createSkillPackageStore(options.stateDir)
       : undefined;
     const expertStore = options?.stateDir ? createExpertStore(options.stateDir) : undefined;
+    const runSkillAssemblyStore = options?.stateDir
+      ? createRunSkillAssemblyStore(options.stateDir)
+      : undefined;
     const canonicalEventLogger =
       options?.canonicalEventLogger ??
       (options?.canonicalEventLogPath !== undefined
@@ -1134,7 +1137,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             throw new Error("The pinned Expert snapshot does not use the skill-index schema.");
           }
           const expectedBaseSession = expertSession.skillAssemblyId
-            ? await createRunSkillAssemblyStore(options!.stateDir!).verifySession(expertSession)
+            ? await runSkillAssemblyStore!.verifySession(expertSession)
             : expertSnapshotSession(snapshot);
           if (!isDeepStrictEqual(expertSession, expectedBaseSession)) {
             throw new Error(
@@ -1605,15 +1608,68 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     type ResolvedProviderSessionStartInput = ProviderSessionStartInput & {
       readonly provider: ProviderKind;
     };
+    const withRunSkillAssemblyInitialization = <A, E, R>(
+      expertSession: ProviderExpertSession | undefined,
+      operation: string,
+      nativeStart: () => Effect.Effect<A, E, R>,
+    ) => {
+      const rootRunId = expertSession?.skillRootRunId;
+      if (!rootRunId || !runSkillAssemblyStore) return Effect.suspend(nativeStart);
+
+      return Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const attempt = yield* Effect.tryPromise({
+            try: () => runSkillAssemblyStore.beginInitialization(rootRunId),
+            catch: (cause) =>
+              toValidationError(
+                operation,
+                `Could not begin native Skill initialization: ${String(cause)}`,
+                cause,
+              ),
+          });
+          const finish = (error?: string) =>
+            Effect.tryPromise({
+              try: () => runSkillAssemblyStore.finishInitialization(rootRunId, attempt, error),
+              catch: (cause) =>
+                toValidationError(
+                  operation,
+                  `Could not persist native Skill initialization outcome: ${String(cause)}`,
+                  cause,
+                ),
+            });
+          const started = Effect.suspend(nativeStart).pipe(
+            Effect.onExit((exit) =>
+              Exit.isSuccess(exit)
+                ? finish()
+                : finish(Cause.pretty(exit.cause)).pipe(
+                    Effect.catch((cause) =>
+                      Effect.logError("Could not persist failed Skill initialization", {
+                        operation,
+                        rootRunId,
+                        error: cause,
+                      }),
+                    ),
+                  ),
+            ),
+          );
+          return yield* restore(started);
+        }),
+      );
+    };
     const startAdapterWithStaleDevinFallback = (
       adapter: ProviderAdapterShape<ProviderAdapterError>,
       startInput: ResolvedProviderSessionStartInput,
       startSession = adapter.startSession,
     ) =>
-      startSession(startInput).pipe(
+      withRunSkillAssemblyInitialization(
+        startInput.expertSession,
+        "ProviderService.startSession",
+        () => startSession(startInput),
+      ).pipe(
         Effect.map((session) => ({ session, staleDevinFallbackOccurred: false })),
         Effect.catchIf(
           (error) =>
+            error._tag !== "ProviderValidationError" &&
             hasResumeCursor(startInput.resumeCursor) &&
             isStaleDevinSessionLoadError(startInput.provider, error),
           (error) =>
@@ -1623,9 +1679,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                   return Effect.fail(error);
                 }
                 const { resumeCursor: _staleResumeCursor, ...freshStartInput } = startInput;
-                return adapter
-                  .startSession(freshStartInput)
-                  .pipe(Effect.map((session) => ({ session, staleDevinFallbackOccurred: true })));
+                return withRunSkillAssemblyInitialization(
+                  freshStartInput.expertSession,
+                  "ProviderService.startSession",
+                  () => adapter.startSession(freshStartInput),
+                ).pipe(Effect.map((session) => ({ session, staleDevinFallbackOccurred: true })));
               }),
             ),
         ),
@@ -3274,7 +3332,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             };
             // Prompt construction has already happened here. Only explicit startup
             // may replace lost native history and request a transcript recap.
-            const startedSession = yield* adapter.startSession(resumeStartInput);
+            const startedSession = yield* withRunSkillAssemblyInitialization(
+              verifiedExpertSession,
+              input.operation,
+              () => adapter.startSession(resumeStartInput),
+            );
             const resumed: ProviderSession = {
               ...startedSession,
               lifecycleGeneration: lease.generation,
@@ -4398,38 +4460,43 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                             runtimeNotices: previousExpertRuntimeNotices,
                           },
                         );
-                        const restoredSession = yield* previousAdapter.startSession({
-                          threadId,
-                          provider: persistedBinding.provider,
-                          ...(persistedProviderInstanceId
-                            ? { providerInstanceId: persistedProviderInstanceId }
-                            : {}),
-                          lifecycleGeneration: previousGeneration,
-                          runtimeMode: persistedBinding.runtimeMode ?? "full-access",
-                          ...(previousCwd !== undefined ? { cwd: previousCwd } : {}),
-                          ...(previousModelSelection !== undefined
-                            ? { modelSelection: previousModelSelection }
-                            : {}),
-                          ...(previousProviderOptions !== undefined
-                            ? { providerOptions: previousProviderOptions }
-                            : {}),
-                          ...(restoredExpertSession !== undefined
-                            ? { expertSession: restoredExpertSession }
-                            : {}),
-                          ...(previousContextSession !== undefined
-                            ? { contextSession: previousContextSession }
-                            : {}),
-                          ...(restoredComputerControl ? { enableComputerControl: true } : {}),
-                          ...(restoredAutoApproveSynaraTools
-                            ? { autoApproveSynaraTools: true }
-                            : {}),
-                          ...(previousAdditionalDirectories.length > 0
-                            ? { additionalDirectories: previousAdditionalDirectories }
-                            : {}),
-                          ...(persistedBinding.resumeCursor !== undefined
-                            ? { resumeCursor: persistedBinding.resumeCursor }
-                            : {}),
-                        });
+                        const restoredSession = yield* withRunSkillAssemblyInitialization(
+                          restoredExpertSession,
+                          "ProviderService.startSession.restore",
+                          () =>
+                            previousAdapter.startSession({
+                              threadId,
+                              provider: persistedBinding.provider,
+                              ...(persistedProviderInstanceId
+                                ? { providerInstanceId: persistedProviderInstanceId }
+                                : {}),
+                              lifecycleGeneration: previousGeneration,
+                              runtimeMode: persistedBinding.runtimeMode ?? "full-access",
+                              ...(previousCwd !== undefined ? { cwd: previousCwd } : {}),
+                              ...(previousModelSelection !== undefined
+                                ? { modelSelection: previousModelSelection }
+                                : {}),
+                              ...(previousProviderOptions !== undefined
+                                ? { providerOptions: previousProviderOptions }
+                                : {}),
+                              ...(restoredExpertSession !== undefined
+                                ? { expertSession: restoredExpertSession }
+                                : {}),
+                              ...(previousContextSession !== undefined
+                                ? { contextSession: previousContextSession }
+                                : {}),
+                              ...(restoredComputerControl ? { enableComputerControl: true } : {}),
+                              ...(restoredAutoApproveSynaraTools
+                                ? { autoApproveSynaraTools: true }
+                                : {}),
+                              ...(previousAdditionalDirectories.length > 0
+                                ? { additionalDirectories: previousAdditionalDirectories }
+                                : {}),
+                              ...(persistedBinding.resumeCursor !== undefined
+                                ? { resumeCursor: persistedBinding.resumeCursor }
+                                : {}),
+                            }),
+                        );
                         const restored: ProviderSession = {
                           ...restoredSession,
                           lifecycleGeneration: previousGeneration,

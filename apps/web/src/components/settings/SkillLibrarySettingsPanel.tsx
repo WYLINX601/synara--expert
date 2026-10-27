@@ -407,6 +407,8 @@ export function SkillLibrarySettingsPanel() {
             expectedRevision: skill.revision,
             operation: "updateFromSource",
             requestId: batchUpdateRequestIds[skill.skillId]!,
+            expectedPackageId: results?.find((result) => result.skillId === skill.skillId)
+              ?.updateResult?.preview?.package.packageId,
             ...(skill.locallyModified ? { overwriteLocalEdits: true } : {}),
           })),
       });
@@ -1106,6 +1108,7 @@ export function SkillLibrarySettingsPanel() {
                               expectedRevision: refresh.revision,
                               requestId: refreshRequestId!,
                               overwriteLocalEdits: true,
+                              expectedPackageId: preview.package.packageId,
                             })
                           : await call({ action: "import", previewId: preview.previewId, choices });
                         clearPreviewOwnership(false);

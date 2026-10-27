@@ -2,14 +2,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { FIXED_EXPERT_SKILL_POLICY, type ProviderExpertSession } from "@synara/contracts";
 import { createSkillPackageStore } from "../experts/SkillPackageStore";
+import { expertResourceFiles } from "../experts/ExpertStore";
 import { createFixedSkillProjection } from "./fixedSkillProjection";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const directory of temporaryDirectories.splice(0)) {
     const makeDirectoriesWritable = async (current: string): Promise<void> => {
       const info = await fs.lstat(current).catch(() => undefined);
@@ -134,6 +136,109 @@ describe("fixed native Skill projection", () => {
     expect(otherAssembly.root).not.toBe(projection.root);
   });
 
+  it("projects an imported Claude plugin manifest with the fixed identity and preserves native metadata", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "synara-fixed-plugin-manifest-"));
+    temporaryDirectories.push(root);
+    const stateDir = path.join(root, "state");
+    const packageSource = path.join(root, "package");
+    await fs.mkdir(path.join(packageSource, "skills", "review"), { recursive: true });
+    await fs.mkdir(path.join(packageSource, ".claude-plugin"), { recursive: true });
+    await fs.writeFile(
+      path.join(packageSource, "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: Review changes\n---\nReview the selected change.\n",
+    );
+    const nativeManifest = {
+      name: "source-review-plugin",
+      displayName: "Source Review Plugin",
+      version: "2.4.1",
+      description: "A native plugin manifest imported with this Skill package.",
+      author: { name: "Example Team", email: "dev@example.com" },
+      homepage: "https://example.com/review-plugin",
+      repository: "https://github.com/example/review-plugin",
+      license: "MIT",
+      keywords: ["review", "skills"],
+      metadata: { catalogId: "catalog-review" },
+      skills: ["./skills/"],
+    };
+    const originalManifest = `${JSON.stringify(nativeManifest, null, 2)}\n`;
+    await fs.writeFile(path.join(packageSource, ".claude-plugin", "plugin.json"), originalManifest);
+
+    const store = createSkillPackageStore(stateDir);
+    const preview = await store.preview({ path: packageSource });
+    const imported = await store.import({ previewId: preview.previewId });
+    const [entry] = await store.resolveSelections([
+      {
+        packageId: imported.package.packageId,
+        entryPath: "skills/review/SKILL.md",
+        activation: "on-demand",
+      },
+    ]);
+    expect(entry).toBeDefined();
+    const immutableManifestPath = path.join(
+      stateDir,
+      "experts",
+      "skill-packages",
+      imported.package.packageId,
+      "content",
+      ".claude-plugin",
+      "plugin.json",
+    );
+    expect(await fs.readFile(immutableManifestPath, "utf8")).toBe(originalManifest);
+    const session: ProviderExpertSession = {
+      skillAssemblyId: "assembly-native-plugin-manifest",
+      snapshotId: `exp_${"b".repeat(64)}`,
+      persona: "Expert",
+      skills: [{ name: entry!.name, path: entry!.path }],
+      skillEntries: [entry!],
+      skillPolicy: FIXED_EXPERT_SKILL_POLICY,
+      references: [],
+    };
+
+    const views = path.join(root, "views");
+    const assemblyHash = createHash("sha256").update(session.skillAssemblyId!).digest("hex");
+    const staleV3 = path.join(views, `native-skill-view-v3-${assemblyHash}`);
+    const legacyManifest = path.join(
+      staleV3,
+      "plugins",
+      `synara-fixed-${assemblyHash.slice(0, 20)}-${entry!.packageId.slice(4, 12)}`,
+      ".claude-plugin",
+      "plugin.json",
+    );
+    await fs.mkdir(path.dirname(legacyManifest), { recursive: true });
+    await fs.link(immutableManifestPath, legacyManifest);
+    const projection = await createFixedSkillProjection(views, session);
+    expect(projection.root).toContain("native-skill-view-v4-");
+    expect(projection.root).not.toBe(staleV3);
+    expect(await fs.readFile(legacyManifest, "utf8")).toBe(originalManifest);
+    const nativeEntry = projection.entries[0]!;
+    const plugin = projection.plugins[0]!;
+    const projectedManifest = JSON.parse(
+      await fs.readFile(path.join(plugin.path, ".claude-plugin", "plugin.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(projectedManifest).toMatchObject({ ...nativeManifest, name: plugin.name });
+    expect(projectedManifest.name).toBe(nativeEntry.pluginName);
+    expect(nativeEntry.pluginName).toBe(plugin.name);
+    expect(nativeEntry.nativeName).toBe(`${projectedManifest.name}:${nativeEntry.name}`);
+    expect(await fs.readFile(immutableManifestPath, "utf8")).toBe(originalManifest);
+
+    const read = expertResourceFiles.read;
+    vi.spyOn(expertResourceFiles, "read").mockImplementation((...args) =>
+      args[0] === immutableManifestPath
+        ? Promise.resolve(
+            Buffer.from(
+              JSON.stringify({
+                ...nativeManifest,
+                description: "Changed after package verification",
+              }),
+            ),
+          )
+        : read(...args),
+    );
+    await expect(createFixedSkillProjection(views, session)).rejects.toThrow(
+      "Immutable Claude plugin manifest changed before projection",
+    );
+  });
+
   it("keeps root Skill relative resources beside its entry and bypasses stale v2 projections", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "synara-root-skill-projection-"));
     temporaryDirectories.push(root);
@@ -171,7 +276,7 @@ describe("fixed native Skill projection", () => {
 
     const projection = await createFixedSkillProjection(views, session);
     const nativeEntry = projection.entries[0]!;
-    expect(projection.root).toContain("native-skill-view-v3-");
+    expect(projection.root).toContain("native-skill-view-v4-");
     expect(projection.root).not.toBe(staleV2);
     expect(await fs.readFile(nativeEntry.path, "utf8")).toContain("Read ./assets/example.txt");
     expect(

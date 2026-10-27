@@ -91,6 +91,8 @@ SDK 的主会话 Skill allowlist 不自动等于子代理排他继承；已核�
 
 批量每项独立提交：`updated/unchanged/skipped/conflict/failed`，无托管源为 skipped，源内容相同为 unchanged；下载、内容校验、名称冲突及 CAS 失败不改变旧头或绑定。发布失败复用既有新包回滚和引用保护，不删除其他任务依赖的资源。更新在下一 Run 使用，当前运行没有热替换。
 
+2026-10-27 审核修复：单项和批量的预览确认携带 `expectedPackageId`，服务端重新下载后严格比较，来源变化返回 conflict 并要求重新预览；未展示预览的一键更新继续读取执行时来源。远程下载、解包与独立校验在管理提交队列外完成，列表和文件读取直接读取已提交状态；提交时重新检查 revision、操作回执和授权。保存、替换导入及来源更新在包生命周期锁内、切换库头前，用候选头重新验证受影响 Expert 的启用装配，不要求全库名称唯一。
+
 ### 6. G4/G6：统一查询与批量绑定服务
 
 查询将 Skill 库与当前 Expert 保存态聚合，统一输出被绑定的 distinct Expert 数及 enabled 数；“已使用”不等于启用。来源细类在服务端规范化；过滤维度间 AND/维度内 OR。时间未知项始终排后，排序最后追加名称/稳定 ID，避免 UI/CLI 不一致。维持已有文字搜索范围，本轮不顺带建设分页/搜索服务。
@@ -168,6 +170,7 @@ CLI 鉴权增加明确的本机 management 配对用途，不能只复用现有�
 - Claude 默认空值或历史裸 `claude` 采用配套 CLI 2.1.296；用户自定义路径保持原值并核验版本。只在该精确版本、零插件来源已核验且空装配时，允许上下文省略 Skill 类别表示零集合；非空省略或畸形回执仍拒绝。插件 Agent 保留工具/maxTurns 与显式 Skill 子集，不扩大为整库。
 - `RunSkillAssemblyStore` 在实际启动时保存当前绑定和头版本；同 Run、自动 goal、恢复及同 Hub 工作项继续使用原装配。历史恢复缺少可验证 Run 记录时明确报错，不用当前库头补造旧运行。旧共享任务结束会唤醒排队入口，放行前不冻结新版本。
 - 初始化前记录意图和尝试；入口 hooks/startup 及包级 `hooks/hooks.json`、`.claude-plugin/plugin.json`、`.mcp.json` 均保守视为可能产生启动副作用。旧记录重新分类时，进行中或已有初始化错误转为 uncertain；同 Run 与跨 Worker 续跑均禁止自动重放未知副作用，不删除合法 hooks。
+- 2026-10-27 审核修复将初始化登记统一到 ProviderService 实际原生启动边界，覆盖首次启动、自动恢复与回滚恢复，Reactor 不重复登记。Claude 投影从原清单保留原生字段并统一受控 name，镜像不覆盖生成清单，原不可变包保持原文；派生目录版本提升至 v4，恢复时重建该视图并保留旧 v3 目录，避免命中旧清单缓存。
 - 桌面通过四个窄 owner WS RPC 读取本地授权、创建配对码、列举和吊销凭据；CLI 使用独立本地 HTTP 命令通道。凭据不提升为通用 owner，不注册默认管理 Agent。所有写入都有服务端有效 requestId；旧客户端未传 ID 时返回生成的 ID，新客户端在发送前生成，CLI 另私存首次提交信封以稳定 CAS 重试。
 - OMP 固定投影清理只修改临时目录权限，叶子只 unlink、目录逐级 rmdir；不会调用可能在 Windows 自动 chmod 文件的递归删除。删除受阻报告错误并保留未删临时资源；原不可变包的权限、inode 和内容保持不变。
 - OMP 18.12.1 的上游 ACP 仅在父 prompt 活跃时转发工具进度，父运行结束后的后台 Task 终态会丢失。本轮 fixed v2/inherit 使用私有 Bun preload，在相同 CLI 原文件的运行时视图中补充 idle Task 转发；不改全局安装、不替换模型或配置。只接受 SHA-256 `c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d`、17,638,974 字节、原 Bun shebang 与唯一处理器锚点。相同账户 PATH 解析 Bun，以独立 argv 传入 preload；版本预检和实际 ACP 子进程均须给出兼容层 marker，缺失或未知 bundle 明确拒绝，普通 harness/旧策略不使用该层。运行时 onLoad/argv 依据见 [Bun 插件](https://bun.com/docs/runtime/plugins)和 [preload](https://bun.com/docs/runtime)。
@@ -207,6 +210,8 @@ Expert 使用 `ExpertSkillBinding { skillId, enabled, activation }`，最多一�
 唯一入口仍为 Settings → Agent skills。复用 Settings 父布局、Dialog、CodeEditorPane、草稿离开保护、连接 generation、查询缓存和现有 ExpertClient，不新增顶级页面。
 
 2026-10-26 详情对齐增量：列表打开 `SkillLibraryDetail`，用“概览 / 文件”组织同一份草稿。概览管理名称、描述、标签和专家绑定；文件页复用编辑器、文件图标、行样式和 Collapsible，主文件优先，附属文件分层展示。通用 `buildPathTree` 同时服务已有 review 文件树；HTTP 文件访问与错误处理由 `skillLibraryFiles` 共享，不复制第二套存储或通信逻辑。
+
+2026-10-27 保存边界修复：文件保存期间允许继续编辑；成功响应只更新已保存基线和 revision，保留提交后产生的草稿并继续提示未保存。下一次保存提交保留的最新草稿。
 
 随后按用户视觉规格与最终宽度批注，详情两页统一 920px 上限、浅色原生边框，继续使用现有 Dialog 的固定头尾与滚动区。标签编辑复用 Combobox / Chips，不另建标签存储；已提交胶囊与待输入文本共同组成保存草稿，新增、去重、移除以及关闭保护都归前端原草稿流程。Badge、Alert 和现有图标分别承担来源/计数、持久说明和危险操作。DialogPopup 的关闭按钮样式/标签、ComboboxChip 的移除按钮属性、ScrollArea 的 viewportTabIndex 为可选扩展，原调用方默认行为保持；仅技能概览跳过滚动容器的额外 Tab 停靠点。未增加依赖、网络接口或运行装配逻辑。
 

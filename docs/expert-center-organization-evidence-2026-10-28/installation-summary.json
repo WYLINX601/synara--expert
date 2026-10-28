@@ -1,0 +1,33 @@
+{
+  "sourceCommit": "77f0c5690494846fda445494882c6cee8be5f73c",
+  "version": "0.1.8",
+  "installedAsarSha256": "da427105616ae9d14f6797c106f4d4d51a49d7505af2e307a17a14202e034850",
+  "healthPassed": true,
+  "preservedRecords": {
+    "projection_threads": {
+      "before": 32,
+      "after": 32,
+      "allOriginalIdsPresent": true
+    },
+    "projection_thread_messages": {
+      "before": 308,
+      "after": 308,
+      "allOriginalIdsPresent": true
+    },
+    "projection_spaces": {
+      "before": 3,
+      "after": 3,
+      "allOriginalIdsPresent": true
+    },
+    "projection_projects": {
+      "before": 18,
+      "after": 18,
+      "allOriginalIdsPresent": true
+    }
+  },
+  "protectedFilesUnchanged": 699,
+  "screenshots": {
+    "teams-installed.png": "d3aff7e23f48ec60107ce0d106893bbb39ce6257d982718051069d67b921458a",
+    "skills-installed.png": "1a326907f1e7babb3ce42f9fdec74120940542e621d51014e95da90fb6c53c20"
+  }
+}

@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "versions": {
-    "workbench": "0.1.8",
+    "workbench": "0.1.9",
     "workbench-preview": "0.1.0-preview.1"
   }
 }

@@ -1,6 +1,6 @@
 # Expert 中心技术改造方案
 
-日期：2026-10-28。状态：产品方案已通过；用户已要求实施；已合入本地 main 并更新日用 Workbench 0.1.7，实际结果见[验收记录](./expert-center-implementation-2026-10-28.md)。
+日期：2026-10-28。状态：产品方案已通过；用户已要求实施；初版已交付 0.1.7；专家团/技能整合后已合入并更新日用 Workbench 0.1.8，见[整合验收](./expert-center-organization-2026-10-28.md)。
 
 基线：`2577e5819353e6089cc3f6e118e848f38df04913`。范围以[已通过的产品方案](./expert-center-product-plan-2026-10-28.md)为准；遵循[架构标准 v1.1](./workbench-adaptation-plan.md#current-standard-v11)及[开发检查矩阵](./workbench-development-workflow.md#按实际影响选择检查)。原型用于评审功能和入口，不作为重新实现现有控件的规格。
 

@@ -50,6 +50,10 @@ vi.mock("~/hooks/useNativeApiServerCapability", () => ({
     api: undefined,
   }),
 }));
+vi.mock("~/components/settings/ExpertTaskHistory", () => ({ ExpertTaskHistory: () => null }));
+vi.mock("~/workbench/host/expertTaskActions", () => ({
+  useExpertTaskActions: () => ({ startExpertDraft: vi.fn(), projectPicker: null }),
+}));
 vi.mock("~/lib/providerDiscoveryReactQuery", () => ({
   skillsCatalogQueryOptions: ({
     enabled,
@@ -65,7 +69,7 @@ vi.mock("~/lib/providerDiscoveryReactQuery", () => ({
 }));
 
 import { SkillLibrarySettingsPanel } from "./SkillLibrarySettingsPanel";
-import { ExpertsSettingsPanel } from "./ExpertsSettingsPanel";
+import ExpertCenterPage from "~/workbench/ExpertCenterPage";
 
 const packageId = `pkg_${"a".repeat(64)}`;
 const pkg: SkillPackage = {
@@ -218,31 +222,31 @@ async function mountPanel(width?: number, expertCenter = false) {
       </div>
     ),
   });
-  const center = createRoute({
+  const shell = createRoute({
     getParentRoute: () => root,
-    path: "/experts",
-    component: () => {
-      const search = center.useSearch() as { kind?: "teams" | "skills" };
-      return (
-        <ExpertsSettingsPanel
-          centerRoute={{
-            expertId: null,
-            kind: search.kind ?? "experts",
-            tab: "capabilities",
-            navigate: async () => {},
-            navigateKind: async (kind) => {
-              await router.navigate({
-                to: "/experts" as never,
-                search: { ...(kind !== "experts" ? { kind } : {}) } as never,
-              });
-            },
-          }}
-        />
-      );
-    },
+    id: "_chat",
+    component: () => (
+      <div className="relative flex h-svh min-h-0 min-w-0 flex-1" data-testid="route-column">
+        <Outlet />
+      </div>
+    ),
   });
+  const center = createRoute({
+    getParentRoute: () => shell,
+    path: "experts",
+    validateSearch: (search: Record<string, unknown>) => ({
+      ...(search.kind === "teams" || search.kind === "skills" ? { kind: search.kind } : {}),
+      tab: "capabilities" as const,
+    }),
+    component: ExpertCenterPage,
+  });
+  const list = createRoute({ getParentRoute: () => center, path: "/" });
+  const detail = createRoute({ getParentRoute: () => center, path: "$expertId" });
   const router = createRouter({
-    routeTree: root.addChildren([settings, center]),
+    routeTree: root.addChildren([
+      settings,
+      shell.addChildren([center.addChildren([list, detail])]),
+    ]),
     history: createMemoryHistory({
       initialEntries: [expertCenter ? "/experts?kind=skills" : "/settings"],
     }),
@@ -502,6 +506,24 @@ function setTestUiFontSize(fontSize: number) {
 }
 
 describe("Skill library management browser flows", () => {
+  it.each([390, 1280])(
+    "fills the actual flex route column for an empty skills page at %i px",
+    async (width) => {
+      harness.skills = [];
+      await page.viewport(width, 844);
+      await mountPanel(undefined, true);
+      await expect
+        .element(page.getByRole("heading", { name: "技能库", exact: true }))
+        .toBeVisible();
+      const route = page.getByTestId("route-column").element();
+      const main = page.getByRole("main").element();
+      expect(main.getBoundingClientRect().width).toBeGreaterThanOrEqual(
+        route.getBoundingClientRect().width - 1,
+      );
+      expect(main.scrollWidth).toBeLessThanOrEqual(main.clientWidth);
+    },
+  );
+
   it.each(["放弃更改", "保存并继续"] as const)(
     "keeps skill edits guarded when leaving the Expert center skills category after %s",
     async (decision) => {

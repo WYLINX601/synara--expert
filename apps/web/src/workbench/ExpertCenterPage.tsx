@@ -11,7 +11,7 @@ export default function ExpertCenterPage() {
   const navigate = useNavigate();
   const actions = useExpertTaskActions(search.projectId, search.sourceThreadId);
   return (
-    <main className="h-full overflow-y-auto p-4 sm:p-6">
+    <main className="h-full min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
       <div className="mx-auto max-w-5xl">
         <ExpertsSettingsPanel
           centerRoute={{

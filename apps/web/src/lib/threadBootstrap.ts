@@ -33,6 +33,9 @@ export interface NewThreadOptions {
   temporary?: boolean;
   provider?: ProviderKind;
   fresh?: boolean;
+  /** Create an independent draft without claiming the project composer slot. */
+  standalone?: boolean;
+  expertId?: string;
 }
 
 export interface InheritedThreadContext {

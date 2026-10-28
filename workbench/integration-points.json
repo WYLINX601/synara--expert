@@ -827,6 +827,39 @@
         "apps/web/src/components/settings/SkillManagementPairingSettingsPanel.tsx",
         "apps/web/src/wsNativeApi.ts"
       ]
+    },
+    {
+      "id": "web.expert-center",
+      "surface": "web-routes",
+      "entryFiles": [
+        "apps/web/src/routes/_chat.experts.tsx",
+        "apps/web/src/routes/_chat.experts.index.tsx",
+        "apps/web/src/routes/_chat.experts.$expertId.tsx",
+        "apps/web/src/workbench/ExpertCenterPage.tsx",
+        "apps/web/src/workbench/host/expertTaskActions.tsx",
+        "apps/web/src/workbench/host/expertTaskSource.ts",
+        "apps/web/src/hooks/useHandleNewThread.ts",
+        "apps/web/src/routes/__root.tsx"
+      ],
+      "featureFiles": [
+        "apps/web/src/components/settings/ExpertsSettingsPanel.tsx",
+        "apps/web/src/components/settings/ExpertEditor.tsx",
+        "apps/web/src/components/settings/ExpertTaskHistory.tsx",
+        "apps/web/src/components/settings/ExpertTeamsSettingsPanel.tsx"
+      ],
+      "responsibility": "The _chat parent retains its existing shell and subscriptions. A single route-owned Expert editor reuses the current draft guard and save contract. The native new-thread host can stage an independent Expert draft without dispatching or claiming an existing project slot. History reads the existing shell binding and summary projections through a narrow adapter, including archive and synchronization state; it does not fetch task bodies or add server APIs. Settings retains expert teams and links to the single personal Expert surface; MCP return targets use the same route.",
+      "tests": [
+        "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
+        "apps/web/src/components/settings/WorkbenchSettingsPages.browser.tsx",
+        "apps/web/src/workbench/host/expertTaskSource.test.ts",
+        "apps/web/src/workbench/host/settings.test.ts",
+        "apps/web/src/composerDraftStore.test.ts",
+        "apps/web/src/lib/draftThreadCreate.test.ts",
+        "apps/web/src/components/chat/prepareChatSendWorkspace.test.ts",
+        "apps/web/src/hooks/useHandleNewThread.expert.browser.tsx",
+        "apps/web/src/components/settings/ExpertTaskHistory.browser.tsx",
+        "apps/web/src/storeState.test.ts"
+      ]
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { ProjectId, ThreadId } from "@synara/contracts";
+import { ProjectId, ThreadId, type OrchestrationThreadPullRequest } from "@synara/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { selectComposerThreadDraft } from "./composerDraftDomain";
 import { runComposerSendOnce } from "./lib/composerSendOwnership";
@@ -434,6 +434,83 @@ describe("composerDraftStore project draft thread mapping", () => {
       branch: "feature/next",
       worktreePath: "/tmp/feature-next",
       envMode: "worktree",
+    });
+  });
+
+  it("updates a standalone draft context without claiming or replacing a project slot", () => {
+    const store = useComposerDraftStore.getState();
+    const pullRequest = {
+      number: 42,
+      title: "Expert task PR",
+      url: "https://example.test/pull/42",
+      baseBranch: "main",
+      headBranch: "feature/expert",
+      state: "open",
+    } as OrchestrationThreadPullRequest;
+    store.registerDraftThread(threadId, { projectId });
+    store.setProjectDraftThreadId(otherProjectId, otherThreadId);
+    store.setPrompt(otherThreadId, "keep the project's primary draft");
+
+    store.setDraftThreadContext(threadId, {
+      projectId: otherProjectId,
+      expertId: "expert-1",
+      branch: "feature/expert",
+      worktreePath: "/tmp/expert-worktree",
+      envMode: "worktree",
+      lastKnownPr: pullRequest,
+    });
+
+    const updated = useComposerDraftStore.getState();
+    expect(updated.getDraftThread(threadId)).toMatchObject({
+      projectId: otherProjectId,
+      expertId: "expert-1",
+      branch: "feature/expert",
+      worktreePath: "/tmp/expert-worktree",
+      envMode: "worktree",
+      lastKnownPr: pullRequest,
+    });
+    expect(updated.getDraftThreadByProjectId(projectId)).toBeNull();
+    expect(updated.getDraftThreadByProjectId(otherProjectId)?.threadId).toBe(otherThreadId);
+    expect(updated.draftsByThreadId[otherThreadId]?.prompt).toBe(
+      "keep the project's primary draft",
+    );
+  });
+
+  it("moves a standalone draft's project metadata without taking the target slot", () => {
+    const store = useComposerDraftStore.getState();
+    store.registerDraftThread(threadId, { projectId });
+    store.setProjectDraftThreadId(otherProjectId, otherThreadId);
+    store.setPrompt(otherThreadId, "keep this primary draft");
+
+    store.moveDraftThreadToProject(threadId, otherProjectId, {
+      branch: "feature/standalone",
+      envMode: "worktree",
+    });
+
+    const updated = useComposerDraftStore.getState();
+    expect(updated.getDraftThread(threadId)).toMatchObject({
+      projectId: otherProjectId,
+      branch: "feature/standalone",
+      envMode: "worktree",
+    });
+    expect(updated.getDraftThreadByProjectId(projectId)).toBeNull();
+    expect(updated.getDraftThreadByProjectId(otherProjectId)?.threadId).toBe(otherThreadId);
+    expect(updated.getDraftThread(otherThreadId)).not.toBeNull();
+    expect(updated.draftsByThreadId[otherThreadId]?.prompt).toBe("keep this primary draft");
+  });
+
+  it("moves a claimed draft's context with its existing project-slot ownership", () => {
+    const store = useComposerDraftStore.getState();
+    store.setProjectDraftThreadId(projectId, threadId);
+
+    store.setDraftThreadContext(threadId, { projectId: otherProjectId, branch: "main" });
+
+    const updated = useComposerDraftStore.getState();
+    expect(updated.getDraftThreadByProjectId(projectId)).toBeNull();
+    expect(updated.getDraftThreadByProjectId(otherProjectId)?.threadId).toBe(threadId);
+    expect(updated.getDraftThread(threadId)).toMatchObject({
+      projectId: otherProjectId,
+      branch: "main",
     });
   });
 

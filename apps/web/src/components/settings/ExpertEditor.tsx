@@ -28,10 +28,11 @@ import { ExpertSkillBindingsEditor } from "./ExpertSkillBindingsEditor";
 import { ExpertSkillPackagesEditor } from "./ExpertSkillPackagesEditor";
 import { SettingsCard, SettingsSectionShell, SettingsSelectPopup } from "./SettingsPanelPrimitives";
 
-export type ExpertEditorTab = "capabilities" | "settings";
+export type ExpertEditorTab = "capabilities" | "settings" | "history";
 
 export function ExpertEditor({
   header,
+  history,
   status,
   draft,
   issues,
@@ -49,6 +50,7 @@ export function ExpertEditor({
   onOpenConnections,
 }: {
   header: ReactNode;
+  history?: ReactNode;
   status?: ReactNode;
   draft: ExpertSaveInput;
   issues: ReadonlyArray<ExpertDraftIssue>;
@@ -80,7 +82,9 @@ export function ExpertEditor({
     )
       return;
     event.preventDefault();
-    const tabs: ExpertEditorTab[] = ["capabilities", "settings"];
+    const tabs: ExpertEditorTab[] = history
+      ? ["capabilities", "settings", "history"]
+      : ["capabilities", "settings"];
     const currentIndex = tabs.indexOf(tab);
     const nextIndex =
       event.key === "Home"
@@ -130,6 +134,20 @@ export function ExpertEditor({
           >
             设置
           </button>
+          {history ? (
+            <button
+              id="expert-tab-history"
+              type="button"
+              role="tab"
+              aria-selected={tab === "history"}
+              aria-controls="expert-panel-history"
+              tabIndex={tab === "history" ? 0 : -1}
+              className="rounded-lg px-3 py-1.5 text-ui-sm outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-border-focus)] aria-selected:bg-background aria-selected:text-foreground aria-selected:shadow-sm"
+              onClick={() => onTabChange("history")}
+            >
+              任务历史
+            </button>
+          ) : null}
         </div>
       </header>
       {status}
@@ -176,7 +194,16 @@ export function ExpertEditor({
         </DialogPopup>
       </Dialog>
 
-      {tab === "settings" ? (
+      {tab === "history" && history ? (
+        <div
+          id="expert-panel-history"
+          role="tabpanel"
+          aria-labelledby="expert-tab-history"
+          tabIndex={-1}
+        >
+          {history}
+        </div>
+      ) : tab === "settings" ? (
         <div
           id="expert-panel-settings"
           role="tabpanel"

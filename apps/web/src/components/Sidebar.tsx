@@ -10,6 +10,7 @@ import {
   BotIcon,
   CircleQuestionIcon,
   ClockIcon,
+  BrainIcon,
   CodeReviewIcon,
   CopyIcon,
   CustomizeIcon,
@@ -4548,6 +4549,24 @@ export default function Sidebar() {
           void navigate({ to: "/automations" });
         },
       },
+      experts: {
+        icon: BrainIcon,
+        label: "Experts",
+        active: pathname === "/experts" || pathname.startsWith("/experts/"),
+        badge: null,
+        onClick: () => {
+          const sourceThreadId = routeThreadId;
+          const projectId = activeRouteProjectId ?? undefined;
+          void navigate({
+            to: "/experts",
+            search: {
+              tab: "capabilities",
+              ...(sourceThreadId === null ? {} : { sourceThreadId }),
+              ...(projectId === undefined ? {} : { projectId }),
+            },
+          });
+        },
+      },
     }),
     [
       automationCountBadge,
@@ -4559,9 +4578,12 @@ export default function Sidebar() {
       isOnPullRequests,
       isOnTasks,
       appSettings.tasksViewMode,
+      activeRouteProjectId,
       navigate,
       prefetchModelsForPrimaryNewThread,
       pullRequestsReviewBadge,
+      pathname,
+      routeThreadId,
       tasksAttentionBadge,
     ],
   );
@@ -7350,6 +7372,9 @@ export default function Sidebar() {
                 <SidebarPanelTitle title="Settings" />
                 <SettingsSidebarNav
                   activeSection={activeSettingsSection}
+                  onSelectRoute={(route) => {
+                    void navigate({ to: route, search: { tab: "capabilities" } });
+                  }}
                   onSelectSection={(section, options) => {
                     void navigate({
                       to: "/settings",

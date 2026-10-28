@@ -7,11 +7,11 @@ import type { ComponentProps, ComponentType, ReactNode } from "react";
 
 import { Button } from "../components/ui/button";
 import { SettingsEmptyState } from "../components/settings/SettingsPanelPrimitives";
-import type { ExpertsSettingsPanel } from "../components/settings/ExpertsSettingsPanel";
+import type { ExpertTeamsSettingsPanel } from "../components/settings/ExpertTeamsSettingsPanel";
 import type { GlobalMcpSettingsPanel } from "../components/settings/GlobalMcpSettingsPanel";
 import { WORKBENCH_MODULES, type WorkbenchSettingsPageId } from "./registry";
 
-type ExpertsSettingsPageProps = Omit<ComponentProps<typeof ExpertsSettingsPanel>, "active">;
+type ExpertsSettingsPageProps = Omit<ComponentProps<typeof ExpertTeamsSettingsPanel>, "active">;
 type McpSettingsPageProps = ComponentProps<typeof GlobalMcpSettingsPanel>;
 
 type SettingsPagePropsById = {
@@ -23,8 +23,8 @@ type SettingsPageLoader<Props> = () => Promise<{ default: ComponentType<Props> }
 
 const WORKBENCH_SETTINGS_PAGE_LOADERS = {
   "experts-settings": async () => {
-    const module = await import("../components/settings/ExpertsSettingsPanel");
-    return { default: module.ExpertsSettingsPanel };
+    const module = await import("../components/settings/ExpertTeamsSettingsPanel");
+    return { default: module.ExpertTeamsSettingsPanel };
   },
   "mcp-settings": async () => {
     const module = await import("../components/settings/GlobalMcpSettingsPanel");
@@ -41,6 +41,7 @@ type WorkbenchSettingsPageBase = {
 export type WorkbenchSettingsPageProps =
   | (WorkbenchSettingsPageBase & {
       readonly pageId: "experts-settings";
+      readonly onOpenExperts: () => void;
     } & ExpertsSettingsPageProps)
   | (WorkbenchSettingsPageBase & {
       readonly pageId: "mcp-settings";
@@ -98,12 +99,7 @@ export function WorkbenchSettingsPage(props: WorkbenchSettingsPageProps) {
   );
   const page =
     props.pageId === "experts-settings" ? (
-      <ExpertsPage
-        {...(props.initialExpertId === undefined ? {} : { initialExpertId: props.initialExpertId })}
-        {...(props.onOpenConnections === undefined
-          ? {}
-          : { onOpenConnections: props.onOpenConnections })}
-      />
+      <ExpertsPage onOpenExperts={props.onOpenExperts} />
     ) : (
       <McpPage
         {...(props.initialTab === undefined ? {} : { initialTab: props.initialTab })}

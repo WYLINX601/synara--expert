@@ -31,6 +31,7 @@ describe("rail item order", () => {
       "tasks",
       "pullRequests",
       "studio",
+      "experts",
     ]);
   });
 
@@ -44,6 +45,7 @@ describe("rail item order", () => {
       "pullRequests",
       "automations",
       "studio",
+      "experts",
     ]);
     expect(normalizeRailItemOrder(["home", "spaces", "inbox"]).slice(0, 3)).toEqual([
       "home",
@@ -53,7 +55,10 @@ describe("rail item order", () => {
   });
 
   it("never keeps Home hidden", () => {
-    expect(normalizeHiddenRailItems(["home", "kanban", "gone", "kanban"])).toEqual(["kanban"]);
+    expect(normalizeHiddenRailItems(["home", "kanban", "experts", "gone", "kanban"])).toEqual([
+      "kanban",
+      "experts",
+    ]);
   });
 
   it("drops hidden items unless active, and Studio or Inbox unless available", () => {
@@ -66,7 +71,7 @@ describe("rail item order", () => {
         studioAvailable: false,
         inboxAvailable: false,
       }),
-    ).toEqual(["home", "kanban", "tasks", "pullRequests", "automations"]);
+    ).toEqual(["home", "kanban", "tasks", "pullRequests", "automations", "experts"]);
     expect(
       buildRailItemOrder({
         order,
@@ -87,6 +92,7 @@ describe("rail item order", () => {
       "tasks",
       "pullRequests",
       "automations",
+      "experts",
     ]);
     expect(isRailItemAvailable("inbox", { studioAvailable: false, inboxAvailable: true })).toBe(
       true,
@@ -149,6 +155,7 @@ describe("railItemShowsPanel", () => {
     for (const id of ["home", "spaces", "automations", "studio", "settings"] as const) {
       expect(railItemShowsPanel(id)).toBe(true);
     }
+    expect(railItemShowsPanel("experts")).toBe(false);
   });
 });
 
@@ -159,6 +166,9 @@ describe("railItemForPathname", () => {
     expect(railItemForPathname("/tasks")).toBe("tasks");
     expect(railItemForPathname("/pull-requests/42")).toBe("pullRequests");
     expect(railItemForPathname("/automations")).toBe("automations");
+    expect(railItemForPathname("/experts")).toBe("experts");
+    expect(railItemForPathname("/experts/planner")).toBe("experts");
+    expect(railItemForPathname("/expertsish")).toBeNull();
     expect(railItemForPathname("/studio/abc")).toBe("studio");
     expect(railItemForPathname("/groups")).toBe("studio");
     expect(railItemForPathname("/hubs")).toBe("studio");

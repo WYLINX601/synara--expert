@@ -22,6 +22,7 @@ import {
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
 } from "../../composerDraftStore";
+import { isDraftThreadMappedToProjectSlot } from "../../composerDraftDomain";
 import { formatAssistantSelectionTitleSeed } from "../../lib/assistantSelections";
 import { formatBrowserAnnotationLabel } from "../../lib/browserAnnotations";
 import { resolveFirstSendTarget } from "../../lib/chatFirstSend";
@@ -262,7 +263,15 @@ export async function prepareChatSendWorkspace({
       }
     }
 
-    clearProjectDraftThreadId(targetProjectIdForSend);
+    const composerDraftState = useComposerDraftStore.getState();
+    const draftOwnsProjectSlot = isDraftThreadMappedToProjectSlot(
+      composerDraftState.projectDraftThreadIdByProjectId,
+      threadIdForSend,
+    );
+    const targetDraftThread = composerDraftState.getDraftThreadByProjectId(targetProjectIdForSend);
+    if (draftOwnsProjectSlot && targetDraftThread?.threadId !== threadIdForSend) {
+      clearProjectDraftThreadId(targetProjectIdForSend);
+    }
     setDraftThreadContext(threadIdForSend, {
       projectId: targetProjectIdForSend,
       envMode: "local",

@@ -8,6 +8,7 @@ import {
   createRouter,
   Outlet,
   RouterProvider,
+  useParams,
 } from "@tanstack/react-router";
 import { page } from "vitest/browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -276,6 +277,66 @@ async function mountPanel(initialEntry = "/settings") {
   return {
     queryClient,
     router,
+    close: async () => {
+      await view.unmount();
+      queryClient.clear();
+    },
+  };
+}
+
+async function mountCenter(initialEntry = "/experts/planner?tab=capabilities") {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  const onUseExpert = vi.fn(async (_expertId: string) => {});
+  const root = createRootRoute({
+    component: () => (
+      <QueryClientProvider client={queryClient}>
+        <Outlet />
+      </QueryClientProvider>
+    ),
+  });
+  let router: ReturnType<typeof createRouter>;
+  const center = createRoute({
+    getParentRoute: () => root,
+    path: "/experts",
+    component: () => {
+      const params = useParams({ strict: false });
+      const search = center.useSearch() as { tab?: "capabilities" | "settings" | "history" };
+      return (
+        <ExpertsSettingsPanel
+          centerRoute={{
+            expertId: params.expertId ?? null,
+            tab: search.tab ?? "capabilities",
+            navigate: async (expertId, tab, replace) => {
+              await router.navigate({
+                to: (expertId ? "/experts/$expertId" : "/experts") as never,
+                params: { expertId } as never,
+                search: { tab } as never,
+                ...(replace === undefined ? {} : { replace }),
+              });
+            },
+          }}
+          renderHistory={(expertId) => <p>任务历史 {expertId}</p>}
+          onUseExpert={onUseExpert}
+        />
+      );
+    },
+  });
+  const list = createRoute({ getParentRoute: () => center, path: "/" });
+  const detail = createRoute({ getParentRoute: () => center, path: "$expertId" });
+  const outside = createRoute({
+    getParentRoute: () => root,
+    path: "/outside",
+    component: () => <p>其他页面</p>,
+  });
+  router = createRouter({
+    routeTree: root.addChildren([center.addChildren([list, detail]), outside]),
+    history: createMemoryHistory({ initialEntries: [initialEntry] }),
+  });
+  const view = await render(<RouterProvider router={router} />);
+  return {
+    router,
+    queryClient,
+    onUseExpert,
     close: async () => {
       await view.unmount();
       queryClient.clear();
@@ -1633,5 +1694,79 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     expect(page.getByText(/允许但未发现/u).length).toBe(0);
     await view.unmount();
     queryClient.clear();
+  });
+});
+
+describe("Expert center routes", () => {
+  it("locates a newly saved expert without a second leave confirmation", async () => {
+    const { router, close } = await mountCenter("/experts?tab=capabilities");
+    try {
+      await page.getByRole("button", { name: "新建专家", exact: true }).click();
+      await page.getByLabelText("专家名称").fill("新专家路由测试");
+      await page.getByRole("button", { name: "保存更改", exact: true }).click();
+      await expect.poll(() => router.state.location.pathname).toBe("/experts/created-expert");
+      await expect
+        .element(page.getByRole("heading", { name: "未保存的更改" }))
+        .not.toBeInTheDocument();
+      await expect
+        .element(page.getByRole("heading", { name: "新专家路由测试", exact: true }))
+        .toBeVisible();
+    } finally {
+      await close();
+    }
+  });
+
+  it("keeps the same draft through history/settings and guards leaving the expert", async () => {
+    const { router, close } = await mountCenter();
+    try {
+      const persona = page.getByLabelText("专家角色与工作方式");
+      await persona.fill("保留我的未保存角色");
+      await page.getByRole("tab", { name: "任务历史", exact: true }).click();
+      await expect.element(page.getByText("任务历史 planner", { exact: true })).toBeVisible();
+      expect(router.state.location.searchStr).toContain("history");
+      await page.getByRole("tab", { name: "能力", exact: true }).click();
+      await expect.element(persona).toHaveValue("保留我的未保存角色");
+      void router.navigate({ to: "/outside" as never });
+      await expect.element(page.getByRole("heading", { name: "未保存的更改" })).toBeVisible();
+      await page.getByRole("button", { name: "取消", exact: true }).click();
+      expect(router.state.location.pathname).toBe("/experts/planner");
+      await expect.element(persona).toHaveValue("保留我的未保存角色");
+    } finally {
+      await close();
+    }
+  });
+
+  it("does not display the previous expert for an unknown detail ID", async () => {
+    const { router, close } = await mountCenter();
+    try {
+      await expect
+        .element(page.getByRole("heading", { name: "规划专家", exact: true }))
+        .toBeVisible();
+      await router.navigate({
+        to: "/experts/$expertId",
+        params: { expertId: "missing" },
+        search: { tab: "capabilities" },
+      });
+      await expect.element(page.getByText("该专家不存在或已删除。")).toBeVisible();
+      await expect
+        .element(page.getByRole("button", { name: "使用此专家", exact: true }))
+        .not.toBeInTheDocument();
+    } finally {
+      await close();
+    }
+  });
+
+  it("starts with the saved expert after resolving dirty edits once", async () => {
+    const { close, onUseExpert } = await mountCenter();
+    try {
+      await page.getByLabelText("专家角色与工作方式").fill("新的角色");
+      await page.getByRole("button", { name: "使用此专家", exact: true }).click();
+      await page.getByRole("button", { name: "保存并继续", exact: true }).click();
+      await expect.poll(() => onUseExpert.mock.calls.length).toBe(1);
+      expect(onUseExpert).toHaveBeenCalledWith("planner");
+      expect(harness.server.saveExpert).toHaveBeenCalledTimes(1);
+    } finally {
+      await close();
+    }
   });
 });

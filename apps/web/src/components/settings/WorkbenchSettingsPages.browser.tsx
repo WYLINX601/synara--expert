@@ -18,24 +18,19 @@ const harness = vi.hoisted(() => ({
   failNextExpertRender: false,
 }));
 
-vi.mock("./ExpertsSettingsPanel", async () => {
+vi.mock("./ExpertTeamsSettingsPanel", async () => {
   const React = await import("react");
   return {
-    ExpertsSettingsPanel: (props: {
-      initialExpertId?: string;
-      onOpenConnections?: (expertId: string, connectionId?: string) => void;
-    }) => {
+    ExpertTeamsSettingsPanel: (props: { onOpenExperts: () => void }) => {
       const [instance] = React.useState(() => ++harness.expertsMounts);
       if (harness.failNextExpertRender) {
         throw new Error("Test page render failure");
       }
       return (
         <div>
-          <p data-testid="experts-page">
-            Experts {props.initialExpertId ?? "none"} instance {instance}
-          </p>
-          <button type="button" onClick={() => props.onOpenConnections?.("planner", "linear")}>
-            Open connection
+          <p data-testid="experts-page">Expert teams instance {instance}</p>
+          <button type="button" onClick={props.onOpenExperts}>
+            Open Experts
           </button>
         </div>
       );
@@ -82,9 +77,8 @@ vi.mock("./GlobalMcpSettingsPanel", async () => {
 
 import { validateSettingsRouteSearch } from "../../settingsNavigation";
 import {
+  expertCenterRouteTarget,
   resolveSettingsHostRoute,
-  settingsSearchForExpertFromMcp,
-  settingsSearchForMcpFromExpert,
   settingsSearchForMcpTab,
 } from "../../workbench/host/settings";
 import { WorkbenchSettingsPage } from "../../workbench/settingsPages";
@@ -119,16 +113,7 @@ async function mountSettings(initialEntry: string) {
                   search: { section: "general" } as never,
                 })
               }
-              onOpenConnections={(expertId, connectionId) =>
-                void router.navigate({
-                  to: "/settings",
-                  search: settingsSearchForMcpFromExpert({
-                    expertId,
-                    ...(connectionId ? { connectionId } : {}),
-                  }) as never,
-                })
-              }
-              {...(resolved.expertId === undefined ? {} : { initialExpertId: resolved.expertId })}
+              onOpenExperts={() => void router.navigate({ to: "/experts" } as never)}
             />
           ) : resolved.pageId === "mcp-settings" ? (
             <WorkbenchSettingsPage
@@ -153,9 +138,8 @@ async function mountSettings(initialEntry: string) {
               }
               onReturnToExpert={(target) =>
                 void router.navigate({
-                  to: "/settings",
-                  search: settingsSearchForExpertFromMcp(target) as never,
-                })
+                  ...expertCenterRouteTarget({ ...target, search: rawSearch }),
+                } as never)
               }
             />
           ) : null}
@@ -163,8 +147,24 @@ async function mountSettings(initialEntry: string) {
       );
     },
   });
+  const experts = createRoute({
+    getParentRoute: () => root,
+    path: "/experts/$expertId",
+    component: () => {
+      const location = useRouterState({
+        select: (state) => ({ pathname: state.location.pathname, search: state.location.search }),
+      });
+      const expertId = location.pathname.split("/").at(-1);
+      return (
+        <p data-testid="expert-center-route">
+          {expertId} {String(location.search.tab ?? "")}{" "}
+          {String(location.search.connectionId ?? "")} {String(location.search.search ?? "")}
+        </p>
+      );
+    },
+  });
   router = createRouter({
-    routeTree: root.addChildren([settings]),
+    routeTree: root.addChildren([settings, experts]),
     history: createMemoryHistory({ initialEntries: [initialEntry] }),
   });
   const view = await render(<RouterProvider router={router} />);
@@ -194,11 +194,11 @@ describe("Workbench settings page host", () => {
       root.render(
         <WorkbenchSettingsPage
           pageId="experts-settings"
-          initialExpertId="planner"
           onReturnToSettings={() => {}}
+          onOpenExperts={() => {}}
         />,
       );
-      await expect.element(page.getByTestId("experts-page")).toHaveTextContent("Experts planner");
+      await expect.element(page.getByTestId("experts-page")).toHaveTextContent("Expert teams");
       root.render(
         <WorkbenchSettingsPage
           pageId="mcp-settings"
@@ -214,10 +214,9 @@ describe("Workbench settings page host", () => {
   });
 
   it("loads a page lazily and keeps MCP route props live without remounting on tab changes", async () => {
-    const router = await mountSettings("/settings?section=experts&expertId=planner");
-
-    await expect.element(page.getByTestId("experts-page")).toHaveTextContent("Experts planner");
-    await page.getByRole("button", { name: "Open connection" }).click();
+    const router = await mountSettings(
+      "/settings?section=mcp&tab=tools&expertId=planner&returnExpertId=planner&connectionId=linear&search=Linear",
+    );
     await expect
       .element(page.getByTestId("mcp-page"))
       .toHaveTextContent("MCP tools planner linear");
@@ -228,15 +227,16 @@ describe("Workbench settings page host", () => {
     expect(harness.mcpMounts).toBe(1);
 
     await page.getByRole("button", { name: "Return to expert" }).click();
-    await expect.element(page.getByTestId("experts-page")).toHaveTextContent("Experts planner");
     await expect
-      .element(page.getByTestId("route-search"))
-      .toHaveTextContent('"connectionId":"linear"');
+      .element(page.getByTestId("expert-center-route"))
+      .toHaveTextContent("planner capabilities linear Linear");
 
     router.history.back();
     await expect.element(page.getByTestId("mcp-page")).toHaveTextContent("MCP apps planner linear");
     router.history.forward();
-    await expect.element(page.getByTestId("experts-page")).toHaveTextContent("Experts planner");
+    await expect
+      .element(page.getByTestId("expert-center-route"))
+      .toHaveTextContent("planner capabilities linear Linear");
   });
 
   it("shows retry and return actions when a Workbench page render fails", async () => {
@@ -245,8 +245,8 @@ describe("Workbench settings page host", () => {
     const view = await render(
       <WorkbenchSettingsPage
         pageId="experts-settings"
-        initialExpertId="planner"
         onReturnToSettings={returned}
+        onOpenExperts={() => {}}
       />,
     );
 
@@ -255,15 +255,15 @@ describe("Workbench settings page host", () => {
       .toHaveTextContent("Could not load Experts settings.");
     harness.failNextExpertRender = false;
     await page.getByRole("button", { name: "Retry" }).click();
-    await expect.element(page.getByTestId("experts-page")).toHaveTextContent("Experts planner");
+    await expect.element(page.getByTestId("experts-page")).toHaveTextContent("Expert teams");
     await view.unmount();
 
     harness.failNextExpertRender = true;
     const secondView = await render(
       <WorkbenchSettingsPage
         pageId="experts-settings"
-        initialExpertId="planner"
         onReturnToSettings={returned}
+        onOpenExperts={() => {}}
       />,
     );
     await expect

@@ -97,6 +97,32 @@ describe("draft thread creation", () => {
     );
   });
 
+  it("seeds expert and workspace context on an unclaimed standalone draft", () => {
+    const projectId = ProjectId.makeUnsafe("project-expert-draft");
+    const threadId = createDraftThread({
+      projectId,
+      expertId: "expert-1",
+      prompt: "",
+      modelSelection: { provider: "codex", model: "gpt-5.4" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      envMode: "worktree",
+      branch: "feature/expert",
+      worktreePath: "/tmp/expert-worktree",
+    });
+
+    const store = useComposerDraftStore.getState();
+    expect(store.getDraftThread(threadId)).toMatchObject({
+      projectId,
+      expertId: "expert-1",
+      branch: "feature/expert",
+      worktreePath: "/tmp/expert-worktree",
+      envMode: "worktree",
+    });
+    expect(store.getDraftThreadByProjectId(projectId)).toBeNull();
+    expect(store.draftsByThreadId[threadId]?.prompt ?? "").toBe("");
+  });
+
   it("stamps a promoted draft at first dispatch instead of draft creation", async () => {
     const projectId = ProjectId.makeUnsafe("project-draft-created-at");
     const draftCreatedAt = "2026-03-04T12:00:00.000Z";

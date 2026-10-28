@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ExpertDefinition, ExpertSaveInput } from "@synara/contracts";
 import { ArrowLeftIcon } from "~/lib/icons";
@@ -45,11 +53,22 @@ function errorText(error: unknown): string {
 
 export function ExpertsSettingsPanel(props: {
   readonly active?: boolean;
+  readonly centerRoute?: {
+    readonly expertId: string | null;
+    readonly tab: ExpertEditorTab;
+    readonly navigate: (
+      expertId: string | null,
+      tab: ExpertEditorTab,
+      replace?: boolean,
+    ) => Promise<void>;
+  };
+  readonly renderHistory?: (expertId: string) => ReactNode;
+  readonly onUseExpert?: (expertId: string) => Promise<void>;
   readonly initialExpertId?: string;
   readonly onOpenConnections?: (expertId: string, connectionId?: string) => void;
 }) {
   const active = props.active ?? true;
-  const requestedExpertId = props.initialExpertId ?? null;
+  const requestedExpertId = props.centerRoute?.expertId ?? props.initialExpertId ?? null;
   const queryClient = useQueryClient();
   const expertsQuery = useQuery({
     queryKey: EXPERTS_QUERY_KEY,
@@ -69,6 +88,11 @@ export function ExpertsSettingsPanel(props: {
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [displayConfirmAction, setDisplayConfirmAction] = useState<ConfirmAction>(null);
   const savingRef = useRef(false);
+  const generationRef = useRef(0);
+  const [starting, setStarting] = useState(false);
+  const startingRef = useRef(false);
+  const centerRouteRef = useRef(props.centerRoute);
+  centerRouteRef.current = props.centerRoute;
   const lastRouteRequestRef = useRef<string | null>(null);
   const baselineRef = useRef(baseline);
   const draftRef = useRef(draft);
@@ -126,6 +150,7 @@ export function ExpertsSettingsPanel(props: {
       return null;
     }
 
+    const generation = generationRef.current;
     savingRef.current = true;
     setPending(true);
     setActionError(null);
@@ -141,6 +166,7 @@ export function ExpertsSettingsPanel(props: {
       });
       void queryClient.invalidateQueries({ queryKey: EXPERTS_QUERY_KEY });
       void queryClient.invalidateQueries({ queryKey: EXPERT_CONNECTIONS_QUERY_KEY });
+      if (generation !== generationRef.current) return null;
       const cleanDraft = expertDraftFromDefinition(saved);
       baselineRef.current = saved;
       draftRef.current = cleanDraft;
@@ -160,6 +186,25 @@ export function ExpertsSettingsPanel(props: {
 
   const { confirmLeave, dialog: leaveDialog } = useExpertDraftGuard({
     isDirty,
+    ...(props.centerRoute
+      ? {
+          shouldGuardNavigation: ({
+            currentPathname,
+            nextPathname,
+          }: {
+            currentPathname: string;
+            nextPathname: string;
+          }) =>
+            currentPathname !== nextPathname &&
+            Boolean(
+              draftRef.current &&
+              !expertDraftsEqual(
+                draftRef.current,
+                expertDraftFromDefinition(baselineRef.current ?? undefined),
+              ),
+            ),
+        }
+      : {}),
     canSave: issues.length === 0,
     ...(issues[0] ? { saveDisabledReason: issues[0].message } : {}),
     onSave: async () => Boolean(await saveDraft()),
@@ -177,7 +222,30 @@ export function ExpertsSettingsPanel(props: {
     setSettingsKind(next);
   };
 
+  // Route changes reach this controller only after the shared route blocker has settled.
   useEffect(() => {
+    const route = centerRouteRef.current;
+    if (!route) return;
+    if (!expertsQuery.data) return;
+    if (route.expertId === lastRouteRequestRef.current) return;
+    generationRef.current += 1;
+    lastRouteRequestRef.current = route.expertId;
+    const requested = expertsQuery.data.find((expert) => expert.id === route.expertId);
+    baselineRef.current = requested ?? null;
+    draftRef.current = requested ? expertDraftFromDefinition(requested) : null;
+    setBaseline(baselineRef.current);
+    setDraft(draftRef.current);
+    setSelectedId(requested?.id ?? null);
+    setView(route.expertId ? "editor" : "list");
+    setActionError(null);
+  }, [props.centerRoute?.expertId, expertsQuery.data]);
+
+  useEffect(() => {
+    if (props.centerRoute) setTab(props.centerRoute.tab);
+  }, [props.centerRoute?.tab]);
+
+  useEffect(() => {
+    if (centerRouteRef.current) return;
     if (!requestedExpertId) {
       lastRouteRequestRef.current = null;
       return;
@@ -240,6 +308,10 @@ export function ExpertsSettingsPanel(props: {
 
   const openExpert = async (expert: ExpertDefinition) => {
     if (!(await confirmLeave())) return;
+    if (props.centerRoute) {
+      await props.centerRoute.navigate(expert.id, "capabilities");
+      return;
+    }
     const latest =
       queryClient
         .getQueryData<ReadonlyArray<ExpertDefinition>>(EXPERTS_QUERY_KEY)
@@ -257,6 +329,11 @@ export function ExpertsSettingsPanel(props: {
 
   const startNew = async () => {
     if (!(await confirmLeave())) return;
+    if (props.centerRoute) {
+      lastRouteRequestRef.current = null;
+      await props.centerRoute.navigate(null, "settings");
+    }
+    generationRef.current += 1;
     baselineRef.current = null;
     draftRef.current = expertDraftFromDefinition();
     setBaseline(null);
@@ -279,6 +356,11 @@ export function ExpertsSettingsPanel(props: {
   const duplicateExpert = async (source: ExpertDefinition) => {
     if (pending || !(await confirmLeave())) return;
     const current = latestExpert(source);
+    if (props.centerRoute) {
+      lastRouteRequestRef.current = null;
+      await props.centerRoute.navigate(null, "settings");
+    }
+    generationRef.current += 1;
     const duplicate = expertDraftFromDefinition(current);
     const newDraft = { ...duplicate, name: `${current.name} 副本` };
     baselineRef.current = null;
@@ -293,7 +375,10 @@ export function ExpertsSettingsPanel(props: {
 
   const backToList = async () => {
     if (!(await confirmLeave())) return;
+    if (props.centerRoute) await props.centerRoute.navigate(null, "capabilities");
     setView("list");
+    setDraft(null);
+    draftRef.current = null;
   };
 
   const openConnectionManager = async () => {
@@ -335,6 +420,7 @@ export function ExpertsSettingsPanel(props: {
           setBaseline(null);
           setDraft(null);
           setView("list");
+          if (props.centerRoute) await props.centerRoute.navigate(null, "capabilities", true);
         }
       } else {
         const result =
@@ -350,7 +436,10 @@ export function ExpertsSettingsPanel(props: {
           draftRef.current = cleanDraft;
           setBaseline(result);
           setDraft(cleanDraft);
-          if (action.type === "archive") setView("list");
+          if (action.type === "archive") {
+            setView("list");
+            if (props.centerRoute) await props.centerRoute.navigate(null, "capabilities", true);
+          }
         }
       }
       void queryClient.invalidateQueries({ queryKey: EXPERTS_QUERY_KEY });
@@ -371,6 +460,34 @@ export function ExpertsSettingsPanel(props: {
     onDelete: (expert: ExpertDefinition) => void requestExpertAction("delete", expert),
   };
 
+  const saveAndLocate = async () => {
+    const saved = await saveDraft();
+    if (saved && centerRouteRef.current && centerRouteRef.current.expertId !== saved.id) {
+      lastRouteRequestRef.current = saved.id;
+      await centerRouteRef.current.navigate(saved.id, tab, true);
+    }
+  };
+  const changeTab = (next: ExpertEditorTab) => {
+    setTab(next);
+    if (props.centerRoute) void props.centerRoute.navigate(props.centerRoute.expertId, next);
+  };
+  const useExpert = async () => {
+    if (!props.onUseExpert || startingRef.current || pending) return;
+    startingRef.current = true;
+    setStarting(true);
+    try {
+      if (!(await confirmLeave())) return;
+      let current = baselineRef.current;
+      if (!current) current = await saveDraft();
+      if (current && !current.archived) await props.onUseExpert(current.id);
+    } catch (error) {
+      setActionError(errorText(error));
+    } finally {
+      startingRef.current = false;
+      setStarting(false);
+    }
+  };
+
   const handleSaveKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!(event.metaKey || event.ctrlKey) || event.key.toLocaleLowerCase() !== "s") return;
     if (settingsKind !== "experts") return;
@@ -378,7 +495,7 @@ export function ExpertsSettingsPanel(props: {
     event.preventDefault();
     event.stopPropagation();
     if (readonly || pending || !isDirty) return;
-    void saveDraft();
+    void saveAndLocate();
   };
 
   const focusDraftIssue = (issue: ExpertDraftIssue) => {
@@ -410,7 +527,7 @@ export function ExpertsSettingsPanel(props: {
           return "添加专家 MCP 连接";
       }
     })();
-    setTab(nextTab);
+    changeTab(nextTab);
     window.requestAnimationFrame(() => {
       const panel = document.getElementById(`expert-panel-${nextTab}`);
       const target = Array.from(panel?.querySelectorAll<HTMLElement>("[aria-label]") ?? []).find(
@@ -437,16 +554,27 @@ export function ExpertsSettingsPanel(props: {
 
   return (
     <div className="space-y-5" onKeyDown={handleSaveKey}>
-      <SettingsSegmentedControl
-        value={settingsKind}
-        onValueChange={(next) => void changeSettingsKind(next)}
-        ariaLabel="专家设置分类"
-        options={[
-          { value: "experts", label: "单个专家" },
-          { value: "teams", label: "专家团" },
-        ]}
-      />
-      {settingsKind === "teams" ? (
+      {!props.centerRoute ? (
+        <SettingsSegmentedControl
+          value={settingsKind}
+          onValueChange={(next) => void changeSettingsKind(next)}
+          ariaLabel="专家设置分类"
+          options={[
+            { value: "experts", label: "单个专家" },
+            { value: "teams", label: "专家团" },
+          ]}
+        />
+      ) : null}
+      {props.centerRoute?.expertId &&
+      expertsQuery.data &&
+      !experts.some((expert) => expert.id === props.centerRoute?.expertId) ? (
+        <SettingsEmptyState layout="status">
+          <p>该专家不存在或已删除。</p>
+          <Button variant="outline" onClick={() => void backToList()}>
+            返回专家列表
+          </Button>
+        </SettingsEmptyState>
+      ) : settingsKind === "teams" ? (
         <HubTeamsSettingsPanel
           ref={hubTeamsPanelRef}
           active={active}
@@ -515,6 +643,15 @@ export function ExpertsSettingsPanel(props: {
                   ) : null}
                 </div>
                 <div className="ml-auto flex shrink-0 items-center gap-1">
+                  {props.onUseExpert && !readonly ? (
+                    <Button
+                      size="sm"
+                      disabled={pending || starting}
+                      onClick={() => void useExpert()}
+                    >
+                      {starting ? "准备中…" : "使用此专家"}
+                    </Button>
+                  ) : null}
                   <ExpertPreviewPopover
                     expert={baseline}
                     provider={previewProvider}
@@ -551,6 +688,7 @@ export function ExpertsSettingsPanel(props: {
                 ) : null}
               </>
             }
+            history={baseline && props.renderHistory ? props.renderHistory(baseline.id) : undefined}
             draft={draft}
             issues={issues}
             tab={tab}
@@ -562,7 +700,7 @@ export function ExpertsSettingsPanel(props: {
             catalog={skillsQuery.data?.skills ?? []}
             catalogLoading={skillsQuery.isPending && !skillsQuery.data}
             catalogError={skillsQuery.isError ? errorText(skillsQuery.error) : null}
-            onTabChange={setTab}
+            onTabChange={changeTab}
             onChange={updateDraft}
             onOpenConnections={() => void openConnectionManager()}
           />
@@ -573,7 +711,7 @@ export function ExpertsSettingsPanel(props: {
               pending={pending}
               issueCount={issues.length}
               {...(issues[0] ? { issueSummary: issues[0].message } : {})}
-              onSave={() => void saveDraft()}
+              onSave={() => void saveAndLocate()}
               onDiscard={discardDraft}
               onFocusIssue={() => {
                 const firstIssue = issues[0];

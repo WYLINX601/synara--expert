@@ -138,9 +138,8 @@ import { SETTINGS_PAGE_BACKGROUND_CLASS_NAME } from "../settingsPanelStyles";
 import { isAudioLevelAvailable } from "../lib/audioLevel";
 import {
   canonicalizeSettingsMcpSearch,
+  expertCenterRouteTarget,
   resolveSettingsHostRoute,
-  settingsSearchForExpertFromMcp,
-  settingsSearchForMcpFromExpert,
   settingsSearchForMcpTab,
 } from "../workbench/host/settings";
 import { WorkbenchSettingsPage } from "../workbench/settingsPages";
@@ -376,6 +375,22 @@ function SettingsRouteView() {
     rawRouteSearch.section,
     rawRouteSearch.tab,
     settingsRoute.shouldCanonicalizeMcpRoute,
+  ]);
+
+  useEffect(() => {
+    if (!settingsRoute.shouldRedirectExpertToCenter || settingsRoute.expertId === undefined) return;
+    void navigate({
+      ...expertCenterRouteTarget({
+        expertId: settingsRoute.expertId,
+        search: rawRouteSearch,
+      }),
+      replace: true,
+    } as never);
+  }, [
+    navigate,
+    rawRouteSearch,
+    settingsRoute.expertId,
+    settingsRoute.shouldRedirectExpertToCenter,
   ]);
 
   const {
@@ -1715,6 +1730,7 @@ function SettingsRouteView() {
   );
 
   const renderRouteOwnedPanel = () => {
+    if (settingsRoute.shouldRedirectExpertToCenter) return null;
     const workbenchPageId = settingsRoute.pageId;
     if (workbenchPageId !== undefined) {
       const onReturnToSettings = () => {
@@ -1723,25 +1739,14 @@ function SettingsRouteView() {
           search: { section: "general" } as never,
         });
       };
-      const onOpenConnections = (expertId: string, connectionId?: string) => {
-        void navigate({
-          to: "/settings",
-          search: settingsSearchForMcpFromExpert({
-            expertId,
-            ...(connectionId ? { connectionId } : {}),
-          }) as never,
-        });
-      };
-
       if (workbenchPageId === "experts-settings") {
         return (
           <WorkbenchSettingsPage
             pageId="experts-settings"
             onReturnToSettings={onReturnToSettings}
-            onOpenConnections={onOpenConnections}
-            {...(settingsRoute.expertId === undefined
-              ? {}
-              : { initialExpertId: settingsRoute.expertId })}
+            onOpenExperts={() => {
+              void navigate({ to: "/experts", search: { tab: "capabilities" } });
+            }}
           />
         );
       }
@@ -1772,12 +1777,12 @@ function SettingsRouteView() {
           }}
           onReturnToExpert={({ expertId, connectionId }) => {
             void navigate({
-              to: "/settings",
-              search: settingsSearchForExpertFromMcp({
+              ...expertCenterRouteTarget({
                 expertId,
+                search: rawRouteSearch,
                 ...(connectionId ? { connectionId } : {}),
-              }) as never,
-            });
+              }),
+            } as never);
           }}
         />
       );

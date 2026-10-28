@@ -12,7 +12,7 @@ import {
   SETTINGS_NAV_ITEMS,
   type SettingsSectionId,
 } from "./settingsNavigation";
-import { WORKBENCH_MODULES } from "./workbench/registry";
+import { WORKBENCH_MODULES, type WorkbenchSettingsSearchRoute } from "./workbench/registry";
 
 /**
  * One searchable settings result. `title` usually matches a string SettingsRow heading so
@@ -25,6 +25,8 @@ export interface SettingsSearchEntry {
   keywords: string;
   target?: string | null;
   query?: Readonly<Record<string, string>>;
+  /** Route destinations bypass the legacy settings section and open the owning feature page. */
+  route?: WorkbenchSettingsSearchRoute;
   /**
    * Whether this row exists on the machine the user is actually looking at.
    * Omitted means "always". A search result for a row the panel does not render
@@ -65,6 +67,7 @@ const WORKBENCH_SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = WORKBE
       title: module.settings.navigation.label,
       keywords: `${module.settings.navigation.description} ${module.settings.search.keywords}`,
       target: null,
+      ...("route" in module.settings.search ? { route: module.settings.search.route } : {}),
     },
     ...(module.settings.search.entries ?? []).map((entry) => ({
       ...entry,

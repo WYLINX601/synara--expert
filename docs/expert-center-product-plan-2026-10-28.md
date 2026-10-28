@@ -1,6 +1,6 @@
 # Synara Expert 中心产品方案
 
-日期：2026-10-28。状态：产品方案已通过（2026-10-28）；隔离分支已实施，见[验收记录](./expert-center-implementation-2026-10-28.md)。
+日期：2026-10-28。状态：产品方案已通过（2026-10-28）；已合入本地 main 并更新日用应用 0.1.7，见[验收记录](./expert-center-implementation-2026-10-28.md)。
 
 后续设计见[技术改造方案](./expert-center-technical-plan-2026-10-28.md)。
 

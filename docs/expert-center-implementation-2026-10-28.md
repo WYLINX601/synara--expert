@@ -1,6 +1,6 @@
 # Expert 中心实现与验收
 
-日期：2026-10-28。用户已批准产品方案并要求实施。实现位于 `codex/expert-center` 隔离开发分支，基线 `2577e5819353e6089cc3f6e118e848f38df04913`；当前为未提交工作区，代码摘要见[源码清单](./expert-center-evidence-2026-10-28/source-manifest.json)，不代表 main、日用应用或发布已更新。
+日期：2026-10-28。用户已批准产品方案并要求实施。初次实现位于 `codex/expert-center` 隔离开发分支，基线 `2577e5819353e6089cc3f6e118e848f38df04913`；下文初始实施验收保留其时点范围；本轮已提交合入本地 main 并更新日用应用至 0.1.7，见文末交付结果。代码摘要见[源码清单](./expert-center-evidence-2026-10-28/source-manifest.json)。
 
 ## 交付范围
 
@@ -44,13 +44,39 @@
 
 ## 环境与恢复
 
-- 实际代码：`/Users/wangyuelin/synara-expert/.synara/expert-center-source`，分支 `codex/expert-center`。独立锁定依赖；检查使用仓库指定 Node 24.13.1 / Bun 1.4.2。
+- 实施时源码：`/Users/wangyuelin/synara-expert/.synara/expert-center-source`，分支 `codex/expert-center`。独立锁定依赖；检查使用仓库指定 Node 24.13.1 / Bun 1.4.2。该临时树在合入和安装完成后已核验回收；当前源码位于主目录，受管预览见文末。
 - 初次依赖安装由当前 shell 的 Bun 1.4.0 执行 frozen lockfile；锁文件未变，最终检查切换到指定工具版本。
 - 测试 home：`/Users/wangyuelin/synara-expert/.synara/expert-center-runtime`；保留最小测试任务与草稿供复核，不回写日用。
-- 桌面工具最初创建的空树 `/Users/wangyuelin/.codex/worktrees/expert-center/synara-expert` 未写入实现；桌面将其作为当前任务主 checkout，原生归档拒绝移除。它保持基线且无改动，待任务主 checkout 关系解除后可重新核验归档。实际代码树因不在桌面管理目录，attach 工具拒绝关联；所有本轮检查均显式使用实际代码路径。
+- 桌面工具最初创建的空树 `/Users/wangyuelin/.codex/worktrees/expert-center/synara-expert` 是当前任务主 checkout，归档曾被原生工具拒绝。后续已将其干净同步到 main，复用为唯一受管预览，不再保留无用途的空树。实施阶段所有检查使用上述临时源码路径，交付后主目录及受管预览均有同一代码。
 - 预览已正常停止；19851/19852 监听均关闭，本轮已知服务、Codex 与其 MCP 子进程均不再存在。截图和最小测试 home 保留，界面验证用临时页已关闭。
-- 没有提交、合并、推送、安装或发布；保留的源码与现场不按“空闲”自动删除。
+- 初次实施结束时未提交、合并、安装或发布；后续授权及实际交付以文末为准。
 
-## 2026-10-28 提交与安装交付（进行中）
+## 2026-10-28 提交与安装交付结果
 
-用户授权提交合入与更新日用应用。提交前审查补齐了 standalone 草稿只改 Expert/项目/工作区元数据时的回滚保护，新增两项延迟导航回归；修后独立复核通过。应用构建版本升至 0.1.7，Workbench 构建测试 21/21 通过；应用代码最终格式、lint、7 包 typecheck 通过。最终全库检查正在串行执行，正式合入与安装等待其结果。后续固定提交、产物、数据保护与实际安装状态另行回写，不以本段计划代替结果。
+用户授权提交合入与更新日用应用。提交前审查补齐了 standalone 草稿仅改 Expert/项目/工作区元数据时的回滚保护；新增两项延迟导航回归，修后独立复核通过。
+
+| 项目           | 实际结果                                                                                                                                                   |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 源码提交与合入 | `7af8e7f0971d124a7720aa941e3d564a26087acb` 已快进合入本地 main；包含已批准的独立 Expert 页面、启动衔接、历史页及必要导航，版本配置仅 Workbench 升为 0.1.7  |
+| 最终门禁       | 格式、lint、7 包 typecheck 通过；最终全库 6/6 包通过，18,337 tests passed、40 既有 skipped，耗时 16m19.075s；浏览器交互累计 40 项通过；构建专项 21/21 通过 |
+| 本机产物       | 固定源码/锁文件构建 macOS arm64 DMG/ZIP；包内版本、flavor、源码、锁摘要、完整文件清单与 deep/strict codesign 通过；隔离原生依赖及实际产物启动通过          |
+| 日用应用       | `/Applications/Personal Workbench.app` 已从 0.1.6 更新至 **0.1.7 并启动**；包内来源仍为 7af8e7f09，沿用原 `.synara-workbench` home 与 Electron profile     |
+| 数据与恢复     | 原生生命周期锁内完整备份 home/profile；SQLite backup API 一致性校验、副本迁移层和 105 张原表旧列逐行摘要核验通过；未替换日用数据库                         |
+| 安装后核验     | 新进程与原 home 的原生锁 PID 一致，health=ok；已认证只读快照核验原 32 线程、308 消息、3 Space、18 Project 的全部 ID 保留；699 个受保护配置/资源摘要不变    |
+| 原生界面       | 已安装窗口显示独立 Experts 入口和原有 12 个专家；原专家的 Skill/MCP 配置可读，历史显示原任务与当时修订 3/4，没有改写成当前版本                             |
+
+首轮构建缺少本机 `actool`，随后发现 Rust 未在当前 PATH。采用构建器已有的正式输入：经摘要校验的上一版原包 `Assets.car`，以及来源、补丁、架构、编译器记录和二进制摘要均符合当前锁定版本的原生 Cua 构建缓存。没有改写 provenance、放宽校验或安装新的全局工具链。最终通过后才安装；失败尝试日志保留在本机交付目录。
+
+本机交付与恢复目录：`/Users/wangyuelin/synara-expert/.synara/expert-center-delivery/`。`installation-result.json` 状态为 `installed-and-started`；`recovery-set/` 保留完整一致性 home/profile、干净 0.1.6 回退应用及原安装应用。现行操作入口 `application/installation-receipt.json` 与 `application/latest-application-backup.json` 已更新，上一份指针原样保存在恢复集。回退前须停止应用并保护更新后新增数据，使用匹配程序与数据组合。
+
+| 产物                               | SHA-256                                                            |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| app.asar                           | `0e980f6a04229c3fd81892230073614463ec394b970f0f3c57784a54efff5527` |
+| Personal-Workbench-0.1.7-arm64.dmg | `9e5f4769cef0e11946b5a00c307ac8a6feac4bfb038b505b06e1a5a03c3ac022` |
+| Personal-Workbench-0.1.7-arm64.zip | `b187b921da79ed8723277e31927d37750ac8135dc436f348d1e300f79323c205` |
+
+这是本机 ad-hoc 更新，未经 Developer ID 签名或公证；没有创建发布 tag、推送、上传二进制或更改自动更新 feed。未进行 Windows/Linux 实机验收。
+
+交付收尾：目前 Git 仅登记主目录 `/Users/wangyuelin/synara-expert` 与受管预览 `/Users/wangyuelin/.codex/worktrees/expert-center/synara-expert`。临时开发树在确认源码已合入、无未提交/独有成果及文件占用，并保留失败浏览器截图和测试日志后回收；两个可从已校验 ZIP 重建的解包目录也已回收，完整恢复集和原包保留。图标输入恢复引用已改指向恢复集中的 0.1.6 原应用，不再引用退役解包路径。
+
+最小隔离测试 home 保留在 `.synara/expert-center-runtime`；其中测试项目仍记录原临时源码路径，若需重演，应先从 `codex/expert-center` 固定提交重建该工作树并安装锁定依赖，再按隔离端口启动，不将该测试 home 用于日用应用。早期主目录方案草稿保存在 Git stash `ac5fe91d92ff6077a807c66ee25f7d1af7c82b03`，未覆盖或丢弃。

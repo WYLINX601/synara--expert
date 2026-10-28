@@ -38,7 +38,10 @@ const harness = vi.hoisted(() => ({
     getConfig: vi.fn(async () => ({ keybindings: [] })),
   },
 }));
-vi.mock("~/nativeApi", () => ({ ensureNativeApi: () => ({ server: harness.server }) }));
+vi.mock("~/nativeApi", () => ({
+  ensureNativeApi: () => ({ server: harness.server }),
+  readNativeApiServerCapabilityState: () => "supported",
+}));
 vi.mock("~/hooks/useNativeApiServerCapability", () => ({
   useNativeApiServerCapabilitySnapshot: () => ({
     generation: harness.generation,
@@ -62,6 +65,7 @@ vi.mock("~/lib/providerDiscoveryReactQuery", () => ({
 }));
 
 import { SkillLibrarySettingsPanel } from "./SkillLibrarySettingsPanel";
+import { ExpertsSettingsPanel } from "./ExpertsSettingsPanel";
 
 const packageId = `pkg_${"a".repeat(64)}`;
 const pkg: SkillPackage = {
@@ -196,7 +200,7 @@ function listResponse(query?: SkillLibraryQuery): SkillLibraryResponse {
   };
 }
 
-async function mountPanel(width?: number) {
+async function mountPanel(width?: number, expertCenter = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const root = createRootRoute({
     component: () => (
@@ -214,16 +218,41 @@ async function mountPanel(width?: number) {
       </div>
     ),
   });
+  const center = createRoute({
+    getParentRoute: () => root,
+    path: "/experts",
+    component: () => {
+      const search = center.useSearch() as { kind?: "teams" | "skills" };
+      return (
+        <ExpertsSettingsPanel
+          centerRoute={{
+            expertId: null,
+            kind: search.kind ?? "experts",
+            tab: "capabilities",
+            navigate: async () => {},
+            navigateKind: async (kind) => {
+              await router.navigate({
+                to: "/experts" as never,
+                search: { ...(kind !== "experts" ? { kind } : {}) } as never,
+              });
+            },
+          }}
+        />
+      );
+    },
+  });
   const router = createRouter({
-    routeTree: root.addChildren([settings]),
-    history: createMemoryHistory({ initialEntries: ["/settings"] }),
+    routeTree: root.addChildren([settings, center]),
+    history: createMemoryHistory({
+      initialEntries: [expertCenter ? "/experts?kind=skills" : "/settings"],
+    }),
   });
   const view = await render(<RouterProvider router={router} />);
   dispose = async () => {
     await view.unmount();
     client.clear();
   };
-  return view;
+  return router;
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -473,6 +502,31 @@ function setTestUiFontSize(fontSize: number) {
 }
 
 describe("Skill library management browser flows", () => {
+  it.each(["放弃更改", "保存并继续"] as const)(
+    "keeps skill edits guarded when leaving the Expert center skills category after %s",
+    async (decision) => {
+      managedFiles();
+      const router = await mountPanel(undefined, true);
+      await page.getByText("Alpha", { exact: true }).click();
+      await page.getByRole("textbox", { name: "技能名称", exact: true }).fill("Changed skill");
+      void router.navigate({ to: "/experts" as never, search: {} as never });
+      await expect.element(page.getByRole("heading", { name: "未保存的更改" })).toBeVisible();
+      await page.getByRole("button", { name: "取消", exact: true }).click();
+      await expect
+        .element(page.getByRole("textbox", { name: "技能名称", exact: true }))
+        .toHaveValue("Changed skill");
+      void router.navigate({ to: "/experts" as never, search: {} as never });
+      await page.getByRole("button", { name: decision, exact: true }).click();
+      await expect.element(page.getByRole("radio", { name: "专家", exact: true })).toBeChecked();
+      await expect
+        .element(page.getByRole("heading", { name: "未保存的更改" }))
+        .not.toBeInTheDocument();
+      expect(
+        harness.server.skillLibrary.mock.calls.filter(([request]) => request.action === "save"),
+      ).toHaveLength(decision === "保存并继续" ? 1 : 0);
+    },
+  );
+
   const showFiles = async (edit = false) => {
     await page.getByRole("tab", { name: /^文件/u }).click();
     if (edit) await page.getByRole("button", { name: "编辑", exact: true }).click();

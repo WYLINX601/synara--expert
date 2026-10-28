@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -42,6 +44,14 @@ import {
   type HubTeamsSettingsPanelHandle,
 } from "~/features/hubCollaboration/HubTeamsSettingsPanel";
 
+const SkillLibrarySettingsPanel = lazy(() =>
+  import("./SkillLibrarySettingsPanel").then((module) => ({
+    default: module.SkillLibrarySettingsPanel,
+  })),
+);
+
+type ExpertCenterKind = "experts" | "teams" | "skills";
+
 const EMPTY_EXPERTS: ReadonlyArray<ExpertDefinition> = [];
 
 type ExpertActionType = "archive" | "restore" | "delete";
@@ -55,6 +65,8 @@ export function ExpertsSettingsPanel(props: {
   readonly active?: boolean;
   readonly centerRoute?: {
     readonly expertId: string | null;
+    readonly kind?: ExpertCenterKind;
+    readonly navigateKind?: (kind: ExpertCenterKind) => Promise<void>;
     readonly tab: ExpertEditorTab;
     readonly navigate: (
       expertId: string | null,
@@ -77,7 +89,8 @@ export function ExpertsSettingsPanel(props: {
   });
   const experts = expertsQuery.data ?? EMPTY_EXPERTS;
   const [view, setView] = useState<"list" | "editor">("list");
-  const [settingsKind, setSettingsKind] = useState<"experts" | "teams">("experts");
+  const [localSettingsKind, setSettingsKind] = useState<"experts" | "teams">("experts");
+  const settingsKind = props.centerRoute?.kind ?? localSettingsKind;
   const hubTeamsPanelRef = useRef<HubTeamsSettingsPanelHandle>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [baseline, setBaseline] = useState<ExpertDefinition | null>(null);
@@ -94,6 +107,7 @@ export function ExpertsSettingsPanel(props: {
   const centerRouteRef = useRef(props.centerRoute);
   centerRouteRef.current = props.centerRoute;
   const lastRouteRequestRef = useRef<string | null>(null);
+  const lastRouteKindRef = useRef(props.centerRoute?.kind);
   const baselineRef = useRef(baseline);
   const draftRef = useRef(draft);
   baselineRef.current = baseline;
@@ -191,11 +205,15 @@ export function ExpertsSettingsPanel(props: {
           shouldGuardNavigation: ({
             currentPathname,
             nextPathname,
+            currentSearch,
+            nextSearch,
           }: {
             currentPathname: string;
             nextPathname: string;
+            currentSearch: Readonly<Record<string, unknown>>;
+            nextSearch: Readonly<Record<string, unknown>>;
           }) =>
-            currentPathname !== nextPathname &&
+            (currentPathname !== nextPathname || currentSearch.kind !== nextSearch.kind) &&
             Boolean(
               draftRef.current &&
               !expertDraftsEqual(
@@ -211,7 +229,7 @@ export function ExpertsSettingsPanel(props: {
     onDiscard: discardDraft,
   });
 
-  const changeSettingsKind = async (next: "experts" | "teams") => {
+  const changeSettingsKind = async (next: ExpertCenterKind) => {
     if (next === settingsKind) return;
     if (settingsKind === "teams") {
       const teamPanel = hubTeamsPanelRef.current;
@@ -219,7 +237,11 @@ export function ExpertsSettingsPanel(props: {
     } else if (!(await confirmLeave())) {
       return;
     }
-    setSettingsKind(next);
+    if (props.centerRoute?.navigateKind) {
+      await props.centerRoute.navigateKind(next);
+    } else if (next !== "skills") {
+      setSettingsKind(next);
+    }
   };
 
   // Route changes reach this controller only after the shared route blocker has settled.
@@ -227,9 +249,11 @@ export function ExpertsSettingsPanel(props: {
     const route = centerRouteRef.current;
     if (!route) return;
     if (!expertsQuery.data) return;
-    if (route.expertId === lastRouteRequestRef.current) return;
+    if (route.expertId === lastRouteRequestRef.current && route.kind === lastRouteKindRef.current)
+      return;
     generationRef.current += 1;
     lastRouteRequestRef.current = route.expertId;
+    lastRouteKindRef.current = route.kind;
     const requested = expertsQuery.data.find((expert) => expert.id === route.expertId);
     baselineRef.current = requested ?? null;
     draftRef.current = requested ? expertDraftFromDefinition(requested) : null;
@@ -238,7 +262,7 @@ export function ExpertsSettingsPanel(props: {
     setSelectedId(requested?.id ?? null);
     setView(route.expertId ? "editor" : "list");
     setActionError(null);
-  }, [props.centerRoute?.expertId, expertsQuery.data]);
+  }, [props.centerRoute?.expertId, props.centerRoute?.kind, expertsQuery.data]);
 
   useEffect(() => {
     if (props.centerRoute) setTab(props.centerRoute.tab);
@@ -554,17 +578,18 @@ export function ExpertsSettingsPanel(props: {
 
   return (
     <div className="space-y-5" onKeyDown={handleSaveKey}>
-      {!props.centerRoute ? (
+      <div className={props.centerRoute ? "border-b border-border pb-3" : undefined}>
         <SettingsSegmentedControl
           value={settingsKind}
           onValueChange={(next) => void changeSettingsKind(next)}
           ariaLabel="专家设置分类"
           options={[
-            { value: "experts", label: "单个专家" },
+            { value: "experts", label: props.centerRoute ? "专家" : "单个专家" },
             { value: "teams", label: "专家团" },
+            ...(props.centerRoute ? [{ value: "skills" as const, label: "技能" }] : []),
           ]}
         />
-      ) : null}
+      </div>
       {props.centerRoute?.expertId &&
       expertsQuery.data &&
       !experts.some((expert) => expert.id === props.centerRoute?.expertId) ? (
@@ -578,10 +603,29 @@ export function ExpertsSettingsPanel(props: {
         <HubTeamsSettingsPanel
           ref={hubTeamsPanelRef}
           active={active}
+          {...(props.centerRoute
+            ? {
+                shouldGuardNavigation: ({
+                  currentPathname,
+                  nextPathname,
+                  nextSearch,
+                }: {
+                  currentPathname: string;
+                  nextPathname: string;
+                  nextSearch: Readonly<Record<string, unknown>>;
+                }) => currentPathname !== nextPathname || nextSearch.kind !== "teams",
+              }
+            : {})}
           experts={expertsQuery.data}
           expertsLoading={expertsQuery.isPending || expertsQuery.isFetching}
           expertsError={expertsQuery.error ? errorText(expertsQuery.error) : null}
         />
+      ) : settingsKind === "skills" ? (
+        <Suspense
+          fallback={<SettingsEmptyState layout="status">正在读取技能库…</SettingsEmptyState>}
+        >
+          <SkillLibrarySettingsPanel />
+        </Suspense>
       ) : view === "list" ? (
         expertsQuery.isPending && !expertsQuery.data ? (
           <SettingsEmptyState layout="status">正在读取专家…</SettingsEmptyState>

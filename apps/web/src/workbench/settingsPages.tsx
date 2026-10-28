@@ -11,7 +11,7 @@ import type { ExpertTeamsSettingsPanel } from "../components/settings/ExpertTeam
 import type { GlobalMcpSettingsPanel } from "../components/settings/GlobalMcpSettingsPanel";
 import { WORKBENCH_MODULES, type WorkbenchSettingsPageId } from "./registry";
 
-type ExpertsSettingsPageProps = Omit<ComponentProps<typeof ExpertTeamsSettingsPanel>, "active">;
+type ExpertsSettingsPageProps = ComponentProps<typeof ExpertTeamsSettingsPanel>;
 type McpSettingsPageProps = ComponentProps<typeof GlobalMcpSettingsPanel>;
 
 type SettingsPagePropsById = {
@@ -41,7 +41,6 @@ type WorkbenchSettingsPageBase = {
 export type WorkbenchSettingsPageProps =
   | (WorkbenchSettingsPageBase & {
       readonly pageId: "experts-settings";
-      readonly onOpenExperts: () => void;
     } & ExpertsSettingsPageProps)
   | (WorkbenchSettingsPageBase & {
       readonly pageId: "mcp-settings";

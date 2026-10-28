@@ -21,7 +21,7 @@ const harness = vi.hoisted(() => ({
 vi.mock("./ExpertTeamsSettingsPanel", async () => {
   const React = await import("react");
   return {
-    ExpertTeamsSettingsPanel: (props: { onOpenExperts: () => void }) => {
+    ExpertTeamsSettingsPanel: (props: { onOpenExperts: (kind?: "teams" | "skills") => void }) => {
       const [instance] = React.useState(() => ++harness.expertsMounts);
       if (harness.failNextExpertRender) {
         throw new Error("Test page render failure");
@@ -29,7 +29,7 @@ vi.mock("./ExpertTeamsSettingsPanel", async () => {
       return (
         <div>
           <p data-testid="experts-page">Expert teams instance {instance}</p>
-          <button type="button" onClick={props.onOpenExperts}>
+          <button type="button" onClick={() => props.onOpenExperts()}>
             Open Experts
           </button>
         </div>

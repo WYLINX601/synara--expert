@@ -23,7 +23,10 @@ import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "~/components/
 import { DisclosureChevron } from "~/components/ui/DisclosureChevron";
 import { Input } from "~/components/ui/input";
 import { Textarea } from "~/components/ui/textarea";
-import { useExpertDraftGuard } from "~/components/settings/useExpertDraftGuard";
+import {
+  useExpertDraftGuard,
+  type UseExpertDraftGuardOptions,
+} from "~/components/settings/useExpertDraftGuard";
 import {
   SettingsCard,
   SettingsEmptyState,
@@ -83,6 +86,7 @@ export const HubTeamsSettingsPanel = forwardRef<
   HubTeamsSettingsPanelHandle,
   {
     readonly active: boolean;
+    readonly shouldGuardNavigation?: UseExpertDraftGuardOptions["shouldGuardNavigation"];
     readonly experts: ReadonlyArray<ExpertDefinition> | undefined;
     readonly expertsLoading: boolean;
     readonly expertsError: string | null;
@@ -288,6 +292,7 @@ export const HubTeamsSettingsPanel = forwardRef<
 
   const { confirmLeave, dialog: leaveDialog } = useExpertDraftGuard({
     isDirty: props.active && isDirty,
+    ...(props.shouldGuardNavigation ? { shouldGuardNavigation: props.shouldGuardNavigation } : {}),
     canSave: validationError === null,
     ...(validationError ? { saveDisabledReason: validationError } : {}),
     onSave: async () => Boolean(await saveDraft()),
@@ -422,6 +427,8 @@ export const HubTeamsSettingsPanel = forwardRef<
             ) : null}
             <SettingsSectionShell
               title={archivedView ? "已归档的专家团" : "专家团"}
+              layout="compact"
+              count={visibleTeams.length}
               action={
                 archivedView ? (
                   <Button size="sm" variant="outline" onClick={() => setArchivedView(false)}>
@@ -475,6 +482,7 @@ export const HubTeamsSettingsPanel = forwardRef<
                       return (
                         <SettingsListRow
                           key={team.id}
+                          layout="compact"
                           title={
                             <button
                               type="button"

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalizeSettingsMcpSearch,
   expertCenterRouteTarget,
+  expertCenterSectionRouteTarget,
   resolveSettingsHostRoute,
   settingsSearchForExpertFromMcp,
   settingsSearchForMcpFromExpert,
@@ -177,13 +178,57 @@ describe("settings host route adaptation", () => {
       pageId: "experts-settings",
       shouldRedirectExpertToCenter: true,
     });
-    expect(resolveSettingsHostRoute({ section: "experts" }).shouldRedirectExpertToCenter).toBe(
-      false,
-    );
+    expect(resolveSettingsHostRoute({ section: "experts" })).toMatchObject({
+      shouldRedirectExpertToCenter: false,
+      redirectExpertCenterKind: "teams",
+    });
+    expect(resolveSettingsHostRoute({ section: "skills" })).toMatchObject({
+      activeSection: "skills",
+      shouldRedirectExpertToCenter: false,
+      redirectExpertCenterKind: "skills",
+    });
+    expect(resolveSettingsHostRoute({ section: "skills", expertId: "planner" })).toMatchObject({
+      shouldRedirectExpertToCenter: false,
+      redirectExpertCenterKind: "skills",
+    });
     expect(
       resolveSettingsHostRoute({ section: "expert-connections", expertId: "planner" })
         .shouldRedirectExpertToCenter,
     ).toBe(false);
+  });
+
+  it("targets Experts sections from legacy settings and keeps supported context only", () => {
+    const context = {
+      section: "experts",
+      expertId: "ignored-personal-id",
+      projectId: "project-1",
+      sourceThreadId: "thread-1",
+      search: "Planning",
+      target: "teams-list",
+      connectionId: "ignored-connection",
+    };
+    expect(expertCenterSectionRouteTarget("teams", context)).toEqual({
+      to: "/experts",
+      search: {
+        kind: "teams",
+        tab: "capabilities",
+        projectId: "project-1",
+        sourceThreadId: "thread-1",
+        search: "Planning",
+        target: "teams-list",
+      },
+    });
+    expect(expertCenterSectionRouteTarget("skills", context)).toEqual({
+      to: "/experts",
+      search: {
+        kind: "skills",
+        tab: "capabilities",
+        projectId: "project-1",
+        sourceThreadId: "thread-1",
+        search: "Planning",
+        target: "teams-list",
+      },
+    });
   });
 
   it("keeps ordinary settings outside the Workbench page map", () => {

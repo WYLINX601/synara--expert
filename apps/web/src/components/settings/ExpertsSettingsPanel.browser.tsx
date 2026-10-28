@@ -300,11 +300,24 @@ async function mountCenter(initialEntry = "/experts/planner?tab=capabilities") {
     path: "/experts",
     component: () => {
       const params = useParams({ strict: false });
-      const search = center.useSearch() as { tab?: "capabilities" | "settings" | "history" };
+      const search = center.useSearch() as {
+        tab?: "capabilities" | "settings" | "history";
+        kind?: "teams" | "skills";
+      };
       return (
         <ExpertsSettingsPanel
           centerRoute={{
             expertId: params.expertId ?? null,
+            kind: params.expertId ? "experts" : (search.kind ?? "experts"),
+            navigateKind: async (kind) => {
+              await router.navigate({
+                to: "/experts" as never,
+                search: {
+                  tab: "capabilities",
+                  ...(kind !== "experts" ? { kind } : {}),
+                } as never,
+              });
+            },
             tab: search.tab ?? "capabilities",
             navigate: async (expertId, tab, replace) => {
               await router.navigate({
@@ -598,11 +611,11 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     }
   });
 
-  it("archives and restores team presets with revisioned actions", async () => {
+  it("archives and restores team presets from the Expert center with revisioned actions", async () => {
     harness.data.teams = [makeHubTeam()];
-    const { close } = await mountPanel("/settings");
+    const { close } = await mountCenter("/experts?kind=teams&tab=capabilities");
     try {
-      await page.getByRole("radio", { name: "专家团" }).click();
+      await expect.element(page.getByRole("radio", { name: "专家团" })).toBeChecked();
       await page.getByRole("button", { name: "归档", exact: true }).click();
       await page.getByRole("button", { name: "确认归档" }).click();
       await expect.poll(() => harness.hubTeams.setArchived.mock.calls.length).toBe(1);
@@ -1698,6 +1711,166 @@ describe("ExpertsSettingsPanel browser interactions", () => {
 });
 
 describe("Expert center routes", () => {
+  it.each([
+    ["专家团", "放弃更改"],
+    ["技能", "保存并继续"],
+  ] as const)(
+    "returns to the personal list after resolving a new draft through %s with %s",
+    async (category, decision) => {
+      const { close } = await mountCenter("/experts?tab=capabilities");
+      try {
+        await page.getByRole("button", { name: "新建专家", exact: true }).click();
+        await page.getByLabelText("专家名称").fill("分类切换新专家");
+        await page.getByRole("radio", { name: category, exact: true }).click();
+        await page.getByRole("button", { name: decision, exact: true }).click();
+        await expect
+          .element(page.getByRole("radio", { name: category, exact: true }))
+          .toBeChecked();
+        await page.getByRole("radio", { name: "专家", exact: true }).click();
+        await expect
+          .element(page.getByRole("button", { name: "新建专家", exact: true }))
+          .toBeVisible();
+        await expect.element(page.getByLabelText("专家名称")).not.toBeInTheDocument();
+        expect(harness.server.saveExpert).toHaveBeenCalledTimes(decision === "保存并继续" ? 1 : 0);
+        if (decision === "保存并继续") {
+          await expect
+            .element(page.getByRole("button", { name: "编辑专家 分类切换新专家", exact: true }))
+            .toBeVisible();
+        }
+      } finally {
+        await close();
+      }
+    },
+  );
+
+  it("opens the existing skill library directly in the skills category", async () => {
+    const { close } = await mountCenter("/experts?kind=skills&tab=capabilities");
+    try {
+      await expect.element(page.getByRole("radio", { name: "技能", exact: true })).toBeChecked();
+      await expect
+        .element(page.getByRole("button", { name: "新建技能", exact: true }))
+        .toBeVisible();
+      await expect
+        .element(page.getByRole("button", { name: "导入技能", exact: true }))
+        .toBeVisible();
+      await page.getByRole("radio", { name: "专家", exact: true }).click();
+      await expect
+        .element(page.getByRole("button", { name: "新建专家", exact: true }))
+        .toBeVisible();
+    } finally {
+      await close();
+    }
+  });
+
+  it("opens team deep links and preserves the existing full team editor", async () => {
+    harness.data.teams = [makeHubTeam()];
+    const { close, router } = await mountCenter("/experts?kind=teams&tab=capabilities");
+    try {
+      await expect.element(page.getByRole("radio", { name: "专家团" })).toBeChecked();
+      await expect.element(page.getByRole("button", { name: /^研究协作团/u })).toBeVisible();
+      await page.getByLabelText("搜索专家团").fill("missing");
+      await expect.element(page.getByText("没有符合搜索条件的专家团。")).toBeVisible();
+      await page.getByLabelText("搜索专家团").fill("");
+      await page.getByRole("button", { name: "新建专家团", exact: true }).click();
+      await page.getByLabelText("专家团名称").fill("产品方案小队");
+      await page.getByLabelText("专家团用途").fill("梳理方案与评审");
+      await page.getByRole("checkbox", { name: "规划专家", exact: true }).click();
+      await page.getByRole("button", { name: /角色与协调方式/u }).click();
+      await page.getByLabelText("协调者角色与协调方式").fill("先澄清目标再安排成员");
+      await page.getByLabelText("协作偏好").fill("输出前交叉评审");
+      await page.getByRole("button", { name: "保存专家团", exact: true }).click();
+      await expect.poll(() => harness.hubTeams.save.mock.calls.length).toBe(1);
+      expect(harness.hubTeams.save.mock.calls[0]?.[0]).toMatchObject({
+        name: "产品方案小队",
+        purpose: "梳理方案与评审",
+        expertIds: ["planner"],
+        coordinatorInstructions: "先澄清目标再安排成员",
+        collaborationPreferences: "输出前交叉评审",
+      });
+      expect(router.state.location.searchStr).toContain("kind=teams");
+    } finally {
+      await close();
+    }
+  });
+
+  it("resolves a personal draft once before switching to teams", async () => {
+    const { router, close } = await mountCenter();
+    try {
+      await page.getByLabelText("专家角色与工作方式").fill("保留专家修改");
+      await page.getByRole("radio", { name: "专家团", exact: true }).click();
+      await expect.element(page.getByRole("heading", { name: "未保存的更改" })).toBeVisible();
+      await page.getByRole("button", { name: "取消", exact: true }).click();
+      await expect.element(page.getByLabelText("专家角色与工作方式")).toHaveValue("保留专家修改");
+      await page.getByRole("radio", { name: "专家团", exact: true }).click();
+      await page.getByRole("button", { name: "保存并继续", exact: true }).click();
+      await expect
+        .element(page.getByRole("button", { name: "新建专家团", exact: true }))
+        .toBeVisible();
+      await expect
+        .element(page.getByRole("heading", { name: "未保存的更改" }))
+        .not.toBeInTheDocument();
+      expect(harness.server.saveExpert).toHaveBeenCalledTimes(1);
+      expect(router.state.location.pathname).toBe("/experts");
+      expect(router.state.location.searchStr).toContain("kind=teams");
+    } finally {
+      await close();
+    }
+  });
+
+  it.each(["放弃更改", "保存并继续"] as const)(
+    "guards a same-path team switch and continues after %s",
+    async (decision) => {
+      harness.data.teams = [makeHubTeam()];
+      const { router, close } = await mountCenter("/experts?kind=teams&tab=capabilities");
+      try {
+        await page.getByRole("button", { name: "编辑", exact: true }).click();
+        await page.getByLabelText("专家团用途").fill("尚未保存的用途");
+        await page.getByRole("radio", { name: "专家", exact: true }).click();
+        await expect.element(page.getByRole("heading", { name: "未保存的更改" })).toBeVisible();
+        await page.getByRole("button", { name: "取消", exact: true }).click();
+        await expect.element(page.getByLabelText("专家团用途")).toHaveValue("尚未保存的用途");
+        await page.getByRole("radio", { name: "专家", exact: true }).click();
+        await page.getByRole("button", { name: decision, exact: true }).click();
+        await expect
+          .element(page.getByRole("button", { name: "新建专家", exact: true }))
+          .toBeVisible();
+        await expect
+          .element(page.getByRole("heading", { name: "未保存的更改" }))
+          .not.toBeInTheDocument();
+        expect(router.state.location.pathname).toBe("/experts");
+        expect(router.state.location.searchStr).not.toContain("kind=teams");
+        expect(harness.hubTeams.save).toHaveBeenCalledTimes(decision === "保存并继续" ? 1 : 0);
+      } finally {
+        await close();
+      }
+    },
+  );
+
+  it("guards query-only route changes and restores the teams view on back", async () => {
+    harness.data.teams = [makeHubTeam()];
+    const { router, close } = await mountCenter("/experts?tab=capabilities");
+    try {
+      await page.getByRole("radio", { name: "专家团", exact: true }).click();
+      await page.getByRole("button", { name: "编辑", exact: true }).click();
+      await page.getByLabelText("专家团用途").fill("浏览器返回前保留");
+      void router.navigate({ to: "/experts" as never, search: { tab: "capabilities" } as never });
+      await expect.element(page.getByRole("heading", { name: "未保存的更改" })).toBeVisible();
+      await page.getByRole("button", { name: "取消", exact: true }).click();
+      await expect.element(page.getByLabelText("专家团用途")).toHaveValue("浏览器返回前保留");
+      expect(router.state.location.searchStr).toContain("kind=teams");
+      void router.navigate({ to: "/experts" as never, search: { tab: "capabilities" } as never });
+      await page.getByRole("button", { name: "放弃更改", exact: true }).click();
+      await expect
+        .element(page.getByRole("button", { name: "新建专家", exact: true }))
+        .toBeVisible();
+      router.history.back();
+      await expect.element(page.getByRole("button", { name: /^研究协作团/u })).toBeVisible();
+      await expect.element(page.getByRole("radio", { name: "专家团", exact: true })).toBeChecked();
+    } finally {
+      await close();
+    }
+  });
+
   it("locates a newly saved expert without a second leave confirmation", async () => {
     const { router, close } = await mountCenter("/experts?tab=capabilities");
     try {

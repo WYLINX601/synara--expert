@@ -6,12 +6,14 @@ export const Route = createFileRoute("/_chat/experts")({
     search: Record<string, unknown>,
   ): {
     tab: ExpertEditorTab;
+    kind?: "teams" | "skills";
     connectionId?: string;
     projectId?: string;
     search?: string;
     target?: string;
     sourceThreadId?: string;
   } => ({
+    ...(search.kind === "teams" || search.kind === "skills" ? { kind: search.kind } : {}),
     tab: search.tab === "settings" || search.tab === "history" ? search.tab : "capabilities",
     ...(typeof search.connectionId === "string" ? { connectionId: search.connectionId } : {}),
     ...(typeof search.search === "string" ? { search: search.search } : {}),

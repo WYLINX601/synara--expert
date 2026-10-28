@@ -82,7 +82,6 @@ import {
   SettingsSection,
   SettingsSectionShell,
 } from "../components/settings/SettingsPanelPrimitives";
-import { SkillsSettingsPanel } from "../components/settings/SkillsSettingsPanel";
 import { ThemeModePicker } from "../components/settings/ThemeModePicker";
 import { ThemePackEditor } from "../components/ThemePackEditor";
 import {
@@ -139,6 +138,7 @@ import { isAudioLevelAvailable } from "../lib/audioLevel";
 import {
   canonicalizeSettingsMcpSearch,
   expertCenterRouteTarget,
+  expertCenterSectionRouteTarget,
   resolveSettingsHostRoute,
   settingsSearchForMcpTab,
 } from "../workbench/host/settings";
@@ -392,6 +392,15 @@ function SettingsRouteView() {
     settingsRoute.expertId,
     settingsRoute.shouldRedirectExpertToCenter,
   ]);
+
+  useEffect(() => {
+    const kind = settingsRoute.redirectExpertCenterKind;
+    if (kind === undefined) return;
+    void navigate({
+      ...expertCenterSectionRouteTarget(kind, rawRouteSearch),
+      replace: true,
+    } as never);
+  }, [navigate, rawRouteSearch, settingsRoute.redirectExpertCenterKind]);
 
   const {
     isDefaultActiveTheme,
@@ -1730,7 +1739,12 @@ function SettingsRouteView() {
   );
 
   const renderRouteOwnedPanel = () => {
-    if (settingsRoute.shouldRedirectExpertToCenter) return null;
+    if (
+      settingsRoute.shouldRedirectExpertToCenter ||
+      settingsRoute.redirectExpertCenterKind !== undefined
+    ) {
+      return null;
+    }
     const workbenchPageId = settingsRoute.pageId;
     if (workbenchPageId !== undefined) {
       const onReturnToSettings = () => {
@@ -1744,8 +1758,12 @@ function SettingsRouteView() {
           <WorkbenchSettingsPage
             pageId="experts-settings"
             onReturnToSettings={onReturnToSettings}
-            onOpenExperts={() => {
-              void navigate({ to: "/experts", search: { tab: "capabilities" } });
+            onOpenExperts={(kind) => {
+              if (kind !== undefined) {
+                void navigate(expertCenterSectionRouteTarget(kind, rawRouteSearch) as never);
+                return;
+              }
+              void navigate({ to: "/experts", search: { tab: "capabilities" } } as never);
             }}
           />
         );
@@ -1799,8 +1817,6 @@ function SettingsRouteView() {
         return <KeyboardShortcutsSettingsPanel />;
       case "profile":
         return <ProfileSettingsPanel />;
-      case "skills":
-        return <SkillsSettingsPanel />;
       case "usage":
         return <ProviderUsageSettingsPanel />;
       default:

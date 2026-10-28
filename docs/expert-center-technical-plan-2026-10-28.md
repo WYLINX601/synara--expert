@@ -48,13 +48,13 @@
 
 从 `ExpertsSettingsPanel` 中分离个人 Expert 的现有控制逻辑，形成一个 `ExpertCenter` 控制器；可以保留原组件路径并提取附近的 controller hook，不以改目录为目标。
 
-| 职责                                                                  | 归属                                       |
-| --------------------------------------------------------------------- | ------------------------------------------ |
-| selectedId、baseline、draft、revision、保存/复制/归档/恢复/删除、错误 | 同一 Expert 控制器                         |
-| 路由意图解析、导航、进入 MCP、启动任务、历史数据接入                  | Workbench host 适配                        |
-| 列表、能力/设置表单、保存条、确认、Skill/资料/MCP 选择                | 现有 Expert 组件                           |
-| 历史页                                                                | 新增只读 ExpertTaskHistory，消费窄数据输入 |
-| 专家团                                                                | 原 HubTeamsSettingsPanel，继续留在设置入口 |
+| 职责                                                                  | 归属                                               |
+| --------------------------------------------------------------------- | -------------------------------------------------- |
+| selectedId、baseline、draft、revision、保存/复制/归档/恢复/删除、错误 | 同一 Expert 控制器                                 |
+| 路由意图解析、导航、进入 MCP、启动任务、历史数据接入                  | Workbench host 适配                                |
+| 列表、能力/设置表单、保存条、确认、Skill/资料/MCP 选择                | 现有 Expert 组件                                   |
+| 历史页                                                                | 新增只读 ExpertTaskHistory，消费窄数据输入         |
+| 专家团                                                                | 原 HubTeamsSettingsPanel，由专家页的专家团分类承载 |
 
 必要组件扩展仅包含：详情顶部“使用此专家”回调、历史页签/内容槽、路由状态受控接入。`ExpertEditor` 中现有两个页签的布局、表单及校验继续复用；不能在外部再套一组重复页签。
 
@@ -76,12 +76,12 @@
 | 入口                                     | 处理                                                                                            |
 | ---------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | 原设置中的“单个专家”                     | 导向新列表；携带 expertId 时导向对应详情                                                        |
-| 原设置中的“专家团”                       | 保持原面板和入口，不被统一 redirect 吞掉                                                        |
+| 原设置中的“专家团”                       | 同一原面板移入 `/experts?kind=teams`，旧入口重定向                                              |
 | Expert → MCP                             | 沿用 section=mcp、tab=tools、expertId、connectionId、returnExpertId；仅发起方变为独立 Expert 页 |
 | MCP → Expert                             | 返回 `/experts/$expertId?tab=capabilities`，保留必要目标标识                                    |
 | 原 expert-connections / MCP 应用接入别名 | 继续由现有 settings adapter 归一化，不丢 tab、search 或连接标识                                 |
 
-设置中可保留个人 Expert 的跳转项与专家团切换壳，但不能保留第二套个人 Expert 编辑器。旧无 expertId 的设置 URL 不做无条件重定向，以免使专家团入口不可达。
+设置中仅保留跳转薄壳，不挂载第二套编辑器。依据后续用户授权，旧无 expertId 的 Experts 设置 URL 转到专家团分类，Agent skills 设置 URL 转到技能分类，详见下文整合补充。
 
 在现有导航注册和 AppRail 接入 Experts，并处理当前项识别、自定义排序/隐藏与默认值归一化；不重置用户导航顺序，不新增 MCP 顶层项目。设置搜索指向同一新入口，元数据集中登记。
 
@@ -251,5 +251,17 @@
 
 - 原生启动最终复用 `useHandleNewThread` 的既有初始化与阶段式导航，增加可选 `standalone`、`expertId` 及 `navigation.isCurrent`，而不是在新适配器复制初始化流程。standalone 强制新草稿且不执行主槽认领；普通调用者不传这些参数时保持既有行为。`createDraftThread` 的可选注册字段同时补齐。
 - Sidebar 从当前真实任务路由传入 `projectId/sourceThreadId`，Expert → MCP → Expert 保留允许的上下文字段。宿主只继承匹配项目的来源任务/草稿工作区，避免静默选取最近项目。
-- `ExpertsSettingsPanel` 以可选 `centerRoute` 接入单一父路由，复用其原有状态和控件；旧设置使用只承载专家团与跳转按钮的薄壳。没有另建完整编辑器。
+- `ExpertsSettingsPanel` 以可选 `centerRoute` 接入单一父路由，复用其原有状态和控件；旧设置使用跳转薄壳。专家团与技能库后续按下节移入中心，仍复用原编辑器。
 - 历史复用任务状态解析器，回合完成显示“回合已结束”；同步游标延续 root 重挂前代次。静态边界清单覆盖新增接入和回归测试。
+
+## 13. 专家团与技能库整合（2026-10-28）
+
+依据用户后续直接要求，替代初版“专家团继续留在设置”的安排。父布局仍为 `_chat`，数据所有者不变：Expert/Skill 使用既有 server 资源接口，专家团使用既有 hubTeams 接口；没有新增 RPC、迁移或任务运行路径。
+
+- 父路由 `/experts` 的可选 `kind` 接受 `teams` / `skills`；省略表示个人专家。`/experts/$expertId` 始终展示个人详情，原 `tab` 语义不变。分类切换保留允许的项目/来源上下文，并回到各分类列表。
+- `ExpertsSettingsPanel.centerRoute` 接受分类及导航回调；保留个人 Expert 原控制器，条件挂载原 `HubTeamsSettingsPanel` 和按需加载的 `SkillLibrarySettingsPanel`，不新增第二套编辑器。
+- `useExpertDraftGuard` 的可选导航判定接收当前/目标查询参数，个人专家和专家团可识别同路径的分类切换。个人同详情页签仍不触发离开保护；技能详情沿用自身既有路由保护。
+- Settings adapter 统一使用 `expertCenterSectionRouteTarget(kind, search)`，仅保留允许的上下文字段。旧 Experts 有 ID 时进个人详情，无 ID 时进团队；旧 Skills 始终进技能库。MCP 的连接 ID、授权及返回个人专家 helper 保持原样。
+- 复用 `SettingsSegmentedControl`、`SettingsSectionShell.count/layout` 与 `SettingsListRow.layout`；团队紧凑列表不另建控件。技能库查询、编辑、上传、绑定和更新流程均未改动。
+
+本次仅改变 Web 入口、分类与编辑离开判定，不改任务草稿生命周期、进程或数据库。检查取 C + 受影响浏览器 + 接入边界；沿用初版未改路径的历史验收边界，不把 0.1.7 全库与真实 Provider 结果改记成本次验证。实际记录见[整合验收](./expert-center-organization-2026-10-28.md)。

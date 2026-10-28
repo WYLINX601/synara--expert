@@ -845,9 +845,12 @@
         "apps/web/src/components/settings/ExpertsSettingsPanel.tsx",
         "apps/web/src/components/settings/ExpertEditor.tsx",
         "apps/web/src/components/settings/ExpertTaskHistory.tsx",
-        "apps/web/src/components/settings/ExpertTeamsSettingsPanel.tsx"
+        "apps/web/src/components/settings/ExpertTeamsSettingsPanel.tsx",
+        "apps/web/src/components/settings/SkillLibrarySettingsPanel.tsx",
+        "apps/web/src/components/settings/SkillsSettingsPanel.tsx",
+        "apps/web/src/features/hubCollaboration/HubTeamsSettingsPanel.tsx"
       ],
-      "responsibility": "The _chat parent retains its existing shell and subscriptions. A single route-owned Expert editor reuses the current draft guard and save contract. The native new-thread host can stage an independent Expert draft without dispatching or claiming an existing project slot. History reads the existing shell binding and summary projections through a narrow adapter, including archive and synchronization state; it does not fetch task bodies or add server APIs. Settings retains expert teams and links to the single personal Expert surface; MCP return targets use the same route.",
+      "responsibility": "The _chat parent retains its existing shell and subscriptions. A single route-owned Expert editor reuses the current draft guard and save contract. The native new-thread host can stage an independent Expert draft without dispatching or claiming an existing project slot. History reads the existing shell binding and summary projections through a narrow adapter, including archive and synchronization state; it does not fetch task bodies or add server APIs. The Experts route owns personal experts, teams, and the existing Skill library as categories. Team and Skill editing reuse their existing owners and draft guards; query-only category changes are guarded. Legacy Settings links redirect to the matching category; MCP return targets use the personal Expert route.",
       "tests": [
         "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
         "apps/web/src/components/settings/WorkbenchSettingsPages.browser.tsx",
@@ -858,7 +861,8 @@
         "apps/web/src/components/chat/prepareChatSendWorkspace.test.ts",
         "apps/web/src/hooks/useHandleNewThread.expert.browser.tsx",
         "apps/web/src/components/settings/ExpertTaskHistory.browser.tsx",
-        "apps/web/src/storeState.test.ts"
+        "apps/web/src/storeState.test.ts",
+        "apps/web/src/components/settings/SkillLibrarySettingsPanel.browser.tsx"
       ]
     }
   ]

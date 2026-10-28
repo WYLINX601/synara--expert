@@ -20,6 +20,7 @@ export interface SettingsHostRoute {
   readonly originalSection: unknown;
   readonly shouldCanonicalizeMcpRoute: boolean;
   readonly shouldRedirectExpertToCenter: boolean;
+  readonly redirectExpertCenterKind?: "teams" | "skills";
   readonly expertId?: string;
   readonly connectionId?: string;
   readonly initialSearch?: string;
@@ -46,6 +47,12 @@ export function resolveSettingsHostRoute(routeSearch: Search, rawSearch: Search 
   const connectionId = searchString(routeSearch.connectionId);
   const initialSearch = searchString(routeSearch.search);
   const returnExpertId = searchString(routeSearch.returnExpertId);
+  const redirectExpertCenterKind =
+    activeSection === "skills"
+      ? "skills"
+      : activeSection === "experts" && expertId === undefined
+        ? "teams"
+        : undefined;
 
   return {
     activeSection,
@@ -54,6 +61,7 @@ export function resolveSettingsHostRoute(routeSearch: Search, rawSearch: Search 
     originalSection,
     shouldCanonicalizeMcpRoute,
     shouldRedirectExpertToCenter: activeSection === "experts" && expertId !== undefined,
+    ...(redirectExpertCenterKind === undefined ? {} : { redirectExpertCenterKind }),
     ...(expertId === undefined ? {} : { expertId }),
     ...(connectionId === undefined ? {} : { connectionId }),
     ...(initialSearch === undefined ? {} : { initialSearch }),
@@ -132,5 +140,24 @@ export function expertCenterRouteTarget(input: {
     to: "/experts/$expertId" as const,
     params: { expertId: input.expertId },
     search,
+  };
+}
+
+/** Build an Experts section destination from legacy Settings, retaining supported context. */
+export function expertCenterSectionRouteTarget(kind: "teams" | "skills", search: Search = {}) {
+  const projectId = searchString(search.projectId);
+  const sourceThreadId = searchString(search.sourceThreadId);
+  const initialSearch = searchString(search.search);
+  const target = searchString(search.target);
+  return {
+    to: "/experts" as const,
+    search: {
+      kind,
+      tab: "capabilities" as const,
+      ...(projectId === undefined ? {} : { projectId }),
+      ...(sourceThreadId === undefined ? {} : { sourceThreadId }),
+      ...(initialSearch === undefined ? {} : { search: initialSearch }),
+      ...(target === undefined ? {} : { target }),
+    },
   };
 }

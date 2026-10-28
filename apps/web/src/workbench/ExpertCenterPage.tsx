@@ -16,9 +16,22 @@ export default function ExpertCenterPage() {
         <ExpertsSettingsPanel
           centerRoute={{
             expertId: params.expertId ?? null,
+            kind: params.expertId ? "experts" : (search.kind ?? "experts"),
+            navigateKind: async (kind) => {
+              const { kind: _previousKind, ...context } = search;
+              await navigate({
+                to: "/experts",
+                search: {
+                  ...context,
+                  tab: "capabilities",
+                  ...(kind !== "experts" ? { kind } : {}),
+                },
+              });
+            },
             tab: search.tab,
             navigate: async (expertId, tab, replace) => {
-              const nextSearch = { ...search, tab };
+              const { kind: _previousKind, ...context } = search;
+              const nextSearch = { ...context, tab };
               if (expertId)
                 await navigate({
                   to: "/experts/$expertId",

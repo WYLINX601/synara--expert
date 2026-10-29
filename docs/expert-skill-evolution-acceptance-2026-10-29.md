@@ -1,6 +1,6 @@
 # Expert Skill 主动进化实现验收
 
-日期：2026-10-29，Asia/Shanghai。状态：实现、首轮隔离预览验收及三项私密审查问题的修复复验均完成；未提交、合入、推送、打包或安装日用应用。授权来源：用户要求按已确认的产品方案和计划执行，并根据私密审查修复。真实 Provider/平台未验范围保留在下表。
+日期：2026-10-29，Asia/Shanghai。状态：实现、首轮隔离预览验收及三项私密审查问题的修复复验均完成；后续已提交并合入 main，日用 0.1.10 已安装并健康重启；未推送或公开发布。授权来源：用户要求按已确认的产品方案和计划执行，并根据私密审查修复。真实 Provider/平台未验范围保留在下表。
 
 范围依据：[产品方案](./expert-skill-evolution-product-plan-2026-10-28.md)、[研发方案](./expert-skill-evolution-technical-plan-2026-10-28.md)、[实施计划](./expert-skill-evolution-implementation-plan-2026-10-28.md)。源码基线 `9846774838274c45989a9dea3dcf1dc70de3af2b`，实施分支 `codex/expert-skill-evolution`。
 
@@ -108,3 +108,13 @@
 ![Skill 时间环星图](./expert-skill-evolution-assets-2026-10-29/evolution-star-map.png)
 
 ![首次派生恢复原绑定预览](./expert-skill-evolution-assets-2026-10-29/binding-restore-preview.png)
+
+## 本机交付（2026-10-29）
+
+用户授权提交、合入并更新日用应用。实现提交 `9f313abf73405123e2a95c6659e5a26d32b72dab` 已 fast-forward 合入 main，日用 `/Applications/Personal Workbench.app` 为 **0.1.10**，来源精确匹配该提交。安装前来源、锁、产物清单、依赖、严格签名、隔离启动及一致备份副本上的 Expert 9→10 迁移通过；正常重启后 HTTP 200、startupReady=true、projection=healthy。此前“未提交/安装”描述保留其验收时点。
+
+更新前新鲜恢复组合、原安装应用和经严格校验的干净 0.1.9 回退应用均保留。更新后静止库一致快照 quick_check=ok；32 个聊天、18 个项目、3 个 Space、308 个可见消息对的身份摘要一致。97 张既有业务表摘要完全相同，4 张运行时表和模型发现缓存发生启动相关变化；其余 699 个保护文件摘要一致，用户设置与 Provider/模型配置未改。
+
+本机构建因 iconutil 转换失败，使用私有受限步骤校验生成尺寸并复用字节一致的仓库图标，不修改源码素材；固定 Cua artifact 的 provenance 验证通过。隔离启动需外部执行入口。启动后的严格签名检查仍受既有 Finder 自定义图标元数据影响；923 个原包条目的内容、权限及符号链接均一致，未清除用户图标设置。owner RPC 未通过现有鉴权，数据验收改用正常退出后的只读一致快照，未提取凭据或改变认证。
+
+完整本机验收与恢复指针见私有 `.synara/expert-evolution-delivery-20261029/acceptance-0.1.10.md`、`postinstall-restart-health-verification.json`、`postinstall-data-retention-verification.json` 和 `recovery-set/`。未调用真实模型，未推送、发布 tag 或修改更新 feed。main 原先的规划草稿已保留在 `preserve pre-integration evolution planning 20261029` stash，未覆盖或丢弃。

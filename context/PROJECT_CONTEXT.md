@@ -1,6 +1,6 @@
 # Linx / Synara Expert 项目上下文
 
-更新日期：2026-10-28
+更新日期：2026-10-29
 
 范围：以 Linx V2.0 组织长期方向管理、专业任务执行与能力进化，并在现有 Synara Expert / MCP / 工作台适配层上增量推进。本文只负责项目路由、设计边界与当前状态；产品、技术和验收细节以链接的权威文档为准。
 
@@ -23,6 +23,8 @@
 | Expert / MCP                          | [已通过产品方案](../docs/expert-center-product-plan-2026-10-28.md)、[技术方案](../docs/expert-center-technical-plan-2026-10-28.md)、[本轮实现验收](../docs/expert-center-implementation-2026-10-28.md)；历史：[原产品与技术方案](../docs/expert-product-technical-design.md)、[MCP 调整验收](../docs/mcp-connection-selection-acceptance.md) | Expert 中心已统一专家/专家团/技能，96a453046 已合入并安装日用 0.1.9；见[整合验收](../docs/expert-center-organization-2026-10-28.md) |
 | Provider / Gateway 真实运行与发布缺口 | [P0 证据](../docs/expert-p0/README.md)、[故障矩阵](../docs/expert-p0/release-fault-matrix.md)                                                                                                                                                                                                                                                | 查对应源码、Provider、平台和场景，不搬用旧结果                                                                                      |
 | 既有适配实现与历史设计                | [适配层验收](../docs/workbench-adaptation-acceptance.md)、[工作台历史架构](../docs/workbench-architecture.md)、[Expert 架构图](../docs/expert-architecture.drawio)                                                                                                                                                                           | 历史路径、tree 和演练保留原范围，不是当前源码入口                                                                                   |
+
+Expert Skill 主动进化已按用户确认的[产品方案](../docs/expert-skill-evolution-product-plan-2026-10-28.md)、[研发方案](../docs/expert-skill-evolution-technical-plan-2026-10-28.md)和[实施计划](../docs/expert-skill-evolution-implementation-plan-2026-10-28.md)完成本轮实现、隔离预览验收与三项私密审查问题修复，实际状态见[实现验收](../docs/expert-skill-evolution-acceptance-2026-10-29.md)。范围为手动提炼、候选预览后采用、三类策略与时间环星图；专家不产生 Memory。首轮 Pi 真实模型验证专用派生、原包保留、同会话下一独立 Run 装配和取消；修复后全库 18,391 项及浏览器 68 项通过，其他 Provider 未验范围保留。本任务临时实例已停止，源码和验收数据保留；未提交、合入、推送或更新日用应用。
 
 每项任务先完成 SOP 的范围/基线核对，实施中按需读取表中材料，结束时把结果写入对应验收，只有跨任务目标、入口、决定或状态变化才回写本页。主会话保留需求和架构决策；明确边界后才委派执行。不为小改强制新增需求目录或管理记录。
 

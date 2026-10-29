@@ -18,6 +18,7 @@ import {
 } from "./HubCollaborationMigration.ts";
 import { HUB_PLAN_SQL, HUB_PLAN_EFFECT } from "./HubPlanMigration.ts";
 import { HUB_PLAN_INPUT_REQUEST_SQL, HUB_PLAN_INPUT_REQUEST_EFFECT } from "./HubPlanMigration.ts";
+import { SKILL_EVOLUTION_SQL, SKILL_EVOLUTION_EFFECT } from "./SkillEvolutionMigration.ts";
 import {
   CONTEXT_SCHEMA_OBJECTS_QUERY,
   validateFrozenContextSchema,
@@ -385,6 +386,14 @@ export const workbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] 
     checksum: "sha256:c1eed65d20738b04e96d8197d66fa5094fbb0fac6899e23cfb2b9c6ef6cabcdc",
     statement: HUB_PLAN_INPUT_REQUEST_SQL,
     effect: HUB_PLAN_INPUT_REQUEST_EFFECT,
+  },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 10,
+    name: "ExpertSkillEvolution",
+    checksum: "sha256:fe4cc3be8d7c7cebd5d36dce4ae48a6c8528b3d4b4ed0dc695be5570633074fa",
+    statement: SKILL_EVOLUTION_SQL,
+    effect: SKILL_EVOLUTION_EFFECT,
   },
 ];
 

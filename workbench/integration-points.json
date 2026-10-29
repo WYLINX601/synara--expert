@@ -2,6 +2,57 @@
   "version": 1,
   "integrationPoints": [
     {
+      "id": "expert.skill-evolution",
+      "surface": "expert-evolution",
+      "entryFiles": [
+        "packages/contracts/src/skillEvolution.ts",
+        "packages/contracts/src/provider.ts",
+        "packages/contracts/src/ws.ts",
+        "packages/contracts/src/rpc.ts",
+        "packages/contracts/src/ipc.ts",
+        "apps/server/src/wsRpc.ts",
+        "apps/server/src/serverLayers.ts",
+        "apps/server/src/workbench/host/skillEvolutionRpc.ts",
+        "apps/server/src/workbench/host/skillEvolutionPersistence.ts",
+        "apps/server/src/workbench/host/skillEvolutionExecution.ts",
+        "apps/server/src/workbench/persistence/SkillEvolutionMigration.ts",
+        "apps/server/src/workbench/persistence/WorkbenchMigrations.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts",
+        "apps/server/src/provider/Layers/PiAdapter.ts",
+        "apps/server/src/provider/Layers/ClaudeAdapter.ts",
+        "apps/server/src/provider/Layers/ProviderService.ts",
+        "apps/server/src/provider/runtimeLayer.ts",
+        "apps/server/src/provider/skillEvolutionConstraints.ts",
+        "apps/server/src/experts/SkillLibraryStore.ts",
+        "apps/server/src/experts/RunSkillAssemblyStore.ts",
+        "apps/server/src/experts/skillEvolutionPackagePins.ts",
+        "apps/web/src/wsNativeApi.ts",
+        "apps/web/src/workbench/host/expertClient.ts"
+      ],
+      "featureRoots": [
+        "apps/server/src/experts/evolution",
+        "apps/web/src/workbench/features/expert-evolution"
+      ],
+      "responsibility": "Owner-authorized manual extraction freezes selected completed Expert turns and targets. The host dispatches existing native create/turn/interrupt commands and persists their exact identities; there is no second executor. Server-registered execution purpose constrains Pi/Claude sessions and final prompts without ambient tools, Skills, Hub Memory or project context. Candidates require exact evidence, digest acknowledgement and revision checks. Library journals preserve shared identity or a full independent copy, bindings and partial recovery. Immutable package pins retain candidate bases and adopted history. The Expert tab reuses native model choice, task links, Skill editors and draft guards; its time rings display Skill identities and verified adoption events, not memory or inferred usage. Static checks and mocks do not prove real model execution.",
+      "tests": [
+        "apps/server/src/experts/evolution/SkillEvolutionService.test.ts",
+        "apps/server/src/workbench/host/skillEvolutionRpc.test.ts",
+        "apps/server/src/workbench/host/skillEvolutionPersistence.test.ts",
+        "apps/server/src/experts/SkillLibraryStore.test.ts",
+        "apps/server/src/experts/RunSkillAssemblyStore.test.ts",
+        "apps/server/src/experts/skillEvolutionPolicy.test.ts",
+        "apps/server/src/provider/skillEvolutionConstraints.test.ts",
+        "apps/server/src/provider/Layers/PiAdapter.test.ts",
+        "apps/server/src/provider/Layers/PiAdapter.lifecycle.test.ts",
+        "apps/server/src/provider/Layers/ClaudeAdapter.test.ts",
+        "apps/server/src/provider/Layers/ProviderService.test.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
+        "apps/web/src/components/settings/ExpertSkillEvolution.browser.tsx",
+        "apps/web/src/components/settings/SkillLibraryDetail.evolution.browser.tsx",
+        "apps/web/src/workbench/features/expert-evolution/model.test.ts"
+      ]
+    },
+    {
       "id": "provider.omp-user-input",
       "surface": "provider-session",
       "entryFiles": [

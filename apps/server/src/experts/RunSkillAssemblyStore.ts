@@ -166,7 +166,7 @@ export function createRunSkillAssemblyStore(stateDir: string) {
     const bindings = definition.skillBindings;
     const selections =
       bindings !== undefined
-        ? await resolveSkillBindings(stateDir, bindings)
+        ? await resolveSkillBindings(stateDir, bindings, definition.id)
         : (definition.skillSelections ?? snapshot.skillSelections ?? []);
     const managedSkills = await Promise.all(
       (bindings ?? [])

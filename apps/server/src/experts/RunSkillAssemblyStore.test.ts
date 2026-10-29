@@ -101,6 +101,53 @@ describe("per-run Skill assemblies", () => {
     ).rejects.toThrow("another task");
   });
 
+  it("rejects a private Skill in another Expert's current Run assembly", async () => {
+    const f = await fixture();
+    const owner = await f.experts.save({
+      name: "Private owner",
+      description: "",
+      useCases: "",
+      persona: "Owner",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const privateSkill = (
+      await f.library.execute({
+        action: "create",
+        name: "Private method",
+        body,
+        tags: [],
+        evolutionPolicy: "protected",
+        scope: { kind: "expert", expertId: owner.id },
+      })
+    ).skill!;
+    const other = await f.experts.save({
+      name: "Other Expert",
+      description: "",
+      useCases: "",
+      persona: "Other",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const otherSnapshot = await f.experts.prepareSnapshot(other.id),
+      definitionFile = path.join(f.stateDir, "experts", "definitions", `${other.id}.json`),
+      stored = await f.experts.read(other.id);
+    await fs.writeFile(
+      definitionFile,
+      JSON.stringify({
+        ...stored,
+        skillBindings: [{ skillId: privateSkill.skillId, enabled: true, activation: "on-demand" }],
+      }),
+    );
+    await expect(f.store.preview(otherSnapshot.snapshotId)).rejects.toThrow(
+      `belongs to Expert ${owner.id}`,
+    );
+  });
+
   it("does not rebuild the effective assembly for tags-only edits", async () => {
     const f = await fixture();
     const first = await f.prepare("run-A");

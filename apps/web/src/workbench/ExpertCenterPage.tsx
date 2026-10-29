@@ -1,7 +1,10 @@
 // Route-owned assembly keeps a single Expert editor alive across detail tabs.
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { useState } from "react";
+import type { ThreadId } from "@synara/contracts";
 import { ExpertsSettingsPanel } from "~/components/settings/ExpertsSettingsPanel";
 import { ExpertTaskHistory } from "~/components/settings/ExpertTaskHistory";
+import { ExpertSkillEvolution } from "./features/expert-evolution/ExpertSkillEvolution";
 import { settingsSearchForMcpFromExpert } from "./host/settings";
 import { useExpertTaskActions } from "./host/expertTaskActions";
 
@@ -10,6 +13,23 @@ export default function ExpertCenterPage() {
   const search = useSearch({ from: "/_chat/experts" });
   const navigate = useNavigate();
   const actions = useExpertTaskActions(search.projectId, search.sourceThreadId);
+  const [sourceSelection, setSourceSelection] = useState<{
+    readonly expertId: string;
+    readonly threadId: ThreadId;
+    readonly requestKey: number;
+  } | null>(null);
+  const selectHistorySource = (expertId: string, threadId: ThreadId) => {
+    setSourceSelection((current) => ({
+      expertId,
+      threadId,
+      requestKey: (current?.requestKey ?? 0) + 1,
+    }));
+    void navigate({
+      to: "/experts/$expertId",
+      params: { expertId },
+      search: { ...search, tab: "evolution" },
+    });
+  };
   return (
     <main className="h-full min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
       <div className="mx-auto max-w-5xl">
@@ -58,10 +78,34 @@ export default function ExpertCenterPage() {
               }),
             });
           }}
-          renderHistory={(expertId) => (
+          renderHistory={(expertId, canExtract) => (
             <ExpertTaskHistory
               expertId={expertId}
               onOpenThread={(threadId) => {
+                void navigate({ to: "/$threadId", params: { threadId } });
+              }}
+              {...(canExtract
+                ? {
+                    onExtractFromThread: (threadId: ThreadId) =>
+                      selectHistorySource(expertId, threadId),
+                  }
+                : {})}
+            />
+          )}
+          renderEvolution={(expert, active) => (
+            <ExpertSkillEvolution
+              key={expert.id}
+              expertId={expert.id}
+              expertName={expert.name}
+              expertArchived={expert.archived}
+              active={active}
+              initialThreadId={
+                sourceSelection?.expertId === expert.id ? sourceSelection.threadId : null
+              }
+              {...(sourceSelection?.requestKey === undefined
+                ? {}
+                : { initialThreadRequestKey: sourceSelection.requestKey })}
+              onOpenTask={(threadId) => {
                 void navigate({ to: "/$threadId", params: { threadId } });
               }}
             />

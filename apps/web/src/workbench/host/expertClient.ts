@@ -13,6 +13,7 @@ export type ExpertClient = Pick<
   | "deleteExpert"
   | "previewExpert"
   | "skillLibrary"
+  | "skillEvolution"
   | "readSkillManagementAccess"
   | "createSkillManagementPairing"
   | "listSkillManagementCredentials"

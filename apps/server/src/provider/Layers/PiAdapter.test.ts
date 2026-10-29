@@ -33,6 +33,10 @@ import {
   piResourceLoaderOptionsForSession,
 } from "./PiAdapter";
 import { makePiStoragePaths } from "../piStoragePaths.ts";
+import {
+  SKILL_EVOLUTION_EXECUTION_PURPOSE,
+  SKILL_EVOLUTION_SYSTEM_PROMPT,
+} from "../skillEvolutionConstraints.ts";
 
 async function withoutAmbientAnthropicAuthToken<T>(action: () => Promise<T>): Promise<T> {
   vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
@@ -247,6 +251,37 @@ describe("Pi extension mode in-flight reservations", () => {
 });
 
 describe("Pi Expert resource loading", () => {
+  it("uses only the Skill evolution system prompt and disables every ambient resource", () => {
+    const options = piResourceLoaderOptionsForSession({
+      executionPurpose: SKILL_EVOLUTION_EXECUTION_PURPOSE,
+      expertSession: {
+        snapshotId: "must-not-load",
+        persona: "Must not be inherited.",
+        skillsRoot: "/tmp/skills",
+        skills: [{ name: "secret", path: "/tmp/skills/secret/SKILL.md" }],
+        references: [],
+      },
+      contextSession: {
+        snapshotId: "must-not-load-context",
+        snapshotHash: "context-hash",
+        text: "Must not be inherited.",
+        hasContent: true,
+      },
+    });
+
+    expect(options).toMatchObject({
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+      systemPrompt: SKILL_EVOLUTION_SYSTEM_PROMPT,
+      appendSystemPrompt: [],
+    });
+    expect(options).not.toHaveProperty("additionalSkillPaths");
+    expect(options?.appendSystemPrompt?.join("\n")).not.toContain("Must not be inherited");
+  });
+
   it("submits Expert V2 instructions without exposing the package parent to native discovery", () => {
     const options = piResourceLoaderOptionsForSession({
       expertSession: {

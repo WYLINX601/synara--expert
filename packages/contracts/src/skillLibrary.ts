@@ -19,6 +19,22 @@ export const SkillSource = Schema.Struct({
   packageId: SkillPackageId,
 });
 export type SkillSource = typeof SkillSource.Type;
+export const SkillEvolutionPolicy = Schema.Literals(["protected", "shared", "independent"]);
+export type SkillEvolutionPolicy = typeof SkillEvolutionPolicy.Type;
+export const SkillScope = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("shared") }),
+  Schema.Struct({
+    kind: Schema.Literal("expert"),
+    expertId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  }),
+]).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type SkillScope = typeof SkillScope.Type;
+export const SkillDerivation = Schema.Struct({
+  skillId: SkillId,
+  revision: PositiveInt,
+  packageId: SkillPackageId,
+}).annotate({ parseOptions: { onExcessProperty: "error" } });
+export type SkillDerivation = typeof SkillDerivation.Type;
 export const SkillDefinition = Schema.Struct({
   skillId: SkillId,
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
@@ -37,6 +53,11 @@ export const SkillDefinition = Schema.Struct({
   createdAt: Schema.optional(IsoDateTime),
   /** Trusted server actor identifier; "unknown" is reserved for query filters. */
   createdBy: Schema.optional(TrimmedNonEmptyString),
+  /** Historical records default to protected evolution and shared scope. */
+  evolutionPolicy: Schema.optional(SkillEvolutionPolicy),
+  scope: Schema.optional(SkillScope),
+  /** Immutable source identity and revision for a derived Skill. */
+  derivedFrom: Schema.optional(SkillDerivation),
 });
 export type SkillDefinition = typeof SkillDefinition.Type;
 
@@ -125,6 +146,7 @@ export const SkillFileChange = Schema.Struct({
   content: Schema.optional(Schema.String.check(Schema.isMaxLength(22_369_624))),
   executable: Schema.optional(Schema.Boolean),
 });
+export type SkillFileChange = typeof SkillFileChange.Type;
 export const SkillImportChoice = Schema.Struct({
   entryPath: SkillEntryPath,
   duplicate: Schema.Literals(["skip", "rename", "replace"]),
@@ -145,7 +167,24 @@ export const SkillLibraryRequest = Schema.Union([
     name: TrimmedNonEmptyString,
     body: Schema.String.check(Schema.isMaxLength(16_777_216)),
     tags: Schema.Array(TrimmedNonEmptyString),
+    changes: Schema.optional(Schema.Array(SkillFileChange).check(Schema.isMaxLength(5_000))),
+    evolutionPolicy: Schema.optional(SkillEvolutionPolicy),
+    scope: Schema.optional(SkillScope),
     dryRun: Schema.optional(Schema.Boolean),
+  }),
+  action("configureEvolution", {
+    ...Revision,
+    requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+    evolutionPolicy: SkillEvolutionPolicy,
+    scope: SkillScope,
+  }),
+  action("derive", {
+    requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+    sourceSkillId: SkillId,
+    expectedRevision: PositiveInt,
+    expertId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+    name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+    changes: Schema.Array(SkillFileChange).check(Schema.isMaxLength(5_000)),
   }),
   action("save", {
     ...Revision,

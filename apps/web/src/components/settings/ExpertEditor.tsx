@@ -28,11 +28,12 @@ import { ExpertSkillBindingsEditor } from "./ExpertSkillBindingsEditor";
 import { ExpertSkillPackagesEditor } from "./ExpertSkillPackagesEditor";
 import { SettingsCard, SettingsSectionShell, SettingsSelectPopup } from "./SettingsPanelPrimitives";
 
-export type ExpertEditorTab = "capabilities" | "settings" | "history";
+export type ExpertEditorTab = "capabilities" | "settings" | "history" | "evolution";
 
 export function ExpertEditor({
   header,
   history,
+  evolution,
   status,
   draft,
   issues,
@@ -51,6 +52,7 @@ export function ExpertEditor({
 }: {
   header: ReactNode;
   history?: ReactNode;
+  evolution?: ReactNode;
   status?: ReactNode;
   draft: ExpertSaveInput;
   issues: ReadonlyArray<ExpertDraftIssue>;
@@ -82,9 +84,12 @@ export function ExpertEditor({
     )
       return;
     event.preventDefault();
-    const tabs: ExpertEditorTab[] = history
-      ? ["capabilities", "settings", "history"]
-      : ["capabilities", "settings"];
+    const tabs: ExpertEditorTab[] = [
+      "capabilities",
+      "settings",
+      ...(history ? ["history" as const] : []),
+      ...(evolution ? ["evolution" as const] : []),
+    ];
     const currentIndex = tabs.indexOf(tab);
     const nextIndex =
       event.key === "Home"
@@ -146,6 +151,20 @@ export function ExpertEditor({
               onClick={() => onTabChange("history")}
             >
               任务历史
+            </button>
+          ) : null}
+          {evolution ? (
+            <button
+              id="expert-tab-evolution"
+              type="button"
+              role="tab"
+              aria-selected={tab === "evolution"}
+              aria-controls="expert-panel-evolution"
+              tabIndex={tab === "evolution" ? 0 : -1}
+              className="rounded-lg px-3 py-1.5 text-ui-sm outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-border-focus)] aria-selected:bg-background aria-selected:text-foreground aria-selected:shadow-sm"
+              onClick={() => onTabChange("evolution")}
+            >
+              进化
             </button>
           ) : null}
         </div>
@@ -313,7 +332,7 @@ export function ExpertEditor({
             </SettingsSectionShell>
           </SettingsCard>
         </div>
-      ) : (
+      ) : tab !== "evolution" || !evolution ? (
         <div
           id="expert-panel-capabilities"
           role="tabpanel"
@@ -421,7 +440,18 @@ export function ExpertEditor({
             />
           </SettingsCard>
         </div>
-      )}
+      ) : null}
+      {evolution ? (
+        <div
+          id="expert-panel-evolution"
+          role="tabpanel"
+          aria-labelledby="expert-tab-evolution"
+          tabIndex={-1}
+          hidden={tab !== "evolution"}
+        >
+          {evolution}
+        </div>
+      ) : null}
     </div>
   );
 }

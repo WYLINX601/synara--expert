@@ -1016,6 +1016,13 @@ export function createExpertStore(stateDir: string): ExpertStore {
         await ensureInitialized();
         const input = decodeSaveInput(rawInput);
         validateDefinitionInput(input);
+        const id = input.id ?? randomUUID().replaceAll("-", "");
+        if (!EXPERT_ID_PATTERN.test(id)) {
+          throw new ExpertStoreError(
+            "Expert ID may contain lowercase letters, digits, _ and - only.",
+            "invalid_input",
+          );
+        }
         if (
           input.skillBindings !== undefined &&
           (input.skills.length || input.skillSelections?.length)
@@ -1030,7 +1037,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
             await resolvePackageSelections(
               stateDir,
               input.skillBindings !== undefined
-                ? await resolveSkillBindings(stateDir, input.skillBindings)
+                ? await resolveSkillBindings(stateDir, input.skillBindings, id)
                 : input.skillSelections!,
             );
           } catch (cause) {
@@ -1040,13 +1047,6 @@ export function createExpertStore(stateDir: string): ExpertStore {
               { cause },
             );
           }
-        }
-        const id = input.id ?? randomUUID().replaceAll("-", "");
-        if (!EXPERT_ID_PATTERN.test(id)) {
-          throw new ExpertStoreError(
-            "Expert ID may contain lowercase letters, digits, _ and - only.",
-            "invalid_input",
-          );
         }
         const previous = await readDefinitionFile(id);
         if (previous && input.expectedRevision === undefined) {
@@ -1274,7 +1274,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
       }
       const skillSelections =
         definition.skillBindings !== undefined
-          ? await resolveSkillBindings(stateDir, definition.skillBindings)
+          ? await resolveSkillBindings(stateDir, definition.skillBindings, definition.id)
           : (definition.skillSelections ?? []);
       try {
         await resolvePackageSelections(stateDir, skillSelections);
@@ -1466,7 +1466,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
         skillEntries = await resolvePackageSelections(
           stateDir,
           definition.skillBindings !== undefined
-            ? await resolveSkillBindings(stateDir, definition.skillBindings)
+            ? await resolveSkillBindings(stateDir, definition.skillBindings, definition.id)
             : definition.skillSelections!,
         );
         if (definition.skillBindings) {

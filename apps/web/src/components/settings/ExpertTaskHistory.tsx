@@ -10,6 +10,7 @@ import { useExpertTaskHistory, type ExpertTaskHistoryRow } from "~/workbench/hos
 export interface ExpertTaskHistoryProps {
   readonly expertId: string;
   readonly onOpenThread: (threadId: ThreadId) => void;
+  readonly onExtractFromThread?: (threadId: ThreadId) => void;
 }
 
 function ActivityTime({ updatedAt }: { readonly updatedAt: string | null }) {
@@ -23,9 +24,11 @@ function ActivityTime({ updatedAt }: { readonly updatedAt: string | null }) {
 function HistoryRow({
   row,
   onOpenThread,
+  onExtractFromThread,
 }: {
   readonly row: ExpertTaskHistoryRow;
   readonly onOpenThread: (threadId: ThreadId) => void;
+  readonly onExtractFromThread?: (threadId: ThreadId) => void;
 }) {
   return (
     <li className="rounded-lg border border-border px-3 py-3">
@@ -67,11 +70,27 @@ function HistoryRow({
           </dd>
         </div>
       </dl>
+      {onExtractFromThread ? (
+        <div className="mt-2">
+          <button
+            type="button"
+            className="text-ui-sm font-medium text-foreground hover:underline"
+            aria-label={`选择来源并提炼 Skill：${row.title}`}
+            onClick={() => onExtractFromThread(row.threadId)}
+          >
+            从此任务选择来源
+          </button>
+        </div>
+      ) : null}
     </li>
   );
 }
 
-export function ExpertTaskHistory({ expertId, onOpenThread }: ExpertTaskHistoryProps) {
+export function ExpertTaskHistory({
+  expertId,
+  onOpenThread,
+  onExtractFromThread,
+}: ExpertTaskHistoryProps) {
   const history = useExpertTaskHistory(expertId);
 
   return (
@@ -106,7 +125,12 @@ export function ExpertTaskHistory({ expertId, onOpenThread }: ExpertTaskHistoryP
       {history.rows.length > 0 && (
         <ul className="space-y-2" aria-label="Expert 任务历史">
           {history.rows.map((row) => (
-            <HistoryRow key={row.threadId} row={row} onOpenThread={onOpenThread} />
+            <HistoryRow
+              key={row.threadId}
+              row={row}
+              onOpenThread={onOpenThread}
+              {...(onExtractFromThread ? { onExtractFromThread } : {})}
+            />
           ))}
         </ul>
       )}

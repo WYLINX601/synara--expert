@@ -1,4 +1,5 @@
 import { SkillLibraryRpcInput, SkillLibraryResponse } from "./skillLibrary";
+import { SkillEvolutionRpcInput, SkillEvolutionResponse } from "./skillEvolution";
 import {
   SkillManagementAccess,
   SkillManagementCredentialRevokeInput,
@@ -1595,6 +1596,11 @@ export const WsServerSkillLibraryRpc = Rpc.make(WS_METHODS.serverSkillLibrary, {
   success: SkillLibraryResponse,
   error: WsRpcError,
 });
+export const WsServerSkillEvolutionRpc = Rpc.make(WS_METHODS.serverSkillEvolution, {
+  payload: SkillEvolutionRpcInput,
+  success: SkillEvolutionResponse,
+  error: WsRpcError,
+});
 
 export const WsServerListSkillPackagesRpc = Rpc.make(WS_METHODS.serverListSkillPackages, {
   payload: Schema.Struct({}),
@@ -2524,6 +2530,7 @@ const WS_FEATURE_RPC_GROUP_3 = RpcGroup.make(
   WsServerDeleteExpertRpc,
   WsServerPreviewExpertRpc,
   WsServerSkillLibraryRpc,
+  WsServerSkillEvolutionRpc,
   WsServerReadSkillManagementAccessRpc,
   WsServerCreateSkillManagementPairingRpc,
   WsServerListSkillManagementCredentialsRpc,

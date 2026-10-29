@@ -14,6 +14,7 @@ import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore";
 import { expertSnapshotSession } from "../../experts/expertSnapshotSession";
 import { ContextRepository } from "../../context/ContextRepository.ts";
+import { captureSkillEvolutionExecutionReader } from "../../workbench/host/skillEvolutionExecution";
 import { contextExecutionInputDigest } from "../contextDispatchEvidence.ts";
 import { ComputerService } from "../../computer/Services/ComputerService";
 import { providerWorkspaceChanged } from "../projectRelocationPaths.ts";
@@ -926,6 +927,7 @@ const make = Effect.gen(function* () {
   } = yield* ProviderCommandReactorConfig;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const contextRepository = yield* ContextRepository;
+  const readSkillEvolutionExecution = yield* captureSkillEvolutionExecutionReader;
   const deliveryRepository = yield* OrchestrationEventDeliveryRepository;
   const turnCheckpointCoordinator = yield* TurnCheckpointCoordinator;
   const queuedTurnPromotions = yield* QueuedTurnPromotionRepository;
@@ -2187,6 +2189,16 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${threadId}' was not found in projection state.`),
       );
     }
+    const evolutionExecution = yield* readSkillEvolutionExecution(threadId).pipe(
+      Effect.mapError(
+        () =>
+          new ProviderAdapterValidationError({
+            provider: thread.modelSelection.provider,
+            operation: "thread.turn.start",
+            issue: "无法核验 Skill 提炼任务的执行限制。",
+          }),
+      ),
+    );
     let preserveExpertSkillRun = false;
     let managedSkillRunKey: string | undefined;
     if (Option.isSome(projectAgentService)) {
@@ -2240,7 +2252,7 @@ const make = Effect.gen(function* () {
         }
       }
     }
-    if (thread.expertBinding && Option.isSome(projectAgentRepository)) {
+    if (!evolutionExecution && thread.expertBinding && Option.isSome(projectAgentRepository)) {
       const worker = yield* projectAgentRepository.value.findManagedWorkerByThread(threadId).pipe(
         Effect.mapError(
           (error) =>
@@ -2254,7 +2266,9 @@ const make = Effect.gen(function* () {
       if (Option.isSome(worker) && worker.value.settledAt === null)
         managedSkillRunKey = `hub-work:${worker.value.projectId}:${worker.value.requestId}`;
     }
-    const contextSession = yield* admitContextForExecution(threadId, createdAt);
+    const contextSession = evolutionExecution
+      ? undefined
+      : yield* admitContextForExecution(threadId, createdAt);
 
     const desiredRuntimeMode = options?.runtimeMode ?? thread.runtimeMode;
     const previousAutoApproveSynaraTools =
@@ -2405,17 +2419,31 @@ const make = Effect.gen(function* () {
         ? providerStartOptionsFromInstance(desiredProviderInstance)
         : undefined,
     );
-    const expertSnapshot = thread.expertBinding
-      ? yield* Effect.tryPromise({
-          try: () => expertStore.readSnapshot(thread.expertBinding!.snapshotId),
-          catch: (error) =>
-            new ProviderAdapterValidationError({
-              provider: preferredProvider,
-              operation: "thread.turn.start",
-              issue: `Could not load the pinned expert snapshot for thread '${threadId}': ${String(error)}`,
-            }),
-        })
-      : undefined;
+    if (
+      evolutionExecution &&
+      (!["pi", "claudeAgent"].includes(desiredRoutedModelSelection.provider) ||
+        evolutionExecution.modelSelection.provider !== desiredRoutedModelSelection.provider ||
+        evolutionExecution.modelSelection.model !== desiredRoutedModelSelection.model ||
+        (evolutionExecution.modelSelection.instanceId ??
+          evolutionExecution.modelSelection.provider) !== desiredProviderInstanceId)
+    )
+      return yield* new ProviderAdapterValidationError({
+        provider: preferredProvider,
+        operation: "thread.turn.start",
+        issue: "Skill 提炼任务的 Provider 实例和模型已固定，且必须支持隔离执行。",
+      });
+    const expertSnapshot =
+      !evolutionExecution && thread.expertBinding
+        ? yield* Effect.tryPromise({
+            try: () => expertStore.readSnapshot(thread.expertBinding!.snapshotId),
+            catch: (error) =>
+              new ProviderAdapterValidationError({
+                provider: preferredProvider,
+                operation: "thread.turn.start",
+                issue: `Could not load the pinned expert snapshot for thread '${threadId}': ${String(error)}`,
+              }),
+          })
+        : undefined;
     const runSkillAssembly = expertSnapshot
       ? yield* Effect.tryPromise({
           try: async () => {
@@ -2472,7 +2500,7 @@ const make = Effect.gen(function* () {
       envMode: thread.envMode,
       worktreePath: thread.worktreePath,
     });
-    if (workspaceState === "worktree-pending") {
+    if (!evolutionExecution && workspaceState === "worktree-pending") {
       return yield* new ProviderAdapterValidationError({
         provider: preferredProvider,
         operation: "thread.turn.start",
@@ -2481,18 +2509,18 @@ const make = Effect.gen(function* () {
     }
     // Multi-folder projects grant their extra folders natively; refuse the chats that
     // could not honor them rather than silently dropping folders.
-    const workspaceProject = yield* projectionSnapshotQuery
-      .getProjectShellById(thread.projectId)
-      .pipe(
-        Effect.mapError(
-          () =>
-            new ProviderAdapterValidationError({
-              provider: preferredProvider,
-              operation: "thread.turn.start",
-              issue: "Could not load the project's folder access configuration. Retry the turn.",
-            }),
-        ),
-      );
+    const workspaceProject = evolutionExecution
+      ? Option.none()
+      : yield* projectionSnapshotQuery.getProjectShellById(thread.projectId).pipe(
+          Effect.mapError(
+            () =>
+              new ProviderAdapterValidationError({
+                provider: preferredProvider,
+                operation: "thread.turn.start",
+                issue: "Could not load the project's folder access configuration. Retry the turn.",
+              }),
+          ),
+        );
     const additionalDirectories = Option.getOrUndefined(workspaceProject)?.additionalFolders ?? [];
     if (additionalDirectories.length > 0) {
       const folderIssue = projectFoldersSessionIssue({
@@ -2513,7 +2541,7 @@ const make = Effect.gen(function* () {
     // The coordinator check reads the persisted config directly — the same
     // lookup the service's principal resolver performs first.
     const autoApproveSynaraTools =
-      !isServerGroupsEnabled() || Option.isNone(projectAgentRepository)
+      evolutionExecution || !isServerGroupsEnabled() || Option.isNone(projectAgentRepository)
         ? false
         : yield* projectAgentRepository.value.getConfigByCoordinatorThread(threadId).pipe(
             // Only an active group grants the flag — a paused or archived
@@ -2528,21 +2556,31 @@ const make = Effect.gen(function* () {
             ),
             Effect.catch(() => Effect.succeed(false)),
           );
-    const providerSessionOptions = {
-      threadId,
-      providerInstanceId: desiredProviderInstanceId,
-      ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-      ...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
-      modelSelection: desiredRoutedModelSelection,
-      providerOptions: resolvedProviderOptions,
-      ...(expertSession ? { expertSession } : {}),
-      ...(contextSession ? { contextSession } : {}),
-      ...(options?.enableComputerControl !== undefined
-        ? { enableComputerControl: options.enableComputerControl }
-        : {}),
-      ...(autoApproveSynaraTools ? { autoApproveSynaraTools: true } : {}),
-      runtimeMode: desiredRuntimeMode,
-    };
+    const providerSessionOptions = evolutionExecution
+      ? {
+          threadId,
+          providerInstanceId: desiredProviderInstanceId,
+          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+          modelSelection: evolutionExecution.modelSelection,
+          providerOptions: resolvedProviderOptions,
+          executionPurpose: "skill-evolution" as const,
+          runtimeMode: "approval-required" as const,
+        }
+      : {
+          threadId,
+          providerInstanceId: desiredProviderInstanceId,
+          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+          ...(additionalDirectories.length > 0 ? { additionalDirectories } : {}),
+          modelSelection: desiredRoutedModelSelection,
+          providerOptions: resolvedProviderOptions,
+          ...(expertSession ? { expertSession } : {}),
+          ...(contextSession ? { contextSession } : {}),
+          ...(options?.enableComputerControl !== undefined
+            ? { enableComputerControl: options.enableComputerControl }
+            : {}),
+          ...(autoApproveSynaraTools ? { autoApproveSynaraTools: true } : {}),
+          runtimeMode: desiredRuntimeMode,
+        };
     const autoApproveSynaraToolsChanged = autoApproveSynaraTools !== previousAutoApproveSynaraTools;
 
     // Check required connections only at a new runtime boundary. In particular,
@@ -3273,7 +3311,31 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
-    const contextSession = yield* admitContextForExecution(input.threadId, input.createdAt);
+    const evolutionExecution = yield* readSkillEvolutionExecution(input.threadId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderValidationError({
+            operation: "skill-evolution.dispatch",
+            issue: "无法核验提炼任务，已停止发送。",
+            cause,
+          }),
+      ),
+    );
+    if (
+      evolutionExecution &&
+      (input.attachments?.length ||
+        input.skills?.length ||
+        input.mentions?.length ||
+        input.reviewTarget !== undefined ||
+        input.turnKind === "goal-continuation")
+    )
+      return yield* new ProviderValidationError({
+        operation: "skill-evolution.dispatch",
+        issue: "提炼任务只接受已选来源文本，不接受附件、引用、评审或自动续接。",
+      });
+    const contextSession = evolutionExecution
+      ? undefined
+      : yield* admitContextForExecution(input.threadId, input.createdAt);
     const contextDeliverySequence = input.completionEventSequence ?? input.sourceEventSequence;
     const contextDelivery = contextSession?.hasContent
       ? yield* deliveryRepository.getDelivery({
@@ -3372,7 +3434,8 @@ const make = Effect.gen(function* () {
               ),
             ),
           };
-    const projectContextPacket: ProjectAgentTurnContext = yield* Option.isSome(projectAgentService)
+    const projectContextPacket: ProjectAgentTurnContext = yield* !evolutionExecution &&
+    Option.isSome(projectAgentService)
       ? projectAgentService.value.formatContextPacketForTurn(input.threadId).pipe(
           Effect.mapError(
             (cause) =>
@@ -3384,7 +3447,9 @@ const make = Effect.gen(function* () {
           ),
         )
       : Effect.succeed({ text: "" });
-    const threadProject = yield* resolveThreadWorkspaceProject(thread);
+    const threadProject = evolutionExecution
+      ? undefined
+      : yield* resolveThreadWorkspaceProject(thread);
     const projectFoldersPreamble = threadProject
       ? buildProjectFoldersPreamble({
           primaryFolder: threadProject.workspaceRoot,
@@ -3406,11 +3471,15 @@ const make = Effect.gen(function* () {
     const projectContext = [packetText, projectFoldersPreamble ?? ""]
       .filter((block) => block.trim().length > 0)
       .join("\n\n");
-    const debugPromptOverheadChars = debugModePromptOverheadChars(input.interactionMode);
-    const goalPromptOverheadChars = providerGoalPromptOverheadChars(activeThreadGoal(thread));
+    const debugPromptOverheadChars = evolutionExecution
+      ? 0
+      : debugModePromptOverheadChars(input.interactionMode);
+    const goalPromptOverheadChars = evolutionExecution
+      ? 0
+      : providerGoalPromptOverheadChars(activeThreadGoal(thread));
     const providerPromptOverheadChars = debugPromptOverheadChars + goalPromptOverheadChars;
     const computerInvocation =
-      input.dispatchOrigin === undefined || input.dispatchOrigin === "user"
+      !evolutionExecution && (input.dispatchOrigin === undefined || input.dispatchOrigin === "user")
         ? parseComputerInvocation(input.messageText)
         : null;
     // Synara owns this command. Keep it in durable user text for provenance,
@@ -4052,6 +4121,9 @@ const make = Effect.gen(function* () {
           )
         : "";
     const finalizeProviderInput = (bootstrap: BootstrapContextSelection | null) => {
+      // The extraction prompt is already a bounded source snapshot. Do not
+      // prepend Hub/Memory, goals, restarts, references or native slash commands.
+      if (evolutionExecution) return toNonEmptyProviderInput(input.messageText);
       // Native control commands must remain the first token in every mode.
       if (
         selectedProvider === "claudeAgent" &&
@@ -4239,6 +4311,10 @@ const make = Effect.gen(function* () {
     let hubPreparation: "completed" | "not-applicable" | "unavailable" = "unavailable";
     let checkpointCaptureCwd: string | undefined;
     const captureMessageStartCheckpoint = Effect.gen(function* () {
+      if (evolutionExecution) {
+        checkpointPreparation = "not-applicable";
+        return;
+      }
       if ((input.dispatchMode ?? "queue") === "steer") {
         checkpointPreparation = "not-applicable";
         return;
@@ -4290,7 +4366,10 @@ const make = Effect.gen(function* () {
     const capturePreTurnBaselines = Effect.all(
       [
         captureMessageStartCheckpoint,
-        hubOutputReactor.captureBaselineBeforeTurn(input.threadId).pipe(
+        (evolutionExecution
+          ? Effect.succeed({ status: "not-applicable" as const })
+          : hubOutputReactor.captureBaselineBeforeTurn(input.threadId)
+        ).pipe(
           Effect.tap((result) =>
             Effect.sync(() => {
               if (result.status === "failed") {

@@ -20,6 +20,7 @@ export * from "./providerDiscovery";
 export * from "./expert";
 export * from "./skillPackage";
 export * from "./skillLibrary";
+export * from "./skillEvolution";
 export * from "./skillManagementAuth";
 export * from "./runSkillAssembly";
 export * from "./skillPackageSwitch";

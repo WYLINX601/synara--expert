@@ -1,4 +1,5 @@
 import { SkillLibraryRequest, SkillLibraryResponse } from "./skillLibrary";
+import { SkillEvolutionRequest, SkillEvolutionResponse } from "./skillEvolution";
 import type {
   SkillManagementAccess,
   SkillManagementCredentialRevokeInput,
@@ -1373,6 +1374,7 @@ export interface NativeApi {
     deleteExpert: (input: ExpertDeleteInput) => Promise<void>;
     previewExpert: (input: ExpertPreviewInput) => Promise<ExpertPreview>;
     skillLibrary: (input: SkillLibraryRequest) => Promise<SkillLibraryResponse>;
+    skillEvolution: (input: SkillEvolutionRequest) => Promise<SkillEvolutionResponse>;
     readSkillManagementAccess: () => Promise<SkillManagementAccess>;
     createSkillManagementPairing: () => Promise<SkillManagementPairingResult>;
     listSkillManagementCredentials: () => Promise<ReadonlyArray<SkillManagementCredentialSummary>>;

@@ -780,6 +780,8 @@ export function createWsNativeApi(): NativeApi {
               ? { ...input, requestId: crypto.randomUUID() }
               : input,
         }),
+      skillEvolution: (input) =>
+        transport.request(WS_METHODS.serverSkillEvolution, { request: input }),
       readSkillManagementAccess: () =>
         transport.request(WS_METHODS.serverReadSkillManagementAccess),
       createSkillManagementPairing: () =>

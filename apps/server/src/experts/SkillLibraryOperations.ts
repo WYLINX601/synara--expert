@@ -58,6 +58,8 @@ const OperationRecord = Schema.Struct({
   requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   operation: Schema.Literals([
     "create",
+    "configureEvolution",
+    "derive",
     "save",
     "import",
     "refresh",
@@ -93,6 +95,10 @@ const OperationRecord = Schema.Struct({
   bindingResult: Schema.optional(SkillLibraryBindingState),
   updateResult: Schema.optional(SkillLibraryUpdateResult),
   plannedPackageId: Schema.optional(SkillPackageId),
+  /** Durable package references retained for pending or completed evolution history. */
+  evolutionPackageIds: Schema.optional(
+    Schema.Array(SkillPackageId).check(Schema.isMaxLength(10_000)),
+  ),
 });
 const OperationJournal = Schema.Struct({
   schemaVersion: Schema.Literal(1),
@@ -177,6 +183,7 @@ export function createSkillLibraryOperations(stateDir: string) {
         | "bindingResult"
         | "updateResult"
         | "plannedPackageId"
+        | "evolutionPackageIds"
       >
     >,
   ): Promise<OperationRecord> => {
@@ -298,6 +305,7 @@ export function createSkillLibraryOperations(stateDir: string) {
         | "plannedSkillIds"
         | "plannedRevision"
         | "plannedPackageId"
+        | "evolutionPackageIds"
         | "plannedSkill"
         | "plannedSkills"
       >,

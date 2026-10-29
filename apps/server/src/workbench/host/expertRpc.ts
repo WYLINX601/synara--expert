@@ -44,7 +44,7 @@ import type { createWorkbenchExpertRuntime } from "../runtimeLayer.ts";
 import type { SkillPackageSwitchHost } from "../../experts/SkillPackageSwitch.ts";
 
 type WorkbenchExpertRuntime = ReturnType<typeof createWorkbenchExpertRuntime>;
-type RpcEffect = <A, E, R>(
+export type RpcEffect = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
   fallbackMessage: string,
 ) => Effect.Effect<A, WsRpcError, R>;

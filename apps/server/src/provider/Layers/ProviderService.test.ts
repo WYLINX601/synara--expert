@@ -115,6 +115,10 @@ import { createSkillLibraryStore } from "../../experts/SkillLibraryStore.ts";
 import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore.ts";
 import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
 import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
+import {
+  SkillEvolutionRepository,
+  type SkillEvolutionRepositoryShape,
+} from "../../experts/evolution/SkillEvolutionRepository";
 
 // The fake adapter never prepares Codex storage. Give lifecycle tests real
 // continuation metadata without reading or writing the developer's Codex home.
@@ -870,6 +874,7 @@ function makeProviderServiceLayer(
     readonly confirmExpertApplication?: boolean;
     readonly confirmSkillApplication?: boolean;
     readonly contextRepository?: ContextRepositoryShape;
+    readonly skillEvolutionRepository?: SkillEvolutionRepositoryShape;
     readonly codexDidResumeSession?: NonNullable<
       ProviderAdapterShape<ProviderAdapterError>["didResumeSession"]
     >;
@@ -957,6 +962,9 @@ function makeProviderServiceLayer(
   const serverSettingsLayer = ServerSettingsService.layerTest(
     providers?.providerInstances ? { providerInstances: providers.providerInstances } : {},
   );
+  const skillEvolutionRepositoryLayer = providers?.skillEvolutionRepository
+    ? Layer.succeed(SkillEvolutionRepository, providers.skillEvolutionRepository)
+    : Layer.empty;
 
   const rawLayer = Layer.mergeAll(
     makeProviderServiceLiveRaw({ stateDir: strictExpertTestState, ...options }).pipe(
@@ -965,6 +973,7 @@ function makeProviderServiceLayer(
       Layer.provide(contextRepositoryLayer),
       Layer.provide(ProviderServiceTestSecretStoreLayer),
       Layer.provide(serverSettingsLayer),
+      Layer.provide(skillEvolutionRepositoryLayer),
     ),
     directoryLayer,
     runtimeRepositoryLayer,
@@ -1086,6 +1095,25 @@ const makeTestContextSession = (snapshotId: string, text: string): TestContextSe
   text,
   hasContent: true,
 });
+
+type SkillEvolutionTestExecution = {
+  readonly requestId: string;
+  readonly ownerId: string;
+  readonly modelSelection: ModelSelection;
+};
+
+function makeSkillEvolutionRepository(
+  execution: SkillEvolutionRepositoryShape["execution"],
+): SkillEvolutionRepositoryShape {
+  return {
+    read: () => Effect.succeed(undefined),
+    list: () => Effect.succeed([]),
+    write: () => Effect.void,
+    appendEvent: () => Effect.void,
+    events: () => Effect.succeed([]),
+    execution,
+  };
+}
 
 const contextDispatchRepository = makeMutableContextRepository();
 const contextDispatchRouting = makeProviderServiceLayer(undefined, {
@@ -1629,6 +1657,347 @@ contextForkRouting.layer("ProviderService Context V1.1 native fork", (it) => {
       assert.equal(applied?.lifecycleGeneration, targetBinding?.lifecycleGeneration);
       yield* provider.stopSession({ threadId: contextForkSourceThreadId });
       yield* provider.stopSession({ threadId: contextForkTargetThreadId });
+    }),
+  );
+});
+
+const skillEvolutionContextRepository = makeMutableContextRepository();
+const skillEvolutionContextSession = makeTestContextSession(
+  "skill-evolution-context",
+  "Project instructions are present but must stay outside the extraction session.",
+);
+const skillEvolutionFixedModel: ModelSelection = {
+  provider: "pi",
+  instanceId: "pi",
+  model: "openai/gpt-4o",
+};
+const skillEvolutionThreadIds = {
+  start: asThreadId("thread-skill-evolution-provider-start"),
+  spoof: asThreadId("thread-skill-evolution-provider-spoof"),
+  missingPurpose: asThreadId("thread-skill-evolution-provider-missing-purpose"),
+  wrongModel: asThreadId("thread-skill-evolution-provider-wrong-model"),
+  ordinaryContext: asThreadId("thread-skill-evolution-provider-ordinary-context"),
+  fork: asThreadId("thread-skill-evolution-provider-fork"),
+  recovery: asThreadId("thread-skill-evolution-provider-recovery"),
+  missingRegistration: asThreadId("thread-skill-evolution-provider-missing-registration"),
+} as const;
+for (const threadId of [skillEvolutionThreadIds.start, skillEvolutionThreadIds.ordinaryContext]) {
+  skillEvolutionContextRepository.setContext(threadId, skillEvolutionContextSession);
+}
+const skillEvolutionExecutions = new Map<ThreadId, SkillEvolutionTestExecution>(
+  [
+    skillEvolutionThreadIds.start,
+    skillEvolutionThreadIds.missingPurpose,
+    skillEvolutionThreadIds.wrongModel,
+    skillEvolutionThreadIds.fork,
+    skillEvolutionThreadIds.recovery,
+    skillEvolutionThreadIds.missingRegistration,
+  ].map((threadId) => [
+    threadId,
+    {
+      requestId: `evolution-${threadId}`,
+      ownerId: "skill-evolution-owner",
+      modelSelection: skillEvolutionFixedModel,
+    },
+  ]),
+);
+const skillEvolutionExecution = vi.fn((threadId: ThreadId) =>
+  Effect.succeed(skillEvolutionExecutions.get(threadId)),
+);
+const skillEvolutionContextSessionRead = vi.spyOn(
+  skillEvolutionContextRepository.repository,
+  "getContextSession",
+);
+const skillEvolutionContextBindingRead = vi.spyOn(
+  skillEvolutionContextRepository.repository,
+  "getThreadBinding",
+);
+const skillEvolutionContextAppliedRead = vi.spyOn(
+  skillEvolutionContextRepository.repository,
+  "getApplied",
+);
+const skillEvolutionRouting = makeProviderServiceLayer(undefined, {
+  includePi: true,
+  contextRepository: skillEvolutionContextRepository.repository,
+  skillEvolutionRepository: makeSkillEvolutionRepository(skillEvolutionExecution),
+});
+skillEvolutionRouting.layer("ProviderService Skill Evolution execution boundary", (it) => {
+  it.effect("starts and sends registered extraction without reading or forwarding Context", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = skillEvolutionThreadIds.start;
+      skillEvolutionRouting.pi.startSession.mockClear();
+      skillEvolutionRouting.pi.sendTurn.mockClear();
+      skillEvolutionContextSessionRead.mockClear();
+      skillEvolutionContextBindingRead.mockClear();
+      skillEvolutionContextAppliedRead.mockClear();
+
+      yield* provider.startSession(threadId, {
+        provider: "pi",
+        providerInstanceId: "pi" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionFixedModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      const adapterInput = skillEvolutionRouting.pi.startSession.mock.calls.at(-1)?.[0];
+      assert.equal(adapterInput?.executionPurpose, "skill-evolution");
+      assert.deepEqual(adapterInput?.modelSelection, skillEvolutionFixedModel);
+      assert.equal(adapterInput?.runtimeMode, "approval-required");
+      assert.isUndefined(adapterInput?.contextSession);
+      assert.isUndefined(adapterInput?.expertSession);
+      assert.isUndefined(adapterInput?.additionalDirectories);
+      const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(
+        asRuntimePayloadRecord(binding.runtimePayload).executionPurpose,
+        "skill-evolution",
+      );
+      assert.equal(skillEvolutionContextSessionRead.mock.calls.length, 0);
+      assert.equal(skillEvolutionContextBindingRead.mock.calls.length, 0);
+      assert.equal(skillEvolutionContextAppliedRead.mock.calls.length, 0);
+
+      const sent = yield* provider.sendTurn({
+        threadId,
+        input: "Extract the reusable skill guidance.",
+        attachments: [],
+        modelSelection: skillEvolutionFixedModel,
+      });
+      assert.equal(sent.threadId, threadId);
+      assert.equal(skillEvolutionRouting.pi.sendTurn.mock.calls.length, 1);
+      assert.equal(skillEvolutionContextSessionRead.mock.calls.length, 0);
+      assert.equal(skillEvolutionContextBindingRead.mock.calls.length, 0);
+      assert.equal(skillEvolutionContextAppliedRead.mock.calls.length, 0);
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
+  it.effect("rejects client-supplied purpose without a persisted execution registration", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = skillEvolutionThreadIds.spoof;
+      skillEvolutionRouting.pi.startSession.mockClear();
+      const result = yield* Effect.exit(
+        provider.startSession(threadId, {
+          provider: "pi",
+          providerInstanceId: "pi" as ProviderInstanceId,
+          threadId,
+          modelSelection: skillEvolutionFixedModel,
+          runtimeMode: "approval-required",
+          executionPurpose: "skill-evolution",
+        }),
+      );
+      assert.isTrue(Exit.isFailure(result));
+      assert.equal(skillEvolutionRouting.pi.startSession.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("rejects registered starts that omit purpose or change the pinned model", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      skillEvolutionRouting.pi.startSession.mockClear();
+      const missingPurpose = yield* Effect.exit(
+        provider.startSession(skillEvolutionThreadIds.missingPurpose, {
+          provider: "pi",
+          providerInstanceId: "pi" as ProviderInstanceId,
+          threadId: skillEvolutionThreadIds.missingPurpose,
+          modelSelection: skillEvolutionFixedModel,
+          runtimeMode: "approval-required",
+        }),
+      );
+      assert.isTrue(Exit.isFailure(missingPurpose));
+
+      const wrongModel = yield* Effect.exit(
+        provider.startSession(skillEvolutionThreadIds.wrongModel, {
+          provider: "pi",
+          providerInstanceId: "pi" as ProviderInstanceId,
+          threadId: skillEvolutionThreadIds.wrongModel,
+          modelSelection: { ...skillEvolutionFixedModel, model: "openai/gpt-4.1" },
+          runtimeMode: "approval-required",
+          executionPurpose: "skill-evolution",
+        }),
+      );
+      assert.isTrue(Exit.isFailure(wrongModel));
+      assert.equal(skillEvolutionRouting.pi.startSession.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("keeps the ordinary non-empty Context requirement", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = skillEvolutionThreadIds.ordinaryContext;
+      skillEvolutionRouting.pi.startSession.mockClear();
+      skillEvolutionContextSessionRead.mockClear();
+      const result = yield* Effect.exit(
+        provider.startSession(threadId, {
+          provider: "pi",
+          providerInstanceId: "pi" as ProviderInstanceId,
+          threadId,
+          modelSelection: skillEvolutionFixedModel,
+          runtimeMode: "approval-required",
+        }),
+      );
+      assert.isTrue(Exit.isFailure(result));
+      assert.equal(skillEvolutionContextSessionRead.mock.calls.length, 1);
+      assert.equal(skillEvolutionRouting.pi.startSession.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("prevents native forks and ordinary recovery for registered extraction sessions", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = skillEvolutionThreadIds.fork;
+      const targetThreadId = asThreadId("thread-skill-evolution-provider-fork-target");
+      skillEvolutionRouting.pi.startSession.mockClear();
+      skillEvolutionRouting.pi.sendTurn.mockClear();
+      skillEvolutionRouting.pi.forkThread.mockClear();
+
+      yield* provider.startSession(threadId, {
+        provider: "pi",
+        providerInstanceId: "pi" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionFixedModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      const fork = yield* Effect.exit(
+        provider.forkThread!({
+          sourceThreadId: threadId,
+          threadId: targetThreadId,
+          runtimeMode: "approval-required",
+        }),
+      );
+      assert.isTrue(Exit.isFailure(fork));
+      assert.equal(skillEvolutionRouting.pi.forkThread.mock.calls.length, 0);
+      assert.isUndefined(Option.getOrUndefined(yield* directory.getBinding(targetThreadId)));
+      yield* provider.stopSession({ threadId });
+
+      const recoveryThreadId = skillEvolutionThreadIds.recovery;
+      yield* provider.startSession(recoveryThreadId, {
+        provider: "pi",
+        providerInstanceId: "pi" as ProviderInstanceId,
+        threadId: recoveryThreadId,
+        modelSelection: skillEvolutionFixedModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      const recoveredBinding = Option.getOrThrow(yield* directory.getBinding(recoveryThreadId));
+      assert.equal(
+        asRuntimePayloadRecord(recoveredBinding.runtimePayload).executionPurpose,
+        "skill-evolution",
+      );
+      const startsBeforeRecovery = skillEvolutionRouting.pi.startSession.mock.calls.length;
+      yield* provider.stopRuntimeSession!({ threadId: recoveryThreadId });
+      const recovery = yield* Effect.exit(
+        provider.sendTurn({
+          threadId: recoveryThreadId,
+          input: "Do not silently resume through an ordinary session.",
+          attachments: [],
+          modelSelection: skillEvolutionFixedModel,
+        }),
+      );
+      assert.isTrue(Exit.isFailure(recovery));
+      assert.equal(skillEvolutionRouting.pi.startSession.mock.calls.length, startsBeforeRecovery);
+      assert.equal(skillEvolutionRouting.pi.sendTurn.mock.calls.length, 0);
+      yield* provider.stopSession({ threadId: recoveryThreadId });
+    }),
+  );
+
+  it.effect("fails closed when an extraction purpose outlives its registration", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const directory = yield* ProviderSessionDirectory;
+      const threadId = skillEvolutionThreadIds.missingRegistration;
+      const registration = skillEvolutionExecutions.get(threadId);
+      if (!registration) throw new Error("Expected a Skill Evolution registration fixture.");
+      const forkTargetThreadId = asThreadId("thread-skill-evolution-stale-purpose-fork-target");
+      const ordinarySourceThreadId = asThreadId(
+        "thread-skill-evolution-stale-purpose-ordinary-source",
+      );
+      skillEvolutionRouting.pi.startSession.mockClear();
+      skillEvolutionRouting.pi.sendTurn.mockClear();
+      skillEvolutionRouting.pi.forkThread.mockClear();
+
+      yield* provider.startSession(threadId, {
+        provider: "pi",
+        providerInstanceId: "pi" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionFixedModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      const initialBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+      assert.equal(
+        asRuntimePayloadRecord(initialBinding.runtimePayload).executionPurpose,
+        "skill-evolution",
+      );
+      assert.isTrue(
+        initialBinding.resumeCursor !== undefined && initialBinding.resumeCursor !== null,
+      );
+
+      skillEvolutionExecutions.delete(threadId);
+      yield* provider.stopRuntimeSession!({ threadId });
+      const startsBeforeRejectedPaths = skillEvolutionRouting.pi.startSession.mock.calls.length;
+      const recovery = yield* Effect.exit(
+        provider.sendTurn({
+          threadId,
+          input: "The missing registration must not resume an ordinary Pi session.",
+          attachments: [],
+          modelSelection: skillEvolutionFixedModel,
+        }),
+      );
+      assert.isTrue(Exit.isFailure(recovery));
+      const ordinaryRestart = yield* Effect.exit(
+        provider.startSession(threadId, {
+          provider: "pi",
+          providerInstanceId: "pi" as ProviderInstanceId,
+          threadId,
+          modelSelection: skillEvolutionFixedModel,
+          runtimeMode: "approval-required",
+        }),
+      );
+      assert.isTrue(Exit.isFailure(ordinaryRestart));
+      const staleSourceFork = yield* Effect.exit(
+        provider.forkThread!({
+          sourceThreadId: threadId,
+          threadId: forkTargetThreadId,
+          runtimeMode: "approval-required",
+        }),
+      );
+      assert.isTrue(Exit.isFailure(staleSourceFork));
+      assert.equal(
+        skillEvolutionRouting.pi.startSession.mock.calls.length,
+        startsBeforeRejectedPaths,
+      );
+      assert.equal(skillEvolutionRouting.pi.sendTurn.mock.calls.length, 0);
+      assert.equal(skillEvolutionRouting.pi.forkThread.mock.calls.length, 0);
+
+      yield* provider.startSession(ordinarySourceThreadId, {
+        provider: "pi",
+        providerInstanceId: "pi" as ProviderInstanceId,
+        threadId: ordinarySourceThreadId,
+        modelSelection: skillEvolutionFixedModel,
+        runtimeMode: "approval-required",
+      });
+      const startsBeforeStaleTargetFork = skillEvolutionRouting.pi.startSession.mock.calls.length;
+      const staleTargetFork = yield* Effect.exit(
+        provider.forkThread!({
+          sourceThreadId: ordinarySourceThreadId,
+          threadId,
+          runtimeMode: "approval-required",
+        }),
+      );
+      assert.isTrue(Exit.isFailure(staleTargetFork));
+      assert.equal(
+        skillEvolutionRouting.pi.startSession.mock.calls.length,
+        startsBeforeStaleTargetFork,
+      );
+      assert.equal(skillEvolutionRouting.pi.forkThread.mock.calls.length, 0);
+
+      yield* provider.stopSession({ threadId });
+      yield* provider.stopSession({ threadId: ordinarySourceThreadId });
+      skillEvolutionExecutions.set(threadId, registration);
     }),
   );
 });

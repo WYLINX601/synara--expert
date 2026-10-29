@@ -86,6 +86,10 @@ import { createExpertConnectionStore } from "../../experts/ExpertConnectionStore
 import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
 import { createSkillLibraryStore } from "../../experts/SkillLibraryStore.ts";
 import { listRunSkillAssemblies } from "../../experts/RunSkillAssemblyStore.ts";
+import {
+  SkillEvolutionRepository,
+  type SkillEvolutionRepositoryShape,
+} from "../../experts/evolution/SkillEvolutionRepository";
 import { startWorkbenchRuntimeMcpFixture } from "../../../../../scripts/lib/workbench-runtime-mcp-fixture.ts";
 import { ContextRepository } from "../../context/ContextRepository.ts";
 import { GitCommandError, TextGenerationError } from "../../git/Errors.ts";
@@ -423,6 +427,7 @@ describe("ProviderCommandReactor", () => {
     readonly cancelClaudeCompactionDiscovery?: NonNullable<
       ProviderServiceShape["cancelClaudeCompactionDiscovery"]
     >;
+    readonly skillEvolutionExecution?: SkillEvolutionRepositoryShape["execution"];
   }) {
     const now = new Date().toISOString();
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "synara-reactor-"));
@@ -840,7 +845,15 @@ describe("ProviderCommandReactor", () => {
             : Option.none(),
         ),
     } as unknown as (typeof ProjectAgentRepository)["Service"]);
-    const reactorLayer = makeProviderCommandReactorLive(input);
+    const reactorLayer = makeProviderCommandReactorLive(input).pipe(
+      Layer.provideMerge(
+        input?.skillEvolutionExecution
+          ? Layer.succeed(SkillEvolutionRepository, {
+              execution: input.skillEvolutionExecution,
+            } as SkillEvolutionRepositoryShape)
+          : Layer.empty,
+      ),
+    );
     const layer = Layer.mergeAll(reactorLayer, ProviderRuntimeIngestionLive).pipe(
       Layer.provideMerge(projectAgentLayer),
       Layer.provideMerge(projectAgentRepositoryLayer),
@@ -912,6 +925,12 @@ describe("ProviderCommandReactor", () => {
     );
     const runtime = ManagedRuntime.make(layer);
     runtimes.add(runtime);
+    if (input?.skillEvolutionExecution) {
+      const repository = await runtime.runPromise(Effect.serviceOption(SkillEvolutionRepository));
+      if (Option.isNone(repository)) {
+        throw new Error("SkillEvolutionRepository was not installed in the test harness.");
+      }
+    }
     const emitRuntimeEvent = (event: ProviderRuntimeEvent) =>
       Effect.runPromise(PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid));
 
@@ -14018,6 +14037,213 @@ describe("ProviderCommandReactor", () => {
     // One scan rechecks the provider's live-turn race before dispatch; the
     // session ensure then performs the only full lookup needed for startup.
     expect(harness.listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses server-registered Skill Evolution constraints while preserving ordinary start options", async () => {
+    vi.spyOn(groupsBetaGate, "isServerGroupsEnabled").mockReturnValue(true);
+    const evolutionThreadId = ThreadId.makeUnsafe("skill-evolution-thread");
+    const fixedModelSelection: ModelSelection = {
+      provider: "claudeAgent",
+      instanceId: "claudeAgent",
+      model: "claude-sonnet-4-6",
+    };
+    const ordinaryModelSelection: ModelSelection = { provider: "codex", model: "gpt-5-codex" };
+    const skillEvolutionExecution = vi.fn((threadId: ThreadId) =>
+      Effect.succeed(
+        threadId === evolutionThreadId
+          ? {
+              requestId: "evolution-request",
+              ownerId: "owner-1",
+              modelSelection: fixedModelSelection,
+            }
+          : undefined,
+      ),
+    );
+    const harness = await createHarness({
+      projectAdditionalFolders: ["/tmp/provider-extra"],
+      coordinatorThreadIds: ["thread-1", evolutionThreadId],
+      skillEvolutionExecution,
+      formatContextPacket: "UNSELECTED_HUB_MEMORY_MUST_STAY_OUT",
+    });
+    const expertId = "skill-evolution-expert-fixture";
+    await createExpertStore(harness.stateDir).save({
+      id: expertId,
+      name: "Pinned Expert fixture",
+      description: "",
+      useCases: "",
+      persona: "This Expert must not enter the extraction session.",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+      preferredProvider: "claudeAgent",
+    });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("create-skill-evolution-thread"),
+        threadId: evolutionThreadId,
+        projectId: asProjectId("project-1"),
+        expertId,
+        title: "Skill Evolution",
+        modelSelection: fixedModelSelection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    const evolutionBinding = (await readHarnessThread(harness, evolutionThreadId))?.expertBinding;
+    expect(evolutionBinding).toBeDefined();
+    const corruptExpertSnapshotPath = path.join(
+      harness.stateDir,
+      "experts",
+      "snapshots",
+      evolutionBinding!.snapshotId,
+      "snapshot.json",
+    );
+    fs.chmodSync(corruptExpertSnapshotPath, 0o600);
+    fs.writeFileSync(corruptExpertSnapshotPath, "{}\n");
+
+    const contextSession = {
+      snapshotId: "context-fixture",
+      snapshotHash: "context-hash",
+      text: "This Context must not enter the extraction session.",
+      hasContent: true,
+    };
+    vi.spyOn(harness.contextRepository, "getContextSession").mockReturnValue(
+      Effect.succeed(contextSession),
+    );
+    const startTurn = async (
+      threadId: ThreadId,
+      suffix: string,
+      modelSelection: ModelSelection = fixedModelSelection,
+    ) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe(`skill-evolution-start-${suffix}`),
+          threadId,
+          message: {
+            messageId: asMessageId(`skill-evolution-user-${suffix}`),
+            role: "user",
+            text: "Extract the reusable skill instructions.",
+            attachments: [],
+          },
+          modelSelection,
+          enableComputerControl: true,
+          runtimeMode: "full-access",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+
+    await startTurn(evolutionThreadId, "registered");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0].input).toBe(
+      "Extract the reusable skill instructions.",
+    );
+    const evolutionStart = harness.startSessionWithOutcome.mock.calls[0]?.[1];
+    expect(evolutionStart).toMatchObject({
+      executionPurpose: "skill-evolution",
+      provider: "claudeAgent",
+      modelSelection: fixedModelSelection,
+      runtimeMode: "approval-required",
+    });
+    expect(skillEvolutionExecution).toHaveBeenCalledWith(evolutionThreadId);
+    for (const omitted of [
+      "additionalDirectories",
+      "autoApproveSynaraTools",
+      "contextSession",
+      "enableComputerControl",
+      "expertRuntimeNotices",
+      "expertSession",
+      "resumeCursor",
+    ]) {
+      expect(evolutionStart).not.toHaveProperty(omitted);
+    }
+
+    await startTurn(ThreadId.makeUnsafe("thread-1"), "ordinary", ordinaryModelSelection);
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.sendTurn.mock.calls[1]?.[0].input).toContain(
+      "UNSELECTED_HUB_MEMORY_MUST_STAY_OUT",
+    );
+    expect(harness.sendTurn.mock.calls[1]?.[0].input).toContain("<project_folders>");
+    const ordinaryStart = harness.startSessionWithOutcome.mock.calls[1]?.[1];
+    expect(skillEvolutionExecution).toHaveBeenCalledWith(ThreadId.makeUnsafe("thread-1"));
+    expect(ordinaryStart).not.toHaveProperty("executionPurpose");
+    expect(ordinaryStart).toMatchObject({
+      modelSelection: ordinaryModelSelection,
+      runtimeMode: "full-access",
+      additionalDirectories: ["/tmp/provider-extra"],
+      autoApproveSynaraTools: true,
+      contextSession,
+      enableComputerControl: true,
+    });
+  });
+
+  it.each([
+    {
+      label: "provider",
+      requested: { provider: "codex", model: "gpt-5-codex" } as const,
+    },
+    {
+      label: "model",
+      requested: { provider: "claudeAgent", model: "claude-sonnet-4-5" } as const,
+    },
+  ])("rejects a Skill Evolution $label change before provider start", async ({ requested }) => {
+    const threadId = ThreadId.makeUnsafe("skill-evolution-fixed-model-thread");
+    const fixedModelSelection: ModelSelection = {
+      provider: "claudeAgent",
+      instanceId: "claudeAgent",
+      model: "claude-sonnet-4-6",
+    };
+    const harness = await createHarness({
+      initialThread: { threadId },
+      skillEvolutionExecution: (requestedThreadId) =>
+        Effect.succeed(
+          requestedThreadId === threadId
+            ? {
+                requestId: "evolution-request",
+                ownerId: "owner-1",
+                modelSelection: fixedModelSelection,
+              }
+            : undefined,
+        ),
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe(
+          `skill-evolution-change-${requested.provider}-${requested.model}`,
+        ),
+        threadId,
+        message: {
+          messageId: asMessageId(
+            `skill-evolution-change-message-${requested.provider}-${requested.model}`,
+          ),
+          role: "user",
+          text: "Continue extraction.",
+          attachments: [],
+        },
+        modelSelection: requested,
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: new Date().toISOString(),
+      }),
+    );
+
+    await waitFor(
+      async () => (await readHarnessThread(harness, threadId))?.session?.status === "error",
+    );
+    expect(harness.startSessionWithOutcome).not.toHaveBeenCalled();
+    expect(harness.startSession).not.toHaveBeenCalled();
+    expect(harness.sendTurn).not.toHaveBeenCalled();
+    expect((await readHarnessThread(harness, threadId))?.session?.lastError).toContain(
+      "Provider 实例和模型已固定",
+    );
   });
 
   it("injects the immutable server-bound Expert snapshot after runtime recovery", async () => {

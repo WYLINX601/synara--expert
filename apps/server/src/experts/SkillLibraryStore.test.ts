@@ -6,6 +6,7 @@ import { createSkillLibraryStore } from "./SkillLibraryStore";
 import { expertResourceFiles, createExpertStore } from "./ExpertStore";
 import { createSkillPackageStore } from "./SkillPackageStore";
 import * as storage from "./ExpertMcpStorage";
+import { readSkillEvolutionPackagePins } from "./skillEvolutionPackagePins";
 import { SKILL_FILE_LIMIT } from "./skillLibraryArchive";
 import { createRunSkillAssemblyStore } from "./RunSkillAssemblyStore";
 import type { SkillLibraryRequest } from "@synara/contracts";
@@ -1311,12 +1312,26 @@ describe("managed Skill library", () => {
         choices: [{ entryPath: "SKILL.md", duplicate: "skip" }],
       })
     ).skills![0]!;
+    expect(original).toMatchObject({
+      evolutionPolicy: "protected",
+      scope: { kind: "shared" },
+    });
+    const governed = (
+      await store.execute({
+        action: "configureEvolution",
+        skillId: original.skillId,
+        expectedRevision: original.revision,
+        requestId: "hosted-skill-policy",
+        evolutionPolicy: "shared",
+        scope: { kind: "shared" },
+      })
+    ).skill!;
     const edited = (
       await store.execute({
         action: "save",
-        skillId: original.skillId,
-        expectedRevision: original.revision,
-        name: original.name,
+        skillId: governed.skillId,
+        expectedRevision: governed.revision,
+        name: governed.name,
         tags: ["preserve"],
         changes: [
           { path: "SKILL.md", content: Buffer.from(body + "Local edits.\n").toString("base64") },
@@ -1421,6 +1436,8 @@ describe("managed Skill library", () => {
       locallyModified: false,
       createdAt: original.createdAt,
       createdBy: original.createdBy,
+      evolutionPolicy: "shared",
+      scope: { kind: "shared" },
       source: { resolvedRevision: sha },
     });
     expect((await createExpertStore(stateDir).read(expert.id))?.skillBindings).toEqual([
@@ -1434,6 +1451,61 @@ describe("managed Skill library", () => {
       overwriteLocalEdits: true,
     });
     expect(unchanged.updateResult?.status).toBe("unchanged");
+  });
+
+  it("preserves evolution metadata when refreshing a hosted Skill", async () => {
+    const { store } = await fixture(),
+      hosted = hostedSource();
+    const preview = (
+        await store.execute({ action: "previewImport", kind: "url", location: hosted.location })
+      ).preview!,
+      imported = (
+        await store.execute({
+          action: "import",
+          previewId: preview.previewId,
+          choices: [{ entryPath: "SKILL.md", duplicate: "skip" }],
+        })
+      ).skills![0]!;
+    expect(imported).toMatchObject({
+      evolutionPolicy: "protected",
+      scope: { kind: "shared" },
+    });
+    const configured = (
+      await store.execute({
+        action: "configureEvolution",
+        skillId: imported.skillId,
+        expectedRevision: imported.revision,
+        requestId: "configure-hosted-shared-evolution",
+        evolutionPolicy: "shared",
+        scope: { kind: "shared" },
+      })
+    ).skill!;
+    hosted.source.sha = "5".repeat(40);
+    hosted.source.body = hosted.source.body.replace("Do alpha.", "Updated hosted alpha.");
+    const refreshPreview = (
+      await store.execute({
+        action: "previewRefresh",
+        skillId: configured.skillId,
+        expectedRevision: configured.revision,
+      })
+    ).preview!;
+    const refreshed = (
+      await store.execute({
+        action: "refresh",
+        skillId: configured.skillId,
+        expectedRevision: configured.revision,
+        requestId: "refresh-hosted-shared-evolution",
+        previewId: refreshPreview.previewId,
+      })
+    ).skill!;
+    expect(refreshed).toMatchObject({
+      skillId: imported.skillId,
+      revision: configured.revision + 1,
+      evolutionPolicy: "shared",
+      scope: { kind: "shared" },
+      createdAt: imported.createdAt,
+      createdBy: imported.createdBy,
+    });
   });
 
   it("keeps historical writes dry-run-only and replays a durable create receipt across store restart", async () => {
@@ -1822,5 +1894,766 @@ describe("managed Skill library", () => {
     expect(await store.execute({ ...deleteRequest, requestId: deleted.requestId })).toEqual(
       deleted,
     );
+  });
+
+  it("defaults new Skills to protected shared scope and versions explicit policy changes", async () => {
+    const { stateDir, store } = await fixture();
+    const expert = await createExpertStore(stateDir).save({
+      name: "Evolution owner",
+      description: "",
+      useCases: "",
+      persona: "Expert",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const historicalShape = (
+      await store.execute({ action: "create", name: "Shared Driven", body, tags: [] })
+    ).skill!;
+    expect(historicalShape).toMatchObject({
+      evolutionPolicy: "protected",
+      scope: { kind: "shared" },
+    });
+    const independentShared = (
+      await store.execute({
+        action: "configureEvolution",
+        skillId: historicalShape.skillId,
+        expectedRevision: historicalShape.revision,
+        requestId: "shared-driven-independent-policy",
+        evolutionPolicy: "independent",
+        scope: { kind: "shared" },
+      })
+    ).skill!;
+    expect(independentShared).toMatchObject({
+      revision: historicalShape.revision + 1,
+      evolutionPolicy: "independent",
+      scope: { kind: "shared" },
+    });
+
+    const privateSkill = (
+      await store.execute({
+        action: "create",
+        name: "Private method",
+        body,
+        tags: [],
+        changes: [
+          {
+            path: "references/seed.md",
+            content: Buffer.from("Complete from first publication").toString("base64"),
+          },
+        ],
+        evolutionPolicy: "protected",
+        scope: { kind: "expert", expertId: expert.id },
+      })
+    ).skill!;
+    expect(
+      Buffer.from(
+        (
+          await store.execute({
+            action: "readFile",
+            skillId: privateSkill.skillId,
+            path: "references/seed.md",
+          })
+        ).file!.content,
+        "base64",
+      ).toString("utf8"),
+    ).toBe("Complete from first publication");
+    const configure = {
+      action: "configureEvolution" as const,
+      skillId: privateSkill.skillId,
+      expectedRevision: privateSkill.revision,
+      requestId: "open-private-skill",
+      evolutionPolicy: "shared" as const,
+      scope: { kind: "shared" as const },
+    };
+    const opened = (await store.execute(configure)).skill!;
+    expect(opened).toMatchObject({
+      revision: privateSkill.revision + 1,
+      evolutionPolicy: "shared",
+      scope: { kind: "shared" },
+    });
+    expect(await store.execute(configure)).toEqual({
+      skill: opened,
+      requestId: configure.requestId,
+    });
+    await expect(store.execute({ ...configure, evolutionPolicy: "protected" })).rejects.toThrow(
+      /different operation content/u,
+    );
+
+    const saved = (
+      await store.execute({
+        action: "save",
+        skillId: opened.skillId,
+        expectedRevision: opened.revision,
+        name: opened.name,
+        tags: opened.tags,
+        changes: [],
+      })
+    ).skill!;
+    expect(saved).toMatchObject({
+      evolutionPolicy: "shared",
+      scope: { kind: "shared" },
+    });
+    await expect(
+      store.execute({
+        action: "configureEvolution",
+        skillId: saved.skillId,
+        expectedRevision: saved.revision,
+        requestId: "shared-to-private-is-derive-only",
+        evolutionPolicy: "independent",
+        scope: { kind: "expert", expertId: expert.id },
+      }),
+    ).rejects.toThrow(/derive a private copy/u);
+  });
+
+  it("derives a complete private package from a shared independent Skill without changing the source", async () => {
+    const { stateDir, store } = await fixture();
+    const experts = createExpertStore(stateDir);
+    const owner = await experts.save({
+      name: "Skill owner",
+      description: "",
+      useCases: "",
+      persona: "Expert",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const source = (
+      await store.execute(
+        {
+          action: "create",
+          name: "Source method",
+          body,
+          tags: [],
+          evolutionPolicy: "independent",
+          scope: { kind: "shared" },
+        },
+        { retainForEvolution: true },
+      )
+    ).skill!;
+    expect(source).toMatchObject({
+      evolutionPolicy: "independent",
+      scope: { kind: "shared" },
+    });
+    const withResources = (
+      await store.execute(
+        {
+          action: "save",
+          skillId: source.skillId,
+          expectedRevision: source.revision,
+          name: source.name,
+          tags: source.tags,
+          changes: [
+            {
+              path: "references/method.md",
+              content: Buffer.from("Original method notes").toString("base64"),
+            },
+            { path: "assets/pixel.bin", content: Buffer.from([0, 255, 7]).toString("base64") },
+          ],
+        },
+        { retainForEvolution: true },
+      )
+    ).skill!;
+    const ownerWithSource = await experts.save({
+      id: owner.id,
+      expectedRevision: owner.revision,
+      name: owner.name,
+      description: owner.description,
+      useCases: owner.useCases,
+      persona: owner.persona,
+      outputRequirements: owner.outputRequirements,
+      skills: [],
+      references: owner.references,
+      connections: owner.connections,
+      skillBindings: [{ skillId: withResources.skillId, enabled: true, activation: "on-demand" }],
+    });
+    const other = await experts.save({
+      name: "Other owner",
+      description: "",
+      useCases: "",
+      persona: "Expert",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const otherWithSource = await experts.save({
+      id: other.id,
+      expectedRevision: other.revision,
+      name: other.name,
+      description: other.description,
+      useCases: other.useCases,
+      persona: other.persona,
+      outputRequirements: other.outputRequirements,
+      skills: [],
+      references: other.references,
+      connections: other.connections,
+      skillBindings: [{ skillId: withResources.skillId, enabled: true, activation: "on-demand" }],
+    });
+    expect((await experts.read(owner.id))?.skillBindings).toEqual([
+      { skillId: withResources.skillId, enabled: true, activation: "on-demand" },
+    ]);
+    expect((await experts.read(otherWithSource.id))?.skillBindings).toEqual([
+      { skillId: withResources.skillId, enabled: true, activation: "on-demand" },
+    ]);
+    const assemblies = createRunSkillAssemblyStore(stateDir),
+      ownerAssembly = await assemblies.preview(
+        (await experts.prepareSnapshot(owner.id)).snapshotId,
+      ),
+      otherAssembly = await assemblies.preview(
+        (await experts.prepareSnapshot(otherWithSource.id)).snapshotId,
+      );
+    expect(ownerAssembly.skillEntries?.map((entry) => entry.managedSkillId)).toEqual([
+      withResources.skillId,
+    ]);
+    expect(otherAssembly.skillEntries?.map((entry) => entry.managedSkillId)).toEqual([
+      withResources.skillId,
+    ]);
+    const derive = {
+      action: "derive" as const,
+      requestId: "derive-source-once",
+      sourceSkillId: withResources.skillId,
+      expectedRevision: withResources.revision,
+      expertId: owner.id,
+      name: "Private method copy",
+      changes: [
+        {
+          path: "references/method.md",
+          content: Buffer.from("Updated method notes").toString("base64"),
+        },
+        {
+          path: "notes/decision.md",
+          content: Buffer.from("New decision note").toString("base64"),
+        },
+      ],
+    };
+    const derived = (await store.execute(derive, { retainForEvolution: true })).skill!;
+    expect(derived).toMatchObject({
+      skillId: expect.not.stringMatching(withResources.skillId),
+      packageId: expect.not.stringMatching(withResources.packageId),
+      evolutionPolicy: "independent",
+      scope: { kind: "expert", expertId: owner.id },
+      derivedFrom: {
+        skillId: withResources.skillId,
+        revision: withResources.revision,
+        packageId: withResources.packageId,
+      },
+    });
+    await expect(
+      store.execute(
+        { ...derive, requestId: "derive-source-second-copy", name: "Another private method copy" },
+        { retainForEvolution: true },
+      ),
+    ).rejects.toThrow(derived.skillId);
+    const otherDerived = (
+      await store.execute(
+        {
+          ...derive,
+          requestId: "derive-source-other-expert",
+          expertId: otherWithSource.id,
+          name: "Other Expert method copy",
+        },
+        { retainForEvolution: true },
+      )
+    ).skill!;
+    expect(otherDerived).toMatchObject({
+      scope: { kind: "expert", expertId: otherWithSource.id },
+      derivedFrom: { skillId: withResources.skillId },
+    });
+    expect((await store.execute({ action: "read", skillId: withResources.skillId })).skill).toEqual(
+      withResources,
+    );
+    expect((await experts.read(owner.id))?.skillBindings).toEqual([
+      { skillId: withResources.skillId, enabled: true, activation: "on-demand" },
+    ]);
+    expect((await experts.read(otherWithSource.id))?.skillBindings).toEqual([
+      { skillId: withResources.skillId, enabled: true, activation: "on-demand" },
+    ]);
+    expect(
+      Buffer.from(
+        (
+          await store.execute({
+            action: "readFile",
+            skillId: derived.skillId,
+            path: "assets/pixel.bin",
+          })
+        ).file!.content,
+        "base64",
+      ),
+    ).toEqual(Buffer.from([0, 255, 7]));
+    expect(
+      Buffer.from(
+        (
+          await store.execute({
+            action: "readFile",
+            skillId: derived.skillId,
+            path: "references/method.md",
+          })
+        ).file!.content,
+        "base64",
+      ).toString("utf8"),
+    ).toBe("Updated method notes");
+    expect(
+      Buffer.from(
+        (
+          await store.execute({
+            action: "readFile",
+            skillId: derived.skillId,
+            path: "notes/decision.md",
+          })
+        ).file!.content,
+        "base64",
+      ).toString("utf8"),
+    ).toBe("New decision note");
+
+    const forbidden = await store.execute({
+      action: "bindings",
+      operation: "add",
+      expertId: otherWithSource.id,
+      expectedRevision: otherWithSource.revision,
+      requestId: "bind-private-to-other",
+      bindings: [{ skillId: derived.skillId, enabled: true, activation: "on-demand" }],
+    });
+    expect(forbidden.bindingResult).toMatchObject({
+      status: "failed",
+      bindings: [{ skillId: withResources.skillId, enabled: true, activation: "on-demand" }],
+    });
+    expect(forbidden.bindingResult?.error).toMatch(/belongs to Expert/u);
+    const batch = await store.execute({
+      action: "bindExperts",
+      requestId: "batch-bind-private-to-other",
+      skillIds: [derived.skillId],
+      targets: [{ expertId: otherWithSource.id, expectedRevision: otherWithSource.revision }],
+    });
+    expect(batch.bindingResults?.[0]).toMatchObject({ status: "failed", addedSkillIds: [] });
+    await expect(
+      experts.save({
+        id: otherWithSource.id,
+        expectedRevision: otherWithSource.revision,
+        name: otherWithSource.name,
+        description: otherWithSource.description,
+        useCases: otherWithSource.useCases,
+        persona: otherWithSource.persona,
+        outputRequirements: otherWithSource.outputRequirements,
+        skills: [],
+        references: otherWithSource.references,
+        connections: otherWithSource.connections,
+        skillBindings: [{ skillId: derived.skillId, enabled: true, activation: "on-demand" }],
+      }),
+    ).rejects.toMatchObject({ code: "invalid_resource" });
+
+    const pinsPath = path.join(stateDir, "experts", "skill-evolution-package-pins.json");
+    await expect(readSkillEvolutionPackagePins(stateDir)).resolves.toEqual(
+      expect.arrayContaining([source.packageId, withResources.packageId, derived.packageId]),
+    );
+    await fs.writeFile(pinsPath, JSON.stringify({ schemaVersion: 1, packageIds: [] }), {
+      mode: 0o600,
+    });
+    await store.dispose();
+    const restarted = createSkillLibraryStore(stateDir);
+    const replayed = await restarted.execute(derive, { retainForEvolution: true });
+    expect(replayed).toEqual({ skill: derived, requestId: derive.requestId });
+    expect(
+      (await restarted.execute({ action: "list" })).skills?.filter((skill) => skill.derivedFrom),
+    ).toHaveLength(2);
+    await expect(readSkillEvolutionPackagePins(stateDir)).resolves.toEqual(
+      expect.arrayContaining([withResources.packageId, derived.packageId]),
+    );
+    await expect(
+      restarted.execute({ ...derive, name: "different" }, { retainForEvolution: true }),
+    ).rejects.toThrow(/different operation content/u);
+    await restarted.execute({
+      action: "delete",
+      skillId: derived.skillId,
+      expectedRevision: derived.revision,
+      confirmExpertIds: [],
+    });
+    const replacement = (
+      await restarted.execute(
+        { ...derive, requestId: "derive-source-after-delete", name: "Replacement private method" },
+        { retainForEvolution: true },
+      )
+    ).skill!;
+    expect(replacement).toMatchObject({
+      scope: { kind: "expert", expertId: owner.id },
+      derivedFrom: { skillId: withResources.skillId },
+    });
+    await restarted.dispose();
+  });
+
+  it("blocks only active private derivations of the same source for the same Expert", async () => {
+    const { stateDir, store } = await fixture();
+    const experts = createExpertStore(stateDir);
+    const owner = await experts.save({
+      name: "First derivation owner",
+      description: "",
+      useCases: "",
+      persona: "Expert",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const other = await experts.save({
+      name: "Second derivation owner",
+      description: "",
+      useCases: "",
+      persona: "Expert",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const source = (
+      await store.execute({
+        action: "create",
+        name: "Derivation boundary source",
+        body,
+        tags: [],
+        evolutionPolicy: "independent",
+        scope: { kind: "shared" },
+      })
+    ).skill!;
+    for (const expert of [owner, other])
+      await experts.save({
+        id: expert.id,
+        expectedRevision: expert.revision,
+        name: expert.name,
+        description: expert.description,
+        useCases: expert.useCases,
+        persona: expert.persona,
+        outputRequirements: expert.outputRequirements,
+        skills: [],
+        references: expert.references,
+        connections: expert.connections,
+        skillBindings: [{ skillId: source.skillId, enabled: true, activation: "on-demand" }],
+      });
+
+    const sharedCopy = (
+      await store.execute({
+        action: "create",
+        name: "Shared published descendant",
+        body,
+        tags: [],
+        evolutionPolicy: "shared",
+        scope: { kind: "shared" },
+      })
+    ).skill!;
+    const registryPath = path.join(stateDir, "experts", "skill-library.json");
+    const registry = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
+      schemaVersion: number;
+      skills: Array<Record<string, unknown> & { skillId: string }>;
+    };
+    registry.skills = registry.skills.map((skill) =>
+      skill.skillId === sharedCopy.skillId
+        ? {
+            ...skill,
+            derivedFrom: {
+              skillId: source.skillId,
+              revision: source.revision,
+              packageId: source.packageId,
+            },
+          }
+        : skill,
+    );
+    await fs.writeFile(registryPath, JSON.stringify(registry), { mode: 0o600 });
+
+    const derive = (expertId: string, requestId: string, name: string) =>
+      store.execute({
+        action: "derive" as const,
+        requestId,
+        sourceSkillId: source.skillId,
+        expectedRevision: source.revision,
+        expertId,
+        name,
+        changes: [],
+      });
+    const ownerCopy = (await derive(owner.id, "derive-boundary-owner", "Owner private copy"))
+      .skill!;
+    const otherCopy = (await derive(other.id, "derive-boundary-other", "Other private copy"))
+      .skill!;
+    expect(ownerCopy.scope).toEqual({ kind: "expert", expertId: owner.id });
+    expect(otherCopy.scope).toEqual({ kind: "expert", expertId: other.id });
+
+    await store.execute({
+      action: "delete",
+      skillId: ownerCopy.skillId,
+      expectedRevision: ownerCopy.revision,
+      confirmExpertIds: [],
+    });
+    const replacement = (
+      await derive(owner.id, "derive-boundary-owner-after-delete", "Owner replacement copy")
+    ).skill!;
+    expect(replacement.skillId).not.toBe(ownerCopy.skillId);
+    expect(replacement.derivedFrom?.skillId).toBe(source.skillId);
+    expect(otherCopy.derivedFrom?.skillId).toBe(source.skillId);
+  });
+
+  it("rechecks derivation uniqueness under the shared lifecycle lock across store instances", async () => {
+    const { stateDir, store } = await fixture();
+    const secondStore = createSkillLibraryStore(stateDir);
+    const expert = await createExpertStore(stateDir).save({
+      name: "Concurrent derivation owner",
+      description: "",
+      useCases: "",
+      persona: "Expert",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const source = (
+      await store.execute({
+        action: "create",
+        name: "Concurrent derivation source",
+        body,
+        tags: [],
+        evolutionPolicy: "independent",
+        scope: { kind: "shared" },
+      })
+    ).skill!;
+    const currentExpert = (await createExpertStore(stateDir).read(expert.id))!;
+    await createExpertStore(stateDir).save({
+      id: currentExpert.id,
+      expectedRevision: currentExpert.revision,
+      name: currentExpert.name,
+      description: currentExpert.description,
+      useCases: currentExpert.useCases,
+      persona: currentExpert.persona,
+      outputRequirements: currentExpert.outputRequirements,
+      skills: [],
+      references: currentExpert.references,
+      connections: currentExpert.connections,
+      skillBindings: [{ skillId: source.skillId, enabled: true, activation: "on-demand" }],
+    });
+
+    const makeRequest = (requestId: string, name: string) => ({
+      action: "derive" as const,
+      requestId,
+      sourceSkillId: source.skillId,
+      expectedRevision: source.revision,
+      expertId: expert.id,
+      name,
+      changes: [],
+    });
+    const results = await Promise.allSettled([
+      store.execute(makeRequest("derive-concurrent-first", "Concurrent first copy")),
+      secondStore.execute(makeRequest("derive-concurrent-second", "Concurrent second copy")),
+    ]);
+    const success = results.find((result) => result.status === "fulfilled");
+    const failure = results.find((result) => result.status === "rejected");
+    if (!success || success.status !== "fulfilled") throw new Error("No derivation succeeded.");
+    if (!failure || failure.status !== "rejected") throw new Error("Both derivations succeeded.");
+    expect(failure.reason).toBeInstanceOf(Error);
+    expect(failure.reason.message).toContain(success.value.skill!.skillId);
+    const copies = (await store.execute({ action: "list" })).skills?.filter(
+      (skill) =>
+        !skill.deleted &&
+        skill.scope?.kind === "expert" &&
+        skill.scope.expertId === expert.id &&
+        skill.derivedFrom?.skillId === source.skillId,
+    );
+    expect(copies).toHaveLength(1);
+    await secondStore.dispose();
+  });
+
+  it("rechecks derivation uniqueness when recovering a planned package before registry commit", async () => {
+    const { stateDir, store } = await fixture();
+    const expert = await createExpertStore(stateDir).save({
+      name: "Planned derivation owner",
+      description: "",
+      useCases: "",
+      persona: "Expert",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const source = (
+      await store.execute({
+        action: "create",
+        name: "Planned derivation source",
+        body,
+        tags: [],
+        evolutionPolicy: "independent",
+        scope: { kind: "shared" },
+      })
+    ).skill!;
+    const currentExpert = (await createExpertStore(stateDir).read(expert.id))!;
+    await createExpertStore(stateDir).save({
+      id: currentExpert.id,
+      expectedRevision: currentExpert.revision,
+      name: currentExpert.name,
+      description: currentExpert.description,
+      useCases: currentExpert.useCases,
+      persona: currentExpert.persona,
+      outputRequirements: currentExpert.outputRequirements,
+      skills: [],
+      references: currentExpert.references,
+      connections: currentExpert.connections,
+      skillBindings: [{ skillId: source.skillId, enabled: true, activation: "on-demand" }],
+    });
+    const request = {
+      action: "derive" as const,
+      requestId: "derive-planned-before-registry-commit",
+      sourceSkillId: source.skillId,
+      expectedRevision: source.revision,
+      expertId: expert.id,
+      name: "Planned candidate A",
+      changes: [
+        {
+          path: "notes/candidate.md",
+          content: Buffer.from("A's original candidate.").toString("base64"),
+        },
+      ],
+    };
+    let mutationCount = 0;
+    await expect(
+      store.execute(request, {
+        retainForEvolution: true,
+        beforeMutation: async () => {
+          mutationCount += 1;
+          if (mutationCount === 3) throw new Error("injected crash before derived registry commit");
+        },
+      }),
+    ).rejects.toThrow("injected crash before derived registry commit");
+    expect(mutationCount).toBe(3);
+
+    const journal = JSON.parse(
+      await fs.readFile(path.join(stateDir, "experts", "skill-library-operations.json"), "utf8"),
+    ) as {
+      requests: Array<{
+        requestId: string;
+        plannedSkill?: { skillId: string; packageId: string };
+      }>;
+    };
+    const plannedSkill = journal.requests.find(
+      (item) => item.requestId === request.requestId,
+    )?.plannedSkill;
+    if (!plannedSkill) throw new Error("Injected crash did not preserve the planned Skill.");
+    await expect(
+      createSkillPackageStore(stateDir).read(plannedSkill.packageId),
+    ).resolves.toMatchObject({ packageId: plannedSkill.packageId });
+    expect(
+      (await store.execute({ action: "list" })).skills?.some(
+        (skill) => skill.skillId === plannedSkill.skillId,
+      ),
+    ).toBe(false);
+
+    const competingRequest = {
+      ...request,
+      requestId: "derive-planned-competing-copy",
+      name: "Planned candidate B",
+      changes: [],
+    };
+    const competing = (await store.execute(competingRequest, { retainForEvolution: true })).skill!;
+    expect(competing.skillId).not.toBe(plannedSkill.skillId);
+    await expect(store.execute(request, { retainForEvolution: true })).rejects.toThrow(
+      competing.skillId,
+    );
+
+    const activeCopies = (await store.execute({ action: "list" })).skills?.filter(
+      (skill) =>
+        !skill.deleted &&
+        skill.scope?.kind === "expert" &&
+        skill.scope.expertId === expert.id &&
+        skill.derivedFrom?.skillId === source.skillId,
+    );
+    expect(activeCopies?.map((skill) => skill.skillId)).toEqual([competing.skillId]);
+    await expect(
+      store.execute({ action: "read", skillId: plannedSkill.skillId }),
+    ).rejects.toThrow();
+  });
+
+  it("preserves scope, policy, and derivation lineage when an import replaces a Skill", async () => {
+    const { root, stateDir, store } = await fixture();
+    const owner = await createExpertStore(stateDir).save({
+      name: "Replacement owner",
+      description: "",
+      useCases: "",
+      persona: "Expert",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const upstream = (
+      await store.execute({
+        action: "create",
+        name: "Shared source",
+        body,
+        tags: ["preserve"],
+      })
+    ).skill!;
+    await createExpertStore(stateDir).save({
+      id: owner.id,
+      expectedRevision: owner.revision,
+      name: owner.name,
+      description: owner.description,
+      useCases: owner.useCases,
+      persona: owner.persona,
+      outputRequirements: owner.outputRequirements,
+      skills: [],
+      references: owner.references,
+      connections: owner.connections,
+      skillBindings: [{ skillId: upstream.skillId, enabled: true, activation: "on-demand" }],
+    });
+    const source = (
+      await store.execute({
+        action: "derive",
+        requestId: "derive-for-import-replacement",
+        sourceSkillId: upstream.skillId,
+        expectedRevision: upstream.revision,
+        expertId: owner.id,
+        name: "Private target",
+        changes: [],
+      })
+    ).skill!;
+    const importedDirectory = path.join(root, "replacement-package");
+    await fs.mkdir(importedDirectory);
+    await fs.writeFile(
+      path.join(importedDirectory, "SKILL.md"),
+      body.replace("Do alpha.", "Replacement contents."),
+    );
+    const preview = (
+      await store.execute({
+        action: "previewImport",
+        kind: "local",
+        location: importedDirectory,
+      })
+    ).preview!;
+    const replaced = (
+      await store.execute({
+        action: "import",
+        requestId: "replace-private-target",
+        previewId: preview.previewId,
+        choices: [
+          {
+            entryPath: "SKILL.md",
+            duplicate: "replace",
+            name: source.name,
+            replaceSkillId: source.skillId,
+            expectedRevision: source.revision,
+          },
+        ],
+      })
+    ).skills![0]!;
+    expect(replaced).toMatchObject({
+      skillId: source.skillId,
+      revision: source.revision + 1,
+      tags: source.tags,
+      evolutionPolicy: "independent",
+      scope: { kind: "expert", expertId: owner.id },
+      derivedFrom: {
+        skillId: upstream.skillId,
+        revision: upstream.revision,
+        packageId: upstream.packageId,
+      },
+      createdAt: source.createdAt,
+      createdBy: source.createdBy,
+    });
+    expect(replaced.packageId).not.toBe(source.packageId);
   });
 });

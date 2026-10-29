@@ -162,8 +162,8 @@ layer("Hub plan store", (test) => {
       `;
         assert.strictEqual(migrationRows.length, workbenchMigrationEntries.length);
         assert.deepStrictEqual(migrationRows.at(-1), {
-          migrationId: 9,
-          name: "HubPlanDirectedInput",
+          migrationId: 10,
+          name: "ExpertSkillEvolution",
         });
 
         const created = yield* store.savePlan(basePlan, null);

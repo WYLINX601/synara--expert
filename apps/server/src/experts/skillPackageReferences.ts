@@ -30,6 +30,9 @@ export async function scanSkillPackageReferences(
 ): Promise<string[]> {
   Schema.decodeUnknownSync(SkillPackageId)(packageId);
   const references: string[] = [];
+  const { readSkillEvolutionPackagePins } = await import("./skillEvolutionPackagePins");
+  if ((await readSkillEvolutionPackagePins(stateDir)).includes(packageId))
+    references.push("Skill evolution history or pending proposal");
   const { readSkillLibraryDefinitions } = await import("./SkillLibraryStore");
   const library = await readSkillLibraryDefinitions(stateDir);
   for (const skill of library.filter((item) => !item.deleted))

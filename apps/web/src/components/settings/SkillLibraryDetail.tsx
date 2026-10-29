@@ -1,6 +1,11 @@
 import { useId, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { SkillDefinition, SkillLibraryResponse } from "@synara/contracts";
+import type {
+  SkillDefinition,
+  SkillEvolutionPolicy,
+  SkillLibraryResponse,
+  SkillScope,
+} from "@synara/contracts";
 import { SKILL_DOWNLOAD_ROUTE_PATH, SKILL_UPLOAD_ROUTE_PATH } from "@synara/shared/binaryTransfer";
 import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { useTheme } from "~/hooks/useTheme";
@@ -12,6 +17,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Textarea } from "../ui/textarea";
 import { Badge } from "../ui/badge";
+import { Select, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Combobox, ComboboxChip, ComboboxChips, ComboboxChipsInput } from "../ui/combobox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
@@ -29,6 +35,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { SKILL_LIBRARY_QUERY_KEY, SkillBindingControls } from "./ExpertSkillBindingsEditor";
+import { SettingsSelectPopup } from "./SettingsPanelPrimitives";
 import { useSkillPackageConnection } from "./skillPackageSettingsQueries";
 import { useExpertDraftGuard } from "./useExpertDraftGuard";
 import { tagsFrom, errorText, transfer, resourceParams } from "./skillLibraryFiles";
@@ -50,7 +57,11 @@ export function SkillLibraryDetail({
   const [base, setBase] = useState(initial),
     [name, setName] = useState(initial.name),
     [description, setDescription] = useState(initial.description),
-    [tags, setTags] = useState(initial.tags.join(", "));
+    [tags, setTags] = useState(initial.tags.join(", ")),
+    [evolutionPolicy, setEvolutionPolicy] = useState<SkillEvolutionPolicy>(
+      initial.evolutionPolicy ?? "protected",
+    ),
+    [scope, setScope] = useState<SkillScope>(initial.scope ?? { kind: "shared" });
   const [resourcePath, setResourcePath] = useState(initial.entryPath),
     [loadedPath, setLoadedPath] = useState<string | null>(null),
     [text, setTextState] = useState<string | null>(null),
@@ -64,12 +75,14 @@ export function SkillLibraryDetail({
   };
   const [busy, setBusy] = useState(false),
     [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"overview" | "files">("overview");
+  const [tab, setTab] = useState<"overview" | "files" | "evolution">("overview");
   const [mode, setMode] = useState<"preview" | "edit">("preview");
   const [addExperts, setAddExperts] = useState(false);
   const [expertSearch, setExpertSearch] = useState("");
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
+  const [scopeConfirmationOpen, setScopeConfirmationOpen] = useState(false);
+  const scopeConfirmationResolver = useRef<((confirmed: boolean) => void) | null>(null);
   const [tagInput, setTagInput] = useState("");
   const tagValues = tagsFrom(tags);
   const draftTags = tagsFrom([tags, tagInput].join(", "));
@@ -97,11 +110,19 @@ export function SkillLibraryDetail({
     queryFn: () => ensureExpertClient().listExperts(),
     enabled: connection.connected,
   });
-  const dirty =
+  const contentDirty =
     name !== base.name ||
     description !== base.description ||
     JSON.stringify(draftTags) !== JSON.stringify(base.tags) ||
     text !== savedText;
+  const baseScope = base.scope ?? { kind: "shared" as const };
+  const scopeChanged =
+    scope.kind !== baseScope.kind ||
+    (scope.kind === "expert" &&
+      baseScope.kind === "expert" &&
+      scope.expertId !== baseScope.expertId);
+  const metadataDirty = evolutionPolicy !== (base.evolutionPolicy ?? "protected") || scopeChanged;
+  const dirty = contentDirty || metadataDirty;
   const checked = async <T,>(operation: Promise<T>) => {
     const started = connection.generation,
       result = await operation;
@@ -145,6 +166,8 @@ export function SkillLibraryDetail({
     setName(result.skill.name);
     setDescription(result.skill.description);
     setTags(result.skill.tags.join(", "));
+    setEvolutionPolicy(result.skill.evolutionPolicy ?? "protected");
+    setScope(result.skill.scope ?? { kind: "shared" });
     setTagInput("");
     if (canonicalPath) {
       let canonicalText: string | null;
@@ -178,14 +201,38 @@ export function SkillLibraryDetail({
     }
     await onChanged();
   };
+  const confirmScopeChange = () =>
+    new Promise<boolean>((resolve) => {
+      scopeConfirmationResolver.current = resolve;
+      setScopeConfirmationOpen(true);
+    });
+  const resolveScopeChange = (confirmed: boolean) => {
+    setScopeConfirmationOpen(false);
+    const resolve = scopeConfirmationResolver.current;
+    scopeConfirmationResolver.current = null;
+    resolve?.(confirmed);
+  };
   const save = () => {
     const draftText = readDraftText();
     if (draftText !== text) setText(draftText);
     const submittedText = { value: draftText, version: textVersion.current };
+    const submittedPolicy = evolutionPolicy;
+    const submittedScope = scope;
     return run(async () => {
-      let result: SkillLibraryResponse;
+      let result: SkillLibraryResponse | null = null;
       const currentBase = acceptedBase.current;
-      if (draftText !== savedText && draftText !== null && loadedPath) {
+      const contentDraftDirty =
+        name !== currentBase.name ||
+        description !== currentBase.description ||
+        JSON.stringify(draftTags) !== JSON.stringify(currentBase.tags) ||
+        draftText !== savedText;
+      if (metadataDirty && evolutionPolicy === "shared" && scope.kind !== "shared") {
+        throw new Error("共享进化策略要求共享可用范围，请调整策略或范围后再保存。");
+      }
+      if (metadataDirty && scopeChanged && !(await confirmScopeChange())) {
+        throw new Error("已取消范围变更。");
+      }
+      if (contentDraftDirty && draftText !== savedText && draftText !== null && loadedPath) {
         const params = resourceParams(currentBase, loadedPath);
         params.set("name", loadedPath.split("/").at(-1)!);
         params.set("skillName", name);
@@ -197,7 +244,7 @@ export function SkillLibraryDetail({
             body: new Blob([draftText]),
           }).then((response) => response.json() as Promise<SkillLibraryResponse>),
         );
-      } else
+      } else if (contentDraftDirty)
         result = await checked(
           ensureExpertClient().skillLibrary({
             action: "save",
@@ -209,7 +256,26 @@ export function SkillLibraryDetail({
             changes: [],
           }),
         );
-      await accept(result, loadedPath, submittedText);
+      if (result) {
+        await accept(result, loadedPath, submittedText);
+        if (metadataDirty) {
+          setEvolutionPolicy(submittedPolicy);
+          setScope(submittedScope);
+        }
+      }
+      if (!metadataDirty) return;
+      const nextBase = acceptedBase.current;
+      const configured = await checked(
+        ensureExpertClient().skillLibrary({
+          action: "configureEvolution",
+          skillId: nextBase.skillId,
+          expectedRevision: nextBase.revision,
+          requestId: globalThis.crypto.randomUUID(),
+          evolutionPolicy: submittedPolicy,
+          scope: submittedScope,
+        }),
+      );
+      await accept(configured, null);
     });
   };
   const guard = useExpertDraftGuard({
@@ -222,6 +288,8 @@ export function SkillLibraryDetail({
       setTags(base.tags.join(", "));
       setTagInput("");
       setText(savedText);
+      setEvolutionPolicy(base.evolutionPolicy ?? "protected");
+      setScope(base.scope ?? { kind: "shared" });
     },
   });
   const load = async (file: string) => {
@@ -368,19 +436,22 @@ export function SkillLibraryDetail({
               if (busy) return;
               if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
               event.preventDefault();
+              const tabs = ["overview", "files", "evolution"] as const;
+              const currentIndex = tabs.indexOf(tab);
               const next =
                 event.key === "Home"
-                  ? "overview"
+                  ? tabs[0]!
                   : event.key === "End"
-                    ? "files"
-                    : tab === "overview"
-                      ? "files"
-                      : "overview";
+                    ? tabs[tabs.length - 1]!
+                    : (tabs[
+                        (currentIndex + (event.key === "ArrowRight" ? 1 : tabs.length - 1)) %
+                          tabs.length
+                      ] ?? tab);
               changeTab(next);
               document.getElementById(`${detailId}-${next}-tab`)?.focus();
             }}
           >
-            {(["overview", "files"] as const).map((item) => (
+            {(["overview", "files", "evolution"] as const).map((item) => (
               <Button
                 key={item}
                 id={`${detailId}-${item}-tab`}
@@ -400,7 +471,7 @@ export function SkillLibraryDetail({
                     tab === item ? "border-foreground" : "border-transparent",
                   )}
                 >
-                  {item === "overview" ? "概览" : "文件"}
+                  {item === "overview" ? "概览" : item === "files" ? "文件" : "进化策略"}
                 </span>
                 {item === "files" && pkg.data ? (
                   <Badge
@@ -641,7 +712,7 @@ export function SkillLibraryDetail({
                 </div>
               </section>
             </DialogPanel>
-          ) : (
+          ) : tab === "files" ? (
             <section
               role="tabpanel"
               id={`${detailId}-files-panel`}
@@ -864,6 +935,130 @@ export function SkillLibraryDetail({
                 </div>
               </div>
             </section>
+          ) : (
+            <DialogPanel
+              scrollFade={false}
+              viewportTabIndex={-1}
+              className="px-6 py-6 [&_[data-slot=textarea-control]]:min-h-0"
+            >
+              <section
+                role="tabpanel"
+                id={`${detailId}-evolution-panel`}
+                aria-labelledby={`${detailId}-evolution-tab`}
+                className="mx-auto w-full max-w-3xl space-y-6 py-6"
+              >
+                <div className="space-y-2">
+                  <h2 className="text-ui-lg font-semibold">进化策略与可用范围</h2>
+                  <p className="text-ui-sm text-muted-foreground">
+                    历史 Skill
+                    缺省为受保护、共享可用。策略与范围只由用户保存；提炼候选不能替你修改这些设置。
+                  </p>
+                </div>
+                <div className="grid min-w-0 gap-4 sm:grid-cols-2">
+                  <label className="grid min-w-0 gap-2 text-ui-sm">
+                    <span className="font-medium">进化策略</span>
+                    <Select
+                      value={evolutionPolicy}
+                      disabled={busy || !connection.connected}
+                      onValueChange={(value) => {
+                        if (value === "protected" || value === "shared" || value === "independent")
+                          setEvolutionPolicy(value);
+                      }}
+                    >
+                      <SelectTrigger aria-label="Skill 进化策略" className="w-full">
+                        <SelectValue>
+                          {evolutionPolicy === "protected"
+                            ? "受保护"
+                            : evolutionPolicy === "shared"
+                              ? "共享进化"
+                              : "独立进化"}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SettingsSelectPopup>
+                        <SelectItem value="protected">受保护</SelectItem>
+                        <SelectItem value="shared">共享进化</SelectItem>
+                        <SelectItem value="independent">独立进化</SelectItem>
+                      </SettingsSelectPopup>
+                    </Select>
+                  </label>
+                  <label className="grid min-w-0 gap-2 text-ui-sm">
+                    <span className="font-medium">可用范围</span>
+                    <Select
+                      value={scope.kind === "shared" ? "shared" : scope.expertId}
+                      disabled={busy || !connection.connected}
+                      onValueChange={(value) => {
+                        if (value === null) return;
+                        setScope(
+                          value === "shared"
+                            ? { kind: "shared" }
+                            : { kind: "expert", expertId: value },
+                        );
+                      }}
+                    >
+                      <SelectTrigger aria-label="Skill 可用范围" className="w-full">
+                        <SelectValue>
+                          {scope.kind === "shared"
+                            ? "共享可用"
+                            : `仅限 ${activeExperts.find((expert) => expert.id === scope.expertId)?.name ?? scope.expertId}`}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SettingsSelectPopup>
+                        <SelectItem value="shared">共享可用</SelectItem>
+                        {scope.kind === "expert" &&
+                        !activeExperts.some((expert) => expert.id === scope.expertId) ? (
+                          <SelectItem value={scope.expertId}>
+                            {scope.expertId} · 当前归属
+                          </SelectItem>
+                        ) : null}
+                        {activeExperts.map((expert) => (
+                          <SelectItem key={expert.id} value={expert.id}>
+                            {expert.name}
+                          </SelectItem>
+                        ))}
+                      </SettingsSelectPopup>
+                    </Select>
+                    {scope.kind === "expert" ? (
+                      <span className="text-ui-xs text-muted-foreground">
+                        专用范围只允许所选专家装配此 Skill；其他专家不会自动绑定。
+                      </span>
+                    ) : null}
+                  </label>
+                </div>
+                <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-4 text-ui-sm">
+                  <p>
+                    <strong>受保护：</strong>采用前需要对本次准确差异明确认可。
+                  </p>
+                  <p>
+                    <strong>共享进化：</strong>
+                    只接受通用方法；共享版本更新会影响所有引用专家的下一次独立运行。
+                  </p>
+                  <p>
+                    <strong>独立进化：</strong>
+                    共享来源保持共享；每个专家首次采用时创建自己的完整副本，之后只更新自己的副本。
+                  </p>
+                  {base.derivedFrom ? (
+                    <p className="break-all text-ui-xs text-muted-foreground">
+                      派生来源：{base.derivedFrom.skillId} · v{base.derivedFrom.revision} ·{" "}
+                      {base.derivedFrom.packageId}
+                    </p>
+                  ) : null}
+                  {scopeChanged ? (
+                    <p className="border-t border-border pt-2 text-ui-sm" role="status">
+                      范围变更会影响 Skill 的读取与装配资格；当前 {boundExperts.length} 个专家引用此
+                      Skill。保存时将再次展示确认，且不会自动绑定其他专家。
+                    </p>
+                  ) : null}
+                  {evolutionPolicy === "shared" && scope.kind !== "shared" ? (
+                    <p className="text-ui-sm text-destructive" role="alert">
+                      共享进化要求“共享可用”范围。
+                    </p>
+                  ) : null}
+                  {evolutionPolicy !== (base.evolutionPolicy ?? "protected") || scopeChanged ? (
+                    <p className="text-ui-xs text-muted-foreground">策略或范围尚未保存。</p>
+                  ) : null}
+                </div>
+              </section>
+            </DialogPanel>
           )}
           <DialogFooter className="shrink-0 flex-row flex-wrap items-center border-t border-border px-6">
             <div className="mr-auto flex min-w-0 flex-wrap items-center gap-2">
@@ -896,8 +1091,33 @@ export function SkillLibraryDetail({
               disabled={busy || !dirty || !connection.connected || !name.trim()}
               onClick={() => void save()}
             >
-              保存新版本
+              {metadataDirty && !contentDirty ? "保存进化策略" : "保存更改"}
             </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
+      <Dialog
+        open={scopeConfirmationOpen}
+        onOpenChange={(open) => {
+          if (!open) resolveScopeChange(false);
+        }}
+      >
+        <DialogPopup>
+          <DialogHeader>
+            <DialogTitle>确认更改 Skill 可用范围</DialogTitle>
+            <DialogDescription>
+              范围将从{" "}
+              {baseScope.kind === "shared" ? "共享可用" : `专家专用（${baseScope.expertId}）`} 改为{" "}
+              {scope.kind === "shared" ? "共享可用" : `专家专用（${scope.expertId}）`}。 当前有{" "}
+              {boundExperts.length} 个专家引用此
+              Skill。保存会重新校验其读取和装配资格，不会自动绑定其他专家，也不会覆盖上游 Skill。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => resolveScopeChange(false)}>
+              取消
+            </Button>
+            <Button onClick={() => resolveScopeChange(true)}>确认并保存范围</Button>
           </DialogFooter>
         </DialogPopup>
       </Dialog>

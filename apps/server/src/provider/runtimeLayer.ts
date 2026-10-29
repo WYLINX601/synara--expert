@@ -29,6 +29,7 @@ import { ProviderSessionRuntimeRepositoryLive } from "../persistence/Layers/Prov
 import { ProviderRuntimeEventRepositoryLive } from "../persistence/Layers/ProviderRuntimeEvents";
 import { ExpertAppliedRuntimeRepositoryLive } from "../persistence/Layers/ExpertAppliedRuntimeRecords";
 import { ContextRepositoryLive } from "../context/ContextRepository";
+import { SkillEvolutionRepositoryLive } from "../workbench/host/skillEvolutionPersistence";
 
 export function makeServerProviderLayer(
   options: {
@@ -118,6 +119,7 @@ export function makeServerProviderLayer(
       Layer.provide(ProviderRuntimeEventRepositoryLive),
       Layer.provide(ExpertAppliedRuntimeRepositoryLive),
       Layer.provideMerge(ContextRepositoryLive),
+      Layer.provideMerge(SkillEvolutionRepositoryLive),
       // Provider sessions resolve persisted provider-instance settings before launch.
       Layer.provide(Layer.succeed(ServerSettingsService, serverSettings)),
       Layer.provide(ServerSecretStoreLive),

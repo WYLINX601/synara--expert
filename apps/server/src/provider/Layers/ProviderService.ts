@@ -91,6 +91,7 @@ import {
 import { inspectBmadWorkspace } from "../../experts/bmadSkillPreset.ts";
 import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore";
 import { expertSnapshotSession } from "../../experts/expertSnapshotSession";
+import { captureSkillEvolutionExecutionReader } from "../../workbench/host/skillEvolutionExecution";
 import {
   buildExpertSkillInstructions,
   createExpertSkillApplication,
@@ -1066,6 +1067,23 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     const registry = yield* ProviderAdapterRegistry;
     const directory = yield* ProviderSessionDirectory;
     const contextRepository = yield* ContextRepository;
+    const readEvolutionExecution = yield* captureSkillEvolutionExecutionReader;
+    const evolutionExecutionFor = (threadId: ThreadId, operation: string) =>
+      readEvolutionExecution(threadId).pipe(
+        Effect.mapError((cause) =>
+          toValidationError(
+            operation,
+            "Cannot verify the registered Skill extraction purpose.",
+            cause,
+          ),
+        ),
+      );
+    const sameEvolutionModel = (expected: ModelSelection, actual: ModelSelection | undefined) =>
+      actual !== undefined &&
+      expected.provider === actual.provider &&
+      expected.model === actual.model &&
+      (expected.instanceId ?? expected.provider) === (actual.instanceId ?? actual.provider) &&
+      isDeepStrictEqual(expected.options ?? {}, actual.options ?? {});
     const readVerifiedExpertSkillBody = async (
       entry: ResolvedExpertSkillEntry,
       knownPackage?: Awaited<ReturnType<SkillPackageStore["read"]>>,
@@ -3033,6 +3051,14 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       readonly operation: string;
     }) =>
       Effect.gen(function* () {
+        if (
+          (yield* evolutionExecutionFor(input.binding.threadId, input.operation)) ||
+          runtimePayloadRecord(input.binding.runtimePayload).executionPurpose === "skill-evolution"
+        )
+          return yield* toValidationError(
+            input.operation,
+            "Skill extraction sessions cannot resume through the ordinary recovery path. Start a new extraction explicitly.",
+          );
         const threadId = input.binding.threadId;
         const getCurrentBinding = () =>
           directory.getBinding(threadId).pipe(
@@ -3780,6 +3806,10 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     const validateContextDispatch = (input: {
       readonly threadId: ThreadId;
       readonly operation: string;
+      readonly turnInput?: Pick<
+        ProviderSendTurnInput,
+        "modelSelection" | "skills" | "mentions" | "attachments"
+      >;
       readonly routed: {
         readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
         readonly lifecycleGeneration?: string;
@@ -3787,6 +3817,36 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     }) =>
       Effect.gen(function* () {
         const providerBinding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+        const evolution = yield* evolutionExecutionFor(input.threadId, input.operation);
+        const persistedPurpose = runtimePayloadRecord(
+          providerBinding?.runtimePayload,
+        ).executionPurpose;
+        if (evolution || persistedPurpose === "skill-evolution") {
+          if (
+            !evolution ||
+            !providerBinding ||
+            persistedPurpose !== "skill-evolution" ||
+            !["pi", "claudeAgent"].includes(providerBinding.provider) ||
+            providerBinding.provider !== evolution.modelSelection.provider ||
+            (providerBinding.providerInstanceId ?? providerBinding.provider) !==
+              (evolution.modelSelection.instanceId ?? evolution.modelSelection.provider) ||
+            !sameEvolutionModel(
+              evolution.modelSelection,
+              readPersistedModelSelection(providerBinding.runtimePayload),
+            ) ||
+            !["ProviderService.sendTurn", "ProviderService.steerTurn"].includes(input.operation) ||
+            (input.turnInput?.modelSelection &&
+              !sameEvolutionModel(evolution.modelSelection, input.turnInput.modelSelection)) ||
+            input.turnInput?.attachments?.length ||
+            input.turnInput?.skills?.length ||
+            input.turnInput?.mentions?.length
+          )
+            return yield* toValidationError(
+              input.operation,
+              "Skill extraction dispatch does not match its registered model and isolated session.",
+            );
+          return undefined;
+        }
         const persistedExpertSession = readPersistedExpertSession(providerBinding?.runtimePayload);
         if (persistedExpertSession === null) {
           return yield* toValidationError(
@@ -3932,6 +3992,37 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           threadId,
           provider: resolvedProvider,
         };
+        const evolution = yield* evolutionExecutionFor(threadId, "ProviderService.startSession");
+        const previousPurpose = runtimePayloadRecord(
+          Option.getOrUndefined(yield* directory.getBinding(threadId))?.runtimePayload,
+        ).executionPurpose;
+        if (
+          evolution ||
+          input.executionPurpose === "skill-evolution" ||
+          previousPurpose === "skill-evolution"
+        ) {
+          if (
+            !evolution ||
+            input.executionPurpose !== "skill-evolution" ||
+            !["pi", "claudeAgent"].includes(input.provider) ||
+            !sameEvolutionModel(evolution.modelSelection, input.modelSelection) ||
+            input.provider !== evolution.modelSelection.provider ||
+            (input.providerInstanceId ?? input.modelSelection?.instanceId ?? input.provider) !==
+              (evolution.modelSelection.instanceId ?? evolution.modelSelection.provider) ||
+            input.runtimeMode !== "approval-required" ||
+            input.contextSession ||
+            input.expertSession ||
+            input.additionalDirectories?.length ||
+            input.enableComputerControl ||
+            input.autoApproveSynaraTools ||
+            input.resumeCursor !== undefined ||
+            input.forkSourceResumeCursor !== undefined
+          )
+            return yield* toValidationError(
+              "ProviderService.startSession",
+              "Skill extraction start does not match its registered isolated execution.",
+            );
+        }
         yield* ensureProviderEnabled(input.provider, "ProviderService.startSession");
         yield* validateAutoRuntimeMode(
           "ProviderService.startSession",
@@ -3950,11 +4041,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             `Expert sessions are not supported by provider '${input.provider}'.`,
           );
         }
-        yield* validateContextSessionStart(
-          threadId,
-          input.contextSession,
-          "ProviderService.startSession",
-        );
+        if (!evolution)
+          yield* validateContextSessionStart(
+            threadId,
+            input.contextSession,
+            "ProviderService.startSession",
+          );
         const verifiedExpertSession = yield* prepareExpertSession(input.expertSession, {
           operation: "ProviderService.startSession",
           ...(input.cwd ? { cwd: input.cwd } : {}),
@@ -4003,6 +4095,16 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 ? { providerOptions: input.providerOptions ?? persistedProviderOptions }
                 : {}),
             });
+            if (
+              evolution &&
+              (resolved.instance.driver !== evolution.modelSelection.provider ||
+                resolved.instance.instanceId !==
+                  (evolution.modelSelection.instanceId ?? evolution.modelSelection.provider))
+            )
+              return yield* toValidationError(
+                "ProviderService.startSession",
+                "The registered Skill extraction provider instance changed.",
+              );
             return { resolved, persistedProviderInstanceId, persistedProviderOptions } as const;
           });
         // Resolve the instance up front so the driver's adapter can prepare a
@@ -4306,6 +4408,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                       expertSession: input.expertSession ?? null,
                       expertRuntimeNotices: input.expertRuntimeNotices ?? [],
                       contextSession: input.contextSession ?? null,
+                      ...(input.executionPurpose
+                        ? { executionPurpose: input.executionPurpose }
+                        : {}),
                       [PRIOR_TRANSCRIPT_BOOTSTRAP_PENDING]: priorTranscriptBootstrapPending,
                     },
                   }),
@@ -4630,6 +4735,21 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           schema: ProviderForkThreadInput,
           payload: rawInput,
         });
+        if (
+          (yield* evolutionExecutionFor(input.sourceThreadId, "ProviderService.forkThread")) ||
+          (yield* evolutionExecutionFor(input.threadId, "ProviderService.forkThread")) ||
+          runtimePayloadRecord(
+            Option.getOrUndefined(yield* directory.getBinding(input.sourceThreadId))
+              ?.runtimePayload,
+          ).executionPurpose === "skill-evolution" ||
+          runtimePayloadRecord(
+            Option.getOrUndefined(yield* directory.getBinding(input.threadId))?.runtimePayload,
+          ).executionPurpose === "skill-evolution"
+        )
+          return yield* toValidationError(
+            "ProviderService.forkThread",
+            "Skill extraction tasks cannot fork a native session.",
+          );
 
         const existingTargetBinding = Option.getOrUndefined(
           yield* directory.getBinding(input.threadId),
@@ -5295,6 +5415,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             const verifiedExpertSession = yield* validateContextDispatch({
               threadId: input.threadId,
               operation: "ProviderService.sendTurn",
+              turnInput: input,
               routed,
             });
             const skillInvocation = yield* prepareExpertSkillInvocations({
@@ -5401,6 +5522,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             const verifiedExpertSession = yield* validateContextDispatch({
               threadId: input.threadId,
               operation: "ProviderService.steerTurn",
+              turnInput: input,
               routed,
             });
             const skillInvocation = yield* prepareExpertSkillInvocations({

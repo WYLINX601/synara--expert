@@ -93,6 +93,8 @@ export type ProviderExpertRuntimeNotices = typeof ProviderExpertRuntimeNotices.T
 
 export const ProviderSessionStartInput = Schema.Struct({
   threadId: ThreadId,
+  /** Server-owned purpose used to constrain a native Skill evolution session. */
+  executionPurpose: Schema.optional(Schema.Literal("skill-evolution")),
   provider: Schema.optional(ProviderDriverKind),
   lifecycleGeneration: Schema.optional(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),

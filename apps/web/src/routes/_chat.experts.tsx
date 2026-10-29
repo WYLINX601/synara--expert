@@ -14,7 +14,10 @@ export const Route = createFileRoute("/_chat/experts")({
     sourceThreadId?: string;
   } => ({
     ...(search.kind === "teams" || search.kind === "skills" ? { kind: search.kind } : {}),
-    tab: search.tab === "settings" || search.tab === "history" ? search.tab : "capabilities",
+    tab:
+      search.tab === "settings" || search.tab === "history" || search.tab === "evolution"
+        ? search.tab
+        : "capabilities",
     ...(typeof search.connectionId === "string" ? { connectionId: search.connectionId } : {}),
     ...(typeof search.search === "string" ? { search: search.search } : {}),
     ...(typeof search.sourceThreadId === "string" ? { sourceThreadId: search.sourceThreadId } : {}),

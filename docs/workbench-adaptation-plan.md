@@ -60,6 +60,17 @@ Context 页面、自动保存与旧指令迁移通过 `workbench/host/contextCli
 - Graph 默认使用原生输入区胶囊收起，展开后横向展示节点，详情按需复用 StageInspector。节点快照的原生任务、Work 与报告只读投影须核对当前修订、阶段代次和分配尝试；审核结果还绑定当前候选 ID 与摘要。Graph 不推断权限恢复、不直接重试；确认与计划操作定位既有消息卡，继续经过原命令校验，不另建执行状态或详情系统。
 - 接入清单见 `workbench/integration-points.json` 的 `hub.collaboration`。边界检查覆盖声明目录的静态导入、深层接入与约定例外，不证明运行时权限隔离或真实 Provider 成功。实施状态与未验收范围见[Hub 评审记录](./hub-review-2026-10-22/README.md#implementation-status)。
 
+### Expert Skill 主动进化接入（2026-10-29）
+
+`expert.skill-evolution` 只持有来源快照、提炼请求、候选与采用事件；正式 Skill、不可变包和绑定继续由技能库拥有。来源限定为同一专家已正常结束的明确回合，专家不新增 Memory。用户点击提炼及认可具体摘要是唯一触发与采用权限。
+
+- 跨进程契约位于 `packages/contracts/src/skillEvolution.ts`。服务端业务在 `experts/evolution`；`workbench/host/skillEvolutionRpc` 保留 owner、原生命令和投影接入，`skillEvolutionPersistence` 使用宿主 SqlClient，Expert ledger 加法迁移为 10。请求先持久化再派发已有 Thread/turn 命令，不新增执行器或队列。
+- 原生 Reactor 和 ProviderService 在构造时捕获持久登记能力，启动与发送共同核对 purpose、Provider 实例和模型。Pi/Claude 适配器提供无工具、无环境 Skill/Context/Hub Memory 的会话；普通上下文校验继续有效。隔离任务不借普通恢复或原生 fork 放宽约束；取消沿用原生准确回合。未支持的 Provider 明确拒绝，不自动切换。
+- Skill 范围与进化策略独立。共享来源可以配置独立进化；第一次派生完整专用副本并保留绑定启用及激活方式，后续更新同一身份。共享更新使用原 Skill 身份。采用沿用版本 CAS 和持久操作回执，保存与绑定分阶段恢复；事件在实际保存及绑定完成后记时。旧包保留进入既有生命周期锁和引用检查，恢复内容产生新修订，恢复原绑定保留副本。
+- 前端挂载原 `/experts/$expertId?tab=evolution`，继承 `_chat` 布局；通过 Expert 编辑器窄槽位复用来源任务、模型选择、Skill 详情和草稿保护。时间环每个 Skill 一个节点，候选不生成能力，未知基线不编造日期、调用量或分数。
+
+接入清单见 `workbench/integration-points.json`。该检查只覆盖静态边界；实现、真实模型和未验收平台分别见[本轮验收](./expert-skill-evolution-acceptance-2026-10-29.md)。
+
 ### 路由与布局契约
 
 先核对真实父布局，再选择 URL 与挂载层级：

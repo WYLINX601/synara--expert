@@ -19,6 +19,9 @@ import {
   type SkillLibraryResponse,
   type SkillPackage,
   type SkillSource,
+  type SkillEvolutionPolicy,
+  type SkillScope,
+  type SkillDerivation,
 } from "@synara/contracts";
 import { Schema } from "effect";
 import YAML from "yaml";
@@ -32,6 +35,11 @@ import {
 } from "./SkillLibraryOperations";
 import { createSkillPackageStore, SkillPackageStoreError } from "./SkillPackageStore";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle";
+import { retainSkillEvolutionPackagesUnlocked } from "./skillEvolutionPackagePins";
+import {
+  assertSkillEvolutionConfiguration,
+  assertSkillScopeForExpert,
+} from "./skillEvolutionPolicy";
 import {
   assertSkillResourcePath,
   downloadSkillSource,
@@ -52,6 +60,8 @@ export type SkillLibraryMutationEffect = {
 export type SkillLibraryExecutionContext = {
   /** Supplied by a trusted server owner principal, never by the request payload. */
   readonly actor?: string;
+  /** Trusted server-only retention request; never accepted from the RPC payload. */
+  readonly retainForEvolution?: boolean;
   /** Revalidate the caller immediately before each persistent mutation. */
   readonly beforeMutation?: (effect?: SkillLibraryMutationEffect) => Promise<void>;
 };
@@ -91,9 +101,21 @@ const hasOptionalWriteRequestId = (
   request: SkillLibraryRequest,
 ): request is Extract<
   SkillLibraryRequest,
-  { action: "create" | "save" | "import" | "refresh" | "delete" | "batch" }
+  {
+    action:
+      | "create"
+      | "configureEvolution"
+      | "derive"
+      | "save"
+      | "import"
+      | "refresh"
+      | "delete"
+      | "batch";
+  }
 > =>
   request.action === "create" ||
+  request.action === "configureEvolution" ||
+  request.action === "derive" ||
   request.action === "save" ||
   request.action === "import" ||
   request.action === "refresh" ||
@@ -176,6 +198,7 @@ export async function readSkillDefinition(
 export async function resolveSkillBindings(
   stateDir: string,
   rawBindings: ReadonlyArray<ExpertSkillBinding>,
+  expertId?: string,
 ): Promise<ExpertSkillSelection[]> {
   const bindings = Schema.decodeUnknownSync(
     Schema.Array(ExpertSkillBinding).check(Schema.isMaxLength(100)),
@@ -187,6 +210,8 @@ export async function resolveSkillBindings(
   const skills = await Promise.all(
     bindings.map((binding) => readSkillDefinition(stateDir, binding.skillId)),
   );
+  if (expertId !== undefined)
+    for (const skill of skills) assertSkillScopeForExpert(skill, expertId);
   return bindings.flatMap((binding, index) =>
     binding.enabled
       ? [
@@ -223,6 +248,26 @@ export function createSkillLibraryStore(stateDir: string) {
   libraryInstances.set(key, store);
   return store;
 }
+function assertNoActivePrivateDerivation(
+  definitions: ReadonlyArray<SkillDefinition>,
+  sourceSkillId: string,
+  expertId: string,
+  allowedSkillId?: string,
+) {
+  const existing = definitions.find(
+    (skill) =>
+      !skill.deleted &&
+      skill.skillId !== allowedSkillId &&
+      skill.scope?.kind === "expert" &&
+      skill.scope.expertId === expertId &&
+      skill.derivedFrom?.skillId === sourceSkillId,
+  );
+  if (existing)
+    throw new Error(
+      `This Expert already has a private derived copy of the source Skill (${existing.skillId}); continue with that copy or resolve it before deriving again.`,
+    );
+}
+
 function makeSkillLibraryStore(stateDir: string) {
   if (!path.isAbsolute(stateDir))
     throw new Error("Skill library state directory must be absolute.");
@@ -311,23 +356,21 @@ function makeSkillLibraryStore(stateDir: string) {
       // Expert saves share this lifecycle lock. Validate the proposed head while
       // both its package and the complete set of affected bindings are stable.
       for (const expert of await createExpertStore(stateDir).list()) {
-        if (!expert.skillBindings?.some((binding) => binding.enabled && ids.has(binding.skillId)))
-          continue;
-        await packages.resolveSelections(
-          expert.skillBindings.flatMap((binding) => {
-            if (!binding.enabled) return [];
-            const skill = nextById.get(binding.skillId);
-            if (!skill || skill.deleted)
-              throw new Error(`Skill not found or deleted: ${binding.skillId}`);
-            return [
-              {
-                packageId: skill.packageId,
-                entryPath: skill.entryPath,
-                activation: binding.activation,
-              },
-            ];
-          }),
-        );
+        if (!expert.skillBindings?.some((binding) => ids.has(binding.skillId))) continue;
+        const selections: ExpertSkillSelection[] = [];
+        for (const binding of expert.skillBindings) {
+          const skill =
+            nextById.get(binding.skillId) ?? (await readSkillDefinition(stateDir, binding.skillId));
+          if (skill.deleted) throw new Error(`Skill not found or deleted: ${binding.skillId}`);
+          assertSkillScopeForExpert(skill, expert.id);
+          if (binding.enabled)
+            selections.push({
+              packageId: skill.packageId,
+              entryPath: skill.entryPath,
+              activation: binding.activation,
+            });
+        }
+        await packages.resolveSelections(selections);
       }
       await writeRegistry(next, true, beforeMutation);
     };
@@ -387,6 +430,9 @@ function makeSkillLibraryStore(stateDir: string) {
     previous?: SkillDefinition;
     modified?: boolean;
     actor?: string;
+    evolutionPolicy?: SkillEvolutionPolicy;
+    scope?: SkillScope;
+    derivedFrom?: SkillDerivation;
   }): SkillDefinition => {
     const entry = input.pkg.entries.find((entry) => entry.entryPath === input.entryPath);
     if (!entry) throw new Error("Selected Skill entry disappeared or is ambiguous.");
@@ -411,8 +457,21 @@ function makeSkillLibraryStore(stateDir: string) {
             ...(input.previous.createdBy !== undefined
               ? { createdBy: input.previous.createdBy }
               : {}),
+            ...(input.previous.evolutionPolicy !== undefined
+              ? { evolutionPolicy: input.previous.evolutionPolicy }
+              : {}),
+            ...(input.previous.scope !== undefined ? { scope: input.previous.scope } : {}),
+            ...(input.previous.derivedFrom !== undefined
+              ? { derivedFrom: input.previous.derivedFrom }
+              : {}),
           }
-        : { createdAt: new Date().toISOString(), createdBy: input.actor ?? "owner" }),
+        : {
+            createdAt: new Date().toISOString(),
+            createdBy: input.actor ?? "owner",
+            evolutionPolicy: input.evolutionPolicy ?? "protected",
+            scope: input.scope ?? { kind: "shared" },
+            ...(input.derivedFrom !== undefined ? { derivedFrom: input.derivedFrom } : {}),
+          }),
     });
   };
   const previewSource = async (
@@ -542,6 +601,10 @@ function makeSkillLibraryStore(stateDir: string) {
     }
     if (current.revision !== request.expectedRevision)
       throw new Error("Skill revision changed; reload before saving.");
+    if (journal && context.retainForEvolution)
+      await operations.recordPlan(journal.requestId, "save", journal.fingerprint, {
+        evolutionPackageIds: [current.packageId],
+      });
     const pkg = await packages.read(current.packageId);
     const owned = await fs.mkdtemp(path.join(staging, "edit-")),
       directory = path.join(owned, pkg.rootName);
@@ -630,10 +693,232 @@ function makeSkillLibraryStore(stateDir: string) {
             plannedRevision: current.revision + 1,
             plannedPackageId: next.packageId,
             plannedSkill: item,
+            ...(context.retainForEvolution
+              ? { evolutionPackageIds: [current.packageId, next.packageId] }
+              : {}),
           });
+        if (context.retainForEvolution)
+          await retainSkillEvolutionPackagesUnlocked(stateDir, [current.packageId, next.packageId]);
         await commit([item], true, context.beforeMutation);
       });
       return { skill: item };
+    } finally {
+      await fs.rm(owned, { recursive: true, force: true });
+    }
+  };
+  const configureEvolution = async (
+    request: Extract<SkillLibraryRequest, { action: "configureEvolution" }>,
+    context: SkillLibraryExecutionContext,
+    journal?: { requestId: string; fingerprint: string },
+  ): Promise<{ skill: SkillDefinition }> => {
+    if (journal) {
+      const prior = await operations.read(journal.requestId);
+      if (prior?.plannedSkill) {
+        const recovered = await recoverPlannedSkills([prior.plannedSkill], context);
+        if (recovered) return { skill: recovered[0]! };
+      }
+    }
+    const current = await revision(request.skillId, request.expectedRevision);
+    assertSkillEvolutionConfiguration({
+      current,
+      evolutionPolicy: request.evolutionPolicy,
+      scope: request.scope,
+    });
+    if (
+      current.evolutionPolicy === request.evolutionPolicy &&
+      stableJson(current.scope) === stableJson(request.scope)
+    )
+      return { skill: current };
+    const planned: SkillDefinition = Schema.decodeUnknownSync(SkillDefinition)({
+      ...current,
+      evolutionPolicy: request.evolutionPolicy,
+      scope: request.scope,
+      revision: current.revision + 1,
+      updatedAt: new Date().toISOString(),
+    });
+    await context.beforeMutation?.();
+    if (journal)
+      await operations.recordPlan(journal.requestId, "configureEvolution", journal.fingerprint, {
+        plannedSkillId: planned.skillId,
+        plannedRevision: planned.revision,
+        plannedPackageId: planned.packageId,
+        plannedSkill: planned,
+      });
+    await commit([planned], false, context.beforeMutation);
+    return { skill: planned };
+  };
+  const deriveSkill = async (
+    request: Extract<SkillLibraryRequest, { action: "derive" }>,
+    context: SkillLibraryExecutionContext,
+    journal?: { requestId: string; fingerprint: string },
+  ): Promise<{ skill: SkillDefinition }> => {
+    const prior = journal ? await operations.read(journal.requestId) : undefined;
+    if (prior?.plannedSkill) {
+      const planned = prior.plannedSkill,
+        scope = planned.scope,
+        derivation = planned.derivedFrom;
+      const recoveryContext: SkillLibraryExecutionContext =
+        scope?.kind === "expert" && derivation
+          ? {
+              ...context,
+              beforeMutation: async (effect) => {
+                assertNoActivePrivateDerivation(
+                  await readSkillLibraryDefinitions(stateDir),
+                  derivation.skillId,
+                  scope.expertId,
+                  planned.skillId,
+                );
+                await context.beforeMutation?.(effect);
+              },
+            }
+          : context;
+      const recovered = await recoverPlannedSkills([planned], recoveryContext);
+      if (recovered) return { skill: recovered[0]! };
+    }
+    const validateSource = async () => {
+      const current = await revision(request.sourceSkillId, request.expectedRevision);
+      assertSkillScopeForExpert(current, request.expertId);
+      const expert = await createExpertStore(stateDir).read(request.expertId);
+      if (!expert || expert.archived) throw new Error("Active target Expert not found.");
+      if (needsLegacyConversion(expert))
+        throw new Error("Convert the target Expert's Skill configuration before deriving.");
+      if (!expert.skillBindings?.some((binding) => binding.skillId === current.skillId))
+        throw new Error("The source Skill must be bound to the target Expert before deriving.");
+      assertNoActivePrivateDerivation(
+        await readSkillLibraryDefinitions(stateDir),
+        request.sourceSkillId,
+        request.expertId,
+      );
+      const duplicateName = (await readSkillLibraryDefinitions(stateDir)).some(
+        (skill) =>
+          !skill.deleted &&
+          skill.name.normalize("NFC").toLowerCase() === request.name.normalize("NFC").toLowerCase(),
+      );
+      if (duplicateName)
+        throw new Error("A Skill with this name already exists; choose a unique derived name.");
+      if (context.retainForEvolution)
+        await retainSkillEvolutionPackagesUnlocked(stateDir, [current.packageId]);
+      return current;
+    };
+    const source = prior?.plannedSkill
+      ? undefined
+      : await withSkillPackageLifecycle(stateDir, validateSource);
+    if (source) {
+      assertSkillScopeForExpert(source, request.expertId);
+    }
+    const sourcePackageId = prior?.plannedSkill?.derivedFrom?.packageId ?? source?.packageId;
+    const entryPath = prior?.plannedSkill?.entryPath ?? source?.entryPath;
+    if (!sourcePackageId || !entryPath)
+      throw new Error("The planned derivation has no immutable source package.");
+    let plannedSkillId = prior?.plannedSkillId;
+    if (journal && !plannedSkillId) {
+      plannedSkillId = `skl_${randomUUID().replaceAll("-", "")}`;
+      await operations.recordPlan(journal.requestId, "derive", journal.fingerprint, {
+        plannedSkillId,
+        ...(context.retainForEvolution && sourcePackageId
+          ? { evolutionPackageIds: [sourcePackageId] }
+          : {}),
+      });
+    } else if (journal && context.retainForEvolution && sourcePackageId) {
+      await operations.recordPlan(journal.requestId, "derive", journal.fingerprint, {
+        evolutionPackageIds: [sourcePackageId],
+      });
+    }
+    const sourcePackage = await packages.read(sourcePackageId),
+      owned = await fs.mkdtemp(path.join(staging, "derive-")),
+      directory = path.join(owned, sourcePackage.rootName);
+    await fs.mkdir(directory, { mode: 0o700 });
+    try {
+      for (const resource of sourcePackage.resources) {
+        const relative = resource.path.slice("content/".length);
+        if (!relative) continue;
+        const target = path.join(directory, ...relative.split("/"));
+        if (resource.kind === "directory") await fs.mkdir(target, { recursive: true, mode: 0o700 });
+        else {
+          await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+          await fs.writeFile(
+            target,
+            await expertResourceFiles.read(
+              path.join(rootPath(sourcePackageId), ...relative.split("/")),
+            ),
+            { mode: resource.executable ? 0o700 : 0o600 },
+          );
+        }
+      }
+      const changed = new Set<string>();
+      for (const change of request.changes) {
+        assertSkillResourcePath(change.path);
+        const key = change.path.normalize("NFC").toLowerCase();
+        if (changed.has(key)) throw new Error("Duplicate file change.");
+        changed.add(key);
+        const target = path.join(directory, ...change.path.split("/")),
+          resourcePath = `content/${change.path}`,
+          previousResource = sourcePackage.resources.find(
+            (resource) => resource.path === resourcePath,
+          );
+        if (previousResource?.kind === "directory")
+          throw new Error(`Skill changes must target files: ${change.path}`);
+        if (change.content === undefined) {
+          if (change.path === entryPath)
+            throw new Error("The selected Skill entry cannot be deleted during derivation.");
+          await fs.rm(target, { force: true });
+          continue;
+        }
+        const bytes = Buffer.from(change.content, "base64");
+        if (bytes.toString("base64") !== change.content || bytes.length > SKILL_FILE_LIMIT)
+          throw new Error("Invalid base64 or resource exceeds 16 MiB.");
+        await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+        await fs.writeFile(target, bytes, { mode: change.executable ? 0o700 : 0o600 });
+        await fs.chmod(target, (change.executable ?? previousResource?.executable) ? 0o700 : 0o600);
+      }
+      await renameEntry(path.join(directory, ...entryPath.split("/")), request.name);
+      let derived!: SkillDefinition;
+      await context.beforeMutation?.();
+      await packages.publishDirectory(directory, async (pkg) => {
+        if (prior?.plannedSkill && pkg.packageId !== prior.plannedSkill.packageId)
+          throw new Error("Derived package changed after the operation plan.");
+        assertNoActivePrivateDerivation(
+          await readSkillLibraryDefinitions(stateDir),
+          request.sourceSkillId,
+          request.expertId,
+          prior?.plannedSkill?.skillId ?? plannedSkillId,
+        );
+        derived =
+          prior?.plannedSkill ??
+          makeItem({
+            pkg,
+            entryPath,
+            ...(plannedSkillId ? { skillId: plannedSkillId } : {}),
+            name: request.name,
+            source: { kind: "manual", location: "", packageId: pkg.packageId, entryPath },
+            modified: false,
+            ...(context.actor ? { actor: context.actor } : {}),
+            evolutionPolicy: "independent",
+            scope: { kind: "expert", expertId: request.expertId },
+            derivedFrom: {
+              skillId: request.sourceSkillId,
+              revision: request.expectedRevision,
+              packageId: sourcePackageId,
+            },
+          });
+        if (journal)
+          await operations.recordPlan(journal.requestId, "derive", journal.fingerprint, {
+            plannedSkillId: derived.skillId,
+            plannedRevision: derived.revision,
+            plannedPackageId: derived.packageId,
+            plannedSkill: derived,
+            ...(context.retainForEvolution
+              ? { evolutionPackageIds: [sourcePackageId, derived.packageId] }
+              : {}),
+          });
+        if (context.retainForEvolution)
+          await retainSkillEvolutionPackagesUnlocked(stateDir, [
+            sourcePackageId,
+            derived.packageId,
+          ]);
+        await commit([derived], true, context.beforeMutation);
+      });
+      return { skill: derived };
     } finally {
       await fs.rm(owned, { recursive: true, force: true });
     }
@@ -959,7 +1244,7 @@ function makeSkillLibraryStore(stateDir: string) {
         error: "Expert revision changed; reload before saving bindings.",
       });
     try {
-      await resolveSkillBindings(stateDir, nextBindings);
+      await resolveSkillBindings(stateDir, nextBindings, current.id);
       if (request.dryRun) return { ...initial, status: "applied", revision: current.revision + 1 };
       await context.beforeMutation?.();
       await operations.recordBindingIntent(request.requestId, "bindings", requestFingerprint, {
@@ -1152,7 +1437,7 @@ function makeSkillLibraryStore(stateDir: string) {
             })),
           ];
           try {
-            await resolveSkillBindings(stateDir, nextBindings);
+            await resolveSkillBindings(stateDir, nextBindings, current.id);
             if (request.dryRun) {
               result = {
                 expertId: current.id,
@@ -1424,7 +1709,7 @@ function makeSkillLibraryStore(stateDir: string) {
         ? (decodedRequest.requestId ?? randomUUID())
         : undefined,
       request: SkillLibraryRequest = hasOptionalWriteRequestId(decodedRequest)
-        ? { ...decodedRequest, requestId: generatedRequestId }
+        ? { ...decodedRequest, requestId: generatedRequestId! }
         : decodedRequest;
     if (request.action === "cancel")
       for (const controller of activePreviews.get(request.previewId) ?? []) controller.abort();
@@ -1465,6 +1750,7 @@ function makeSkillLibraryStore(stateDir: string) {
       writeRequestId && writeOperation && !isDryRun
         ? fingerprint({
             actor: context.actor ?? "owner",
+            ...(context.retainForEvolution ? { retainForEvolution: true } : {}),
             request: { ...request, dryRun: undefined },
           })
         : undefined;
@@ -1529,6 +1815,10 @@ function makeSkillLibraryStore(stateDir: string) {
       if (writeRequestId && writeOperation && writeFingerprint) {
         await context.beforeMutation?.();
         writeJournal = await operations.begin(writeRequestId, writeOperation, writeFingerprint);
+        if (context.retainForEvolution && writeJournal.evolutionPackageIds?.length)
+          await withSkillPackageLifecycle(stateDir, () =>
+            retainSkillEvolutionPackagesUnlocked(stateDir, writeJournal!.evolutionPackageIds!),
+          );
         if (
           writeJournal.response &&
           (writeOperation !== "batch" ||
@@ -1547,6 +1837,14 @@ function makeSkillLibraryStore(stateDir: string) {
             return { skill, resources: (await packages.read(skill.packageId)).resources };
           }
           case "create": {
+            const evolutionPolicy = request.evolutionPolicy ?? "protected",
+              scope = request.scope ?? { kind: "shared" };
+            assertSkillEvolutionConfiguration({ evolutionPolicy, scope });
+            if (scope.kind === "expert") {
+              const owner = await createExpertStore(stateDir).read(scope.expertId);
+              if (!owner || owner.archived)
+                throw new Error("Active target Expert not found for private Skill creation.");
+            }
             let plannedSkillId: string | undefined;
             if (writeRequestId && writeFingerprint && !request.dryRun) {
               plannedSkillId = writeJournal?.plannedSkillId;
@@ -1575,6 +1873,26 @@ function makeSkillLibraryStore(stateDir: string) {
             try {
               await fs.writeFile(path.join(directory, "SKILL.md"), request.body, { mode: 0o600 });
               await renameEntry(path.join(directory, "SKILL.md"), request.name);
+              const changedPaths = new Set<string>();
+              for (const change of request.changes ?? []) {
+                assertSkillResourcePath(change.path);
+                const key = change.path.normalize("NFC").toLowerCase();
+                if (key === "skill.md")
+                  throw new Error(
+                    "Create changes may add support files but cannot replace SKILL.md.",
+                  );
+                if (changedPaths.has(key)) throw new Error("Duplicate file change.");
+                changedPaths.add(key);
+                if (change.content === undefined)
+                  throw new Error("Create changes may add support files but cannot delete files.");
+                const bytes = Buffer.from(change.content, "base64");
+                if (bytes.toString("base64") !== change.content || bytes.length > SKILL_FILE_LIMIT)
+                  throw new Error("Invalid base64 or resource exceeds 16 MiB.");
+                const target = path.join(directory, ...change.path.split("/"));
+                await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+                await fs.writeFile(target, bytes, { mode: change.executable ? 0o700 : 0o600 });
+                await fs.chmod(target, change.executable ? 0o700 : 0o600);
+              }
               if (request.dryRun) {
                 const preview = await packages.preview({ path: directory });
                 packages.cancelPreview(preview.previewId);
@@ -1599,13 +1917,20 @@ function makeSkillLibraryStore(stateDir: string) {
                   ...(plannedSkillId ? { skillId: plannedSkillId } : {}),
                   tags: request.tags,
                   ...(context.actor ? { actor: context.actor } : {}),
+                  evolutionPolicy,
+                  scope,
                   source: { kind: "manual", location: "", packageId: pkg.packageId, entryPath },
                 });
                 if (writeRequestId && writeFingerprint)
                   await operations.recordPlan(writeRequestId, "create", writeFingerprint, {
                     plannedSkillId: skill.skillId,
                     plannedSkill: skill,
+                    ...(context.retainForEvolution
+                      ? { evolutionPackageIds: [skill.packageId] }
+                      : {}),
                   });
+                if (context.retainForEvolution)
+                  await retainSkillEvolutionPackagesUnlocked(stateDir, [skill.packageId]);
                 await commit([skill], true, context.beforeMutation);
               });
               return { skill };
@@ -1613,6 +1938,22 @@ function makeSkillLibraryStore(stateDir: string) {
               await fs.rm(owned, { recursive: true, force: true });
             }
           }
+          case "configureEvolution":
+            return configureEvolution(
+              request,
+              context,
+              writeRequestId && writeFingerprint
+                ? { requestId: writeRequestId, fingerprint: writeFingerprint }
+                : undefined,
+            );
+          case "derive":
+            return deriveSkill(
+              request,
+              context,
+              writeRequestId && writeFingerprint
+                ? { requestId: writeRequestId, fingerprint: writeFingerprint }
+                : undefined,
+            );
           case "save": {
             const result = await edit(
               request,

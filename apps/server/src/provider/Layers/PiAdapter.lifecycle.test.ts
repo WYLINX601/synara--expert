@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -36,6 +36,7 @@ import { SYNARA_COMPUTER_TOOL_NAMES } from "../../agentGateway/computerToolPermi
 import { ServerConfig } from "../../config.ts";
 import { PiAdapter, type PiAdapterShape } from "../Services/PiAdapter.ts";
 import { makePiAdapterLive } from "./PiAdapter.ts";
+import { SKILL_EVOLUTION_SYSTEM_PROMPT } from "../skillEvolutionConstraints.ts";
 
 const captured = vi.hoisted(() => ({
   sessions: [] as AgentSession[],
@@ -55,6 +56,8 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
     SessionManager: {
       ...sdk.SessionManager,
       create: (cwd: string) => sdk.SessionManager.create(cwd, path.join(cwd, "sessions")),
+      inMemory: (...args: Parameters<typeof sdk.SessionManager.inMemory>) =>
+        sdk.SessionManager.inMemory(...args),
       open: (...args: Parameters<typeof sdk.SessionManager.open>) =>
         sdk.SessionManager.open(...args),
     },
@@ -181,6 +184,7 @@ async function withAdapter(
     readonly contextSession?: ProviderSessionStartInput["contextSession"];
     readonly lifecycleGeneration?: string;
     readonly prepareCwd?: (cwd: string) => void;
+    readonly executionPurpose?: ProviderSessionStartInput["executionPurpose"];
   },
   gatewayFetchOverride?: AgentGatewayMcpFetch,
 ) {
@@ -258,6 +262,9 @@ async function withAdapter(
         ...(startSessionOverrides?.lifecycleGeneration !== undefined
           ? { lifecycleGeneration: startSessionOverrides.lifecycleGeneration }
           : {}),
+        ...(startSessionOverrides?.executionPurpose
+          ? { executionPurpose: startSessionOverrides.executionPurpose }
+          : {}),
       });
       yield* Effect.promise(() => run(adapter, events, cwd));
     }).pipe(Effect.provide(layer), Effect.scoped),
@@ -282,6 +289,70 @@ it("reports the loaded Pi SDK version and lifecycle generation on its session", 
     100,
     undefined,
     { lifecycleGeneration: "pi-generation-1" },
+  );
+});
+
+it("keeps Skill evolution isolated from Pi tools, ambient resources, Gateway, and disk sessions", async () => {
+  const modelCalls = responses("success");
+  const credentials = gatewayCredentials();
+  const fetch = vi.fn<AgentGatewayMcpFetch>(async () => {
+    throw new Error("Skill evolution must not connect to Gateway");
+  });
+  await withAdapter(
+    async (adapter, events, cwd) => {
+      const session = captured.sessions[0]!;
+      expect(session.getActiveToolNames()).toEqual([]);
+      expect(session.resourceLoader.getSystemPrompt()).toBe(SKILL_EVOLUTION_SYSTEM_PROMPT);
+      expect(session.resourceLoader.getAppendSystemPrompt()).toEqual([]);
+      expect(session.resourceLoader.getExtensions().extensions).toEqual([]);
+      expect(session.resourceLoader.getSkills().skills).toEqual([]);
+      expect(session.resourceLoader.getPrompts().prompts).toEqual([]);
+      expect(session.resourceLoader.getThemes().themes).toEqual([]);
+      expect(session.resourceLoader.getAgentsFiles().agentsFiles).toEqual([]);
+      expect(session.sessionManager.getSessionFile()).toBeUndefined();
+      const providerSessions = await Effect.runPromise(adapter.listSessions());
+      expect(providerSessions[0]?.threadId).toBe(threadId);
+      expect(providerSessions[0]?.resumeCursor).toBeUndefined();
+
+      await send(adapter);
+      await waitFor(() => expect(completions(events)).toHaveLength(1));
+      expect(captured.modelTools[0]).toEqual([]);
+      expect(captured.modelSystemPrompts[0]).toContain(SKILL_EVOLUTION_SYSTEM_PROMPT);
+      expect(captured.modelSystemPrompts[0]).not.toContain(cwd);
+      expect(captured.modelSystemPrompts[0]).not.toContain("Do not inherit");
+      const reload = vi.spyOn(session, "reload");
+      await Effect.runPromise(adapter.sendTurn({ threadId, input: "/reload" }));
+      await waitFor(() => expect(completions(events)).toHaveLength(2));
+      expect(reload).not.toHaveBeenCalled();
+      expect(captured.modelTools[1]).toEqual([]);
+      expect(captured.modelSystemPrompts[1]).toContain(SKILL_EVOLUTION_SYSTEM_PROMPT);
+      expect(credentials.connectionForThread).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(modelCalls()).toBe(2);
+      expect(existsSync(path.join(cwd, "sessions"))).toBe(false);
+    },
+    1,
+    credentials,
+    {
+      executionPurpose: "skill-evolution",
+      enableComputerControl: true,
+      expertSession: {
+        snapshotId: "ambient-expert-must-not-load",
+        persona: "Do not inherit this Expert.",
+        skillsRoot: "/tmp/skill-evolution-skills",
+        skills: [{ name: "ambient", path: "/tmp/skill-evolution-skills/ambient/SKILL.md" }],
+        references: [],
+      },
+      contextSession: {
+        snapshotId: "ambient-context-must-not-load",
+        snapshotHash: "ambient-hash",
+        text: "Do not inherit this Context.",
+        hasContent: true,
+      },
+      prepareCwd: (cwd) =>
+        writeFileSync(path.join(cwd, "AGENTS.md"), "Do not load this project instruction."),
+    },
+    fetch,
   );
 });
 

@@ -74,7 +74,8 @@ export function ExpertsSettingsPanel(props: {
       replace?: boolean,
     ) => Promise<void>;
   };
-  readonly renderHistory?: (expertId: string) => ReactNode;
+  readonly renderHistory?: (expertId: string, canExtract: boolean) => ReactNode;
+  readonly renderEvolution?: (expert: ExpertDefinition, active: boolean) => ReactNode;
   readonly onUseExpert?: (expertId: string) => Promise<void>;
   readonly initialExpertId?: string;
   readonly onOpenConnections?: (expertId: string, connectionId?: string) => void;
@@ -732,7 +733,19 @@ export function ExpertsSettingsPanel(props: {
                 ) : null}
               </>
             }
-            history={baseline && props.renderHistory ? props.renderHistory(baseline.id) : undefined}
+            history={
+              baseline && props.renderHistory
+                ? props.renderHistory(baseline.id, !readonly)
+                : undefined
+            }
+            evolution={
+              baseline && props.renderEvolution
+                ? props.renderEvolution(
+                    baseline,
+                    active && view === "editor" && tab === "evolution",
+                  )
+                : undefined
+            }
             draft={draft}
             issues={issues}
             tab={tab}

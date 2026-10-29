@@ -1,4 +1,5 @@
 import { SkillLibraryRpcInput } from "./skillLibrary";
+import { SkillEvolutionRpcInput } from "./skillEvolution";
 import { SkillManagementCredentialRevokeInput } from "./skillManagementAuth";
 import {
   HubPlanListInputSchema,
@@ -385,6 +386,7 @@ export const WS_METHODS = {
   serverDeleteExpert: "server.deleteExpert",
   serverPreviewExpert: "server.previewExpert",
   serverSkillLibrary: "server.skillLibrary",
+  serverSkillEvolution: "server.skillEvolution",
   serverReadSkillManagementAccess: "server.readSkillManagementAccess",
   serverCreateSkillManagementPairing: "server.createSkillManagementPairing",
   serverListSkillManagementCredentials: "server.listSkillManagementCredentials",
@@ -736,6 +738,7 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverDeleteExpert, ExpertDeleteInput),
   tagRequestBody(WS_METHODS.serverPreviewExpert, ExpertPreviewInput),
   tagRequestBody(WS_METHODS.serverSkillLibrary, SkillLibraryRpcInput),
+  tagRequestBody(WS_METHODS.serverSkillEvolution, SkillEvolutionRpcInput),
   tagRequestBody(WS_METHODS.serverReadSkillManagementAccess, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverCreateSkillManagementPairing, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverListSkillManagementCredentials, Schema.Struct({})),

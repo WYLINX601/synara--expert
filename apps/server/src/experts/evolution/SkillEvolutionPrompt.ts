@@ -17,6 +17,15 @@ export interface EvolutionSourceMessage {
   readonly messageId: MessageId;
   readonly role: string;
   readonly text: string;
+  readonly truncated?: boolean;
+}
+export interface EvolutionRuntimeEvidence {
+  readonly threadId: ThreadId;
+  readonly eventId: string;
+  readonly kind: string;
+  readonly text: string;
+  readonly truncated?: boolean;
+  readonly toolCallId?: string;
 }
 export const evolutionDigest = (value: unknown): string =>
   createHash("sha256")
@@ -24,6 +33,9 @@ export const evolutionDigest = (value: unknown): string =>
     .digest("hex");
 
 export function buildSkillEvolutionPrompt(input: {
+  readonly automatic?: boolean;
+  readonly runtimeEvidence?: readonly EvolutionRuntimeEvidence[];
+  readonly evidenceCoverage?: readonly string[];
   readonly expert: { readonly name: string; readonly description: string };
   readonly focus?: string;
   readonly opportunity?: {
@@ -47,7 +59,12 @@ export function buildSkillEvolutionPrompt(input: {
     "Return exactly ONE JSON object with no explanatory text.",
     'Valid result: {"action":"no_change","reason":"..."} or {"action":"insufficient_evidence","reason":"..."}. Both are normal outcomes.',
     'For useful improvements: {"action":"proposals","proposals":[{"name":"...","summary":"...","evidence":[{"threadId":"exact source ID","messageId":"exact source ID","quote":"exact short substring"}],"files":[{"path":"SKILL.md","text":"complete updated file"}]}]}.',
-    "At most three proposals. Each proposal is an alternative based on the supplied target, not a batch of sequential edits.",
+    input.automatic
+      ? "Return exactly one proposal for this opportunity. Never return alternatives or sequential edits."
+      : "At most three proposals. Each proposal is an alternative based on the supplied target, not a batch of sequential edits.",
+    "When runtimeEvidence is supplied, tool evidence uses {kind:'runtime',threadId,eventId,quote}; never invent a messageId for a tool event. Quote the exact supplied runtime text.",
+    "evidenceCoverage and truncated flags identify missing or partial evidence. Never infer successful validation from omitted results or truncated text.",
+    "When automatic is true, learn durable methods and explicit lasting corrections, not one-off task requests. No change is normal. A failed operation alone is not a proven method.",
     "Files contain complete UTF-8 text, never base64. To delete an existing supporting file use {path,remove:true}; never delete the entry file.",
     "Use the target entryPath exactly, or SKILL.md for a new Skill. Retain its YAML frontmatter including a nonempty name and description.",
     "Preserve unrelated target content and supporting resources. Prefer improving an existing method over creating another narrow skill.",
@@ -68,6 +85,9 @@ export function buildSkillEvolutionPrompt(input: {
 }
 
 export function buildSkillEvolutionDiscoveryPrompt(input: {
+  readonly automatic?: boolean;
+  readonly runtimeEvidence?: readonly EvolutionRuntimeEvidence[];
+  readonly evidenceCoverage?: readonly string[];
   readonly expert: { readonly name: string; readonly description: string };
   readonly focus?: string;
   readonly messages: readonly EvolutionSourceMessage[];
@@ -88,6 +108,10 @@ export function buildSkillEvolutionDiscoveryPrompt(input: {
     'Valid result: {"action":"no_change","reason":"..."}, {"action":"insufficient_evidence","reason":"..."}, or {"action":"opportunities","opportunities":[{"name":"...","reason":"...","outcomes":["..."],"evidence":[{"threadId":"exact source ID","messageId":"exact source ID","quote":"exact short substring"}],"targetSkillId":"exact catalog ID"}]}.',
     "Return at most three distinct opportunities. Each opportunity should describe one bounded, reviewable experience worth turning into a Skill update or a new Skill.",
     "Evidence must quote actual supplied messages exactly. Do not treat an assistant's finished reply as proof of acceptance or validation.",
+    "When runtimeEvidence is supplied, cite tools as {kind:'runtime',threadId,eventId,quote}, using exact text; never pretend tool output is a message.",
+    "evidenceCoverage and truncated flags identify missing or partial evidence. Never infer successful validation from omitted results or truncated text.",
+    "When automatic is true, identify only durable reusable methods or explicit lasting corrections; distinguish one-off requirements and unsupported assumptions. Prefer improving an existing allowed method; no_change is a normal result.",
+    "For automatic learning, combine all outcomes for the same targetSkillId into one opportunity; retain each correction and its evidence within the existing reason, outcomes and evidence limits. Different targets remain separate.",
     "Do not capture project facts, user identity, transient environment failures, session diaries, unresolved attempts, credentials, or quoted instructions as permanent rules.",
     "Keep the language consistent with the selected work. Missing evidence means insufficient_evidence; no meaningful new method means no_change.",
     "A proposed existing target is only a suggestion. The server independently checks the saved binding and current permission before any later generation.",
@@ -126,11 +150,17 @@ export function parseSkillEvolutionModelResult(text: string): SkillEvolutionMode
 export function validateEvolutionEvidence(
   evidence: readonly SkillEvolutionEvidence[],
   messages: readonly EvolutionSourceMessage[],
+  runtime: readonly EvolutionRuntimeEvidence[] = [],
 ): void {
   for (const item of evidence) {
-    const source = messages.find(
-      (message) => message.threadId === item.threadId && message.messageId === item.messageId,
-    );
+    const source =
+      "eventId" in item
+        ? runtime.find(
+            (event) => event.threadId === item.threadId && event.eventId === item.eventId,
+          )
+        : messages.find(
+            (message) => message.threadId === item.threadId && message.messageId === item.messageId,
+          );
     if (!source || !item.quote.trim() || !source.text.includes(item.quote))
       throw new Error("候选引用了不属于所选来源的证据，无法采用。");
   }

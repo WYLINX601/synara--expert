@@ -23,6 +23,7 @@ import { ThreadGitMetadataReactorLive } from "./orchestration/Layers/ThreadGitMe
 import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderCommandReactor";
 import { ContextRepositoryLive } from "./context/ContextRepository.ts";
 import { SkillEvolutionRepositoryLive } from "./workbench/host/skillEvolutionPersistence.ts";
+import { ExpertLearningRepositoryLive } from "./workbench/host/expertLearningPersistence.ts";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus";
 import { SidechatExpiryReactorLive } from "./orchestration/Layers/SidechatExpiryReactor";
@@ -154,6 +155,7 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(runtimeServicesLayer),
   );
   const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
+    Layer.provideMerge(ExpertLearningRepositoryLive),
     Layer.provideMerge(SkillEvolutionRepositoryLive),
     Layer.provideMerge(ContextRepositoryLive),
     Layer.provideMerge(runtimeServicesLayer),
@@ -308,6 +310,7 @@ export function makeServerRuntimeServicesLayer(
   );
 
   return Layer.mergeAll(
+    ExpertLearningRepositoryLive,
     HubCollaborationConfigLive,
     hubPlanServiceLayer,
     agentGatewayCredentialsLayer,

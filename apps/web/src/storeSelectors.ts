@@ -573,6 +573,8 @@ export function isSidebarThreadVisible(
   if (isSidechatThread(thread)) return false;
   if (thread.parentThreadId && !options?.includeSubagents) return false;
   if (thread.snoozedUntil != null && !options?.includeSnoozed) return false;
+  // Background learning remains reachable by its native task link or an explicit pin.
+  if (thread.creationSource === "expert_learning" && !thread.isPinned) return false;
   if (!options?.hideAutomationRunThreads) return true;
   if (thread.isPinned) return true;
   return !isAutomationRunThread(thread);

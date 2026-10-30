@@ -89,6 +89,9 @@ import {
   type SkillPackageStore,
 } from "../../experts/SkillPackageStore.ts";
 import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore";
+import { ExpertLearningRepository } from "../../experts/evolution/ExpertLearningRepository";
+import { frozenLearningEntriesReader } from "../../experts/evolution/ExpertLearningState";
+import { acquireExpertLearningAdmission } from "../../experts/expertLearningCommit";
 import { expertSnapshotSession } from "../../experts/expertSnapshotSession";
 import { captureSkillEvolutionExecutionReader } from "../../workbench/host/skillEvolutionExecution";
 import {
@@ -1049,12 +1052,21 @@ function runtimeLastErrorForEvent(event: ProviderRuntimeEvent): string | null | 
 
 const makeProviderService = (options?: ProviderServiceLiveOptions) =>
   Effect.gen(function* () {
+    const learningRepository = yield* Effect.serviceOption(ExpertLearningRepository);
     const skillPackageStore: SkillPackageStore | undefined = options?.stateDir
       ? createSkillPackageStore(options.stateDir)
       : undefined;
     const expertStore = options?.stateDir ? createExpertStore(options.stateDir) : undefined;
     const runSkillAssemblyStore = options?.stateDir
-      ? createRunSkillAssemblyStore(options.stateDir)
+      ? createRunSkillAssemblyStore(
+          options.stateDir,
+          Option.isSome(learningRepository)
+            ? {
+                frozenEntries: (expertId, bindings) =>
+                  frozenLearningEntriesReader(learningRepository.value)(expertId, bindings ?? []),
+              }
+            : {},
+        )
       : undefined;
     const canonicalEventLogger =
       options?.canonicalEventLogger ??
@@ -1078,6 +1090,42 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           ),
         ),
       );
+    const withAutomaticLearningAdmission = <A, E, R>(
+      threadId: ThreadId,
+      operation: string,
+      action: Effect.Effect<A, E, R>,
+    ) =>
+      Effect.gen(function* () {
+        const execution = yield* evolutionExecutionFor(threadId, operation);
+        if (execution?.origin !== "automatic") return yield* action;
+        if (!options?.stateDir)
+          return yield* toValidationError(
+            operation,
+            "Automatic learning admission requires durable state.",
+          );
+        return yield* Effect.acquireUseRelease(
+          Effect.tryPromise({
+            try: () => acquireExpertLearningAdmission(options.stateDir!),
+            catch: (cause) =>
+              toValidationError(operation, "Cannot acquire automatic learning admission.", cause),
+          }),
+          () =>
+            Effect.gen(function* () {
+              const current = yield* evolutionExecutionFor(threadId, operation);
+              if (
+                current?.origin !== "automatic" ||
+                current.requestId !== execution.requestId ||
+                current.learningEpoch !== execution.learningEpoch
+              )
+                return yield* toValidationError(
+                  operation,
+                  "Automatic learning execution identity changed before admission.",
+                );
+              return yield* action;
+            }),
+          (release) => Effect.sync(release),
+        );
+      });
     const sameEvolutionModel = (expected: ModelSelection, actual: ModelSelection | undefined) =>
       actual !== undefined &&
       expected.provider === actual.provider &&
@@ -4268,10 +4316,14 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 // The lifecycle is updated inside observeProviderStartup; these taps
                 // only log the already-recorded outcome.
                 const started = yield* observeProviderStartup(
-                  startAdapterWithStaleDevinFallback(
-                    adapter,
-                    resolvedAdapterStartInput,
-                    preparedStart,
+                  withAutomaticLearningAdmission(
+                    threadId,
+                    "ProviderService.startSession",
+                    startAdapterWithStaleDevinFallback(
+                      adapter,
+                      resolvedAdapterStartInput,
+                      preparedStart,
+                    ),
                   ),
                   { lifecycle: startupLifecycle, timeout: PROVIDER_START_SESSION_TIMEOUT },
                 ).pipe(
@@ -5387,9 +5439,15 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 : {}),
             };
             if (dispatchOptions?.beforeDispatch) yield* dispatchOptions.beforeDispatch;
-            const turn = yield* dispatchOptions
-              ? routed.adapter.sendTurn(routedInput, dispatchOptions)
-              : routed.adapter.sendTurn(routedInput);
+            const turn = yield* withAutomaticLearningAdmission(
+              input.threadId,
+              "ProviderService.sendTurn",
+              Effect.suspend(() =>
+                dispatchOptions
+                  ? routed.adapter.sendTurn(routedInput, dispatchOptions)
+                  : routed.adapter.sendTurn(routedInput),
+              ),
+            );
             const persistenceInput: StartedTurnPersistenceInput = {
               threadId: input.threadId,
               provider: routed.adapter.provider,
@@ -5494,9 +5552,16 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 : {}),
             };
             if (dispatchOptions?.beforeDispatch) yield* dispatchOptions.beforeDispatch;
-            const turn = yield* dispatchOptions
-              ? routed.adapter.steerTurn(routedInput, dispatchOptions)
-              : routed.adapter.steerTurn(routedInput);
+            const nativeSteerTurn = routed.adapter.steerTurn;
+            const turn = yield* withAutomaticLearningAdmission(
+              input.threadId,
+              "ProviderService.steerTurn",
+              Effect.suspend(() =>
+                dispatchOptions
+                  ? nativeSteerTurn(routedInput, dispatchOptions)
+                  : nativeSteerTurn(routedInput),
+              ),
+            );
             const persistenceInput: StartedTurnPersistenceInput = {
               threadId: input.threadId,
               provider: routed.adapter.provider,

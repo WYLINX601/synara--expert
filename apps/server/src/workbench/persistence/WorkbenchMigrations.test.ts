@@ -136,6 +136,13 @@ it.effect("uses stable expert checksums and rejects malformed or future extensio
     assert.isFalse(planWorkbenchHistory(gap).ok);
     assert.isFalse(planWorkbenchHistory(future).ok);
     assert.isFalse(planWorkbenchHistory(unsupportedModule).ok);
+
+    const complete = planWorkbenchHistory(workbenchRows(workbenchMigrationEntries.length));
+    assert.isTrue(complete.ok);
+    if (complete.ok) {
+      assert.strictEqual(complete.applied.at(-1)?.migrationId, 11);
+      assert.strictEqual(complete.applied.at(-1)?.name, "ExpertAutomaticLearning");
+    }
   }),
 );
 
@@ -485,6 +492,36 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
         { name: "hub_id", pk: 1 },
         { name: "expert_id", pk: 2 },
       ]);
+      const learningTables = yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN (
+          'expert_learning_states',
+          'expert_learning_evidence',
+          'expert_learning_cycles'
+        )
+        ORDER BY name
+      `;
+      assert.deepStrictEqual(
+        learningTables.map(({ name }) => name),
+        ["expert_learning_cycles", "expert_learning_evidence", "expert_learning_states"],
+      );
+      const learningIndexes = yield* sql<{ readonly name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'index' AND name IN (
+          'expert_learning_states_updated',
+          'expert_learning_evidence_owner_expert',
+          'expert_learning_cycles_owner_expert'
+        )
+        ORDER BY name
+      `;
+      assert.deepStrictEqual(
+        learningIndexes.map(({ name }) => name),
+        [
+          "expert_learning_cycles_owner_expert",
+          "expert_learning_evidence_owner_expert",
+          "expert_learning_states_updated",
+        ],
+      );
       const foreignKeys = yield* sql<{
         readonly table: string;
         readonly from: string;

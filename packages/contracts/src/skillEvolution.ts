@@ -10,6 +10,7 @@ import {
   TurnId,
 } from "./baseSchemas";
 import { ModelSelection } from "./orchestration";
+import { ExpertLearningState } from "./expertLearning";
 import {
   SkillDefinition,
   SkillFileChange,
@@ -42,11 +43,15 @@ export const SkillEvolutionSource = Schema.Struct({
 });
 export type SkillEvolutionSource = typeof SkillEvolutionSource.Type;
 
-export const SkillEvolutionEvidence = Schema.Struct({
-  threadId: ThreadId,
-  messageId: MessageId,
-  quote: ShortText,
-});
+export const SkillEvolutionEvidence = Schema.Union([
+  Schema.Struct({ threadId: ThreadId, messageId: MessageId, quote: ShortText }),
+  Schema.Struct({
+    kind: Schema.Literal("runtime"),
+    threadId: ThreadId,
+    eventId: Id,
+    quote: ShortText,
+  }),
+]);
 export type SkillEvolutionEvidence = typeof SkillEvolutionEvidence.Type;
 
 /** A reviewable learning opportunity, before any Skill files are generated. */
@@ -98,6 +103,9 @@ export type SkillEvolutionProposal = typeof SkillEvolutionProposal.Type;
 export const SkillEvolutionRun = Schema.Struct({
   requestId: Id,
   expertId: Id,
+  origin: Schema.optional(Schema.Literals(["manual", "automatic"])),
+  cycleId: Schema.optional(Id),
+  learningEpoch: Schema.optional(NonNegativeInt),
   /** Missing on historical generation records; all new requests set their stage. */
   stage: Schema.optional(Schema.Literals(["discovery", "generation"])),
   discoveryRequestId: Schema.optional(Id),
@@ -195,6 +203,14 @@ const action = <T extends string, F extends Schema.Struct.Fields>(name: T, field
 export const SkillEvolutionRequest = Schema.Union([
   action("sources", { expertId: Id }),
   action("capabilities", {}),
+  action("learningRead", { expertId: Id }),
+  action("learningSet", {
+    expertId: Id,
+    requestId: Id,
+    expectedRevision: NonNegativeInt,
+    enabled: Schema.Boolean,
+    harnessKind: Schema.optional(Schema.Literals(["omp", "pi"])),
+  }),
   action("list", { expertId: Id }),
   action("start", {
     requestId: Id,
@@ -252,6 +268,7 @@ export const SkillEvolutionRequest = Schema.Union([
 ]);
 export type SkillEvolutionRequest = typeof SkillEvolutionRequest.Type;
 export const SkillEvolutionResponse = Schema.Struct({
+  learningState: Schema.optional(ExpertLearningState),
   sources: Schema.optional(Schema.Array(SkillEvolutionSource)),
   capabilities: Schema.optional(Schema.Array(SkillEvolutionCapability)),
   runs: Schema.optional(Schema.Array(SkillEvolutionRun)),

@@ -5,6 +5,7 @@ import {
   MessageId,
   ThreadId,
   TurnId,
+  type ExpertLearningEvidence,
   type ExpertSkillBinding,
   type OrchestrationCommand,
   type OrchestrationMessage,
@@ -296,6 +297,7 @@ function newService(input: {
   library: ReturnType<typeof createSkillLibraryStore>;
   repository: ReturnType<typeof makeRepository>;
   host: FakeHost;
+  authorizeAutomatic?: (run: SkillEvolutionRun) => Promise<void>;
 }) {
   let tick = 0;
   const service = createSkillEvolutionService({
@@ -308,6 +310,7 @@ function newService(input: {
     host: input.host,
     now: () => new Date(Date.UTC(2026, 9, 29, 0, 0, tick++)),
     pollMs: 60_000,
+    ...(input.authorizeAutomatic ? { authorizeAutomatic: input.authorizeAutomatic } : {}),
   });
   services.push(service);
   return service;
@@ -632,6 +635,551 @@ async function setBindings(
   if (!expert) throw new Error("fixture Expert disappeared");
   return bind(state.library, expert, bindings, requestId);
 }
+
+describe("SkillEvolutionService automatic host boundary", () => {
+  async function automaticFixture(
+    id: string,
+    evidenceOverride?: (
+      source: ReturnType<typeof addStandardSource>,
+    ) => Pick<ExpertLearningEvidence, "coverage" | "items">,
+    withBoundTarget = false,
+  ) {
+    const state = await fixture();
+    await state.service.dispose();
+    let allowed = true;
+    state.service = newService({
+      ...state,
+      authorizeAutomatic: async () => {
+        if (!allowed) throw new Error("learning epoch closed");
+      },
+    });
+    const expert = await createExpert(state.experts, id);
+    const targetSkill = withBoundTarget
+      ? await createSkill(state.library, { name: `Target ${id}` })
+      : undefined;
+    if (targetSkill)
+      await bind(
+        state.library,
+        expert,
+        [{ skillId: targetSkill.skillId, enabled: true, allowEvolution: true }],
+        `bind-${id}-target`,
+      );
+    const source = addStandardSource(state.host, expert.id);
+    const thread = state.host.threads.get(source.threadId)!;
+    const evidenceContent = evidenceOverride?.(source);
+    const evidence: import("@synara/contracts").ExpertLearningEvidence = {
+      evidenceId: "evidence-" + id,
+      ownerId,
+      expertId: id,
+      threadId: source.threadId,
+      turnId: source.turnId,
+      projectId: thread.projectId,
+      snapshotId: thread.expertBinding!.snapshotId,
+      modelSelection,
+      updatedAt: createdAt,
+      completedAt: createdAt,
+      coverage: evidenceContent?.coverage ?? [],
+      items: evidenceContent?.items ?? [
+        {
+          id: source.assistantId,
+          kind: "message",
+          role: "assistant",
+          text: "Verified evidence: keep a decision log.",
+        },
+        { id: "native-tool-result", kind: "tool_result", text: "check exited successfully" },
+      ],
+    };
+    const discovery = (
+      await state.service.startAutomatic(
+        {
+          action: "start",
+          requestId: "auto-discovery-" + id,
+          expertId: id,
+          sources: [source],
+          modelSelection,
+        },
+        { cycleId: "cycle-" + id, epoch: 1, evidence },
+      )
+    ).run!;
+    return {
+      state,
+      expert,
+      source,
+      discovery,
+      ...(targetSkill ? { targetSkill } : {}),
+      close: () => {
+        allowed = false;
+      },
+    };
+  }
+
+  function automaticPromptPayload(host: FakeHost, threadId: ThreadId) {
+    const command = host.dispatches.find(
+      (item) => item.type === "thread.turn.start" && item.threadId === threadId,
+    );
+    if (!command || command.type !== "thread.turn.start")
+      throw new Error("automatic prompt was not dispatched");
+    const marker = "\nSOURCE_DATA\n";
+    const markerIndex = command.message.text.lastIndexOf(marker);
+    if (markerIndex < 0) throw new Error("automatic prompt has no SOURCE_DATA payload");
+    return JSON.parse(command.message.text.slice(markerIndex + marker.length)) as Record<
+      string,
+      unknown
+    >;
+  }
+
+  function sameTargetOpportunityResponse(
+    source: ReturnType<typeof addStandardSource>,
+    targetSkillId: string,
+    includeRuntimeEvidence = true,
+  ) {
+    return JSON.stringify({
+      action: "opportunities",
+      opportunities: [
+        {
+          name: "Decision log",
+          reason: "Capture the selected decision before proceeding.",
+          outcomes: ["Write down the decision and its rationale."],
+          evidence: [
+            {
+              threadId: source.threadId,
+              messageId: source.assistantId,
+              quote: "keep a decision log",
+            },
+          ],
+          targetSkillId,
+        },
+        {
+          name: "Check verification",
+          reason: "Preserve the verified check result before reporting completion.",
+          outcomes: ["Record the exact check output before reporting success."],
+          evidence: includeRuntimeEvidence
+            ? [
+                {
+                  kind: "runtime",
+                  threadId: source.threadId,
+                  eventId: "native-tool-result",
+                  quote: "check exited successfully",
+                },
+              ]
+            : [
+                {
+                  threadId: source.threadId,
+                  messageId: source.assistantId,
+                  quote: "Verified evidence",
+                },
+              ],
+          targetSkillId,
+        },
+      ],
+    });
+  }
+
+  it("merges automatic opportunities for one target and generates one proposal from both", async () => {
+    const fixture = await automaticFixture("automatic-target-merge", undefined, true);
+    const targetSkill = fixture.targetSkill;
+    if (!targetSkill) throw new Error("fixture did not bind its target Skill");
+    const learned = await completeStage(
+      fixture.state,
+      fixture.discovery,
+      sameTargetOpportunityResponse(fixture.source, targetSkill.skillId),
+    );
+
+    expect(learned.opportunities).toHaveLength(1);
+    const opportunity = learned.opportunities![0]!;
+    expect(opportunity).toMatchObject({
+      name: "Decision log",
+      targetSkillId: targetSkill.skillId,
+      reason:
+        "Capture the selected decision before proceeding.\n\n[Check verification] Preserve the verified check result before reporting completion.",
+      outcomes: [
+        "Write down the decision and its rationale.",
+        "Record the exact check output before reporting success.",
+      ],
+      evidence: expect.arrayContaining([
+        {
+          threadId: fixture.source.threadId,
+          messageId: fixture.source.assistantId,
+          quote: "keep a decision log",
+        },
+        {
+          kind: "runtime",
+          threadId: fixture.source.threadId,
+          eventId: "native-tool-result",
+          quote: "check exited successfully",
+        },
+      ]),
+    });
+
+    const generation = await startGeneration(
+      fixture.state,
+      learned,
+      "automatic-target-merge-generation",
+    );
+    const generationPayload = automaticPromptPayload(fixture.state.host, generation.taskThreadId!);
+    expect(generationPayload.opportunity).toMatchObject({
+      reason: expect.stringContaining("[Check verification] Preserve the verified check result"),
+      outcomes: [
+        "Write down the decision and its rationale.",
+        "Record the exact check output before reporting success.",
+      ],
+      evidence: expect.arrayContaining([
+        expect.objectContaining({ messageId: fixture.source.assistantId }),
+        expect.objectContaining({ eventId: "native-tool-result" }),
+      ]),
+    });
+    const ready = await completeStage(
+      fixture.state,
+      generation,
+      proposalText({
+        name: "Decision and verification",
+        text: entry(
+          "decision-and-verification",
+          "Record the decision and verify the exact check output before reporting completion.",
+        ),
+        threadId: fixture.source.threadId,
+        messageId: fixture.source.assistantId,
+      }),
+    );
+    expect(ready.proposals).toHaveLength(1);
+  });
+
+  it("keeps same-target opportunities separate for manual discovery", async () => {
+    const state = await fixture();
+    const expert = await createExpert(state.experts, "manual-same-target");
+    const targetSkill = await createSkill(state.library, { name: "Manual same target" });
+    await bind(
+      state.library,
+      expert,
+      [{ skillId: targetSkill.skillId, enabled: true, allowEvolution: true }],
+      "bind-manual-same-target",
+    );
+    const source = addStandardSource(state.host, expert.id, "manual-same-target");
+    const discovery = await startDiscovery(state, {
+      requestId: "manual-same-target-discovery",
+      expertId: expert.id,
+      sources: [source],
+    });
+    const learned = await completeStage(
+      state,
+      discovery,
+      sameTargetOpportunityResponse(source, targetSkill.skillId, false),
+    );
+
+    expect(learned.origin).toBeUndefined();
+    expect(learned.opportunities).toHaveLength(2);
+    expect(learned.opportunities?.map((item) => item.name)).toEqual([
+      "Decision log",
+      "Check verification",
+    ]);
+    expect(learned.opportunities?.map((item) => item.targetSkillId)).toEqual([
+      targetSkill.skillId,
+      targetSkill.skillId,
+    ]);
+  });
+
+  it("uses typed runtime evidence and creates a privately bound Skill that remains editable", async () => {
+    const { state, expert, source, discovery } = await automaticFixture("automatic-create");
+    const nativeCreate = state.host.dispatches.find((command) => command.type === "thread.create");
+    expect(nativeCreate).toMatchObject({
+      creationSource: "expert_learning",
+      sourceThreadId: source.threadId,
+    });
+    const learned = await completeStage(
+      state,
+      discovery,
+      JSON.stringify({
+        action: "opportunities",
+        opportunities: [
+          {
+            name: "Verified checks",
+            reason: "A confirmed check supports a reusable step.",
+            outcomes: ["Run the check before reporting."],
+            evidence: [
+              {
+                kind: "runtime",
+                threadId: source.threadId,
+                eventId: "native-tool-result",
+                quote: "check exited successfully",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    expect(learned.origin).toBe("automatic");
+    const generated = await startGeneration(state, learned, "automatic-create-generation");
+    expect(generated).toMatchObject({
+      origin: "automatic",
+      learningEpoch: 1,
+      cycleId: "cycle-automatic-create",
+    });
+    const ready = await completeStage(
+      state,
+      generated,
+      proposalText({
+        name: "Verified checks",
+        text: entry("verified-checks", "Keep a decision log and verify the result."),
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const proposal = ready.proposals[0]!;
+    const adopted = await state.service.execute({
+      action: "apply",
+      requestId: ready.requestId,
+      proposalId: proposal.proposalId,
+      expectedDigest: proposal.digest,
+      operationId: "automatic-create-adoption",
+    });
+    expect(adopted.run?.proposals[0]?.status).toBe("applied");
+    expect((await state.experts.read(expert.id))?.skillBindings).toContainEqual({
+      skillId: adopted.skill!.skillId,
+      enabled: true,
+      allowEvolution: true,
+    });
+    expect(adopted.skill?.scope).toEqual({ kind: "expert", expertId: expert.id });
+    const replay = await state.service.execute({
+      action: "apply",
+      requestId: ready.requestId,
+      proposalId: proposal.proposalId,
+      expectedDigest: proposal.digest,
+      operationId: "automatic-create-adoption",
+    });
+    expect(replay.run?.proposals[0]?.status).toBe("applied");
+    expect(state.repository.events.size).toBe(1);
+  });
+
+  it("preserves bounded evidence and coverage in actual discovery and generation prompts", async () => {
+    const fixture = await automaticFixture("automatic-prompt-evidence", (source) => {
+      const messages: ExpertLearningEvidence["items"] = [
+        {
+          id: "discarded-message",
+          kind: "message",
+          role: "user",
+          text: "Old message outside the prompt item budget.",
+        },
+        {
+          id: "already-truncated-message",
+          kind: "message",
+          role: "user",
+          text: "This message was clipped while capturing evidence.",
+          truncated: true,
+        },
+        ...Array.from({ length: 4 }, (_, index) => ({
+          id: `context-message-${index}`,
+          kind: "message" as const,
+          role: "user" as const,
+          text: `Context message ${index}.`,
+        })),
+        {
+          id: source.assistantId,
+          kind: "message",
+          role: "assistant",
+          text: `${"long assistant evidence ".repeat(220)}\nVerified evidence: keep a decision log.`,
+        },
+      ];
+      const runtimeItems: ExpertLearningEvidence["items"] = [
+        {
+          id: "discarded-runtime",
+          kind: "activity",
+          text: "Old runtime evidence outside the prompt item budget.",
+        },
+        {
+          id: "already-truncated-tool-call",
+          kind: "tool_call",
+          toolCallId: "tool-call-already-truncated",
+          text: "This tool call was clipped while capturing evidence.",
+          truncated: true,
+        },
+        ...Array.from({ length: 18 }, (_, index) => ({
+          id: `runtime-context-${index}`,
+          kind: "activity" as const,
+          text: `Runtime context ${index}.`,
+        })),
+        {
+          id: "native-tool-result",
+          kind: "tool_result",
+          toolCallId: "tool-call-automatic",
+          text: `check exited successfully ${"runtime result evidence ".repeat(100)}`,
+        },
+      ];
+      return {
+        coverage: ["user_feedback", "coverage-preserved-marker"],
+        items: [...messages, ...runtimeItems],
+      };
+    });
+    const discovery = fixture.discovery;
+    const discoveryPayload = automaticPromptPayload(fixture.state.host, discovery.taskThreadId!);
+    const discoveryMessages = discoveryPayload.messages as Array<Record<string, unknown>>;
+    const discoveryRuntime = discoveryPayload.runtimeEvidence as Array<Record<string, unknown>>;
+    const longMessage = discoveryMessages.find(
+      (item) => item.messageId === fixture.source.assistantId,
+    );
+    const clippedToolResult = discoveryRuntime.find(
+      (item) => item.eventId === "native-tool-result",
+    );
+
+    expect(discoveryMessages).toHaveLength(6);
+    expect(longMessage).toMatchObject({
+      truncated: true,
+      text: expect.stringContaining("Verified evidence: keep a decision log."),
+    });
+    expect((longMessage?.text as string).length).toBe(4_000);
+    expect(
+      discoveryMessages.find((item) => item.messageId === "already-truncated-message"),
+    ).toMatchObject({ truncated: true });
+    expect(discoveryRuntime).toHaveLength(20);
+    expect(
+      discoveryRuntime.find((item) => item.eventId === "already-truncated-tool-call"),
+    ).toMatchObject({ toolCallId: "tool-call-already-truncated", truncated: true });
+    expect(clippedToolResult).toMatchObject({
+      toolCallId: "tool-call-automatic",
+      truncated: true,
+      text: expect.stringContaining("check exited successfully"),
+    });
+    expect((clippedToolResult?.text as string).length).toBe(1_500);
+    expect(discoveryPayload.evidenceCoverage).toEqual([
+      "user_feedback",
+      "coverage-preserved-marker",
+      "prompt-messages-truncated",
+      "prompt-runtime-items-truncated",
+    ]);
+
+    const learned = await completeStage(
+      fixture.state,
+      discovery,
+      opportunityText({
+        name: "Decision process",
+        threadId: fixture.source.threadId,
+        messageId: fixture.source.assistantId,
+      }),
+    );
+    const generation = await startGeneration(
+      fixture.state,
+      learned,
+      "automatic-prompt-evidence-generation",
+    );
+    const generationPayload = automaticPromptPayload(fixture.state.host, generation.taskThreadId!);
+    expect(generationPayload.messages).toEqual(discoveryPayload.messages);
+    expect(generationPayload.runtimeEvidence).toEqual(discoveryPayload.runtimeEvidence);
+    expect(generationPayload.evidenceCoverage).toEqual(discoveryPayload.evidenceCoverage);
+  });
+
+  it("cannot write a late automatic draft after learning authorization is closed", async () => {
+    const { state, expert, source, discovery, close } = await automaticFixture("automatic-close");
+    const learned = await completeStage(
+      state,
+      discovery,
+      opportunityText({
+        name: "Decision process",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const generated = await startGeneration(state, learned, "automatic-close-generation");
+    const ready = await completeStage(
+      state,
+      generated,
+      proposalText({
+        name: "Decision process",
+        text: entry("decision-process", "Keep a decision log."),
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    close();
+    const proposal = ready.proposals[0]!;
+    await expect(
+      state.service.execute({
+        action: "apply",
+        requestId: ready.requestId,
+        proposalId: proposal.proposalId,
+        expectedDigest: proposal.digest,
+        operationId: "late-automatic-write",
+      }),
+    ).rejects.toThrow("learning epoch closed");
+    expect(await readSkillLibraryDefinitions(state.stateDir)).toEqual([]);
+    expect((await state.experts.read(expert.id))?.skillBindings).toEqual([]);
+    expect(state.repository.events.size).toBe(0);
+  });
+
+  it("replays a saved automatic creation intent on reading the same generation", async () => {
+    const { state, source, discovery } = await automaticFixture("automatic-partial-replay");
+    const learned = await completeStage(
+      state,
+      discovery,
+      opportunityText({
+        name: "Decision process",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const generated = await startGeneration(state, learned, "automatic-partial-replay-generation");
+    const ready = await completeStage(
+      state,
+      generated,
+      proposalText({
+        name: "Decision process",
+        text: entry("decision-process", "Keep a decision log and verify the result."),
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const proposal = ready.proposals[0]!;
+    const operation = {
+      action: "apply" as const,
+      requestId: ready.requestId,
+      proposalId: proposal.proposalId,
+      expectedDigest: proposal.digest,
+      operationId: "automatic-partial-replay-adoption",
+    };
+    const beforeReplay = {
+      threadCreates: state.host.dispatches.filter((command) => command.type === "thread.create")
+        .length,
+      requests: state.repository.rows.size,
+    };
+    const execute = state.library.execute.bind(state.library);
+    let failBindingOnce = true;
+    const bindingSpy = vi.spyOn(state.library, "execute").mockImplementation((request, context) => {
+      if (failBindingOnce && request.action === "bindings" && request.operation === "set") {
+        failBindingOnce = false;
+        return Promise.reject(new Error("Injected one-time automatic binding interruption."));
+      }
+      return execute(request, context);
+    });
+    let partial: Awaited<ReturnType<typeof state.service.execute>>;
+    try {
+      partial = await state.service.execute(operation);
+    } finally {
+      bindingSpy.mockRestore();
+    }
+
+    expect(partial.run?.proposals[0]?.status, partial.run?.proposals[0]?.error).toBe(
+      "saved_unbound",
+    );
+    const savedSkillId = partial.run?.proposals[0]?.resultSkillId;
+    expect(savedSkillId).toBeTruthy();
+    expect(state.repository.events.size).toBe(0);
+    expect((await state.library.execute({ action: "list" })).items).toHaveLength(1);
+    expect((await state.experts.read("automatic-partial-replay"))?.skillBindings).toEqual([]);
+
+    const replay = await state.service.execute({ action: "read", requestId: ready.requestId });
+    expect(replay.run?.proposals[0]?.status, replay.run?.proposals[0]?.error).toBe("applied");
+    expect(replay.run?.proposals[0]?.resultSkillId).toBe(savedSkillId);
+    expect((await state.library.execute({ action: "list" })).items).toHaveLength(1);
+    expect((await state.experts.read("automatic-partial-replay"))?.skillBindings).toContainEqual({
+      skillId: savedSkillId,
+      enabled: true,
+      allowEvolution: true,
+    });
+    expect(state.repository.events.size).toBe(1);
+    expect(
+      state.host.dispatches.filter((command) => command.type === "thread.create"),
+    ).toHaveLength(beforeReplay.threadCreates);
+    expect(state.repository.rows.size).toBe(beforeReplay.requests);
+  });
+});
 
 describe("SkillEvolutionService deterministic workflows", () => {
   it("advertises the verified native OMP extraction capability", async () => {

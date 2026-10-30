@@ -23,6 +23,7 @@ export function ExpertEditor({
   header,
   history,
   evolution,
+  learning,
   status,
   draft,
   issues,
@@ -38,6 +39,7 @@ export function ExpertEditor({
   header: ReactNode;
   history?: ReactNode;
   evolution?: ReactNode;
+  learning?: ReactNode;
   status?: ReactNode;
   draft: ExpertSaveInput;
   issues: ReadonlyArray<ExpertDraftIssue>;
@@ -268,6 +270,7 @@ export function ExpertEditor({
                     </SettingsSelectPopup>
                   </Select>
                 </div>
+                {learning ? <div className="mt-4">{learning}</div> : null}
               </SettingsSectionShell>
             </SettingsCard>
           </div>

@@ -11,6 +11,7 @@ import {
   createLastActivityTimestampSelector,
   createProjectLastActivityAtSelector,
   createSidebarDisplayThreadsSelector,
+  createSidebarThreadSummariesSelector,
   createSidechatSummariesForGitHubItemSelector,
   createSidechatSummariesForSourceSelector,
   createThreadExistsSelector,
@@ -271,6 +272,31 @@ describe("sidebar thread visibility", () => {
     } as SidebarThreadSummary;
     expect(isSidebarThreadVisible(standaloneSidechat)).toBe(false);
     expect(isSidebarThreadVisible(sidechatSummary, { hideAutomationRunThreads: true })).toBe(false);
+  });
+
+  it("hides background learning by default while preserving explicitly pinned tasks", () => {
+    const learning = { ...summaryA, creationSource: "expert_learning" } as SidebarThreadSummary;
+    const pinned = { ...learning, id: threadIdB, isPinned: true };
+    const learningState = makeState({
+      threadIds: [threadIdA, threadIdB, threadIdC],
+      sidebarThreadSummaryById: {
+        [threadIdA]: learning,
+        [threadIdB]: pinned,
+        [threadIdC]: normalSummary,
+      },
+    });
+    for (const options of [undefined, { hideAutomationRunThreads: true }]) {
+      expect(isSidebarThreadVisible(learning, options)).toBe(false);
+      expect(isSidebarThreadVisible(pinned, options)).toBe(true);
+      expect(
+        createSidebarDisplayThreadsSelector(options)(learningState).map((thread) => thread.id),
+      ).toEqual([threadIdB, threadIdC]);
+    }
+    expect(createSidebarThreadSummariesSelector()(learningState)).toHaveLength(3);
+    expect(isSidebarThreadVisible({ ...pinned, parentThreadId: threadIdC })).toBe(false);
+    expect(isSidebarThreadVisible({ ...pinned, snoozedUntil: "2026-11-01T00:00:00.000Z" })).toBe(
+      false,
+    );
   });
 
   it("filters run threads out of the display selector", () => {

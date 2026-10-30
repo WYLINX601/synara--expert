@@ -85,6 +85,12 @@ import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { createExpertConnectionStore } from "../../experts/ExpertConnectionStore.ts";
 import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
 import { createSkillLibraryStore } from "../../experts/SkillLibraryStore.ts";
+import {
+  ExpertLearningRepository,
+  type ExpertLearningRepositoryShape,
+  type LearningStateRow,
+} from "../../experts/evolution/ExpertLearningRepository.ts";
+import { captureLearningBindings } from "../../experts/evolution/ExpertLearningState.ts";
 import { listRunSkillAssemblies } from "../../experts/RunSkillAssemblyStore.ts";
 import {
   SkillEvolutionRepository,
@@ -428,6 +434,7 @@ describe("ProviderCommandReactor", () => {
       ProviderServiceShape["cancelClaudeCompactionDiscovery"]
     >;
     readonly skillEvolutionExecution?: SkillEvolutionRepositoryShape["execution"];
+    readonly expertLearningRepository?: ExpertLearningRepositoryShape;
   }) {
     const now = new Date().toISOString();
     const baseDir = input?.baseDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "synara-reactor-"));
@@ -846,6 +853,11 @@ describe("ProviderCommandReactor", () => {
         ),
     } as unknown as (typeof ProjectAgentRepository)["Service"]);
     const reactorLayer = makeProviderCommandReactorLive(input).pipe(
+      Layer.provideMerge(
+        input?.expertLearningRepository
+          ? Layer.succeed(ExpertLearningRepository, input.expertLearningRepository)
+          : Layer.empty,
+      ),
       Layer.provideMerge(
         input?.skillEvolutionExecution
           ? Layer.succeed(SkillEvolutionRepository, {
@@ -14431,6 +14443,186 @@ describe("ProviderCommandReactor", () => {
     expect(latest?.skillEntries?.[0]?.packageId).toBe(nextPackage.package.packageId);
     expect(latest?.persona).toBe(expectedExpertSession.persona);
     expect((await readHarnessThread(harness, threadId))?.expertBinding).toEqual(binding);
+  });
+
+  it("uses frozen learning Skill entries for new Runs while active and missing state use latest", async () => {
+    const rows = new Map<string, LearningStateRow>();
+    const learningRepository: ExpertLearningRepositoryShape = {
+      readState: (ownerId, expertId) => Effect.succeed(rows.get(`${ownerId}\0${expertId}`)),
+      listStates: () => Effect.succeed([...rows.values()]),
+      writeState: () => Effect.void,
+      readEvidence: () => Effect.succeed(undefined),
+      listEvidence: () => Effect.succeed([]),
+      writeEvidence: () => Effect.void,
+      readCycle: () => Effect.succeed(undefined),
+      listCycles: () => Effect.succeed([]),
+      writeCycle: () => Effect.void,
+    };
+    const harness = await createHarness({ expertLearningRepository: learningRepository });
+    const library = createSkillLibraryStore(harness.stateDir);
+    const expertStore = createExpertStore(harness.stateDir);
+    const originalBody =
+      "---\nname: reactor-pinned-skill\ndescription: Reactor frozen skill\n---\nOriginal frozen content.\n";
+    const originalSkill = (
+      await library.execute({
+        action: "create",
+        requestId: "reactor-learning-create-shared-skill",
+        name: "Reactor pinned skill",
+        body: originalBody,
+        tags: [],
+      })
+    ).skill!;
+    const skillBinding = { skillId: originalSkill.skillId, enabled: true };
+    const saveExpert = (id: string, name: string) =>
+      expertStore.save({
+        id,
+        name,
+        description: "",
+        useCases: "",
+        persona: "Use the pinned Skill package.",
+        outputRequirements: "Report checked evidence.",
+        skills: [],
+        skillBindings: [skillBinding],
+        references: [],
+        connections: [],
+        preferredProvider: "codex",
+      });
+    const frozenExpert = await saveExpert("reactor-frozen-learning", "Frozen learning");
+    const frozenDefinition = (await expertStore.read(frozenExpert.id))!;
+    const frozenBindings = await captureLearningBindings(
+      harness.stateDir,
+      frozenDefinition.skillBindings ?? [],
+      frozenDefinition.id,
+    );
+    const updatedAt = new Date().toISOString();
+    const frozenState = {
+      ownerKind: "session" as const,
+      state: {
+        expertId: frozenDefinition.id,
+        enabled: false,
+        epoch: 2,
+        revision: 1,
+        updatedAt,
+      },
+      frozenBindings,
+    };
+    rows.set("reactor-learning-owner\0" + frozenDefinition.id, {
+      ownerId: "reactor-learning-owner",
+      expertId: frozenDefinition.id,
+      revision: 1,
+      updatedAt,
+      record: JSON.stringify(frozenState),
+    });
+    const originalFrozenEntry = frozenBindings[0]!.entries[0]!;
+
+    const threadIds = {
+      frozen: ThreadId.makeUnsafe("thread-reactor-frozen-learning"),
+      enabled: ThreadId.makeUnsafe("thread-reactor-active-learning"),
+      missing: ThreadId.makeUnsafe("thread-reactor-missing-learning"),
+    };
+    const createExpertThread = (threadId: ThreadId, expertId: string) =>
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe(`cmd-${threadId}`),
+        threadId,
+        projectId: asProjectId("project-1"),
+        expertId,
+        title: `Run for ${expertId}`,
+        modelSelection: { provider: "codex", model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: updatedAt,
+      });
+
+    await Effect.runPromise(createExpertThread(threadIds.frozen, frozenDefinition.id));
+
+    const updatedBody = originalBody.replace(
+      "Original frozen content.",
+      "New shared library head.",
+    );
+    const latestSkill = (
+      await library.execute({
+        action: "save",
+        skillId: originalSkill.skillId,
+        expectedRevision: originalSkill.revision,
+        name: originalSkill.name,
+        tags: originalSkill.tags,
+        changes: [
+          {
+            path: originalSkill.entryPath,
+            content: Buffer.from(updatedBody).toString("base64"),
+          },
+        ],
+      })
+    ).skill!;
+    expect(latestSkill.packageId).not.toBe(originalSkill.packageId);
+
+    const activeExpert = await saveExpert("reactor-active-learning", "Active learning");
+    rows.set("reactor-learning-owner\0" + activeExpert.id, {
+      ownerId: "reactor-learning-owner",
+      expertId: activeExpert.id,
+      revision: 1,
+      updatedAt,
+      record: JSON.stringify({
+        ownerKind: "session",
+        state: {
+          expertId: activeExpert.id,
+          enabled: true,
+          epoch: 1,
+          revision: 1,
+          updatedAt,
+        },
+      }),
+    });
+    const missingStateExpert = await saveExpert("reactor-no-learning-state", "No learning state");
+    await Effect.runPromise(createExpertThread(threadIds.enabled, activeExpert.id));
+    await Effect.runPromise(createExpertThread(threadIds.missing, missingStateExpert.id));
+
+    const startRun = (threadId: ThreadId, label: string) =>
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe(`cmd-reactor-learning-turn-${label}`),
+        threadId,
+        message: {
+          messageId: MessageId.makeUnsafe(`user-reactor-learning-${label}`),
+          role: "user",
+          text: `Start ${label}`,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: updatedAt,
+      });
+
+    await Effect.runPromise(startRun(threadIds.frozen, "frozen"));
+    await waitFor(() => harness.startSession.mock.calls.length === 1);
+    const frozenSession = harness.startSession.mock.calls[0]?.[1].expertSession;
+    expect(frozenSession?.skillEntries?.[0]).toMatchObject({
+      packageId: originalSkill.packageId,
+      entryPath: originalSkill.entryPath,
+      sha256: originalFrozenEntry.sha256,
+    });
+    await expect(
+      fs.promises.readFile(frozenSession!.skillEntries![0]!.path, "utf8"),
+    ).resolves.toContain("Original frozen content.");
+    const frozenAssembly = (await listRunSkillAssemblies(harness.stateDir)).find(
+      (assembly) => assembly.rootRunId === frozenSession?.skillRootRunId,
+    );
+    expect(frozenAssembly?.assemblyId).toBe(frozenSession?.skillAssemblyId);
+    expect(frozenAssembly?.session.skillEntries?.[0]?.packageId).toBe(originalSkill.packageId);
+
+    await Effect.runPromise(startRun(threadIds.enabled, "enabled"));
+    await waitFor(() => harness.startSession.mock.calls.length === 2);
+    const enabledSession = harness.startSession.mock.calls[1]?.[1].expertSession;
+    expect(enabledSession?.skillEntries?.[0]?.packageId).toBe(latestSkill.packageId);
+    expect(enabledSession?.skillAssemblyId).not.toBe(frozenSession?.skillAssemblyId);
+
+    await Effect.runPromise(startRun(threadIds.missing, "missing"));
+    await waitFor(() => harness.startSession.mock.calls.length === 3);
+    const missingStateSession = harness.startSession.mock.calls[2]?.[1].expertSession;
+    expect(missingStateSession?.skillEntries?.[0]?.packageId).toBe(latestSkill.packageId);
   });
 
   it("does not migrate missing historical Run records while applying an idle runtime setting", async () => {

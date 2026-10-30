@@ -19,6 +19,10 @@ export interface SkillEvolutionRepositoryShape {
         readonly requestId: string;
         readonly ownerId: string;
         readonly modelSelection: ModelSelection;
+        readonly expertId?: string;
+        readonly origin?: "manual" | "automatic";
+        readonly cycleId?: string;
+        readonly learningEpoch?: number;
       }
     | undefined,
     unknown

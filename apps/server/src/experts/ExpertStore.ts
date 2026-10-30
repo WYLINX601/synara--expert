@@ -23,6 +23,7 @@ import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
 import { readSkillDefinition, resolveSkillBindings } from "./SkillLibraryStore";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle.ts";
 import { verifyPinnedSkillReferences } from "./pinnedSkillReferences";
+import { withExpertLearningCommit } from "./expertLearningCommit";
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024;
@@ -1593,10 +1594,16 @@ export function createExpertStore(stateDir: string): ExpertStore {
       await ensureInitialized();
       return readDefinitionFile(id);
     },
-    save,
-    archive,
-    restore,
-    remove,
+    save: (input) =>
+      withExpertLearningCommit(stateDir, () => save(input), {
+        expertIds: input.id ? [input.id] : [],
+      }),
+    archive: (id, revision) =>
+      withExpertLearningCommit(stateDir, () => archive(id, revision), { expertIds: [id] }),
+    restore: (id, revision) =>
+      withExpertLearningCommit(stateDir, () => restore(id, revision), { expertIds: [id] }),
+    remove: (id, revision) =>
+      withExpertLearningCommit(stateDir, () => remove(id, revision), { expertIds: [id] }),
     preview,
     prepareSnapshot,
     readSnapshot,

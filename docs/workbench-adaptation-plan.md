@@ -66,7 +66,7 @@ Context 页面、自动保存与旧指令迁移通过 `workbench/host/contextCli
 
 ### Expert Skill 主动进化接入（2026-10-29）
 
-`expert.skill-evolution` 只持有来源快照、提炼请求、候选与采用事件；正式 Skill、不可变包和绑定继续由技能库拥有。来源限定为同一专家已正常结束的明确回合，专家不新增 Memory。用户点击提炼及认可具体摘要是唯一触发与采用权限。
+`expert.skill-evolution` 持有来源快照、提炼请求、候选与采用事件；正式 Skill、不可变包和绑定继续由技能库拥有。来源限定为同一专家已正常结束的明确回合，专家不新增 Memory。手动流程由用户点击提炼及认可摘要授权；自动流程遵循下节明确开启的学习授权，不要求逐项采用。
 
 - 跨进程契约位于 `packages/contracts/src/skillEvolution.ts`。服务端业务在 `experts/evolution`；`workbench/host/skillEvolutionRpc` 保留 owner、原生命令和投影接入，`skillEvolutionPersistence` 使用宿主 SqlClient，Expert ledger 加法迁移为 10。请求先持久化再派发已有 Thread/turn 命令，不新增执行器或队列。
 - 原生 Reactor 和 ProviderService 在构造时捕获持久登记能力，启动与发送共同核对 purpose、Provider 实例和模型。Pi/Claude/OMP 适配器提供无工具、无环境 Skill/Context/Hub Memory 的会话；Reactor 的受限派发允许名单和 ProviderService 保持相同三端范围；普通上下文校验继续有效。隔离任务不借普通恢复或原生 fork 放宽约束；取消沿用原生准确回合。未支持的 Provider 明确拒绝，不自动切换。
@@ -75,6 +75,21 @@ Context 页面、自动保存与旧指令迁移通过 `workbench/host/contextCli
 - 前端挂载原 `/experts/$expertId?tab=evolution`，继承 `_chat` 布局；通过 Expert 编辑器窄槽位复用来源任务、模型选择、Skill 详情和草稿保护。时间环每个 Skill 一个节点，候选不生成能力，未知基线不编造日期、调用量或分数。
 
 接入清单见 `workbench/integration-points.json`。该检查只覆盖静态边界；实现、真实模型和未验收平台分别见[本轮验收](./expert-skill-evolution-acceptance-2026-10-29.md)。
+
+### Expert 自动学习接入（2026-10-31）
+
+自动学习扩展既有 `experts/evolution` 与同一正式资产服务。`ExpertLearningService` 仅协调当前任务证据、发现、逐点单结果生成与采用；宿主继续拥有原生 Thread/turn、账户、模型、事件消费、取消和恢复。第一阶段支持明确选择的 OMP/Pi，缺省关闭；不扫描历史会话、不增加 Memory 或评测执行器。
+
+- `expertLearning` 契约与公开 RPC 仅提供读取／设置。可信自动调用身份由服务端登记，客户端不能声明 epoch 或自动采用权限。Expert ledger 追加 11 `ExpertAutomaticLearning`，SQL 分别拥有状态、证据和周期；沿用宿主连接，未重写旧迁移。
+- RPC 与后台复用按真实 owner 隔离的 `SkillEvolutionService`。HTTP 宿主构造时启动并恢复，不依赖进化页。一个宿主同时推进一个自动周期；当前 Expert 的前台工作优先。派发前登记稳定身份，保存未绑定时重试同一意图，不生成新副本掩盖中断。
+- 证据采集挂在唯一持久 Provider 事件消费链，正常投影之后、消费位置确认之前。按实际 turn、快照、Provider 实例、model、学习代次和可确认的 Run/装配固定归属；消息和工具使用不同引用类型，缺失与截断保留覆盖说明。学习会话不再产生学习来源。写入失败不确认消费位置；缺少依赖不能静默禁用采集。
+- 学习提交、开关和显式 Expert／Skill 修改共用短提交门，模型执行不持锁。关闭递增 epoch；原生启动、发送与正式写入重新校验；最终原生准入在同一短门内读取当前授权，接受后释放而不持锁等待模型生成，保留原 Effect 的取消与作用域。关闭回执后旧代次不能继续绑定。学习线程退出通用自动续跑，普通业务任务不受取消影响。
+- 关闭时保存完整绑定与解析条目并保留包引用。新独立 Run 通过窄解析能力读取固定清单；已有 Run、审批和 continuation 优先原装配。共享源的后续修改不会推动关闭的 Expert；明确变更身份／范围或修改自身私有内容才协调对应固定项。只改启用、改进许可或资源方式保留固定来源。
+- 自动采用保留 `allowEvolution` 既有约束，首次改进共享技能完整派生为 Expert 专属副本，后续复用同一身份。自动新建绑定显式允许后续学习。采用意图、包引用、修订检查和完整资源保留仍归原资产服务。
+- 普通 OMP 仅在会话局部关闭原生 AutoLearn；受限提炼沿用固定 18.12.1 bundle、preload、空工具和固定提示词断言，不修改全局配置或换模型。Pi 沿用已有受限 Adapter。源会话的实际模型／账户配置传给后台，不自动降级。
+- 设置和进化共用 owner/Expert 查询状态，等待回执后才表示关闭成功；失败重读仍不确定时保留不确定状态。进化页优先显示已保存并绑定的成长，手动提炼复用现有折叠区域；自动无变化／失败不产生待办。后台会话默认从普通侧栏隐藏，显式固定仍可查看；原草稿保护和编辑冲突继续有效。
+
+实现范围和实际验收分别见[实施计划](../context/expert-autolearning-implementation-plan-2026-10-30.md)及[自动学习验收](./expert-autolearning-acceptance-2026-10-31.md)。静态边界、受控测试、真实 Provider 与平台验收分别记录，不能互相替代。
 
 ### Skill 文件交付与 OMP 提炼接缝（2026-10-29 候选）
 

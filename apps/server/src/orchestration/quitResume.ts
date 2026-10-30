@@ -245,6 +245,7 @@ function buildCrashResumeRecord(input: {
       !thread.goal &&
       !managedProjects.has(thread.projectId) &&
       thread.creationSource !== "automation_run" &&
+      thread.creationSource !== "expert_learning" &&
       thread.creationSource !== "provider_native" &&
       thread.creationSource !== "synara_mcp" &&
       thread.creationSource !== "external_mcp" &&

@@ -279,7 +279,7 @@ describe("workbench build manifest", () => {
 
     expect(schemas).toEqual({
       officialMigrationHighWater: 135,
-      workbenchMigrationHighWaterByModule: { context: 1, expert: 10 },
+      workbenchMigrationHighWaterByModule: { context: 1, expert: 11 },
       workbenchSchemaFormatVersion: 1,
     });
   });

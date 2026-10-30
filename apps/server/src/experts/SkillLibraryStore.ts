@@ -36,6 +36,7 @@ import { createSkillPackageStore, SkillPackageStoreError } from "./SkillPackageS
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle";
 import { retainSkillEvolutionPackagesUnlocked } from "./skillEvolutionPackagePins";
 import { assertSkillScopeForExpert } from "./skillEvolutionPolicy";
+import { withExpertLearningCommit } from "./expertLearningCommit";
 import {
   assertSkillResourcePath,
   downloadSkillSource,
@@ -2640,7 +2641,15 @@ function makeSkillLibraryStore(stateDir: string) {
         request.action === "previewRefresh" ||
         request.action === "previewDelete" ||
         (request.action === "bindings" && request.operation === "list");
-      return await (independent ? runOperation() : lock(runOperation));
+      return await (independent
+        ? runOperation()
+        : withExpertLearningCommit(stateDir, () => lock(runOperation), {
+            ...("expertId" in request ? { expertIds: [request.expertId] } : {}),
+            ...("skillId" in request ? { skillIds: [request.skillId] } : {}),
+            ...(request.action === "batch"
+              ? { skillIds: request.items.map((item) => item.skillId) }
+              : {}),
+          }));
     } finally {
       for (const id of ownedPreviews) await cleanup(id);
       if (previewRequestId) {

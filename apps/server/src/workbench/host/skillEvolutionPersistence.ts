@@ -10,7 +10,13 @@ import {
 const ExecutionIdentity = Schema.Struct({
   requestId: Schema.String,
   ownerId: Schema.String,
-  run: Schema.Struct({ modelSelection: ModelSelection }),
+  run: Schema.Struct({
+    modelSelection: ModelSelection,
+    expertId: Schema.optional(Schema.String),
+    origin: Schema.optional(Schema.Literals(["manual", "automatic"])),
+    cycleId: Schema.optional(Schema.String),
+    learningEpoch: Schema.optional(Schema.Number),
+  }),
 });
 
 export const makeSkillEvolutionRepository = Effect.gen(function* () {
@@ -99,6 +105,12 @@ export const makeSkillEvolutionRepository = Effect.gen(function* () {
                   requestId: value.requestId,
                   ownerId: value.ownerId,
                   modelSelection: value.run.modelSelection,
+                  ...(value.run.expertId !== undefined ? { expertId: value.run.expertId } : {}),
+                  ...(value.run.origin !== undefined ? { origin: value.run.origin } : {}),
+                  ...(value.run.cycleId !== undefined ? { cycleId: value.run.cycleId } : {}),
+                  ...(value.run.learningEpoch !== undefined
+                    ? { learningEpoch: value.run.learningEpoch }
+                    : {}),
                 };
               },
               catch: (cause) => cause,

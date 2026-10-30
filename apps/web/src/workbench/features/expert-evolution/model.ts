@@ -304,6 +304,8 @@ export function evolutionTimelineEntries(
       const applied = Boolean(
         latest?.proposals.length && latest.proposals.every((item) => item.status === "applied"),
       );
+      // Background progress and no-change outcomes are state, never a user review queue.
+      if ((run.origin === "automatic" || latest?.origin === "automatic") && !applied) continue;
       const active = isSkillEvolutionRunActive(latest);
       const needsReview =
         latest?.proposals.some((item) =>

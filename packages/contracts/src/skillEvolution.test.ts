@@ -122,4 +122,31 @@ describe("Expert experience discovery contracts", () => {
     };
     expect(Schema.decodeUnknownSync(SkillEvolutionRun)(historical)).not.toHaveProperty("stage");
   });
+
+  it("accepts learning provenance on automatic evolution runs", () => {
+    const run = {
+      requestId: "automatic-run",
+      expertId: "expert-a",
+      origin: "automatic",
+      cycleId: "cycle-a",
+      learningEpoch: 2,
+      createdAt: "2026-10-31T00:00:00.000Z",
+      updatedAt: "2026-10-31T00:00:00.000Z",
+      modelSelection: { provider: "pi", model: "configured-model" },
+      sourceCount: 1,
+      status: "queued",
+      proposals: [],
+    };
+    expect(Schema.decodeUnknownSync(SkillEvolutionRun)(run)).toMatchObject({
+      origin: "automatic",
+      cycleId: "cycle-a",
+      learningEpoch: 2,
+    });
+    expect(() =>
+      Schema.decodeUnknownSync(SkillEvolutionRun)({ ...run, learningEpoch: -1 }),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(SkillEvolutionRun)({ ...run, origin: "system" }),
+    ).toThrow();
+  });
 });

@@ -36,6 +36,7 @@ import { parseSkillFrontmatter } from "../provider/skillsCatalog.ts";
 import { writePrivateFileAtomically } from "./ExpertMcpStorage.ts";
 import { expertResourceFiles, type CollectedExpertResource } from "./ExpertStore.ts";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle.ts";
+import { withExpertLearningCommit } from "./expertLearningCommit.ts";
 import {
   assertSkillPackageUnreferenced,
   scanSkillPackageReferences,
@@ -1145,49 +1146,55 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
       }),
     remove: async (packageId) => {
       assertPackageId(packageId);
-      return withSkillPackageLifecycle(stateDir, async () => {
-        const existing = await readRemovalJournal(packageId);
-        if (existing) {
-          if (existing.state === "pending") {
-            await finishRemoval(existing);
-            return;
-          }
-          try {
-            await read(packageId);
-          } catch (cause) {
-            if (cause instanceof SkillPackageStoreError && cause.code === "not_found") return;
-            throw cause;
-          }
-          // A completed record is an acknowledgement replay token only while its
-          // package is absent. A later import may republish the same content ID;
-          // retire the old token and begin a fresh, reference-checked removal.
-          await fs.unlink(removalJournalPath(packageId));
-          await syncDirectoryEntry(removalsDir);
-        }
+      return withExpertLearningCommit(
+        stateDir,
+        () =>
+          withSkillPackageLifecycle(stateDir, async () => {
+            const existing = await readRemovalJournal(packageId);
+            if (existing) {
+              if (existing.state === "pending") {
+                await finishRemoval(existing);
+                return;
+              }
+              try {
+                await read(packageId);
+              } catch (cause) {
+                if (cause instanceof SkillPackageStoreError && cause.code === "not_found") return;
+                throw cause;
+              }
+              // A completed record is an acknowledgement replay token only while its
+              // package is absent. A later import may republish the same content ID;
+              // retire the old token and begin a fresh, reference-checked removal.
+              await fs.unlink(removalJournalPath(packageId));
+              await syncDirectoryEntry(removalsDir);
+            }
 
-        await read(packageId);
-        await assertSkillPackageUnreferenced(stateDir, packageId);
-        // Validate and journal every source pointer before touching either the
-        // pointers or immutable package tree. The outside source directories are
-        // never modified; only these managed tracking records are removed.
-        const sources: SkillPackageSource[] = [];
-        for (const name of (await fs.readdir(sourcesDir)).toSorted(ordinal)) {
-          if (!name.endsWith(".json"))
-            throw new SkillPackageStoreError("Unknown skill source record.", "package_corrupt");
-          const source = await readSource(name.slice(0, -5));
-          if (!source)
-            throw new SkillPackageStoreError("Skill source disappeared.", "package_corrupt");
-          if (source.packageId === packageId) sources.push(source);
-        }
-        const journal: SkillPackageRemovalRecord = {
-          schemaVersion: 1,
-          packageId,
-          state: "pending",
-          sources,
-        };
-        await writeRemovalJournal(journal);
-        await finishRemoval(journal);
-      });
+            await read(packageId);
+            await assertSkillPackageUnreferenced(stateDir, packageId);
+            // Validate and journal every source pointer before touching either the
+            // pointers or immutable package tree. The outside source directories are
+            // never modified; only these managed tracking records are removed.
+            const sources: SkillPackageSource[] = [];
+            for (const name of (await fs.readdir(sourcesDir)).toSorted(ordinal)) {
+              if (!name.endsWith(".json"))
+                throw new SkillPackageStoreError("Unknown skill source record.", "package_corrupt");
+              const source = await readSource(name.slice(0, -5));
+              if (!source)
+                throw new SkillPackageStoreError("Skill source disappeared.", "package_corrupt");
+              if (source.packageId === packageId) sources.push(source);
+            }
+            const journal: SkillPackageRemovalRecord = {
+              schemaVersion: 1,
+              packageId,
+              state: "pending",
+              sources,
+            };
+            await writeRemovalJournal(journal);
+            await finishRemoval(journal);
+          }),
+        {},
+        "control",
+      );
     },
     read,
     list: () =>

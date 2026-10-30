@@ -23,6 +23,7 @@ import {
   type SkillEvolutionSourceSelection,
   type SkillFileChange,
   type TurnId,
+  type ExpertLearningEvidence,
 } from "@synara/contracts";
 import { Effect, Schema } from "effect";
 import { expertResourceFiles, type ExpertStore } from "../ExpertStore";
@@ -40,7 +41,9 @@ import {
   validateEvolutionChanges,
   validateEvolutionEvidence,
   type EvolutionSourceMessage,
+  type EvolutionRuntimeEvidence,
 } from "./SkillEvolutionPrompt";
+import { withExpertLearningCommit } from "../expertLearningCommit";
 import type { SkillEvolutionRepositoryShape } from "./SkillEvolutionRepository";
 
 type Library = ReturnType<typeof createSkillLibraryStore>;
@@ -55,6 +58,9 @@ export interface SkillEvolutionHost {
     readonly Pick<OrchestrationThread, "id" | "expertBinding" | "archivedAt">[]
   >;
   readonly readThread: (id: ThreadId) => Promise<OrchestrationThread | undefined>;
+  readonly readProjectIdentity?: (
+    projectId: string,
+  ) => Promise<{ readonly projectId: string; readonly spaceId?: string | null } | undefined>;
   readonly readTaskState?: (
     id: ThreadId,
   ) => Promise<Pick<OrchestrationThread, "id" | "session" | "latestTurn"> | undefined>;
@@ -99,6 +105,8 @@ interface StoredRequest {
     readonly executable?: boolean;
   }[];
   readonly messages: readonly EvolutionSourceMessage[];
+  readonly runtimeEvidence?: readonly EvolutionRuntimeEvidence[];
+  readonly evidenceCoverage?: readonly string[];
   readonly prompt: string;
   readonly repairCount: number;
   readonly intents: readonly ApplyIntent[];
@@ -154,6 +162,8 @@ export function createSkillEvolutionService(input: {
   readonly now?: () => Date;
   readonly timeoutMs?: number;
   readonly pollMs?: number;
+  /** Trusted host capability; unavailable to public request payloads. */
+  readonly authorizeAutomatic?: (run: SkillEvolutionRun) => Promise<void>;
 }) {
   const now = () => (input.now?.() ?? new Date()).toISOString();
   const runEffect = <A>(effect: Effect.Effect<A, unknown>) => Effect.runPromise(effect);
@@ -218,6 +228,10 @@ export function createSkillEvolutionService(input: {
     return binding;
   };
   const assertMutationPermission = async (record: StoredRequest, result?: SkillDefinition) => {
+    if (record.run.origin === "automatic") {
+      if (!input.authorizeAutomatic) throw new Error("自动学习授权服务不可用。");
+      await input.authorizeAutomatic(record.run);
+    }
     const expert = await activeExpert(record.run.expertId);
     if (record.base) {
       const bindingSkillId = record.bindingSkillId ?? record.base.skillId;
@@ -439,7 +453,8 @@ export function createSkillEvolutionService(input: {
     }
     return rows.sort((a, b) => b.completedAt.localeCompare(a.completedAt)).slice(0, 200);
   };
-  const dispatchTurn = async (record: StoredRequest, repair: boolean) => {
+  const dispatchTurnCommit = async (record: StoredRequest, repair: boolean) => {
+    await assertMutationPermission(record);
     if (record.run.stage === "generation") await assertGenerationCanApply(record);
     await assertMutationPermission(record);
     await input.host.dispatch({
@@ -463,7 +478,16 @@ export function createSkillEvolutionService(input: {
       createdAt: record.run.createdAt,
     });
   };
-  const dispatchRequest = async (record: StoredRequest) => {
+  const dispatchTurn = (record: StoredRequest, repair: boolean) =>
+    record.run.origin === "automatic"
+      ? withExpertLearningCommit(
+          input.stateDir,
+          () => dispatchTurnCommit(record, repair),
+          {},
+          "automatic",
+        )
+      : dispatchTurnCommit(record, repair);
+  const dispatchRequestCommit = async (record: StoredRequest) => {
     if (record.run.stage === "generation") await assertGenerationCanApply(record);
     await assertMutationPermission(record);
     let next = await save({ ...record, dispatchAttempts: record.dispatchAttempts + 1 });
@@ -473,6 +497,14 @@ export function createSkillEvolutionService(input: {
       threadId: record.taskThreadId,
       projectId: record.projectId,
       title: record.taskTitle,
+      ...(record.run.origin === "automatic"
+        ? {
+            creationSource: "expert_learning" as const,
+            ...(record.run.sourceSelections?.[0]
+              ? { sourceThreadId: record.run.sourceSelections[0].threadId }
+              : {}),
+          }
+        : {}),
       modelSelection: record.run.modelSelection,
       runtimeMode: "approval-required",
       interactionMode: "default",
@@ -493,16 +525,50 @@ export function createSkillEvolutionService(input: {
     });
     return next;
   };
+  const dispatchRequest = (record: StoredRequest) =>
+    record.run.origin === "automatic"
+      ? withExpertLearningCommit(
+          input.stateDir,
+          () => dispatchRequestCommit(record),
+          {},
+          "automatic",
+        )
+      : dispatchRequestCommit(record);
   const setDiscoveryResult = async (record: StoredRequest, text: string) => {
     const result: SkillEvolutionDiscoveryResult = parseSkillEvolutionDiscoveryResult(text);
     if (result.action !== "opportunities")
       return updateRun(record, { status: result.action, summary: result.reason });
     const catalogIds = new Set(record.catalogSkillIds ?? []);
     const opportunities: SkillEvolutionOpportunity[] = [];
-    for (const [index, candidate] of result.opportunities.entries()) {
+    const candidates: Array<(typeof result.opportunities)[number]> = [];
+    for (const candidate of result.opportunities) {
+      const previousIndex =
+        record.run.origin === "automatic" && candidate.targetSkillId
+          ? candidates.findIndex((item) => item.targetSkillId === candidate.targetSkillId)
+          : -1;
+      if (previousIndex < 0) {
+        candidates.push(candidate);
+        continue;
+      }
+      const previous = candidates[previousIndex]!;
+      candidates[previousIndex] = {
+        ...previous,
+        reason: previous.reason + "\n\n[" + candidate.name + "] " + candidate.reason,
+        outcomes: [...new Set([...previous.outcomes, ...candidate.outcomes])],
+        evidence: [
+          ...new Map(
+            [...previous.evidence, ...candidate.evidence].map((item) => [
+              evolutionDigest(item),
+              item,
+            ]),
+          ).values(),
+        ],
+      };
+    }
+    for (const [index, candidate] of candidates.entries()) {
       if (!candidate.reason.trim() || candidate.outcomes.some((outcome) => !outcome.trim()))
         throw new Error("经验机会的原因和预期结果必须填写具体内容。");
-      validateEvolutionEvidence(candidate.evidence, record.messages);
+      validateEvolutionEvidence(candidate.evidence, record.messages, record.runtimeEvidence);
       if (candidate.targetSkillId && !catalogIds.has(candidate.targetSkillId))
         throw new Error("经验机会引用了不属于当前专家绑定目录的 Skill，请使用目录中的准确 ID。");
       const content = {
@@ -520,7 +586,7 @@ export function createSkillEvolutionService(input: {
         digest: evolutionDigest(content),
         status: "suggested" as const,
       };
-      opportunities.push(opportunity);
+      opportunities.push(Schema.decodeUnknownSync(SkillEvolutionOpportunity)(opportunity));
     }
     return updateRun(record, {
       status: opportunities.length ? "opportunity_ready" : "no_change",
@@ -534,9 +600,11 @@ export function createSkillEvolutionService(input: {
     const result = parseSkillEvolutionModelResult(text);
     if (result.action !== "proposals")
       return updateRun(record, { status: result.action, summary: result.reason });
+    if (record.run.origin === "automatic" && result.proposals.length !== 1)
+      throw new Error("自动学习每个进化点只能生成一个确定修订。");
     const proposals: SkillEvolutionProposal[] = [];
     for (const [index, candidate] of result.proposals.entries()) {
-      validateEvolutionEvidence(candidate.evidence, record.messages);
+      validateEvolutionEvidence(candidate.evidence, record.messages, record.runtimeEvidence);
       const changes = validateEvolutionChanges(
         candidate.files.map((file) => ({
           path: file.path,
@@ -608,7 +676,11 @@ export function createSkillEvolutionService(input: {
     }
     for (const proposal of record.run.proposals) {
       const intent = record.intents.find((item) => item.proposalId === proposal.proposalId);
-      if (!intent || !["proposed", "applying", "conflict"].includes(proposal.status)) continue;
+      if (
+        !intent ||
+        !["proposed", "applying", "saved_unbound", "conflict"].includes(proposal.status)
+      )
+        continue;
       // A durable intent is the user's acknowledgement of this exact digest.
       // Replay the same library operation; never infer approval from model text.
       try {
@@ -797,7 +869,7 @@ export function createSkillEvolutionService(input: {
       .map((expert) => expert.id)
       .toSorted();
 
-  const apply = async (request: Extract<SkillEvolutionRequest, { action: "apply" }>) => {
+  const applyCommit = async (request: Extract<SkillEvolutionRequest, { action: "apply" }>) => {
     let record = await load(request.requestId);
     if (record.run.stage === "generation") await assertGenerationCanApply(record);
     let proposal = proposalFor(record, request.proposalId, request.expectedDigest);
@@ -914,7 +986,12 @@ export function createSkillEvolutionService(input: {
       }
       await assertMutationPermission(record, result);
       const bindingSkillId = record.bindingSkillId ?? record.base?.skillId;
-      const needsBinding = !bindingSkillId || bindingSkillId !== result.skillId;
+      const alreadyBound =
+        expert.skillBindings?.some((binding) => binding.skillId === result.skillId) &&
+        (!bindingSkillId ||
+          bindingSkillId === result.skillId ||
+          !expert.skillBindings.some((binding) => binding.skillId === bindingSkillId));
+      const needsBinding = !alreadyBound && (!bindingSkillId || bindingSkillId !== result.skillId);
       if (needsBinding) {
         proposal = {
           ...proposal,
@@ -929,7 +1006,14 @@ export function createSkillEvolutionService(input: {
                 ? { ...binding, skillId: result!.skillId }
                 : binding,
             )
-          : [...record.bindings, { skillId: result.skillId, enabled: true }];
+          : [
+              ...record.bindings,
+              {
+                skillId: result.skillId,
+                enabled: true,
+                ...(record.run.origin === "automatic" ? { allowEvolution: true } : {}),
+              },
+            ];
         const bindingResult = await input.library.execute(
           {
             action: "bindings",
@@ -1210,11 +1294,30 @@ export function createSkillEvolutionService(input: {
     });
   };
 
-  const execute = async (request: SkillEvolutionRequest): Promise<SkillEvolutionResponse> => {
+  const apply = async (request: Extract<SkillEvolutionRequest, { action: "apply" }>) => {
+    const record = await load(request.requestId);
+    return withExpertLearningCommit(
+      input.stateDir,
+      () => applyCommit(request),
+      {},
+      record.run.origin === "automatic" ? "automatic" : "manual",
+    );
+  };
+  const execute = async (
+    request: SkillEvolutionRequest,
+    automatic?: {
+      readonly cycleId: string;
+      readonly epoch: number;
+      readonly evidence: ExpertLearningEvidence;
+    },
+  ): Promise<SkillEvolutionResponse> => {
     if (request.action === "capabilities")
       return { capabilities: [...SKILL_EVOLUTION_CAPABILITIES] };
     return serialize(input.stateDir, async () => {
       switch (request.action) {
+        case "learningRead":
+        case "learningSet":
+          throw new Error("自学习设置由宿主学习服务处理。");
         case "sources":
           return { sources: await sources(request.expertId) };
         case "list": {
@@ -1234,7 +1337,11 @@ export function createSkillEvolutionService(input: {
           return { run: publicRun(record) };
         }
         case "start": {
-          const fingerprint = evolutionDigest({ ...request, requestId: undefined });
+          const fingerprint = evolutionDigest({
+            ...request,
+            requestId: undefined,
+            ...(automatic ? { automatic } : {}),
+          });
           const previous = await runEffect(input.repository.read(request.requestId));
           if (previous) {
             const record = await load(request.requestId);
@@ -1261,14 +1368,66 @@ export function createSkillEvolutionService(input: {
           const selected = await Promise.all(
             [...unique.values()].map((selection) => sourceFor(expert.id, selection)),
           );
-          const messages = selected.flatMap((source) => source.messages);
+          if (
+            automatic &&
+            (automatic.evidence.expertId !== expert.id ||
+              automatic.evidence.ownerId !== input.ownerId ||
+              !selected.some(
+                (source) =>
+                  source.source.threadId === automatic.evidence.threadId &&
+                  source.source.turnId === automatic.evidence.turnId &&
+                  source.source.snapshotId === automatic.evidence.snapshotId &&
+                  source.source.projectId === automatic.evidence.projectId,
+              ))
+          )
+            throw new Error("自动学习证据与已完成任务归属不符。");
+          const messages: readonly EvolutionSourceMessage[] = automatic
+            ? automatic.evidence.items
+                .filter((item) => item.kind === "message" && item.role)
+                .slice(-6)
+                .map((item) => ({
+                  threadId: ThreadId.makeUnsafe(automatic.evidence.threadId),
+                  messageId: MessageId.makeUnsafe(item.id),
+                  role: item.role!,
+                  text: item.text.slice(-4_000),
+                  ...(item.truncated || item.text.length > 4_000 ? { truncated: true } : {}),
+                }))
+            : selected.flatMap((source) => source.messages);
+          const runtimeEvidence: readonly EvolutionRuntimeEvidence[] = automatic
+            ? automatic.evidence.items
+                .filter((item) => item.kind !== "message")
+                .slice(-20)
+                .map((item) => ({
+                  threadId: ThreadId.makeUnsafe(automatic.evidence.threadId),
+                  eventId: item.id,
+                  kind: item.kind,
+                  text: item.text.slice(0, 1_500),
+                  ...(item.toolCallId ? { toolCallId: item.toolCallId } : {}),
+                  ...(item.truncated || item.text.length > 1_500 ? { truncated: true } : {}),
+                }))
+            : [];
+          const evidenceCoverage = automatic
+            ? [
+                ...automatic.evidence.coverage,
+                ...(automatic.evidence.items.filter((item) => item.kind === "message").length >
+                messages.length
+                  ? ["prompt-messages-truncated"]
+                  : []),
+                ...(automatic.evidence.items.filter((item) => item.kind !== "message").length >
+                runtimeEvidence.length
+                  ? ["prompt-runtime-items-truncated"]
+                  : []),
+              ]
+            : [];
           const catalog = await boundSkillCatalog(expert);
           const sourceDigest = evolutionDigest({
             messages,
             focus: request.focus ?? "",
             catalog,
+            ...(automatic ? { runtimeEvidence, evidenceCoverage } : {}),
           });
           const prompt = buildSkillEvolutionDiscoveryPrompt({
+            ...(automatic ? { automatic: true, runtimeEvidence, evidenceCoverage } : {}),
             expert: { name: expert.name, description: expert.description },
             ...(request.focus ? { focus: request.focus } : {}),
             messages,
@@ -1286,6 +1445,13 @@ export function createSkillEvolutionService(input: {
               requestId: request.requestId,
               expertId: expert.id,
               stage: "discovery",
+              ...(automatic
+                ? {
+                    origin: "automatic" as const,
+                    cycleId: automatic.cycleId,
+                    learningEpoch: automatic.epoch,
+                  }
+                : {}),
               sourceSelections: [...unique.values()],
               createdAt: now(),
               updatedAt: now(),
@@ -1299,6 +1465,7 @@ export function createSkillEvolutionService(input: {
             bindings: expert.skillBindings ?? [],
             files: [],
             messages,
+            ...(automatic ? { runtimeEvidence, evidenceCoverage } : {}),
             prompt,
             repairCount: 0,
             intents: [],
@@ -1410,6 +1577,13 @@ export function createSkillEvolutionService(input: {
             evidence: opportunity.evidence,
           };
           const prompt = buildSkillEvolutionPrompt({
+            ...(parent.run.origin === "automatic"
+              ? {
+                  automatic: true,
+                  runtimeEvidence: parent.runtimeEvidence ?? [],
+                  evidenceCoverage: parent.evidenceCoverage ?? [],
+                }
+              : {}),
             expert: { name: expert.name, description: expert.description },
             opportunity: selectedOpportunity,
             ...(request.feedback ? { feedback: request.feedback } : {}),
@@ -1453,6 +1627,13 @@ export function createSkillEvolutionService(input: {
               requestId: request.requestId,
               expertId: expert.id,
               stage: "generation",
+              ...(parent.run.origin === "automatic"
+                ? {
+                    origin: "automatic" as const,
+                    cycleId: parent.run.cycleId,
+                    learningEpoch: parent.run.learningEpoch,
+                  }
+                : {}),
               discoveryRequestId: parent.requestId,
               opportunityId: opportunity.opportunityId,
               generationIndex,
@@ -1473,6 +1654,8 @@ export function createSkillEvolutionService(input: {
               : {}),
             files,
             messages: parent.messages,
+            ...(parent.runtimeEvidence ? { runtimeEvidence: parent.runtimeEvidence } : {}),
+            ...(parent.evidenceCoverage ? { evidenceCoverage: parent.evidenceCoverage } : {}),
             prompt,
             repairCount: 0,
             intents: [],
@@ -1690,6 +1873,9 @@ export function createSkillEvolutionService(input: {
             delete restoreRecord.opportunityDigest;
             delete restoreRecord.catalogSkillIds;
             const restoreRun = { ...origin.run };
+            delete restoreRun.origin;
+            delete restoreRun.cycleId;
+            delete restoreRun.learningEpoch;
             delete restoreRun.stage;
             delete restoreRun.discoveryRequestId;
             delete restoreRun.opportunityId;
@@ -1740,7 +1926,15 @@ export function createSkillEvolutionService(input: {
     });
   };
   return {
-    execute,
+    execute: (request: SkillEvolutionRequest) => execute(request),
+    startAutomatic: (
+      request: Extract<SkillEvolutionRequest, { action: "start" }>,
+      context: { cycleId: string; epoch: number; evidence: ExpertLearningEvidence },
+    ) => execute(request, context),
+    hasAutomaticIntent: async (requestId: string) => {
+      const record = await load(requestId);
+      return record.run.origin === "automatic" && record.intents.length > 0;
+    },
     dispose: async () => {
       for (const watcher of watchers.values()) watcher.abort();
       watchers.clear();

@@ -60,6 +60,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQu
 import {
   collectPersistedGeneratedImagePaths,
   nextRuntimeJournalSafetyPollDelayMs,
+  processProviderRuntimeRowBeforeAcknowledgement,
   ProviderRuntimeIngestionLive,
   selectProviderRuntimeJournalStream,
 } from "./ProviderRuntimeIngestion.ts";
@@ -327,6 +328,278 @@ type ProviderRuntimeTestActivity = ProviderRuntimeTestThread["activities"][numbe
 type ProviderRuntimeTestCheckpoint = ProviderRuntimeTestThread["checkpoints"][number];
 
 describe("ProviderRuntimeIngestion", () => {
+  it("keeps a persisted runtime row unacknowledged when evidence capture fails", async () => {
+    const order: string[] = [];
+    const event: ProviderRuntimeEvent = {
+      type: "turn.completed",
+      eventId: asEventId("evidence-cursor-event"),
+      provider: "omp",
+      providerInstanceId: "omp",
+      lifecycleGeneration: "generation-a",
+      threadId: asThreadId("evidence-cursor-thread"),
+      turnId: asTurnId("evidence-cursor-turn"),
+      createdAt: "2026-10-31T10:00:00.000Z",
+      payload: { state: "completed" },
+    };
+    const input = { source: "runtime" as const, sequence: 37, event };
+    const process = () =>
+      Effect.sync(() => {
+        order.push("projected");
+        return asTurnId("evidence-cursor-turn");
+      });
+    const failedCapture = (entry: PersistedProviderRuntimeEvent, resolvedTurnId?: TurnId) =>
+      Effect.sync(() => {
+        order.push(`captured:${entry.sequence}:${resolvedTurnId}`);
+      }).pipe(Effect.andThen(Effect.fail(new Error("evidence write failed"))));
+    const acknowledge = () =>
+      Effect.sync(() => {
+        order.push("acknowledged");
+      });
+
+    const failed = await Effect.runPromiseExit(
+      processProviderRuntimeRowBeforeAcknowledgement(input, process, failedCapture, acknowledge),
+    );
+    expect(Exit.isFailure(failed)).toBe(true);
+    expect(order).toEqual(["projected", "captured:37:evidence-cursor-turn"]);
+
+    order.length = 0;
+    const successfulCapture = (entry: PersistedProviderRuntimeEvent, resolvedTurnId?: TurnId) =>
+      Effect.sync(() => {
+        order.push(`captured:${entry.sequence}:${resolvedTurnId}`);
+      });
+    await Effect.runPromise(
+      processProviderRuntimeRowBeforeAcknowledgement(
+        input,
+        process,
+        successfulCapture,
+        acknowledge,
+      ),
+    );
+    expect(order).toEqual(["projected", "captured:37:evidence-cursor-turn", "acknowledged"]);
+  });
+
+  it("writes completed Expert learning evidence through the live ingestion layer", async () => {
+    const harness = await createHarness({ learningFixture: true, persistedStream: true });
+    const sql = await runtime!.runPromise(Effect.service(SqlClient.SqlClient));
+    const threadId = asThreadId("thread-1");
+    const expertId = "ingestion-learning-expert";
+    const ownerId = "ingestion-learning-owner";
+    const binding = {
+      expertId,
+      snapshotId: "snapshot-ingestion-learning",
+      displayName: "Ingestion learning fixture",
+      revision: 1,
+    };
+    await runtime!.runPromise(
+      sql`
+        UPDATE projection_threads SET expert_binding_json = ${JSON.stringify(binding)}
+        WHERE thread_id = ${threadId}
+      `,
+    );
+    expect((await harness.readProjectedThread(threadId))?.expertBinding).toEqual(binding);
+
+    const enabledAt = new Date(Date.now() - 10_000).toISOString();
+    const requestedAt = new Date().toISOString();
+    const turnId = asTurnId("ingestion-learning-turn");
+    const lifecycleGeneration = "learning-ingestion-generation";
+    const userMessageId = asMessageId("ingestion-learning-user-message");
+    const assistantItemId = asItemId("ingestion-learning-assistant-item");
+    await runtime!.runPromise(
+      sql`
+        INSERT INTO expert_learning_states (owner_id, expert_id, record_json, revision, updated_at)
+        VALUES (
+          ${ownerId},
+          ${expertId},
+          ${JSON.stringify({
+            ownerKind: "principal",
+            enabledAt,
+            state: {
+              expertId,
+              enabled: true,
+              epoch: 4,
+              revision: 1,
+              harnessKind: "omp",
+            },
+          })},
+          1,
+          ${enabledAt}
+        )
+      `,
+    );
+    await runtime!.runPromise(
+      sql`
+        INSERT INTO expert_applied_runtime_records (
+          thread_id, snapshot_id, provider, model, lifecycle_generation, applied_at
+        ) VALUES (
+          ${threadId},
+          ${binding.snapshotId},
+          'omp',
+          'gpt-5.4',
+          ${lifecycleGeneration},
+          ${requestedAt}
+        )
+      `,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-ingestion-learning-turn-start"),
+        threadId,
+        message: {
+          messageId: userMessageId,
+          role: "user",
+          text: "Run the integrated learning evidence check and report its result.",
+          attachments: [],
+        },
+        modelSelection: { provider: "omp", instanceId: "omp", model: "gpt-5.4" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: requestedAt,
+      }),
+    );
+    expect(
+      (await harness.readProjectedThread(threadId))?.messages.find(
+        (message) => message.id === userMessageId,
+      )?.turnId,
+    ).toBeNull();
+
+    const at = (offsetMs: number) => new Date(Date.parse(requestedAt) + offsetMs).toISOString();
+    const events: ProviderRuntimeEvent[] = [
+      {
+        type: "turn.started",
+        eventId: asEventId("evt-ingestion-learning-start"),
+        provider: "omp",
+        providerInstanceId: "omp",
+        lifecycleGeneration,
+        threadId,
+        turnId,
+        createdAt: at(1_000),
+        payload: { model: "gpt-5.4", effort: "medium" },
+      },
+      {
+        type: "item.started",
+        eventId: asEventId("evt-ingestion-learning-tool-start"),
+        provider: "omp",
+        providerInstanceId: "omp",
+        lifecycleGeneration,
+        threadId,
+        turnId,
+        itemId: asItemId("ingestion-learning-tool"),
+        createdAt: at(2_000),
+        payload: {
+          itemType: "command_execution",
+          status: "inProgress",
+          title: "Focused integration check",
+          detail: "bun run --cwd apps/server typecheck",
+        },
+      },
+      {
+        type: "item.completed",
+        eventId: asEventId("evt-ingestion-learning-tool-result"),
+        provider: "omp",
+        providerInstanceId: "omp",
+        lifecycleGeneration,
+        threadId,
+        turnId,
+        itemId: asItemId("ingestion-learning-tool"),
+        createdAt: at(3_000),
+        payload: {
+          itemType: "command_execution",
+          status: "completed",
+          title: "Focused integration check",
+          detail: "Typecheck passed.",
+          data: { exitCode: 0 },
+        },
+      },
+      {
+        type: "content.delta",
+        eventId: asEventId("evt-ingestion-learning-assistant-delta"),
+        provider: "omp",
+        providerInstanceId: "omp",
+        lifecycleGeneration,
+        threadId,
+        turnId,
+        itemId: assistantItemId,
+        createdAt: at(4_000),
+        payload: {
+          streamKind: "assistant_text",
+          delta: "The integrated evidence capture completed successfully.",
+        },
+      },
+      {
+        type: "item.completed",
+        eventId: asEventId("evt-ingestion-learning-assistant-complete"),
+        provider: "omp",
+        providerInstanceId: "omp",
+        lifecycleGeneration,
+        threadId,
+        turnId,
+        itemId: assistantItemId,
+        createdAt: at(5_000),
+        payload: { itemType: "assistant_message", status: "completed" },
+      },
+      {
+        type: "turn.completed",
+        eventId: asEventId("evt-ingestion-learning-complete"),
+        provider: "omp",
+        providerInstanceId: "omp",
+        lifecycleGeneration,
+        threadId,
+        turnId,
+        createdAt: at(6_000),
+        payload: { state: "completed" },
+      },
+    ];
+    for (const event of events) {
+      const persisted = await Effect.runPromise(harness.runtimeEventRepository.append(event));
+      harness.emitPersisted(persisted);
+    }
+    await harness.drain();
+
+    const projectedThread = await harness.readProjectedThread(threadId);
+    expect(projectedThread?.messages.find((message) => message.id === userMessageId)?.text).toBe(
+      "Run the integrated learning evidence check and report its result.",
+    );
+    const assistantMessage = projectedThread?.messages.find(
+      (message) => message.role === "assistant" && message.turnId === turnId,
+    );
+    expect(assistantMessage?.text).toBe("The integrated evidence capture completed successfully.");
+    expect(projectedThread?.latestTurn).toMatchObject({ turnId, state: "completed" });
+
+    const evidenceRows = await runtime!.runPromise(
+      sql<{ readonly record_json: string }>`
+        SELECT record_json FROM expert_learning_evidence
+        WHERE owner_id = ${ownerId} AND expert_id = ${expertId} AND thread_id = ${threadId}
+      `,
+    );
+    expect(evidenceRows).toHaveLength(1);
+    const evidence = JSON.parse(evidenceRows[0]!.record_json) as {
+      readonly learningEpoch: number;
+      readonly snapshotId: string;
+      readonly turnId: string;
+      readonly completedAt?: string;
+      readonly items: ReadonlyArray<{
+        readonly id: string;
+        readonly kind: string;
+        readonly text: string;
+      }>;
+    };
+    expect(evidence).toMatchObject({
+      learningEpoch: 4,
+      snapshotId: binding.snapshotId,
+      turnId,
+      completedAt: at(6_000),
+    });
+    expect(evidence.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: userMessageId, kind: "message" }),
+        expect.objectContaining({ id: `tool-result:ingestion-learning-tool`, kind: "tool_result" }),
+        expect.objectContaining({ id: assistantMessage?.id, kind: "message" }),
+      ]),
+    );
+  });
+
   it("backs off idle journal safety polls and returns to the fast recovery cadence", () => {
     let delayMs = 250;
     const idleDelays: number[] = [];
@@ -404,6 +677,7 @@ describe("ProviderRuntimeIngestion", () => {
     readonly startIngestion?: boolean;
     readonly persistedStream?: boolean;
     readonly computerManager?: ComputerManager;
+    readonly learningFixture?: boolean;
   }) {
     const workspaceRoot = makeTempDir("synara-provider-project-");
     fs.mkdirSync(path.join(workspaceRoot, ".git"));
@@ -473,6 +747,11 @@ describe("ProviderRuntimeIngestion", () => {
     };
 
     const createdAt = new Date().toISOString();
+    const providerKind = options?.learningFixture === true ? "omp" : "codex";
+    const modelSelection =
+      providerKind === "omp"
+        ? { provider: "omp" as const, instanceId: "omp", model: "gpt-5.4" }
+        : { provider: "codex" as const, model: "gpt-5-codex" };
     await Effect.runPromise(
       engine.dispatch({
         type: "project.create",
@@ -480,10 +759,7 @@ describe("ProviderRuntimeIngestion", () => {
         projectId: asProjectId("project-1"),
         title: "Provider Project",
         workspaceRoot,
-        defaultModelSelection: {
-          provider: "codex",
-          model: "gpt-5-codex",
-        },
+        defaultModelSelection: modelSelection,
         createdAt,
       }),
     );
@@ -494,10 +770,7 @@ describe("ProviderRuntimeIngestion", () => {
         threadId: ThreadId.makeUnsafe("thread-1"),
         projectId: asProjectId("project-1"),
         title: "Thread",
-        modelSelection: {
-          provider: "codex",
-          model: "gpt-5-codex",
-        },
+        modelSelection,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
         branch: null,
@@ -513,7 +786,8 @@ describe("ProviderRuntimeIngestion", () => {
         session: {
           threadId: ThreadId.makeUnsafe("thread-1"),
           status: "ready",
-          providerName: "codex",
+          providerName: providerKind,
+          ...(options?.learningFixture === true ? { providerInstanceId: "omp" } : {}),
           runtimeMode: "approval-required",
           activeTurnId: null,
           updatedAt: createdAt,
@@ -523,7 +797,10 @@ describe("ProviderRuntimeIngestion", () => {
       }),
     );
     provider.setSession({
-      provider: "codex",
+      provider: providerKind,
+      ...(options?.learningFixture === true
+        ? { providerInstanceId: "omp", lifecycleGeneration: "learning-ingestion-generation" }
+        : {}),
       status: "ready",
       runtimeMode: "approval-required",
       threadId: ThreadId.makeUnsafe("thread-1"),

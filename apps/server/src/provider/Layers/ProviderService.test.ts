@@ -119,6 +119,11 @@ import {
   SkillEvolutionRepository,
   type SkillEvolutionRepositoryShape,
 } from "../../experts/evolution/SkillEvolutionRepository";
+import {
+  ExpertLearningRepository,
+  type ExpertLearningRepositoryShape,
+} from "../../experts/evolution/ExpertLearningRepository";
+import { withExpertLearningCommit } from "../../experts/expertLearningCommit";
 
 // The fake adapter never prepares Codex storage. Give lifecycle tests real
 // continuation metadata without reading or writing the developer's Codex home.
@@ -869,6 +874,7 @@ function makeProviderServiceLayer(
     readonly confirmSkillApplication?: boolean;
     readonly contextRepository?: ContextRepositoryShape;
     readonly skillEvolutionRepository?: SkillEvolutionRepositoryShape;
+    readonly expertLearningRepository?: ExpertLearningRepositoryShape;
     readonly codexDidResumeSession?: NonNullable<
       ProviderAdapterShape<ProviderAdapterError>["didResumeSession"]
     >;
@@ -959,6 +965,9 @@ function makeProviderServiceLayer(
   const skillEvolutionRepositoryLayer = providers?.skillEvolutionRepository
     ? Layer.succeed(SkillEvolutionRepository, providers.skillEvolutionRepository)
     : Layer.empty;
+  const expertLearningRepositoryLayer = providers?.expertLearningRepository
+    ? Layer.succeed(ExpertLearningRepository, providers.expertLearningRepository)
+    : Layer.empty;
 
   const rawLayer = Layer.mergeAll(
     makeProviderServiceLiveRaw({ stateDir: strictExpertTestState, ...options }).pipe(
@@ -968,6 +977,7 @@ function makeProviderServiceLayer(
       Layer.provide(ProviderServiceTestSecretStoreLayer),
       Layer.provide(serverSettingsLayer),
       Layer.provide(skillEvolutionRepositoryLayer),
+      Layer.provide(expertLearningRepositoryLayer),
     ),
     directoryLayer,
     runtimeRepositoryLayer,
@@ -1726,6 +1736,96 @@ const skillEvolutionRouting = makeProviderServiceLayer(undefined, {
   contextRepository: skillEvolutionContextRepository.repository,
   skillEvolutionRepository: makeSkillEvolutionRepository(skillEvolutionExecution),
 });
+const automaticAdmissionThreadIds = {
+  closeDuringWitness: asThreadId("thread-learning-admission-close-during-witness"),
+  acceptedSend: asThreadId("thread-learning-admission-accepted-send"),
+  cancelledSend: asThreadId("thread-learning-admission-cancelled-send"),
+} as const;
+const automaticAdmissionExecutions = new Map(
+  [
+    [automaticAdmissionThreadIds.closeDuringWitness, "witness"],
+    [automaticAdmissionThreadIds.acceptedSend, "accepted"],
+    [automaticAdmissionThreadIds.cancelledSend, "cancelled"],
+  ].map(
+    ([threadId, suffix]) =>
+      [
+        threadId,
+        {
+          requestId: `automatic-admission-${suffix}`,
+          ownerId: "automatic-admission-owner",
+          expertId: "automatic-admission-expert",
+          origin: "automatic" as const,
+          cycleId: `automatic-admission-cycle-${suffix}`,
+          learningEpoch: 1,
+          modelSelection: skillEvolutionOmpModel,
+        },
+      ] as const,
+  ),
+);
+const automaticAdmissionExecution = (threadId: ThreadId) =>
+  Effect.succeed(automaticAdmissionExecutions.get(threadId));
+const automaticAdmissionLearningState = { enabled: true, epoch: 1, revision: 1 };
+const automaticAdmissionUpdatedAt = "2026-10-31T00:00:00.000Z";
+const automaticAdmissionLearningRepository: ExpertLearningRepositoryShape = {
+  readState: (ownerId, expertId) =>
+    Effect.succeed({
+      ownerId,
+      expertId,
+      revision: automaticAdmissionLearningState.revision,
+      updatedAt: automaticAdmissionUpdatedAt,
+      record: JSON.stringify({
+        ownerKind: "session",
+        state: {
+          expertId,
+          enabled: automaticAdmissionLearningState.enabled,
+          epoch: automaticAdmissionLearningState.epoch,
+          revision: automaticAdmissionLearningState.revision,
+          harnessKind: "omp",
+          updatedAt: automaticAdmissionUpdatedAt,
+        },
+      }),
+    }),
+  listStates: () => Effect.succeed([]),
+  writeState: () => Effect.void,
+  readEvidence: () => Effect.succeed(undefined),
+  listEvidence: () => Effect.succeed([]),
+  writeEvidence: () => Effect.void,
+  readCycle: (cycleId) => {
+    const execution = [...automaticAdmissionExecutions.values()].find(
+      (candidate) => candidate.cycleId === cycleId,
+    );
+    return Effect.succeed(
+      execution
+        ? {
+            cycleId,
+            ownerId: execution.ownerId,
+            expertId: execution.expertId!,
+            updatedAt: automaticAdmissionUpdatedAt,
+            record: JSON.stringify({
+              status: "generation",
+              generationId: execution.requestId,
+            }),
+          }
+        : undefined,
+    );
+  },
+  listCycles: () => Effect.succeed([]),
+  writeCycle: () => Effect.void,
+};
+const automaticAdmissionStateDir = path.join(strictExpertTestRoot, "automatic-learning-admission");
+const automaticAdmissionRouting = makeProviderServiceLayer(
+  { stateDir: automaticAdmissionStateDir },
+  {
+    includeOmp: true,
+    skillEvolutionRepository: makeSkillEvolutionRepository(automaticAdmissionExecution),
+    expertLearningRepository: automaticAdmissionLearningRepository,
+  },
+);
+const resetAutomaticAdmissionState = () => {
+  automaticAdmissionLearningState.enabled = true;
+  automaticAdmissionLearningState.epoch = 1;
+  automaticAdmissionLearningState.revision = 1;
+};
 skillEvolutionRouting.layer("ProviderService Skill Evolution execution boundary", (it) => {
   it.effect("admits only registered OMP extraction sessions and dispatches through OMP", () =>
     Effect.gen(function* () {
@@ -2043,6 +2143,179 @@ skillEvolutionRouting.layer("ProviderService Skill Evolution execution boundary"
       yield* provider.stopSession({ threadId });
       yield* provider.stopSession({ threadId: ordinarySourceThreadId });
       skillEvolutionExecutions.set(threadId, registration);
+    }),
+  );
+});
+
+automaticAdmissionRouting.layer("ProviderService automatic learning admission", (it) => {
+  it.effect("rechecks the closed epoch after beforeDispatch and skips native send", () =>
+    Effect.gen(function* () {
+      resetAutomaticAdmissionState();
+      const provider = yield* ProviderService;
+      const threadId = automaticAdmissionThreadIds.closeDuringWitness;
+      yield* provider.startSession(threadId, {
+        provider: "omp",
+        providerInstanceId: "omp" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionOmpModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      automaticAdmissionRouting.omp.sendTurn.mockClear();
+
+      const witnessEntered = yield* Deferred.make<void>();
+      const resumeWitness = yield* Deferred.make<void>();
+      const send = yield* provider
+        .sendTurn(
+          {
+            threadId,
+            input: "Automatic extraction request",
+            attachments: [],
+            modelSelection: skillEvolutionOmpModel,
+          },
+          {
+            beforeDispatch: Effect.gen(function* () {
+              yield* Deferred.succeed(witnessEntered, undefined);
+              yield* Deferred.await(resumeWitness);
+            }),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(witnessEntered);
+
+      yield* Effect.promise(() =>
+        withExpertLearningCommit(
+          automaticAdmissionStateDir,
+          async () => {
+            automaticAdmissionLearningState.enabled = false;
+            automaticAdmissionLearningState.epoch += 1;
+            automaticAdmissionLearningState.revision += 1;
+          },
+          {},
+          "control",
+        ),
+      );
+      yield* Deferred.succeed(resumeWitness, undefined);
+      const outcome = yield* Effect.exit(Fiber.join(send));
+
+      assert.isTrue(Exit.isFailure(outcome));
+      assert.equal(automaticAdmissionRouting.omp.sendTurn.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("holds close behind native send acceptance, then releases the admission", () =>
+    Effect.gen(function* () {
+      resetAutomaticAdmissionState();
+      const provider = yield* ProviderService;
+      const threadId = automaticAdmissionThreadIds.acceptedSend;
+      yield* provider.startSession(threadId, {
+        provider: "omp",
+        providerInstanceId: "omp" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionOmpModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      const sendStarted = yield* Deferred.make<void>();
+      const acceptSend = yield* Deferred.make<void>();
+      const events: string[] = [];
+      automaticAdmissionRouting.omp.sendTurn.mockImplementationOnce(() =>
+        Effect.gen(function* () {
+          events.push("native-send-started");
+          yield* Deferred.succeed(sendStarted, undefined);
+          yield* Deferred.await(acceptSend);
+          events.push("native-send-accepted");
+          return {
+            threadId,
+            turnId: TurnId.makeUnsafe(`automatic-admission-turn-${threadId}`),
+          };
+        }),
+      );
+
+      const send = yield* provider
+        .sendTurn({
+          threadId,
+          input: "Automatic extraction request",
+          attachments: [],
+          modelSelection: skillEvolutionOmpModel,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(sendStarted);
+      const closeRequested = yield* Deferred.make<void>();
+      const close = yield* Effect.gen(function* () {
+        yield* Deferred.succeed(closeRequested, undefined);
+        return yield* Effect.promise(() =>
+          withExpertLearningCommit(
+            automaticAdmissionStateDir,
+            async () => {
+              events.push("learning-closed");
+              automaticAdmissionLearningState.enabled = false;
+              automaticAdmissionLearningState.epoch += 1;
+              automaticAdmissionLearningState.revision += 1;
+            },
+            {},
+            "control",
+          ),
+        );
+      }).pipe(Effect.forkChild);
+      yield* Deferred.await(closeRequested);
+      yield* Effect.yieldNow;
+      assert.deepEqual(events, ["native-send-started"]);
+
+      yield* Deferred.succeed(acceptSend, undefined);
+      yield* Fiber.join(send);
+      yield* Fiber.join(close);
+
+      assert.deepEqual(events, ["native-send-started", "native-send-accepted", "learning-closed"]);
+      assert.equal(automaticAdmissionLearningState.enabled, false);
+    }),
+  );
+
+  it.effect("releases native admission when its Effect is interrupted", () =>
+    Effect.gen(function* () {
+      resetAutomaticAdmissionState();
+      const provider = yield* ProviderService;
+      const threadId = automaticAdmissionThreadIds.cancelledSend;
+      yield* provider.startSession(threadId, {
+        provider: "omp",
+        providerInstanceId: "omp" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionOmpModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      const sendStarted = yield* Deferred.make<void>();
+      automaticAdmissionRouting.omp.sendTurn.mockImplementationOnce(() =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(sendStarted, undefined);
+          return yield* Effect.never;
+        }),
+      );
+
+      const send = yield* provider
+        .sendTurn({
+          threadId,
+          input: "Automatic extraction request",
+          attachments: [],
+          modelSelection: skillEvolutionOmpModel,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(sendStarted);
+      yield* Fiber.interrupt(send);
+
+      yield* Effect.promise(() =>
+        withExpertLearningCommit(
+          automaticAdmissionStateDir,
+          async () => {
+            automaticAdmissionLearningState.enabled = false;
+            automaticAdmissionLearningState.epoch += 1;
+            automaticAdmissionLearningState.revision += 1;
+          },
+          {},
+          "control",
+        ),
+      );
+      assert.equal(automaticAdmissionLearningState.enabled, false);
     }),
   );
 });

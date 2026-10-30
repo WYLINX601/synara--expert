@@ -12,6 +12,8 @@ import { AgentGatewaySessionRegistry } from "../../agentGateway/Services/AgentGa
 import { preflightExpertConnections } from "../../experts/ExpertGatewayTools.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore";
+import { ExpertLearningRepository } from "../../experts/evolution/ExpertLearningRepository";
+import { frozenLearningEntriesReader } from "../../experts/evolution/ExpertLearningState";
 import { expertSnapshotSession } from "../../experts/expertSnapshotSession";
 import { ContextRepository } from "../../context/ContextRepository.ts";
 import { captureSkillEvolutionExecutionReader } from "../../workbench/host/skillEvolutionExecution";
@@ -1003,7 +1005,16 @@ const make = Effect.gen(function* () {
   const managedAttachments = yield* ManagedAttachmentRepository;
   const serverConfig = yield* ServerConfig;
   const expertStore = createExpertStore(serverConfig.stateDir);
-  const runSkillAssemblies = createRunSkillAssemblyStore(serverConfig.stateDir);
+  const learningRepository = yield* Effect.serviceOption(ExpertLearningRepository);
+  const runSkillAssemblies = createRunSkillAssemblyStore(
+    serverConfig.stateDir,
+    Option.isSome(learningRepository)
+      ? {
+          frozenEntries: (expertId, bindings) =>
+            frozenLearningEntriesReader(learningRepository.value)(expertId, bindings ?? []),
+        }
+      : {},
+  );
   const threadSkillAssemblyIds = new Map<ThreadId, string>();
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,

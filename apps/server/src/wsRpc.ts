@@ -195,6 +195,8 @@ import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
 import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
 import { createExpertStore } from "./experts/ExpertStore";
 import { SkillEvolutionRepository } from "./experts/evolution/SkillEvolutionRepository";
+import { ExpertLearningRepository } from "./experts/evolution/ExpertLearningRepository";
+import { frozenLearningEntriesReader } from "./experts/evolution/ExpertLearningState";
 import { ProjectionTurnRepository } from "./persistence/Services/ProjectionTurns";
 import { makeSkillEvolutionRpcHandlers } from "./workbench/host/skillEvolutionRpc";
 import { readHubExpertCatalog } from "./agentGateway/hubExpertCatalog";
@@ -597,6 +599,7 @@ const makeWsRpcHandlersLayer = () =>
       const expertAppliedRuntimeRepository = yield* ExpertAppliedRuntimeRepository;
       const contextRepository = yield* ContextRepository;
       const evolutionRepository = yield* Effect.serviceOption(SkillEvolutionRepository);
+      const learningRepository = yield* Effect.serviceOption(ExpertLearningRepository);
       const evolutionTurns = yield* Effect.serviceOption(ProjectionTurnRepository);
       const contextDeliveries = yield* OrchestrationEventDeliveryRepository;
       const workbenchExpertRuntime = createWorkbenchExpertRuntime({
@@ -1420,7 +1423,18 @@ const makeWsRpcHandlersLayer = () =>
               shell?.session?.status === "starting" ||
               hasBackground,
             );
-            const assemblies = createRunSkillAssemblyStore(config.stateDir);
+            const assemblies = createRunSkillAssemblyStore(
+              config.stateDir,
+              Option.isSome(learningRepository)
+                ? {
+                    frozenEntries: (expertId, bindings) =>
+                      frozenLearningEntriesReader(learningRepository.value)(
+                        expertId,
+                        bindings ?? [],
+                      ),
+                  }
+                : {},
+            );
             return yield* Effect.tryPromise(async () => {
               if (!running) return assemblies.preview(snapshot.snapshotId);
               const current = await assemblies.current(threadId);
@@ -1434,9 +1448,24 @@ const makeWsRpcHandlersLayer = () =>
         stateDir: config.stateDir,
         runtime: workbenchExpertRuntime,
         ...(Option.isSome(evolutionRepository) ? { repository: evolutionRepository.value } : {}),
+        ...(Option.isSome(learningRepository)
+          ? { learningRepository: learningRepository.value }
+          : {}),
         requireOwner,
         rpcEffect,
         host: (principal) => ({
+          readProjectIdentity: (projectId) =>
+            Effect.runPromise(
+              projectionReadModelQuery
+                .getProjectShellById(projectId as ProjectId)
+                .pipe(
+                  Effect.map((project) =>
+                    Option.isSome(project)
+                      ? { projectId: project.value.id, spaceId: project.value.spaceId ?? null }
+                      : undefined,
+                  ),
+                ),
+            ),
           readThreads: () =>
             Effect.runPromise(
               projectionReadModelQuery
@@ -1468,6 +1497,7 @@ const makeWsRpcHandlersLayer = () =>
         }),
       });
       yield* Effect.addFinalizer(() => Effect.promise(() => evolutionRpc.dispose()));
+      yield* Effect.promise(() => evolutionRpc.start());
       const workbenchExpertRpcHandlers = makeWorkbenchExpertRpcHandlers({
         runtime: workbenchExpertRuntime,
         requireSkillOwner,

@@ -2,6 +2,9 @@ import "../../../index.css";
 
 import type {
   ExpertDefinition,
+  ExpertLearningState,
+  ProviderKind,
+  ThreadId,
   ModelSelection,
   SkillDefinition,
   SkillEvolutionGraph,
@@ -31,6 +34,11 @@ import { useState } from "react";
 
 const harness = vi.hoisted(() => ({
   calls: [] as SkillEvolutionRequest[],
+  learningState: undefined as ExpertLearningState | undefined,
+  learningSetGate: null as Promise<void> | null,
+  learningSetFailure: false,
+  learningReadFailure: false,
+  configuredProvider: "pi" as ProviderKind,
   runs: [] as SkillEvolutionRun[],
   startStatus: "no_change" as SkillEvolutionRun["status"],
   startUnknownOutcomeOnce: "none" as "none" | "before-persist" | "after-persist",
@@ -83,6 +91,7 @@ vi.mock("~/lib/serverReactQuery", () => ({
 }));
 vi.mock("~/lib/providerDiscovery", () => ({ resolveProviderDiscoveryCwd: () => null }));
 
+import { ExpertLearningControl, expertLearningQueryKey } from "./ExpertLearningControl";
 import { ExpertSkillEvolution } from "./ExpertSkillEvolution";
 import { ExpertEditor, type ExpertEditorTab } from "~/components/settings/ExpertEditor";
 import { evolutionTimelineEntries, skillEvolutionQueryKey } from "./model";
@@ -428,6 +437,13 @@ function EvolutionEditorFixture() {
     <ExpertEditor
       header={<h1>{expert.name}</h1>}
       history={<p>专家任务历史</p>}
+      learning={
+        <ExpertLearningControl
+          expertId={expert.id}
+          provider={harness.configuredProvider}
+          active={tab === "settings"}
+        />
+      }
       evolution={
         <ExpertSkillEvolution
           expertId={expert.id}
@@ -481,6 +497,7 @@ async function mount(
   initialThreadId: string | null = null,
   editor = false,
   historySelector = false,
+  openManual = true,
 ) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const root = createRootRoute({
@@ -510,6 +527,7 @@ async function mount(
                 <ExpertSkillEvolution
                   expertId={expert.id}
                   expertName={expert.name}
+                  preferredProvider={harness.configuredProvider}
                   active
                   initialThreadId={initialThreadId}
                   initialThreadRequestKey={initialThreadId ? 1 : 0}
@@ -535,6 +553,10 @@ async function mount(
     history: createMemoryHistory({ initialEntries: ["/evolution"] }),
   });
   const view = await render(<RouterProvider router={router} />);
+  if (openManual) {
+    const toggle = page.getByRole("button", { name: "手动提炼经验", exact: true });
+    if (toggle.element().getAttribute("aria-expanded") !== "true") await toggle.click();
+  }
   dispose = async () => {
     await view.unmount();
     client.clear();
@@ -544,6 +566,11 @@ async function mount(
 
 beforeEach(() => {
   harness.calls = [];
+  harness.learningState = undefined;
+  harness.learningSetGate = null;
+  harness.learningSetFailure = false;
+  harness.learningReadFailure = false;
+  harness.configuredProvider = "pi";
   harness.runs = [];
   graphForTest = graph;
   harness.startStatus = "no_change";
@@ -559,6 +586,22 @@ beforeEach(() => {
   harness.server.skillEvolution.mockReset().mockImplementation(async (request) => {
     harness.calls.push(request);
     switch (request.action) {
+      case "learningRead":
+        if (harness.learningReadFailure) throw new Error("offline");
+        return harness.learningState ? { learningState: harness.learningState } : {};
+      case "learningSet":
+        if (harness.learningSetGate) await harness.learningSetGate;
+        if (harness.learningSetFailure) throw new Error("receipt unavailable");
+        harness.learningState = {
+          expertId: request.expertId,
+          enabled: request.enabled,
+          revision: request.expectedRevision + 1,
+          epoch: (harness.learningState?.epoch ?? 0) + 1,
+          harnessKind: request.harnessKind ?? harness.learningState?.harnessKind ?? "pi",
+          updatedAt: new Date().toISOString(),
+          status: request.enabled ? "idle" : "disabled",
+        };
+        return { learningState: harness.learningState };
       case "sources":
         return { sources: sourceRows };
       case "capabilities":
@@ -795,6 +838,211 @@ afterEach(async () => {
 });
 
 describe("Expert Skill evolution browser flow", () => {
+  it("defaults learning off and manual extraction collapsed, then shares confirmed settings across tabs", async () => {
+    await mount(null, true, false, false);
+    const manual = page.getByRole("button", { name: "手动提炼经验", exact: true });
+    await expect.element(manual).toHaveAttribute("aria-expanded", "false");
+    await expect.element(page.getByRole("switch", { name: "自学习" })).not.toBeChecked();
+    await page.getByRole("tab", { name: "设置", exact: true }).click();
+    const toggle = page.getByRole("switch", { name: "自学习" });
+    await expect.element(toggle).toBeEnabled();
+    await toggle.click();
+    await expect.element(toggle).toBeChecked();
+    expect(harness.calls.find((request) => request.action === "learningSet")).toMatchObject({
+      expertId: expert.id,
+      expectedRevision: 0,
+      enabled: true,
+      harnessKind: "pi",
+    });
+    await page.getByRole("tab", { name: "进化", exact: true }).click();
+    await expect.element(toggle).toBeChecked();
+    await toggle.click();
+    await expect.element(toggle).not.toBeChecked();
+    await expect.element(page.getByText("已关闭 · 当前技能版本已固定")).toBeVisible();
+    await expect.element(toggle).toBeEnabled();
+    await toggle.click();
+    await expect.element(toggle).toBeChecked();
+    expect(
+      harness.calls
+        .filter((request) => request.action === "learningSet")
+        .map((request) =>
+          request.action === "learningSet" ? [request.enabled, request.expectedRevision] : [],
+        ),
+    ).toEqual([
+      [true, 0],
+      [false, 1],
+      [true, 2],
+    ]);
+    expect(harness.draft.handleProviderModelChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps the confirmed enabled state until a disable receipt arrives", async () => {
+    harness.learningState = {
+      expertId: expert.id,
+      enabled: true,
+      revision: 4,
+      epoch: 2,
+      harnessKind: "pi",
+      updatedAt: "2026-10-31T00:00:00.000Z",
+      status: "idle",
+    };
+    let release!: () => void;
+    harness.learningSetGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await mount(null, false, false, false);
+    const toggle = page.getByRole("switch", { name: "自学习" });
+    await expect.element(toggle).toBeChecked();
+    await toggle.click();
+    await expect.element(toggle).toBeDisabled();
+    await expect.element(toggle).toBeChecked();
+    await expect.element(page.getByText("正在保存自学习设置…")).toBeVisible();
+    release();
+    await expect.element(toggle).not.toBeChecked();
+  });
+
+  it("does not claim disable completion after an unknown receipt and failed reread", async () => {
+    harness.learningState = {
+      expertId: expert.id,
+      enabled: true,
+      revision: 4,
+      epoch: 2,
+      harnessKind: "pi",
+      updatedAt: "2026-10-31T00:00:00.000Z",
+      status: "idle",
+    };
+    await mount(null, false, false, false);
+    const toggle = page.getByRole("switch", { name: "自学习" });
+    await expect.element(toggle).toBeChecked();
+    harness.learningSetFailure = true;
+    harness.learningReadFailure = true;
+    await toggle.click();
+    await expect.element(page.getByText("暂时无法确认自学习状态，请稍后重试。")).toBeVisible();
+    await expect.element(toggle).toBeChecked();
+    await expect.element(toggle).toBeDisabled();
+    await expect.element(page.getByText("已关闭 · 当前技能版本已固定")).not.toBeInTheDocument();
+  });
+
+  it("keeps unsupported learning isolated from manual extraction and never switches providers", async () => {
+    harness.configuredProvider = "codex";
+    await mount(null, false, false, false);
+    await expect.element(page.getByRole("switch", { name: "自学习" })).toBeDisabled();
+    await expect.element(page.getByText(/当前 Provider 暂不支持自学习/)).toBeVisible();
+    await page.getByRole("button", { name: "手动提炼经验", exact: true }).click();
+    await expect.element(page.getByRole("button", { name: "提炼经验", exact: true })).toBeEnabled();
+    expect(harness.calls.some((request) => request.action === "learningSet")).toBe(false);
+    expect(harness.draft.handleProviderModelChange).not.toHaveBeenCalled();
+  });
+
+  it("shows background failure calmly and reveals technical detail only on demand", async () => {
+    harness.learningState = {
+      expertId: expert.id,
+      enabled: true,
+      revision: 4,
+      epoch: 2,
+      harnessKind: "pi",
+      updatedAt: "2026-10-31T00:00:00.000Z",
+      status: "failed",
+      summary: "Synthetic provider failure at /isolated/test",
+    };
+    harness.runs = [run({ origin: "automatic", status: "failed", proposals: [] })];
+    await mount(null, false, false, false);
+    await expect.element(page.getByText("本轮暂未完成，后续任务不受影响。")).toBeVisible();
+    expect(
+      page
+        .getByText(harness.learningState.summary!)
+        .element()
+        .closest('[aria-hidden="true"][inert]'),
+    ).not.toBeNull();
+    await expect
+      .element(page.getByTestId("experience-node:request-update"))
+      .not.toBeInTheDocument();
+    await page.getByRole("button", { name: "查看学习详情" }).click();
+    await expect.element(page.getByText(harness.learningState.summary!)).toBeVisible();
+  });
+
+  it("shows confirmed automatic growth with runtime evidence and existing diff details", async () => {
+    const applied = proposal({
+      status: "applied",
+      resultSkillId: skillId,
+      resultRevision: 3,
+      evidence: [
+        {
+          kind: "runtime",
+          threadId: "thread-alpha" as ThreadId,
+          eventId: "tool-result-1",
+          quote: "Verified the actual output.",
+        },
+      ],
+    });
+    const parent = { ...discoveryRun(), origin: "automatic" as const };
+    harness.runs = [
+      parent,
+      run({
+        origin: "automatic",
+        proposals: [applied],
+        stage: "generation",
+        discoveryRequestId: parent.requestId,
+        opportunityId: "opportunity-1",
+        generationIndex: 1,
+      }),
+    ];
+    harness.learningState = {
+      expertId: expert.id,
+      enabled: true,
+      revision: 3,
+      epoch: 1,
+      harnessKind: "pi",
+      updatedAt: "2026-10-31T00:00:00.000Z",
+      status: "idle",
+    };
+    await page.viewport(1000, 900);
+    await mount(null, true, false, false);
+    await expect.element(page.getByText("自动学习", { exact: true })).toBeVisible();
+    await expect.element(page.getByText(/条待处理/)).not.toBeInTheDocument();
+    await openRun(parent.requestId);
+    await page.getByRole("tab", { name: "依据 1", exact: true }).click();
+    await expect.element(page.getByText("Verified the actual output.")).toBeVisible();
+    await page.getByRole("tab", { name: "本次改动", exact: true }).click();
+    await expect.element(page.getByRole("button", { name: "编辑候选" })).not.toBeInTheDocument();
+    await page.getByRole("button", { name: /查看完整差异/ }).click();
+    await expect.element(page.getByRole("dialog", { name: /完整差异/ })).toBeVisible();
+    await page.getByRole("button", { name: "关闭完整差异" }).click();
+    await page.getByRole("tab", { name: "设置", exact: true }).click();
+    await expect.element(page.getByRole("switch", { name: "自学习" })).toBeChecked();
+  });
+
+  it("refreshes automatic state without losing feedback or announcing no-change growth", async () => {
+    harness.runs = [
+      discoveryRun(),
+      run({
+        requestId: "automatic-no-change",
+        origin: "automatic",
+        status: "no_change",
+        proposals: [],
+      }),
+    ];
+    const client = await mount();
+    await openRun("request-discovery");
+    const feedback = page.getByRole("textbox", { name: "生成反馈：修复后复核" });
+    await feedback.fill("保留自动刷新期间的反馈");
+    harness.learningState = {
+      expertId: expert.id,
+      enabled: true,
+      revision: 3,
+      epoch: 1,
+      harnessKind: "pi",
+      updatedAt: "2026-10-31T00:00:00.000Z",
+      status: "idle",
+    };
+    await client.invalidateQueries({ queryKey: expertLearningQueryKey(expert.id) });
+    await expect.element(feedback).toHaveValue("保留自动刷新期间的反馈");
+    await expect
+      .element(page.getByTestId("experience-node:automatic-no-change"))
+      .not.toBeInTheDocument();
+    expect(harness.calls.filter((request) => request.action === "list").length).toBeGreaterThan(1);
+  });
+
   it("opens one timeline node at a time, preserves draft edits and collapses secondary controls", async () => {
     harness.runs = [run(), discoveryRun()];
     await mount();

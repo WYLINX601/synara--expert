@@ -75,6 +75,7 @@ export function ExpertsSettingsPanel(props: {
     ) => Promise<void>;
   };
   readonly renderHistory?: (expertId: string, canExtract: boolean) => ReactNode;
+  readonly renderLearning?: (expert: ExpertDefinition, active: boolean) => ReactNode;
   readonly renderEvolution?: (expert: ExpertDefinition, active: boolean) => ReactNode;
   readonly onUseExpert?: (expertId: string) => Promise<void>;
   readonly initialExpertId?: string;
@@ -737,6 +738,7 @@ export function ExpertsSettingsPanel(props: {
                 ? props.renderHistory(baseline.id, !readonly)
                 : undefined
             }
+            learning={baseline && props.renderLearning?.(baseline, tab === "settings")}
             evolution={
               baseline && props.renderEvolution
                 ? props.renderEvolution(

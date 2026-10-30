@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { ThreadId } from "@synara/contracts";
 import { ExpertsSettingsPanel } from "~/components/settings/ExpertsSettingsPanel";
 import { ExpertTaskHistory } from "~/components/settings/ExpertTaskHistory";
+import { ExpertLearningControl } from "./features/expert-evolution/ExpertLearningControl";
 import { ExpertSkillEvolution } from "./features/expert-evolution/ExpertSkillEvolution";
 import { settingsSearchForMcpFromExpert } from "./host/settings";
 import { useExpertTaskActions } from "./host/expertTaskActions";
@@ -92,12 +93,21 @@ export default function ExpertCenterPage() {
                 : {})}
             />
           )}
+          renderLearning={(expert, active) => (
+            <ExpertLearningControl
+              expertId={expert.id}
+              provider={expert.preferredProvider}
+              active={active}
+              disabled={expert.archived}
+            />
+          )}
           renderEvolution={(expert, active) => (
             <ExpertSkillEvolution
               key={expert.id}
               expertId={expert.id}
               expertName={expert.name}
               expertArchived={expert.archived}
+              preferredProvider={expert.preferredProvider}
               active={active}
               initialThreadId={
                 sourceSelection?.expertId === expert.id ? sourceSelection.threadId : null

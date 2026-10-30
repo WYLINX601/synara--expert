@@ -1,5 +1,6 @@
 import {
   type ModelSelection,
+  type ProviderKind,
   type SkillDefinition,
   type SkillEvolutionGraph,
   type SkillEvolutionGraphNode,
@@ -75,6 +76,8 @@ import {
   DialogPopup,
   DialogTitle,
 } from "~/components/ui/dialog";
+
+import { ExpertLearningControl } from "./ExpertLearningControl";
 
 const RUNS_QUERY_SUFFIX = "runs";
 const SOURCES_QUERY_SUFFIX = "sources";
@@ -962,7 +965,7 @@ function ProposalCard({
                   <ul className="space-y-2">
                     {proposal.evidence.map((evidence, evidenceIndex) => (
                       <li
-                        key={`${evidence.threadId}:${evidence.messageId}:${evidenceIndex}`}
+                        key={`${evidence.threadId}:${"eventId" in evidence ? evidence.eventId : evidence.messageId}:${evidenceIndex}`}
                         className="rounded-lg bg-muted/50 p-3 text-ui-sm"
                       >
                         <blockquote className="whitespace-pre-wrap break-words">
@@ -1301,7 +1304,7 @@ function OpportunityCard({
           <ul className="space-y-2">
             {displayedEvidence.map((evidence, evidenceIndex) => (
               <li
-                key={`${evidence.threadId}:${evidence.messageId}:${evidenceIndex}`}
+                key={`${evidence.threadId}:${"eventId" in evidence ? evidence.eventId : evidence.messageId}:${evidenceIndex}`}
                 className="flex min-w-0 flex-col gap-2 border-b border-border/60 py-3 text-ui-sm last:border-b-0 sm:flex-row sm:items-start sm:justify-between sm:gap-5"
               >
                 <blockquote className="min-w-0 flex-1 whitespace-pre-wrap break-words">
@@ -1367,6 +1370,7 @@ export function ExpertSkillEvolution({
   expertId,
   expertName,
   expertArchived = false,
+  preferredProvider,
   active,
   initialThreadId,
   initialThreadRequestKey,
@@ -1376,6 +1380,7 @@ export function ExpertSkillEvolution({
   readonly expertId: string;
   readonly expertName: string;
   readonly expertArchived?: boolean;
+  readonly preferredProvider?: ProviderKind | undefined;
   readonly active: boolean;
   readonly initialThreadId?: string | null;
   readonly initialThreadRequestKey?: number;
@@ -1470,6 +1475,8 @@ export function ExpertSkillEvolution({
   const [expandedEntryId, setExpandedEntryId] = useState<string | null>(null);
   const [visitedEntries, setVisitedEntries] = useState<ReadonlySet<string>>(new Set());
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [manualOpen, setManualOpen] = useState(Boolean(initialThreadId));
+  const manualPanelId = useId();
   const [graphOpen, setGraphOpen] = useState(false);
   const [focus, setFocus] = useState("");
   const [feedbackDrafts, setFeedbackDrafts] = useState<Readonly<Record<string, string>>>({});
@@ -1667,6 +1674,7 @@ export function ExpertSkillEvolution({
     if (initialThreadSelectionRef.current === signature) return;
     initialThreadSelectionRef.current = signature;
     if (!initialThreadId) return;
+    setManualOpen(true);
     const explicitSource = defaultSkillEvolutionSources(sources, {
       preferredThreadId: initialThreadId,
     })[0];
@@ -2038,290 +2046,31 @@ export function ExpertSkillEvolution({
 
   return (
     <div className="min-w-0 space-y-5" aria-label={`${expertName} Skill 进化`}>
-      <section className="min-w-0 rounded-xl border border-border bg-background p-4">
-        <header className="mb-4 space-y-1">
-          <h2 className="text-ui-lg font-medium">提炼经验</h2>
-          <p className="text-ui-sm text-muted-foreground">
-            把工作经验沉淀为技能。审阅并应用后，正式 Skill 才会更新。
-          </p>
-        </header>
-        {expertArchived ? (
-          <p className="rounded-lg bg-muted/50 p-3 text-ui-sm text-muted-foreground" role="status">
-            专家已归档。历史进化记录可查看，但不能发起、采用或恢复。
-          </p>
-        ) : (
-          <>
-            {sourcesQuery.isPending ? (
-              <p className="text-ui-sm text-muted-foreground" role="status">
-                正在读取可用工作经验…
-              </p>
-            ) : sourcesQuery.isError ? (
-              <p className="text-ui-sm text-destructive" role="alert">
-                无法读取来源：{errorText(sourcesQuery.error)}
-              </p>
-            ) : sources.length === 0 ? (
-              <p className="rounded-lg border border-dashed border-border p-3 text-ui-sm text-muted-foreground">
-                暂无可提炼的工作经验
-              </p>
-            ) : (
-              <>
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    aria-expanded={sourceOpen}
-                    aria-controls={configPanelId}
-                    onClick={() =>
-                      setConfigPanel((panel) => (panel === "sources" ? null : "sources"))
-                    }
-                  >
-                    已选 {selectedSources.size} 段工作记录 <DisclosureChevron open={sourceOpen} />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="min-w-0 max-w-full"
-                    aria-label="调整提炼模型"
-                    aria-expanded={modelOpen}
-                    aria-controls={configPanelId}
-                    onClick={() => setConfigPanel((panel) => (panel === "model" ? null : "model"))}
-                  >
-                    <span className="truncate">
-                      {draft.selectedModel
-                        ? formatProviderModelOptionName({
-                            provider: draft.selectedProvider,
-                            slug: draft.selectedModel,
-                          })
-                        : "选择模型"}
-                    </span>
-                    <DisclosureChevron open={modelOpen} />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    aria-expanded={focusOpen}
-                    aria-controls={configPanelId}
-                    onClick={() => setConfigPanel((panel) => (panel === "focus" ? null : "focus"))}
-                  >
-                    {focus.trim() ? "编辑提炼重点" : "补充提炼重点"}
-                    <DisclosureChevron open={focusOpen} />
-                  </Button>
-                  <div className="order-1 basis-full text-ui-xs empty:hidden">
-                    {initialThreadSourceMissing ? (
-                      <p className="text-ui-xs text-muted-foreground" role="status">
-                        此任务没有可用片段，可在下方选择其他来源。
-                      </p>
-                    ) : null}
-                    {capabilityFailure ? (
-                      <p className="text-ui-xs text-destructive" role="status">
-                        {capabilityFailure}
-                      </p>
-                    ) : !runsQuery.isSuccess ? (
-                      <p className="text-ui-xs text-muted-foreground" role="status">
-                        {runsQuery.isError
-                          ? "无法确认已用片段，暂时不能发起提炼。"
-                          : "正在核对已用片段…"}
-                      </p>
-                    ) : !draft.selectedModel?.trim() ? (
-                      <p className="text-ui-xs text-muted-foreground" role="status">
-                        请选择本次提炼使用的模型。
-                      </p>
-                    ) : null}
-                  </div>
-                  <Button
-                    className="ml-auto"
-                    disabled={
-                      selectedSources.size < 1 ||
-                      selectedSources.size > 5 ||
-                      !runsQuery.isSuccess ||
-                      Boolean(capabilityFailure) ||
-                      startMutation.isPending ||
-                      working ||
-                      !draft.selectedModel?.trim()
-                    }
-                    aria-busy={startMutation.isPending}
-                    onClick={start}
-                  >
-                    {startMutation.isPending ? (
-                      <LoaderCircleIcon
-                        aria-hidden="true"
-                        className="size-4 animate-spin motion-reduce:animate-none"
-                      />
-                    ) : null}
-                    {startMutation.isPending ? "提交中…" : "提炼经验"}
-                  </Button>
-                </div>
-
-                <div id={configPanelId}>
-                  <DisclosureRegion open={configPanel !== null} className="min-w-0">
-                    <div hidden={!sourceOpen}>
-                      <div className="border-t border-border pt-3">
-                        <fieldset className="min-w-0 space-y-2" disabled={startMutation.isPending}>
-                          <legend className="text-ui-sm font-medium">
-                            选择工作记录（最多 5 段）
-                          </legend>
-                          <ul className="max-h-72 min-w-0 space-y-2 overflow-y-auto pr-1">
-                            {[...sources]
-                              .sort((left, right) =>
-                                right.completedAt.localeCompare(left.completedAt),
-                              )
-                              .map((source) => {
-                                const key = sourceKey(source);
-                                const checked = selectedSources.has(key);
-                                const disabled = !checked && selectedSources.size >= 5;
-                                return (
-                                  <li
-                                    key={key}
-                                    className="min-w-0 rounded-lg border border-border px-3 py-2"
-                                  >
-                                    <div className="grid min-w-0 grid-cols-1 items-center gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,1fr)_auto]">
-                                      <label className="flex min-w-0 cursor-pointer items-start gap-3">
-                                        <Checkbox
-                                          aria-label={`选择来源：${source.title || "未命名任务"}`}
-                                          checked={checked}
-                                          disabled={disabled}
-                                          onCheckedChange={(value) =>
-                                            setSelectedSourcesOverride((current) => {
-                                              const next = new Set(current ?? defaultSourceKeys);
-                                              if (value === true) next.add(key);
-                                              else next.delete(key);
-                                              return next;
-                                            })
-                                          }
-                                        />
-                                        <span className="min-w-0 flex-1">
-                                          <span className="block break-words text-ui font-medium">
-                                            {source.title || "未命名任务"}
-                                          </span>
-                                          <span className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-ui-xs text-muted-foreground">
-                                            <span>
-                                              {new Date(source.completedAt).toLocaleString()}
-                                            </span>
-                                            <span>{source.messageCount} 条消息</span>
-                                            {runs.some(
-                                              (run) =>
-                                                run.stage === "discovery" &&
-                                                run.sourceSelections?.some(
-                                                  (selection) => sourceKey(selection) === key,
-                                                ),
-                                            ) ? (
-                                              <span>已提炼过</span>
-                                            ) : null}
-                                          </span>
-                                        </span>
-                                      </label>
-                                      <div className="flex shrink-0 flex-wrap items-center gap-1 pl-7 sm:pl-0">
-                                        <Button
-                                          size="sm"
-                                          variant="ghost"
-                                          aria-expanded={expandedSourceKey === key}
-                                          onClick={() =>
-                                            setExpandedSourceKey((current) =>
-                                              current === key ? null : key,
-                                            )
-                                          }
-                                        >
-                                          记录详情{" "}
-                                          <DisclosureChevron open={expandedSourceKey === key} />
-                                        </Button>
-                                        {onOpenTask ? (
-                                          <Button
-                                            size="sm"
-                                            variant="ghost"
-                                            onClick={() => onOpenTask(source.threadId as ThreadId)}
-                                          >
-                                            打开任务{" "}
-                                            <ExternalLinkIcon
-                                              aria-hidden="true"
-                                              className="size-3.5"
-                                            />
-                                          </Button>
-                                        ) : null}
-                                      </div>
-                                    </div>
-                                    <DisclosureRegion open={expandedSourceKey === key}>
-                                      <p className="break-all pt-2 pl-7 text-ui-xs text-muted-foreground">
-                                        Expert v{source.expertRevision} · 来源 {source.snapshotId}
-                                      </p>
-                                    </DisclosureRegion>
-                                  </li>
-                                );
-                              })}
-                          </ul>
-                        </fieldset>
-                      </div>
-                    </div>
-                    <div hidden={!focusOpen} className="pt-3">
-                      <label className="grid min-w-0 gap-1.5 text-ui-sm">
-                        <span className="font-medium">发现重点（可选）</span>
-                        <Textarea
-                          aria-label="发现重点"
-                          value={focus}
-                          maxLength={8_000}
-                          rows={3}
-                          disabled={startMutation.isPending}
-                          placeholder="例如：查找可复用的排查与复核步骤。"
-                          onChange={(event) => setFocus(event.target.value)}
-                        />
-                      </label>
-                    </div>
-                    <div hidden={!modelOpen} className="pt-3">
-                      <div className="min-w-0 space-y-2 rounded-lg border border-border p-3">
-                        <div className="space-y-1">
-                          <p className="text-ui-sm font-medium">本次运行模型</p>
-                          <p className="text-ui-xs text-muted-foreground">
-                            使用当前已选 Provider 和模型；只有通过下方选择器明确操作时才会切换。
-                          </p>
-                        </div>
-                        <ScratchModelPickers
-                          draft={draft}
-                          catalog={catalog}
-                          providerStatuses={providerStatuses}
-                        />
-                        {capabilityFailure ? (
-                          <p
-                            className="flex items-start gap-2 text-ui-sm text-destructive"
-                            role="status"
-                          >
-                            <CircleAlertIcon
-                              aria-hidden="true"
-                              className="mt-0.5 size-4 shrink-0"
-                            />
-                            <span>{capabilityFailure}</span>
-                          </p>
-                        ) : currentProviderCapability ? (
-                          <p className="text-ui-xs text-muted-foreground" role="status">
-                            {currentProviderCapability.reason || "当前 Provider 满足提炼约束。"}
-                          </p>
-                        ) : null}
-                      </div>
-                    </div>
-                  </DisclosureRegion>
-                </div>
-              </>
-            )}
-          </>
-        )}
-        {notice ? (
-          <p className="rounded-lg border border-border bg-muted/40 p-3 text-ui-sm" role="status">
-            {notice}
-          </p>
-        ) : null}
-        {extractionError ? <ExtractionFailure reason={extractionError} /> : null}
-        {error ? (
-          <p
-            className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-ui-sm text-destructive"
-            role="alert"
-          >
-            {error}
-          </p>
-        ) : null}
-      </section>
+      <ExpertLearningControl
+        expertId={expertId}
+        provider={preferredProvider}
+        active={active}
+        disabled={expertArchived}
+      />
+      {notice ? (
+        <p className="rounded-lg border border-border bg-muted/40 p-3 text-ui-sm" role="status">
+          {notice}
+        </p>
+      ) : null}
+      {extractionError ? <ExtractionFailure reason={extractionError} /> : null}
+      {error ? (
+        <p
+          className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-ui-sm text-destructive"
+          role="alert"
+        >
+          {error}
+        </p>
+      ) : null}
 
       <section className="min-w-0 space-y-3" aria-labelledby="expert-evolution-history-heading">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 id="expert-evolution-history-heading" className="text-ui-lg font-medium">
-            经验{" "}
+            成长记录{" "}
             {pendingCount > 0 ? (
               <span className="ml-2 text-ui-sm font-normal text-muted-foreground">
                 {pendingCount} 条待处理
@@ -2337,6 +2086,9 @@ export function ExpertSkillEvolution({
             进化星图 <DisclosureChevron open={graphOpen} />
           </Button>
         </div>
+        <p className="text-ui-xs text-muted-foreground">
+          已保存并绑定的能力变化；实际效果仍需在后续工作中验证。
+        </p>
         {runsQuery.isPending ? (
           <p role="status" className="text-ui-sm text-muted-foreground">
             正在读取经验…
@@ -2351,7 +2103,7 @@ export function ExpertSkillEvolution({
           <p className="rounded-xl border border-dashed border-border px-4 py-6 text-ui-sm text-muted-foreground">
             {timeline.length
               ? "暂时没有待处理经验，历史记录已保留。"
-              : "从一次工作记录开始，发现值得复用的方法。"}
+              : "暂无已完成的成长记录。开启自学习后，后续工作中的有效变化会显示在这里。"}
           </p>
         ) : null}
         <ol className="min-w-0" aria-label="经验时间线">
@@ -2397,6 +2149,9 @@ export function ExpertSkillEvolution({
                   </span>
                 ) : null}
 
+                {entry.run.origin === "automatic" ? (
+                  <span className="text-ui-xs text-muted-foreground">自动学习</span>
+                ) : null}
                 <time
                   dateTime={entry.run.createdAt}
                   className="flex items-center gap-1 text-ui-xs text-muted-foreground"
@@ -2760,7 +2515,7 @@ export function ExpertSkillEvolution({
                     .flatMap((proposal) => proposal.evidence)
                     .map((evidence, evidenceIndex) => (
                       <blockquote
-                        key={`${evidence.threadId}:${evidence.messageId}:${evidenceIndex}`}
+                        key={`${evidence.threadId}:${"eventId" in evidence ? evidence.eventId : evidence.messageId}:${evidenceIndex}`}
                         className="break-words border-l-2 border-border pl-3 text-ui-sm"
                       >
                         {evidence.quote}
@@ -2893,6 +2648,306 @@ export function ExpertSkillEvolution({
           ) : null}
         </section>
       </DisclosureRegion>
+
+      <section className="min-w-0 border-t border-border pt-3">
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-expanded={manualOpen}
+          aria-controls={manualPanelId}
+          onClick={() => setManualOpen((open) => !open)}
+        >
+          手动提炼经验 <DisclosureChevron open={manualOpen} />
+        </Button>
+        <div id={manualPanelId}>
+          <DisclosureRegion open={manualOpen}>
+            <section className="min-w-0 rounded-xl border border-border bg-background p-4">
+              <header className="mb-4 space-y-1">
+                <p className="text-ui-sm text-muted-foreground">
+                  把工作经验沉淀为技能。审阅并应用后，正式 Skill 才会更新。
+                </p>
+              </header>
+              {expertArchived ? (
+                <p
+                  className="rounded-lg bg-muted/50 p-3 text-ui-sm text-muted-foreground"
+                  role="status"
+                >
+                  专家已归档。历史进化记录可查看，但不能发起、采用或恢复。
+                </p>
+              ) : (
+                <>
+                  {sourcesQuery.isPending ? (
+                    <p className="text-ui-sm text-muted-foreground" role="status">
+                      正在读取可用工作经验…
+                    </p>
+                  ) : sourcesQuery.isError ? (
+                    <p className="text-ui-sm text-destructive" role="alert">
+                      无法读取来源：{errorText(sourcesQuery.error)}
+                    </p>
+                  ) : sources.length === 0 ? (
+                    <p className="rounded-lg border border-dashed border-border p-3 text-ui-sm text-muted-foreground">
+                      暂无可提炼的工作经验
+                    </p>
+                  ) : (
+                    <>
+                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          aria-expanded={sourceOpen}
+                          aria-controls={configPanelId}
+                          onClick={() =>
+                            setConfigPanel((panel) => (panel === "sources" ? null : "sources"))
+                          }
+                        >
+                          已选 {selectedSources.size} 段工作记录{" "}
+                          <DisclosureChevron open={sourceOpen} />
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="min-w-0 max-w-full"
+                          aria-label="调整提炼模型"
+                          aria-expanded={modelOpen}
+                          aria-controls={configPanelId}
+                          onClick={() =>
+                            setConfigPanel((panel) => (panel === "model" ? null : "model"))
+                          }
+                        >
+                          <span className="truncate">
+                            {draft.selectedModel
+                              ? formatProviderModelOptionName({
+                                  provider: draft.selectedProvider,
+                                  slug: draft.selectedModel,
+                                })
+                              : "选择模型"}
+                          </span>
+                          <DisclosureChevron open={modelOpen} />
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-expanded={focusOpen}
+                          aria-controls={configPanelId}
+                          onClick={() =>
+                            setConfigPanel((panel) => (panel === "focus" ? null : "focus"))
+                          }
+                        >
+                          {focus.trim() ? "编辑提炼重点" : "补充提炼重点"}
+                          <DisclosureChevron open={focusOpen} />
+                        </Button>
+                        <div className="order-1 basis-full text-ui-xs empty:hidden">
+                          {initialThreadSourceMissing ? (
+                            <p className="text-ui-xs text-muted-foreground" role="status">
+                              此任务没有可用片段，可在下方选择其他来源。
+                            </p>
+                          ) : null}
+                          {capabilityFailure ? (
+                            <p className="text-ui-xs text-destructive" role="status">
+                              {capabilityFailure}
+                            </p>
+                          ) : !runsQuery.isSuccess ? (
+                            <p className="text-ui-xs text-muted-foreground" role="status">
+                              {runsQuery.isError
+                                ? "无法确认已用片段，暂时不能发起提炼。"
+                                : "正在核对已用片段…"}
+                            </p>
+                          ) : !draft.selectedModel?.trim() ? (
+                            <p className="text-ui-xs text-muted-foreground" role="status">
+                              请选择本次提炼使用的模型。
+                            </p>
+                          ) : null}
+                        </div>
+                        <Button
+                          className="ml-auto"
+                          disabled={
+                            selectedSources.size < 1 ||
+                            selectedSources.size > 5 ||
+                            !runsQuery.isSuccess ||
+                            Boolean(capabilityFailure) ||
+                            startMutation.isPending ||
+                            working ||
+                            !draft.selectedModel?.trim()
+                          }
+                          aria-busy={startMutation.isPending}
+                          onClick={start}
+                        >
+                          {startMutation.isPending ? (
+                            <LoaderCircleIcon
+                              aria-hidden="true"
+                              className="size-4 animate-spin motion-reduce:animate-none"
+                            />
+                          ) : null}
+                          {startMutation.isPending ? "提交中…" : "提炼经验"}
+                        </Button>
+                      </div>
+
+                      <div id={configPanelId}>
+                        <DisclosureRegion open={configPanel !== null} className="min-w-0">
+                          <div hidden={!sourceOpen}>
+                            <div className="border-t border-border pt-3">
+                              <fieldset
+                                className="min-w-0 space-y-2"
+                                disabled={startMutation.isPending}
+                              >
+                                <legend className="text-ui-sm font-medium">
+                                  选择工作记录（最多 5 段）
+                                </legend>
+                                <ul className="max-h-72 min-w-0 space-y-2 overflow-y-auto pr-1">
+                                  {[...sources]
+                                    .sort((left, right) =>
+                                      right.completedAt.localeCompare(left.completedAt),
+                                    )
+                                    .map((source) => {
+                                      const key = sourceKey(source);
+                                      const checked = selectedSources.has(key);
+                                      const disabled = !checked && selectedSources.size >= 5;
+                                      return (
+                                        <li
+                                          key={key}
+                                          className="min-w-0 rounded-lg border border-border px-3 py-2"
+                                        >
+                                          <div className="grid min-w-0 grid-cols-1 items-center gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,1fr)_auto]">
+                                            <label className="flex min-w-0 cursor-pointer items-start gap-3">
+                                              <Checkbox
+                                                aria-label={`选择来源：${source.title || "未命名任务"}`}
+                                                checked={checked}
+                                                disabled={disabled}
+                                                onCheckedChange={(value) =>
+                                                  setSelectedSourcesOverride((current) => {
+                                                    const next = new Set(
+                                                      current ?? defaultSourceKeys,
+                                                    );
+                                                    if (value === true) next.add(key);
+                                                    else next.delete(key);
+                                                    return next;
+                                                  })
+                                                }
+                                              />
+                                              <span className="min-w-0 flex-1">
+                                                <span className="block break-words text-ui font-medium">
+                                                  {source.title || "未命名任务"}
+                                                </span>
+                                                <span className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-ui-xs text-muted-foreground">
+                                                  <span>
+                                                    {new Date(source.completedAt).toLocaleString()}
+                                                  </span>
+                                                  <span>{source.messageCount} 条消息</span>
+                                                  {runs.some(
+                                                    (run) =>
+                                                      run.stage === "discovery" &&
+                                                      run.sourceSelections?.some(
+                                                        (selection) => sourceKey(selection) === key,
+                                                      ),
+                                                  ) ? (
+                                                    <span>已提炼过</span>
+                                                  ) : null}
+                                                </span>
+                                              </span>
+                                            </label>
+                                            <div className="flex shrink-0 flex-wrap items-center gap-1 pl-7 sm:pl-0">
+                                              <Button
+                                                size="sm"
+                                                variant="ghost"
+                                                aria-expanded={expandedSourceKey === key}
+                                                onClick={() =>
+                                                  setExpandedSourceKey((current) =>
+                                                    current === key ? null : key,
+                                                  )
+                                                }
+                                              >
+                                                记录详情{" "}
+                                                <DisclosureChevron
+                                                  open={expandedSourceKey === key}
+                                                />
+                                              </Button>
+                                              {onOpenTask ? (
+                                                <Button
+                                                  size="sm"
+                                                  variant="ghost"
+                                                  onClick={() =>
+                                                    onOpenTask(source.threadId as ThreadId)
+                                                  }
+                                                >
+                                                  打开任务{" "}
+                                                  <ExternalLinkIcon
+                                                    aria-hidden="true"
+                                                    className="size-3.5"
+                                                  />
+                                                </Button>
+                                              ) : null}
+                                            </div>
+                                          </div>
+                                          <DisclosureRegion open={expandedSourceKey === key}>
+                                            <p className="break-all pt-2 pl-7 text-ui-xs text-muted-foreground">
+                                              Expert v{source.expertRevision} · 来源{" "}
+                                              {source.snapshotId}
+                                            </p>
+                                          </DisclosureRegion>
+                                        </li>
+                                      );
+                                    })}
+                                </ul>
+                              </fieldset>
+                            </div>
+                          </div>
+                          <div hidden={!focusOpen} className="pt-3">
+                            <label className="grid min-w-0 gap-1.5 text-ui-sm">
+                              <span className="font-medium">发现重点（可选）</span>
+                              <Textarea
+                                aria-label="发现重点"
+                                value={focus}
+                                maxLength={8_000}
+                                rows={3}
+                                disabled={startMutation.isPending}
+                                placeholder="例如：查找可复用的排查与复核步骤。"
+                                onChange={(event) => setFocus(event.target.value)}
+                              />
+                            </label>
+                          </div>
+                          <div hidden={!modelOpen} className="pt-3">
+                            <div className="min-w-0 space-y-2 rounded-lg border border-border p-3">
+                              <div className="space-y-1">
+                                <p className="text-ui-sm font-medium">本次运行模型</p>
+                                <p className="text-ui-xs text-muted-foreground">
+                                  使用当前已选 Provider
+                                  和模型；只有通过下方选择器明确操作时才会切换。
+                                </p>
+                              </div>
+                              <ScratchModelPickers
+                                draft={draft}
+                                catalog={catalog}
+                                providerStatuses={providerStatuses}
+                              />
+                              {capabilityFailure ? (
+                                <p
+                                  className="flex items-start gap-2 text-ui-sm text-destructive"
+                                  role="status"
+                                >
+                                  <CircleAlertIcon
+                                    aria-hidden="true"
+                                    className="mt-0.5 size-4 shrink-0"
+                                  />
+                                  <span>{capabilityFailure}</span>
+                                </p>
+                              ) : currentProviderCapability ? (
+                                <p className="text-ui-xs text-muted-foreground" role="status">
+                                  {currentProviderCapability.reason ||
+                                    "当前 Provider 满足提炼约束。"}
+                                </p>
+                              ) : null}
+                            </div>
+                          </div>
+                        </DisclosureRegion>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+            </section>
+          </DisclosureRegion>
+        </div>
+      </section>
 
       {skillDetail ? (
         <SkillLibraryDetail

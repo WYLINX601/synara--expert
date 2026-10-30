@@ -535,6 +535,7 @@ export const ThreadCreationSource = Schema.Literals([
   "external_mcp",
   "provider_native",
   "automation_run",
+  "expert_learning",
 ]);
 export type ThreadCreationSource = typeof ThreadCreationSource.Type;
 export const ProviderReviewTarget = Schema.Union([

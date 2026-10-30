@@ -8,6 +8,8 @@ import {
   FIXED_EXPERT_SKILL_POLICY,
   RunSkillAssembly,
   type ProviderExpertSession,
+  type ResolvedExpertSkillEntry,
+  type ExpertSkillBinding,
 } from "@synara/contracts";
 import { ensurePrivateDirectorySync } from "../privatePathPermissions";
 import { createExpertStore, expertResourceFiles } from "./ExpertStore";
@@ -94,7 +96,15 @@ const pointers = Schema.Struct({
   continuations: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 });
 
-export function createRunSkillAssemblyStore(stateDir: string) {
+export function createRunSkillAssemblyStore(
+  stateDir: string,
+  options: {
+    readonly frozenEntries?: (
+      expertId: string,
+      bindings: readonly ExpertSkillBinding[] | undefined,
+    ) => Promise<readonly ResolvedExpertSkillEntry[] | undefined>;
+  } = {},
+) {
   const experts = createExpertStore(stateDir);
   const packages = createSkillPackageStore(stateDir);
   const initializationHasEffects = async (session: ProviderExpertSession): Promise<boolean> => {
@@ -176,21 +186,28 @@ export function createRunSkillAssemblyStore(stateDir: string) {
     if (!definition || definition.archived)
       throw new Error("The Expert definition is unavailable or archived.");
     const bindings = definition.skillBindings;
+    const frozen = await options.frozenEntries?.(definition.id, bindings);
     const selections =
-      bindings !== undefined
-        ? await resolveSkillBindings(stateDir, bindings, definition.id)
-        : (definition.skillSelections ?? snapshot.skillSelections ?? []);
+      frozen !== undefined
+        ? []
+        : bindings !== undefined
+          ? await resolveSkillBindings(stateDir, bindings, definition.id)
+          : (definition.skillSelections ?? snapshot.skillSelections ?? []);
     const managedSkills = await Promise.all(
       (bindings ?? [])
         .filter((binding) => binding.enabled)
         .map((binding) => readSkillDefinition(stateDir, binding.skillId)),
     );
-    const entries = (await packages.resolveSelections(selections)).map((entry) => {
-      const managed = managedSkills.find(
-        (skill) => skill.packageId === entry.packageId && skill.entryPath === entry.entryPath,
-      );
-      return { ...entry, ...(managed ? { managedSkillId: managed.skillId } : {}) };
-    });
+    const entries =
+      frozen !== undefined
+        ? [...frozen]
+        : (await packages.resolveSelections(selections)).map((entry) => {
+            const managed = managedSkills.find(
+              (skill) => skill.packageId === entry.packageId && skill.entryPath === entry.entryPath,
+            );
+            return { ...entry, ...(managed ? { managedSkillId: managed.skillId } : {}) };
+          });
+    if (frozen !== undefined) await verifyPinnedSkillReferences(stateDir, entries);
     const session: ProviderExpertSession = {
       ...expertSnapshotSession(snapshot),
       skillPolicy: FIXED_EXPERT_SKILL_POLICY,

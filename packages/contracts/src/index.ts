@@ -21,6 +21,7 @@ export * from "./expert";
 export * from "./skillPackage";
 export * from "./skillLibrary";
 export * from "./skillEvolution";
+export * from "./expertLearning";
 export * from "./skillManagementAuth";
 export * from "./runSkillAssembly";
 export * from "./context";

@@ -44,6 +44,12 @@ describe("OMP Skill extraction compatibility", () => {
     expect(transformed).not.toContain(OMP_SKILL_EVOLUTION_FACTORY_ANCHOR);
     expect(transformed).not.toContain(OMP_SKILL_EVOLUTION_DATE_CWD_REMINDER_ANCHOR);
     expect(transformed).toContain("async function transform(vt){return vt}");
+    expect(transformed).toContain(
+      'r.overlay({"autolearn.enabled":!1,"autolearn.autoContinue":!1})',
+    );
+    expect(transformed).toContain("could not prepare a session-local Auto-Learn settings overlay");
+    expect(transformed).toContain("synaraAutoLearnSettings.rawValue");
+    expect(transformed).toContain("could not verify disabled native Auto-Learn settings");
     expect(transformed).toContain("restrictToolNames:!0,toolNames:[],tools:[],customTools:[]");
     expect(transformed).toContain("preloadedPreparedExtensions:[]");
     expect(transformed).toContain("contextFiles:[],skills:[],rules:[]");
@@ -129,6 +135,19 @@ describe("OMP Skill extraction compatibility", () => {
     const enabledTools = ["read_file"];
     const receivedPrompts: Array<ReadonlyArray<unknown>> = [];
     let finalOptions: Record<string, unknown> | undefined;
+    const ambientSettingsValues: Record<string, unknown> = {
+      "autolearn.enabled": true,
+      "autolearn.autoContinue": true,
+      "autolearn.minToolCalls": 0,
+      provider: "user-settings-sentinel",
+    };
+    const ambientSettings = {
+      overlay: vi.fn((overrides: Record<string, unknown>) => ({
+        rawValue: vi.fn(
+          (setting: { id: string }) => overrides[setting.id] ?? ambientSettingsValues[setting.id],
+        ),
+      })),
+    };
     const session = {
       systemPrompt: ["environment sentinel"],
       getActiveToolNames: () => activeTools,
@@ -166,7 +185,7 @@ describe("OMP Skill extraction compatibility", () => {
       },
       "/private/cwd",
       {},
-      {},
+      ambientSettings,
       "agent-id",
       {},
       "title prompt",
@@ -194,10 +213,53 @@ describe("OMP Skill extraction compatibility", () => {
       additionalDirectories: [],
       spawns: "",
     });
+    expect(ambientSettings.overlay).toHaveBeenCalledExactlyOnceWith({
+      "autolearn.enabled": false,
+      "autolearn.autoContinue": false,
+    });
+    const sessionSettings = finalOptions?.settings as {
+      rawValue: (setting: { id: string }) => unknown;
+    };
+    expect(sessionSettings.rawValue({ id: "autolearn.enabled" })).toBe(false);
+    expect(sessionSettings.rawValue({ id: "autolearn.autoContinue" })).toBe(false);
+    expect(sessionSettings.rawValue({ id: "autolearn.minToolCalls" })).toBe(0);
+    expect(sessionSettings.rawValue({ id: "provider" })).toBe("user-settings-sentinel");
+    expect(ambientSettingsValues["autolearn.enabled"]).toBe(true);
+    expect(ambientSettingsValues["autolearn.autoContinue"]).toBe(true);
     expect(finalOptions?.preloadedExtensions).toBeUndefined();
     expect(JSON.stringify(finalOptions)).not.toMatch(
       /ENV_(?:SYSTEM|APPEND|CONTEXT|SKILL|RULE|CUSTOM_TOOL|EXTENSION)_SENTINEL/u,
     );
+
+    const unsafeCreateSession = vi.fn(async () => ({ session }));
+    await expect(
+      run(
+        { baseOptions: {}, createSession: unsafeCreateSession },
+        "/private/cwd",
+        {},
+        { overlay: () => ({ rawValue: () => true }) },
+        "agent-id",
+        {},
+        "title prompt",
+        {},
+        {},
+      ),
+    ).rejects.toThrow(/could not verify disabled native Auto-Learn settings/u);
+    expect(unsafeCreateSession).not.toHaveBeenCalled();
+    await expect(
+      run(
+        { baseOptions: {}, createSession: unsafeCreateSession },
+        "/private/cwd",
+        {},
+        {},
+        "agent-id",
+        {},
+        "title prompt",
+        {},
+        {},
+      ),
+    ).rejects.toThrow(/could not prepare a session-local Auto-Learn settings overlay/u);
+    expect(unsafeCreateSession).not.toHaveBeenCalled();
 
     await result.prompt("Only this submitted user message.");
     expect(receivedPrompts).toEqual([["Only this submitted user message."]]);

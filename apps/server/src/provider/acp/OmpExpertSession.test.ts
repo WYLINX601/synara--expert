@@ -76,6 +76,8 @@ function nativeConfig(overrides: Record<string, unknown> = {}) {
     "skills.customDirectories": { value: ["/existing/native-skills"] },
     "skills.ignoredSkills": { value: [] },
     "skills.includeSkills": { value: [] },
+    "autolearn.enabled": { value: true },
+    "autolearn.autoContinue": { value: true },
     disabledExtensions: { value: [] },
     enabledProviders: { value: [] },
     disabledProviders: { value: [] },
@@ -108,6 +110,11 @@ function makeRunner(input: {
   readonly omitDescription?: boolean;
   readonly hideSkill?: boolean;
   readonly failOverlayCheck?: boolean;
+  readonly failAutoLearnOverlayCheck?: boolean;
+  readonly effectiveAutoLearnValues?: Array<{
+    readonly enabled: unknown;
+    readonly autoContinue: unknown;
+  }>;
   readonly calls?: Array<ReadonlyArray<string>>;
 }) {
   const config = input.config ?? nativeConfig();
@@ -119,7 +126,40 @@ function makeRunner(input: {
           return result(input.version ?? "omp/18.12.1\n");
         }
         if (args[0] === "config" && args[1] === "list") {
-          return result(JSON.stringify(config));
+          let autoLearnEnabled = config["autolearn.enabled"].value;
+          let autoLearnAutoContinue = config["autolearn.autoContinue"].value;
+          const configFiles = [
+            path.join(env.HOME ?? "", ".omp", "agent", "config.yml"),
+            ...(env.PI_CONFIG_FILES ?? "").split(path.delimiter).filter(Boolean),
+          ];
+          for (const configFile of configFiles) {
+            const source = await readFile(configFile, "utf8").catch(() => undefined);
+            if (source === undefined) continue;
+            const overlay = parseYaml(source) as {
+              autolearn?: { enabled?: unknown; autoContinue?: unknown };
+            };
+            if (typeof overlay.autolearn?.enabled === "boolean") {
+              autoLearnEnabled = overlay.autolearn.enabled;
+            }
+            if (typeof overlay.autolearn?.autoContinue === "boolean") {
+              autoLearnAutoContinue = overlay.autolearn.autoContinue;
+            }
+          }
+          if (input.failAutoLearnOverlayCheck && (env.PI_CONFIG_FILES ?? "").length > 0) {
+            autoLearnEnabled = true;
+            autoLearnAutoContinue = true;
+          }
+          input.effectiveAutoLearnValues?.push({
+            enabled: autoLearnEnabled,
+            autoContinue: autoLearnAutoContinue,
+          });
+          return result(
+            JSON.stringify({
+              ...config,
+              "autolearn.enabled": { value: autoLearnEnabled },
+              "autolearn.autoContinue": { value: autoLearnAutoContinue },
+            }),
+          );
         }
         if (args[0] === "config" && args[1] === "get") {
           if (input.failOverlayCheck) return result("", 1);
@@ -274,6 +314,7 @@ describe("prepareOmpExpertSession", () => {
     expect(calls.map((args) => args.slice(0, 2))).toEqual([
       ["--version"],
       ["config", "list"],
+      ["config", "list"],
       ["config", "get"],
       ["skill", "list"],
     ]);
@@ -281,7 +322,9 @@ describe("prepareOmpExpertSession", () => {
     const overlayPath = preparation.configOverlayPath!;
     const overlay = parseYaml(await readFile(overlayPath, "utf8")) as {
       skills: { customDirectories: ReadonlyArray<string> };
+      autolearn: { enabled: boolean; autoContinue: boolean };
     };
+    expect(overlay.autolearn).toEqual({ enabled: false, autoContinue: false });
     expect(overlay.skills.customDirectories).toEqual([
       path.dirname(path.dirname(await realpath(skill.path))),
       "/existing/native-skills",
@@ -338,13 +381,59 @@ describe("prepareOmpExpertSession", () => {
     const instructions = composeProviderBaseInstructions({ expertPersona: persona }) ?? "";
     expect(preparation.issues).toEqual([]);
     expect(preparation.loadedSkills).toEqual([]);
-    expect(preparation.configOverlayPath).toBeUndefined();
+    expect(preparation.configOverlayPath).toBeDefined();
+    const overlay = parseYaml(await readFile(preparation.configOverlayPath!, "utf8")) as {
+      autolearn: { enabled: boolean; autoContinue: boolean };
+    };
+    expect(overlay).toEqual({ autolearn: { enabled: false, autoContinue: false } });
     expect(preparation.instructionsHash).toBe(
       createHash("sha256").update(instructions, "utf8").digest("hex"),
     );
     expect(await readFile(preparation.appendSystemPromptPath!, "utf8")).toContain(persona);
     expect(calls.some((args) => args[0] === "skill")).toBe(false);
     expect(calls.some((args) => args[0] === "config" && args[1] === "get")).toBe(false);
+    await Effect.runPromise(preparation.cleanup());
+  });
+
+  it("overrides user and inherited PI_CONFIG_FILES Auto-Learn sentinels for managed Experts", async () => {
+    const root = await makeRoot();
+    const cwd = path.join(root, "project");
+    const userConfigPath = path.join(root, ".omp", "agent", "config.yml");
+    const inheritedConfigPath = path.join(root, "environment-config.yml");
+    await mkdir(path.dirname(userConfigPath), { recursive: true });
+    await writeFile(
+      userConfigPath,
+      "autolearn:\n  enabled: true\n  autoContinue: true\n  minToolCalls: 0\n",
+    );
+    await writeFile(inheritedConfigPath, "autolearn:\n  enabled: true\n  autoContinue: true\n");
+    const effectiveAutoLearnValues: Array<{ enabled: unknown; autoContinue: unknown }> = [];
+    const calls: Array<ReadonlyArray<string>> = [];
+    const runCli = makeRunner({ cwd, skills: [], calls, effectiveAutoLearnValues });
+
+    const preparation = await Effect.runPromise(
+      prepareOmpExpertSession({
+        cwd,
+        env: { HOME: root, PI_CONFIG_FILES: inheritedConfigPath },
+        runCli,
+        expertSession: {
+          snapshotId: "expert-empty-skills",
+          persona: "Managed Expert without selected skills.",
+          skills: [],
+          references: [],
+        },
+      }),
+    );
+
+    expect(preparation.issues).toEqual([]);
+    expect(effectiveAutoLearnValues).toEqual([
+      { enabled: true, autoContinue: true },
+      { enabled: false, autoContinue: false },
+    ]);
+    const overlay = parseYaml(await readFile(preparation.configOverlayPath!, "utf8")) as {
+      autolearn: { enabled: boolean; autoContinue: boolean };
+    };
+    expect(overlay.autolearn).toEqual({ enabled: false, autoContinue: false });
+    expect(calls.filter((args) => args[0] === "skill")).toEqual([]);
     await Effect.runPromise(preparation.cleanup());
   });
 
@@ -508,6 +597,33 @@ describe("prepareOmpExpertSession", () => {
     expect(preparation.issues.join(" ")).toContain("did not confirm the Expert skills overlay");
     expect(await readdir(tempDirectory)).toEqual([]);
   });
+
+  it("fails closed when native Auto-Learn values cannot be verified as disabled", async () => {
+    const root = await makeRoot();
+    const cwd = path.join(root, "project");
+    const tempDirectory = path.join(root, "temp");
+    await mkdir(tempDirectory);
+    const preparation = await Effect.runPromise(
+      prepareOmpExpertSession({
+        cwd,
+        env: { HOME: root },
+        runCli: makeRunner({ cwd, skills: [], failAutoLearnOverlayCheck: true }),
+        expertSession: {
+          snapshotId: "expert-autolearn-unverified",
+          persona: "Managed Expert with an unverified Auto-Learn overlay.",
+          skills: [],
+          references: [],
+        },
+        tempDirectory,
+      }),
+    );
+
+    expect(preparation.issues.join(" ")).toContain(
+      "autolearn.enabled=false and autolearn.autoContinue=false",
+    );
+    expect(preparation.issues.join(" ")).toContain("native learning isolation is unavailable");
+    expect(await readdir(tempDirectory)).toEqual([]);
+  });
 });
 
 describe("OMP fixed native Skill preparation", () => {
@@ -609,6 +725,7 @@ describe("OMP fixed native Skill preparation", () => {
     subagents?: boolean;
     advisor?: boolean;
     ambientSource?: boolean;
+    autolearn?: boolean;
   }): OmpExpertSessionPreparationInput["runCli"] {
     return (args, _cwd, env) =>
       Effect.tryPromise({
@@ -621,6 +738,7 @@ describe("OMP fixed native Skill preparation", () => {
               skills: Record<string, unknown>;
               task: { maxRecursionDepth: number };
               advisor: { enabled: boolean };
+              autolearn: { enabled: boolean; autoContinue: boolean };
             };
           if (args[0] === "config") {
             const values: Record<string, { value: unknown }> = {};
@@ -630,6 +748,12 @@ describe("OMP fixed native Skill preparation", () => {
               value: control.subagents ? 0 : config.task.maxRecursionDepth,
             };
             values["advisor.enabled"] = { value: control.advisor ? true : config.advisor.enabled };
+            values["autolearn.enabled"] = {
+              value: control.autolearn ? true : config.autolearn.enabled,
+            };
+            values["autolearn.autoContinue"] = {
+              value: control.autolearn ? true : config.autolearn.autoContinue,
+            };
             if (control.ambientSource) values["skills.enableAgentsProject"] = { value: true };
             return result(JSON.stringify(values));
           }
@@ -696,8 +820,10 @@ describe("OMP fixed native Skill preparation", () => {
         skills: Record<string, unknown>;
         task: { maxRecursionDepth: number };
         advisor: { enabled: boolean };
+        autolearn: { enabled: boolean; autoContinue: boolean };
       };
       expect(config.advisor.enabled).toBe(false);
+      expect(config.autolearn).toEqual({ enabled: false, autoContinue: false });
       expect(config.task.maxRecursionDepth).toBe(1);
       for (const key of [
         "enableCodexUser",
@@ -901,7 +1027,7 @@ describe("OMP fixed native Skill preparation", () => {
     expect(preparation.loadedSkills).toEqual([]);
     expect((await readdir(root)).some((name) => name.startsWith("synara-omp-expert-"))).toBe(false);
   });
-  it.each(["foreign", "subagents", "advisor", "ambientSource"] as const)(
+  it.each(["foreign", "subagents", "advisor", "ambientSource", "autolearn"] as const)(
     "fails closed on native %s and cleans its owned projection",
     async (failure) => {
       const { root, session } = await fixedFixture();

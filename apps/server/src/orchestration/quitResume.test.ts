@@ -119,6 +119,7 @@ describe("crash recovery", () => {
       { ...makeRunningThread("child"), parentThreadId: threadId("running") },
       { ...makeRunningThread("goal"), goal: "finish" },
       { ...makeRunningThread("scheduled"), creationSource: "automation_run" },
+      { ...makeRunningThread("learning"), creationSource: "expert_learning" },
       makeRunningThread("archived", { archivedAt: NOW }),
       makeThread("stopped"),
       makeConnectingThread("starting"),

@@ -284,6 +284,29 @@ describe("experience timeline grouping", () => {
     });
   });
 
+  it("projects only bound automatic growth, hiding pending, failed and no-change cycles", () => {
+    const automaticParent = { ...parent, origin: "automatic" as const };
+    const automaticChild = { ...child("proposed"), origin: "automatic" as const };
+    for (const result of [
+      automaticChild,
+      { ...automaticChild, status: "failed" as const },
+      { ...automaticChild, status: "no_change" as const, proposals: [] },
+      {
+        ...automaticChild,
+        proposals: [{ ...automaticChild.proposals[0]!, status: "saved_unbound" as const }],
+      },
+    ]) {
+      expect(evolutionTimelineEntries([automaticParent, result])).toEqual([]);
+    }
+    expect(
+      evolutionTimelineEntries([automaticParent, { ...child("applied"), origin: "automatic" }]),
+    ).toMatchObject([{ applied: true, pending: false, run: { origin: "automatic" } }]);
+    expect(
+      evolutionTimelineEntries([{ ...automaticParent, opportunities: [], status: "no_change" }]),
+    ).toEqual([]);
+    expect(evolutionTimelineEntries([parent, child("proposed")])).toHaveLength(1);
+  });
+
   it("marks a failed extraction as an outcome rather than pending user work", () => {
     const failed = {
       ...child("proposed"),

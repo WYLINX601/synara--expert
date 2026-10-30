@@ -147,6 +147,7 @@ it("keeps legacy Context 111 byte-for-byte frozen and uses its checksum for cont
       [9, "HubPlanDirectedInput"],
       [10, "ExpertSkillEvolution"],
       [11, "ExpertAutomaticLearning"],
+      [12, "ExpertLearningEvidenceDelivery"],
     ],
   );
 });
@@ -199,6 +200,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
             ["expert", 9],
             ["expert", 10],
             ["expert", 11],
+            ["expert", 12],
           ],
         );
         assert.deepStrictEqual(yield* readPreservedData, before);
@@ -224,6 +226,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
             ["expert", 9],
             ["expert", 10],
             ["expert", 11],
+            ["expert", 12],
           ],
         );
         const repeated = yield* finishUpgrade;
@@ -242,7 +245,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
         assert.strictEqual(settled.kind, "ready");
         if (settled.kind === "ready") {
           assert.deepStrictEqual(settled.workbench.modules, {
-            expert: { sourceVersion: 11, targetVersion: 11 },
+            expert: { sourceVersion: 12, targetVersion: 12 },
             context: { sourceVersion: 1, targetVersion: 1 },
           });
           assert.isFalse(settled.requiresBackup);
@@ -273,6 +276,7 @@ it.effect(
           ["expert", 9],
           ["expert", 10],
           ["expert", 11],
+          ["expert", 12],
           ["context", 1],
         ],
       );
@@ -313,6 +317,7 @@ for (const through of [109, 110] as const) {
               ["expert", 9],
               ["expert", 10],
               ["expert", 11],
+              ["expert", 12],
               ["context", 1],
             ]
           : [
@@ -325,6 +330,7 @@ for (const through of [109, 110] as const) {
               ["expert", 9],
               ["expert", 10],
               ["expert", 11],
+              ["expert", 12],
               ["context", 1],
             ],
       );

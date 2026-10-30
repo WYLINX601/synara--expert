@@ -305,6 +305,21 @@ async function waitForProjectedThread(
   }
 }
 
+async function eventually<T>(
+  read: () => Promise<T>,
+  predicate: (value: T) => boolean,
+  label: string,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read();
+    if (predicate(value)) return value;
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 // The first drain stops at a row whose dispatch failed; the second retries it.
 async function drainWithRetry(harness: { readonly drain: () => Promise<void> }) {
   await harness.drain().catch(() => undefined);
@@ -328,7 +343,7 @@ type ProviderRuntimeTestActivity = ProviderRuntimeTestThread["activities"][numbe
 type ProviderRuntimeTestCheckpoint = ProviderRuntimeTestThread["checkpoints"][number];
 
 describe("ProviderRuntimeIngestion", () => {
-  it("keeps a persisted runtime row unacknowledged when evidence capture fails", async () => {
+  it("keeps a persisted runtime row unacknowledged when its pre-ack callback fails", async () => {
     const order: string[] = [];
     const event: ProviderRuntimeEvent = {
       type: "turn.completed",
@@ -378,7 +393,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(order).toEqual(["projected", "captured:37:evidence-cursor-turn", "acknowledged"]);
   });
 
-  it("writes completed Expert learning evidence through the live ingestion layer", async () => {
+  it("keeps completed chat projection moving while Expert learning evidence delivery retries", async () => {
     const harness = await createHarness({ learningFixture: true, persistedStream: true });
     const sql = await runtime!.runPromise(Effect.service(SqlClient.SqlClient));
     const threadId = asThreadId("thread-1");
@@ -398,8 +413,8 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect((await harness.readProjectedThread(threadId))?.expertBinding).toEqual(binding);
 
-    const enabledAt = new Date(Date.now() - 10_000).toISOString();
-    const requestedAt = new Date().toISOString();
+    const enabledAt = new Date(Date.now() - 30_000).toISOString();
+    const requestedAt = new Date(Date.now() - 20_000).toISOString();
     const turnId = asTurnId("ingestion-learning-turn");
     const lifecycleGeneration = "learning-ingestion-generation";
     const userMessageId = asMessageId("ingestion-learning-user-message");
@@ -465,6 +480,82 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBeNull();
 
     const at = (offsetMs: number) => new Date(Date.parse(requestedAt) + offsetMs).toISOString();
+    const secondThreadId = asThreadId("thread-2");
+    const secondTurnId = asTurnId("ingestion-learning-second-turn");
+    const secondUserMessageId = asMessageId("ingestion-learning-second-user-message");
+    const secondAssistantItemId = asItemId("ingestion-learning-second-assistant-item");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("cmd-ingestion-learning-second-thread-create"),
+        threadId: secondThreadId,
+        projectId: asProjectId("project-1"),
+        title: "Second thread",
+        modelSelection: { provider: "omp", instanceId: "omp", model: "gpt-5.4" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: at(7_000),
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("cmd-ingestion-learning-second-session"),
+        threadId: secondThreadId,
+        session: {
+          threadId: secondThreadId,
+          status: "ready",
+          providerName: "omp",
+          providerInstanceId: "omp",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          updatedAt: at(7_000),
+          lastError: null,
+        },
+        createdAt: at(7_000),
+      }),
+    );
+    harness.setProviderSession({
+      provider: "omp",
+      providerInstanceId: "omp",
+      lifecycleGeneration,
+      status: "ready",
+      runtimeMode: "approval-required",
+      threadId: secondThreadId,
+      createdAt: at(7_000),
+      updatedAt: at(7_000),
+    });
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-ingestion-learning-second-turn-start"),
+        threadId: secondThreadId,
+        message: {
+          messageId: secondUserMessageId,
+          role: "user",
+          text: "Continue the independent thread while learning retries.",
+          attachments: [],
+        },
+        modelSelection: { provider: "omp", instanceId: "omp", model: "gpt-5.4" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: at(7_000),
+      }),
+    );
+
+    await runtime!.runPromise(sql`
+      CREATE TRIGGER reject_learning_evidence_insert
+      BEFORE INSERT ON expert_learning_evidence
+      BEGIN SELECT RAISE(ABORT, 'test temporarily blocks learning evidence'); END
+    `);
+    await runtime!.runPromise(sql`
+      CREATE TRIGGER reject_learning_evidence_update
+      BEFORE UPDATE ON expert_learning_evidence
+      BEGIN SELECT RAISE(ABORT, 'test temporarily blocks learning evidence'); END
+    `);
+
     const events: ProviderRuntimeEvent[] = [
       {
         type: "turn.started",
@@ -539,25 +630,82 @@ describe("ProviderRuntimeIngestion", () => {
         createdAt: at(5_000),
         payload: { itemType: "assistant_message", status: "completed" },
       },
+    ];
+    const completionEvent: ProviderRuntimeEvent = {
+      type: "turn.completed",
+      eventId: asEventId("evt-ingestion-learning-complete"),
+      provider: "omp",
+      providerInstanceId: "omp",
+      lifecycleGeneration,
+      threadId,
+      turnId,
+      createdAt: at(6_000),
+      payload: { state: "completed" },
+    };
+    const secondEvents: ProviderRuntimeEvent[] = [
       {
-        type: "turn.completed",
-        eventId: asEventId("evt-ingestion-learning-complete"),
+        type: "turn.started",
+        eventId: asEventId("evt-ingestion-learning-second-start"),
         provider: "omp",
         providerInstanceId: "omp",
         lifecycleGeneration,
-        threadId,
-        turnId,
-        createdAt: at(6_000),
+        threadId: secondThreadId,
+        turnId: secondTurnId,
+        createdAt: at(8_000),
+        payload: { model: "gpt-5.4", effort: "medium" },
+      },
+      {
+        type: "content.delta",
+        eventId: asEventId("evt-ingestion-learning-second-assistant-delta"),
+        provider: "omp",
+        providerInstanceId: "omp",
+        lifecycleGeneration,
+        threadId: secondThreadId,
+        turnId: secondTurnId,
+        itemId: secondAssistantItemId,
+        createdAt: at(9_000),
+        payload: { streamKind: "assistant_text", delta: "The independent thread completed." },
+      },
+      {
+        type: "item.completed",
+        eventId: asEventId("evt-ingestion-learning-second-assistant-complete"),
+        provider: "omp",
+        providerInstanceId: "omp",
+        lifecycleGeneration,
+        threadId: secondThreadId,
+        turnId: secondTurnId,
+        itemId: secondAssistantItemId,
+        createdAt: at(10_000),
+        payload: { itemType: "assistant_message", status: "completed" },
+      },
+      {
+        type: "turn.completed",
+        eventId: asEventId("evt-ingestion-learning-second-complete"),
+        provider: "omp",
+        providerInstanceId: "omp",
+        lifecycleGeneration,
+        threadId: secondThreadId,
+        turnId: secondTurnId,
+        createdAt: at(11_000),
         payload: { state: "completed" },
       },
     ];
-    for (const event of events) {
+    for (const event of [...events, ...secondEvents]) {
       const persisted = await Effect.runPromise(harness.runtimeEventRepository.append(event));
       harness.emitPersisted(persisted);
     }
     await harness.drain();
 
-    const projectedThread = await harness.readProjectedThread(threadId);
+    const projectedThread = await waitForProjectedThread(
+      () => harness.readProjectedThread(threadId),
+      (thread) =>
+        thread.messages.some(
+          (message) =>
+            message.role === "assistant" &&
+            message.turnId === turnId &&
+            message.text === "The integrated evidence capture completed successfully.",
+        ),
+    );
     expect(projectedThread?.messages.find((message) => message.id === userMessageId)?.text).toBe(
       "Run the integrated learning evidence check and report its result.",
     );
@@ -565,13 +713,171 @@ describe("ProviderRuntimeIngestion", () => {
       (message) => message.role === "assistant" && message.turnId === turnId,
     );
     expect(assistantMessage?.text).toBe("The integrated evidence capture completed successfully.");
-    expect(projectedThread?.latestTurn).toMatchObject({ turnId, state: "completed" });
+    const secondProjectedThread = await waitForProjectedThread(
+      () => harness.readProjectedThread(secondThreadId),
+      (thread) =>
+        thread.latestTurn?.turnId === secondTurnId && thread.latestTurn.state === "completed",
+    );
+    expect(
+      secondProjectedThread.messages.find(
+        (message) => message.role === "assistant" && message.turnId === secondTurnId,
+      )?.text,
+    ).toBe("The independent thread completed.");
 
-    const evidenceRows = await runtime!.runPromise(
-      sql<{ readonly record_json: string }>`
-        SELECT record_json FROM expert_learning_evidence
+    const initialHighWater = await Effect.runPromise(
+      harness.runtimeEventRepository.getHighWaterSequence,
+    );
+    expect(
+      await Effect.runPromise(
+        harness.runtimeEventRepository.getConsumerCursor(PROVIDER_RUNTIME_INGESTION_CONSUMER),
+      ),
+    ).toBe(initialHighWater);
+
+    const pendingBeforeNextRun = await eventually(
+      () =>
+        runtime!.runPromise(
+          sql<{
+            readonly pending: number;
+            readonly updated_at: string;
+            readonly record_json: string;
+          }>`
+            SELECT pending, updated_at, record_json FROM expert_learning_pending_evidence
+            WHERE pending = 1 AND json_valid(record_json)
+              AND json_extract(record_json, '$.turnId') = ${turnId}
+          `,
+        ),
+      (rows) => rows.length === 1 && Date.parse(rows[0]!.updated_at) > Date.parse(at(5_000)),
+      "the deferred evidence retry timestamp",
+    );
+    expect(pendingBeforeNextRun).toHaveLength(1);
+    expect(pendingBeforeNextRun[0]!.pending).toBe(1);
+    const queuedPacket = JSON.parse(pendingBeforeNextRun[0]!.record_json) as {
+      readonly appliedIdentity: {
+        readonly model?: string;
+        readonly lifecycleGeneration: string;
+      };
+      readonly modelEvent: ProviderRuntimeEvent;
+      readonly effort?: string;
+    };
+    expect(queuedPacket.appliedIdentity).toMatchObject({
+      model: "gpt-5.4",
+      lifecycleGeneration,
+    });
+    expect(queuedPacket.modelEvent).toMatchObject({
+      type: "turn.started",
+      payload: { model: "gpt-5.4", effort: "medium" },
+    });
+    expect(queuedPacket.effort).toBe("medium");
+    const blockedEvidence = await runtime!.runPromise(
+      sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM expert_learning_evidence
         WHERE owner_id = ${ownerId} AND expert_id = ${expertId} AND thread_id = ${threadId}
       `,
+    );
+    expect(blockedEvidence[0]!.count).toBe(0);
+
+    // A later run can replace the thread's applied runtime record while the
+    // original turn is still producing journal rows. The pending packet must
+    // keep the proof from the original run for the late tool and completion.
+    await runtime!.runPromise(sql`
+      UPDATE expert_applied_runtime_records
+      SET lifecycle_generation = 'next-generation', model = 'gpt-5.5'
+      WHERE thread_id = ${threadId}
+    `);
+
+    const lateToolEvent: ProviderRuntimeEvent = {
+      type: "item.completed",
+      eventId: asEventId("evt-ingestion-learning-late-tool"),
+      provider: "omp",
+      providerInstanceId: "omp",
+      lifecycleGeneration,
+      threadId,
+      turnId,
+      itemId: asItemId("ingestion-learning-late-tool"),
+      createdAt: at(5_500),
+      payload: {
+        itemType: "command_execution",
+        status: "completed",
+        title: "Late tool after rerun",
+        detail: "This late tool still belongs to the original applied runtime.",
+      },
+    };
+    for (const event of [lateToolEvent, completionEvent]) {
+      const persisted = await Effect.runPromise(harness.runtimeEventRepository.append(event));
+      harness.emitPersisted(persisted);
+    }
+    await harness.drain();
+
+    const completedThread = await waitForProjectedThread(
+      () => harness.readProjectedThread(threadId),
+      (thread) => thread.latestTurn?.turnId === turnId && thread.latestTurn.state === "completed",
+    );
+    expect(completedThread.latestTurn).toMatchObject({ turnId, state: "completed" });
+    expect(
+      completedThread.messages.find(
+        (message) => message.role === "assistant" && message.turnId === turnId,
+      )?.text,
+    ).toBe("The integrated evidence capture completed successfully.");
+    const finalHighWater = await Effect.runPromise(
+      harness.runtimeEventRepository.getHighWaterSequence,
+    );
+    expect(
+      await Effect.runPromise(
+        harness.runtimeEventRepository.getConsumerCursor(PROVIDER_RUNTIME_INGESTION_CONSUMER),
+      ),
+    ).toBe(finalHighWater);
+
+    const pendingAfterLateTool = await eventually(
+      () =>
+        runtime!.runPromise(
+          sql<{
+            readonly pending: number;
+            readonly updated_at: string;
+            readonly record_json: string;
+          }>`
+            SELECT pending, updated_at, record_json FROM expert_learning_pending_evidence
+            WHERE pending = 1 AND json_valid(record_json)
+              AND json_extract(record_json, '$.turnId') = ${turnId}
+          `,
+        ),
+      (rows) => rows.length === 1 && Date.parse(rows[0]!.updated_at) > Date.parse(at(6_000)),
+      "the deferred evidence retry after the late tool and completion",
+    );
+    const retriedPacket = JSON.parse(pendingAfterLateTool[0]!.record_json) as {
+      readonly appliedIdentity: {
+        readonly model?: string;
+        readonly lifecycleGeneration: string;
+      };
+      readonly modelEvent: ProviderRuntimeEvent;
+      readonly effort?: string;
+      readonly items: ReadonlyArray<{ readonly id: string }>;
+    };
+    expect(retriedPacket.appliedIdentity).toMatchObject({
+      model: "gpt-5.4",
+      lifecycleGeneration,
+    });
+    expect(retriedPacket.modelEvent).toMatchObject({
+      type: "turn.started",
+      payload: { model: "gpt-5.4", effort: "medium" },
+    });
+    expect(retriedPacket.effort).toBe("medium");
+    expect(retriedPacket.items.map(({ id }) => id)).toContain(
+      "tool-result:ingestion-learning-late-tool",
+    );
+
+    await runtime!.runPromise(sql`DROP TRIGGER reject_learning_evidence_insert`);
+    await runtime!.runPromise(sql`DROP TRIGGER reject_learning_evidence_update`);
+
+    const evidenceRows = await eventually(
+      () =>
+        runtime!.runPromise(
+          sql<{ readonly record_json: string }>`
+            SELECT record_json FROM expert_learning_evidence
+            WHERE owner_id = ${ownerId} AND expert_id = ${expertId} AND thread_id = ${threadId}
+          `,
+        ),
+      (rows) => rows.length === 1,
+      "successful evidence capture after removing the test trigger",
     );
     expect(evidenceRows).toHaveLength(1);
     const evidence = JSON.parse(evidenceRows[0]!.record_json) as {
@@ -579,6 +885,12 @@ describe("ProviderRuntimeIngestion", () => {
       readonly snapshotId: string;
       readonly turnId: string;
       readonly completedAt?: string;
+      readonly modelSelection: {
+        readonly provider: string;
+        readonly instanceId: string;
+        readonly model: string;
+        readonly options?: { readonly thinkingLevel?: string };
+      };
       readonly items: ReadonlyArray<{
         readonly id: string;
         readonly kind: string;
@@ -590,14 +902,51 @@ describe("ProviderRuntimeIngestion", () => {
       snapshotId: binding.snapshotId,
       turnId,
       completedAt: at(6_000),
+      modelSelection: {
+        provider: "omp",
+        instanceId: "omp",
+        model: "gpt-5.4",
+        options: { thinkingLevel: "medium" },
+      },
     });
     expect(evidence.items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: userMessageId, kind: "message" }),
         expect.objectContaining({ id: `tool-result:ingestion-learning-tool`, kind: "tool_result" }),
+        expect.objectContaining({
+          id: `tool-result:ingestion-learning-late-tool`,
+          kind: "tool_result",
+        }),
         expect.objectContaining({ id: assistantMessage?.id, kind: "message" }),
       ]),
     );
+    const settledPendingRows = await runtime!.runPromise(
+      sql<{ readonly source_json: string; readonly record_json: string; readonly pending: number }>`
+        SELECT source_json, record_json, pending FROM expert_learning_pending_evidence
+        WHERE json_valid(source_json) AND json_extract(record_json, '$.turnId') = ${turnId}
+      `,
+    );
+    expect(settledPendingRows).toHaveLength(1);
+    expect(settledPendingRows[0]!.pending).toBe(0);
+    const settledPacket = JSON.parse(settledPendingRows[0]!.record_json) as {
+      readonly items: ReadonlyArray<unknown>;
+      readonly coverage: ReadonlyArray<unknown>;
+      readonly appliedIdentity: { readonly lifecycleGeneration: string };
+    };
+    expect(settledPacket).toMatchObject({
+      items: [],
+      coverage: [],
+      appliedIdentity: { lifecycleGeneration },
+    });
+    expect(settledPendingRows[0]!.record_json).not.toContain(
+      "This late tool still belongs to the original applied runtime.",
+    );
+    expect(JSON.parse(settledPendingRows[0]!.source_json)).toMatchObject({
+      expertId,
+      snapshotId: binding.snapshotId,
+      projectId: "project-1",
+      instanceId: "omp",
+    });
   });
 
   it("backs off idle journal safety polls and returns to the fast recovery cadence", () => {

@@ -21,6 +21,10 @@ import { HUB_PLAN_INPUT_REQUEST_SQL, HUB_PLAN_INPUT_REQUEST_EFFECT } from "./Hub
 import { SKILL_EVOLUTION_SQL, SKILL_EVOLUTION_EFFECT } from "./SkillEvolutionMigration.ts";
 import { EXPERT_LEARNING_SQL, EXPERT_LEARNING_EFFECT } from "./ExpertLearningMigration.ts";
 import {
+  EXPERT_LEARNING_EVIDENCE_DELIVERY_SQL,
+  EXPERT_LEARNING_EVIDENCE_DELIVERY_EFFECT,
+} from "./ExpertLearningEvidenceDeliveryMigration.ts";
+import {
   CONTEXT_SCHEMA_OBJECTS_QUERY,
   validateFrozenContextSchema,
   type SqliteSchemaObject,
@@ -403,6 +407,14 @@ export const workbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] 
     checksum: "sha256:dcc48be624cd25911d923e8f730ee31ab57b9914f44113e11a2f69ca161484b7",
     statement: EXPERT_LEARNING_SQL,
     effect: EXPERT_LEARNING_EFFECT,
+  },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 12,
+    name: "ExpertLearningEvidenceDelivery",
+    checksum: "sha256:38b2eda40b36b010e44234a78232664299a7031ba98fafe9414557c1261a71a5",
+    statement: EXPERT_LEARNING_EVIDENCE_DELIVERY_SQL,
+    effect: EXPERT_LEARNING_EVIDENCE_DELIVERY_EFFECT,
   },
 ];
 

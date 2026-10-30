@@ -88,7 +88,6 @@ import {
   createSkillPackageStore,
   type SkillPackageStore,
 } from "../../experts/SkillPackageStore.ts";
-import { inspectBmadWorkspace } from "../../experts/bmadSkillPreset.ts";
 import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore";
 import { expertSnapshotSession } from "../../experts/expertSnapshotSession";
 import { captureSkillEvolutionExecutionReader } from "../../workbench/host/skillEvolutionExecution";
@@ -100,6 +99,7 @@ import {
   expertSkillEntryId,
   sha256Utf8,
 } from "../expertSkillCatalog.ts";
+import { skillRuntimeEntries, verifySkillRunResources } from "../../experts/skillRunResources";
 
 import {
   type ProviderAdapterError,
@@ -1086,10 +1086,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       isDeepStrictEqual(expected.options ?? {}, actual.options ?? {});
     const readVerifiedExpertSkillBody = async (
       entry: ResolvedExpertSkillEntry,
-      knownPackage?: Awaited<ReturnType<SkillPackageStore["read"]>>,
     ): Promise<string> => {
       if (!skillPackageStore) throw new Error("Expert V2 skill package storage is unavailable.");
-      const manifest = knownPackage ?? (await skillPackageStore.read(entry.packageId));
+      const manifest = await skillPackageStore.read(entry.packageId);
       const stat = await fs.lstat(entry.path);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > EXPERT_SKILL_ENTRY_MAX_BYTES) {
         throw new Error(`Expert skill exceeds 64 KiB or is not a regular file: ${entry.entryPath}`);
@@ -1164,23 +1163,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           }
 
           const entries = expertSession.skillEntries!;
-          const selections = entries.map(({ packageId, entryPath, activation }) => ({
-            packageId,
-            entryPath,
-            activation,
-          }));
-          const resolved = (await skillPackageStore.resolveSelections(selections)).map((entry) => {
-            const managedSkillId = entries.find(
-              (selected) =>
-                selected.packageId === entry.packageId && selected.entryPath === entry.entryPath,
-            )?.managedSkillId;
-            return { ...entry, ...(managedSkillId ? { managedSkillId } : {}) };
-          });
-          if (!isDeepStrictEqual(resolved, entries)) {
-            throw new Error(
-              "Persisted Expert V2 entry metadata or paths do not match its packages.",
-            );
-          }
+          await verifySkillRunResources(
+            options!.stateDir!,
+            entries,
+            expertSession.skillResourceRefs,
+          );
+          const resolved = [...entries];
           const canonicalSkills = resolved.map(({ name, path: skillPath }) => ({
             name,
             path: skillPath,
@@ -1191,35 +1179,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             );
           }
 
-          const packages = new Map(
-            await Promise.all(
-              [...new Set(resolved.map((entry) => entry.packageId))].map(
-                async (packageId) => [packageId, await skillPackageStore.read(packageId)] as const,
-              ),
-            ),
-          );
-          const startupBodies = new Map<string, string>();
-          for (const entry of resolved) {
-            if (entry.activation !== "startup") continue;
-            startupBodies.set(
-              expertSkillEntryId(entry),
-              await readVerifiedExpertSkillBody(entry, packages.get(entry.packageId)),
-            );
-          }
-
           const compiled = buildExpertSkillInstructions({
             snapshotId: expertSession.snapshotId,
-            entries: resolved,
-            bodies: startupBodies,
+            entries: skillRuntimeEntries(expertSession),
           });
-          const bmad = await inspectBmadWorkspace(resolved, input.cwd ?? options?.defaultCwd);
-          if (bmad?.issues.length) {
-            throw new Error(bmad.issues.join(" "));
-          }
-          const bmadEvidence = bmad
-            ? `BMad workspace preflight evidence (this does not grant tools or authorization): ${JSON.stringify({ projectRoot: bmad.projectRoot, configurationHash: bmad.configurationHash })}.`
-            : "";
-          const instructions = [compiled.text, bmadEvidence, runtimeNoticeInstructions]
+          const instructions = [compiled.text, runtimeNoticeInstructions]
             .filter(Boolean)
             .join("\n\n");
           return {
@@ -1322,19 +1286,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             };
           }
 
-          const startupBodies = new Map<string, string>();
-          for (const entry of selectedEntries) {
-            if (entry.activation === "startup") {
-              startupBodies.set(
-                expertSkillEntryId(entry),
-                await readVerifiedExpertSkillBody(entry),
-              );
-            }
-          }
           const compiled = buildExpertSkillInstructions({
             snapshotId: input.expertSession!.snapshotId,
-            entries: selectedEntries,
-            bodies: startupBodies,
+            entries: skillRuntimeEntries(input.expertSession!),
           });
           const explicitBlocks = await Promise.all(
             expertSkills.map(async (entry) => {
@@ -3826,7 +3780,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             !evolution ||
             !providerBinding ||
             persistedPurpose !== "skill-evolution" ||
-            !["pi", "claudeAgent"].includes(providerBinding.provider) ||
+            !["pi", "claudeAgent", "omp"].includes(providerBinding.provider) ||
             providerBinding.provider !== evolution.modelSelection.provider ||
             (providerBinding.providerInstanceId ?? providerBinding.provider) !==
               (evolution.modelSelection.instanceId ?? evolution.modelSelection.provider) ||
@@ -4004,7 +3958,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           if (
             !evolution ||
             input.executionPurpose !== "skill-evolution" ||
-            !["pi", "claudeAgent"].includes(input.provider) ||
+            !["pi", "claudeAgent", "omp"].includes(input.provider) ||
             !sameEvolutionModel(evolution.modelSelection, input.modelSelection) ||
             input.provider !== evolution.modelSelection.provider ||
             (input.providerInstanceId ?? input.modelSelection?.instanceId ?? input.provider) !==

@@ -38,6 +38,10 @@ Synara 宿主拥有认证、任务执行、Provider、事件投影、数据库�
 
 新增或变更宿主依赖时同步接入清单与扫描覆盖；例外精确到文件、specifier、原因和测试。现有 [边界检查](../scripts/check-workbench-boundary.ts)覆盖指定 features、server experts、命名的 Expert/MCP 与 Space/Context Web 界面，以及接入清单的 `featureFiles` / `featureRoots`；真实 CLI 要求清单存在、引用可访问、保留依赖与实现一致。新目录必须登记或纳入自动命名范围；该检查不是传递依赖分析或运行时安全隔离。
 
+Expert 中心继续由现有 `_chat` 父路由和查询缓存承载。专家、专家团与技能共用无业务状态的 `SettingsEditorDialog`，沿用技能弹窗的响应式尺寸、关闭入口和初始焦点；列表留在背景，编辑内容内部滚动。专家与专家团复用 `SettingsSaveBar` 固定底部操作，未修改时保存禁用。草稿、保存、冲突检查、路由深链及离开保护仍由原编辑器拥有，关闭、Escape 与路由离开均经过原保护；保存期间拒绝关闭。显示版本号与持久修订分别处理，隐藏界面徽章不改变快照或并发检查。接入清单登记共享呈现组件，不新增宿主订阅或任务数据源。
+
+Skill 绑定作者契约只管理身份、启用、范围与资源方式。Expert／Skill 编辑器不提供加载时机；宿主只交付目录和完整资源，正文由原生运行器按需读取或明确调用。只读固定记录保留必要的原历史字段以校验指纹，作者接口和新写入不使用它们；未决初始化保护仍覆盖原生 hooks／插件。
+
 Context 页面、自动保存与旧指令迁移通过 `workbench/host/contextClient` 读取现有 `ContextApi` 和 capability，不再直接读取完整 native API 或旧指令 store。宿主保留“不支持”与“支持但连接不可用”的区别，返回原 API 对象，保持自动保存队列身份。Space 命令辅助函数只接收所需的 orchestration 方法；批量归属在传输结果不确定时仍保留 `getShellSnapshot` 校准能力。Space controller/路由同步、Context RPC/生命周期/投影/持久化继续作为明确登记的宿主接入。
 
 连接状态与共享连接代次由现有宿主 transport 提供。重连开始即暂停依赖 Context 的写入，当前代次的实际读取成功后再恢复；多个观察者复用同一查询结果，旧代次的晚返回不能授权新连接。自动保存队列仍按原 API、数据实例和项目区分。相同项目或 Space 切换数据所有者时，未保存、已发送待回执及结果不确定的操作都属于受保护状态；保留旧草稿及离开保护，明确丢弃后才采纳新所有者。首次发送与迁移交互在异步步骤返回后再次核对当前连接及数据归属，不以开始时的闭包快照放行。
@@ -65,11 +69,18 @@ Context 页面、自动保存与旧指令迁移通过 `workbench/host/contextCli
 `expert.skill-evolution` 只持有来源快照、提炼请求、候选与采用事件；正式 Skill、不可变包和绑定继续由技能库拥有。来源限定为同一专家已正常结束的明确回合，专家不新增 Memory。用户点击提炼及认可具体摘要是唯一触发与采用权限。
 
 - 跨进程契约位于 `packages/contracts/src/skillEvolution.ts`。服务端业务在 `experts/evolution`；`workbench/host/skillEvolutionRpc` 保留 owner、原生命令和投影接入，`skillEvolutionPersistence` 使用宿主 SqlClient，Expert ledger 加法迁移为 10。请求先持久化再派发已有 Thread/turn 命令，不新增执行器或队列。
-- 原生 Reactor 和 ProviderService 在构造时捕获持久登记能力，启动与发送共同核对 purpose、Provider 实例和模型。Pi/Claude 适配器提供无工具、无环境 Skill/Context/Hub Memory 的会话；普通上下文校验继续有效。隔离任务不借普通恢复或原生 fork 放宽约束；取消沿用原生准确回合。未支持的 Provider 明确拒绝，不自动切换。
-- Skill 范围与进化策略独立。共享来源可以配置独立进化；第一次派生完整专用副本并保留绑定启用及激活方式，后续更新同一身份。共享更新使用原 Skill 身份。采用沿用版本 CAS 和持久操作回执，保存与绑定分阶段恢复；事件在实际保存及绑定完成后记时。旧包保留进入既有生命周期锁和引用检查，恢复内容产生新修订，恢复原绑定保留副本。
+- 原生 Reactor 和 ProviderService 在构造时捕获持久登记能力，启动与发送共同核对 purpose、Provider 实例和模型。Pi/Claude/OMP 适配器提供无工具、无环境 Skill/Context/Hub Memory 的会话；Reactor 的受限派发允许名单和 ProviderService 保持相同三端范围；普通上下文校验继续有效。隔离任务不借普通恢复或原生 fork 放宽约束；取消沿用原生准确回合。未支持的 Provider 明确拒绝，不自动切换。
+- 改进权限属于 ExpertSkillBinding.allowEvolution，缺省关闭；与启用、资源方式和原生工具权限独立。共享来源首次采用时派生完整专属副本并保留绑定全部字段，后续更新同一身份；原版重新绑定时复用已有副本。公开全局策略及范围配置已移除，归属仅由创建／派生记录并只读展示。派发、采用、恢复和持久化前重新校验权限，撤销阻止旧意图继续修改。采用沿用版本 CAS 和持久操作回执，保存与绑定分阶段恢复；事件在实际保存及绑定完成后记时。旧包保留进入既有生命周期锁和引用检查，恢复内容产生新修订，恢复原绑定保留副本。
+- 两阶段共用原生受限执行链路：start 只发现经验机会，generate 通过准确父机会摘要和反馈生成文件草稿。子记录固定独立任务、模型、来源和生成轮次；不依赖跨记录事务，新轮次使旧草稿不可采用，忽略及权限撤销阻止后续写入。服务端仍只在正式采用时写技能库与绑定。
 - 前端挂载原 `/experts/$expertId?tab=evolution`，继承 `_chat` 布局；通过 Expert 编辑器窄槽位复用来源任务、模型选择、Skill 详情和草稿保护。时间环每个 Skill 一个节点，候选不生成能力，未知基线不编造日期、调用量或分数。
 
 接入清单见 `workbench/integration-points.json`。该检查只覆盖静态边界；实现、真实模型和未验收平台分别见[本轮验收](./expert-skill-evolution-acceptance-2026-10-29.md)。
+
+### Skill 文件交付与 OMP 提炼接缝（2026-10-29 候选）
+
+内容校验和固定引用是 Expert 领域的只读能力，派生索引不参与源文件完整性。`fixedSkillProjection` 只定位完整资源树；`claudeSkillProjection` 独占 Claude 插件、Agent 和命名规则。Run 私有工作树由 Run 资源能力持久化，原生适配器使用其实际路径；continuation 继承资源所有者引用，不能用新的 Worker Run ID 重建或覆盖旧输出。
+
+OMP 提炼继续经过已持久登记的 purpose、ProviderService 和现有 ACP 生命周期。仅该用途启用固定 bundle 哈希／锚点校验的私有原生兼容变换，强制空工具和固定请求，且跳过普通 Gateway、MCP 与 harness 消息注入。账户及模型来源沿用已选配置；版本或断言不匹配只阻断该提炼能力，不改写全局 CLI。受控 transport、真实模型及操作系统隔离是不同证据。接入清单和实际检查见[优化验收](./skill-management-optimization-acceptance-2026-10-29.md)。
 
 ### 路由与布局契约
 

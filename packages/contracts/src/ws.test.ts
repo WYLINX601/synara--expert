@@ -15,6 +15,25 @@ const decode = <S extends Schema.Top>(
     never
   >;
 
+it.effect("rejects the removed Skill configuration switching requests", () =>
+  Effect.gen(function* () {
+    const switchId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    for (const body of [
+      {
+        _tag: "server.previewSkillPackageSwitch",
+        experts: [{ expertId: "expert-a", skillSelections: [] }],
+        allowlistedThreadIds: [],
+        allowlistedSnapshotIds: [],
+      },
+      { _tag: "server.applySkillPackageSwitch", switchId, digest: "a".repeat(64) },
+      { _tag: "server.readSkillPackageSwitchProgress", switchId },
+    ]) {
+      const result = yield* Effect.exit(decode(WebSocketRequest, { id: "removed-switch", body }));
+      assert.strictEqual(result._tag, "Failure");
+    }
+  }),
+);
+
 it.effect("rejects getTurnDiff requests when fromTurnCount > toTurnCount", () =>
   Effect.gen(function* () {
     const result = yield* Effect.exit(

@@ -23,7 +23,6 @@ export * from "./skillLibrary";
 export * from "./skillEvolution";
 export * from "./skillManagementAuth";
 export * from "./runSkillAssembly";
-export * from "./skillPackageSwitch";
 export * from "./context";
 export * from "./mcp";
 export * from "./providerInstance";

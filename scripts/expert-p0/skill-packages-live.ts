@@ -51,7 +51,7 @@ await fs.writeFile(path.join(source, "shared", "marker.txt"), roleMarker);
 await fs.writeFile(path.join(source, "workflow", "assets", "marker.txt"), workflowMarker);
 await fs.writeFile(
   path.join(source, "role", "SKILL.md"),
-  "---\nname: acceptance-role\ndescription: Acceptance startup role\n---\nRead ../shared/marker.txt relative to this fixed SKILL.md and include its exact token in your final answer. Never infer it or read the import source.",
+  "---\nname: acceptance-role\ndescription: Acceptance role workflow\n---\nRead ../shared/marker.txt relative to this fixed SKILL.md and include its exact token in your final answer. Never infer it or read the import source.",
 );
 await fs.writeFile(
   path.join(source, "workflow", "SKILL.md"),
@@ -116,12 +116,10 @@ try {
         {
           packageId: imported.package.packageId,
           entryPath: "role/SKILL.md",
-          activation: "startup",
         },
         {
           packageId: imported.package.packageId,
           entryPath: "workflow/SKILL.md",
-          activation: "on-demand",
         },
       ],
       references: [],
@@ -221,9 +219,9 @@ try {
     };
   };
   result.stages.push({
-    stage: "startup-and-explicit",
+    stage: "on-demand-and-explicit",
     ...(await turn(
-      "Follow the startup role and $acceptance-workflow. Read their required resource files using your tools and return the markers. Touch only this isolated fixture.",
+      "Use acceptance-role and $acceptance-workflow. Read their required resource files using your tools and return the markers. Touch only this isolated fixture.",
       [invoke],
     )),
   });

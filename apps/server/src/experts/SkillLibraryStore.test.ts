@@ -2,7 +2,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createSkillLibraryStore } from "./SkillLibraryStore";
+import {
+  createSkillLibraryStore,
+  readSkillLibraryDefinitions,
+  resolveSkillBindings,
+} from "./SkillLibraryStore";
 import { expertResourceFiles, createExpertStore } from "./ExpertStore";
 import { createSkillPackageStore } from "./SkillPackageStore";
 import * as storage from "./ExpertMcpStorage";
@@ -109,10 +113,42 @@ async function bindPair(
     skillBindings: [first, second].map((skill) => ({
       skillId: skill.skillId,
       enabled: true,
-      activation: "on-demand" as const,
     })),
   });
   return { first, second, experts, expert };
+}
+async function importArchiveEntries(
+  root: string,
+  store: ReturnType<typeof createSkillLibraryStore>,
+  count: number,
+) {
+  const source = path.join(root, `multi-entry-${count}.zip`),
+    entries = Array.from({ length: count }, (_, index) => {
+      const name = `skill-${count}-${String(index).padStart(4, "0")}`;
+      return {
+        entryPath: `${name}/SKILL.md`,
+        name,
+        body: `---\nname: ${name}\ndescription: ${name} description\n---\n${name}\n`,
+      };
+    });
+  await fs.writeFile(
+    source,
+    storedZip(
+      entries.map((entry) => ({
+        name: entry.entryPath,
+        content: entry.body,
+      })),
+    ),
+  );
+  const preview = (
+    await store.execute({ action: "previewImport", location: source, kind: "local" })
+  ).preview!;
+  const imported = await store.execute({
+    action: "import",
+    previewId: preview.previewId,
+    choices: entries.map((entry) => ({ entryPath: entry.entryPath, duplicate: "skip" as const })),
+  });
+  return { entries, skills: imported.skills!, packageId: preview.package.packageId };
 }
 describe("managed Skill library", () => {
   it.each(["cancel", "dispose"] as const)(
@@ -529,7 +565,7 @@ describe("managed Skill library", () => {
       skills: [],
       references: [],
       connections: [],
-      skillBindings: [{ skillId: first.skillId, enabled: true, activation: "on-demand" }],
+      skillBindings: [{ skillId: first.skillId, enabled: true }],
     });
     const pinned = await experts.prepareSnapshot(expert.id);
     const binary = Buffer.from([0, 255, 128, 42]);
@@ -885,7 +921,7 @@ describe("managed Skill library", () => {
     const rebind = experts.save({
       ...expert,
       expectedRevision: expert.revision,
-      skillBindings: [{ skillId: item.skillId, enabled: true, activation: "on-demand" }],
+      skillBindings: [{ skillId: item.skillId, enabled: true }],
     });
     const rejection = expect(rebind).rejects.toThrow(/unavailable/iu);
     release();
@@ -906,7 +942,7 @@ describe("managed Skill library", () => {
         skills: [],
         references: [],
         connections: [],
-        skillBindings: [{ skillId: item.skillId, enabled: true, activation: "startup" }],
+        skillBindings: [{ skillId: item.skillId, enabled: true }],
       });
     const pinned = await experts.prepareSnapshot(expert.id);
     expect(
@@ -1007,8 +1043,8 @@ describe("managed Skill library", () => {
       references: [],
       connections: [],
       skillBindings: [
-        { skillId: first.skillId, enabled: false, activation: "startup" },
-        { skillId: second.skillId, enabled: true, activation: "on-demand" },
+        { skillId: first.skillId, enabled: false },
+        { skillId: second.skillId, enabled: true },
       ],
     });
     const all = await store.execute({ action: "list" });
@@ -1035,7 +1071,6 @@ describe("managed Skill library", () => {
           query: {
             sources: ["manual"],
             tags: ["writing", "design"],
-            createdBy: ["owner"],
             sort: { field: "name", direction: "asc" },
           },
         })
@@ -1045,6 +1080,48 @@ describe("managed Skill library", () => {
       (await store.execute({ action: "list", query: { usage: "unused", expertIds: [expert.id] } }))
         .skills,
     ).toEqual([]);
+  });
+
+  it("does not persist or return creator metadata, including from legacy registry entries", async () => {
+    const { stateDir, store } = await fixture();
+    const created = (
+      await store.execute(
+        { action: "create", name: "Unattributed", body, tags: [] },
+        { actor: "management-client:credential-id" },
+      )
+    ).skill!;
+    expect(created).not.toHaveProperty("createdBy");
+    expect(created.createdAt).toBeDefined();
+
+    const registryPath = path.join(stateDir, "experts", "skill-library.json");
+    const registry = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
+      skills: Array<Record<string, unknown>>;
+    };
+    registry.skills[0]!.createdBy = "legacy-actor";
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    const listed = await store.execute({ action: "list" });
+    expect(listed.skills?.[0]).not.toHaveProperty("createdBy");
+    expect(listed.items?.[0]).not.toHaveProperty("createdBy");
+    await store.execute({
+      action: "batch",
+      requestId: "canonicalize-legacy-skill",
+      items: [
+        {
+          skillId: created.skillId,
+          expectedRevision: created.revision,
+          operation: "tags",
+          tags: ["rewritten"],
+        },
+      ],
+    });
+    const persisted = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
+      skills: Array<Record<string, unknown>>;
+    };
+    expect(persisted.skills[0]).not.toHaveProperty("createdBy");
+    const read = await store.execute({ action: "read", skillId: created.skillId });
+    expect(read.skill).not.toHaveProperty("createdBy");
+    expect(read.skill?.createdAt).toBe(created.createdAt);
   });
 
   it("previews and applies N×M bindings without changing existing disabled bindings, then replays after restart", async () => {
@@ -1063,7 +1140,7 @@ describe("managed Skill library", () => {
         skills: [],
         references: [],
         connections: [],
-        skillBindings: [{ skillId: existingSkill.skillId, enabled: false, activation: "startup" }],
+        skillBindings: [{ skillId: existingSkill.skillId, enabled: false }],
       }),
       request = {
         action: "bindExperts" as const,
@@ -1083,8 +1160,8 @@ describe("managed Skill library", () => {
     expect(applied.bindingResults?.[0]?.status).toBe("applied");
     const saved = (await experts.read(expert.id))!;
     expect(saved.skillBindings).toEqual([
-      { skillId: existingSkill.skillId, enabled: false, activation: "startup" },
-      { skillId: newSkill.skillId, enabled: true, activation: "on-demand" },
+      { skillId: existingSkill.skillId, enabled: false },
+      { skillId: newSkill.skillId, enabled: true },
     ]);
     const journalPath = path.join(stateDir, "experts", "skill-library-operations.json"),
       journal = JSON.parse(await fs.readFile(journalPath, "utf8")),
@@ -1139,7 +1216,7 @@ describe("managed Skill library", () => {
     expect((await store.execute({ action: "list" })).skills).toEqual([]);
   });
 
-  it("dry-runs narrow binding edits, permits the same requestId for apply, and returns needs_conversion for legacy Experts", async () => {
+  it("dry-runs narrow binding edits and does not migrate older Expert skill configuration", async () => {
     const { store, stateDir } = await fixture(),
       skill = (await store.execute({ action: "create", name: "Binding", body, tags: [] })).skill!,
       experts = createExpertStore(stateDir),
@@ -1160,7 +1237,7 @@ describe("managed Skill library", () => {
       expertId: current.id,
       expectedRevision: current.revision,
       requestId: "binding-add-dry-run",
-      bindings: [{ skillId: skill.skillId, enabled: false, activation: "startup" as const }],
+      bindings: [{ skillId: skill.skillId, enabled: false }],
     };
     const preview = await store.execute({ ...request, dryRun: true });
     expect(preview.bindingResult?.status).toBe("applied");
@@ -1181,13 +1258,379 @@ describe("managed Skill library", () => {
     });
     const result = await store.execute({
       action: "bindExperts",
-      requestId: "legacy-conversion-plan",
+      requestId: "legacy-bind-plan",
       skillIds: [skill.skillId],
       targets: [{ expertId: legacy.id, expectedRevision: legacy.revision }],
       dryRun: true,
     });
-    expect(result.bindingResults?.[0]?.status).toBe("needs_conversion");
+    expect(result.bindingResults?.[0]?.status).toBe("applied");
     expect((await experts.read(legacy.id))?.skillBindings).toBeUndefined();
+    const appliedBatch = await store.execute({
+      action: "bindExperts",
+      requestId: "legacy-bind-plan",
+      skillIds: [skill.skillId],
+      targets: [{ expertId: legacy.id, expectedRevision: legacy.revision }],
+    });
+    const bindingFailure = appliedBatch.bindingResults?.[0];
+    expect(bindingFailure?.status).toBe("failed");
+    expect(bindingFailure?.error).toBeDefined();
+    expect(bindingFailure?.error).not.toMatch(/convert/iu);
+    const unchangedLegacy = await experts.read(legacy.id);
+    expect(unchangedLegacy?.skills).toEqual([{ name: "Old", path: "/old/SKILL.md" }]);
+    expect(unchangedLegacy?.skillBindings).toBeUndefined();
+  });
+
+  it("reads historical binding journal fields without rewriting them or changing request fingerprints", async () => {
+    const { store, stateDir } = await fixture();
+    const skill = (await store.execute({ action: "create", name: "Journal", body, tags: [] }))
+      .skill!;
+    const experts = createExpertStore(stateDir);
+    const expert = await experts.save({
+      name: "Journal target",
+      description: "",
+      useCases: "",
+      persona: "Expert",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+      skillBindings: [{ skillId: skill.skillId, enabled: false, allowEvolution: true }],
+    });
+    const request = {
+      action: "bindings" as const,
+      operation: "set" as const,
+      expertId: expert.id,
+      expectedRevision: expert.revision,
+      requestId: "legacy-binding-journal-read",
+      bindings: [{ skillId: skill.skillId, enabled: true }],
+    };
+    const applied = await store.execute(request);
+    expect(applied.bindingResult?.status).toBe("applied");
+    expect(applied.bindingResult?.bindings).toEqual([{ skillId: skill.skillId, enabled: true }]);
+    expect(applied.bindingResult?.bindings[0]?.allowEvolution ?? false).toBe(false);
+
+    const journalPath = path.join(stateDir, "experts", "skill-library-operations.json");
+    const journal = JSON.parse(await fs.readFile(journalPath, "utf8")) as {
+      requests: Array<{
+        requestId: string;
+        fingerprint: string;
+        bindingIntent: {
+          expectedExpert: { skillBindings?: Array<Record<string, unknown>> };
+          bindings: Array<Record<string, unknown>>;
+        };
+        bindingResult: { bindings: Array<Record<string, unknown>> };
+      }>;
+    };
+    const operation = journal.requests.find((item) => item.requestId === request.requestId)!;
+    operation.bindingIntent.expectedExpert.skillBindings![0]!.activation = "on-demand";
+    operation.bindingIntent.bindings[0]!.activation = "startup";
+    operation.bindingResult.bindings[0]!.activation = "startup";
+    const historicalJournal = JSON.stringify(journal);
+    const fingerprint = operation.fingerprint;
+    await fs.writeFile(journalPath, historicalJournal);
+    await store.dispose();
+
+    const reopened = createSkillLibraryStore(stateDir);
+    const replay = await reopened.execute(request);
+    expect(replay.bindingResult).toMatchObject({
+      status: "applied",
+      bindings: [{ skillId: skill.skillId, enabled: true }],
+    });
+    expect(replay.bindingResult?.bindings[0]).not.toHaveProperty("activation");
+    expect(replay.bindingResult?.bindings[0]?.allowEvolution ?? false).toBe(false);
+    await expect(
+      reopened.execute({ ...request, bindings: [{ skillId: skill.skillId, enabled: false }] }),
+    ).rejects.toThrow(/different operation content/u);
+    expect(await fs.readFile(journalPath, "utf8")).toBe(historicalJournal);
+    const persisted = JSON.parse(await fs.readFile(journalPath, "utf8")) as typeof journal;
+    expect(
+      persisted.requests.find((item) => item.requestId === request.requestId)?.fingerprint,
+    ).toBe(fingerprint);
+    await reopened.dispose();
+  });
+
+  it("keeps an approved evolution permission through add, enable, and disable and leaves new bindings off", async () => {
+    const { stateDir, store } = await fixture(),
+      approvedSkill = (await store.execute({ action: "create", name: "Approved", body, tags: [] }))
+        .skill!,
+      defaultSkill = (await store.execute({ action: "create", name: "Default", body, tags: [] }))
+        .skill!,
+      experts = createExpertStore(stateDir),
+      expert = await experts.save({
+        name: "Evolution permission target",
+        description: "",
+        useCases: "",
+        persona: "Expert",
+        outputRequirements: "",
+        skills: [],
+        references: [],
+        connections: [],
+        skillBindings: [{ skillId: approvedSkill.skillId, enabled: false, allowEvolution: true }],
+      });
+
+    const addedDuplicate = await store.execute({
+      action: "bindings",
+      operation: "add",
+      expertId: expert.id,
+      expectedRevision: expert.revision,
+      requestId: "approved-add-preserves-permission",
+      bindings: [{ skillId: approvedSkill.skillId, enabled: true }],
+    });
+    expect(addedDuplicate.bindingResult?.bindings).toEqual([
+      { skillId: approvedSkill.skillId, enabled: false, allowEvolution: true },
+    ]);
+
+    const disabled = await store.execute({
+      action: "bindings",
+      operation: "disable",
+      expertId: expert.id,
+      expectedRevision: addedDuplicate.bindingResult!.revision,
+      requestId: "approved-disable-preserves-permission",
+      skillIds: [approvedSkill.skillId],
+    });
+    expect(disabled.bindingResult?.bindings).toEqual([
+      { skillId: approvedSkill.skillId, enabled: false, allowEvolution: true },
+    ]);
+    const enabled = await store.execute({
+      action: "bindings",
+      operation: "enable",
+      expertId: expert.id,
+      expectedRevision: disabled.bindingResult!.revision,
+      requestId: "approved-enable-preserves-permission",
+      skillIds: [approvedSkill.skillId],
+    });
+    expect(enabled.bindingResult?.bindings).toEqual([
+      { skillId: approvedSkill.skillId, enabled: true, allowEvolution: true },
+    ]);
+
+    const addedNew = await store.execute({
+      action: "bindings",
+      operation: "add",
+      expertId: expert.id,
+      expectedRevision: enabled.bindingResult!.revision,
+      requestId: "new-binding-defaults-off",
+      bindings: [{ skillId: defaultSkill.skillId, enabled: true }],
+    });
+    expect(
+      addedNew.bindingResult?.bindings.find((binding) => binding.skillId === defaultSkill.skillId)
+        ?.allowEvolution ?? false,
+    ).toBe(false);
+    expect(
+      addedNew.bindingResult?.bindings.find((binding) => binding.skillId === approvedSkill.skillId)
+        ?.allowEvolution,
+    ).toBe(true);
+
+    const explicitlyRevoked = await store.execute({
+      action: "bindings",
+      operation: "set",
+      expertId: expert.id,
+      expectedRevision: addedNew.bindingResult!.revision,
+      requestId: "explicitly-revoke-evolution-permission",
+      bindings: [
+        { skillId: approvedSkill.skillId, enabled: true, allowEvolution: false },
+        { skillId: defaultSkill.skillId, enabled: true, allowEvolution: false },
+      ],
+    });
+    expect(explicitlyRevoked.bindingResult?.bindings).toEqual([
+      { skillId: approvedSkill.skillId, enabled: true, allowEvolution: false },
+      { skillId: defaultSkill.skillId, enabled: true, allowEvolution: false },
+    ]);
+  });
+
+  it("expands entry and package bindings, merges duplicate entries, and scopes private resources to enabled package bindings", async () => {
+    const { root, stateDir, store } = await fixture(),
+      imported = await importArchiveEntries(root, store, 2),
+      [first, second] = imported.skills,
+      packageBinding = {
+        skillId: first!.skillId,
+        enabled: true,
+        selectionScope: "package" as const,
+      };
+    const expanded = await resolveSkillBindings(stateDir, [packageBinding], "scope-owner");
+    expect(expanded).toEqual([
+      {
+        packageId: imported.packageId,
+        entryPath: "skill-2-0000/SKILL.md",
+      },
+      {
+        packageId: imported.packageId,
+        entryPath: "skill-2-0001/SKILL.md",
+      },
+    ]);
+    expect(await resolveSkillBindings(stateDir, [], "scope-owner")).toEqual([]);
+
+    const registryPath = path.join(stateDir, "experts", "skill-library.json"),
+      registry = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
+        skills: Array<typeof first>;
+      },
+      duplicateId = "skl_0123456789abcdef0123456789abcdef";
+    registry.skills.push({ ...first!, skillId: duplicateId });
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+    const deduped = await resolveSkillBindings(
+      stateDir,
+      [
+        { skillId: first!.skillId, enabled: true },
+        { skillId: duplicateId, enabled: true },
+      ],
+      "scope-owner",
+    );
+    expect(deduped).toEqual([
+      {
+        packageId: imported.packageId,
+        entryPath: "skill-2-0000/SKILL.md",
+      },
+    ]);
+    const privateResources = await resolveSkillBindings(
+      stateDir,
+      [
+        { skillId: first!.skillId, enabled: true },
+        {
+          skillId: second!.skillId,
+          enabled: false,
+          resourceMode: "run-private",
+        },
+      ],
+      "scope-owner",
+    );
+    expect(privateResources).toHaveLength(1);
+    expect(privateResources[0]?.resourceMode).toBeUndefined();
+    const enabledPrivateResources = await resolveSkillBindings(
+      stateDir,
+      [
+        { skillId: first!.skillId, enabled: true },
+        {
+          skillId: second!.skillId,
+          enabled: true,
+          resourceMode: "run-private",
+        },
+      ],
+      "scope-owner",
+    );
+    expect(enabledPrivateResources).toHaveLength(2);
+    expect(enabledPrivateResources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ entryPath: first!.entryPath, resourceMode: "run-private" }),
+        expect.objectContaining({ entryPath: second!.entryPath, resourceMode: "run-private" }),
+      ]),
+    );
+    expect(
+      await resolveSkillBindings(
+        stateDir,
+        [
+          {
+            ...packageBinding,
+            resourceMode: "run-private",
+          },
+        ],
+        "scope-owner",
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ resourceMode: "run-private" }),
+        expect.objectContaining({ resourceMode: "run-private" }),
+      ]),
+    );
+  });
+
+  it("caps configured bindings at 100 independently from package expansion up to 5,000", async () => {
+    const { stateDir, store } = await fixture(),
+      skill = (await store.execute({ action: "create", name: "Expansion anchor", body, tags: [] }))
+        .skill!,
+      registryPath = path.join(stateDir, "experts", "skill-library.json"),
+      registry = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
+        skills: Array<Record<string, unknown> & { skillId: string }>;
+      },
+      extraIds = Array.from(
+        { length: 100 },
+        (_, index) => `skl_${String(index + 1).padStart(32, "0")}`,
+      );
+    registry.skills.push(...extraIds.map((skillId) => ({ ...skill, skillId })));
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+    await expect(
+      resolveSkillBindings(
+        stateDir,
+        [skill.skillId, ...extraIds].map((skillId) => ({
+          skillId,
+          enabled: true,
+        })),
+        "limit-owner",
+      ),
+    ).rejects.toThrow(/at most 100/u);
+    const fakePackage = {
+      schemaVersion: 1 as const,
+      packageId: skill.packageId,
+      rootName: "synthetic-large-package",
+      resources: [],
+      entries: Array.from({ length: 5_000 }, (_, index) => ({
+        entryPath:
+          index === 0 ? skill.entryPath : `entry-${String(index).padStart(4, "0")}/SKILL.md`,
+        name: `entry-${index}`,
+        description: "",
+        issues: [],
+      })),
+      fileCount: 0,
+      totalBytes: 0,
+    };
+    const expanded = await resolveSkillBindings(
+      stateDir,
+      [
+        {
+          skillId: skill.skillId,
+          enabled: true,
+          selectionScope: "package",
+        },
+      ],
+      "limit-owner",
+      { packages: [fakePackage] },
+    );
+    expect(expanded).toHaveLength(5_000);
+  });
+
+  it("rejects cross-Expert and inconsistent package ownership without blocking another entry selection", async () => {
+    const { root, stateDir, store } = await fixture(),
+      imported = await importArchiveEntries(root, store, 2),
+      first = imported.skills[0]!,
+      second = imported.skills[1]!,
+      experts = createExpertStore(stateDir),
+      owner = await experts.save({
+        name: "Scope owner",
+        description: "",
+        useCases: "",
+        persona: "Expert",
+        outputRequirements: "",
+        skills: [],
+        references: [],
+        connections: [],
+      }),
+      registryPath = path.join(stateDir, "experts", "skill-library.json"),
+      registry = JSON.parse(await fs.readFile(registryPath, "utf8")) as {
+        skills: Array<typeof first>;
+      };
+    registry.skills = registry.skills.map((skill) =>
+      skill.skillId === second.skillId
+        ? { ...skill, scope: { kind: "expert" as const, expertId: owner.id } }
+        : skill,
+    );
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+    await expect(
+      resolveSkillBindings(
+        stateDir,
+        [
+          {
+            skillId: first.skillId,
+            enabled: true,
+            selectionScope: "package",
+          },
+        ],
+        "other-expert",
+      ),
+    ).rejects.toThrow(/conflicting ownership/u);
+    await expect(
+      resolveSkillBindings(stateDir, [{ skillId: second.skillId, enabled: true }], "other-expert"),
+    ).rejects.toThrow(/belongs to Expert/u);
+    await expect(
+      resolveSkillBindings(stateDir, [{ skillId: first.skillId, enabled: true }], "other-expert"),
+    ).resolves.toHaveLength(1);
   });
 
   it("retries only failed Experts from a partially committed N×M binding request", async () => {
@@ -1293,7 +1736,7 @@ describe("managed Skill library", () => {
     );
     expect((await store.execute(replanned)).bindingResults?.[0]?.status).toBe("applied");
     expect((await experts.read(expert.id))?.skillBindings).toEqual([
-      { skillId: skill.skillId, enabled: true, activation: "on-demand" },
+      { skillId: skill.skillId, enabled: true },
     ]);
   });
 
@@ -1313,25 +1756,14 @@ describe("managed Skill library", () => {
       })
     ).skills![0]!;
     expect(original).toMatchObject({
-      evolutionPolicy: "protected",
       scope: { kind: "shared" },
     });
-    const governed = (
-      await store.execute({
-        action: "configureEvolution",
-        skillId: original.skillId,
-        expectedRevision: original.revision,
-        requestId: "hosted-skill-policy",
-        evolutionPolicy: "shared",
-        scope: { kind: "shared" },
-      })
-    ).skill!;
     const edited = (
       await store.execute({
         action: "save",
-        skillId: governed.skillId,
-        expectedRevision: governed.revision,
-        name: governed.name,
+        skillId: original.skillId,
+        expectedRevision: original.revision,
+        name: original.name,
         tags: ["preserve"],
         changes: [
           { path: "SKILL.md", content: Buffer.from(body + "Local edits.\n").toString("base64") },
@@ -1347,7 +1779,7 @@ describe("managed Skill library", () => {
       skills: [],
       references: [],
       connections: [],
-      skillBindings: [{ skillId: original.skillId, enabled: false, activation: "startup" }],
+      skillBindings: [{ skillId: original.skillId, enabled: false }],
     });
     const registry = path.join(stateDir, "experts", "skill-library.json"),
       registryData = JSON.parse(await fs.readFile(registry, "utf8")) as {
@@ -1435,13 +1867,11 @@ describe("managed Skill library", () => {
       tags: ["preserve"],
       locallyModified: false,
       createdAt: original.createdAt,
-      createdBy: original.createdBy,
-      evolutionPolicy: "shared",
       scope: { kind: "shared" },
       source: { resolvedRevision: sha },
     });
     expect((await createExpertStore(stateDir).read(expert.id))?.skillBindings).toEqual([
-      { skillId: original.skillId, enabled: false, activation: "startup" },
+      { skillId: original.skillId, enabled: false },
     ]);
     const unchanged = await store.execute({
       action: "updateFromSource",
@@ -1453,7 +1883,7 @@ describe("managed Skill library", () => {
     expect(unchanged.updateResult?.status).toBe("unchanged");
   });
 
-  it("preserves evolution metadata when refreshing a hosted Skill", async () => {
+  it("preserves Skill scope and creation metadata when refreshing a hosted Skill", async () => {
     const { store } = await fixture(),
       hosted = hostedSource();
     const preview = (
@@ -1467,44 +1897,31 @@ describe("managed Skill library", () => {
         })
       ).skills![0]!;
     expect(imported).toMatchObject({
-      evolutionPolicy: "protected",
       scope: { kind: "shared" },
     });
-    const configured = (
-      await store.execute({
-        action: "configureEvolution",
-        skillId: imported.skillId,
-        expectedRevision: imported.revision,
-        requestId: "configure-hosted-shared-evolution",
-        evolutionPolicy: "shared",
-        scope: { kind: "shared" },
-      })
-    ).skill!;
     hosted.source.sha = "5".repeat(40);
     hosted.source.body = hosted.source.body.replace("Do alpha.", "Updated hosted alpha.");
     const refreshPreview = (
       await store.execute({
         action: "previewRefresh",
-        skillId: configured.skillId,
-        expectedRevision: configured.revision,
+        skillId: imported.skillId,
+        expectedRevision: imported.revision,
       })
     ).preview!;
     const refreshed = (
       await store.execute({
         action: "refresh",
-        skillId: configured.skillId,
-        expectedRevision: configured.revision,
-        requestId: "refresh-hosted-shared-evolution",
+        skillId: imported.skillId,
+        expectedRevision: imported.revision,
+        requestId: "refresh-hosted-skill",
         previewId: refreshPreview.previewId,
       })
     ).skill!;
     expect(refreshed).toMatchObject({
       skillId: imported.skillId,
-      revision: configured.revision + 1,
-      evolutionPolicy: "shared",
+      revision: imported.revision + 1,
       scope: { kind: "shared" },
       createdAt: imported.createdAt,
-      createdBy: imported.createdBy,
     });
   });
 
@@ -1690,7 +2107,7 @@ describe("managed Skill library", () => {
         skills: [],
         references: [],
         connections: [],
-        skillBindings: [{ skillId: skill.skillId, enabled: true, activation: "on-demand" }],
+        skillBindings: [{ skillId: skill.skillId, enabled: true }],
       }),
       request = {
         action: "delete" as const,
@@ -1896,10 +2313,53 @@ describe("managed Skill library", () => {
     );
   });
 
-  it("defaults new Skills to protected shared scope and versions explicit policy changes", async () => {
-    const { stateDir, store } = await fixture();
-    const expert = await createExpertStore(stateDir).save({
-      name: "Evolution owner",
+  it("creates shared Skills publicly and private Skills only for a trusted active Expert", async () => {
+    const { stateDir, store } = await fixture(),
+      experts = createExpertStore(stateDir),
+      expert = await experts.save({
+        name: "Private Skill owner",
+        description: "",
+        useCases: "",
+        persona: "Expert",
+        outputRequirements: "",
+        skills: [],
+        references: [],
+        connections: [],
+      });
+    const privateCreate = {
+      action: "create" as const,
+      requestId: "private-skill-create",
+      name: "Private method",
+      body,
+      tags: [],
+      changes: [
+        {
+          path: "references/seed.md",
+          content: Buffer.from("Complete from first publication").toString("base64"),
+        },
+      ],
+    };
+    const publicCreate = {
+        action: "create" as const,
+        requestId: "public-skill-create",
+        name: "Shared by default",
+        body,
+        tags: [],
+      },
+      shared = (await store.execute(publicCreate)).skill!;
+    expect(shared.scope).toEqual({ kind: "shared" });
+    expect(shared).not.toHaveProperty("evolutionPolicy");
+
+    const privateSkill = (await store.execute(privateCreate, { createForExpertId: expert.id }))
+      .skill!;
+    expect(privateSkill.scope).toEqual({ kind: "expert", expertId: expert.id });
+    await expect(
+      store.execute(privateCreate, { createForExpertId: expert.id }),
+    ).resolves.toMatchObject({
+      skill: { skillId: privateSkill.skillId, scope: { kind: "expert", expertId: expert.id } },
+    });
+    const otherExpert = await experts.save({
+      name: "Other private Skill owner",
       description: "",
       useCases: "",
       persona: "Expert",
@@ -1908,45 +2368,9 @@ describe("managed Skill library", () => {
       references: [],
       connections: [],
     });
-    const historicalShape = (
-      await store.execute({ action: "create", name: "Shared Driven", body, tags: [] })
-    ).skill!;
-    expect(historicalShape).toMatchObject({
-      evolutionPolicy: "protected",
-      scope: { kind: "shared" },
-    });
-    const independentShared = (
-      await store.execute({
-        action: "configureEvolution",
-        skillId: historicalShape.skillId,
-        expectedRevision: historicalShape.revision,
-        requestId: "shared-driven-independent-policy",
-        evolutionPolicy: "independent",
-        scope: { kind: "shared" },
-      })
-    ).skill!;
-    expect(independentShared).toMatchObject({
-      revision: historicalShape.revision + 1,
-      evolutionPolicy: "independent",
-      scope: { kind: "shared" },
-    });
-
-    const privateSkill = (
-      await store.execute({
-        action: "create",
-        name: "Private method",
-        body,
-        tags: [],
-        changes: [
-          {
-            path: "references/seed.md",
-            content: Buffer.from("Complete from first publication").toString("base64"),
-          },
-        ],
-        evolutionPolicy: "protected",
-        scope: { kind: "expert", expertId: expert.id },
-      })
-    ).skill!;
+    await expect(
+      store.execute(privateCreate, { createForExpertId: otherExpert.id }),
+    ).rejects.toThrow(/different operation content/u);
     expect(
       Buffer.from(
         (
@@ -1959,55 +2383,42 @@ describe("managed Skill library", () => {
         "base64",
       ).toString("utf8"),
     ).toBe("Complete from first publication");
-    const configure = {
-      action: "configureEvolution" as const,
-      skillId: privateSkill.skillId,
-      expectedRevision: privateSkill.revision,
-      requestId: "open-private-skill",
-      evolutionPolicy: "shared" as const,
-      scope: { kind: "shared" as const },
-    };
-    const opened = (await store.execute(configure)).skill!;
-    expect(opened).toMatchObject({
-      revision: privateSkill.revision + 1,
-      evolutionPolicy: "shared",
-      scope: { kind: "shared" },
-    });
-    expect(await store.execute(configure)).toEqual({
-      skill: opened,
-      requestId: configure.requestId,
-    });
-    await expect(store.execute({ ...configure, evolutionPolicy: "protected" })).rejects.toThrow(
-      /different operation content/u,
-    );
 
-    const saved = (
-      await store.execute({
-        action: "save",
-        skillId: opened.skillId,
-        expectedRevision: opened.revision,
-        name: opened.name,
-        tags: opened.tags,
-        changes: [],
-      })
-    ).skill!;
-    expect(saved).toMatchObject({
-      evolutionPolicy: "shared",
-      scope: { kind: "shared" },
-    });
+    await expect(
+      store.execute(
+        {
+          action: "create",
+          name: "Unknown owner",
+          body,
+          tags: [],
+        },
+        { createForExpertId: "missing-expert" },
+      ),
+    ).rejects.toThrow(/Active target Expert not found/u);
+    await expect(
+      store.execute({ action: "list" }, { createForExpertId: expert.id }),
+    ).rejects.toThrow(/only valid for a create request/u);
+    await expect(
+      store.execute({
+        ...publicCreate,
+        requestId: "retired-public-scope",
+        evolutionPolicy: "independent",
+        scope: { kind: "expert", expertId: expert.id },
+      } as never),
+    ).rejects.toThrow();
     await expect(
       store.execute({
         action: "configureEvolution",
-        skillId: saved.skillId,
-        expectedRevision: saved.revision,
-        requestId: "shared-to-private-is-derive-only",
+        skillId: shared.skillId,
+        expectedRevision: shared.revision,
+        requestId: "retired-evolution-policy",
         evolutionPolicy: "independent",
-        scope: { kind: "expert", expertId: expert.id },
-      }),
-    ).rejects.toThrow(/derive a private copy/u);
+        scope: { kind: "shared" },
+      } as never),
+    ).rejects.toThrow();
   });
 
-  it("derives a complete private package from a shared independent Skill without changing the source", async () => {
+  it("derives a complete private package from a shared Skill without changing the source", async () => {
     const { stateDir, store } = await fixture();
     const experts = createExpertStore(stateDir);
     const owner = await experts.save({
@@ -2027,14 +2438,11 @@ describe("managed Skill library", () => {
           name: "Source method",
           body,
           tags: [],
-          evolutionPolicy: "independent",
-          scope: { kind: "shared" },
         },
         { retainForEvolution: true },
       )
     ).skill!;
     expect(source).toMatchObject({
-      evolutionPolicy: "independent",
       scope: { kind: "shared" },
     });
     const withResources = (
@@ -2067,7 +2475,7 @@ describe("managed Skill library", () => {
       skills: [],
       references: owner.references,
       connections: owner.connections,
-      skillBindings: [{ skillId: withResources.skillId, enabled: true, activation: "on-demand" }],
+      skillBindings: [{ skillId: withResources.skillId, enabled: true }],
     });
     const other = await experts.save({
       name: "Other owner",
@@ -2090,13 +2498,13 @@ describe("managed Skill library", () => {
       skills: [],
       references: other.references,
       connections: other.connections,
-      skillBindings: [{ skillId: withResources.skillId, enabled: true, activation: "on-demand" }],
+      skillBindings: [{ skillId: withResources.skillId, enabled: true }],
     });
     expect((await experts.read(owner.id))?.skillBindings).toEqual([
-      { skillId: withResources.skillId, enabled: true, activation: "on-demand" },
+      { skillId: withResources.skillId, enabled: true },
     ]);
     expect((await experts.read(otherWithSource.id))?.skillBindings).toEqual([
-      { skillId: withResources.skillId, enabled: true, activation: "on-demand" },
+      { skillId: withResources.skillId, enabled: true },
     ]);
     const assemblies = createRunSkillAssemblyStore(stateDir),
       ownerAssembly = await assemblies.preview(
@@ -2133,7 +2541,6 @@ describe("managed Skill library", () => {
     expect(derived).toMatchObject({
       skillId: expect.not.stringMatching(withResources.skillId),
       packageId: expect.not.stringMatching(withResources.packageId),
-      evolutionPolicy: "independent",
       scope: { kind: "expert", expertId: owner.id },
       derivedFrom: {
         skillId: withResources.skillId,
@@ -2166,10 +2573,10 @@ describe("managed Skill library", () => {
       withResources,
     );
     expect((await experts.read(owner.id))?.skillBindings).toEqual([
-      { skillId: withResources.skillId, enabled: true, activation: "on-demand" },
+      { skillId: withResources.skillId, enabled: true },
     ]);
     expect((await experts.read(otherWithSource.id))?.skillBindings).toEqual([
-      { skillId: withResources.skillId, enabled: true, activation: "on-demand" },
+      { skillId: withResources.skillId, enabled: true },
     ]);
     expect(
       Buffer.from(
@@ -2214,11 +2621,11 @@ describe("managed Skill library", () => {
       expertId: otherWithSource.id,
       expectedRevision: otherWithSource.revision,
       requestId: "bind-private-to-other",
-      bindings: [{ skillId: derived.skillId, enabled: true, activation: "on-demand" }],
+      bindings: [{ skillId: derived.skillId, enabled: true }],
     });
     expect(forbidden.bindingResult).toMatchObject({
       status: "failed",
-      bindings: [{ skillId: withResources.skillId, enabled: true, activation: "on-demand" }],
+      bindings: [{ skillId: withResources.skillId, enabled: true }],
     });
     expect(forbidden.bindingResult?.error).toMatch(/belongs to Expert/u);
     const batch = await store.execute({
@@ -2240,7 +2647,7 @@ describe("managed Skill library", () => {
         skills: [],
         references: otherWithSource.references,
         connections: otherWithSource.connections,
-        skillBindings: [{ skillId: derived.skillId, enabled: true, activation: "on-demand" }],
+        skillBindings: [{ skillId: derived.skillId, enabled: true }],
       }),
     ).rejects.toMatchObject({ code: "invalid_resource" });
 
@@ -2312,8 +2719,6 @@ describe("managed Skill library", () => {
         name: "Derivation boundary source",
         body,
         tags: [],
-        evolutionPolicy: "independent",
-        scope: { kind: "shared" },
       })
     ).skill!;
     for (const expert of [owner, other])
@@ -2328,7 +2733,7 @@ describe("managed Skill library", () => {
         skills: [],
         references: expert.references,
         connections: expert.connections,
-        skillBindings: [{ skillId: source.skillId, enabled: true, activation: "on-demand" }],
+        skillBindings: [{ skillId: source.skillId, enabled: true }],
       });
 
     const sharedCopy = (
@@ -2337,8 +2742,6 @@ describe("managed Skill library", () => {
         name: "Shared published descendant",
         body,
         tags: [],
-        evolutionPolicy: "shared",
-        scope: { kind: "shared" },
       })
     ).skill!;
     const registryPath = path.join(stateDir, "experts", "skill-library.json");
@@ -2410,8 +2813,6 @@ describe("managed Skill library", () => {
         name: "Concurrent derivation source",
         body,
         tags: [],
-        evolutionPolicy: "independent",
-        scope: { kind: "shared" },
       })
     ).skill!;
     const currentExpert = (await createExpertStore(stateDir).read(expert.id))!;
@@ -2426,7 +2827,7 @@ describe("managed Skill library", () => {
       skills: [],
       references: currentExpert.references,
       connections: currentExpert.connections,
-      skillBindings: [{ skillId: source.skillId, enabled: true, activation: "on-demand" }],
+      skillBindings: [{ skillId: source.skillId, enabled: true }],
     });
 
     const makeRequest = (requestId: string, name: string) => ({
@@ -2477,8 +2878,6 @@ describe("managed Skill library", () => {
         name: "Planned derivation source",
         body,
         tags: [],
-        evolutionPolicy: "independent",
-        scope: { kind: "shared" },
       })
     ).skill!;
     const currentExpert = (await createExpertStore(stateDir).read(expert.id))!;
@@ -2493,7 +2892,7 @@ describe("managed Skill library", () => {
       skills: [],
       references: currentExpert.references,
       connections: currentExpert.connections,
-      skillBindings: [{ skillId: source.skillId, enabled: true, activation: "on-demand" }],
+      skillBindings: [{ skillId: source.skillId, enabled: true }],
     });
     const request = {
       action: "derive" as const,
@@ -2567,7 +2966,7 @@ describe("managed Skill library", () => {
     ).rejects.toThrow();
   });
 
-  it("preserves scope, policy, and derivation lineage when an import replaces a Skill", async () => {
+  it("preserves scope and derivation lineage when an import replaces a Skill", async () => {
     const { root, stateDir, store } = await fixture();
     const owner = await createExpertStore(stateDir).save({
       name: "Replacement owner",
@@ -2598,7 +2997,7 @@ describe("managed Skill library", () => {
       skills: [],
       references: owner.references,
       connections: owner.connections,
-      skillBindings: [{ skillId: upstream.skillId, enabled: true, activation: "on-demand" }],
+      skillBindings: [{ skillId: upstream.skillId, enabled: true }],
     });
     const source = (
       await store.execute({
@@ -2644,7 +3043,6 @@ describe("managed Skill library", () => {
       skillId: source.skillId,
       revision: source.revision + 1,
       tags: source.tags,
-      evolutionPolicy: "independent",
       scope: { kind: "expert", expertId: owner.id },
       derivedFrom: {
         skillId: upstream.skillId,
@@ -2652,7 +3050,6 @@ describe("managed Skill library", () => {
         packageId: upstream.packageId,
       },
       createdAt: source.createdAt,
-      createdBy: source.createdBy,
     });
     expect(replaced.packageId).not.toBe(source.packageId);
   });

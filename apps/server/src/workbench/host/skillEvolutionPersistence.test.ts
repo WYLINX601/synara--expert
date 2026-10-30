@@ -71,4 +71,65 @@ layer("Skill evolution persistence", (it) => {
       assert.strictEqual(events[0]?.createdAt, event.createdAt);
     }),
   );
+
+  it.effect(
+    "registers discovery and generation as separate native tasks under the same owner and model",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* SkillEvolutionRepository;
+        const modelSelection = {
+          provider: "omp",
+          instanceId: "omp-local",
+          model: "selected-model",
+        } as const;
+        const parentRecord = {
+          requestId: "discovery-identity",
+          ownerId: "stage-owner",
+          run: { stage: "discovery", modelSelection },
+        };
+        const parent = {
+          requestId: parentRecord.requestId,
+          expertId: "stage-expert",
+          taskThreadId: "discovery-native-task",
+          record: JSON.stringify(parentRecord),
+          updatedAt: "2026-10-29T00:00:00Z",
+        };
+        yield* repository.write(parent);
+        yield* repository.write({
+          requestId: "generation-identity",
+          expertId: parent.expertId,
+          taskThreadId: "generation-native-task",
+          record: JSON.stringify({
+            requestId: "generation-identity",
+            ownerId: parentRecord.ownerId,
+            run: {
+              stage: "generation",
+              discoveryRequestId: parent.requestId,
+              opportunityId: "opportunity-one",
+              generationIndex: 1,
+              feedback: "Preserve the portable method.",
+              modelSelection,
+            },
+          }),
+          updatedAt: "2026-10-29T00:01:00Z",
+        });
+        assert.deepStrictEqual(
+          yield* repository.execution(ThreadId.makeUnsafe(parent.taskThreadId)),
+          {
+            requestId: parent.requestId,
+            ownerId: parentRecord.ownerId,
+            modelSelection,
+          },
+        );
+        assert.deepStrictEqual(
+          yield* repository.execution(ThreadId.makeUnsafe("generation-native-task")),
+          {
+            requestId: "generation-identity",
+            ownerId: parentRecord.ownerId,
+            modelSelection,
+          },
+        );
+        assert.strictEqual((yield* repository.read(parent.requestId))?.record, parent.record);
+      }),
+  );
 });

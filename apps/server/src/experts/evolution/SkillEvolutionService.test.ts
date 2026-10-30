@@ -5,6 +5,7 @@ import {
   MessageId,
   ThreadId,
   TurnId,
+  type ExpertSkillBinding,
   type OrchestrationCommand,
   type OrchestrationMessage,
   type OrchestrationThread,
@@ -218,6 +219,13 @@ class FakeHost implements SkillEvolutionHost {
     } as OrchestrationThread);
   }
 
+  markLatestTurnInterrupted(threadId: string) {
+    const turns = this.turns.get(threadId)!;
+    const latest = turns.at(-1)!;
+    latest.state = "interrupted";
+    latest.completedAt = createdAt;
+  }
+
   async dispatch(command: OrchestrationCommand) {
     this.dispatches.push(clone(command));
     if (command.type === "thread.create") {
@@ -327,11 +335,7 @@ async function restartService(state: Awaited<ReturnType<typeof fixture>>) {
 async function createExpert(
   experts: ReturnType<typeof createExpertStore>,
   id: string,
-  skillBindings: Array<{
-    skillId: string;
-    enabled: boolean;
-    activation: "startup" | "on-demand";
-  }> = [],
+  skillBindings: readonly ExpertSkillBinding[] = [],
 ) {
   return experts.save({
     id,
@@ -351,8 +355,7 @@ async function createSkill(
   library: ReturnType<typeof createSkillLibraryStore>,
   options: {
     name: string;
-    policy?: "protected" | "shared" | "independent";
-    scope?: { kind: "shared" } | { kind: "expert"; expertId: string };
+    expertId?: string;
     body?: string;
     changes?: Array<{ path: string; content: string; executable?: boolean }>;
   },
@@ -365,11 +368,12 @@ async function createSkill(
         name: options.name,
         body: options.body ?? entry(options.name, "Original workflow."),
         tags: [],
-        evolutionPolicy: options.policy,
-        scope: options.scope,
         changes: options.changes,
       },
-      { actor: ownerId },
+      {
+        actor: ownerId,
+        ...(options.expertId ? { createForExpertId: options.expertId } : {}),
+      },
     )
   ).skill!;
 }
@@ -377,7 +381,7 @@ async function createSkill(
 async function bind(
   library: ReturnType<typeof createSkillLibraryStore>,
   expert: Awaited<ReturnType<typeof createExpert>>,
-  bindings: Array<{ skillId: string; enabled: boolean; activation: "startup" | "on-demand" }>,
+  bindings: readonly ExpertSkillBinding[],
   requestId: string,
 ) {
   const response = await library.execute(
@@ -452,6 +456,88 @@ function proposalText(input: {
   });
 }
 
+function opportunityText(input: {
+  name: string;
+  threadId: string;
+  messageId: string;
+  targetSkillId?: string;
+  quote?: string;
+}) {
+  return JSON.stringify({
+    action: "opportunities",
+    opportunities: [
+      {
+        name: input.name,
+        reason: "The selected work contains a reusable decision procedure.",
+        outcomes: ["Record the verified decision process."],
+        evidence: [
+          {
+            threadId: input.threadId,
+            messageId: input.messageId,
+            quote: input.quote ?? "Verified evidence: keep a decision log.",
+          },
+        ],
+        ...(input.targetSkillId ? { targetSkillId: input.targetSkillId } : {}),
+      },
+    ],
+  });
+}
+
+async function completeStage(
+  fixtureValue: Awaited<ReturnType<typeof fixture>>,
+  run: SkillEvolutionRun,
+  response: string,
+): Promise<SkillEvolutionRun> {
+  const taskThreadId = run.taskThreadId!;
+  await fixtureValue.service.dispose();
+  fixtureValue.host.completeLatest(taskThreadId, response);
+  return (await fixtureValue.service.execute({ action: "read", requestId: run.requestId })).run!;
+}
+
+async function startDiscovery(
+  fixtureValue: Awaited<ReturnType<typeof fixture>>,
+  input: {
+    requestId: string;
+    expertId: string;
+    sources: readonly { threadId: ThreadId; turnId: TurnId }[];
+    focus?: string;
+  },
+): Promise<SkillEvolutionRun> {
+  return (
+    await fixtureValue.service.execute({
+      action: "start",
+      requestId: input.requestId,
+      expertId: input.expertId,
+      sources: input.sources,
+      ...(input.focus ? { focus: input.focus } : {}),
+      modelSelection,
+    })
+  ).run!;
+}
+
+async function startGeneration(
+  fixtureValue: Awaited<ReturnType<typeof fixture>>,
+  discovery: SkillEvolutionRun,
+  requestId: string,
+  feedback?: string,
+): Promise<SkillEvolutionRun> {
+  return (await fixtureValue.service.execute(generationRequest(discovery, requestId, feedback)))
+    .run!;
+}
+
+function generationRequest(discovery: SkillEvolutionRun, requestId: string, feedback?: string) {
+  const opportunity = discovery.opportunities?.[0];
+  if (!opportunity) throw new Error("fixture discovery did not return an opportunity");
+  return {
+    action: "generate" as const,
+    requestId,
+    discoveryRequestId: discovery.requestId,
+    opportunityId: opportunity.opportunityId,
+    expectedDigest: opportunity.digest,
+    ...(feedback !== undefined ? { feedback } : {}),
+  };
+}
+
 async function startAndFinish(
   fixtureValue: Awaited<ReturnType<typeof fixture>>,
   input: {
@@ -459,28 +545,39 @@ async function startAndFinish(
     expertId: string;
     source: { threadId: ThreadId; turnId: TurnId };
     targetSkillId?: string;
-    protectedAction?: "update" | "derive";
     focus?: string;
     response: string;
   },
 ): Promise<SkillEvolutionRun> {
-  const started = await fixtureValue.service.execute({
-    action: "start",
-    requestId: input.requestId,
+  const discoveryRequestId = `${input.requestId}-discovery`;
+  const started = await startDiscovery(fixtureValue, {
+    requestId: discoveryRequestId,
     expertId: input.expertId,
     sources: [input.source],
-    ...(input.targetSkillId ? { targetSkillId: input.targetSkillId } : {}),
-    ...(input.protectedAction ? { protectedAction: input.protectedAction } : {}),
     ...(input.focus ? { focus: input.focus } : {}),
-    modelSelection,
   });
-  const taskThreadId = started.run!.taskThreadId!;
-  await fixtureValue.service.dispose();
-  fixtureValue.host.completeLatest(taskThreadId, input.response);
-  return (await fixtureValue.service.execute({ action: "read", requestId: input.requestId })).run!;
+  const discovery = await completeStage(
+    fixtureValue,
+    started,
+    opportunityText({
+      name: `Opportunity ${input.requestId}`,
+      threadId: input.source.threadId,
+      messageId: fixtureValue.host.threads
+        .get(input.source.threadId)!
+        .messages.find(
+          (message) =>
+            message.role === "assistant" &&
+            message.turnId === input.source.turnId &&
+            !message.streaming,
+        )!.id,
+      ...(input.targetSkillId ? { targetSkillId: input.targetSkillId } : {}),
+    }),
+  );
+  const generated = await startGeneration(fixtureValue, discovery, input.requestId);
+  return completeStage(fixtureValue, generated, input.response);
 }
 
-function applyRequest(run: SkillEvolutionRun, operationId: string, approveProtected?: boolean) {
+function applyRequest(run: SkillEvolutionRun, operationId: string) {
   const proposal = run.proposals[0]!;
   return {
     action: "apply" as const,
@@ -488,7 +585,6 @@ function applyRequest(run: SkillEvolutionRun, operationId: string, approveProtec
     proposalId: proposal.proposalId,
     expectedDigest: proposal.digest,
     operationId,
-    ...(approveProtected !== undefined ? { approveProtected } : {}),
   };
 }
 
@@ -497,13 +593,11 @@ async function deriveScenario(suffix: string) {
   const expert = await createExpert(state.experts, `binding-restore-${suffix}`);
   const sourceSkill = await createSkill(state.library, {
     name: `Binding Restore Source ${suffix}`,
-    policy: "independent",
-    scope: { kind: "shared" },
   });
   await bind(
     state.library,
     expert,
-    [{ skillId: sourceSkill.skillId, enabled: true, activation: "startup" }],
+    [{ skillId: sourceSkill.skillId, enabled: true, allowEvolution: true }],
     `bind-restore-source-${suffix}`,
   );
   const source = addStandardSource(state.host, expert.id, `binding-restore-${suffix}`);
@@ -531,7 +625,7 @@ async function deriveScenario(suffix: string) {
 async function setBindings(
   state: Awaited<ReturnType<typeof fixture>>,
   expertId: string,
-  bindings: Array<{ skillId: string; enabled: boolean; activation: "startup" | "on-demand" }>,
+  bindings: readonly ExpertSkillBinding[],
   requestId: string,
 ) {
   const expert = await state.experts.read(expertId);
@@ -540,6 +634,95 @@ async function setBindings(
 }
 
 describe("SkillEvolutionService deterministic workflows", () => {
+  it("advertises the verified native OMP extraction capability", async () => {
+    const state = await fixture();
+    const capabilities = await state.service.execute({ action: "capabilities" });
+    expect(capabilities.capabilities).toContainEqual({
+      provider: "omp",
+      supported: true,
+      reason: "原生 ACP 会话已验证无工具、无环境技能及上下文文件。",
+    });
+  });
+
+  it.each(["create", "derive"] as const)(
+    "resumes a %s adoption after projecting removed metadata and preserves binding settings",
+    async (action) => {
+      const state = await fixture();
+      const base = await createSkill(state.library, {
+        name: `Managed ${action} source`,
+      });
+      const expert = await createExpert(state.experts, `managed-${action}-adoption`, [
+        {
+          skillId: base.skillId,
+          enabled: true,
+          ...(action === "derive" ? { allowEvolution: true } : {}),
+          selectionScope: "package",
+          resourceMode: "run-private",
+        },
+      ]);
+      const source = addStandardSource(state.host, expert.id);
+      const run = await startAndFinish(state, {
+        requestId: `managed-${action}-run`,
+        expertId: expert.id,
+        source,
+        ...(action === "derive" ? { targetSkillId: base.skillId } : {}),
+        response: proposalText({
+          name: `Managed ${action} candidate`,
+          text: entry(`Managed ${action} candidate`, "Verified workflow improvement."),
+          threadId: source.threadId,
+          messageId: source.assistantId,
+        }),
+      });
+      const originalBindings = (await state.experts.read(expert.id))!.skillBindings;
+      const execute = state.library.execute.bind(state.library);
+      let failOnce = true;
+      const spy = vi.spyOn(state.library, "execute").mockImplementation((request, context) => {
+        if (failOnce && request.action === "bindings" && request.operation === "set") {
+          failOnce = false;
+          return Promise.reject(new Error("Interrupted before saving current bindings."));
+        }
+        return execute(request, context);
+      });
+      const operation = applyRequest(run, `managed-${action}-apply`);
+      const partial = await state.service.execute(operation);
+      spy.mockRestore();
+      expect(partial.run?.proposals[0]?.status, partial.run?.proposals[0]?.error).toBe(
+        "saved_unbound",
+      );
+      expect((await state.experts.read(expert.id))!.skillBindings).toEqual(originalBindings);
+      const count = (await state.library.execute({ action: "list" })).items?.length;
+      const storedRow = state.repository.rows.get(run.requestId)!;
+      const stored = JSON.parse(storedRow.record) as {
+        bindings: Array<Record<string, unknown>>;
+      };
+      stored.bindings[0]!.activation = "startup";
+      state.repository.rows.set(run.requestId, { ...storedRow, record: JSON.stringify(stored) });
+      await restartService(state);
+      const applied = await state.service.execute(operation);
+      expect(applied.run?.proposals[0]?.status, applied.run?.proposals[0]?.error).toBe("applied");
+      expect((await state.library.execute({ action: "list" })).items?.length).toBe(count);
+      const bindings = (await state.experts.read(expert.id))!.skillBindings!;
+      expect(bindings).toHaveLength(action === "create" ? 2 : 1);
+      expect(
+        bindings.some((binding) => binding.skillId === applied.run?.proposals[0]?.resultSkillId),
+      ).toBe(true);
+      expect(bindings[0]).toMatchObject({
+        enabled: true,
+        selectionScope: "package",
+        resourceMode: "run-private",
+      });
+      expect(bindings[0]).not.toHaveProperty("activation");
+      if (action === "create") {
+        const createdBinding = bindings.find(
+          (binding) => binding.skillId === applied.run?.proposals[0]?.resultSkillId,
+        );
+        expect(createdBinding).toMatchObject({ enabled: true });
+        expect(createdBinding).not.toHaveProperty("allowEvolution");
+      }
+      expect(state.repository.events.size).toBe(1);
+    },
+  );
+
   it("selects only exact completed-turn messages owned by the requested Expert", async () => {
     const state = await fixture();
     const expert = await createExpert(state.experts, "evidence-owner");
@@ -618,173 +801,855 @@ describe("SkillEvolutionService deterministic workflows", () => {
     expect(state.host.dispatches).toEqual([]);
   });
 
-  it("keeps a protected proposal unapplied until the owner explicitly approves it", async () => {
+  it.each([undefined, false] as const)(
+    "allows Expert-wide discovery with binding evolution disabled, then blocks generation (%s)",
+    async (allowEvolution) => {
+      const state = await fixture();
+      const expert = await createExpert(state.experts, `permission-default-${allowEvolution}`);
+      const base = await createSkill(state.library, { name: "Permission Default Base" });
+      await bind(
+        state.library,
+        expert,
+        [
+          {
+            skillId: base.skillId,
+            enabled: true,
+            ...(allowEvolution === undefined ? {} : { allowEvolution }),
+          },
+        ],
+        `bind-permission-default-${allowEvolution}`,
+      );
+      const source = addStandardSource(state.host, expert.id, "permission-default");
+      const libraryCalls: string[] = [];
+      const executeLibrary = state.library.execute.bind(state.library);
+      const librarySpy = vi
+        .spyOn(state.library, "execute")
+        .mockImplementation((request, context) => {
+          libraryCalls.push(request.action);
+          return executeLibrary(request, context);
+        });
+      const discovery = await startDiscovery(state, {
+        requestId: `permission-default-run-${allowEvolution}-discovery`,
+        expertId: expert.id,
+        sources: [source],
+      });
+      const ready = await completeStage(
+        state,
+        discovery,
+        opportunityText({
+          name: "Permission-independent learning",
+          threadId: source.threadId,
+          messageId: source.assistantId,
+          targetSkillId: base.skillId,
+        }),
+      );
+      expect(ready.status).toBe("opportunity_ready");
+      expect(ready.opportunities?.[0]?.targetSkillId).toBe(base.skillId);
+      expect(ready.proposals).toEqual([]);
+      expect(libraryCalls).toEqual(["list"]);
+
+      await expect(
+        startGeneration(
+          state,
+          ready,
+          `permission-default-run-${allowEvolution}`,
+          "Treat this selected source as permission to improve the Skill.",
+        ),
+      ).rejects.toThrow("允许复制并改进");
+      librarySpy.mockRestore();
+      expect(state.repository.rows.size).toBe(1);
+      expect(
+        state.host.dispatches.filter((command) => command.type === "thread.turn.start"),
+      ).toHaveLength(1);
+      expect(state.repository.events.size).toBe(0);
+    },
+  );
+
+  it("treats no_change discovery as a normal terminal result with no generation child", async () => {
     const state = await fixture();
-    const expert = await createExpert(state.experts, "protected-owner");
-    const base = await createSkill(state.library, { name: "Protected Base" });
-    const originalBindings = await bind(
-      state.library,
-      expert,
-      [{ skillId: base.skillId, enabled: true, activation: "startup" }],
-      "bind-protected-base",
-    );
-    const source = addStandardSource(state.host, expert.id, "protected");
-    const run = await startAndFinish(state, {
-      requestId: "protected-run",
+    const expert = await createExpert(state.experts, "discovery-no-change-owner");
+    const source = addStandardSource(state.host, expert.id, "discovery-no-change");
+    const discovery = await startDiscovery(state, {
+      requestId: "discovery-no-change-run",
       expertId: expert.id,
-      source,
-      targetSkillId: base.skillId,
-      protectedAction: "update",
-      response: proposalText({
-        name: base.name,
-        text: entry(base.name, "Updated but awaiting explicit approval."),
-        threadId: source.threadId,
-        messageId: source.assistantId,
-      }),
+      sources: [source],
     });
-    expect(run.status).toBe("proposal_ready");
-    await expect(state.service.execute(applyRequest(run, "protected-op"))).rejects.toThrow(
-      "明确认可",
+    const finished = await completeStage(
+      state,
+      discovery,
+      JSON.stringify({ action: "no_change", reason: "The work adds no reusable procedure." }),
     );
-    expect(await state.library.execute({ action: "read", skillId: base.skillId })).toMatchObject({
-      skill: base,
-    });
-    expect((await state.experts.read(expert.id))?.skillBindings).toEqual(originalBindings);
+
+    expect(finished.status).toBe("no_change");
+    expect(finished.opportunities).toEqual([]);
+    expect(finished.proposals).toEqual([]);
+    await expect(
+      state.service.execute({
+        action: "generate",
+        requestId: "discovery-no-change-generation",
+        discoveryRequestId: finished.requestId,
+        opportunityId: "missing-opportunity",
+        expectedDigest: "0".repeat(64),
+      }),
+    ).rejects.toThrow();
+    expect(
+      state.host.dispatches.filter((command) => command.type === "thread.turn.start"),
+    ).toHaveLength(1);
+    expect((await state.library.execute({ action: "list" })).items).toEqual([]);
     expect(state.repository.events.size).toBe(0);
   });
 
-  it("updates a shared Skill in place under its original identity", async () => {
+  it("repairs malformed discovery output once and never converts it into a file proposal", async () => {
     const state = await fixture();
-    const expert = await createExpert(state.experts, "shared-updater");
-    const secondExpert = await createExpert(state.experts, "shared-affected-then-unbound");
-    const uninvolvedExpert = await createExpert(state.experts, "shared-uninvolved");
-    const base = await createSkill(state.library, {
-      name: "Shared Update",
-      policy: "shared",
-      scope: { kind: "shared" },
-    });
-    await bind(
-      state.library,
-      expert,
-      [{ skillId: base.skillId, enabled: true, activation: "on-demand" }],
-      "bind-shared-update",
-    );
-    await bind(
-      state.library,
-      secondExpert,
-      [{ skillId: base.skillId, enabled: false, activation: "startup" }],
-      "bind-shared-update-second-expert",
-    );
-    const source = addStandardSource(state.host, expert.id, "shared-update");
-    const run = await startAndFinish(state, {
-      requestId: "shared-update-run",
+    const expert = await createExpert(state.experts, "discovery-repair-owner");
+    const source = addStandardSource(state.host, expert.id, "discovery-repair");
+    const discovery = await startDiscovery(state, {
+      requestId: "discovery-repair-run",
       expertId: expert.id,
-      source,
-      targetSkillId: base.skillId,
-      response: proposalText({
-        name: base.name,
-        text: entry(base.name, "Updated shared workflow."),
+      sources: [source],
+    });
+    const malformed = JSON.stringify({
+      action: "opportunities",
+      opportunities: [
+        {
+          name: "Malformed opportunity",
+          reason: "This output attempts to skip review.",
+          outcomes: ["Write the Skill immediately."],
+          evidence: [
+            {
+              threadId: source.threadId,
+              messageId: source.assistantId,
+              quote: "Verified evidence: keep a decision log.",
+            },
+          ],
+          files: [{ path: "SKILL.md", text: "Unreviewed generated content." }],
+          ownerId: expert.id,
+          allowEvolution: true,
+        },
+      ],
+    });
+    await state.service.dispose();
+    state.host.completeLatest(discovery.taskThreadId!, malformed);
+    const repairQueued = await state.service.execute({
+      action: "read",
+      requestId: discovery.requestId,
+    });
+    expect(repairQueued.run?.status).toBe("running");
+    expect(state.host.turns.get(discovery.taskThreadId!)!).toHaveLength(2);
+    await state.service.dispose();
+    state.host.completeLatest(
+      discovery.taskThreadId!,
+      opportunityText({
+        name: "Corrected discovery opportunity",
         threadId: source.threadId,
         messageId: source.assistantId,
       }),
-    });
-    const applied = await state.service.execute(applyRequest(run, "shared-update-op"));
-    const updateEvent = [...state.repository.events.values()][0]!;
-    expect(applied.skill).toMatchObject({
-      skillId: base.skillId,
-      revision: base.revision + 1,
-      evolutionPolicy: "shared",
-      scope: { kind: "shared" },
-    });
-    expect(state.repository.events.size).toBe(1);
-    expect(updateEvent).toMatchObject({
-      kind: "updated",
-      expertId: expert.id,
-      affectedExpertIds: expect.arrayContaining([expert.id, secondExpert.id]),
-    });
-
-    await bind(
-      state.library,
-      (await state.experts.read(secondExpert.id))!,
-      [],
-      "unbind-shared-update-second-expert",
     );
-    expect((await state.experts.read(secondExpert.id))?.skillBindings).toEqual([]);
-
-    const secondGraph = await state.service.execute({
-      action: "graph",
-      expertId: secondExpert.id,
+    const corrected = await state.service.execute({
+      action: "read",
+      requestId: discovery.requestId,
     });
-    expect(secondGraph.graph?.nodes).toContainEqual(
-      expect.objectContaining({ skillId: base.skillId }),
-    );
-    expect(secondGraph.graph?.events).toContainEqual(updateEvent);
-    expect(secondGraph.graph?.events[0]?.expertId).toBe(expert.id);
-
-    const uninvolvedGraph = await state.service.execute({
-      action: "graph",
-      expertId: uninvolvedExpert.id,
-    });
-    expect(uninvolvedGraph.graph?.nodes).toEqual([]);
-    expect(uninvolvedGraph.graph?.events).toEqual([]);
+    expect(corrected.run?.status).toBe("opportunity_ready");
+    expect(corrected.run?.proposals).toEqual([]);
+    expect(corrected.run?.opportunities?.[0]).not.toHaveProperty("files");
+    expect((await state.library.execute({ action: "list" })).items).toEqual([]);
+    expect(state.repository.events.size).toBe(0);
   });
 
-  it("conflicts a shared update when a new Expert binds after the affected set was frozen", async () => {
+  it("repairs discovery evidence that does not quote an exact selected source message", async () => {
     const state = await fixture();
-    const expert = await createExpert(state.experts, "a-shared-proposer");
-    const lateBinder = await createExpert(state.experts, "z-shared-late-binder");
-    const base = await createSkill(state.library, {
-      name: "Shared Frozen Audience",
-      policy: "shared",
-      scope: { kind: "shared" },
-    });
-    await bind(
-      state.library,
-      expert,
-      [{ skillId: base.skillId, enabled: true, activation: "on-demand" }],
-      "bind-shared-frozen-audience-proposer",
-    );
-    const source = addStandardSource(state.host, expert.id, "shared-frozen-audience");
-    const run = await startAndFinish(state, {
-      requestId: "shared-frozen-audience-run",
+    const expert = await createExpert(state.experts, "discovery-evidence-owner");
+    const source = addStandardSource(state.host, expert.id, "discovery-evidence");
+    const discovery = await startDiscovery(state, {
+      requestId: "discovery-evidence-run",
       expertId: expert.id,
-      source,
-      targetSkillId: base.skillId,
-      response: proposalText({
-        name: base.name,
-        text: entry(base.name, "Candidate frozen for the original audience."),
+      sources: [source],
+    });
+    await state.service.dispose();
+    state.host.completeLatest(
+      discovery.taskThreadId!,
+      opportunityText({
+        name: "Forged discovery evidence",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+        quote: "This sentence was never present in the selected work.",
+      }),
+    );
+    const repair = await state.service.execute({
+      action: "read",
+      requestId: discovery.requestId,
+    });
+    expect(repair.run?.status).toBe("running");
+    expect(state.host.turns.get(discovery.taskThreadId!)!).toHaveLength(2);
+    await state.service.dispose();
+    state.host.completeLatest(
+      discovery.taskThreadId!,
+      opportunityText({
+        name: "Corrected discovery evidence",
         threadId: source.threadId,
         messageId: source.assistantId,
       }),
+    );
+    const corrected = await state.service.execute({
+      action: "read",
+      requestId: discovery.requestId,
     });
-    const proposal = run.proposals[0]!;
-    expect(proposal.affectedExpertIds).toEqual([expert.id]);
+    expect(corrected.run?.status).toBe("opportunity_ready");
+    expect(corrected.run?.opportunities?.[0]?.evidence[0]?.quote).toBe(
+      "Verified evidence: keep a decision log.",
+    );
+  });
 
+  it("resumes an identical generation request without dispatching twice and rejects payload reuse", async () => {
+    const state = await fixture();
+    const expert = await createExpert(state.experts, "generation-resume-owner");
+    const base = await createSkill(state.library, { name: "Generation Resume Skill" });
     await bind(
       state.library,
-      lateBinder,
-      [{ skillId: base.skillId, enabled: false, activation: "startup" }],
-      "bind-shared-frozen-audience-late-binder",
+      expert,
+      [{ skillId: base.skillId, enabled: true, allowEvolution: true }],
+      "bind-generation-resume-skill",
     );
-    const result = await state.service.execute(applyRequest(run, "shared-frozen-audience-op"));
+    const source = addStandardSource(state.host, expert.id, "generation-resume");
+    const discoveryStart = await startDiscovery(state, {
+      requestId: "generation-resume-discovery",
+      expertId: expert.id,
+      sources: [source],
+    });
+    const discovery = await completeStage(
+      state,
+      discoveryStart,
+      opportunityText({
+        name: "Generation resume opportunity",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+        targetSkillId: base.skillId,
+      }),
+    );
+    const opportunity = discovery.opportunities![0]!;
+    const payload = {
+      action: "generate" as const,
+      requestId: "generation-resume-child",
+      discoveryRequestId: discovery.requestId,
+      opportunityId: opportunity.opportunityId,
+      expectedDigest: opportunity.digest,
+      feedback: "Keep the verified decision log outcome.",
+    };
+    const first = await state.service.execute(payload);
+    const child = first.run!;
+    const startsBeforeResume = state.host.dispatches.filter(
+      (command) => command.type === "thread.turn.start",
+    ).length;
+    const resumed = await state.service.execute(payload);
 
-    expect(result.run?.proposals[0]?.status).toBe("conflict");
-    expect(result.run?.proposals[0]?.error).toContain("共享使用方已改变");
-    expect(result.skill).toBeUndefined();
+    expect(child).toMatchObject({
+      stage: "generation",
+      expertId: expert.id,
+      discoveryRequestId: discovery.requestId,
+      opportunityId: opportunity.opportunityId,
+      generationIndex: 1,
+      feedback: payload.feedback,
+    });
+    const storedChild = JSON.parse(state.repository.rows.get(child.requestId)!.record) as {
+      ownerId: string;
+      opportunityDigest?: string;
+      run: SkillEvolutionRun;
+    };
+    expect(storedChild).toMatchObject({
+      ownerId,
+      opportunityDigest: opportunity.digest,
+      run: { expertId: expert.id, sourceSelections: discovery.sourceSelections },
+    });
+    expect(resumed.run?.taskThreadId).toBe(child.taskThreadId);
+    expect(
+      state.host.dispatches.filter((command) => command.type === "thread.turn.start"),
+    ).toHaveLength(startsBeforeResume);
+    await expect(
+      state.service.execute({ ...payload, feedback: "Different payload under the same ID." }),
+    ).rejects.toThrow();
+    await expect(
+      state.service.execute({ ...payload, expectedDigest: "f".repeat(64) }),
+    ).rejects.toThrow();
+
+    const createdTask = state.host.dispatches.find(
+      (command) => command.type === "thread.create" && command.threadId === child.taskThreadId,
+    );
+    expect(createdTask).toMatchObject({ type: "thread.create", modelSelection });
+    const generationPrompt = state.host.dispatches.find(
+      (command) => command.type === "thread.turn.start" && command.threadId === child.taskThreadId,
+    );
+    expect(
+      generationPrompt?.type === "thread.turn.start" ? generationPrompt.message.text : "",
+    ).toContain("Keep the verified decision log outcome.");
+    expect(
+      generationPrompt?.type === "thread.turn.start" ? generationPrompt.message.text : "",
+    ).toContain("Verified evidence: keep a decision log.");
+  });
+
+  it("allows a new empty-feedback retry after a generation child fails and preserves its old result", async () => {
+    const state = await fixture();
+    const expert = await createExpert(state.experts, "generation-failed-retry-owner");
+    const source = addStandardSource(state.host, expert.id, "generation-failed-retry");
+    const discoveryStart = await startDiscovery(state, {
+      requestId: "generation-failed-retry-discovery",
+      expertId: expert.id,
+      sources: [source],
+    });
+    const discovery = await completeStage(
+      state,
+      discoveryStart,
+      opportunityText({
+        name: "Failed retry opportunity",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const parentRecord = clone(state.repository.rows.get(discovery.requestId));
+    const feedback = "";
+    const originalRequest = generationRequest(discovery, "generation-failed-first", feedback);
+    const first = (await state.service.execute(originalRequest)).run!;
+    expect(first.generationIndex).toBe(1);
+    await expect(
+      state.service.execute(generationRequest(discovery, "generation-failed-while-busy", feedback)),
+    ).rejects.toThrow();
+
+    const lastError = "Provider failed before producing a completed generation turn.";
+    await state.service.dispose();
+    state.host.markNativeStartupFailure(first.taskThreadId!, lastError);
+    const failed = await state.service.execute({ action: "read", requestId: first.requestId });
+    expect(failed.run).toMatchObject({ status: "failed", error: lastError, generationIndex: 1 });
+    const failedRecord = clone(state.repository.rows.get(first.requestId));
+    const startsBeforeReplay = state.host.dispatches.filter(
+      (command) => command.type === "thread.turn.start",
+    ).length;
+    const replayed = await state.service.execute(originalRequest);
+    expect(replayed.run).toMatchObject({
+      requestId: first.requestId,
+      taskThreadId: first.taskThreadId,
+      status: "failed",
+      generationIndex: 1,
+      feedback,
+    });
+    expect(state.repository.rows.get(first.requestId)).toEqual(failedRecord);
+    expect(
+      state.host.dispatches.filter((command) => command.type === "thread.turn.start"),
+    ).toHaveLength(startsBeforeReplay);
+
+    const retryRequest = generationRequest(discovery, "generation-failed-retry-new-id", feedback);
+    const retry = (await state.service.execute(retryRequest)).run!;
+    expect(retry).toMatchObject({
+      stage: "generation",
+      discoveryRequestId: discovery.requestId,
+      opportunityId: discovery.opportunities?.[0]?.opportunityId,
+      generationIndex: 2,
+      feedback,
+      sourceSelections: discovery.sourceSelections,
+      modelSelection: discovery.modelSelection,
+    });
+    expect(retry.taskThreadId).not.toBe(first.taskThreadId);
+    expect(state.repository.rows.get(discovery.requestId)).toEqual(parentRecord);
+    expect(state.repository.rows.get(first.requestId)).toEqual(failedRecord);
+    expect(
+      state.host.dispatches.find(
+        (command) => command.type === "thread.create" && command.threadId === retry.taskThreadId,
+      ),
+    ).toMatchObject({ type: "thread.create", modelSelection });
+    expect(
+      state.host.dispatches.some(
+        (command) =>
+          command.type === "thread.turn.start" && command.threadId === retry.taskThreadId,
+      ),
+    ).toBe(true);
+    expect((await state.library.execute({ action: "list" })).items).toEqual([]);
+    expect(state.repository.events.size).toBe(0);
+  });
+
+  it("allows a no-feedback retry after cancellation but blocks cancel_requested children", async () => {
+    const state = await fixture();
+    const expert = await createExpert(state.experts, "generation-cancel-retry-owner");
+    const source = addStandardSource(state.host, expert.id, "generation-cancel-retry");
+    const discoveryStart = await startDiscovery(state, {
+      requestId: "generation-cancel-retry-discovery",
+      expertId: expert.id,
+      sources: [source],
+    });
+    const discovery = await completeStage(
+      state,
+      discoveryStart,
+      opportunityText({
+        name: "Cancelled retry opportunity",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const parentRecord = clone(state.repository.rows.get(discovery.requestId));
+    const originalRequest = generationRequest(discovery, "generation-cancelled-first");
+    const first = (await state.service.execute(originalRequest)).run!;
+    expect(first.generationIndex).toBe(1);
+    await expect(
+      state.service.execute(generationRequest(discovery, "generation-cancelled-while-busy")),
+    ).rejects.toThrow();
+
+    const cancelling = await state.service.execute({
+      action: "cancel",
+      requestId: first.requestId,
+    });
+    expect(cancelling.run?.status).toBe("cancel_requested");
+    await expect(
+      state.service.execute(generationRequest(discovery, "generation-cancelled-while-stopping")),
+    ).rejects.toThrow();
+
+    await state.service.dispose();
+    state.host.markLatestTurnInterrupted(first.taskThreadId!);
+    const cancelled = await state.service.execute({ action: "read", requestId: first.requestId });
+    expect(cancelled.run?.status).toBe("cancelled");
+    const cancelledRecord = clone(state.repository.rows.get(first.requestId));
+    const startsBeforeReplay = state.host.dispatches.filter(
+      (command) => command.type === "thread.turn.start",
+    ).length;
+    const replayed = await state.service.execute(originalRequest);
+    expect(replayed.run).toMatchObject({
+      requestId: first.requestId,
+      taskThreadId: first.taskThreadId,
+      status: "cancelled",
+      generationIndex: 1,
+    });
+    expect(state.repository.rows.get(first.requestId)).toEqual(cancelledRecord);
+    expect(
+      state.host.dispatches.filter((command) => command.type === "thread.turn.start"),
+    ).toHaveLength(startsBeforeReplay);
+
+    const retry = (
+      await state.service.execute(generationRequest(discovery, "generation-cancelled-retry-new-id"))
+    ).run!;
+    expect(retry).toMatchObject({
+      stage: "generation",
+      discoveryRequestId: discovery.requestId,
+      opportunityId: discovery.opportunities?.[0]?.opportunityId,
+      generationIndex: 2,
+      sourceSelections: discovery.sourceSelections,
+      modelSelection: discovery.modelSelection,
+    });
+    expect(retry.taskThreadId).not.toBe(first.taskThreadId);
+    expect(state.repository.rows.get(discovery.requestId)).toEqual(parentRecord);
+    expect(state.repository.rows.get(first.requestId)).toEqual(cancelledRecord);
+    expect(
+      state.host.dispatches.find(
+        (command) => command.type === "thread.create" && command.threadId === retry.taskThreadId,
+      ),
+    ).toMatchObject({ type: "thread.create", modelSelection });
+    expect(
+      state.host.dispatches.some(
+        (command) =>
+          command.type === "thread.turn.start" && command.threadId === retry.taskThreadId,
+      ),
+    ).toBe(true);
+    expect((await state.library.execute({ action: "list" })).items).toEqual([]);
+    expect(state.repository.events.size).toBe(0);
+  });
+
+  it("increments generationIndex for feedback regeneration and rejects the superseded draft", async () => {
+    const state = await fixture();
+    const expert = await createExpert(state.experts, "generation-revision-owner");
+    const base = await createSkill(state.library, { name: "Generation Revision Skill" });
+    await bind(
+      state.library,
+      expert,
+      [{ skillId: base.skillId, enabled: true, allowEvolution: true }],
+      "bind-generation-revision-skill",
+    );
+    const source = addStandardSource(state.host, expert.id, "generation-revision");
+    const discoveryStart = await startDiscovery(state, {
+      requestId: "generation-revision-discovery",
+      expertId: expert.id,
+      sources: [source],
+    });
+    const discovery = await completeStage(
+      state,
+      discoveryStart,
+      opportunityText({
+        name: "Generation revision opportunity",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+        targetSkillId: base.skillId,
+      }),
+    );
+    const originalDiscoveryRecord = clone(state.repository.rows.get(discovery.requestId));
+    const firstChild = await startGeneration(state, discovery, "generation-revision-one");
+    const first = await completeStage(
+      state,
+      firstChild,
+      proposalText({
+        name: base.name,
+        text: entry(base.name, "First review draft."),
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    expect(first.generationIndex).toBe(1);
+
+    await expect(
+      startGeneration(state, discovery, "generation-revision-without-feedback"),
+    ).rejects.toThrow("请提供具体反馈");
+    const feedback = "Keep the approval check and include an explicit recovery step.";
+    const secondChild = await startGeneration(
+      state,
+      discovery,
+      "generation-revision-two",
+      feedback,
+    );
+    expect(secondChild).toMatchObject({
+      stage: "generation",
+      discoveryRequestId: discovery.requestId,
+      opportunityId: discovery.opportunities?.[0]?.opportunityId,
+      generationIndex: 2,
+      feedback,
+    });
+    const secondPrompt = state.host.dispatches.find(
+      (command) =>
+        command.type === "thread.turn.start" && command.threadId === secondChild.taskThreadId,
+    );
+    expect(secondPrompt?.type === "thread.turn.start" ? secondPrompt.message.text : "").toContain(
+      feedback,
+    );
+    const second = await completeStage(
+      state,
+      secondChild,
+      proposalText({
+        name: base.name,
+        text: entry(base.name, "Revised review draft."),
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    expect(second.status).toBe("proposal_ready");
+    expect(state.repository.rows.get(discovery.requestId)).toEqual(originalDiscoveryRecord);
+    await expect(
+      state.service.execute(applyRequest(first, "apply-superseded-generation-draft")),
+    ).rejects.toThrow();
     expect((await state.library.execute({ action: "read", skillId: base.skillId })).skill).toEqual(
       base,
     );
     expect(state.repository.events.size).toBe(0);
   });
 
-  it("derives independent shared Skills once, keeps both binding modes, and leaves the shared source unchanged", async () => {
+  it("still requires feedback to retry a completed no_change generation", async () => {
     const state = await fixture();
-    const first = await createExpert(state.experts, "independent-first");
-    const second = await createExpert(state.experts, "independent-second");
+    const expert = await createExpert(state.experts, "generation-no-change-retry-owner");
+    const source = addStandardSource(state.host, expert.id, "generation-no-change-retry");
+    const discoveryStart = await startDiscovery(state, {
+      requestId: "generation-no-change-retry-discovery",
+      expertId: expert.id,
+      sources: [source],
+    });
+    const discovery = await completeStage(
+      state,
+      discoveryStart,
+      opportunityText({
+        name: "No-change retry opportunity",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const firstChild = await startGeneration(state, discovery, "generation-no-change-first");
+    const first = await completeStage(
+      state,
+      firstChild,
+      JSON.stringify({ action: "no_change", reason: "The current Skill already covers it." }),
+    );
+    expect(first.status).toBe("no_change");
+    await expect(
+      startGeneration(state, discovery, "generation-no-change-without-feedback"),
+    ).rejects.toThrow("请提供具体反馈");
+
+    const retry = await startGeneration(
+      state,
+      discovery,
+      "generation-no-change-with-feedback",
+      "Consider a narrower outcome that is missing from the current Skill.",
+    );
+    expect(retry).toMatchObject({ stage: "generation", generationIndex: 2 });
+    expect(retry.feedback).toContain("narrower outcome");
+    expect((await state.library.execute({ action: "list" })).items).toEqual([]);
+    expect(state.repository.events.size).toBe(0);
+  });
+
+  it("dismisses an opportunity in place and blocks generation without changing its evidence", async () => {
+    const state = await fixture();
+    const expert = await createExpert(state.experts, "dismiss-opportunity-owner");
+    const source = addStandardSource(state.host, expert.id, "dismiss-opportunity");
+    const discoveryStart = await startDiscovery(state, {
+      requestId: "dismiss-opportunity-discovery",
+      expertId: expert.id,
+      sources: [source],
+    });
+    const discovery = await completeStage(
+      state,
+      discoveryStart,
+      opportunityText({
+        name: "Dismissable learning",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const opportunity = discovery.opportunities![0]!;
+    const dismissed = await state.service.execute({
+      action: "dismissOpportunity",
+      requestId: discovery.requestId,
+      opportunityId: opportunity.opportunityId,
+      expectedDigest: opportunity.digest,
+    });
+    expect(dismissed.run?.status).toBe("opportunity_ready");
+    expect(dismissed.run?.opportunities?.[0]).toEqual({ ...opportunity, status: "dismissed" });
+    await expect(
+      startGeneration(state, dismissed.run!, "dismissed-opportunity-child"),
+    ).rejects.toThrow();
+    expect(state.repository.rows.size).toBe(1);
+    expect(
+      state.host.dispatches.filter((command) => command.type === "thread.turn.start"),
+    ).toHaveLength(1);
+    expect((await state.library.execute({ action: "list" })).items).toEqual([]);
+    expect(state.repository.events.size).toBe(0);
+  });
+
+  it("keeps existing generation drafts inert after their parent opportunity is dismissed", async () => {
+    const state = await fixture();
+    const expert = await createExpert(state.experts, "dismiss-draft-owner");
+    const source = addStandardSource(state.host, expert.id, "dismiss-draft");
+    const discoveryStart = await startDiscovery(state, {
+      requestId: "dismiss-draft-discovery",
+      expertId: expert.id,
+      sources: [source],
+    });
+    const discovery = await completeStage(
+      state,
+      discoveryStart,
+      opportunityText({
+        name: "Dismissed draft opportunity",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const childStart = await startGeneration(state, discovery, "dismiss-draft-child");
+    const child = await completeStage(
+      state,
+      childStart,
+      proposalText({
+        name: "Dismissed draft skill",
+        text: entry("Dismissed draft skill", "This candidate must remain inert."),
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const proposal = child.proposals[0]!;
+    const childRecord = clone(state.repository.rows.get(child.requestId));
+    const opportunity = discovery.opportunities![0]!;
+    await state.service.execute({
+      action: "dismissOpportunity",
+      requestId: discovery.requestId,
+      opportunityId: opportunity.opportunityId,
+      expectedDigest: opportunity.digest,
+    });
+
+    await expect(
+      state.service.execute(applyRequest(child, "dismissed-draft-apply")),
+    ).rejects.toThrow();
+    await expect(
+      state.service.execute({
+        action: "reject",
+        requestId: child.requestId,
+        proposalId: proposal.proposalId,
+        expectedDigest: proposal.digest,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      state.service.execute({
+        action: "edit",
+        requestId: child.requestId,
+        proposalId: proposal.proposalId,
+        expectedDigest: proposal.digest,
+        name: proposal.name,
+        changes: [
+          {
+            path: "SKILL.md",
+            content: Buffer.from(entry(proposal.name, "Edited after dismissal.")).toString(
+              "base64",
+            ),
+          },
+        ],
+      }),
+    ).rejects.toThrow();
+
+    expect(state.repository.rows.get(child.requestId)).toEqual(childRecord);
+    expect((await state.library.execute({ action: "list" })).items).toEqual([]);
+    expect(state.repository.events.size).toBe(0);
+  });
+
+  it("blocks an adoption when binding permission is revoked after a proposal", async () => {
+    const state = await fixture();
+    const expert = await createExpert(state.experts, "revoked-proposal-owner");
+    const base = await createSkill(state.library, { name: "Revoked Proposal Base" });
+    const allowed = { skillId: base.skillId, enabled: true, allowEvolution: true };
+    await bind(state.library, expert, [allowed], "bind-revoked-proposal-base");
+    const source = addStandardSource(state.host, expert.id, "revoked-proposal");
+    const run = await startAndFinish(state, {
+      requestId: "revoked-proposal-run",
+      expertId: expert.id,
+      source,
+      targetSkillId: base.skillId,
+      response: proposalText({
+        name: "Revoked Proposal Copy",
+        text: entry("Revoked Proposal Copy", "Candidate must not be adopted after revocation."),
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    });
+    await bind(
+      state.library,
+      (await state.experts.read(expert.id))!,
+      [{ ...allowed, allowEvolution: false }],
+      "revoke-after-proposal",
+    );
+
+    await expect(
+      state.service.execute(applyRequest(run, "revoked-proposal-operation")),
+    ).rejects.toThrow("允许复制并改进");
+    expect((await state.library.execute({ action: "read", skillId: base.skillId })).skill).toEqual(
+      base,
+    );
+    expect((await state.experts.read(expert.id))?.skillBindings).toEqual([
+      { ...allowed, allowEvolution: false },
+    ]);
+    expect(state.repository.events.size).toBe(0);
+  });
+
+  it("does not replay a durable adoption intent after binding permission is revoked", async () => {
+    const state = await fixture();
+    const expert = await createExpert(state.experts, "revoked-intent-owner");
+    const base = await createSkill(state.library, { name: "Revoked Intent Base" });
+    const allowed = { skillId: base.skillId, enabled: true, allowEvolution: true };
+    await bind(state.library, expert, [allowed], "bind-revoked-intent-base");
+    const source = addStandardSource(state.host, expert.id, "revoked-intent");
+    const run = await startAndFinish(state, {
+      requestId: "revoked-intent-run",
+      expertId: expert.id,
+      source,
+      targetSkillId: base.skillId,
+      response: proposalText({
+        name: "Revoked Intent Copy",
+        text: entry("Revoked Intent Copy", "A durable intent still needs current permission."),
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    });
+    const operation = applyRequest(run, "revoked-intent-operation");
+    const executeLibrary = state.library.execute.bind(state.library);
+    let interruptBeforeDerive = true;
+    const interruption = vi
+      .spyOn(state.library, "execute")
+      .mockImplementation((request, context) => {
+        if (
+          interruptBeforeDerive &&
+          request.action === "derive" &&
+          request.requestId === "evolution:revoked-intent-operation"
+        ) {
+          interruptBeforeDerive = false;
+          return Promise.reject(new Error("Injected crash before private-copy creation."));
+        }
+        return executeLibrary(request, context);
+      });
+    const interrupted = await state.service.execute(operation);
+    interruption.mockRestore();
+    expect(interrupted.run?.proposals[0]?.status).toBe("conflict");
+    const durable = JSON.parse(state.repository.rows.get(run.requestId)!.record) as {
+      intents: Array<{ operationId: string; result?: unknown }>;
+    };
+    expect(durable.intents).toHaveLength(1);
+    expect(durable.intents[0]).toMatchObject({ operationId: operation.operationId });
+    expect(durable.intents[0]).not.toHaveProperty("result");
+
+    await bind(
+      state.library,
+      (await state.experts.read(expert.id))!,
+      [{ ...allowed, allowEvolution: false }],
+      "revoke-durable-intent",
+    );
+    await restartService(state);
+    const replayed = await state.service.execute({ action: "read", requestId: run.requestId });
+
+    expect(replayed.run?.proposals[0]?.status).toBe("conflict");
+    expect(replayed.run?.proposals[0]?.error).toContain("允许复制并改进");
+    expect((await state.library.execute({ action: "list" })).items).toHaveLength(1);
+    expect((await state.library.execute({ action: "read", skillId: base.skillId })).skill).toEqual(
+      base,
+    );
+    expect((await state.experts.read(expert.id))?.skillBindings).toEqual([
+      { ...allowed, allowEvolution: false },
+    ]);
+    expect(state.repository.events.size).toBe(0);
+  });
+
+  it("repairs a discovery target outside the Expert's bound catalog", async () => {
+    const state = await fixture();
+    const owner = await createExpert(state.experts, "private-scope-owner");
+    const other = await createExpert(state.experts, "private-scope-other");
+    const privateSkill = await createSkill(state.library, {
+      name: "Owned Private Target",
+      expertId: owner.id,
+    });
+    await bind(
+      state.library,
+      owner,
+      [{ skillId: privateSkill.skillId, enabled: true, allowEvolution: true }],
+      "bind-private-scope-owner",
+    );
+    const source = addStandardSource(state.host, other.id, "private-scope");
+
+    const discovery = await startDiscovery(state, {
+      requestId: "private-scope-discovery",
+      expertId: other.id,
+      sources: [source],
+    });
+    await state.service.dispose();
+    state.host.completeLatest(
+      discovery.taskThreadId!,
+      opportunityText({
+        name: "Foreign private target",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+        targetSkillId: privateSkill.skillId,
+      }),
+    );
+    const repair = await state.service.execute({
+      action: "read",
+      requestId: discovery.requestId,
+    });
+    expect(repair.run?.status).toBe("running");
+    expect(state.host.turns.get(discovery.taskThreadId!)!).toHaveLength(2);
+    await state.service.dispose();
+    state.host.completeLatest(
+      discovery.taskThreadId!,
+      opportunityText({
+        name: "Valid new learning",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+      }),
+    );
+    const ready = await state.service.execute({
+      action: "read",
+      requestId: discovery.requestId,
+    });
+    expect(ready.run?.status).toBe("opportunity_ready");
+    expect(ready.run?.opportunities?.[0]).not.toHaveProperty("targetSkillId");
+    expect(state.repository.events.size).toBe(0);
+  });
+
+  it("adopts a shared Skill into an Expert-private copy and updates that copy in place", async () => {
+    const state = await fixture();
+    const expert = await createExpert(state.experts, "private-adopter");
+    const secondExpert = await createExpert(state.experts, "private-adopter-second");
     const base = await createSkill(state.library, {
-      name: "Independent Shared Template",
-      policy: "independent",
-      scope: { kind: "shared" },
+      name: "Shared Template",
       body: entry("Independent Shared Template", "Original template workflow."),
       changes: [
         {
@@ -795,41 +1660,42 @@ describe("SkillEvolutionService deterministic workflows", () => {
         { path: "bin/payload.bin", content: Buffer.from([0, 255, 2, 128]).toString("base64") },
       ],
     });
-    const firstBinding = { skillId: base.skillId, enabled: true, activation: "startup" as const };
-    const secondBinding = {
+    const firstBinding = {
       skillId: base.skillId,
-      enabled: false,
-      activation: "on-demand" as const,
+      enabled: true,
+      allowEvolution: true,
+      selectionScope: "package" as const,
+      resourceMode: "run-private" as const,
     };
-    await bind(state.library, first, [firstBinding], "bind-independent-first");
-    await bind(state.library, second, [secondBinding], "bind-independent-second");
-    const source = addStandardSource(state.host, first.id, "independent");
+    const secondBinding = { skillId: base.skillId, enabled: false };
+    await bind(state.library, expert, [firstBinding], "bind-private-adopter");
+    await bind(state.library, secondExpert, [secondBinding], "bind-private-adopter-second");
+    const source = addStandardSource(state.host, expert.id, "shared-adoption");
     const run = await startAndFinish(state, {
-      requestId: "independent-run",
-      expertId: first.id,
+      requestId: "shared-adoption-run",
+      expertId: expert.id,
       source,
       targetSkillId: base.skillId,
       response: proposalText({
-        name: "Independent Personal Copy",
-        text: entry("Independent Personal Copy", "Personalized specialist workflow."),
+        name: "Private Specialist Copy",
+        text: entry("Private Specialist Copy", "Personalized specialist workflow."),
         threadId: source.threadId,
         messageId: source.assistantId,
       }),
     });
     expect(run.proposals[0]?.action).toBe("derive");
-    const operation = applyRequest(run, "independent-operation");
+    const operation = applyRequest(run, "shared-adoption-operation");
     const result = await state.service.execute(operation);
-    const privateSkill = result.skill!;
-    expect(privateSkill).toMatchObject({
+    const privateCopy = result.skill!;
+    expect(privateCopy).toMatchObject({
       revision: 1,
-      evolutionPolicy: "independent",
-      scope: { kind: "expert", expertId: first.id },
+      scope: { kind: "expert", expertId: expert.id },
       derivedFrom: { skillId: base.skillId, revision: base.revision, packageId: base.packageId },
     });
-    expect((await state.experts.read(first.id))?.skillBindings).toEqual([
-      { ...firstBinding, skillId: privateSkill.skillId },
+    expect((await state.experts.read(expert.id))?.skillBindings).toEqual([
+      { ...firstBinding, skillId: privateCopy.skillId },
     ]);
-    expect((await state.experts.read(second.id))?.skillBindings).toEqual([secondBinding]);
+    expect((await state.experts.read(secondExpert.id))?.skillBindings).toEqual([secondBinding]);
     expect(await state.library.execute({ action: "read", skillId: base.skillId })).toMatchObject({
       skill: base,
     });
@@ -837,7 +1703,7 @@ describe("SkillEvolutionService deterministic workflows", () => {
       (
         await state.library.execute({
           action: "readFile",
-          skillId: privateSkill.skillId,
+          skillId: privateCopy.skillId,
           path: "references/keep.txt",
         })
       ).file?.content,
@@ -846,7 +1712,7 @@ describe("SkillEvolutionService deterministic workflows", () => {
       (
         await state.library.execute({
           action: "readFile",
-          skillId: privateSkill.skillId,
+          skillId: privateCopy.skillId,
           path: "references/change.txt",
         })
       ).file?.content,
@@ -855,36 +1721,97 @@ describe("SkillEvolutionService deterministic workflows", () => {
       (
         await state.library.execute({
           action: "readFile",
-          skillId: privateSkill.skillId,
+          skillId: privateCopy.skillId,
           path: "bin/payload.bin",
         })
       ).file?.content,
     ).toBe(Buffer.from([0, 255, 2, 128]).toString("base64"));
 
-    const countAfterDerive = (await state.library.execute({ action: "list" })).items?.length;
-    const eventsAfterDerive = state.repository.events.size;
-    const replay = await state.service.execute(operation);
-    expect(replay.run?.proposals[0]?.status).toBe("applied");
-    expect((await state.library.execute({ action: "list" })).items?.length).toBe(countAfterDerive);
-    expect(state.repository.events.size).toBe(eventsAfterDerive);
+    const countAfterAdoption = (await state.library.execute({ action: "list" })).items?.length;
+    const originalCopyBinding = (await state.experts.read(expert.id))!.skillBindings!;
+    const privateSource = addStandardSource(state.host, expert.id, "private-update");
+    const privateRun = await startAndFinish(state, {
+      requestId: "private-update-run",
+      expertId: expert.id,
+      source: privateSource,
+      targetSkillId: privateCopy.skillId,
+      response: proposalText({
+        name: privateCopy.name,
+        text: entry(privateCopy.name, "Updated private specialist workflow."),
+        threadId: privateSource.threadId,
+        messageId: privateSource.assistantId,
+      }),
+    });
+    expect(privateRun.proposals[0]?.action).toBe("update");
+    const updatedCopy = (
+      await state.service.execute(applyRequest(privateRun, "private-update-operation"))
+    ).skill!;
+    expect(updatedCopy).toMatchObject({
+      skillId: privateCopy.skillId,
+      revision: privateCopy.revision + 1,
+      scope: { kind: "expert", expertId: expert.id },
+      derivedFrom: privateCopy.derivedFrom,
+    });
+    expect((await state.library.execute({ action: "list" })).items?.length).toBe(
+      countAfterAdoption,
+    );
+    expect((await state.experts.read(expert.id))?.skillBindings).toEqual(originalCopyBinding);
+    expect((await state.experts.read(secondExpert.id))?.skillBindings).toEqual([secondBinding]);
+    expect((await state.library.execute({ action: "read", skillId: base.skillId })).skill).toEqual(
+      base,
+    );
+    expect([...state.repository.events.values()].map((event) => event.kind)).toEqual([
+      "derived",
+      "updated",
+    ]);
 
-    const currentSecond = (await state.experts.read(second.id))!;
+    await setBindings(state, expert.id, [firstBinding], "rebind-shared-source");
+    const reboundSource = addStandardSource(state.host, expert.id, "rebound-shared-source");
+    const reboundRun = await startAndFinish(state, {
+      requestId: "rebound-shared-source-run",
+      expertId: expert.id,
+      source: reboundSource,
+      targetSkillId: base.skillId,
+      response: proposalText({
+        name: updatedCopy.name,
+        text: entry(updatedCopy.name, "Updated through the rebound shared source."),
+        threadId: reboundSource.threadId,
+        messageId: reboundSource.assistantId,
+      }),
+    });
+    expect(reboundRun.proposals[0]?.action).toBe("update");
+    const reused = (
+      await state.service.execute(applyRequest(reboundRun, "rebound-shared-source-operation"))
+    ).skill!;
+    expect(reused).toMatchObject({
+      skillId: privateCopy.skillId,
+      revision: updatedCopy.revision + 1,
+      derivedFrom: privateCopy.derivedFrom,
+    });
+    expect((await state.library.execute({ action: "list" })).items?.length).toBe(
+      countAfterAdoption,
+    );
+    expect((await state.experts.read(expert.id))?.skillBindings).toEqual([
+      { ...firstBinding, skillId: privateCopy.skillId },
+    ]);
+    expect((await state.library.execute({ action: "read", skillId: base.skillId })).skill).toEqual(
+      base,
+    );
+
+    const currentSecond = (await state.experts.read(secondExpert.id))!;
     const rejected = await state.library.execute(
       {
         action: "bindings",
         operation: "set",
-        expertId: second.id,
+        expertId: secondExpert.id,
         expectedRevision: currentSecond.revision,
-        requestId: "try-bind-private-skill",
-        bindings: [
-          secondBinding,
-          { skillId: privateSkill.skillId, enabled: true, activation: "on-demand" },
-        ],
+        requestId: "try-bind-another-experts-private-skill",
+        bindings: [secondBinding, { skillId: privateCopy.skillId, enabled: true }],
       },
       { actor: ownerId },
     );
     expect(rejected.bindingResult?.status).toBe("failed");
-    expect((await state.experts.read(second.id))?.skillBindings).toEqual([secondBinding]);
+    expect((await state.experts.read(secondExpert.id))?.skillBindings).toEqual([secondBinding]);
   });
 
   it("returns saved_unbound on a binding conflict and retries without creating another Skill", async () => {
@@ -892,13 +1819,11 @@ describe("SkillEvolutionService deterministic workflows", () => {
     const expert = await createExpert(state.experts, "retry-derived");
     const base = await createSkill(state.library, {
       name: "Retry Shared Template",
-      policy: "independent",
-      scope: { kind: "shared" },
     });
     const originalBinding = {
       skillId: base.skillId,
       enabled: true,
-      activation: "startup" as const,
+      allowEvolution: true,
     };
     await bind(state.library, expert, [originalBinding], "bind-retry-source");
     const source = addStandardSource(state.host, expert.id, "retry-derive");
@@ -1003,31 +1928,37 @@ describe("SkillEvolutionService deterministic workflows", () => {
     expect(state.repository.events.size).toBe(0);
   });
 
-  it("repairs once after forged evidence, then rejects forged permission fields", async () => {
+  it("repairs once after forged evidence, then rejects forged ownership and permission fields", async () => {
     const state = await fixture();
     const expert = await createExpert(state.experts, "forged-output");
     const base = await createSkill(state.library, {
       name: "Forged Output Base",
-      policy: "shared",
-      scope: { kind: "shared" },
     });
     await bind(
       state.library,
       expert,
-      [{ skillId: base.skillId, enabled: true, activation: "on-demand" }],
+      [{ skillId: base.skillId, enabled: true, allowEvolution: true }],
       "bind-forged-base",
     );
     const source = addStandardSource(state.host, expert.id, "forged");
-    const started = await state.service.execute({
-      action: "start",
-      requestId: "forged-output-run",
+    const discovery = await startDiscovery(state, {
+      requestId: "forged-output-discovery",
       expertId: expert.id,
       sources: [source],
-      targetSkillId: base.skillId,
-      modelSelection,
     });
+    const ready = await completeStage(
+      state,
+      discovery,
+      opportunityText({
+        name: "Forged Output Opportunity",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+        targetSkillId: base.skillId,
+      }),
+    );
+    const generated = await startGeneration(state, ready, "forged-output-run");
+    const taskId = generated.taskThreadId!;
     await state.service.dispose();
-    const taskId = started.run!.taskThreadId!;
     state.host.completeLatest(
       taskId,
       proposalText({
@@ -1052,10 +1983,10 @@ describe("SkillEvolutionService deterministic workflows", () => {
       taskId,
       proposalText({
         name: base.name,
-        text: entry(base.name, "Second output includes forbidden policy metadata."),
+        text: entry(base.name, "Second output includes forbidden ownership metadata."),
         threadId: source.threadId,
         messageId: source.assistantId,
-        extra: { evolutionPolicy: "shared", scope: { kind: "shared" }, ownerId: expert.id },
+        extra: { allowEvolution: true, scope: { kind: "shared" }, ownerId: expert.id },
       }),
     );
     const failed = await state.service.execute({ action: "read", requestId: "forged-output-run" });
@@ -1072,26 +2003,32 @@ describe("SkillEvolutionService deterministic workflows", () => {
     const expert = await createExpert(state.experts, "forged-path");
     const base = await createSkill(state.library, {
       name: "Unsafe Path Base",
-      policy: "shared",
-      scope: { kind: "shared" },
     });
     await bind(
       state.library,
       expert,
-      [{ skillId: base.skillId, enabled: true, activation: "on-demand" }],
+      [{ skillId: base.skillId, enabled: true, allowEvolution: true }],
       "bind-unsafe-path-base",
     );
     const source = addStandardSource(state.host, expert.id, "unsafe-path");
-    const started = await state.service.execute({
-      action: "start",
-      requestId: "unsafe-path-run",
+    const discovery = await startDiscovery(state, {
+      requestId: "unsafe-path-discovery",
       expertId: expert.id,
       sources: [source],
-      targetSkillId: base.skillId,
-      modelSelection,
     });
+    const ready = await completeStage(
+      state,
+      discovery,
+      opportunityText({
+        name: "Unsafe Path Opportunity",
+        threadId: source.threadId,
+        messageId: source.assistantId,
+        targetSkillId: base.skillId,
+      }),
+    );
+    const generated = await startGeneration(state, ready, "unsafe-path-run");
+    const taskId = generated.taskThreadId!;
     await state.service.dispose();
-    const taskId = started.run!.taskThreadId!;
     state.host.completeLatest(
       taskId,
       proposalText({
@@ -1122,26 +2059,18 @@ describe("SkillEvolutionService deterministic workflows", () => {
     );
   });
 
-  it("restores historical package content as a new revision instead of rewinding history", async () => {
+  it("restores historical Expert-private content as a new revision instead of rewinding history", async () => {
     const state = await fixture();
     const expert = await createExpert(state.experts, "restore-owner");
-    const secondExpert = await createExpert(state.experts, "restore-second-expert");
     const base = await createSkill(state.library, {
-      name: "Restorable Shared Skill",
-      policy: "shared",
-      scope: { kind: "shared" },
+      name: "Restorable Private Skill",
+      expertId: expert.id,
     });
     await bind(
       state.library,
       expert,
-      [{ skillId: base.skillId, enabled: true, activation: "on-demand" }],
+      [{ skillId: base.skillId, enabled: true, allowEvolution: true }],
       "bind-restorable-base",
-    );
-    await bind(
-      state.library,
-      secondExpert,
-      [{ skillId: base.skillId, enabled: true, activation: "startup" }],
-      "bind-restorable-base-second-expert",
     );
     const source = addStandardSource(state.host, expert.id, "restore");
 
@@ -1179,38 +2108,12 @@ describe("SkillEvolutionService deterministic workflows", () => {
       .skill!;
     expect(beforeRestore.revision).toBe(3);
 
-    await bind(
-      state.library,
-      (await state.experts.read(secondExpert.id))!,
-      [],
-      "unbind-restorable-base-second-expert",
-    );
     const restorePreview = await state.service.execute({
       action: "previewRestore",
       eventId: historical.eventId,
       expertId: expert.id,
     });
     expect(restorePreview.restorePreview?.affectedExpertIds).toEqual([expert.id]);
-    const restoreInput = {
-      eventId: historical.eventId,
-      expertId: expert.id,
-      expectedRevision: beforeRestore.revision,
-    };
-    await expect(
-      state.service.execute({
-        action: "restore",
-        ...restoreInput,
-        operationId: "restore-to-first-update-missing-audience",
-      }),
-    ).rejects.toThrow("共享使用方已改变，请重新预览恢复影响");
-    await expect(
-      state.service.execute({
-        action: "restore",
-        ...restoreInput,
-        operationId: "restore-to-first-update-stale-audience",
-        expectedAffectedExpertIds: [expert.id, secondExpert.id],
-      }),
-    ).rejects.toThrow("共享使用方已改变，请重新预览恢复影响");
 
     const previewRevision = restorePreview.restorePreview!.skill.revision;
     expect(previewRevision).toBe(beforeRestore.revision);
@@ -1240,7 +2143,6 @@ describe("SkillEvolutionService deterministic workflows", () => {
         expertId: expert.id,
         operationId: "restore-to-first-update-stale-revision",
         expectedRevision: previewRevision,
-        expectedAffectedExpertIds: restorePreview.restorePreview!.affectedExpertIds,
       }),
     ).rejects.toThrow("Skill 已改变，请重新预览恢复差异。");
 
@@ -1251,6 +2153,7 @@ describe("SkillEvolutionService deterministic workflows", () => {
         expertId: expert.id,
       })
     ).restorePreview!;
+    expect(latestRestorePreview.skill.revision).toBe(newerSkill.revision);
 
     const restored = await state.service.execute({
       action: "restore",
@@ -1258,7 +2161,6 @@ describe("SkillEvolutionService deterministic workflows", () => {
       eventId: historical.eventId,
       expertId: expert.id,
       expectedRevision: newerSkill.revision,
-      expectedAffectedExpertIds: latestRestorePreview.affectedExpertIds,
     });
     expect(restored.skill).toMatchObject({
       skillId: base.skillId,
@@ -1279,6 +2181,111 @@ describe("SkillEvolutionService deterministic workflows", () => {
     expect([...state.repository.events.values()].at(-1)?.revision).toBe(newerSkill.revision + 1);
     expect([...state.repository.events.values()].at(-1)?.affectedExpertIds).toEqual([expert.id]);
   });
+
+  it.each(["derived", "rebound-update"] as const)(
+    "restores %s history against the current private binding rather than its source",
+    async (kind) => {
+      const state = await deriveScenario(`content-${kind}`);
+      let historical = state.event;
+      let target = state.copy;
+      if (kind === "rebound-update") {
+        await setBindings(
+          state,
+          state.expert.id,
+          [
+            {
+              skillId: state.sourceSkill.skillId,
+              enabled: true,
+              allowEvolution: true,
+            },
+          ],
+          "rebind-for-content-history",
+        );
+        const source = addStandardSource(state.host, state.expert.id, "content-rebound");
+        const run = await startAndFinish(state, {
+          requestId: "content-rebound-run",
+          expertId: state.expert.id,
+          source,
+          targetSkillId: state.sourceSkill.skillId,
+          response: proposalText({
+            name: target.name,
+            text: entry(target.name, "Reused private history."),
+            threadId: source.threadId,
+            messageId: source.assistantId,
+          }),
+        });
+        target = (await state.service.execute(applyRequest(run, "content-rebound-apply"))).skill!;
+        historical = [...state.repository.events.values()].at(-1)!;
+      }
+      const expected = (
+        await state.library.execute({
+          action: "readFile",
+          skillId: target.skillId,
+          path: target.entryPath,
+        })
+      ).file;
+      const changed = (
+        await state.library.execute(
+          {
+            action: "save",
+            requestId: `change-after-${kind}`,
+            skillId: target.skillId,
+            expectedRevision: target.revision,
+            name: target.name,
+            tags: target.tags,
+            changes: [
+              {
+                path: target.entryPath,
+                content: Buffer.from(entry(target.name, "Later owner edit.")).toString("base64"),
+              },
+            ],
+          },
+          { actor: ownerId },
+        )
+      ).skill!;
+      const bindings = (await state.experts.read(state.expert.id))!.skillBindings;
+      const preview = await state.service.execute({
+        action: "previewRestore",
+        eventId: historical.eventId,
+        expertId: state.expert.id,
+      });
+      expect(preview.restorePreview?.changes).not.toHaveLength(0);
+      const request = {
+        action: "restore" as const,
+        eventId: historical.eventId,
+        expertId: state.expert.id,
+        operationId: `restore-private-${kind}`,
+        expectedRevision: changed.revision,
+      };
+      const restored = await state.service.execute(request);
+      expect(restored.run?.proposals[0]?.status, restored.run?.proposals[0]?.error).toBe("applied");
+      expect(restored.skill).toMatchObject({
+        skillId: target.skillId,
+        revision: changed.revision + 1,
+        packageId: historical.packageId,
+      });
+      expect(
+        (
+          await state.library.execute({
+            action: "readFile",
+            skillId: target.skillId,
+            path: target.entryPath,
+          })
+        ).file?.content,
+      ).toBe(expected?.content);
+      expect(
+        (await state.library.execute({ action: "read", skillId: state.sourceSkill.skillId })).skill,
+      ).toEqual(state.sourceSkill);
+      expect((await state.experts.read(state.expert.id))!.skillBindings).toEqual(bindings);
+      const events = state.repository.events.size;
+      await restartService(state);
+      expect((await state.service.execute(request)).run?.proposals[0]?.status).toBe("applied");
+      expect(state.repository.events.size).toBe(events);
+      expect(
+        (await state.library.execute({ action: "read", skillId: target.skillId })).skill?.revision,
+      ).toBe(changed.revision + 1);
+    },
+  );
 
   it("repairs malformed model output once and matches completion to the repair turn, not the old turn", async () => {
     const state = await fixture();
@@ -1321,18 +2328,15 @@ describe("SkillEvolutionService deterministic workflows", () => {
     const state = await deriveScenario("preview-success");
     const sideSkill = await createSkill(state.library, {
       name: "Binding Restore Side Skill",
-      policy: "shared",
-      scope: { kind: "shared" },
     });
     const copyBinding = {
       skillId: state.copy.skillId,
       enabled: false,
-      activation: "on-demand" as const,
+      allowEvolution: true,
     };
     const sideBinding = {
       skillId: sideSkill.skillId,
       enabled: true,
-      activation: "startup" as const,
     };
     await setBindings(state, state.expert.id, [copyBinding, sideBinding], "binding-preview-seed");
 
@@ -1350,7 +2354,7 @@ describe("SkillEvolutionService deterministic workflows", () => {
     expect(original.digest).toMatch(/^[a-f0-9]{64}$/u);
     expect(original.expertRevision).toBe((await state.experts.read(state.expert.id))?.revision);
 
-    const changedSideBinding = { ...sideBinding, enabled: false, activation: "on-demand" as const };
+    const changedSideBinding = { ...sideBinding, enabled: false };
     await setBindings(
       state,
       state.expert.id,
@@ -1426,8 +2430,6 @@ describe("SkillEvolutionService deterministic workflows", () => {
       kind: "binding_restored",
       skillId: state.sourceSkill.skillId,
       previousSkillId: state.copy.skillId,
-      policy: "independent",
-      scope: { kind: "shared" },
     });
 
     const replay = await state.service.execute(request);
@@ -1443,8 +2445,6 @@ describe("SkillEvolutionService deterministic workflows", () => {
     const state = await deriveScenario("cas-conflict");
     const extraSkill = await createSkill(state.library, {
       name: "Concurrent User Binding",
-      policy: "shared",
-      scope: { kind: "shared" },
     });
     const preview = (
       await state.service.execute({
@@ -1485,7 +2485,7 @@ describe("SkillEvolutionService deterministic workflows", () => {
             skills: current.skills,
             skillBindings: [
               ...(current.skillBindings ?? []),
-              { skillId: extraSkill.skillId, enabled: true, activation: "on-demand" },
+              { skillId: extraSkill.skillId, enabled: true },
             ],
             references: current.references,
             connections: current.connections,
@@ -1500,8 +2500,8 @@ describe("SkillEvolutionService deterministic workflows", () => {
     const current = (await state.experts.read(state.expert.id))!;
     expect(introducedConflict).toBe(true);
     expect(current.skillBindings).toEqual([
-      { skillId: state.copy.skillId, enabled: true, activation: "startup" },
-      { skillId: extraSkill.skillId, enabled: true, activation: "on-demand" },
+      { skillId: state.copy.skillId, enabled: true, allowEvolution: true },
+      { skillId: extraSkill.skillId, enabled: true },
     ]);
     expect(
       current.skillBindings?.some((binding) => binding.skillId === state.sourceSkill.skillId),
@@ -1513,7 +2513,12 @@ describe("SkillEvolutionService deterministic workflows", () => {
 
     const row = state.repository.rows.get(state.run.requestId)!;
     const persisted = JSON.parse(row.record) as {
-      bindingRestores?: Array<{ operationId: string; expertRevision: number; completed?: boolean }>;
+      bindingRestores?: Array<{
+        operationId: string;
+        expertRevision: number;
+        bindings: Array<Record<string, unknown>>;
+        completed?: boolean;
+      }>;
     };
     expect(persisted.bindingRestores).toHaveLength(1);
     expect(persisted.bindingRestores?.[0]).toMatchObject({
@@ -1521,6 +2526,8 @@ describe("SkillEvolutionService deterministic workflows", () => {
       expertRevision: preview.expertRevision,
     });
     expect(persisted.bindingRestores?.[0]?.completed).toBeUndefined();
+    persisted.bindingRestores![0]!.bindings[0]!.activation = "startup";
+    state.repository.rows.set(state.run.requestId, { ...row, record: JSON.stringify(persisted) });
 
     const visible = await state.service.execute({ action: "read", requestId: state.run.requestId });
     expect(visible.run?.proposals[0]?.status).toBe("applied");
@@ -1535,6 +2542,7 @@ describe("SkillEvolutionService deterministic workflows", () => {
     ) as typeof persisted;
     expect(afterRead.bindingRestores?.[0]?.expertRevision).toBe(preview.expertRevision);
     expect(afterRead.bindingRestores?.[0]?.completed).toBeUndefined();
+    expect(afterRead.bindingRestores?.[0]?.bindings[0]?.activation).toBe("startup");
   });
 
   it("keeps deleted derived Skills in the historical evolution graph", async () => {
@@ -1565,18 +2573,16 @@ describe("SkillEvolutionService deterministic workflows", () => {
     expect(result.graph?.events.some((item) => item.eventId === state.event.eventId)).toBe(true);
   });
 
-  it("restarts from an applying protected intent and completes the same derivation without duplicate packages or events", async () => {
+  it("replays an applying intent with unchanged permission without duplicate packages or events", async () => {
     const state = await fixture();
     const expert = await createExpert(state.experts, "applying-restart-owner");
     const base = await createSkill(state.library, {
       name: "Protected Restart Source",
-      policy: "protected",
-      scope: { kind: "shared" },
     });
     await bind(
       state.library,
       expert,
-      [{ skillId: base.skillId, enabled: true, activation: "startup" }],
+      [{ skillId: base.skillId, enabled: true, allowEvolution: true }],
       "bind-applying-restart-source",
     );
     const source = addStandardSource(state.host, expert.id, "applying-restart");
@@ -1585,7 +2591,6 @@ describe("SkillEvolutionService deterministic workflows", () => {
       expertId: expert.id,
       source,
       targetSkillId: base.skillId,
-      protectedAction: "derive",
       response: proposalText({
         name: "Protected Restart Copy",
         text: entry("Protected Restart Copy", "Approved private workflow."),
@@ -1594,7 +2599,7 @@ describe("SkillEvolutionService deterministic workflows", () => {
       }),
     });
     expect(run.proposals[0]?.action).toBe("derive");
-    const apply = applyRequest(run, "applying-restart-operation", true);
+    const apply = applyRequest(run, "applying-restart-operation");
     const packages = createSkillPackageStore(state.stateDir);
     const packagesBefore = (await packages.list()).map((item) => item.packageId).sort();
     const executeLibrary = state.library.execute.bind(state.library);
@@ -1617,7 +2622,6 @@ describe("SkillEvolutionService deterministic workflows", () => {
       intents: Array<{
         operationId: string;
         digest: string;
-        approvedProtected?: boolean;
         createdAt?: string;
       }>;
       run: SkillEvolutionRun;
@@ -1627,7 +2631,6 @@ describe("SkillEvolutionService deterministic workflows", () => {
     expect(intent).toMatchObject({
       operationId: apply.operationId,
       digest: run.proposals[0]!.digest,
-      approvedProtected: true,
     });
     expect(intent.createdAt).toBeTruthy();
     expect((await state.library.execute({ action: "list" })).skills).toHaveLength(1);
@@ -1673,14 +2676,13 @@ describe("SkillEvolutionService deterministic workflows", () => {
     const state = await fixture();
     const expert = await createExpert(state.experts, "event-replay-owner");
     const base = await createSkill(state.library, {
-      name: "Event Replay Shared Skill",
-      policy: "shared",
-      scope: { kind: "shared" },
+      name: "Event Replay Private Skill",
+      expertId: expert.id,
     });
     await bind(
       state.library,
       expert,
-      [{ skillId: base.skillId, enabled: true, activation: "on-demand" }],
+      [{ skillId: base.skillId, enabled: true, allowEvolution: true }],
       "bind-event-replay-base",
     );
     const source = addStandardSource(state.host, expert.id, "event-replay");
@@ -1776,7 +2778,10 @@ describe("SkillEvolutionService deterministic workflows", () => {
     const listed = await state.service.execute({ action: "list", expertId: expert.id });
     writeSpy.mockRestore();
     expect(read.run?.status).toBe("proposal_ready");
-    expect(listed.runs?.map((item) => item.requestId)).toEqual([run.requestId]);
+    expect(listed.runs?.map((item) => item.requestId)).toEqual([
+      `${run.requestId}-discovery`,
+      run.requestId,
+    ]);
     expect(writes).toBe(0);
     expect(state.repository.rows.get(run.requestId)).toEqual(beforeRow);
     expect(await readSkillLibraryDefinitions(state.stateDir)).toEqual(beforeSkills);
@@ -1786,7 +2791,7 @@ describe("SkillEvolutionService deterministic workflows", () => {
     expect(state.repository.events.size).toBe(0);
   });
 
-  it("reports native startup rejection as failed without retrying or changing formal Skill state", async () => {
+  it("reports a native session start failure without retrying or changing formal Skill state", async () => {
     const state = await fixture();
     const expert = await createExpert(state.experts, "native-startup-failure-owner");
     const source = addStandardSource(state.host, expert.id, "native-startup-failure");

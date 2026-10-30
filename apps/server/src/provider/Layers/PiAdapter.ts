@@ -29,6 +29,7 @@ import {
   type ProviderListModelsResult,
   type ProviderListSkillsResult,
   type ProviderExpertSession,
+  type ProviderSkillReference,
   type ContextSession,
   ProviderItemId,
   type ProviderRuntimeEvent,
@@ -51,9 +52,15 @@ import { stripTerminalControlSequences } from "@synara/shared/text";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import {
   createExpertSkillApplication,
+  projectSelectedSkillReferences,
   recordVerifiedNativeSkillAssembly,
   invalidateNativeSkillAssemblyVerification,
 } from "../expertSkillCatalog.ts";
+import {
+  skillPackageStateDir,
+  skillRuntimeEntries,
+  verifySkillRunResources,
+} from "../../experts/skillRunResources";
 import { Effect, FileSystem, Layer, Option, Queue, Stream } from "effect";
 
 import {
@@ -96,6 +103,7 @@ import {
   type ProviderThreadSnapshot,
 } from "../Services/ProviderAdapter.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
+import { appendProviderSkillReferencesPromptBlock } from "../promptReferenceProjection.ts";
 import { makeBoundedCallbackIngress } from "../boundedCallbackIngress.ts";
 import { makeKeyedLock } from "../keyedLock.ts";
 import { settleConcurrentTeardowns } from "../settleConcurrentTeardowns.ts";
@@ -255,15 +263,18 @@ export function piResourceLoaderOptionsForSession(input: {
   if (!input.expertSession && !input.contextSession?.hasContent && !input.noExtensions) {
     return undefined;
   }
+  const fixedSkills = input.expertSession?.skillPolicy
+    ? skillRuntimeEntries(input.expertSession)
+    : [];
   return {
     ...(input.noExtensions || input.expertSession?.skillPolicy ? { noExtensions: true } : {}),
     ...(input.expertSession?.skillPolicy
       ? {
           noSkills: true,
-          additionalSkillPaths: input.expertSession.skills.map((skill) => skill.path),
+          additionalSkillPaths: fixedSkills.map((skill) => skill.path),
           skillsOverride: (base) => ({
             skills: base.skills.filter((skill) =>
-              input.expertSession!.skills.some(
+              fixedSkills.some(
                 (selected) =>
                   selected.name === skill.name &&
                   path.resolve(selected.path) === path.resolve(skill.filePath),
@@ -3329,6 +3340,12 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       signal?: AbortSignal;
       noExtensions?: boolean;
     }) => {
+      if (input.expertSession?.skillResourceRefs !== undefined)
+        await verifySkillRunResources(
+          skillPackageStateDir(input.expertSession),
+          input.expertSession.skillEntries ?? [],
+          input.expertSession.skillResourceRefs,
+        );
       const modelRuntime = await createPiModelRuntime(
         input.agentDir,
         input.sdk,
@@ -3849,17 +3866,38 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       );
     };
 
-    const buildPromptPayload = (input: {
-      readonly input?: string | undefined;
-      readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
-    }) =>
+    const buildPromptPayload = (
+      input: {
+        readonly input?: string | undefined;
+        readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+        readonly skills?: ReadonlyArray<ProviderSkillReference> | undefined;
+      },
+      expertSession?: ProviderExpertSession,
+      allowSelectedSkills = true,
+    ) =>
       Effect.gen(function* () {
-        const text =
+        const attachmentText =
           appendFileAttachmentsPromptBlock({
             text: input.input,
             attachments: input.attachments,
             attachmentsDir: serverConfig.attachmentsDir,
             include: "all-files",
+          }) ?? "";
+        const skills = yield* Effect.try({
+          try: () =>
+            allowSelectedSkills ? projectSelectedSkillReferences(expertSession, input.skills) : [],
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "turn/start",
+              detail: cause instanceof Error ? cause.message : String(cause),
+              cause,
+            }),
+        });
+        const text =
+          appendProviderSkillReferencesPromptBlock({
+            text: attachmentText,
+            skills,
           }) ?? "";
         const images = yield* Effect.forEach(
           input.attachments ?? [],
@@ -3944,7 +3982,11 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           if (input.modelSelection?.provider === "pi") {
             yield* applyPiModelSelection(context, input.modelSelection);
           }
-          const payload = yield* buildPromptPayload(input);
+          const payload = yield* buildPromptPayload(
+            input,
+            context.fixedExpertSession,
+            context.executionPurpose !== SKILL_EVOLUTION_EXECUTION_PURPOSE,
+          );
           if (context.stopped) {
             return yield* new ProviderAdapterSessionClosedError({
               provider: PROVIDER,
@@ -4008,7 +4050,11 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             });
           }
           yield* awaitPromptCommit(context);
-          const payload = yield* buildPromptPayload(input);
+          const payload = yield* buildPromptPayload(
+            input,
+            context.fixedExpertSession,
+            context.executionPurpose !== SKILL_EVOLUTION_EXECUTION_PURPOSE,
+          );
           if (context.stopped) {
             return yield* new ProviderAdapterSessionClosedError({
               provider: PROVIDER,

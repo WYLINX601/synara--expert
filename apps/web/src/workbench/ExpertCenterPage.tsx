@@ -32,7 +32,7 @@ export default function ExpertCenterPage() {
   };
   return (
     <main className="h-full min-h-0 min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
-      <div className="mx-auto max-w-5xl">
+      <div className="mx-auto flex min-h-full max-w-5xl flex-col">
         <ExpertsSettingsPanel
           centerRoute={{
             expertId: params.expertId ?? null,
@@ -107,6 +107,13 @@ export default function ExpertCenterPage() {
                 : { initialThreadRequestKey: sourceSelection.requestKey })}
               onOpenTask={(threadId) => {
                 void navigate({ to: "/$threadId", params: { threadId } });
+              }}
+              onOpenAbilities={() => {
+                void navigate({
+                  to: "/experts/$expertId",
+                  params: { expertId: expert.id },
+                  search: { ...search, tab: "capabilities" },
+                });
               }}
             />
           )}

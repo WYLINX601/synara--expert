@@ -6,7 +6,9 @@ import {
   ExpertSkillBinding,
   MessageId,
   SkillDefinition,
+  SkillEvolutionDiscoveryResult,
   SkillEvolutionEvent,
+  SkillEvolutionOpportunity,
   SkillEvolutionRun,
   ThreadId,
   type ModelSelection,
@@ -27,14 +29,13 @@ import { expertResourceFiles, type ExpertStore } from "../ExpertStore";
 import type { SkillPackageStore } from "../SkillPackageStore";
 import { createSkillLibraryStore, readSkillLibraryDefinitions } from "../SkillLibraryStore";
 import { retainSkillEvolutionPackages } from "../skillEvolutionPackagePins";
+import { decodeStoredExpertSkillBindings } from "../storedExpertSkillBinding.ts";
+import { assertSkillScopeForExpert, effectiveSkillScope } from "../skillEvolutionPolicy";
 import {
-  assertSkillScopeForExpert,
-  effectiveSkillEvolutionPolicy,
-  effectiveSkillScope,
-} from "../skillEvolutionPolicy";
-import {
+  buildSkillEvolutionDiscoveryPrompt,
   buildSkillEvolutionPrompt,
   evolutionDigest,
+  parseSkillEvolutionDiscoveryResult,
   parseSkillEvolutionModelResult,
   validateEvolutionChanges,
   validateEvolutionEvidence,
@@ -65,7 +66,6 @@ interface ApplyIntent {
   readonly operationId: string;
   readonly digest: string;
   readonly result?: SkillDefinition;
-  readonly approvedProtected?: boolean;
   readonly createdAt?: string;
   readonly appliedAt?: string;
 }
@@ -83,13 +83,16 @@ interface StoredRequest {
   readonly ownerId: string;
   readonly fingerprint: string;
   readonly sourceDigest: string;
+  readonly opportunityDigest?: string;
+  readonly catalogSkillIds?: readonly string[];
   readonly taskThreadId: ThreadId;
   readonly projectId: OrchestrationThread["projectId"];
   readonly run: SkillEvolutionRun;
   readonly expertRevision: number;
   readonly bindings: readonly ExpertSkillBinding[];
   readonly base?: SkillDefinition;
-  readonly requestedAction?: "update" | "derive";
+  /** Binding granting permission, retained when an existing private copy is reused. */
+  readonly bindingSkillId?: string;
   readonly files: readonly {
     readonly path: string;
     readonly content: string;
@@ -133,7 +136,11 @@ export const SKILL_EVOLUTION_CAPABILITIES: readonly SkillEvolutionCapability[] =
     reason: "无工具、无 MCP、无环境技能及记忆的提炼会话。",
   },
   { provider: "codex", supported: false, reason: "尚未验证独立于普通只读模式的无工具提炼约束。" },
-  { provider: "omp", supported: false, reason: "尚未验证原生无工具提炼约束。" },
+  {
+    provider: "omp",
+    supported: true,
+    reason: "原生 ACP 会话已验证无工具、无环境技能及上下文文件。",
+  },
 ];
 
 export function createSkillEvolutionService(input: {
@@ -167,7 +174,19 @@ export function createSkillEvolutionService(input: {
       !Array.isArray(value.intents)
     )
       throw new Error("提炼记录身份无效或不属于当前用户。");
-    return { ...value, run };
+    return {
+      ...value,
+      run,
+      bindings: decodeStoredExpertSkillBindings(value.bindings),
+      ...(value.bindingRestores !== undefined
+        ? {
+            bindingRestores: value.bindingRestores.map((intent) => ({
+              ...intent,
+              bindings: decodeStoredExpertSkillBindings(intent.bindings),
+            })),
+          }
+        : {}),
+    };
   };
   const save = async (record: StoredRequest) => {
     await runEffect(
@@ -190,6 +209,144 @@ export function createSkillEvolutionService(input: {
     const expert = await input.experts.read(id);
     if (!expert || expert.archived) throw new Error("专家不存在或已归档。");
     return expert;
+  };
+  const assertCanImprove = (expert: Awaited<ReturnType<typeof activeExpert>>, skillId: string) => {
+    const binding = expert.skillBindings?.find((item) => item.skillId === skillId);
+    if (!binding) throw new Error("目标 Skill 已不在该专家的已保存绑定中。");
+    if (binding.allowEvolution !== true)
+      throw new Error("请先在专家的技能绑定中开启“允许复制并改进”。");
+    return binding;
+  };
+  const assertMutationPermission = async (record: StoredRequest, result?: SkillDefinition) => {
+    const expert = await activeExpert(record.run.expertId);
+    if (record.base) {
+      const bindingSkillId = record.bindingSkillId ?? record.base.skillId;
+      const targetId = expert.skillBindings?.some((item) => item.skillId === bindingSkillId)
+        ? bindingSkillId
+        : (result?.skillId ?? bindingSkillId);
+      assertCanImprove(expert, targetId);
+      assertSkillScopeForExpert(record.base, expert.id);
+    }
+    if (result) {
+      const scope = effectiveSkillScope(result);
+      if (scope.kind !== "expert" || scope.expertId !== expert.id)
+        throw new Error("专家改进只能保存为本专家的专属 Skill。");
+    }
+    return expert;
+  };
+  const opportunityContent = (opportunity: SkillEvolutionOpportunity) => ({
+    opportunityId: opportunity.opportunityId,
+    requestId: opportunity.requestId,
+    expertId: opportunity.expertId,
+    name: opportunity.name,
+    reason: opportunity.reason,
+    outcomes: opportunity.outcomes,
+    evidence: opportunity.evidence,
+    ...(opportunity.targetSkillId ? { targetSkillId: opportunity.targetSkillId } : {}),
+  });
+  const opportunityDigest = (opportunity: SkillEvolutionOpportunity) =>
+    evolutionDigest(opportunityContent(opportunity));
+  const generationChildren = async (
+    expertId: string,
+    discoveryRequestId: string,
+    opportunityId: string,
+  ): Promise<StoredRequest[]> => {
+    const rows = await runEffect(input.repository.list(expertId));
+    const matches: StoredRequest[] = [];
+    for (const row of rows) {
+      const raw = JSON.parse(row.record) as StoredRequest;
+      if (
+        raw.ownerId !== input.ownerId ||
+        raw.run?.stage !== "generation" ||
+        raw.run.discoveryRequestId !== discoveryRequestId ||
+        raw.run.opportunityId !== opportunityId
+      )
+        continue;
+      matches.push(await load(row.requestId));
+    }
+    return matches;
+  };
+  const assertGenerationParent = async (
+    record: StoredRequest,
+    requireSuggested: boolean,
+  ): Promise<{ parent: StoredRequest; opportunity: SkillEvolutionOpportunity }> => {
+    const { discoveryRequestId, opportunityId } = record.run;
+    if (
+      record.run.stage !== "generation" ||
+      !discoveryRequestId ||
+      !opportunityId ||
+      !record.opportunityDigest
+    )
+      throw new Error("生成记录缺少其发现机会的固定身份。 ");
+    const parent = await load(discoveryRequestId);
+    const opportunity = parent.run.opportunities?.find(
+      (item) => item.opportunityId === opportunityId,
+    );
+    if (
+      parent.run.stage !== "discovery" ||
+      parent.run.expertId !== record.run.expertId ||
+      !opportunity ||
+      opportunityDigest(opportunity) !== record.opportunityDigest
+    )
+      throw new Error("生成记录对应的发现机会已改变或不可用。 ");
+    if (requireSuggested && opportunity.status !== "suggested")
+      throw new Error("该经验机会已关闭，不能继续生成或采用候选。 ");
+    return { parent, opportunity };
+  };
+  const assertLatestGeneration = async (record: StoredRequest) => {
+    const { discoveryRequestId, opportunityId } = record.run;
+    if (!discoveryRequestId || !opportunityId)
+      throw new Error("生成记录缺少其发现机会的固定身份。 ");
+    const children = await generationChildren(
+      record.run.expertId,
+      discoveryRequestId,
+      opportunityId,
+    );
+    const latest = children.toSorted(
+      (left, right) =>
+        (right.run.generationIndex ?? 0) - (left.run.generationIndex ?? 0) ||
+        right.requestId.localeCompare(left.requestId),
+    )[0];
+    if (!latest || latest.requestId !== record.requestId)
+      throw new Error("已有更新的生成候选，请只查看并采用最新一轮。 ");
+    if (
+      children.some(
+        (child) =>
+          child.requestId !== record.requestId &&
+          child.run.proposals.some((proposal) =>
+            ["applied", "saved_unbound", "applying"].includes(proposal.status),
+          ),
+      )
+    )
+      throw new Error("该经验机会已有采用中的或已保存的候选。 ");
+    return children;
+  };
+  const assertGenerationCanApply = async (record: StoredRequest) => {
+    await assertGenerationParent(record, true);
+    await assertLatestGeneration(record);
+  };
+  const boundSkillCatalog = async (expert: Awaited<ReturnType<typeof activeExpert>>) => {
+    const bound = new Set((expert.skillBindings ?? []).map((binding) => binding.skillId as string));
+    const response = await input.library.execute({
+      action: "list",
+      query: { expertIds: [expert.id] },
+    });
+    return (response.skills ?? [])
+      .filter((skill) => bound.has(skill.skillId) && !skill.deleted)
+      .filter((skill) => {
+        try {
+          assertSkillScopeForExpert(skill, expert.id);
+          return true;
+        } catch {
+          return false;
+        }
+      })
+      .map((skill) => ({
+        skillId: skill.skillId,
+        name: skill.name,
+        description: skill.description,
+        tags: skill.tags,
+      }));
   };
   const readSkill = async (skillId: string) => {
     const response = await input.library.execute({ action: "read", skillId });
@@ -283,6 +440,8 @@ export function createSkillEvolutionService(input: {
     return rows.sort((a, b) => b.completedAt.localeCompare(a.completedAt)).slice(0, 200);
   };
   const dispatchTurn = async (record: StoredRequest, repair: boolean) => {
+    if (record.run.stage === "generation") await assertGenerationCanApply(record);
+    await assertMutationPermission(record);
     await input.host.dispatch({
       type: "thread.turn.start",
       commandId: CommandId.makeUnsafe(nativeId(record.requestId, repair ? "repair" : "turn")),
@@ -305,6 +464,8 @@ export function createSkillEvolutionService(input: {
     });
   };
   const dispatchRequest = async (record: StoredRequest) => {
+    if (record.run.stage === "generation") await assertGenerationCanApply(record);
+    await assertMutationPermission(record);
     let next = await save({ ...record, dispatchAttempts: record.dispatchAttempts + 1 });
     await input.host.dispatch({
       type: "thread.create",
@@ -332,6 +493,43 @@ export function createSkillEvolutionService(input: {
     });
     return next;
   };
+  const setDiscoveryResult = async (record: StoredRequest, text: string) => {
+    const result: SkillEvolutionDiscoveryResult = parseSkillEvolutionDiscoveryResult(text);
+    if (result.action !== "opportunities")
+      return updateRun(record, { status: result.action, summary: result.reason });
+    const catalogIds = new Set(record.catalogSkillIds ?? []);
+    const opportunities: SkillEvolutionOpportunity[] = [];
+    for (const [index, candidate] of result.opportunities.entries()) {
+      if (!candidate.reason.trim() || candidate.outcomes.some((outcome) => !outcome.trim()))
+        throw new Error("经验机会的原因和预期结果必须填写具体内容。");
+      validateEvolutionEvidence(candidate.evidence, record.messages);
+      if (candidate.targetSkillId && !catalogIds.has(candidate.targetSkillId))
+        throw new Error("经验机会引用了不属于当前专家绑定目录的 Skill，请使用目录中的准确 ID。");
+      const content = {
+        opportunityId: nativeId(record.requestId, "opportunity-" + index),
+        requestId: record.requestId,
+        expertId: record.run.expertId,
+        name: candidate.name,
+        reason: candidate.reason,
+        outcomes: candidate.outcomes,
+        evidence: candidate.evidence,
+        ...(candidate.targetSkillId ? { targetSkillId: candidate.targetSkillId } : {}),
+      };
+      const opportunity = {
+        ...content,
+        digest: evolutionDigest(content),
+        status: "suggested" as const,
+      };
+      opportunities.push(opportunity);
+    }
+    return updateRun(record, {
+      status: opportunities.length ? "opportunity_ready" : "no_change",
+      summary: opportunities.length
+        ? "已发现可复核的经验机会；尚未读取或改变任何 Skill。"
+        : "没有发现新的可复用经验。",
+      opportunities,
+    });
+  };
   const setProposals = async (record: StoredRequest, text: string) => {
     const result = parseSkillEvolutionModelResult(text);
     if (result.action !== "proposals")
@@ -353,11 +551,9 @@ export function createSkillEvolutionService(input: {
         record.files,
       );
       if (!changes.length) continue;
-      const policy = record.base ? effectiveSkillEvolutionPolicy(record.base) : "protected";
       const action = !record.base
         ? "create"
-        : (policy === "independent" && record.base.scope?.kind !== "expert") ||
-            (policy === "protected" && record.requestedAction === "derive")
+        : effectiveSkillScope(record.base).kind === "shared"
           ? "derive"
           : "update";
       const content = {
@@ -375,11 +571,7 @@ export function createSkillEvolutionService(input: {
               basePackageId: record.base.packageId,
             }
           : {}),
-        policy,
-        affectedExpertIds:
-          record.base && action === "update"
-            ? await affectedExperts(record.base.skillId)
-            : [record.run.expertId],
+        affectedExpertIds: [record.run.expertId],
         changes,
       } as const;
       proposals.push({ ...content, digest: evolutionDigest(content), status: "proposed" });
@@ -392,8 +584,20 @@ export function createSkillEvolutionService(input: {
       proposals,
     });
   };
+  const setModelResult = (record: StoredRequest, text: string) =>
+    record.run.stage === "discovery"
+      ? setDiscoveryResult(record, text)
+      : setProposals(record, text);
   const reconcile = async (id: string): Promise<StoredRequest> => {
     let record = await load(id);
+    if (record.run.stage === "generation") {
+      const { opportunity } = await assertGenerationParent(record, false);
+      if (busy.has(record.run.status) || record.intents.length) {
+        if (opportunity.status !== "suggested")
+          throw new Error("该经验机会已关闭，不能继续恢复其生成任务。 ");
+        await assertLatestGeneration(record);
+      }
+    }
     for (const intent of record.bindingRestores ?? []) {
       if (intent.completed) continue;
       try {
@@ -414,7 +618,6 @@ export function createSkillEvolutionService(input: {
           proposalId: proposal.proposalId,
           expectedDigest: intent.digest,
           operationId: intent.operationId,
-          ...(intent.approvedProtected ? { approveProtected: true } : {}),
         });
         record = await load(id);
       } catch (cause) {
@@ -512,7 +715,7 @@ export function createSkillEvolutionService(input: {
         .map((message) => message.text)
         .join("\n") ?? "";
     try {
-      return await setProposals(record, response);
+      return await setModelResult(record, response);
     } catch (cause) {
       if (record.repairCount < 1) {
         record = await save({
@@ -596,13 +799,19 @@ export function createSkillEvolutionService(input: {
 
   const apply = async (request: Extract<SkillEvolutionRequest, { action: "apply" }>) => {
     let record = await load(request.requestId);
+    if (record.run.stage === "generation") await assertGenerationCanApply(record);
     let proposal = proposalFor(record, request.proposalId, request.expectedDigest);
     if (proposal.status === "applied") return { run: publicRun(record) };
     if (proposal.status === "rejected") throw new Error("已拒绝的候选不能采用。");
-    if (proposal.policy === "protected" && !request.approveProtected)
-      throw new Error("请明确认可本次受保护 Skill 的准确改动。");
-    const expert = await activeExpert(record.run.expertId);
     let intent = record.intents.find((item) => item.proposalId === proposal.proposalId);
+    const expert = await assertMutationPermission(record, intent?.result);
+    const expectedAction = !record.base
+      ? "create"
+      : effectiveSkillScope(record.base).kind === "shared"
+        ? "derive"
+        : "update";
+    if (proposal.action !== expectedAction)
+      throw new Error("候选的写入目标与当前专属改进规则不符，请重新提炼。");
     if (
       intent &&
       (intent.operationId !== request.operationId || intent.digest !== request.expectedDigest)
@@ -614,17 +823,13 @@ export function createSkillEvolutionService(input: {
       if (record.base) {
         const current = await readSkill(record.base.skillId);
         assertSkillScopeForExpert(current, expert.id);
-        if (
-          current.revision !== record.base.revision ||
-          effectiveSkillEvolutionPolicy(current) !== proposal.policy
-        )
-          throw new Error("Skill 版本或策略已改变，请重新提炼。");
+        if (current.revision !== record.base.revision)
+          throw new Error("Skill 版本已改变，请重新提炼。");
       }
       intent = {
         proposalId: proposal.proposalId,
         operationId: request.operationId,
         digest: proposal.digest,
-        ...(request.approveProtected ? { approvedProtected: true } : {}),
         createdAt: now(),
       };
       record = await save({
@@ -641,22 +846,13 @@ export function createSkillEvolutionService(input: {
     }
     proposal = { ...proposal, status: "applying", error: undefined };
     record = await changeProposal(record, proposal);
-    const adoptionContext =
-      record.base &&
-      proposal.action === "update" &&
-      effectiveSkillScope(record.base).kind === "shared"
-        ? {
-            ...ctx,
-            beforeMutation: async () => {
-              const affected = await affectedExperts(record.base!.skillId);
-              if (
-                !proposal.affectedExpertIds ||
-                !isDeepStrictEqual(affected, [...proposal.affectedExpertIds].toSorted())
-              )
-                throw new Error("共享使用方已改变，请重新提炼并核对受影响专家。");
-            },
-          }
-        : ctx;
+    const adoptionContext = {
+      ...ctx,
+      beforeMutation: async () => {
+        if (record.run.stage === "generation") await assertGenerationCanApply(record);
+        await assertMutationPermission(record, intent?.result);
+      },
+    };
     try {
       let result = intent.result;
       if (!result) {
@@ -701,11 +897,9 @@ export function createSkillEvolutionService(input: {
                 name: proposal.name,
                 body: Buffer.from(entry.content, "base64").toString("utf8"),
                 tags: [],
-                scope: { kind: "expert", expertId: expert.id },
-                evolutionPolicy: "protected",
                 changes: proposal.changes.filter((file) => file.path !== "SKILL.md"),
               },
-              ctx,
+              { ...adoptionContext, createForExpertId: expert.id },
             )
           ).skill;
         }
@@ -718,7 +912,10 @@ export function createSkillEvolutionService(input: {
           ),
         });
       }
-      if (proposal.action !== "update") {
+      await assertMutationPermission(record, result);
+      const bindingSkillId = record.bindingSkillId ?? record.base?.skillId;
+      const needsBinding = !bindingSkillId || bindingSkillId !== result.skillId;
+      if (needsBinding) {
         proposal = {
           ...proposal,
           status: "saved_unbound",
@@ -728,14 +925,11 @@ export function createSkillEvolutionService(input: {
         record = await changeProposal(record, proposal);
         const bindings = record.base
           ? record.bindings.map((binding) =>
-              binding.skillId === record.base!.skillId
+              binding.skillId === bindingSkillId
                 ? { ...binding, skillId: result!.skillId }
                 : binding,
             )
-          : [
-              ...record.bindings,
-              { skillId: result.skillId, enabled: true, activation: "on-demand" as const },
-            ];
+          : [...record.bindings, { skillId: result.skillId, enabled: true }];
         const bindingResult = await input.library.execute(
           {
             action: "bindings",
@@ -745,7 +939,7 @@ export function createSkillEvolutionService(input: {
             requestId: "evolution-bind:" + intent.operationId,
             bindings,
           },
-          ctx,
+          adoptionContext,
         );
         if (
           !bindingResult.bindingResult ||
@@ -753,9 +947,9 @@ export function createSkillEvolutionService(input: {
           !bindingResult.bindingResult.bindings.some(
             (binding) => binding.skillId === result!.skillId,
           ) ||
-          (record.base &&
+          (bindingSkillId &&
             bindingResult.bindingResult.bindings.some(
-              (binding) => binding.skillId === record.base!.skillId,
+              (binding) => binding.skillId === bindingSkillId,
             ))
         )
           throw new Error(
@@ -792,17 +986,15 @@ export function createSkillEvolutionService(input: {
           ? { previousRevision: record.base.revision, previousPackageId: record.base.packageId }
           : {}),
         ...(proposal.action === "derive" && record.base
-          ? { derivedFromSkillId: record.base.skillId }
+          ? { derivedFromSkillId: result.derivedFrom?.skillId ?? record.base.skillId }
           : {}),
-        policy: effectiveSkillEvolutionPolicy(result),
         scope: effectiveSkillScope(result),
         ...(record.base
           ? {
-              previousPolicy: effectiveSkillEvolutionPolicy(record.base),
               previousScope: effectiveSkillScope(record.base),
             }
           : {}),
-        affectedExpertIds: proposal.affectedExpertIds ?? (await affectedExperts(result.skillId)),
+        affectedExpertIds: [expert.id],
       };
       await runEffect(input.repository.appendEvent(event));
       record = await changeProposal(record, {
@@ -814,7 +1006,9 @@ export function createSkillEvolutionService(input: {
       });
       return { run: publicRun(record), skill: result };
     } catch (cause) {
-      const partial = !!intent.result && proposal.action !== "update";
+      const partial =
+        !!intent.result &&
+        (!record.base || (record.bindingSkillId ?? record.base.skillId) !== intent.result.skillId);
       record = await changeProposal(record, {
         ...proposal,
         status: partial ? "saved_unbound" : "conflict",
@@ -867,9 +1061,6 @@ export function createSkillEvolutionService(input: {
           last?.revision ??
           first!.revision,
         packageId,
-        policy:
-          (at ? (last?.policy ?? first?.previousPolicy) : undefined) ??
-          (skill ? effectiveSkillEvolutionPolicy(skill) : (last?.policy ?? "protected")),
         ...(nodeScope?.kind === "expert" ? { ownerExpertId: nodeScope.expertId } : {}),
         timestamp: creation?.createdAt ?? null,
         baseline: !creation,
@@ -891,8 +1082,9 @@ export function createSkillEvolutionService(input: {
     if (!event) throw new Error("进化版本记录不存在。");
     const skill = await readSkill(event.skillId);
     assertSkillScopeForExpert(skill, expert.id);
-    if (!expert.skillBindings?.some((binding) => binding.skillId === skill.skillId))
-      throw new Error("该 Skill 已不在当前专家的绑定中。");
+    assertCanImprove(expert, skill.skillId);
+    if (effectiveSkillScope(skill).kind !== "expert")
+      throw new Error("只能在此处恢复专家专属版本；共享原版由技能库维护。");
     const current = await filesFor(skill);
     const oldPackage = await input.packages.read(event.packageId);
     const oldFiles: SkillFileChange[] = [];
@@ -1048,8 +1240,9 @@ export function createSkillEvolutionService(input: {
             const record = await load(request.requestId);
             if (record.fingerprint !== fingerprint)
               throw new Error("同一请求 ID 已用于不同的提炼操作。");
-            if (busy.has(record.run.status)) observe(request.requestId);
-            return { run: publicRun(record) };
+            const current = await reconcile(request.requestId);
+            if (busy.has(current.run.status)) observe(request.requestId);
+            return { run: publicRun(current) };
           }
           if (
             !SKILL_EVOLUTION_CAPABILITIES.some(
@@ -1059,11 +1252,6 @@ export function createSkillEvolutionService(input: {
           )
             throw new Error("所选 Provider 尚不支持受限的 Skill 提炼，不会自动切换 Provider。");
           const expert = await activeExpert(request.expertId);
-          if (
-            expert.skillBindings === undefined &&
-            (expert.skills.length || expert.skillSelections?.length)
-          )
-            throw new Error("请先在专家能力页完成原装配转换，再提炼或绑定新 Skill。");
           const unique = new Map(
             request.sources.map((selection) => [
               selection.threadId + ":" + selection.turnId,
@@ -1074,47 +1262,163 @@ export function createSkillEvolutionService(input: {
             [...unique.values()].map((selection) => sourceFor(expert.id, selection)),
           );
           const messages = selected.flatMap((source) => source.messages);
-          const base = request.targetSkillId ? await readSkill(request.targetSkillId) : undefined;
-          if (base) {
+          const catalog = await boundSkillCatalog(expert);
+          const sourceDigest = evolutionDigest({
+            messages,
+            focus: request.focus ?? "",
+            catalog,
+          });
+          const prompt = buildSkillEvolutionDiscoveryPrompt({
+            expert: { name: expert.name, description: expert.description },
+            ...(request.focus ? { focus: request.focus } : {}),
+            messages,
+            catalog,
+          });
+          let record: StoredRequest = {
+            requestId: request.requestId,
+            ownerId: input.ownerId,
+            fingerprint,
+            sourceDigest,
+            catalogSkillIds: catalog.map((skill) => skill.skillId),
+            taskThreadId: ThreadId.makeUnsafe(nativeId(request.requestId, "task")),
+            projectId: selected[0]!.source.projectId,
+            run: {
+              requestId: request.requestId,
+              expertId: expert.id,
+              stage: "discovery",
+              sourceSelections: [...unique.values()],
+              createdAt: now(),
+              updatedAt: now(),
+              modelSelection: request.modelSelection,
+              sourceCount: selected.length,
+              status: "queued",
+              proposals: [],
+              opportunities: [],
+            },
+            expertRevision: expert.revision,
+            bindings: expert.skillBindings ?? [],
+            files: [],
+            messages,
+            prompt,
+            repairCount: 0,
+            intents: [],
+            taskTitle: "Skill 提炼 · " + expert.name,
+            dispatchAccepted: false,
+            dispatchAttempts: 0,
+          };
+          record = await save(record);
+          try {
+            record = await dispatchRequest(record);
+            observe(record.requestId);
+          } catch (cause) {
+            record = await load(record.requestId);
+            record = await updateRun(record, { status: "queued", error: errorText(cause) });
+            observe(record.requestId);
+          }
+          return { run: publicRun(record) };
+        }
+        case "generate": {
+          const fingerprint = evolutionDigest({ ...request, requestId: undefined });
+          const previous = await runEffect(input.repository.read(request.requestId));
+          if (previous) {
+            const existing = await load(request.requestId);
+            if (existing.fingerprint !== fingerprint || existing.run.stage !== "generation")
+              throw new Error("同一请求 ID 已用于不同的生成操作。");
+            const current = await reconcile(request.requestId);
+            if (busy.has(current.run.status)) observe(request.requestId);
+            return { run: publicRun(current) };
+          }
+
+          const parent = await load(request.discoveryRequestId);
+          const opportunity = parent.run.opportunities?.find(
+            (item) => item.opportunityId === request.opportunityId,
+          );
+          if (
+            parent.run.stage !== "discovery" ||
+            !opportunity ||
+            opportunity.expertId !== parent.run.expertId ||
+            opportunity.digest !== request.expectedDigest ||
+            opportunityDigest(opportunity) !== request.expectedDigest
+          )
+            throw new Error("经验机会已改变，请重新查看后再生成。");
+          if (opportunity.status !== "suggested")
+            throw new Error("已关闭的经验机会不能生成 Skill。");
+
+          const children = await generationChildren(
+            parent.run.expertId,
+            parent.requestId,
+            opportunity.opportunityId,
+          );
+          if (
+            children.some((child) =>
+              child.run.proposals.some((proposal) =>
+                ["applied", "saved_unbound"].includes(proposal.status),
+              ),
+            )
+          )
+            throw new Error("该经验机会已有采用或已保存的 Skill 候选。");
+          const latest = children.toSorted(
+            (left, right) =>
+              (right.run.generationIndex ?? 0) - (left.run.generationIndex ?? 0) ||
+              right.requestId.localeCompare(left.requestId),
+          )[0];
+          if (
+            latest &&
+            (busy.has(latest.run.status) ||
+              latest.intents.length > 0 ||
+              latest.run.proposals.some((proposal) =>
+                ["applying", "saved_unbound"].includes(proposal.status),
+              ))
+          )
+            throw new Error("上一轮生成仍在执行或采用中，请等待其结束。");
+          const retryAfterFailure =
+            latest?.run.status === "failed" || latest?.run.status === "cancelled";
+          if (latest && !retryAfterFailure && !request.feedback?.trim())
+            throw new Error("再次生成前请提供具体反馈，说明上一轮需要调整的地方。");
+          if (!parent.run.sourceSelections)
+            throw new Error("发现记录缺少冻结的来源选择，无法继续生成。");
+
+          const expert = await activeExpert(parent.run.expertId);
+          let base: SkillDefinition | undefined;
+          if (opportunity.targetSkillId) {
+            if (!parent.catalogSkillIds?.includes(opportunity.targetSkillId))
+              throw new Error("发现机会的目标不属于其冻结的专家技能目录。");
+            const boundTargetId = opportunity.targetSkillId;
+            assertCanImprove(expert, boundTargetId);
+            base = await readSkill(boundTargetId);
             assertSkillScopeForExpert(base, expert.id);
-            if (!expert.skillBindings?.some((binding) => binding.skillId === base.skillId))
-              throw new Error("目标 Skill 已不在该专家的已保存绑定中。");
-            if (
-              effectiveSkillEvolutionPolicy(base) === "independent" &&
-              base.scope?.kind !== "expert"
-            ) {
-              const copies = (await input.library.execute({ action: "list" })).skills ?? [];
-              if (
-                copies.some(
-                  (skill) =>
-                    !skill.deleted &&
-                    skill.scope?.kind === "expert" &&
-                    skill.scope.expertId === expert.id &&
-                    skill.derivedFrom?.skillId === base.skillId,
-                )
-              )
-                throw new Error(
-                  "该来源已有当前专家的专用副本，请选择该副本，或继续原候选的绑定操作。",
-                );
+            if (effectiveSkillScope(base).kind === "shared") {
+              const copies = (
+                (await input.library.execute({ action: "list" })).skills ?? []
+              ).filter(
+                (skill) =>
+                  !skill.deleted &&
+                  skill.scope?.kind === "expert" &&
+                  skill.scope.expertId === expert.id &&
+                  skill.derivedFrom?.skillId === boundTargetId,
+              );
+              if (copies.length > 1) throw new Error("该来源存在多个专属副本，请先检查技能库。");
+              if (copies[0]) base = await readSkill(copies[0].skillId);
             }
             await retainSkillEvolutionPackages(input.stateDir, [base.packageId]);
           }
           const files = base ? await filesFor(base) : [];
-          const sourceDigest = evolutionDigest({
-            messages,
-            focus: request.focus ?? "",
-            target: base?.derivedFrom?.skillId ?? base?.skillId ?? "new",
-          });
+          const selectedOpportunity = {
+            name: opportunity.name,
+            reason: opportunity.reason,
+            outcomes: opportunity.outcomes,
+            evidence: opportunity.evidence,
+          };
           const prompt = buildSkillEvolutionPrompt({
             expert: { name: expert.name, description: expert.description },
-            ...(request.focus ? { focus: request.focus } : {}),
-            messages,
+            opportunity: selectedOpportunity,
+            ...(request.feedback ? { feedback: request.feedback } : {}),
+            messages: parent.messages,
             ...(base
               ? {
                   target: {
                     name: base.name,
                     entryPath: base.entryPath,
-                    policy: effectiveSkillEvolutionPolicy(base),
                     files: files.map((file) => {
                       const bytes = Buffer.from(file.content, "base64");
                       const text = bytes.toString("utf8");
@@ -1127,57 +1431,55 @@ export function createSkillEvolutionService(input: {
                 }
               : {}),
           });
+          const generationIndex =
+            Math.max(0, ...children.map((child) => child.run.generationIndex ?? 0)) + 1;
           let record: StoredRequest = {
             requestId: request.requestId,
             ownerId: input.ownerId,
             fingerprint,
-            sourceDigest,
+            sourceDigest: evolutionDigest({
+              parentSourceDigest: parent.sourceDigest,
+              opportunityDigest: request.expectedDigest,
+              feedback: request.feedback ?? "",
+              target: base
+                ? { skillId: base.skillId, revision: base.revision, packageId: base.packageId }
+                : "new",
+              messages: parent.messages,
+            }),
+            opportunityDigest: request.expectedDigest,
             taskThreadId: ThreadId.makeUnsafe(nativeId(request.requestId, "task")),
-            projectId: selected[0]!.source.projectId,
+            projectId: parent.projectId,
             run: {
               requestId: request.requestId,
               expertId: expert.id,
+              stage: "generation",
+              discoveryRequestId: parent.requestId,
+              opportunityId: opportunity.opportunityId,
+              generationIndex,
+              ...(request.feedback !== undefined ? { feedback: request.feedback } : {}),
+              sourceSelections: parent.run.sourceSelections,
               createdAt: now(),
               updatedAt: now(),
-              modelSelection: request.modelSelection,
-              sourceCount: selected.length,
+              modelSelection: parent.run.modelSelection,
+              sourceCount: parent.run.sourceCount,
               ...(base ? { targetSkillId: base.skillId } : {}),
               status: "queued",
               proposals: [],
             },
             expertRevision: expert.revision,
             bindings: expert.skillBindings ?? [],
-            ...(base ? { base } : {}),
-            ...(request.protectedAction ? { requestedAction: request.protectedAction } : {}),
+            ...(base && opportunity.targetSkillId
+              ? { base, bindingSkillId: opportunity.targetSkillId }
+              : {}),
             files,
-            messages,
+            messages: parent.messages,
             prompt,
             repairCount: 0,
             intents: [],
-            taskTitle: "Skill 提炼 · " + expert.name,
+            taskTitle: "Skill 经验生成 · " + opportunity.name,
             dispatchAccepted: false,
             dispatchAttempts: 0,
           };
-          const old = await runEffect(input.repository.list(expert.id));
-          if (
-            old.some((row) => {
-              const value = JSON.parse(row.record) as StoredRequest;
-              return (
-                value.sourceDigest === sourceDigest &&
-                value.run.proposals.some((proposal) => proposal.status === "applied")
-              );
-            })
-          ) {
-            record = await save({
-              ...record,
-              run: {
-                ...record.run,
-                status: "no_change",
-                summary: "相同来源与提炼重点已有采用记录，无需重复提炼。",
-              },
-            });
-            return { run: publicRun(record) };
-          }
           record = await save(record);
           try {
             record = await dispatchRequest(record);
@@ -1189,8 +1491,46 @@ export function createSkillEvolutionService(input: {
           }
           return { run: publicRun(record) };
         }
+        case "dismissOpportunity": {
+          const record = await load(request.requestId);
+          if (record.run.stage !== "discovery")
+            throw new Error("只有发现记录中的经验机会可以关闭。");
+          const opportunity = record.run.opportunities?.find(
+            (item) => item.opportunityId === request.opportunityId,
+          );
+          if (
+            !opportunity ||
+            opportunity.digest !== request.expectedDigest ||
+            opportunityDigest(opportunity) !== request.expectedDigest
+          )
+            throw new Error("经验机会已改变，请重新查看后再关闭。");
+          if (opportunity.status === "dismissed") return { run: publicRun(record) };
+          const children = await generationChildren(
+            record.run.expertId,
+            record.requestId,
+            opportunity.opportunityId,
+          );
+          if (
+            children.some(
+              (child) =>
+                busy.has(child.run.status) ||
+                child.intents.length > 0 ||
+                child.run.proposals.some((proposal) =>
+                  ["applying", "saved_unbound", "applied"].includes(proposal.status),
+                ),
+            )
+          )
+            throw new Error("该经验机会已有执行中或已采用的生成候选，暂时不能关闭。");
+          const opportunities = record.run.opportunities!.map((item) =>
+            item.opportunityId === opportunity.opportunityId
+              ? { ...item, status: "dismissed" as const }
+              : item,
+          );
+          return { run: publicRun(await updateRun(record, { opportunities })) };
+        }
         case "cancel": {
           let record = await load(request.requestId);
+          if (record.run.stage === "generation") await assertGenerationParent(record, false);
           if (!busy.has(record.run.status)) return { run: publicRun(record) };
           const thread = await input.host.readThread(record.taskThreadId);
           await input.host.dispatch({
@@ -1209,6 +1549,7 @@ export function createSkillEvolutionService(input: {
           return apply(request);
         case "reject": {
           const record = await load(request.requestId);
+          if (record.run.stage === "generation") await assertGenerationParent(record, true);
           const proposal = proposalFor(record, request.proposalId, request.expectedDigest);
           if (
             proposal.status !== "proposed" ||
@@ -1221,6 +1562,7 @@ export function createSkillEvolutionService(input: {
         }
         case "edit": {
           const record = await load(request.requestId);
+          if (record.run.stage === "generation") await assertGenerationParent(record, true);
           const proposal = proposalFor(record, request.proposalId, request.expectedDigest);
           if (
             proposal.status !== "proposed" ||
@@ -1284,7 +1626,6 @@ export function createSkillEvolutionService(input: {
                 revision: preview.toSkill.revision,
                 packageId: preview.toSkill.packageId,
                 previousSkillId: preview.fromSkill.skillId,
-                policy: effectiveSkillEvolutionPolicy(preview.toSkill),
                 scope: effectiveSkillScope(preview.toSkill),
                 affectedExpertIds: [request.expertId],
               },
@@ -1320,15 +1661,6 @@ export function createSkillEvolutionService(input: {
             if (preview.skill.revision !== request.expectedRevision)
               throw new Error("Skill 已改变，请重新预览恢复差异。");
             const affectedExpertIds = await affectedExperts(preview.skill.skillId);
-            if (
-              effectiveSkillScope(preview.skill).kind === "shared" &&
-              (!request.expectedAffectedExpertIds ||
-                !isDeepStrictEqual(
-                  affectedExpertIds,
-                  [...request.expectedAffectedExpertIds].toSorted(),
-                ))
-            )
-              throw new Error("共享使用方已改变，请重新预览恢复影响。");
             if (!preview.changes.length) return { skill: preview.skill };
             const origin = await load(preview.event.requestId);
             const content = {
@@ -1342,7 +1674,6 @@ export function createSkillEvolutionService(input: {
               baseSkillId: preview.skill.skillId,
               baseRevision: preview.skill.revision,
               basePackageId: preview.skill.packageId,
-              policy: effectiveSkillEvolutionPolicy(preview.skill),
               affectedExpertIds,
               changes: preview.changes,
             };
@@ -1355,19 +1686,31 @@ export function createSkillEvolutionService(input: {
               preview.skill.packageId,
               preview.event.packageId,
             ]);
+            const restoreRecord = { ...origin };
+            delete restoreRecord.opportunityDigest;
+            delete restoreRecord.catalogSkillIds;
+            const restoreRun = { ...origin.run };
+            delete restoreRun.stage;
+            delete restoreRun.discoveryRequestId;
+            delete restoreRun.opportunityId;
+            delete restoreRun.generationIndex;
+            delete restoreRun.feedback;
+            delete restoreRun.sourceSelections;
+            delete restoreRun.opportunities;
             await save({
-              ...origin,
+              ...restoreRecord,
               requestId: id,
               fingerprint: evolutionDigest(request),
               taskThreadId: ThreadId.makeUnsafe(nativeId(id, "task")),
               expertRevision: preview.expert.revision,
               bindings: preview.expert.skillBindings ?? [],
               base: preview.skill,
+              bindingSkillId: preview.skill.skillId,
               files: preview.current,
               intents: [],
               restoreOfEventId: request.eventId,
               run: {
-                ...origin.run,
+                ...restoreRun,
                 requestId: id,
                 expertId: request.expertId,
                 taskThreadId: undefined,
@@ -1384,16 +1727,13 @@ export function createSkillEvolutionService(input: {
           }
           const record = await load(id);
           if (record.fingerprint !== evolutionDigest(request))
-            throw new Error("同一恢复操作 ID 的目标、版本或认可已改变。");
+            throw new Error("同一恢复操作 ID 的目标或版本已改变。");
           return apply({
             action: "apply",
             requestId: id,
             proposalId: record.run.proposals[0]!.proposalId,
             expectedDigest: record.run.proposals[0]!.digest,
             operationId: request.operationId,
-            ...(request.approveProtected !== undefined
-              ? { approveProtected: request.approveProtected }
-              : {}),
           });
         }
       }

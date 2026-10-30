@@ -17,6 +17,7 @@ const preparation = vi.hoisted(() => ({
   reloadChanged: false,
   runtimeCreations: 0,
   prompts: 0,
+  promptInputs: [] as unknown[],
   spawnInputs: [] as unknown[],
   compatChildMarker: true,
   resolveCalls: [] as Array<{ binaryPath?: string | null; options?: unknown }>,
@@ -120,9 +121,10 @@ vi.mock("../acp/OmpAcpSupport.ts", async (original) => ({
       supportsSessionRecovery: Effect.succeed(true),
       supportsSessionFork: Effect.succeed(false),
       cancel: Effect.void,
-      prompt: () =>
+      prompt: (input: unknown) =>
         Effect.sync(() => {
           preparation.prompts++;
+          preparation.promptInputs.push(input);
           return { stopReason: "end_turn" };
         }),
     });
@@ -202,6 +204,7 @@ describe("OMP adapter fixed Skill admission", () => {
       preparation.reloadChanged = false;
       preparation.runtimeCreations = 0;
       preparation.prompts = 0;
+      preparation.promptInputs.length = 0;
       preparation.compatChildMarker = true;
       preparation.resolveCalls.length = 0;
       preparation.compatPreparations = 0;
@@ -222,7 +225,7 @@ describe("OMP adapter fixed Skill admission", () => {
             description: "Selected only",
             packageId: `pkg_${"c".repeat(64)}`,
             entryPath: "SKILL.md",
-            activation: "on-demand",
+
             sha256: createHash("sha256").update(bytes).digest("hex"),
           },
         ],
@@ -307,6 +310,36 @@ describe("OMP adapter fixed Skill admission", () => {
               (yield* Effect.result(adapter.sendTurn({ threadId, input: "Continue" })))._tag,
             ).toBe("Failure");
             expect(preparation.prompts).toBe(0);
+            preparation.reloadChanged = false;
+            const chipResult = yield* Effect.result(
+              adapter.sendTurn({
+                threadId,
+                input: "Use the selected workflow.",
+                skills: [
+                  {
+                    name: "selected",
+                    path: "/untrusted/renderer/path",
+                    expert: {
+                      snapshotId: session.snapshotId,
+                      packageId: session.skillEntries![0]!.packageId,
+                      entryPath: session.skillEntries![0]!.entryPath,
+                    },
+                  },
+                ],
+              }),
+            );
+            expect(chipResult._tag).toBe("Success");
+            yield* Effect.promise(() =>
+              vi.waitFor(() => expect(preparation.prompts).toBe(1), { timeout: 3_000 }),
+            );
+            expect(preparation.prompts).toBe(1);
+            expect(JSON.stringify(preparation.promptInputs[0])).toContain(
+              "<selected_skill_references>",
+            );
+            expect(JSON.stringify(preparation.promptInputs[0])).toContain(file);
+            expect(JSON.stringify(preparation.promptInputs[0])).not.toContain(
+              "/untrusted/renderer/path",
+            );
             yield* adapter.stopSession(threadId);
             expect(yield* adapter.hasSession(threadId)).toBe(false);
           }).pipe(Effect.provide(layer), Effect.scoped),
@@ -416,7 +449,7 @@ describe("OMP adapter fixed Skill admission", () => {
           description: "Selected only",
           packageId: `pkg_${"e".repeat(64)}`,
           entryPath: "SKILL.md",
-          activation: "on-demand",
+
           sha256: createHash("sha256")
             .update(await fs.readFile(file))
             .digest("hex"),

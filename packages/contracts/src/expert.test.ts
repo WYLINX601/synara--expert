@@ -6,6 +6,7 @@ import {
   ExpertAppliedRuntimeRecord,
   ExpertPreviewInput,
   ExpertSaveInput,
+  ExpertDefinition,
   ExpertSnapshot,
 } from "./expert";
 
@@ -53,7 +54,6 @@ describe("Expert skill package selections", () => {
     const selection = {
       packageId: `pkg_${"a".repeat(64)}`,
       entryPath: "writer/SKILL.md",
-      activation: "startup" as const,
     };
     const decoded = Schema.decodeUnknownSync(ExpertSaveInput)({
       ...definition([]),
@@ -74,10 +74,11 @@ describe("Expert skill package selections", () => {
       skills: [
         { name: "Writer", path: "/state/experts/skill-packages/pkg/content/writer/SKILL.md" },
       ],
-      skillSelections: [selection],
+      skillSelections: [{ ...selection, activation: "startup" }],
       skillEntries: [
         {
           ...selection,
+          activation: "startup",
           name: "Writer",
           description: "Writes useful documents.",
           path: "/state/experts/skill-packages/pkg/content/writer/SKILL.md",
@@ -88,8 +89,28 @@ describe("Expert skill package selections", () => {
       connections: [],
       createdAt: "2026-10-20T00:00:00.000Z",
     });
+    expect(snapshot.skillSelections?.[0]).toMatchObject({ ...selection, activation: "startup" });
     expect(snapshot.schemaVersion).toBe(2);
     expect(snapshot.skillEntries?.[0]).toMatchObject({ ...selection, name: "Writer" });
+  });
+
+  it("omits retired authoring metadata on definition reads and rejects it in new saves", () => {
+    const binding = { skillId: `skl_${"a".repeat(32)}`, enabled: true, activation: "startup" };
+    const saved = {
+      ...definition([]),
+      id: "writer",
+      archived: false,
+      revision: 1,
+      updatedAt: "2026-10-20T00:00:00.000Z",
+      skillBindings: [binding],
+    };
+    expect(Schema.decodeUnknownSync(ExpertDefinition)(saved).skillBindings?.[0]).toEqual({
+      skillId: binding.skillId,
+      enabled: true,
+    });
+    expect(() =>
+      Schema.decodeUnknownSync(ExpertSaveInput)({ ...definition([]), skillBindings: [binding] }),
+    ).toThrow();
   });
 
   it("rejects malformed package IDs and entry paths", () => {

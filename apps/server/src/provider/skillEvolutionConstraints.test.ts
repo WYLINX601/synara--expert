@@ -6,8 +6,16 @@ describe("providerSessionStartInputForSkillEvolution", () => {
   it("clears persisted context and inherited authorization for a marked session", () => {
     const input: ProviderSessionStartInput = {
       threadId: ThreadId.makeUnsafe("skill-evolution-provider-test"),
+      provider: "omp",
       executionPurpose: "skill-evolution",
+      cwd: "/selected/project",
       runtimeMode: "full-access",
+      modelSelection: {
+        provider: "omp",
+        instanceId: "omp",
+        model: "openai/gpt-4o",
+      },
+      providerOptions: { omp: { agentDir: "/selected/account/agent" } },
       resumeCursor: { resume: "old-provider-session" },
       forkSourceResumeCursor: { resume: "fork-source-session" },
       additionalDirectories: ["/outside/selected-workspace"],
@@ -28,9 +36,18 @@ describe("providerSessionStartInputForSkillEvolution", () => {
       autoApproveSynaraTools: true,
     };
 
-    expect(providerSessionStartInputForSkillEvolution(input)).toMatchObject({
+    const sanitized = providerSessionStartInputForSkillEvolution(input);
+    expect(sanitized).toMatchObject({
+      provider: "omp",
+      cwd: "/selected/project",
       executionPurpose: "skill-evolution",
       runtimeMode: "full-access",
+      modelSelection: {
+        provider: "omp",
+        instanceId: "omp",
+        model: "openai/gpt-4o",
+      },
+      providerOptions: { omp: { agentDir: "/selected/account/agent" } },
       resumeCursor: undefined,
       forkSourceResumeCursor: undefined,
       additionalDirectories: undefined,

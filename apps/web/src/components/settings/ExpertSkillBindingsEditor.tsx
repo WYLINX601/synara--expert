@@ -3,8 +3,7 @@ import type { ExpertSkillBinding, SkillDefinition } from "@synara/contracts";
 import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
-import { Select, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
-import { SettingsSectionShell, SettingsSelectPopup } from "./SettingsPanelPrimitives";
+import { SettingsSectionShell } from "./SettingsPanelPrimitives";
 import { useSkillPackageConnection } from "./skillPackageSettingsQueries";
 
 export const SKILL_LIBRARY_QUERY_KEY = ["server", "skillLibrary"] as const;
@@ -14,13 +13,7 @@ export function setSkillBinding(
   binding: Omit<ExpertSkillBinding, "skillId"> | null,
 ): ExpertSkillBinding[] {
   return [
-    ...bindings
-      .filter((item) => item.skillId !== skillId)
-      .map((item) =>
-        binding?.enabled && binding.activation === "startup" && item.activation === "startup"
-          ? { ...item, activation: "on-demand" as const }
-          : item,
-      ),
+    ...bindings.filter((item) => item.skillId !== skillId),
     ...(binding ? [{ skillId, ...binding }] : []),
   ];
 }
@@ -43,9 +36,7 @@ export function SkillBindingControls({
         size="sm"
         variant="outline"
         disabled={disabled}
-        onClick={() =>
-          onChange(setSkillBinding(bindings, skillId, { enabled: true, activation: "on-demand" }))
-        }
+        onClick={() => onChange(setSkillBinding(bindings, skillId, { enabled: true }))}
       >
         绑定
       </Button>
@@ -54,28 +45,25 @@ export function SkillBindingControls({
     <div className="flex shrink-0 items-center gap-2">
       <Switch
         aria-label="启用绑定技能"
+        tone="neutral"
         checked={binding.enabled}
         disabled={disabled}
         onCheckedChange={(enabled) =>
           onChange(setSkillBinding(bindings, skillId, { ...binding, enabled }))
         }
       />
-      <Select
-        value={binding.activation}
-        disabled={disabled}
-        onValueChange={(value) => {
-          if (value === "startup" || value === "on-demand")
-            onChange(setSkillBinding(bindings, skillId, { ...binding, activation: value }));
-        }}
-      >
-        <SelectTrigger size="sm" aria-label="技能加载时机" className="w-28">
-          <SelectValue>{binding.activation === "startup" ? "启动时" : "按需"}</SelectValue>
-        </SelectTrigger>
-        <SettingsSelectPopup>
-          <SelectItem value="on-demand">按需</SelectItem>
-          <SelectItem value="startup">启动时</SelectItem>
-        </SettingsSelectPopup>
-      </Select>
+      <label className="flex items-center gap-1.5 text-ui-xs text-muted-foreground">
+        <Switch
+          aria-label="允许复制并改进"
+          tone="neutral"
+          checked={binding.allowEvolution === true}
+          disabled={disabled}
+          onCheckedChange={(allowEvolution) =>
+            onChange(setSkillBinding(bindings, skillId, { ...binding, allowEvolution }))
+          }
+        />
+        <span>允许复制并改进</span>
+      </label>
       <Button
         size="sm"
         variant="ghost"
@@ -121,9 +109,6 @@ export function ExpertSkillBindingsEditor({
       count={bindings.filter((binding) => binding.enabled).length}
       layout="compact"
     >
-      <p className="pb-2 text-ui-sm text-muted-foreground">
-        下一次运行使用已启用技能的最新保存版本；当前运行及其恢复保持原版本。最多一个启动技能。空装配启用零个技能。
-      </p>
       {query.isError ? (
         <p role="alert" className="text-ui-sm text-destructive">
           无法读取技能库。

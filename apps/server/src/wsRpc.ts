@@ -203,7 +203,6 @@ import {
   makeWorkbenchExpertRpcHandlers,
   makeWorkbenchExpertDiscoveryHandlers,
 } from "./workbench/host/expertRpc.ts";
-import { createSkillPackageSwitchHost } from "./workbench/host/skillPackageSwitchHost.ts";
 import { makeWorkbenchContextRpcHandlers } from "./workbench/host/contextRpc.ts";
 import { makeSkillManagementRpcHandlers } from "./workbench/host/skillManagementRpc.ts";
 import { readThreadContextDetails } from "./workbench/host/contextThreadDetails.ts";
@@ -1479,28 +1478,6 @@ const makeWsRpcHandlersLayer = () =>
         requireOwner,
         rpcEffect,
         expertRpcEffect,
-        createSkillPackageSwitchHost: (principal) =>
-          createSkillPackageSwitchHost({
-            stateDir: config.stateDir,
-            experts: workbenchExpertRuntime.experts,
-            hubWorkRepository,
-            hubWorkService,
-            readThreads: () =>
-              Effect.runPromise(
-                projectionReadModelQuery
-                  .getSnapshot()
-                  .pipe(Effect.map((snapshot) => snapshot.threads)),
-              ),
-            readAppliedRuntimeRecords: () =>
-              Effect.runPromise(workbenchExpertRuntime.readAppliedRuntimeRecords()),
-            runEffect: Effect.runPromise,
-            dispatch: (command) =>
-              Effect.runPromise(
-                dispatchOrchestrationCommand(command).pipe(
-                  Effect.provideService(CurrentManagedAttachmentPrincipal, principal),
-                ),
-              ),
-          }),
         loadProjectionThreads: () =>
           projectionReadModelQuery.getSnapshot().pipe(Effect.map((snapshot) => snapshot.threads)),
       });

@@ -11,7 +11,7 @@ import {
 const packageId = `pkg_${"a".repeat(64)}`;
 
 describe("skill package contracts", () => {
-  it.each(["SKILL.md", "skills/bmad-pm/SKILL.md", "模块/入口/SKILL.md"])(
+  it.each(["SKILL.md", "skills/bmad-pm/SKILL.md", "模块/入口/SKILL.md", "native:posix/SKILL.md"])(
     "accepts package-relative entries: %s",
     (entryPath) => {
       expect(Schema.decodeUnknownSync(SkillEntryPath)(entryPath)).toBe(entryPath);
@@ -45,16 +45,16 @@ describe("skill package contracts", () => {
     }
   });
 
-  it("requires explicit activation and rejects local paths or extra selection authority", () => {
-    const selection = { packageId, entryPath: "skills/pm/SKILL.md", activation: "startup" };
+  it("uses native loading and rejects loading-time settings or extra selection authority", () => {
+    const selection = { packageId, entryPath: "skills/pm/SKILL.md" };
     expect(Schema.decodeUnknownSync(ExpertSkillSelection)(selection)).toEqual(selection);
-    expect(Schema.is(ExpertSkillSelection)({ ...selection, activation: "always" })).toBe(false);
+    expect(Schema.is(ExpertSkillSelection)({ ...selection, activation: "startup" })).toBe(false);
     expect(() =>
       Schema.decodeUnknownSync(ExpertSkillSelection)({ ...selection, path: "/local/SKILL.md" }),
     ).toThrow();
-    expect(() =>
+    expect(
       Schema.decodeUnknownSync(ExpertSkillSelection)({ packageId, entryPath: "SKILL.md" }),
-    ).toThrow();
+    ).toEqual({ packageId, entryPath: "SKILL.md" });
   });
 
   it("accepts only the server-owned preview token at confirmation", () => {

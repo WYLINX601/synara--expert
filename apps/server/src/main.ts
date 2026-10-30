@@ -814,7 +814,6 @@ function managementCliFlagsFromCommand(
     expertIds: readOption<string>("expertIds"),
     skillId: value.skillId as ReadonlyArray<string>,
     skillIds: readOption<string>("skillIds"),
-    createdBy: readOption<string>("createdBy"),
     sort: readOption<"name" | "used-by" | "created" | "updated">("sort"),
     direction: readOption<"asc" | "desc">("direction"),
     expectedRevision: readOption<number>("expectedRevision"),
@@ -825,7 +824,9 @@ function managementCliFlagsFromCommand(
     overwriteLocalEdits: value.overwriteLocalEdits as boolean,
     entry: readOption<string>("entry"),
     duplicate: readOption<"skip" | "rename" | "replace">("duplicate"),
-    activation: readOption<"startup" | "on-demand">("activation"),
+    allowEvolution: readOption<"true" | "false">("allowEvolution"),
+    selectionScope: readOption<"entry" | "package">("selectionScope"),
+    resourceMode: readOption<"shared-readonly" | "run-private">("resourceMode"),
     instanceId: readOption<string>("instanceId"),
     flavor: readOption<ManagementCliFlagValues["flavor"]>("flavor"),
   };

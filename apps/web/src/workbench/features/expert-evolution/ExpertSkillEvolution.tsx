@@ -12,6 +12,8 @@ import {
 } from "@synara/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  useId,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -27,28 +29,39 @@ import { ScratchModelPickers } from "~/components/chat/ScratchAgentControls";
 import { useProviderStatusesForLocalConfig } from "~/hooks/useProviderStatusesForLocalConfig";
 import { useScratchComposerDraft } from "~/hooks/useScratchComposerDraft";
 import { useScratchModelCatalog } from "~/hooks/useScratchModelCatalog";
+import { DisclosureChevron } from "~/components/ui/DisclosureChevron";
+import { DisclosureRegion } from "~/components/ui/DisclosureRegion";
 import { resolveProviderDiscoveryCwd } from "~/lib/providerDiscovery";
 import { serverConfigQueryOptions } from "~/lib/serverReactQuery";
 import { Button } from "~/components/ui/button";
+import { Alert, AlertTitle, AlertDescription } from "~/components/ui/alert";
+import { DetailTabs } from "~/components/ui/DetailTabs";
+import { SettingsEditorDialog } from "~/components/settings/SettingsEditorDialog";
 import { Checkbox } from "~/components/ui/checkbox";
 import { Input } from "~/components/ui/input";
 import { Textarea } from "~/components/ui/textarea";
 import { ensureExpertClient } from "~/workbench/host/expertClient";
-import { buildModelSelection } from "~/providerModelOptions";
+import { buildModelSelection, formatProviderModelOptionName } from "~/providerModelOptions";
 import {
+  evolutionTimelineEntries,
   isSkillEvolutionRunActive,
+  defaultSkillEvolutionSources,
+  isLatestOpportunityGeneration,
+  latestOpportunityGeneration,
   layoutEvolutionGraph,
+  skillEvolutionActionLabel,
   skillEvolutionEventLabel,
-  skillEvolutionPolicyLabel,
   skillEvolutionProposalStatusLabel,
   skillEvolutionQueryKey,
   skillEvolutionRunPresentation,
-  skillEvolutionRunStatusLabel,
   skillEvolutionScopeLabel,
 } from "./model";
 import {
   CircleAlertIcon,
+  CircleCheckIcon,
+  ClockIcon,
   ExternalLinkIcon,
+  FileIcon,
   LoaderCircleIcon,
   MinusIcon,
   PlusIcon,
@@ -57,6 +70,7 @@ import {
   Dialog,
   DialogDescription,
   DialogFooter,
+  DialogPanel,
   DialogHeader,
   DialogPopup,
   DialogTitle,
@@ -74,7 +88,7 @@ function errorText(error: unknown) {
 }
 
 async function stableOperationId(
-  kind: "apply" | "restore" | "bind-restore",
+  kind: "apply" | "restore" | "bind-restore" | "generate",
   parts: ReadonlyArray<string>,
 ) {
   const bytes = new TextEncoder().encode(parts.join("\u0000"));
@@ -85,6 +99,10 @@ async function stableOperationId(
 
 function sourceKey(source: { threadId: string; turnId: string }) {
   return `${source.threadId}:${source.turnId}`;
+}
+
+function sameKeys(left: ReadonlySet<string>, right: ReadonlySet<string>) {
+  return left.size === right.size && [...left].every((key) => right.has(key));
 }
 
 function decodeUtf8Base64(value: string): string | null {
@@ -116,6 +134,7 @@ function ProposalFileChange({
   change,
   index = 0,
   editing = false,
+  compareInitiallyOpen = false,
   onChange,
   onRemove,
   onExecutableChange,
@@ -127,6 +146,7 @@ function ProposalFileChange({
   change: SkillFileChange;
   index?: number;
   editing?: boolean;
+  compareInitiallyOpen?: boolean;
   onChange?: (index: number, content: string) => void;
   onRemove?: (index: number) => void;
   onExecutableChange?: (index: number, executable: boolean) => void;
@@ -134,7 +154,7 @@ function ProposalFileChange({
   targetVersionLabel?: string;
   compareButtonLabel?: string;
 }) {
-  const [showBase, setShowBase] = useState(false);
+  const [showBase, setShowBase] = useState(compareInitiallyOpen);
   const basePackage = useQuery({
     queryKey: ["server", "skillPackages", "evolutionDiff", proposal.basePackageId],
     queryFn: () => ensureExpertClient().readSkillPackage({ packageId: proposal.basePackageId! }),
@@ -201,7 +221,7 @@ function ProposalFileChange({
             onChange={(event) => onChange?.(index, encodeUtf8Base64(event.target.value))}
           />
         )
-      ) : change.content === undefined ? (
+      ) : showBase ? null : change.content === undefined ? (
         <p className="border-t border-border px-3 py-2 text-ui-xs text-muted-foreground">
           该文件会被删除。
         </p>
@@ -294,6 +314,7 @@ function ProposalFileChange({
 
 function EvolutionGraphView({
   expertId,
+  expertNameById,
   active,
   graph,
   currentGraph,
@@ -302,6 +323,7 @@ function EvolutionGraphView({
   onSelectSkill,
 }: {
   readonly expertId: string;
+  expertNameById: ReadonlyMap<string, string>;
   readonly active: boolean;
   graph: SkillEvolutionGraph | undefined;
   currentGraph: SkillEvolutionGraph | undefined;
@@ -507,7 +529,7 @@ function EvolutionGraphView({
                   data-skill-node
                   role="button"
                   tabIndex={0}
-                  aria-label={`${node.name}，版本 ${node.revision}，${skillEvolutionPolicyLabel(node.policy)}${node.timestamp ? `，${new Date(node.timestamp).toLocaleDateString()}` : "，时间未知"}${node.deleted ? "，已删除" : ""}`}
+                  aria-label={`${node.name}，版本 ${node.revision}，${skillEvolutionScopeLabel(node.ownerExpertId ? { kind: "expert", expertId: node.ownerExpertId } : undefined, expertNameById)}${node.timestamp ? `，${new Date(node.timestamp).toLocaleDateString()}` : "，时间未知"}${node.deleted ? "，已删除" : ""}`}
                   className="cursor-pointer outline-none focus-visible:outline-none"
                   onClick={() => onSelectSkill(node)}
                   onKeyDown={(event) => {
@@ -526,13 +548,7 @@ function EvolutionGraphView({
                         ? "var(--color-accent)"
                         : "var(--color-background)"
                     }
-                    stroke={
-                      node.policy === "protected"
-                        ? "var(--color-border)"
-                        : node.policy === "shared"
-                          ? "var(--color-primary)"
-                          : "var(--color-ring)"
-                    }
+                    stroke={node.ownerExpertId ? "var(--color-ring)" : "var(--color-primary)"}
                     strokeWidth={node.skillId === selectedSkillId ? "3" : "1.5"}
                   />
                   <text x={x} y={y + 4} textAnchor="middle" className="fill-foreground text-ui-xs">
@@ -599,19 +615,39 @@ function EvolutionGraphView({
   );
 }
 
+function ExtractionFailure({ reason }: { reason: string }) {
+  return (
+    <Alert variant="error" size="sm">
+      <AlertTitle className="text-ui-sm">提取失败</AlertTitle>
+      <AlertDescription className="break-words text-ui-sm">{reason}</AlertDescription>
+    </Alert>
+  );
+}
+
 function ProposalCard({
   proposal,
   expertArchived,
-  affectedExperts,
+  readOnly = false,
+  compact = false,
+  hideHeader = false,
+  summaryDetails,
+  readOnlyReason,
+  ownerName,
   busy,
   onEdit,
   onApply,
   onReject,
   onOpenTask,
+  onViewResult,
 }: {
   proposal: SkillEvolutionProposal;
   expertArchived: boolean;
-  affectedExperts: ReadonlyArray<string> | null;
+  readOnly?: boolean;
+  compact?: boolean;
+  hideHeader?: boolean;
+  summaryDetails?: ReactNode;
+  readOnlyReason?: string;
+  ownerName: string;
   busy: boolean;
   onEdit: (input: {
     proposal: SkillEvolutionProposal;
@@ -621,160 +657,661 @@ function ProposalCard({
   onApply: (proposal: SkillEvolutionProposal) => Promise<void>;
   onReject: (proposal: SkillEvolutionProposal) => Promise<void>;
   onOpenTask?: (threadId: ThreadId) => void;
+  onViewResult?: (proposal: SkillEvolutionProposal) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [appliedDetailsOpen, setAppliedDetailsOpen] = useState(false);
+  const [diffOpen, setDiffOpen] = useState(false);
   const [name, setName] = useState(proposal.name);
   const [changes, setChanges] = useState(() => proposal.changes.map((change) => ({ ...change })));
   const [newFilePath, setNewFilePath] = useState("");
+  useEffect(() => {
+    if (readOnly) setEditing(false);
+  }, [readOnly]);
   useEffect(() => {
     if (editing) return;
     setName(proposal.name);
     setChanges(proposal.changes.map((change) => ({ ...change })));
   }, [editing, proposal.changes, proposal.name]);
   const statusLabel = skillEvolutionProposalStatusLabel(proposal.status);
-  const applyLabel =
-    proposal.policy === "protected"
-      ? "认可并采用本次改动"
-      : proposal.policy === "shared"
-        ? "采用到共享版本"
-        : proposal.action === "derive"
-          ? "创建专用副本并采用"
-          : "更新专用版本";
-  const missingSharedImpactSnapshot =
-    proposal.policy === "shared" &&
-    proposal.action === "update" &&
-    proposal.affectedExpertIds === undefined;
+  const applyLabel = `应用到「${proposal.name}」`;
 
+  const files = (
+    <section className="space-y-2" aria-label="候选文件差异">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="text-ui-sm font-medium">文件差异（{changes.length} 项）</h4>
+        {editing && !readOnly ? (
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 sm:flex-none">
+            <Input
+              aria-label="新候选文件路径"
+              value={newFilePath}
+              maxLength={4_096}
+              placeholder="添加文件路径"
+              className="min-w-40 flex-1 sm:max-w-72"
+              onChange={(event) => setNewFilePath(event.target.value)}
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={
+                !newFilePath.trim() || changes.some((change) => change.path === newFilePath.trim())
+              }
+              onClick={() => {
+                const path = newFilePath.trim();
+                if (!path || changes.some((change) => change.path === path)) return;
+                setChanges((current) => [...current, { path, content: encodeUtf8Base64("") }]);
+                setNewFilePath("");
+              }}
+            >
+              添加文件
+            </Button>
+          </div>
+        ) : null}
+      </div>
+      {changes.length ? (
+        <ul className="space-y-2">
+          {changes.map((change, index) => (
+            <ProposalFileChange
+              key={`${change.path}:${index}`}
+              proposal={proposal}
+              change={change}
+              index={index}
+              editing={editing && !readOnly}
+              compareInitiallyOpen={compact}
+              targetVersionLabel={proposal.status === "applied" ? "已应用内容" : "候选版本"}
+              onChange={(fileIndex, content) =>
+                setChanges((current) =>
+                  current.map((item, i) => (i === fileIndex ? { ...item, content } : item)),
+                )
+              }
+              onExecutableChange={(fileIndex, executable) =>
+                setChanges((current) =>
+                  current.map((item, i) => (i === fileIndex ? { ...item, executable } : item)),
+                )
+              }
+              onRemove={(fileIndex) =>
+                setChanges((current) => current.filter((_, i) => i !== fileIndex))
+              }
+            />
+          ))}
+        </ul>
+      ) : (
+        <p className="text-ui-sm text-muted-foreground">
+          当前编辑草稿没有文件改动；保存后将由服务端重新校验。
+        </p>
+      )}
+    </section>
+  );
+  const actions = (
+    <footer className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+      {readOnly && (proposal.status === "proposed" || proposal.status === "saved_unbound") ? (
+        <p className="text-ui-sm text-muted-foreground" role="status">
+          {readOnlyReason ?? "此候选已被更新的生成结果替代，不能继续编辑或采用。"}
+        </p>
+      ) : proposal.status === "proposed" && !expertArchived ? (
+        editing ? (
+          <>
+            <Button
+              size="sm"
+              disabled={busy || !name.trim()}
+              onClick={() =>
+                void onEdit({ proposal, name: name.trim(), changes }).then(() => setEditing(false))
+              }
+            >
+              保存候选编辑
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                setName(proposal.name);
+                setChanges(proposal.changes.map((change) => ({ ...change })));
+                setEditing(false);
+              }}
+            >
+              放弃编辑
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setEditing(true);
+                if (compact) setDiffOpen(true);
+              }}
+            >
+              编辑候选
+            </Button>
+            <Button
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                if (compact && !diffOpen) setDiffOpen(true);
+                else void onApply(proposal);
+              }}
+            >
+              {compact && !diffOpen ? "审阅并应用" : applyLabel}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => void onReject(proposal)}
+            >
+              拒绝
+            </Button>
+          </>
+        )
+      ) : proposal.status === "saved_unbound" && !expertArchived ? (
+        <Button size="sm" disabled={busy} onClick={() => void onApply(proposal)}>
+          继续完成绑定
+        </Button>
+      ) : proposal.status === "conflict" ? (
+        <p className="text-ui-sm text-destructive" role="status">
+          目标版本或绑定已变化；候选已保留，请基于最新配置重新提炼。
+        </p>
+      ) : proposal.status === "applied" && !compact ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-ui-sm text-emerald-700 dark:text-emerald-300" role="status">
+            已应用到「{proposal.name}」
+            {proposal.resultRevision ? ` · v${proposal.resultRevision}` : ""}
+          </p>
+          {proposal.resultSkillId && onViewResult ? (
+            <Button size="sm" variant="ghost" onClick={() => onViewResult(proposal)}>
+              查看 Skill <ExternalLinkIcon aria-hidden="true" className="size-3.5" />
+            </Button>
+          ) : null}
+        </div>
+      ) : proposal.status === "rejected" ? (
+        <p className="text-ui-sm text-muted-foreground" role="status">
+          已拒绝，此候选不会写入正式 Skill。
+        </p>
+      ) : proposal.status === "applying" ? (
+        <p className="flex items-center gap-2 text-ui-sm text-muted-foreground" role="status">
+          <LoaderCircleIcon
+            aria-hidden="true"
+            className="size-4 animate-spin motion-reduce:animate-none"
+          />
+          正在核对并采用…
+        </p>
+      ) : null}
+    </footer>
+  );
   return (
     <article
-      className="min-w-0 space-y-3 rounded-xl border border-border p-4"
+      className={
+        compact ? "min-w-0 space-y-4" : "min-w-0 space-y-3 rounded-xl border border-border p-4"
+      }
       aria-label={`Skill 候选：${proposal.name}`}
     >
-      <header className="flex min-w-0 flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1 space-y-1">
-          {editing ? (
-            <Input
-              aria-label="候选 Skill 名称"
-              value={name}
-              maxLength={200}
-              onChange={(event) => setName(event.target.value)}
-            />
-          ) : (
-            <h3 className="break-words text-ui-lg font-medium">{proposal.name}</h3>
-          )}
-          <p className="break-words text-ui-sm text-muted-foreground">{proposal.summary}</p>
-        </div>
-        <span className="shrink-0 rounded-full border border-border px-2 py-1 text-ui-xs text-muted-foreground">
-          {skillEvolutionPolicyLabel(proposal.policy)} · {statusLabel}
-        </span>
-      </header>
+      {!hideHeader ? (
+        <header className="flex min-w-0 flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 flex-1 space-y-1">
+            {editing && !readOnly && !compact ? (
+              <Input
+                aria-label="候选 Skill 名称"
+                value={name}
+                maxLength={200}
+                onChange={(event) => setName(event.target.value)}
+              />
+            ) : (
+              <h3 className="break-words text-ui-lg font-medium">{proposal.name}</h3>
+            )}
+            <p className="break-words text-ui-sm text-muted-foreground">{proposal.summary}</p>
+          </div>
+          <span className="shrink-0 rounded-full border border-border px-2 py-1 text-ui-xs text-muted-foreground">
+            {skillEvolutionActionLabel(proposal.action)} · {statusLabel}
+          </span>
+        </header>
+      ) : null}
 
+      {hideHeader ? <p className="break-words text-ui-sm font-medium">{proposal.summary}</p> : null}
+      {summaryDetails}
       {proposal.error ? (
         <p className="text-ui-sm text-destructive" role="alert">
           {proposal.error}
         </p>
       ) : null}
-      {proposal.policy === "shared" && proposal.baseSkillId ? (
-        <p className="rounded-lg bg-muted/50 px-3 py-2 text-ui-sm text-foreground/80">
-          共享更新会影响：
-          {affectedExperts === null
-            ? "此旧候选没有冻结影响名单，当前范围未知；请重新提炼后再采用。"
-            : affectedExperts.length
-              ? affectedExperts.join("、")
-              : "冻结影响名单为空。"}
-        </p>
+      {!hideHeader ? (
+        <>
+          {proposal.status === "applied" ? (
+            <p className="text-ui-sm text-muted-foreground">
+              已保存并绑定给 {ownerName}，后续独立运行可使用。
+            </p>
+          ) : proposal.action === "derive" ? (
+            <p className="rounded-lg bg-muted/50 px-3 py-2 text-ui-sm text-foreground/80">
+              将基于来源 Skill 为 {ownerName} 创建专用副本；共享来源保持原样。
+            </p>
+          ) : proposal.action === "update" ? (
+            <p className="rounded-lg bg-muted/50 px-3 py-2 text-ui-sm text-foreground/80">
+              将更新 {ownerName} 的专用 Skill。
+            </p>
+          ) : (
+            <p className="rounded-lg bg-muted/50 px-3 py-2 text-ui-sm text-foreground/80">
+              将创建归属于 {ownerName} 的专用 Skill。
+            </p>
+          )}
+        </>
       ) : null}
-      {missingSharedImpactSnapshot ? (
-        <p className="text-ui-sm text-destructive" role="alert">
-          此共享更新候选缺少冻结的影响专家名单，不能采用；请重新提炼。
-        </p>
-      ) : null}
-      {proposal.action === "derive" ? (
-        <p className="rounded-lg bg-muted/50 px-3 py-2 text-ui-sm text-foreground/80">
-          将基于来源 Skill 创建当前专家专用副本；来源内容和其他专家绑定保持原样。
-        </p>
-      ) : null}
-
-      <section className="space-y-2" aria-label="候选文件差异">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h4 className="text-ui-sm font-medium">文件差异（{changes.length} 项）</h4>
-          {editing ? (
-            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 sm:flex-none">
-              <Input
-                aria-label="新候选文件路径"
-                value={newFilePath}
-                maxLength={4_096}
-                placeholder="添加文件路径"
-                className="min-w-40 flex-1 sm:max-w-72"
-                onChange={(event) => setNewFilePath(event.target.value)}
-              />
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={
-                  !newFilePath.trim() ||
-                  changes.some((change) => change.path === newFilePath.trim())
-                }
-                onClick={() => {
-                  const path = newFilePath.trim();
-                  if (!path || changes.some((change) => change.path === path)) return;
-                  setChanges((current) => [...current, { path, content: encodeUtf8Base64("") }]);
-                  setNewFilePath("");
-                }}
-              >
-                添加文件
-              </Button>
-            </div>
+      {compact ? (
+        <>
+          <button
+            type="button"
+            className="flex w-full min-w-0 flex-wrap items-center justify-between gap-2 border-y border-border py-3 text-left text-ui-sm hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => setDiffOpen(true)}
+          >
+            <span className="flex min-w-0 items-center gap-2 break-all font-medium">
+              <FileIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+              {changes.length === 1 ? changes[0]?.path : `${changes.length} 项文件变更`}
+            </span>
+            <span className="flex items-center gap-2 text-muted-foreground">
+              {editing ? "继续编辑草稿" : "查看完整差异"}
+              <DisclosureChevron open={false} />
+            </span>
+          </button>
+          {proposal.status !== "applied" && !diffOpen ? actions : null}
+          <SettingsEditorDialog
+            open={diffOpen}
+            onClose={() => setDiffOpen(false)}
+            closeButtonLabel="关闭完整差异"
+          >
+            <DialogHeader className="shrink-0 px-6 pt-5 pb-4">
+              <DialogTitle className="pr-8">{proposal.name} · 完整差异</DialogTitle>
+              <DialogDescription>
+                核对文件内容与基础版本。关闭面板会保留当前页面内尚未保存的编辑。
+              </DialogDescription>
+            </DialogHeader>
+            <DialogPanel className="min-w-0 space-y-4 px-6 pb-5">
+              {editing && !readOnly ? (
+                <Input
+                  aria-label="候选 Skill 名称"
+                  value={name}
+                  maxLength={200}
+                  onChange={(event) => setName(event.target.value)}
+                />
+              ) : null}
+              {files}
+            </DialogPanel>
+            {proposal.status !== "applied" ? (
+              <div className="shrink-0 px-6 pb-4">{actions}</div>
+            ) : null}
+          </SettingsEditorDialog>
+        </>
+      ) : (
+        <>
+          {proposal.status === "applied" ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-expanded={appliedDetailsOpen}
+              onClick={() => setAppliedDetailsOpen((open) => !open)}
+            >
+              查看已应用内容与依据 <DisclosureChevron open={appliedDetailsOpen} />
+            </Button>
           ) : null}
-        </div>
-        {changes.length ? (
-          <ul className="space-y-2">
-            {changes.map((change, index) => (
-              <ProposalFileChange
-                key={`${change.path}:${index}`}
-                proposal={proposal}
-                change={change}
-                index={index}
-                editing={editing}
-                onChange={(fileIndex, content) =>
-                  setChanges((current) =>
-                    current.map((item, i) => (i === fileIndex ? { ...item, content } : item)),
-                  )
-                }
-                onExecutableChange={(fileIndex, executable) =>
-                  setChanges((current) =>
-                    current.map((item, i) => (i === fileIndex ? { ...item, executable } : item)),
-                  )
-                }
-                onRemove={(fileIndex) =>
-                  setChanges((current) => current.filter((_, i) => i !== fileIndex))
-                }
-              />
-            ))}
-          </ul>
-        ) : (
-          <p className="text-ui-sm text-muted-foreground">
-            当前编辑草稿没有文件改动；保存后将由服务端重新校验。
-          </p>
-        )}
-      </section>
+          <DisclosureRegion open={proposal.status !== "applied" || appliedDetailsOpen}>
+            <div className="space-y-3">
+              {files}
+              <section className="space-y-2" aria-label="提炼依据">
+                <h4 className="text-ui-sm font-medium">提炼依据</h4>
+                {proposal.evidence.length ? (
+                  <ul className="space-y-2">
+                    {proposal.evidence.map((evidence, evidenceIndex) => (
+                      <li
+                        key={`${evidence.threadId}:${evidence.messageId}:${evidenceIndex}`}
+                        className="rounded-lg bg-muted/50 p-3 text-ui-sm"
+                      >
+                        <blockquote className="whitespace-pre-wrap break-words">
+                          {evidence.quote}
+                        </blockquote>
+                        {onOpenTask ? (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => onOpenTask(evidence.threadId as ThreadId)}
+                          >
+                            打开来源任务{" "}
+                            <ExternalLinkIcon aria-hidden="true" className="size-3.5" />
+                          </Button>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-ui-sm text-muted-foreground">没有返回可展示的证据引用。</p>
+                )}
+              </section>
+            </div>
+          </DisclosureRegion>
+          {actions}
+        </>
+      )}
+    </article>
+  );
+}
 
-      <section className="space-y-2" aria-label="提炼依据">
-        <h4 className="text-ui-sm font-medium">提炼依据</h4>
-        {proposal.evidence.length ? (
+type SkillEvolutionOpportunity = NonNullable<SkillEvolutionRun["opportunities"]>[number];
+
+function OpportunityCard({
+  generations,
+  opportunity,
+  latestGeneration,
+  generationBlockReason,
+  failureReason,
+  expertArchived,
+  busy,
+  feedback,
+  onFeedbackChange,
+  onGenerate,
+  onDismiss,
+  onOpenAbilities,
+  ownerName,
+  onEdit,
+  onApply,
+  onReject,
+  onOpenTask,
+  onViewResult,
+}: {
+  generations: ReadonlyArray<SkillEvolutionRun>;
+  opportunity: SkillEvolutionOpportunity;
+  latestGeneration?: SkillEvolutionRun;
+  generationBlockReason?: string;
+  failureReason?: string;
+  expertArchived: boolean;
+  busy: boolean;
+  feedback: string;
+  onFeedbackChange: (value: string) => void;
+  onGenerate: () => void;
+  onDismiss: () => void;
+  onOpenAbilities?: () => void;
+  ownerName: string;
+  onEdit: (input: {
+    proposal: SkillEvolutionProposal;
+    name: string;
+    changes: SkillFileChange[];
+  }) => Promise<void>;
+  onApply: (proposal: SkillEvolutionProposal) => Promise<void>;
+  onReject: (proposal: SkillEvolutionProposal) => Promise<void>;
+  onOpenTask?: (threadId: ThreadId) => void;
+  onViewResult?: (proposal: SkillEvolutionProposal) => void;
+}) {
+  const [attemptId, setAttemptId] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const detailId = useId();
+  const [detailTab, setDetailTab] = useState<"changes" | "evidence">("changes");
+  const displayedGeneration =
+    generations.find((run) => run.requestId === attemptId) ?? latestGeneration;
+  const historical = Boolean(
+    displayedGeneration && displayedGeneration.requestId !== latestGeneration?.requestId,
+  );
+  const dismissed = opportunity.status === "dismissed";
+  const generationActive = Boolean(latestGeneration && isSkillEvolutionRunActive(latestGeneration));
+  const feedbackRequired = Boolean(
+    latestGeneration &&
+    !generationActive &&
+    latestGeneration.status !== "failed" &&
+    latestGeneration.status !== "cancelled",
+  );
+  const retryNeedsFeedback = feedbackRequired && !feedback.trim();
+  const adopted = Boolean(
+    latestGeneration?.proposals.some((proposal) =>
+      ["applying", "saved_unbound", "applied"].includes(proposal.status),
+    ),
+  );
+  const canGenerate =
+    !dismissed &&
+    !expertArchived &&
+    !busy &&
+    !generationActive &&
+    !adopted &&
+    !retryNeedsFeedback &&
+    !generationBlockReason;
+
+  const headerProposal =
+    displayedGeneration?.proposals.length === 1 ? displayedGeneration.proposals[0] : undefined;
+  const displayedEvidence = displayedGeneration?.proposals.length
+    ? displayedGeneration.proposals.flatMap((proposal) => proposal.evidence)
+    : opportunity.evidence;
+  const outcomes = (
+    <section className="space-y-2" aria-label="提炼目标">
+      <ul className="list-disc space-y-1 pl-5 text-ui-sm">
+        {opportunity.outcomes.map((outcome, index) => (
+          <li key={`${opportunity.opportunityId}:outcome:${index}`} className="break-words">
+            {outcome}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+  const failed = latestGeneration?.status === "failed" || Boolean(failureReason);
+  if (failed)
+    return (
+      <article className="min-w-0 pt-2" aria-label={`经验机会：${opportunity.name}`}>
+        <ExtractionFailure
+          reason={
+            failureReason ??
+            latestGeneration?.error ??
+            latestGeneration?.summary ??
+            "未能完成提取。"
+          }
+        />
+      </article>
+    );
+  const previews = generations
+    .filter((run) => run.status === "proposal_ready" && run.proposals.length > 0)
+    .toSorted((a, b) => (b.generationIndex ?? 0) - (a.generationIndex ?? 0));
+
+  return (
+    <article className="min-w-0 space-y-4 pt-2" aria-label={`经验机会：${opportunity.name}`}>
+      {headerProposal ? (
+        <header className="space-y-2">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-1 basis-full items-start gap-2 sm:basis-auto">
+              <FileIcon className="size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <h3 className="min-w-0 flex-1 break-words text-ui font-medium">
+                {headerProposal.name}
+              </h3>
+            </div>
+            <span className="rounded-md bg-muted px-2 py-1 text-ui-xs text-muted-foreground">
+              {headerProposal.status === "applied"
+                ? "专家专用"
+                : skillEvolutionActionLabel(headerProposal.action)}
+              {headerProposal.resultRevision ? ` · v${headerProposal.resultRevision}` : ""}
+            </span>
+            {headerProposal.resultSkillId && onViewResult ? (
+              <Button size="sm" variant="ghost" onClick={() => onViewResult(headerProposal)}>
+                查看 Skill <ExternalLinkIcon className="size-3.5" aria-hidden="true" />
+              </Button>
+            ) : null}
+          </div>
+          <p className="text-ui-sm text-muted-foreground">
+            {headerProposal.status === "applied"
+              ? `已绑定 ${ownerName}，下次独立运行生效。`
+              : headerProposal.action === "derive"
+                ? `应用后创建 ${ownerName} 的专用副本，共享来源保持原样。`
+                : headerProposal.action === "update"
+                  ? `应用后更新 ${ownerName} 的专用 Skill。`
+                  : `应用后新建 ${ownerName} 的专用 Skill。`}
+          </p>
+        </header>
+      ) : null}
+      <DetailTabs
+        id={detailId}
+        label="经验详情"
+        value={detailTab}
+        onChange={setDetailTab}
+        tabs={[
+          { value: "changes", label: "本次改动" },
+          { value: "evidence", label: `依据 ${displayedEvidence.length}` },
+        ]}
+      />
+      <div
+        role="tabpanel"
+        id={`${detailId}-changes-panel`}
+        aria-labelledby={`${detailId}-changes-tab`}
+        hidden={detailTab !== "changes"}
+        className="min-w-0 space-y-4"
+      >
+        {!displayedGeneration?.proposals.length ? (
+          <>
+            <header className="space-y-1">
+              <p className="break-words text-ui-sm text-muted-foreground">{opportunity.reason}</p>
+              <p className="text-ui-xs text-muted-foreground">
+                {opportunity.targetSkillId
+                  ? "完善已有 Skill，应用时按权限创建或更新专家专用副本。"
+                  : "新建专家专用 Skill。"}
+              </p>
+            </header>
+
+            <section className="space-y-2" aria-label="预计形成的方法">
+              <h5 className="text-ui-sm font-medium">预计形成的方法</h5>
+              <ul className="list-disc space-y-1 pl-5 text-ui-sm">
+                {opportunity.outcomes.map((outcome, index) => (
+                  <li key={`${opportunity.opportunityId}:outcome:${index}`} className="break-words">
+                    {outcome}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          </>
+        ) : null}
+        {historical ? (
+          <p className="text-ui-xs text-muted-foreground" role="status">
+            正在查看第 {displayedGeneration?.generationIndex ?? 1} 次预览；旧轮次仅供查看。
+          </p>
+        ) : null}
+        {displayedGeneration?.error ? (
+          <p className="text-ui-sm text-destructive" role="alert">
+            {displayedGeneration.error}
+          </p>
+        ) : null}
+        {displayedGeneration && !displayedGeneration.proposals.length ? (
+          <div
+            className="flex flex-wrap items-center gap-2 text-ui-sm text-muted-foreground"
+            role="status"
+          >
+            <span>
+              {generationActive
+                ? "正在提取…"
+                : skillEvolutionRunPresentation(displayedGeneration).label}
+              {displayedGeneration.summary ? ` · ${displayedGeneration.summary}` : ""}
+            </span>
+          </div>
+        ) : null}
+        {displayedGeneration ? (
+          <>
+            {displayedGeneration.stage === "generation"
+              ? displayedGeneration.proposals.map((proposal) => (
+                  <ProposalCard
+                    key={proposal.proposalId}
+                    proposal={proposal}
+                    compact
+                    hideHeader={Boolean(headerProposal)}
+                    summaryDetails={outcomes}
+                    expertArchived={expertArchived}
+                    readOnly={dismissed || historical}
+                    readOnlyReason={
+                      dismissed
+                        ? "此经验已忽略，不能继续编辑或采用。"
+                        : "此候选已被更新的生成结果替代，不能继续编辑或采用。"
+                    }
+                    ownerName={ownerName}
+                    busy={busy}
+                    onEdit={onEdit}
+                    onApply={onApply}
+                    {...(onViewResult ? { onViewResult } : {})}
+                    onReject={onReject}
+                    {...(onOpenTask ? { onOpenTask } : {})}
+                  />
+                ))
+              : null}
+          </>
+        ) : null}
+        {!adopted && !dismissed && !generationActive ? (
+          <label className="grid min-w-0 gap-1.5 text-ui-sm">
+            <span className="font-medium">补充反馈（可选）</span>
+            <Textarea
+              aria-label={`生成反馈：${opportunity.name}`}
+              value={feedback}
+              maxLength={8_000}
+              rows={2}
+              disabled={dismissed || expertArchived || adopted || busy || generationActive}
+              placeholder="例如：保留通用步骤，去掉项目专有信息。"
+              onChange={(event) => onFeedbackChange(event.target.value)}
+            />
+          </label>
+        ) : null}
+        {retryNeedsFeedback && !adopted && !dismissed && !generationActive ? (
+          <p className="text-ui-xs text-muted-foreground" role="status">
+            再次生成前请补充反馈。
+          </p>
+        ) : null}
+
+        {generationBlockReason && !adopted && !dismissed && !generationActive ? (
+          <div className="space-y-2 rounded-lg bg-muted/50 p-3">
+            <p className="text-ui-sm text-muted-foreground" role="status">
+              {generationBlockReason}
+            </p>
+            {onOpenAbilities ? (
+              <Button size="sm" variant="outline" onClick={onOpenAbilities}>
+                前往 Expert 能力配置
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+        {dismissed ? (
+          <p className="text-ui-sm text-muted-foreground" role="status">
+            已忽略此经验机会；相关生成结果不能采用。
+          </p>
+        ) : null}
+
+        {!adopted && !dismissed && !generationActive ? (
+          <footer className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+            <Button
+              disabled={!canGenerate}
+              aria-busy={busy || generationActive}
+              onClick={onGenerate}
+            >
+              {busy ? "提交中…" : latestGeneration ? "重新生成预览" : "生成修改预览"}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={dismissed || expertArchived || busy || generationActive || adopted}
+              onClick={onDismiss}
+            >
+              忽略
+            </Button>
+          </footer>
+        ) : null}
+      </div>
+      <div
+        role="tabpanel"
+        id={`${detailId}-evidence-panel`}
+        aria-labelledby={`${detailId}-evidence-tab`}
+        hidden={detailTab !== "evidence"}
+        className="min-w-0 space-y-4"
+      >
+        <p className="break-words text-ui-sm text-muted-foreground">{opportunity.reason}</p>
+        <section aria-label="经验依据" className="space-y-3">
           <ul className="space-y-2">
-            {proposal.evidence.map((evidence) => (
+            {displayedEvidence.map((evidence, evidenceIndex) => (
               <li
-                key={`${evidence.threadId}:${evidence.messageId}`}
-                className="rounded-lg bg-muted/50 p-3 text-ui-sm"
+                key={`${evidence.threadId}:${evidence.messageId}:${evidenceIndex}`}
+                className="flex min-w-0 flex-col gap-2 border-b border-border/60 py-3 text-ui-sm last:border-b-0 sm:flex-row sm:items-start sm:justify-between sm:gap-5"
               >
-                <blockquote className="whitespace-pre-wrap break-words">
+                <blockquote className="min-w-0 flex-1 whitespace-pre-wrap break-words">
                   {evidence.quote}
                 </blockquote>
                 {onOpenTask ? (
                   <Button
                     size="sm"
                     variant="ghost"
+                    className="shrink-0 self-start sm:self-center"
                     onClick={() => onOpenTask(evidence.threadId as ThreadId)}
                   >
                     打开来源任务 <ExternalLinkIcon aria-hidden="true" className="size-3.5" />
@@ -783,92 +1320,45 @@ function ProposalCard({
               </li>
             ))}
           </ul>
-        ) : (
-          <p className="text-ui-sm text-muted-foreground">没有返回可展示的证据引用。</p>
-        )}
-      </section>
-
-      <footer className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
-        {proposal.status === "proposed" && !expertArchived ? (
-          editing ? (
-            <>
-              <Button
-                size="sm"
-                disabled={busy || !name.trim()}
-                onClick={() =>
-                  void onEdit({ proposal, name: name.trim(), changes }).then(() =>
-                    setEditing(false),
-                  )
-                }
-              >
-                保存候选编辑
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                onClick={() => {
-                  setName(proposal.name);
-                  setChanges(proposal.changes.map((change) => ({ ...change })));
-                  setEditing(false);
-                }}
-              >
-                放弃编辑
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => setEditing(true)}>
-                编辑候选
-              </Button>
-              <Button
-                size="sm"
-                disabled={busy || missingSharedImpactSnapshot}
-                onClick={() => void onApply(proposal)}
-              >
-                {applyLabel}
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={busy}
-                onClick={() => void onReject(proposal)}
-              >
-                拒绝
-              </Button>
-            </>
-          )
-        ) : proposal.status === "saved_unbound" && !expertArchived ? (
+          {displayedEvidence.length === 0 ? (
+            <p className="text-ui-sm text-muted-foreground">没有返回可展示的证据引用。</p>
+          ) : null}
+        </section>
+      </div>
+      {previews.length > 1 ? (
+        <section aria-label="历史预览" className="border-t border-border pt-2">
           <Button
             size="sm"
-            disabled={busy || missingSharedImpactSnapshot}
-            onClick={() => void onApply(proposal)}
+            variant="ghost"
+            aria-expanded={historyOpen}
+            onClick={() => setHistoryOpen((open) => !open)}
           >
-            继续完成绑定
+            历史预览（{previews.length}）<DisclosureChevron open={historyOpen} />
           </Button>
-        ) : proposal.status === "conflict" ? (
-          <p className="text-ui-sm text-destructive" role="status">
-            目标版本或绑定已变化；候选已保留，请基于最新配置重新提炼。
-          </p>
-        ) : proposal.status === "applied" ? (
-          <p className="text-ui-sm text-emerald-700 dark:text-emerald-300" role="status">
-            已采用 {proposal.resultSkillId ? `· ${proposal.resultSkillId}` : ""}
-            {proposal.resultRevision ? ` · v${proposal.resultRevision}` : ""}
-          </p>
-        ) : proposal.status === "rejected" ? (
-          <p className="text-ui-sm text-muted-foreground" role="status">
-            已拒绝，此候选不会写入正式 Skill。
-          </p>
-        ) : proposal.status === "applying" ? (
-          <p className="flex items-center gap-2 text-ui-sm text-muted-foreground" role="status">
-            <LoaderCircleIcon
-              aria-hidden="true"
-              className="size-4 animate-spin motion-reduce:animate-none"
-            />
-            正在核对并采用…
-          </p>
-        ) : null}
-      </footer>
+          <DisclosureRegion open={historyOpen}>
+            <div className="flex flex-wrap gap-2 pt-2">
+              {previews.map((attempt) => (
+                <Button
+                  key={attempt.requestId}
+                  size="sm"
+                  variant={
+                    attempt.requestId === displayedGeneration?.requestId ? "secondary" : "ghost"
+                  }
+                  onClick={() => {
+                    setAttemptId(
+                      attempt.requestId === latestGeneration?.requestId ? null : attempt.requestId,
+                    );
+                    setDetailTab("changes");
+                  }}
+                >
+                  第 {attempt.generationIndex ?? 1} 次预览
+                  {attempt.requestId === latestGeneration?.requestId ? " · 最新" : ""}
+                </Button>
+              ))}
+            </div>
+          </DisclosureRegion>
+        </section>
+      ) : null}
     </article>
   );
 }
@@ -881,6 +1371,7 @@ export function ExpertSkillEvolution({
   initialThreadId,
   initialThreadRequestKey,
   onOpenTask,
+  onOpenAbilities,
 }: {
   readonly expertId: string;
   readonly expertName: string;
@@ -889,6 +1380,7 @@ export function ExpertSkillEvolution({
   readonly initialThreadId?: string | null;
   readonly initialThreadRequestKey?: number;
   readonly onOpenTask?: (threadId: ThreadId) => void;
+  readonly onOpenAbilities?: () => void;
 }) {
   const queryClient = useQueryClient();
   const { settings } = useAppSettings();
@@ -961,11 +1453,26 @@ export function ExpertSkillEvolution({
     enabled: active,
     staleTime: 5_000,
   });
-  const [selectedSources, setSelectedSources] = useState<ReadonlySet<string>>(() => new Set());
+  const [selectedSourcesOverride, setSelectedSourcesOverride] =
+    useState<ReadonlySet<string> | null>(null);
+  const pendingStartRef = useRef<{
+    readonly fingerprint: string;
+    readonly request: Extract<SkillEvolutionRequest, { action: "start" }>;
+  } | null>(null);
+  const initialThreadSelectionRef = useRef<string | null>(null);
+  const [configPanel, setConfigPanel] = useState<"sources" | "model" | "focus" | null>(null);
+  const [expandedSourceKey, setExpandedSourceKey] = useState<string | null>(null);
+  const sourceOpen = configPanel === "sources";
+  const modelOpen = configPanel === "model";
+  const focusOpen = configPanel === "focus";
+  const configPanelId = useId();
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+  const [expandedEntryId, setExpandedEntryId] = useState<string | null>(null);
+  const [visitedEntries, setVisitedEntries] = useState<ReadonlySet<string>>(new Set());
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [graphOpen, setGraphOpen] = useState(false);
   const [focus, setFocus] = useState("");
-  const [targetSkillId, setTargetSkillId] = useState("");
-  const [protectedAction, setProtectedAction] = useState<"update" | "derive">("update");
+  const [feedbackDrafts, setFeedbackDrafts] = useState<Readonly<Record<string, string>>>({});
   const [selectedSkillNode, setSelectedSkillNode] = useState<SkillEvolutionGraphNode | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
@@ -976,13 +1483,29 @@ export function ExpertSkillEvolution({
   const selectedSkillDeleted = Boolean(selectedCurrentNode?.deleted ?? selectedSkillNode?.deleted);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [extractionError, setExtractionError] = useState<string | null>(null);
+  const [generationErrors, setGenerationErrors] = useState<
+    Readonly<Record<string, { reason: string; previousRequestId: string | null }>>
+  >({});
   const [working, setWorking] = useState(false);
   const [skillDetail, setSkillDetail] = useState<SkillDefinition | null>(null);
   const [deleteSkill, setDeleteSkill] = useState<SkillDefinition | null>(null);
-  const initialThreadSeen = useRef<number | null>(null);
   const sources = sourcesQuery.data?.sources ?? [];
   const runs = runsQuery.data?.runs ?? [];
-  const selectedRunIdFromList = selectedRunId ?? runs[0]?.requestId ?? null;
+  const defaultSources = useMemo(
+    () =>
+      defaultSkillEvolutionSources(sources, {
+        runs,
+        ...(initialThreadId === undefined ? {} : { preferredThreadId: initialThreadId }),
+      }),
+    [initialThreadId, runs, sources],
+  );
+  const defaultSourceKeys = useMemo(() => new Set(defaultSources.map(sourceKey)), [defaultSources]);
+  const selectedSources = selectedSourcesOverride ?? defaultSourceKeys;
+  const initialThreadSourceMissing = Boolean(
+    initialThreadId && !sources.some((source) => source.threadId === initialThreadId),
+  );
+  const selectedRunIdFromList = selectedRunId;
   const selectedRunQuery = useQuery({
     queryKey: [...skillEvolutionQueryKey(expertId), "run", selectedRunIdFromList],
     queryFn: () =>
@@ -993,9 +1516,9 @@ export function ExpertSkillEvolution({
       return active && isSkillEvolutionRunActive(run) ? ACTIVE_POLL_MS : false;
     },
   });
-  const selectedRun =
+  const hydratedSelectedRun =
     selectedRunQuery.data?.run ?? runs.find((run) => run.requestId === selectedRunIdFromList);
-  const selectedRunPresentation = selectedRun ? skillEvolutionRunPresentation(selectedRun) : null;
+
   const selectedEvent = (currentGraphQuery.data?.graph?.events ?? []).find(
     (event) => event.eventId === selectedEventId,
   );
@@ -1043,48 +1566,11 @@ export function ExpertSkillEvolution({
     onError: (cause) => setError(errorText(cause)),
   });
 
-  useEffect(() => {
-    if (
-      !initialThreadId ||
-      initialThreadSeen.current === (initialThreadRequestKey ?? 0) ||
-      !sources.length
-    )
-      return;
-    initialThreadSeen.current = initialThreadRequestKey ?? 0;
-    const source = sources
-      .filter((candidate) => candidate.threadId === initialThreadId)
-      .sort((left, right) => right.completedAt.localeCompare(left.completedAt))[0];
-    if (!source) {
-      setNotice("此任务没有可用的已结束提炼来源；可从列表选择其他记录。");
-      return;
-    }
-    setSelectedSources((current) => {
-      if (current.size >= 5 || current.has(sourceKey(source))) return current;
-      return new Set([...current, sourceKey(source)]);
-    });
-  }, [initialThreadId, initialThreadRequestKey, sources]);
-
-  useEffect(() => {
-    if (!selectedRunId && runs[0]) setSelectedRunId(runs[0].requestId);
-  }, [runs, selectedRunId]);
-
   const currentProviderCapability = (capabilitiesQuery.data?.capabilities ?? []).find(
     (capability) => capability.provider === draft.selectedProvider,
   );
-  const currentExpertSkillIds = new Set(
-    (expertsQuery.data?.find((expert) => expert.id === expertId)?.skillBindings ?? []).map(
-      (binding) => binding.skillId,
-    ),
-  );
-  const availableSkills = (skillsQuery.data?.skills ?? []).filter((skill) => {
-    const scope = skill.scope;
-    return (
-      currentExpertSkillIds.has(skill.skillId) &&
-      !skill.deleted &&
-      (!scope || scope.kind === "shared" || scope.expertId === expertId)
-    );
-  });
-  const selectedTargetSkill = availableSkills.find((skill) => skill.skillId === targetSkillId);
+  const currentBindings =
+    expertsQuery.data?.find((expert) => expert.id === expertId)?.skillBindings ?? [];
   const expertNameById = new Map(
     (expertsQuery.data ?? []).map((expert) => [expert.id, expert.name]),
   );
@@ -1097,7 +1583,7 @@ export function ExpertSkillEvolution({
       : null;
 
   const updateRun = useCallback(
-    (next: SkillEvolutionRun | undefined) => {
+    (next: SkillEvolutionRun | undefined, select = true) => {
       if (next) {
         queryClient.setQueryData<SkillEvolutionResponse>(runKey, (current) => ({
           ...(current ?? {}),
@@ -1106,56 +1592,118 @@ export function ExpertSkillEvolution({
         queryClient.setQueryData([...skillEvolutionQueryKey(expertId), "run", next.requestId], {
           run: next,
         });
-        setSelectedRunId(next.requestId);
+        if (select) setSelectedRunId(next.requestId);
       }
     },
-    [expertId, queryClient, runKey, runsQuery.data],
+    [expertId, queryClient, runKey],
+  );
+
+  const startSources = useMemo(
+    () =>
+      sources
+        .filter((source) => selectedSources.has(sourceKey(source)))
+        .map(({ threadId, turnId }) => ({ threadId, turnId })),
+    [selectedSources, sources],
+  );
+  const startFingerprint = useMemo(
+    () =>
+      JSON.stringify({
+        action: "start",
+        expertId,
+        sources: startSources,
+        ...(focus.trim() ? { focus: focus.trim() } : {}),
+        modelSelection,
+      }),
+    [expertId, focus, modelSelection, startSources],
   );
 
   const startMutation = useMutation({
     mutationFn: (request: Extract<SkillEvolutionRequest, { action: "start" }>) =>
       ensureExpertClient().skillEvolution(request),
     onSuccess: (result) => {
-      updateRun(result.run);
-      setNotice("已提交 Skill 提炼任务。状态会在任务运行期间同步；关闭此页不会取消任务。");
-      setSelectedSources(new Set());
-      setFocus("");
-      setTargetSkillId("");
-      setProtectedAction("update");
+      pendingStartRef.current = null;
+      if (result.run) {
+        updateRun(result.run);
+        setExpandedEntryId(result.run.requestId);
+        setVisitedEntries((current) => new Set([...current, result.run!.requestId]));
+        setNotice("已开始查找可复用经验。此阶段不会写入正式 Skill。");
+        setSelectedSourcesOverride(null);
+        setFocus("");
+      }
+      void queryClient.invalidateQueries({ queryKey: runKey });
+      void queryClient.invalidateQueries({
+        queryKey: [...skillEvolutionQueryKey(expertId), SOURCES_QUERY_SUFFIX],
+      });
+    },
+    onError: (cause) => {
+      setExtractionError(errorText(cause));
       void queryClient.invalidateQueries({ queryKey: runKey });
     },
-    onError: (cause) => setError(errorText(cause)),
   });
 
-  const formDraftDirty =
-    selectedSources.size > 0 ||
-    focus.trim().length > 0 ||
-    targetSkillId.length > 0 ||
-    protectedAction !== "update";
+  useEffect(() => {
+    const pending = pendingStartRef.current;
+    if (!pending || startMutation.isPending) return;
+    const recovered = runs.find((run) => run.requestId === pending.request.requestId);
+    if (!recovered) return;
+    pendingStartRef.current = null;
+    updateRun(recovered);
+    setExpandedEntryId(recovered.requestId);
+    setVisitedEntries((current) => new Set([...current, recovered.requestId]));
+    setError(null);
+    setExtractionError(null);
+    setNotice("已恢复此次提炼请求。此阶段不会写入正式 Skill。");
+  }, [runs, startMutation.isPending, updateRun]);
+
+  useEffect(() => {
+    const pending = pendingStartRef.current;
+    if (!pending || startMutation.isPending || pending.fingerprint === startFingerprint) return;
+    pendingStartRef.current = null;
+  }, [startFingerprint, startMutation.isPending]);
+
+  useEffect(() => {
+    if (!sourcesQuery.isSuccess) return;
+    const signature = `${initialThreadRequestKey ?? 0}\u0000${initialThreadId ?? ""}`;
+    if (initialThreadSelectionRef.current === signature) return;
+    initialThreadSelectionRef.current = signature;
+    if (!initialThreadId) return;
+    const explicitSource = defaultSkillEvolutionSources(sources, {
+      preferredThreadId: initialThreadId,
+    })[0];
+    setSelectedSourcesOverride(new Set(explicitSource ? [sourceKey(explicitSource)] : []));
+  }, [initialThreadId, initialThreadRequestKey, sources, sourcesQuery.isSuccess]);
+
+  const sourceDraftDirty = Boolean(
+    selectedSourcesOverride && !sameKeys(selectedSourcesOverride, defaultSourceKeys),
+  );
+  const feedbackDraftDirty = Object.values(feedbackDrafts).some((value) => value.trim().length > 0);
+  const formDraftDirty = sourceDraftDirty || focus.trim().length > 0 || feedbackDraftDirty;
   const draftGuard = useExpertDraftGuard({
-    isDirty: formDraftDirty && !startMutation.isPending,
+    isDirty: formDraftDirty,
     shouldGuardNavigation: ({ currentPathname, nextPathname, currentSearch, nextSearch }) =>
       currentPathname !== nextPathname ||
       currentSearch.kind !== nextSearch.kind ||
       currentSearch.expertId !== nextSearch.expertId,
     canSave: false,
-    saveDisabledReason: "来源选择和提炼重点不会自动提交；可留在本页开始提炼，或明确放弃草稿。",
+    saveDisabledReason: "来源、重点和反馈不会自动提交；可留在本页提炼，或明确放弃草稿。",
     onSave: async () => false,
     onDiscard: () => {
-      setSelectedSources(new Set());
+      setSelectedSourcesOverride(null);
       setFocus("");
-      setTargetSkillId("");
-      setProtectedAction("update");
+      setFeedbackDrafts({});
     },
   });
 
-  const runRequest = async (request: SkillEvolutionRequest) => {
+  const runRequest = async (
+    request: SkillEvolutionRequest,
+    options: { readonly selectResult?: boolean } = {},
+  ) => {
     setWorking(true);
     setError(null);
     setNotice(null);
     try {
       const response = await ensureExpertClient().skillEvolution(request);
-      updateRun(response.run);
+      updateRun(response.run, options.selectResult ?? true);
       if (response.run) {
         setNotice(`操作结果：${skillEvolutionRunPresentation(response.run).label}。`);
       } else if (response.skill) {
@@ -1172,7 +1720,8 @@ export function ExpertSkillEvolution({
       ]);
       return response;
     } catch (cause) {
-      setError(errorText(cause));
+      if (request.action !== "generate") setError(errorText(cause));
+      else void queryClient.invalidateQueries({ queryKey: runKey });
       throw cause;
     } finally {
       setWorking(false);
@@ -1180,22 +1729,101 @@ export function ExpertSkillEvolution({
   };
 
   const start = () => {
-    const selected = sources.filter((source) => selectedSources.has(sourceKey(source)));
-    if (!selected.length || selected.length > 5 || capabilityFailure || expertArchived) return;
+    if (
+      !startSources.length ||
+      startSources.length > 5 ||
+      capabilityFailure ||
+      expertArchived ||
+      !runsQuery.isSuccess
+    )
+      return;
     setError(null);
     setNotice(null);
-    startMutation.mutate({
-      action: "start",
-      requestId: globalThis.crypto.randomUUID(),
-      expertId,
-      sources: selected.map(({ threadId, turnId }) => ({ threadId, turnId })),
-      ...(selectedTargetSkill ? { targetSkillId: selectedTargetSkill.skillId } : {}),
-      ...(selectedTargetSkill &&
-      (selectedTargetSkill.evolutionPolicy ?? "protected") === "protected"
-        ? { protectedAction }
-        : {}),
-      ...(focus.trim() ? { focus: focus.trim() } : {}),
-      modelSelection,
+    setExtractionError(null);
+    const fingerprint = startFingerprint;
+    const request =
+      pendingStartRef.current?.fingerprint === fingerprint
+        ? pendingStartRef.current.request
+        : {
+            action: "start" as const,
+            requestId: globalThis.crypto.randomUUID(),
+            expertId,
+            sources: startSources,
+            ...(focus.trim() ? { focus: focus.trim() } : {}),
+            modelSelection,
+          };
+    pendingStartRef.current = { fingerprint, request };
+    startMutation.mutate(request);
+  };
+
+  const generateOpportunity = async (
+    discovery: SkillEvolutionRun,
+    opportunity: NonNullable<SkillEvolutionRun["opportunities"]>[number],
+  ) => {
+    const previousGeneration = latestOpportunityGeneration(
+      runs,
+      discovery.requestId,
+      opportunity.opportunityId,
+    );
+    const submittedFeedback =
+      feedbackDrafts[opportunity.opportunityId] ?? previousGeneration?.feedback ?? "";
+    const feedback = submittedFeedback.trim();
+    const requestId = await stableOperationId("generate", [
+      discovery.requestId,
+      opportunity.opportunityId,
+      opportunity.digest,
+      previousGeneration?.requestId ?? "first-generation",
+      feedback,
+    ]);
+    setGenerationErrors((current) => {
+      const next = { ...current };
+      delete next[opportunity.opportunityId];
+      return next;
+    });
+    try {
+      await runRequest(
+        {
+          action: "generate",
+          requestId,
+          discoveryRequestId: discovery.requestId,
+          opportunityId: opportunity.opportunityId,
+          expectedDigest: opportunity.digest,
+          ...(feedback ? { feedback } : {}),
+        },
+        { selectResult: false },
+      );
+    } catch (cause) {
+      setGenerationErrors((current) => ({
+        ...current,
+        [opportunity.opportunityId]: {
+          reason: errorText(cause),
+          previousRequestId: previousGeneration?.requestId ?? null,
+        },
+      }));
+      return;
+    }
+    setFeedbackDrafts((current) => {
+      if (current[opportunity.opportunityId] !== submittedFeedback) return current;
+      const next = { ...current };
+      delete next[opportunity.opportunityId];
+      return next;
+    });
+  };
+
+  const dismissOpportunity = async (
+    discovery: SkillEvolutionRun,
+    opportunity: NonNullable<SkillEvolutionRun["opportunities"]>[number],
+  ) => {
+    await runRequest({
+      action: "dismissOpportunity",
+      requestId: discovery.requestId,
+      opportunityId: opportunity.opportunityId,
+      expectedDigest: opportunity.digest,
+    });
+    setFeedbackDrafts((current) => {
+      const next = { ...current };
+      delete next[opportunity.opportunityId];
+      return next;
     });
   };
 
@@ -1204,48 +1832,54 @@ export function ExpertSkillEvolution({
     name: string;
     changes: SkillFileChange[];
   }) => {
-    await runRequest({
-      action: "edit",
-      requestId: input.proposal.requestId,
-      proposalId: input.proposal.proposalId,
-      expectedDigest: input.proposal.digest,
-      name: input.name,
-      changes: input.changes,
-    });
+    await runRequest(
+      {
+        action: "edit",
+        requestId: input.proposal.requestId,
+        proposalId: input.proposal.proposalId,
+        expectedDigest: input.proposal.digest,
+        name: input.name,
+        changes: input.changes,
+      },
+      { selectResult: input.proposal.requestId === selectedRunIdFromList },
+    );
   };
   const performApply = async (proposal: SkillEvolutionProposal) => {
-    if (
-      proposal.policy === "shared" &&
-      proposal.action === "update" &&
-      proposal.affectedExpertIds === undefined
-    ) {
-      setError("此共享更新候选缺少冻结的影响专家名单，不能采用；请重新提炼。");
-      return;
-    }
+    const appliedChild = runs.find(
+      (run) => run.stage === "generation" && run.requestId === proposal.requestId,
+    );
     const operationId = await stableOperationId("apply", [
       proposal.requestId,
       proposal.proposalId,
       proposal.digest,
     ]);
-    await runRequest({
-      action: "apply",
-      requestId: proposal.requestId,
-      proposalId: proposal.proposalId,
-      expectedDigest: proposal.digest,
-      operationId,
-      ...(proposal.policy === "protected" ? { approveProtected: true } : {}),
-    });
+    await runRequest(
+      {
+        action: "apply",
+        requestId: proposal.requestId,
+        proposalId: proposal.proposalId,
+        expectedDigest: proposal.digest,
+        operationId,
+      },
+      { selectResult: proposal.requestId === selectedRunIdFromList },
+    );
+    if (appliedChild?.opportunityId)
+      setFeedbackDrafts((current) => {
+        const next = { ...current };
+        delete next[appliedChild.opportunityId!];
+        return next;
+      });
   };
   const performReject = async (proposal: SkillEvolutionProposal) => {
-    await runRequest({
-      action: "reject",
-      requestId: proposal.requestId,
-      proposalId: proposal.proposalId,
-      expectedDigest: proposal.digest,
-    });
-  };
-  const cancelRun = async (run: SkillEvolutionRun) => {
-    await runRequest({ action: "cancel", requestId: run.requestId });
+    await runRequest(
+      {
+        action: "reject",
+        requestId: proposal.requestId,
+        proposalId: proposal.proposalId,
+        expectedDigest: proposal.digest,
+      },
+      { selectResult: proposal.requestId === selectedRunIdFromList },
+    );
   };
 
   const graphQuery = useQuery({
@@ -1271,10 +1905,6 @@ export function ExpertSkillEvolution({
     (selectedSkillId
       ? (currentGraph?.nodes.find((node) => node.skillId === selectedSkillId) ?? null)
       : null);
-  const impactedExperts = (proposal: SkillEvolutionProposal) => {
-    if (proposal.affectedExpertIds === undefined) return null;
-    return proposal.affectedExpertIds.map((id) => expertNameById.get(id) ?? id);
-  };
   const applyRestore = async () => {
     const preview = restorePreviewMutation.data?.restorePreview;
     if (!preview || preview.eventId !== selectedEvent?.eventId) return;
@@ -1294,10 +1924,6 @@ export function ExpertSkillEvolution({
       expertId,
       operationId,
       expectedRevision: preview.skill.revision,
-      expectedAffectedExpertIds: preview.affectedExpertIds,
-      ...((preview.skill.evolutionPolicy ?? "protected") === "protected"
-        ? { approveProtected: true }
-        : {}),
     });
     restorePreviewMutation.reset();
   };
@@ -1320,6 +1946,19 @@ export function ExpertSkillEvolution({
     bindingRestorePreviewMutation.reset();
     setNotice("已恢复本专家到来源 Skill 的原绑定；专用副本保留，内容未恢复。");
   };
+  const viewResult = (proposal: SkillEvolutionProposal) => {
+    if (!proposal.resultSkillId) return;
+    void ensureExpertClient()
+      .skillLibrary({
+        action: "read",
+        skillId: proposal.resultSkillId as SkillDefinition["skillId"],
+      })
+      .then((response) => {
+        if (!response.skill) throw new Error("此 Skill 已不可用，历史内容仍可在经验中查看。");
+        setSkillDetail(response.skill);
+      })
+      .catch((cause) => setError(errorText(cause)));
+  };
   const bindingSkillName = (skillId: string) => {
     const names = [
       ...(skillsQuery.data?.skills ?? []).map((skill) => [skill.skillId, skill.name] as const),
@@ -1328,6 +1967,63 @@ export function ExpertSkillEvolution({
     ];
     return names.find(([id]) => id === skillId)?.[1] ?? skillId;
   };
+  const generationBlockReasonFor = (opportunity: SkillEvolutionOpportunity) => {
+    if (!opportunity.targetSkillId) return undefined;
+    if (expertsQuery.isPending) return "正在确认目标 Skill 的 Expert 绑定权限，暂不能生成。";
+    if (expertsQuery.isError)
+      return `无法读取此 Expert 的绑定权限：${errorText(expertsQuery.error)}，暂不能生成。`;
+    const binding = currentBindings.find(
+      (candidate) => candidate.skillId === opportunity.targetSkillId,
+    );
+    if (binding?.allowEvolution === true) return undefined;
+    const targetName =
+      skillsQuery.data?.skills?.find((skill) => skill.skillId === opportunity.targetSkillId)
+        ?.name ?? bindingSkillName(opportunity.targetSkillId);
+    return `目标 Skill「${targetName}」尚未在此 Expert 绑定中开启“允许复制并改进”，暂不能生成。`;
+  };
+  const timeline = useMemo(
+    () =>
+      evolutionTimelineEntries(runs).map((entry) => {
+        const failedRequest = entry.opportunity
+          ? generationErrors[entry.opportunity.opportunityId]
+          : undefined;
+        if (!entry.opportunity || !failedRequest) return entry;
+        const latest = latestOpportunityGeneration(
+          runs,
+          entry.run.requestId,
+          entry.opportunity.opportunityId,
+        );
+        return failedRequest.previousRequestId === (latest?.requestId ?? null)
+          ? { ...entry, pending: false, failed: true, label: "提取失败" }
+          : entry;
+      }),
+    [runs, generationErrors],
+  );
+  const recentApplied = new Set(
+    timeline
+      .filter((entry) => entry.applied)
+      .slice(0, 3)
+      .map((entry) => entry.id),
+  );
+  const recentFailureId = timeline.find((entry) => entry.failed)?.id;
+  const visibleTimeline = timeline.filter(
+    (entry) =>
+      historyOpen ||
+      entry.pending ||
+      entry.id === recentFailureId ||
+      recentApplied.has(entry.id) ||
+      entry.id === expandedEntryId,
+  );
+  const hiddenCount = timeline.length - visibleTimeline.length;
+  const pendingCount = timeline.filter((entry) => entry.pending).length;
+  useEffect(() => {
+    if (!expandedEntryId || timeline.some((entry) => entry.id === expandedEntryId)) return;
+    const replacement = timeline.find((entry) => entry.run.requestId === expandedEntryId);
+    if (replacement) {
+      setExpandedEntryId(replacement.id);
+      setVisitedEntries((current) => new Set([...current, replacement.id]));
+    }
+  }, [expandedEntryId, timeline]);
   const contentRestorePreview = restorePreviewMutation.data?.restorePreview;
   const bindingRestorePreview = bindingRestorePreviewMutation.data?.bindingRestorePreview;
   const selectedContentRestorePreview =
@@ -1342,11 +2038,11 @@ export function ExpertSkillEvolution({
 
   return (
     <div className="min-w-0 space-y-5" aria-label={`${expertName} Skill 进化`}>
-      <section className="min-w-0 space-y-4 rounded-xl border border-border bg-background p-4">
-        <header className="space-y-1">
-          <h2 className="text-ui-lg font-medium">主动提炼 Skill</h2>
+      <section className="min-w-0 rounded-xl border border-border bg-background p-4">
+        <header className="mb-4 space-y-1">
+          <h2 className="text-ui-lg font-medium">提炼经验</h2>
           <p className="text-ui-sm text-muted-foreground">
-            只读取你选定的已结束任务。候选、拒绝和“无需提炼”不会直接改变正式 Skill。
+            把工作经验沉淀为技能。审阅并应用后，正式 Skill 才会更新。
           </p>
         </header>
         {expertArchived ? (
@@ -1355,198 +2051,255 @@ export function ExpertSkillEvolution({
           </p>
         ) : (
           <>
-            <fieldset className="min-w-0 space-y-2" disabled={startMutation.isPending}>
-              <legend className="text-ui-sm font-medium">选择 1–5 条已结束工作记录</legend>
-              {sourcesQuery.isPending ? (
-                <p className="text-ui-sm text-muted-foreground" role="status">
-                  正在读取可用来源…
-                </p>
-              ) : sourcesQuery.isError ? (
-                <p className="text-ui-sm text-destructive" role="alert">
-                  无法读取来源：{errorText(sourcesQuery.error)}
-                </p>
-              ) : sources.length === 0 ? (
-                <p className="rounded-lg border border-dashed border-border p-3 text-ui-sm text-muted-foreground">
-                  没有可用的已结束 Expert
-                  工作片段。运行中的任务、无法确认归属的材料和提炼任务不会作为来源。
-                </p>
-              ) : (
-                <ul className="max-h-72 min-w-0 space-y-2 overflow-y-auto pr-1">
-                  {sources.map((source) => {
-                    const key = sourceKey(source);
-                    const checked = selectedSources.has(key);
-                    const disabled = !checked && selectedSources.size >= 5;
-                    return (
-                      <li key={key} className="min-w-0 rounded-lg border border-border p-3">
-                        <label className="flex min-w-0 cursor-pointer items-start gap-3">
-                          <Checkbox
-                            aria-label={`选择来源：${source.title || "未命名任务"}`}
-                            checked={checked}
-                            disabled={disabled}
-                            onCheckedChange={(value) =>
-                              setSelectedSources((current) => {
-                                const next = new Set(current);
-                                if (value === true) next.add(key);
-                                else next.delete(key);
-                                return next;
-                              })
-                            }
-                          />
-                          <span className="min-w-0 flex-1">
-                            <span className="block break-words text-ui font-medium">
-                              {source.title || "未命名任务"}
-                            </span>
-                            <span className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-ui-xs text-muted-foreground">
-                              <span>Expert v{source.expertRevision}</span>
-                              <span>{new Date(source.completedAt).toLocaleString()}</span>
-                              <span>{source.messageCount} 条消息</span>
-                              <span>来源 {source.snapshotId}</span>
-                            </span>
-                          </span>
-                        </label>
-                        {onOpenTask ? (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="ml-7 mt-1"
-                            onClick={() => onOpenTask(source.threadId as ThreadId)}
+            {sourcesQuery.isPending ? (
+              <p className="text-ui-sm text-muted-foreground" role="status">
+                正在读取可用工作经验…
+              </p>
+            ) : sourcesQuery.isError ? (
+              <p className="text-ui-sm text-destructive" role="alert">
+                无法读取来源：{errorText(sourcesQuery.error)}
+              </p>
+            ) : sources.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border p-3 text-ui-sm text-muted-foreground">
+                暂无可提炼的工作经验
+              </p>
+            ) : (
+              <>
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    aria-expanded={sourceOpen}
+                    aria-controls={configPanelId}
+                    onClick={() =>
+                      setConfigPanel((panel) => (panel === "sources" ? null : "sources"))
+                    }
+                  >
+                    已选 {selectedSources.size} 段工作记录 <DisclosureChevron open={sourceOpen} />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="min-w-0 max-w-full"
+                    aria-label="调整提炼模型"
+                    aria-expanded={modelOpen}
+                    aria-controls={configPanelId}
+                    onClick={() => setConfigPanel((panel) => (panel === "model" ? null : "model"))}
+                  >
+                    <span className="truncate">
+                      {draft.selectedModel
+                        ? formatProviderModelOptionName({
+                            provider: draft.selectedProvider,
+                            slug: draft.selectedModel,
+                          })
+                        : "选择模型"}
+                    </span>
+                    <DisclosureChevron open={modelOpen} />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-expanded={focusOpen}
+                    aria-controls={configPanelId}
+                    onClick={() => setConfigPanel((panel) => (panel === "focus" ? null : "focus"))}
+                  >
+                    {focus.trim() ? "编辑提炼重点" : "补充提炼重点"}
+                    <DisclosureChevron open={focusOpen} />
+                  </Button>
+                  <div className="order-1 basis-full text-ui-xs empty:hidden">
+                    {initialThreadSourceMissing ? (
+                      <p className="text-ui-xs text-muted-foreground" role="status">
+                        此任务没有可用片段，可在下方选择其他来源。
+                      </p>
+                    ) : null}
+                    {capabilityFailure ? (
+                      <p className="text-ui-xs text-destructive" role="status">
+                        {capabilityFailure}
+                      </p>
+                    ) : !runsQuery.isSuccess ? (
+                      <p className="text-ui-xs text-muted-foreground" role="status">
+                        {runsQuery.isError
+                          ? "无法确认已用片段，暂时不能发起提炼。"
+                          : "正在核对已用片段…"}
+                      </p>
+                    ) : !draft.selectedModel?.trim() ? (
+                      <p className="text-ui-xs text-muted-foreground" role="status">
+                        请选择本次提炼使用的模型。
+                      </p>
+                    ) : null}
+                  </div>
+                  <Button
+                    className="ml-auto"
+                    disabled={
+                      selectedSources.size < 1 ||
+                      selectedSources.size > 5 ||
+                      !runsQuery.isSuccess ||
+                      Boolean(capabilityFailure) ||
+                      startMutation.isPending ||
+                      working ||
+                      !draft.selectedModel?.trim()
+                    }
+                    aria-busy={startMutation.isPending}
+                    onClick={start}
+                  >
+                    {startMutation.isPending ? (
+                      <LoaderCircleIcon
+                        aria-hidden="true"
+                        className="size-4 animate-spin motion-reduce:animate-none"
+                      />
+                    ) : null}
+                    {startMutation.isPending ? "提交中…" : "提炼经验"}
+                  </Button>
+                </div>
+
+                <div id={configPanelId}>
+                  <DisclosureRegion open={configPanel !== null} className="min-w-0">
+                    <div hidden={!sourceOpen}>
+                      <div className="border-t border-border pt-3">
+                        <fieldset className="min-w-0 space-y-2" disabled={startMutation.isPending}>
+                          <legend className="text-ui-sm font-medium">
+                            选择工作记录（最多 5 段）
+                          </legend>
+                          <ul className="max-h-72 min-w-0 space-y-2 overflow-y-auto pr-1">
+                            {[...sources]
+                              .sort((left, right) =>
+                                right.completedAt.localeCompare(left.completedAt),
+                              )
+                              .map((source) => {
+                                const key = sourceKey(source);
+                                const checked = selectedSources.has(key);
+                                const disabled = !checked && selectedSources.size >= 5;
+                                return (
+                                  <li
+                                    key={key}
+                                    className="min-w-0 rounded-lg border border-border px-3 py-2"
+                                  >
+                                    <div className="grid min-w-0 grid-cols-1 items-center gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,1fr)_auto]">
+                                      <label className="flex min-w-0 cursor-pointer items-start gap-3">
+                                        <Checkbox
+                                          aria-label={`选择来源：${source.title || "未命名任务"}`}
+                                          checked={checked}
+                                          disabled={disabled}
+                                          onCheckedChange={(value) =>
+                                            setSelectedSourcesOverride((current) => {
+                                              const next = new Set(current ?? defaultSourceKeys);
+                                              if (value === true) next.add(key);
+                                              else next.delete(key);
+                                              return next;
+                                            })
+                                          }
+                                        />
+                                        <span className="min-w-0 flex-1">
+                                          <span className="block break-words text-ui font-medium">
+                                            {source.title || "未命名任务"}
+                                          </span>
+                                          <span className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-ui-xs text-muted-foreground">
+                                            <span>
+                                              {new Date(source.completedAt).toLocaleString()}
+                                            </span>
+                                            <span>{source.messageCount} 条消息</span>
+                                            {runs.some(
+                                              (run) =>
+                                                run.stage === "discovery" &&
+                                                run.sourceSelections?.some(
+                                                  (selection) => sourceKey(selection) === key,
+                                                ),
+                                            ) ? (
+                                              <span>已提炼过</span>
+                                            ) : null}
+                                          </span>
+                                        </span>
+                                      </label>
+                                      <div className="flex shrink-0 flex-wrap items-center gap-1 pl-7 sm:pl-0">
+                                        <Button
+                                          size="sm"
+                                          variant="ghost"
+                                          aria-expanded={expandedSourceKey === key}
+                                          onClick={() =>
+                                            setExpandedSourceKey((current) =>
+                                              current === key ? null : key,
+                                            )
+                                          }
+                                        >
+                                          记录详情{" "}
+                                          <DisclosureChevron open={expandedSourceKey === key} />
+                                        </Button>
+                                        {onOpenTask ? (
+                                          <Button
+                                            size="sm"
+                                            variant="ghost"
+                                            onClick={() => onOpenTask(source.threadId as ThreadId)}
+                                          >
+                                            打开任务{" "}
+                                            <ExternalLinkIcon
+                                              aria-hidden="true"
+                                              className="size-3.5"
+                                            />
+                                          </Button>
+                                        ) : null}
+                                      </div>
+                                    </div>
+                                    <DisclosureRegion open={expandedSourceKey === key}>
+                                      <p className="break-all pt-2 pl-7 text-ui-xs text-muted-foreground">
+                                        Expert v{source.expertRevision} · 来源 {source.snapshotId}
+                                      </p>
+                                    </DisclosureRegion>
+                                  </li>
+                                );
+                              })}
+                          </ul>
+                        </fieldset>
+                      </div>
+                    </div>
+                    <div hidden={!focusOpen} className="pt-3">
+                      <label className="grid min-w-0 gap-1.5 text-ui-sm">
+                        <span className="font-medium">发现重点（可选）</span>
+                        <Textarea
+                          aria-label="发现重点"
+                          value={focus}
+                          maxLength={8_000}
+                          rows={3}
+                          disabled={startMutation.isPending}
+                          placeholder="例如：查找可复用的排查与复核步骤。"
+                          onChange={(event) => setFocus(event.target.value)}
+                        />
+                      </label>
+                    </div>
+                    <div hidden={!modelOpen} className="pt-3">
+                      <div className="min-w-0 space-y-2 rounded-lg border border-border p-3">
+                        <div className="space-y-1">
+                          <p className="text-ui-sm font-medium">本次运行模型</p>
+                          <p className="text-ui-xs text-muted-foreground">
+                            使用当前已选 Provider 和模型；只有通过下方选择器明确操作时才会切换。
+                          </p>
+                        </div>
+                        <ScratchModelPickers
+                          draft={draft}
+                          catalog={catalog}
+                          providerStatuses={providerStatuses}
+                        />
+                        {capabilityFailure ? (
+                          <p
+                            className="flex items-start gap-2 text-ui-sm text-destructive"
+                            role="status"
                           >
-                            打开任务 <ExternalLinkIcon aria-hidden="true" className="size-3.5" />
-                          </Button>
+                            <CircleAlertIcon
+                              aria-hidden="true"
+                              className="mt-0.5 size-4 shrink-0"
+                            />
+                            <span>{capabilityFailure}</span>
+                          </p>
+                        ) : currentProviderCapability ? (
+                          <p className="text-ui-xs text-muted-foreground" role="status">
+                            {currentProviderCapability.reason || "当前 Provider 满足提炼约束。"}
+                          </p>
                         ) : null}
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </fieldset>
-
-            <div className="grid min-w-0 gap-4 lg:grid-cols-2">
-              <div className="grid min-w-0 gap-1.5 text-ui-sm">
-                <span className="font-medium">目标 Skill</span>
-                <select
-                  aria-label="目标 Skill"
-                  className="h-9 min-w-0 rounded-md border border-input bg-background px-3 text-ui-sm"
-                  value={targetSkillId}
-                  disabled={startMutation.isPending || skillsQuery.isPending}
-                  onChange={(event) => setTargetSkillId(event.target.value)}
-                >
-                  <option value="">新建当前专家专用 Skill</option>
-                  {availableSkills.map((skill) => (
-                    <option key={skill.skillId} value={skill.skillId}>
-                      {skill.name} ·{" "}
-                      {skillEvolutionPolicyLabel(skill.evolutionPolicy ?? "protected")} ·{" "}
-                      {skillEvolutionScopeLabel(skill.scope, expertNameById)}
-                    </option>
-                  ))}
-                </select>
-                {skillsQuery.isError ? (
-                  <span className="text-ui-xs text-destructive">
-                    无法读取目标 Skill：{errorText(skillsQuery.error)}
-                  </span>
-                ) : null}
-                {selectedTargetSkill &&
-                (selectedTargetSkill.evolutionPolicy ?? "protected") === "protected" ? (
-                  <fieldset className="mt-2 space-y-2 rounded-lg border border-border bg-muted/30 p-3">
-                    <legend className="px-1 text-ui-xs font-medium">
-                      本次受保护操作（仍需认可准确候选）
-                    </legend>
-                    <label className="flex items-start gap-2 text-ui-sm">
-                      <input
-                        type="radio"
-                        name="protected-skill-action"
-                        value="update"
-                        checked={protectedAction === "update"}
-                        onChange={() => setProtectedAction("update")}
-                      />
-                      <span>
-                        <strong>修改原版</strong>
-                        <span className="block text-ui-xs text-muted-foreground">
-                          保持当前 Skill 身份和范围。
-                        </span>
-                      </span>
-                    </label>
-                    <label className="flex items-start gap-2 text-ui-sm">
-                      <input
-                        type="radio"
-                        name="protected-skill-action"
-                        value="derive"
-                        checked={protectedAction === "derive"}
-                        onChange={() => setProtectedAction("derive")}
-                      />
-                      <span>
-                        <strong>创建本专家专用副本</strong>
-                        <span className="block text-ui-xs text-muted-foreground">
-                          保留原版，候选采用后由本专家使用副本。
-                        </span>
-                      </span>
-                    </label>
-                  </fieldset>
-                ) : null}
-              </div>
-              <label className="grid min-w-0 gap-1.5 text-ui-sm">
-                <span className="font-medium">提炼重点（可选）</span>
-                <Textarea
-                  aria-label="提炼重点"
-                  value={focus}
-                  maxLength={8_000}
-                  rows={3}
-                  placeholder="例如：提取可复用的排查步骤，排除本项目专有信息。"
-                  onChange={(event) => setFocus(event.target.value)}
-                />
-              </label>
-            </div>
-
-            <div className="min-w-0 space-y-2 rounded-lg border border-border p-3">
-              <div className="space-y-1">
-                <p className="text-ui-sm font-medium">本次运行模型</p>
-                <p className="text-ui-xs text-muted-foreground">
-                  沿用当前用户的 Provider／模型选择；切换只在你通过选择器明确操作后发生。
-                </p>
-              </div>
-              <ScratchModelPickers
-                draft={draft}
-                catalog={catalog}
-                providerStatuses={providerStatuses}
-              />
-              {capabilityFailure ? (
-                <p className="flex items-start gap-2 text-ui-sm text-destructive" role="status">
-                  <CircleAlertIcon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-                  <span>{capabilityFailure}</span>
-                </p>
-              ) : currentProviderCapability ? (
-                <p className="text-ui-xs text-muted-foreground" role="status">
-                  {currentProviderCapability.reason || "当前 Provider 满足提炼能力约束。"}
-                </p>
-              ) : null}
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                disabled={
-                  selectedSources.size < 1 ||
-                  selectedSources.size > 5 ||
-                  Boolean(capabilityFailure) ||
-                  startMutation.isPending ||
-                  !draft.selectedModel ||
-                  !draft.selectedModel.trim()
-                }
-                aria-busy={startMutation.isPending}
-                onClick={start}
-              >
-                {startMutation.isPending ? (
-                  <LoaderCircleIcon
-                    aria-hidden="true"
-                    className="size-4 animate-spin motion-reduce:animate-none"
-                  />
-                ) : null}
-                {startMutation.isPending ? "提交中…" : "开始提炼"}
-              </Button>
-              {selectedSources.size > 0 ? (
-                <span className="text-ui-xs text-muted-foreground">
-                  已选 {selectedSources.size} 条
-                </span>
-              ) : null}
-            </div>
+                      </div>
+                    </div>
+                  </DisclosureRegion>
+                </div>
+              </>
+            )}
           </>
         )}
         {notice ? (
@@ -1554,6 +2307,7 @@ export function ExpertSkillEvolution({
             {notice}
           </p>
         ) : null}
+        {extractionError ? <ExtractionFailure reason={extractionError} /> : null}
         {error ? (
           <p
             className="rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-ui-sm text-destructive"
@@ -1567,426 +2321,578 @@ export function ExpertSkillEvolution({
       <section className="min-w-0 space-y-3" aria-labelledby="expert-evolution-history-heading">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 id="expert-evolution-history-heading" className="text-ui-lg font-medium">
-            提炼记录与候选
+            经验{" "}
+            {pendingCount > 0 ? (
+              <span className="ml-2 text-ui-sm font-normal text-muted-foreground">
+                {pendingCount} 条待处理
+              </span>
+            ) : null}
           </h2>
-          {runsQuery.isFetching ? (
-            <span className="text-ui-xs text-muted-foreground" role="status">
-              同步任务状态…
-            </span>
-          ) : null}
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-expanded={graphOpen}
+            onClick={() => setGraphOpen((open) => !open)}
+          >
+            进化星图 <DisclosureChevron open={graphOpen} />
+          </Button>
         </div>
+        {runsQuery.isPending ? (
+          <p role="status" className="text-ui-sm text-muted-foreground">
+            正在读取经验…
+          </p>
+        ) : null}
         {runsQuery.isError ? (
           <p role="alert" className="text-ui-sm text-destructive">
             无法读取提炼记录：{errorText(runsQuery.error)}
           </p>
         ) : null}
-        {!runs.length && !runsQuery.isPending ? (
-          <p className="rounded-lg border border-dashed border-border p-3 text-ui-sm text-muted-foreground">
-            还没有提炼请求。
+        {!visibleTimeline.length && !runsQuery.isPending ? (
+          <p className="rounded-xl border border-dashed border-border px-4 py-6 text-ui-sm text-muted-foreground">
+            {timeline.length
+              ? "暂时没有待处理经验，历史记录已保留。"
+              : "从一次工作记录开始，发现值得复用的方法。"}
           </p>
         ) : null}
-        {runs.length ? (
-          <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(12rem,0.32fr)_minmax(0,1fr)]">
-            <nav className="min-w-0 space-y-1" aria-label="提炼请求列表">
-              {runs.map((run) => (
-                <button
-                  key={run.requestId}
-                  type="button"
-                  aria-current={run.requestId === selectedRunIdFromList ? "true" : undefined}
-                  className="flex w-full min-w-0 items-start justify-between gap-2 rounded-lg border border-border px-3 py-2 text-left text-ui-sm hover:bg-muted/50 aria-current:border-primary aria-current:bg-primary/5"
-                  onClick={() => setSelectedRunId(run.requestId)}
+        <ol className="min-w-0" aria-label="经验时间线">
+          {timeline.map((entry) => {
+            const visible = visibleTimeline.some((item) => item.id === entry.id);
+            const expanded = visible && (entry.failed || entry.id === expandedEntryId);
+            const selectedRun =
+              hydratedSelectedRun?.requestId === entry.run.requestId
+                ? hydratedSelectedRun
+                : entry.run;
+            const parent = runs.find((run) => run.requestId === selectedRun.discoveryRequestId);
+            const opportunity = parent?.opportunities?.find(
+              (item) => item.opportunityId === selectedRun.opportunityId,
+            );
+            const readOnlyReason =
+              selectedRun.stage !== "generation"
+                ? undefined
+                : !parent || !opportunity
+                  ? "无法确认此生成结果所属的经验机会，暂不能编辑或采用。"
+                  : opportunity.status === "dismissed"
+                    ? "此经验已忽略，不能继续编辑或采用。"
+                    : !isLatestOpportunityGeneration(selectedRun, runs)
+                      ? "此候选已被更新的生成结果替代，不能继续编辑或采用。"
+                      : undefined;
+            const StatusIcon = entry.active
+              ? LoaderCircleIcon
+              : entry.applied
+                ? CircleCheckIcon
+                : entry.pending
+                  ? ClockIcon
+                  : CircleAlertIcon;
+            const detailId = `experience-detail-${encodeURIComponent(entry.id)}`;
+            const nodeSummary = (
+              <>
+                <span className="min-w-0 flex-1 basis-full break-words text-ui font-medium sm:basis-auto">
+                  {entry.title}
+                </span>
+                {!entry.failed ? (
+                  <span
+                    className={`rounded-md px-2 py-1 text-ui-xs ${entry.applied ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-muted text-muted-foreground"}`}
+                  >
+                    {entry.label}
+                  </span>
+                ) : null}
+
+                <time
+                  dateTime={entry.run.createdAt}
+                  className="flex items-center gap-1 text-ui-xs text-muted-foreground"
                 >
-                  <span className="min-w-0 flex-1">
-                    <span className="block break-all font-medium">{run.requestId}</span>
-                    <span className="block text-ui-xs text-muted-foreground">
-                      {new Date(run.createdAt).toLocaleString()}
-                    </span>
-                  </span>
-                  <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-ui-xs">
-                    {skillEvolutionRunPresentation(run).label}
-                  </span>
-                </button>
-              ))}
-            </nav>
-            <div className="min-w-0 space-y-3">
-              {selectedRunQuery.isFetching ? (
-                <p role="status" className="text-ui-sm text-muted-foreground">
-                  正在读取请求详情…
-                </p>
-              ) : null}
-              {selectedRunQuery.isError ? (
-                <p role="alert" className="text-ui-sm text-destructive">
-                  请求详情不可用：{errorText(selectedRunQuery.error)}
-                </p>
-              ) : null}
-              {selectedRun ? (
-                <div className="min-w-0 space-y-3 rounded-xl border border-border p-4">
-                  <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0 space-y-1">
-                      <h3 className="break-all text-ui font-medium">
-                        {selectedRunPresentation?.label ??
-                          skillEvolutionRunStatusLabel(selectedRun.status)}
-                      </h3>
-                      {selectedRunPresentation?.detail ? (
-                        <p className="break-words text-ui-sm text-muted-foreground" role="status">
-                          {selectedRunPresentation.detail}
-                        </p>
-                      ) : null}
-                      {selectedRun.summary && !selectedRunPresentation?.detail ? (
-                        <p className="break-words text-ui-sm text-muted-foreground">
-                          {selectedRun.summary}
-                        </p>
-                      ) : null}
-                      {selectedRun.error ? (
-                        <p className="break-words text-ui-sm text-destructive" role="alert">
-                          {selectedRun.error}
-                        </p>
-                      ) : null}
-                    </div>
-                    {selectedRun.taskThreadId && onOpenTask ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => onOpenTask(selectedRun.taskThreadId!)}
-                      >
-                        查看提炼任务 <ExternalLinkIcon aria-hidden="true" className="size-3.5" />
-                      </Button>
-                    ) : null}
-                    {isSkillEvolutionRunActive(selectedRun) && !expertArchived ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={working}
-                        onClick={() => void cancelRun(selectedRun)}
-                      >
-                        取消真实任务
-                      </Button>
-                    ) : null}
+                  <ClockIcon aria-hidden="true" className="size-3.5" />
+                  {new Date(entry.run.createdAt).toLocaleString(undefined, {
+                    month: "short",
+                    day: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </time>
+                {!entry.failed ? <DisclosureChevron open={expanded} /> : null}
+              </>
+            );
+            return (
+              <li
+                key={entry.id}
+                hidden={!visible}
+                className="relative min-w-0 pl-9"
+                data-testid={`experience-node:${entry.id}`}
+              >
+                {visibleTimeline.at(-1)?.id !== entry.id || expanded ? (
+                  <div
+                    aria-hidden="true"
+                    className="absolute bottom-0 left-3 top-7 border-l border-border"
+                  />
+                ) : null}
+                <StatusIcon
+                  aria-hidden="true"
+                  className={`absolute left-0.5 top-4 size-5 bg-background ${entry.applied ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"} ${entry.active ? "animate-spin motion-reduce:animate-none" : ""}`}
+                />
+                {entry.failed ? (
+                  <div className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1 py-3 pr-2">
+                    {nodeSummary}
                   </div>
-                  {selectedRun.status === "no_change" ? (
-                    <p className="rounded-lg bg-muted/50 p-3 text-ui-sm" role="status">
-                      无需提炼：没有发现值得写入的可复用方法。正式 Skill、修订和绑定不变。
-                    </p>
-                  ) : null}
-                  {selectedRun.status === "insufficient_evidence" ? (
-                    <p className="rounded-lg bg-muted/50 p-3 text-ui-sm" role="status">
-                      证据不足：当前来源无法支撑可复用结论。你可以补充来源后再次主动提炼。
-                    </p>
-                  ) : null}
-                  {selectedRun.status === "failed" ? (
-                    <p
-                      className="rounded-lg border border-destructive/40 p-3 text-ui-sm text-destructive"
-                      role="alert"
-                    >
-                      分析失败。{selectedRun.error ?? "请检查任务链接中的原生执行错误。"}
-                    </p>
-                  ) : null}
-                  {selectedRun.proposals.map((proposal) => (
-                    <ProposalCard
-                      key={proposal.proposalId}
-                      proposal={proposal}
-                      expertArchived={expertArchived}
-                      affectedExperts={impactedExperts(proposal)}
-                      busy={working}
-                      onEdit={performProposalEdit}
-                      onApply={performApply}
-                      onReject={performReject}
-                      {...(onOpenTask ? { onOpenTask } : {})}
-                    />
-                  ))}
+                ) : (
+                  <button
+                    type="button"
+                    aria-expanded={expanded}
+                    aria-controls={detailId}
+                    className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-lg py-3 pr-2 text-left outline-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={() => {
+                      setExpandedEntryId(expanded ? null : entry.id);
+                      setSelectedRunId(expanded ? null : entry.run.requestId);
+                      setVisitedEntries((current) => new Set([...current, entry.id]));
+                    }}
+                  >
+                    {nodeSummary}
+                  </button>
+                )}
+
+                <div id={detailId}>
+                  <DisclosureRegion open={expanded}>
+                    {entry.failed || visitedEntries.has(entry.id) ? (
+                      <div className="min-w-0 space-y-3 pb-5">
+                        {expanded && !entry.failed && selectedRunQuery.isError ? (
+                          <p role="alert" className="text-ui-sm text-destructive">
+                            请求详情不可用：{errorText(selectedRunQuery.error)}
+                          </p>
+                        ) : null}
+                        {entry.opportunity ? (
+                          (() => {
+                            const opportunity =
+                              selectedRun.opportunities?.find(
+                                (item) => item.opportunityId === entry.opportunity?.opportunityId,
+                              ) ?? entry.opportunity;
+                            const latestGeneration = latestOpportunityGeneration(
+                              runs,
+                              selectedRun.requestId,
+                              opportunity.opportunityId,
+                            );
+                            const generationBlockReason = generationBlockReasonFor(opportunity);
+                            const generationError = generationErrors[opportunity.opportunityId];
+                            const failureReason =
+                              generationError &&
+                              generationError.previousRequestId ===
+                                (latestGeneration?.requestId ?? null)
+                                ? generationError.reason
+                                : undefined;
+                            return (
+                              <div className="min-w-0 pr-2">
+                                <OpportunityCard
+                                  generations={runs.filter(
+                                    (run) =>
+                                      run.discoveryRequestId === selectedRun.requestId &&
+                                      run.opportunityId === opportunity.opportunityId,
+                                  )}
+                                  opportunity={opportunity}
+                                  {...(failureReason ? { failureReason } : {})}
+                                  {...(latestGeneration ? { latestGeneration } : {})}
+                                  {...(generationBlockReason ? { generationBlockReason } : {})}
+                                  expertArchived={expertArchived}
+                                  busy={working}
+                                  feedback={
+                                    feedbackDrafts[opportunity.opportunityId] ??
+                                    latestGeneration?.feedback ??
+                                    ""
+                                  }
+                                  onFeedbackChange={(value) =>
+                                    setFeedbackDrafts((current) => ({
+                                      ...current,
+                                      [opportunity.opportunityId]: value,
+                                    }))
+                                  }
+                                  onGenerate={() =>
+                                    void generateOpportunity(selectedRun, opportunity).catch(
+                                      () => {},
+                                    )
+                                  }
+                                  onDismiss={() =>
+                                    void dismissOpportunity(selectedRun, opportunity).catch(
+                                      () => {},
+                                    )
+                                  }
+                                  {...(onOpenAbilities ? { onOpenAbilities } : {})}
+                                  ownerName={expertNameById.get(expertId) ?? expertName}
+                                  onEdit={performProposalEdit}
+                                  onApply={performApply}
+                                  onViewResult={viewResult}
+                                  onReject={performReject}
+                                  {...(onOpenTask ? { onOpenTask } : {})}
+                                />
+                              </div>
+                            );
+                          })()
+                        ) : selectedRun.status === "failed" ? (
+                          <ExtractionFailure
+                            reason={selectedRun.error ?? selectedRun.summary ?? "未能完成提取。"}
+                          />
+                        ) : (
+                          <div className="space-y-3 rounded-xl border border-border p-4">
+                            <h3 className="text-ui font-medium">
+                              {skillEvolutionRunPresentation(selectedRun).label}
+                            </h3>
+                            {skillEvolutionRunPresentation(selectedRun).detail ? (
+                              <p role="status" className="text-ui-sm text-muted-foreground">
+                                {skillEvolutionRunPresentation(selectedRun).detail}
+                              </p>
+                            ) : null}
+                            {selectedRun.summary &&
+                            !skillEvolutionRunPresentation(selectedRun).detail ? (
+                              <p className="break-words text-ui-sm text-muted-foreground">
+                                {selectedRun.summary}
+                              </p>
+                            ) : null}
+                            {selectedRun.error ? (
+                              <p role="alert" className="break-words text-ui-sm text-destructive">
+                                {selectedRun.error}
+                              </p>
+                            ) : null}
+                            {selectedRun.status === "no_change" ? (
+                              <p role="status" className="text-ui-sm text-muted-foreground">
+                                {selectedRun.stage === "generation"
+                                  ? "此次生成没有形成可采用的 Skill。正式 Skill、修订和绑定不变。"
+                                  : "没有发现值得提炼的可复用经验。正式 Skill、修订和绑定不变。"}
+                              </p>
+                            ) : null}
+                            {selectedRun.status === "insufficient_evidence" ? (
+                              <p role="status" className="text-ui-sm text-muted-foreground">
+                                证据不足：当前来源无法支撑可复用结论。你可以补充来源后再次主动提炼。
+                              </p>
+                            ) : null}
+                            {selectedRun.stage !== "discovery"
+                              ? selectedRun.proposals.map((proposal) => (
+                                  <ProposalCard
+                                    key={proposal.proposalId}
+                                    proposal={proposal}
+                                    expertArchived={expertArchived}
+                                    readOnly={Boolean(readOnlyReason)}
+                                    {...(readOnlyReason ? { readOnlyReason } : {})}
+                                    ownerName={
+                                      expertNameById.get(proposal.expertId) ?? proposal.expertId
+                                    }
+                                    busy={working}
+                                    onEdit={performProposalEdit}
+                                    onApply={performApply}
+                                    onViewResult={viewResult}
+                                    onReject={performReject}
+                                    {...(onOpenTask ? { onOpenTask } : {})}
+                                  />
+                                ))
+                              : null}
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                  </DisclosureRegion>
                 </div>
-              ) : null}
-            </div>
-          </div>
+              </li>
+            );
+          })}
+        </ol>
+        {hiddenCount > 0 || historyOpen ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-expanded={historyOpen}
+            onClick={() => setHistoryOpen((open) => !open)}
+          >
+            {historyOpen ? "收起历史记录" : `查看全部提炼记录（另 ${hiddenCount} 条）`}
+            <DisclosureChevron open={historyOpen} />
+          </Button>
         ) : null}
       </section>
 
-      <section className="min-w-0 space-y-4" aria-label="进化星图与版本详情">
-        <EvolutionGraphView
-          expertId={expertId}
-          active={active}
-          graph={graph}
-          currentGraph={currentGraph}
-          loading={graphQuery.isPending || currentGraphQuery.isPending}
-          selectedSkillId={selectedSkillId}
-          onSelectSkill={(node) => {
-            setSelectedSkillNode(node);
-            setSelectedSkillId(node.skillId);
-            setSelectedEventId(null);
-            restorePreviewMutation.reset();
-            bindingRestorePreviewMutation.reset();
-          }}
-        />
-        {selectedNode ? (
-          <div
-            className="min-w-0 rounded-xl border border-border p-4"
-            aria-label="选中 Skill 版本详情"
-          >
-            <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
-              <div className="min-w-0">
-                <h3 className="break-words text-ui-lg font-medium">{selectedNode.name}</h3>
-                {selectedNode.deleted ? (
-                  <p className="text-ui-sm text-muted-foreground" role="status">
-                    已删除 · 历史事件仍可查看，当前 Skill 详情不可用。
+      <DisclosureRegion open={graphOpen}>
+        <section className="min-w-0 space-y-4" aria-label="进化星图与版本详情">
+          <EvolutionGraphView
+            expertId={expertId}
+            expertNameById={expertNameById}
+            active={active && graphOpen}
+            graph={graph}
+            currentGraph={currentGraph}
+            loading={graphQuery.isPending || currentGraphQuery.isPending}
+            selectedSkillId={selectedSkillId}
+            onSelectSkill={(node) => {
+              setSelectedSkillNode(node);
+              setSelectedSkillId(node.skillId);
+              setSelectedEventId(null);
+              restorePreviewMutation.reset();
+              bindingRestorePreviewMutation.reset();
+            }}
+          />
+          {selectedNode ? (
+            <div
+              className="min-w-0 rounded-xl border border-border p-4"
+              aria-label="选中 Skill 版本详情"
+            >
+              <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h3 className="break-words text-ui-lg font-medium">{selectedNode.name}</h3>
+                  {selectedNode.deleted ? (
+                    <p className="text-ui-sm text-muted-foreground" role="status">
+                      已删除 · 历史事件仍可查看，当前 Skill 详情不可用。
+                    </p>
+                  ) : null}
+                  <p className="break-all text-ui-sm text-muted-foreground">
+                    {selectedNode.skillId} · v{selectedNode.revision} ·{" "}
+                    {skillEvolutionScopeLabel(
+                      selectedNode.ownerExpertId
+                        ? { kind: "expert", expertId: selectedNode.ownerExpertId }
+                        : undefined,
+                      expertNameById,
+                    )}
                   </p>
+                  <p className="break-all text-ui-xs text-muted-foreground">
+                    内容包 {selectedNode.packageId} ·{" "}
+                    {selectedNode.timestamp
+                      ? new Date(selectedNode.timestamp).toLocaleString()
+                      : "基线时间未知"}
+                    {selectedNode.derivedFromSkillId
+                      ? ` · 派生自 ${selectedNode.derivedFromSkillId}`
+                      : ""}
+                  </p>
+                </div>
+                {selectedSkillNode &&
+                !selectedNode.deleted &&
+                !selectedSkillQuery.isPending &&
+                selectedSkillQuery.data ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setSkillDetail(selectedSkillQuery.data!)}
+                  >
+                    打开当前 Skill 详情
+                  </Button>
                 ) : null}
-                <p className="break-all text-ui-sm text-muted-foreground">
-                  {selectedNode.skillId} · v{selectedNode.revision} ·{" "}
-                  {skillEvolutionPolicyLabel(selectedNode.policy)} ·{" "}
-                  {skillEvolutionScopeLabel(
-                    selectedNode.ownerExpertId
-                      ? { kind: "expert", expertId: selectedNode.ownerExpertId }
-                      : undefined,
-                    expertNameById,
-                  )}
-                </p>
-                <p className="break-all text-ui-xs text-muted-foreground">
-                  内容包 {selectedNode.packageId} ·{" "}
-                  {selectedNode.timestamp
-                    ? new Date(selectedNode.timestamp).toLocaleString()
-                    : "基线时间未知"}
-                  {selectedNode.derivedFromSkillId
-                    ? ` · 派生自 ${selectedNode.derivedFromSkillId}`
-                    : ""}
-                </p>
               </div>
-              {selectedSkillNode &&
-              !selectedNode.deleted &&
-              !selectedSkillQuery.isPending &&
-              selectedSkillQuery.data ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setSkillDetail(selectedSkillQuery.data!)}
-                >
-                  打开当前 Skill 详情
-                </Button>
+              {!selectedNode.deleted && selectedSkillQuery.isError ? (
+                <p className="mt-2 text-ui-sm text-destructive" role="alert">
+                  Skill 详情不可用：{errorText(selectedSkillQuery.error)}
+                </p>
               ) : null}
-            </div>
-            {!selectedNode.deleted && selectedSkillQuery.isError ? (
-              <p className="mt-2 text-ui-sm text-destructive" role="alert">
-                Skill 详情不可用：{errorText(selectedSkillQuery.error)}
-              </p>
-            ) : null}
-            {(currentGraph?.events ?? []).filter((event) => event.skillId === selectedNode.skillId)
-              .length ? (
-              <div className="mt-3 space-y-2">
-                <h4 className="text-ui-sm font-medium">版本与来源</h4>
-                <ul className="space-y-2">
-                  {(currentGraph?.events ?? [])
-                    .filter((event) => event.skillId === selectedNode.skillId)
-                    .map((event) => (
-                      <li
-                        key={event.eventId}
-                        className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg bg-muted/40 px-3 py-2"
-                      >
-                        <span className="min-w-0 flex-1 text-ui-sm">
-                          {event.kind === "binding_restored"
-                            ? skillEvolutionEventLabel(event.kind)
-                            : `${skillEvolutionEventLabel(event.kind)} · v${event.revision}`}{" "}
-                          · {new Date(event.createdAt).toLocaleString()}
-                          <span className="block break-all text-ui-xs text-muted-foreground">
-                            来源请求 {event.requestId} · {event.operationId}
-                            {event.affectedExpertIds.length
-                              ? ` · 影响 ${event.affectedExpertIds.map((id) => expertNameById.get(id) ?? id).join("、")}`
-                              : ""}
+              {(currentGraph?.events ?? []).filter(
+                (event) => event.skillId === selectedNode.skillId,
+              ).length ? (
+                <div className="mt-3 space-y-2">
+                  <h4 className="text-ui-sm font-medium">版本与来源</h4>
+                  <ul className="space-y-2">
+                    {(currentGraph?.events ?? [])
+                      .filter((event) => event.skillId === selectedNode.skillId)
+                      .map((event) => (
+                        <li
+                          key={event.eventId}
+                          className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg bg-muted/40 px-3 py-2"
+                        >
+                          <span className="min-w-0 flex-1 text-ui-sm">
+                            {event.kind === "binding_restored"
+                              ? skillEvolutionEventLabel(event.kind)
+                              : `${skillEvolutionEventLabel(event.kind)} · v${event.revision}`}{" "}
+                            · {new Date(event.createdAt).toLocaleString()}
+                            <span className="block break-all text-ui-xs text-muted-foreground">
+                              来源请求 {event.requestId} · {event.operationId}
+                              {event.affectedExpertIds.length
+                                ? ` · 影响 ${event.affectedExpertIds.map((id) => expertNameById.get(id) ?? id).join("、")}`
+                                : ""}
+                            </span>
                           </span>
-                        </span>
-                        <div className="flex shrink-0 flex-wrap gap-1">
+                          <div className="flex shrink-0 flex-wrap gap-1">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => setSelectedEventId(event.eventId)}
+                            >
+                              查看来源
+                            </Button>
+                            {event.kind !== "binding_restored" ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={
+                                  expertArchived ||
+                                  selectedNode.deleted ||
+                                  working ||
+                                  restorePreviewMutation.isPending
+                                }
+                                onClick={() => {
+                                  setSelectedEventId(event.eventId);
+                                  bindingRestorePreviewMutation.reset();
+                                  restorePreviewMutation.mutate(event.eventId);
+                                }}
+                              >
+                                预览内容恢复
+                              </Button>
+                            ) : null}
+                            {event.kind === "derived" ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={
+                                  expertArchived ||
+                                  selectedNode.deleted ||
+                                  working ||
+                                  bindingRestorePreviewMutation.isPending
+                                }
+                                onClick={() => {
+                                  setSelectedEventId(event.eventId);
+                                  restorePreviewMutation.reset();
+                                  bindingRestorePreviewMutation.mutate(event.eventId);
+                                }}
+                              >
+                                预览恢复原绑定
+                              </Button>
+                            ) : null}
+                          </div>
+                        </li>
+                      ))}
+                  </ul>
+                </div>
+              ) : null}
+              {selectedEvent && sourceRunQuery.data?.run ? (
+                <div
+                  className="mt-3 space-y-2 rounded-lg border border-border p-3"
+                  aria-label="事件来源证据"
+                >
+                  <p className="text-ui-sm font-medium">
+                    来源请求：{sourceRunQuery.data.run.requestId}
+                  </p>
+                  {sourceRunQuery.data.run.proposals
+                    .flatMap((proposal) => proposal.evidence)
+                    .map((evidence, evidenceIndex) => (
+                      <blockquote
+                        key={`${evidence.threadId}:${evidence.messageId}:${evidenceIndex}`}
+                        className="break-words border-l-2 border-border pl-3 text-ui-sm"
+                      >
+                        {evidence.quote}
+                        {onOpenTask ? (
                           <Button
                             size="sm"
                             variant="ghost"
-                            onClick={() => setSelectedEventId(event.eventId)}
+                            onClick={() => onOpenTask(evidence.threadId as ThreadId)}
                           >
-                            查看来源
+                            打开任务
                           </Button>
-                          {event.kind !== "binding_restored" ? (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              disabled={
-                                expertArchived ||
-                                selectedNode.deleted ||
-                                working ||
-                                restorePreviewMutation.isPending
-                              }
-                              onClick={() => {
-                                setSelectedEventId(event.eventId);
-                                bindingRestorePreviewMutation.reset();
-                                restorePreviewMutation.mutate(event.eventId);
-                              }}
-                            >
-                              预览内容恢复
-                            </Button>
-                          ) : null}
-                          {event.kind === "derived" ? (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              disabled={
-                                expertArchived ||
-                                selectedNode.deleted ||
-                                working ||
-                                bindingRestorePreviewMutation.isPending
-                              }
-                              onClick={() => {
-                                setSelectedEventId(event.eventId);
-                                restorePreviewMutation.reset();
-                                bindingRestorePreviewMutation.mutate(event.eventId);
-                              }}
-                            >
-                              预览恢复原绑定
-                            </Button>
-                          ) : null}
-                        </div>
-                      </li>
+                        ) : null}
+                      </blockquote>
                     ))}
-                </ul>
-              </div>
-            ) : null}
-            {selectedEvent && sourceRunQuery.data?.run ? (
-              <div
-                className="mt-3 space-y-2 rounded-lg border border-border p-3"
-                aria-label="事件来源证据"
-              >
-                <p className="text-ui-sm font-medium">
-                  来源请求：{sourceRunQuery.data.run.requestId}
-                </p>
-                {sourceRunQuery.data.run.proposals
-                  .flatMap((proposal) => proposal.evidence)
-                  .map((evidence) => (
-                    <blockquote
-                      key={`${evidence.threadId}:${evidence.messageId}`}
-                      className="break-words border-l-2 border-border pl-3 text-ui-sm"
+                </div>
+              ) : null}
+              {selectedContentRestorePreview ? (
+                <div
+                  className="mt-3 space-y-3 rounded-lg border border-border bg-muted/20 p-3"
+                  aria-label="恢复预览"
+                  role="region"
+                >
+                  <div>
+                    <h4 className="text-ui-sm font-medium">恢复预览 · 将保存为新修订</h4>
+                    <p className="text-ui-xs text-muted-foreground">
+                      受影响专家：
+                      {selectedContentRestorePreview.affectedExpertIds
+                        .map((id) => expertNameById.get(id) ?? id)
+                        .join("、") || "无"}
+                    </p>
+                  </div>
+                  <ul className="space-y-2">
+                    {selectedContentRestorePreview.changes.map((change, index) => (
+                      <ProposalFileChange
+                        key={change.path}
+                        proposal={{
+                          baseSkillId: selectedContentRestorePreview.skill.skillId,
+                          baseRevision: selectedContentRestorePreview.skill.revision,
+                          basePackageId: selectedContentRestorePreview.skill.packageId,
+                        }}
+                        change={change}
+                        index={index}
+                        baseVersionLabel={`当前版本 v${selectedContentRestorePreview.skill.revision}`}
+                        targetVersionLabel="恢复目标"
+                        compareButtonLabel="查看当前版本 vs 恢复目标完整对照"
+                      />
+                    ))}
+                  </ul>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      disabled={expertArchived || working}
+                      onClick={() =>
+                        void applyRestore().catch((cause: unknown) => setError(errorText(cause)))
+                      }
                     >
-                      {evidence.quote}
-                      {onOpenTask ? (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => onOpenTask(evidence.threadId as ThreadId)}
-                        >
-                          打开任务
-                        </Button>
-                      ) : null}
-                    </blockquote>
-                  ))}
-              </div>
-            ) : null}
-            {selectedContentRestorePreview ? (
-              <div
-                className="mt-3 space-y-3 rounded-lg border border-border bg-muted/20 p-3"
-                aria-label="恢复预览"
-                role="region"
-              >
-                <div>
-                  <h4 className="text-ui-sm font-medium">恢复预览 · 将保存为新修订</h4>
-                  <p className="text-ui-xs text-muted-foreground">
-                    受影响专家：
-                    {selectedContentRestorePreview.affectedExpertIds
-                      .map((id) => expertNameById.get(id) ?? id)
-                      .join("、") || "无"}
-                  </p>
+                      恢复为新修订
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => restorePreviewMutation.reset()}
+                    >
+                      关闭预览
+                    </Button>
+                  </div>
                 </div>
-                <ul className="space-y-2">
-                  {selectedContentRestorePreview.changes.map((change, index) => (
-                    <ProposalFileChange
-                      key={change.path}
-                      proposal={{
-                        baseSkillId: selectedContentRestorePreview.skill.skillId,
-                        baseRevision: selectedContentRestorePreview.skill.revision,
-                        basePackageId: selectedContentRestorePreview.skill.packageId,
-                      }}
-                      change={change}
-                      index={index}
-                      baseVersionLabel={`当前版本 v${selectedContentRestorePreview.skill.revision}`}
-                      targetVersionLabel="恢复目标"
-                      compareButtonLabel="查看当前版本 vs 恢复目标完整对照"
-                    />
-                  ))}
-                </ul>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    disabled={expertArchived || working}
-                    onClick={() =>
-                      void applyRestore().catch((cause: unknown) => setError(errorText(cause)))
-                    }
-                  >
-                    {(selectedContentRestorePreview.skill.evolutionPolicy ?? "protected") ===
-                    "protected"
-                      ? "认可并恢复为新修订"
-                      : "恢复为新修订"}
-                  </Button>
-                  <Button size="sm" variant="ghost" onClick={() => restorePreviewMutation.reset()}>
-                    关闭预览
-                  </Button>
+              ) : null}
+              {selectedBindingRestorePreview ? (
+                <div
+                  className="mt-3 space-y-3 rounded-lg border border-border bg-muted/20 p-3"
+                  aria-label="恢复原绑定预览"
+                  role="region"
+                >
+                  <div>
+                    <h4 className="text-ui-sm font-medium">恢复原绑定</h4>
+                    <p className="text-ui-sm">
+                      {selectedBindingRestorePreview.fromSkill.name} →{" "}
+                      {selectedBindingRestorePreview.toSkill.name}
+                    </p>
+                    <p className="text-ui-xs text-muted-foreground">
+                      仅替换本专家的 Skill
+                      绑定。专用副本会保留，其他绑定的启用状态与“允许复制并改进”权限均按预览保留；不会恢复内容。
+                    </p>
+                  </div>
+                  <div className="grid min-w-0 gap-3 md:grid-cols-2">
+                    {(
+                      [
+                        ["恢复前绑定", selectedBindingRestorePreview.before],
+                        ["恢复后绑定", selectedBindingRestorePreview.after],
+                      ] as const
+                    ).map(([title, bindings]) => (
+                      <section key={title} className="min-w-0 rounded-lg border border-border p-3">
+                        <h5 className="mb-2 text-ui-sm font-medium">{title}</h5>
+                        <ul className="space-y-1">
+                          {bindings.map((binding) => (
+                            <li
+                              key={binding.skillId}
+                              className="break-words text-ui-xs"
+                              data-testid={`${title}:${binding.skillId}`}
+                            >
+                              {bindingSkillName(binding.skillId)} ·{" "}
+                              {binding.enabled ? "已启用" : "已停用"} ·{" "}
+                              {binding.allowEvolution === true ? "允许复制并改进" : "仅使用"}
+                            </li>
+                          ))}
+                        </ul>
+                      </section>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      disabled={expertArchived || working}
+                      onClick={() => void applyBindingRestore()}
+                    >
+                      确认恢复原绑定
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => bindingRestorePreviewMutation.reset()}
+                    >
+                      关闭预览
+                    </Button>
+                  </div>
                 </div>
-              </div>
-            ) : null}
-            {selectedBindingRestorePreview ? (
-              <div
-                className="mt-3 space-y-3 rounded-lg border border-border bg-muted/20 p-3"
-                aria-label="恢复原绑定预览"
-                role="region"
-              >
-                <div>
-                  <h4 className="text-ui-sm font-medium">恢复原绑定</h4>
-                  <p className="text-ui-sm">
-                    {selectedBindingRestorePreview.fromSkill.name} →{" "}
-                    {selectedBindingRestorePreview.toSkill.name}
-                  </p>
-                  <p className="text-ui-xs text-muted-foreground">
-                    仅替换本专家的 Skill
-                    绑定。专用副本会保留，其他绑定、启用状态和激活方式均按预览保留；不会恢复内容。
-                  </p>
-                </div>
-                <div className="grid min-w-0 gap-3 md:grid-cols-2">
-                  {(
-                    [
-                      ["恢复前绑定", selectedBindingRestorePreview.before],
-                      ["恢复后绑定", selectedBindingRestorePreview.after],
-                    ] as const
-                  ).map(([title, bindings]) => (
-                    <section key={title} className="min-w-0 rounded-lg border border-border p-3">
-                      <h5 className="mb-2 text-ui-sm font-medium">{title}</h5>
-                      <ul className="space-y-1">
-                        {bindings.map((binding) => (
-                          <li
-                            key={binding.skillId}
-                            className="break-words text-ui-xs"
-                            data-testid={`${title}:${binding.skillId}`}
-                          >
-                            {bindingSkillName(binding.skillId)} ·{" "}
-                            {binding.enabled ? "已启用" : "已停用"} ·{" "}
-                            {binding.activation === "startup" ? "启动时激活" : "按需激活"}
-                          </li>
-                        ))}
-                      </ul>
-                    </section>
-                  ))}
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    disabled={expertArchived || working}
-                    onClick={() => void applyBindingRestore()}
-                  >
-                    确认恢复原绑定
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => bindingRestorePreviewMutation.reset()}
-                  >
-                    关闭预览
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </section>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      </DisclosureRegion>
 
       {skillDetail ? (
         <SkillLibraryDetail

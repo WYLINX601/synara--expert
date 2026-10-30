@@ -1,13 +1,22 @@
 import { Schema } from "effect";
 import { IsoDateTime, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas";
-import { SkillEntryPath, SkillPackage, SkillPackageId, SkillPackageResource } from "./skillPackage";
+import {
+  SkillEntryPath,
+  SkillPackage,
+  SkillPackageId,
+  SkillPackageResource,
+  SkillResourceMode,
+} from "./skillPackage";
 
 export const SkillId = Schema.String.check(Schema.isPattern(/^skl_[a-f0-9]{32}$/u));
 export type SkillId = typeof SkillId.Type;
 export const ExpertSkillBinding = Schema.Struct({
   skillId: SkillId,
   enabled: Schema.Boolean,
-  activation: Schema.Literals(["startup", "on-demand"]),
+  /** Permission belongs to this Expert binding; omitted means read-only use. */
+  allowEvolution: Schema.optional(Schema.Boolean),
+  selectionScope: Schema.optional(Schema.Literals(["entry", "package"])),
+  resourceMode: Schema.optional(SkillResourceMode),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type ExpertSkillBinding = typeof ExpertSkillBinding.Type;
 
@@ -19,8 +28,6 @@ export const SkillSource = Schema.Struct({
   packageId: SkillPackageId,
 });
 export type SkillSource = typeof SkillSource.Type;
-export const SkillEvolutionPolicy = Schema.Literals(["protected", "shared", "independent"]);
-export type SkillEvolutionPolicy = typeof SkillEvolutionPolicy.Type;
 export const SkillScope = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("shared") }),
   Schema.Struct({
@@ -51,10 +58,7 @@ export const SkillDefinition = Schema.Struct({
   updatedAt: IsoDateTime,
   /** Missing on historical records. Never infer this from updatedAt. */
   createdAt: Schema.optional(IsoDateTime),
-  /** Trusted server actor identifier; "unknown" is reserved for query filters. */
-  createdBy: Schema.optional(TrimmedNonEmptyString),
-  /** Historical records default to protected evolution and shared scope. */
-  evolutionPolicy: Schema.optional(SkillEvolutionPolicy),
+  /** Ownership is assigned by creation/derivation, never by an Expert proposal. */
   scope: Schema.optional(SkillScope),
   /** Immutable source identity and revision for a derived Skill. */
   derivedFrom: Schema.optional(SkillDerivation),
@@ -76,8 +80,6 @@ export const SkillLibraryQuery = Schema.Struct({
   usage: Schema.optional(Schema.Literals(["used", "unused"])),
   sources: Schema.optional(Schema.Array(SkillLibrarySourceFilter).check(Schema.isMaxLength(7))),
   expertIds: Schema.optional(Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(500))),
-  /** Use the literal "unknown" to select historical records without attribution. */
-  createdBy: Schema.optional(Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(500))),
   tags: Schema.optional(Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(100))),
   sort: Schema.optional(
     Schema.Struct({
@@ -90,7 +92,6 @@ export type SkillLibraryQuery = typeof SkillLibraryQuery.Type;
 export const SkillLibraryItem = Schema.Struct({
   skillId: SkillId,
   createdAt: Schema.optional(IsoDateTime),
-  createdBy: Schema.optional(TrimmedNonEmptyString),
   usage: Schema.Struct({
     expertIds: Schema.Array(TrimmedNonEmptyString),
     enabledExpertIds: Schema.Array(TrimmedNonEmptyString),
@@ -102,7 +103,6 @@ export const SkillLibraryBindingStatus = Schema.Literals([
   "applied",
   "unchanged",
   "conflict",
-  "needs_conversion",
   "failed",
 ]);
 export type SkillLibraryBindingStatus = typeof SkillLibraryBindingStatus.Type;
@@ -119,8 +119,7 @@ export type SkillLibraryBindingResult = typeof SkillLibraryBindingResult.Type;
 export const SkillLibraryBindingState = Schema.Struct({
   expertId: TrimmedNonEmptyString,
   revision: PositiveInt,
-  bindings: Schema.Array(ExpertSkillBinding),
-  needsConversion: Schema.optional(Schema.Boolean),
+  bindings: Schema.Array(Schema.Struct(ExpertSkillBinding.fields)),
   status: Schema.optional(SkillLibraryBindingStatus),
   error: Schema.optional(Schema.String),
   dryRun: Schema.optional(Schema.Boolean),
@@ -168,15 +167,7 @@ export const SkillLibraryRequest = Schema.Union([
     body: Schema.String.check(Schema.isMaxLength(16_777_216)),
     tags: Schema.Array(TrimmedNonEmptyString),
     changes: Schema.optional(Schema.Array(SkillFileChange).check(Schema.isMaxLength(5_000))),
-    evolutionPolicy: Schema.optional(SkillEvolutionPolicy),
-    scope: Schema.optional(SkillScope),
     dryRun: Schema.optional(Schema.Boolean),
-  }),
-  action("configureEvolution", {
-    ...Revision,
-    requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
-    evolutionPolicy: SkillEvolutionPolicy,
-    scope: SkillScope,
   }),
   action("derive", {
     requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),

@@ -24,7 +24,7 @@
 | Provider / Gateway 真实运行与发布缺口 | [P0 证据](../docs/expert-p0/README.md)、[故障矩阵](../docs/expert-p0/release-fault-matrix.md)                                                                                                                                                                                                                                                | 查对应源码、Provider、平台和场景，不搬用旧结果                                                                                      |
 | 既有适配实现与历史设计                | [适配层验收](../docs/workbench-adaptation-acceptance.md)、[工作台历史架构](../docs/workbench-architecture.md)、[Expert 架构图](../docs/expert-architecture.drawio)                                                                                                                                                                           | 历史路径、tree 和演练保留原范围，不是当前源码入口                                                                                   |
 
-Expert Skill 主动进化已按用户确认的[产品方案](../docs/expert-skill-evolution-product-plan-2026-10-28.md)、[研发方案](../docs/expert-skill-evolution-technical-plan-2026-10-28.md)和[实施计划](../docs/expert-skill-evolution-implementation-plan-2026-10-28.md)完成本轮实现、隔离预览验收与三项私密审查问题修复，实际状态见[实现验收](../docs/expert-skill-evolution-acceptance-2026-10-29.md)。范围为手动提炼、候选预览后采用、三类策略与时间环星图；专家不产生 Memory。首轮 Pi 真实模型验证专用派生、原包保留、同会话下一独立 Run 装配和取消；修复后全库 18,391 项及浏览器 68 项通过，其他 Provider 未验范围保留。实现提交 `9f313abf7` 已合入 main，日用 0.1.10 已安装并健康重启；恢复组合和验收数据保留。未推送或公开发布，签名元数据及 RPC 未验范围见验收记录。
+Expert Skill 主动进化已按用户确认的[产品方案](../docs/expert-skill-evolution-product-plan-2026-10-28.md)、[研发方案](../docs/expert-skill-evolution-technical-plan-2026-10-28.md)和[实施计划](../docs/expert-skill-evolution-implementation-plan-2026-10-28.md)完成本轮实现、隔离预览验收与三项私密审查问题修复，实际状态见[实现验收](../docs/expert-skill-evolution-acceptance-2026-10-29.md)。当时范围为手动提炼、候选预览后采用、三类策略与时间环星图；专家不产生 Memory。当前隔离候选已按用户最新决定改为专家绑定的复制改进权限：缺省关闭、首次采用完整专属副本、后续复用、共享原版不变，技能详情只读展示归属；已落地专家工作经验发现、反馈生成草稿、查看差异采用的两阶段流程，两个阶段共用既有受限原生任务，保留明确采用；本轮 18,466 项完整回归及 124 项浏览器通过，OMP 合成样例真实验证发现、生成、派生采用、取消、重启与下一独立 Run 的目录交付；本轮状态以[优化验收](../docs/skill-management-optimization-acceptance-2026-10-29.md)为准。首轮 Pi 真实模型验证专用派生、原包保留、同会话下一独立 Run 装配和取消；修复后全库 18,391 项及浏览器 68 项通过，其他 Provider 未验范围保留。实现提交 `9f313abf7` 已合入 main，日用 0.1.10 已安装并健康重启；恢复组合和验收数据保留。未推送或公开发布，签名元数据及 RPC 未验范围见验收记录。
 
 每项任务先完成 SOP 的范围/基线核对，实施中按需读取表中材料，结束时把结果写入对应验收，只有跨任务目标、入口、决定或状态变化才回写本页。主会话保留需求和架构决策；明确边界后才委派执行。不为小改强制新增需求目录或管理记录。
 
@@ -81,6 +81,8 @@ Personal Workbench 已更新为 0.1.5，源码 `8f7143cf6f001aa495d57f0e3867a91c
 2026-10-21 至 22 的候选范围、决定和检查见[分批执行与验收记录](../docs/hub-reliability-2026-10-21-acceptance.md)。这是专项历史进度；是否包含在当前 main 和安装版，须按当前提交核对，不由该记录推断。
 
 ## 统一 Skill 管理与按运行装配（本轮集成）
+
+2026-10-29，用户要求基于本地 `main@f879925a4` 完成管理层减负、完整资源交付和 OMP 无工具提炼。本候选位于 `codex/skill-management-optimization` 的隔离预览；用户随后否决新增前端板块、范围／资源选项和更多菜单，沿用原有选择、启停与加载时机。用户最新要求删除旧配置转换及数据适配，直接使用当前技能库绑定，不建立自动迁移。 后续批注统一专家／专家团／技能弹窗编辑，移除重复文案和技能添加者记录／筛选／展示，预览继续保留。用户随后取消 Synara 的启动时加载选项与逻辑，统一原生按需发现和明确调用；当前作者配置不再包含加载时机。当前源码、真实四端加载检查、OMP 真实模型采用和集中门禁结果只见[本轮优化验收](../docs/skill-management-optimization-acceptance-2026-10-29.md)，不继承历史候选通过状态。本轮不包含合入、推送、日用安装或发布。
 
 2026-10-27，用户要求修复合并基线 `e1137f7f44e86da00d07d516845249da2c52ec51` 的 CR-01 至 CR-06，随后授权提交推送及更新日用应用。修复提交 `d189ce8af`、仅测试的 CI 跟进 `4337c7e6e` 已推送 main，后者 CI 成功；日用 Personal Workbench **0.1.6 已安装启动**，包内构建源为 d189ce8af。32 线程、308 消息等原始记录及 699 个配置/资源摘要已核验保留。实际检查、恢复入口与未验边界见[审核修复与交付记录](../docs/skill-management-review-fixes-2026-10-27.md#delivery-20261027)。未创建公开二进制 Release 或刷新独立预览；下述历史候选结果不作为本轮验收。
 

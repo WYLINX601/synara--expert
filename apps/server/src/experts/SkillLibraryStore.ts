@@ -19,7 +19,6 @@ import {
   type SkillLibraryResponse,
   type SkillPackage,
   type SkillSource,
-  type SkillEvolutionPolicy,
   type SkillScope,
   type SkillDerivation,
 } from "@synara/contracts";
@@ -36,10 +35,7 @@ import {
 import { createSkillPackageStore, SkillPackageStoreError } from "./SkillPackageStore";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle";
 import { retainSkillEvolutionPackagesUnlocked } from "./skillEvolutionPackagePins";
-import {
-  assertSkillEvolutionConfiguration,
-  assertSkillScopeForExpert,
-} from "./skillEvolutionPolicy";
+import { assertSkillScopeForExpert } from "./skillEvolutionPolicy";
 import {
   assertSkillResourcePath,
   downloadSkillSource,
@@ -62,6 +58,8 @@ export type SkillLibraryExecutionContext = {
   readonly actor?: string;
   /** Trusted server-only retention request; never accepted from the RPC payload. */
   readonly retainForEvolution?: boolean;
+  /** Internal-only ownership for a newly generated Skill; never accepted from RPC input. */
+  readonly createForExpertId?: string;
   /** Revalidate the caller immediately before each persistent mutation. */
   readonly beforeMutation?: (effect?: SkillLibraryMutationEffect) => Promise<void>;
 };
@@ -86,15 +84,21 @@ const matchesExpertIntent = (
     expectedExpert: ExpertDefinition;
     bindings: ReadonlyArray<ExpertSkillBinding>;
   },
-) =>
-  actual.revision === intent.expectedRevision + 1 &&
-  stableJson(actual.skillBindings ?? []) === stableJson(intent.bindings) &&
-  stableJson({
-    ...actual,
-    revision: intent.expectedExpert.revision,
-    updatedAt: intent.expectedExpert.updatedAt,
-    skillBindings: intent.expectedExpert.skillBindings,
-  }) === stableJson(intent.expectedExpert);
+) => {
+  if (
+    actual.revision !== intent.expectedRevision + 1 ||
+    stableJson(actual.skillBindings ?? []) !== stableJson(intent.bindings)
+  )
+    return false;
+  return (
+    stableJson({
+      ...actual,
+      revision: intent.expectedExpert.revision,
+      updatedAt: intent.expectedExpert.updatedAt,
+      skillBindings: intent.expectedExpert.skillBindings,
+    }) === stableJson(intent.expectedExpert)
+  );
+};
 const fingerprint = (value: unknown) =>
   createHash("sha256").update(stableJson(value)).digest("hex");
 const hasOptionalWriteRequestId = (
@@ -102,28 +106,16 @@ const hasOptionalWriteRequestId = (
 ): request is Extract<
   SkillLibraryRequest,
   {
-    action:
-      | "create"
-      | "configureEvolution"
-      | "derive"
-      | "save"
-      | "import"
-      | "refresh"
-      | "delete"
-      | "batch";
+    action: "create" | "derive" | "save" | "import" | "refresh" | "delete" | "batch";
   }
 > =>
   request.action === "create" ||
-  request.action === "configureEvolution" ||
   request.action === "derive" ||
   request.action === "save" ||
   request.action === "import" ||
   request.action === "refresh" ||
   request.action === "delete" ||
   request.action === "batch";
-const needsLegacyConversion = (expert: ExpertDefinition) =>
-  expert.skillBindings === undefined &&
-  (expert.skills.length > 0 || !!expert.skillSelections?.length);
 const expertSaveInput = (
   expert: ExpertDefinition,
   skillBindings: ReadonlyArray<ExpertSkillBinding>,
@@ -199,30 +191,93 @@ export async function resolveSkillBindings(
   stateDir: string,
   rawBindings: ReadonlyArray<ExpertSkillBinding>,
   expertId?: string,
+  additions?: {
+    skills?: ReadonlyArray<SkillDefinition>;
+    packages?: ReadonlyArray<SkillPackage>;
+  },
 ): Promise<ExpertSkillSelection[]> {
   const bindings = Schema.decodeUnknownSync(
     Schema.Array(ExpertSkillBinding).check(Schema.isMaxLength(100)),
   )(rawBindings);
   if (new Set(bindings.map((binding) => binding.skillId)).size !== bindings.length)
     throw new Error("Duplicate Skill binding.");
-  if (bindings.filter((binding) => binding.enabled && binding.activation === "startup").length > 1)
-    throw new Error("An Expert can enable at most one startup Skill.");
-  const skills = await Promise.all(
-    bindings.map((binding) => readSkillDefinition(stateDir, binding.skillId)),
-  );
+  const definitions = await readSkillLibraryDefinitions(stateDir),
+    definitionsById = new Map(definitions.map((definition) => [definition.skillId, definition]));
+  for (const skill of additions?.skills ?? []) definitionsById.set(skill.skillId, skill);
+  const effectiveDefinitions = [...definitionsById.values()];
+  const skills = bindings.map((binding) => {
+    const skill = definitionsById.get(binding.skillId);
+    if (!skill || skill.deleted) throw new Error(`Skill not found or deleted: ${binding.skillId}`);
+    return skill;
+  });
   if (expertId !== undefined)
     for (const skill of skills) assertSkillScopeForExpert(skill, expertId);
-  return bindings.flatMap((binding, index) =>
-    binding.enabled
-      ? [
-          {
-            packageId: skills[index]!.packageId,
-            entryPath: skills[index]!.entryPath,
-            activation: binding.activation,
-          },
-        ]
-      : [],
-  );
+  const packages = createSkillPackageStore(stateDir),
+    packageManifests = new Map(
+      (additions?.packages ?? []).map((manifest) => [manifest.packageId, manifest]),
+    ),
+    expanded = new Map<string, ExpertSkillSelection>(),
+    privatePackages = new Set<string>();
+  for (const [index, binding] of bindings.entries())
+    if (binding.enabled && (binding.resourceMode ?? "shared-readonly") === "run-private")
+      privatePackages.add(skills[index]!.packageId);
+  for (const [index, binding] of bindings.entries()) {
+    if (!binding.enabled) continue;
+    const anchor = skills[index]!;
+    if ((binding.selectionScope ?? "entry") === "entry") {
+      const key = `${anchor.packageId}\0${anchor.entryPath}`,
+        previous = expanded.get(key);
+      expanded.set(key, {
+        packageId: anchor.packageId,
+        entryPath: anchor.entryPath,
+        ...((binding.resourceMode ?? "shared-readonly") === "run-private" ||
+        previous?.resourceMode === "run-private"
+          ? { resourceMode: "run-private" as const }
+          : {}),
+      });
+      continue;
+    }
+    let manifest = packageManifests.get(anchor.packageId);
+    if (!manifest) {
+      manifest = await packages.read(anchor.packageId);
+      packageManifests.set(anchor.packageId, manifest);
+    }
+    if (!manifest.entries.some((entry) => entry.entryPath === anchor.entryPath))
+      throw new Error("The bound Skill entry is missing from its immutable package.");
+    if (expertId !== undefined) {
+      const registered = effectiveDefinitions.filter(
+        (definition) => !definition.deleted && definition.packageId === anchor.packageId,
+      );
+      const scopeKey = (definition: SkillDefinition) =>
+        definition.scope?.kind === "expert" ? `expert:${definition.scope.expertId}` : "shared";
+      const scopes = new Set(registered.map(scopeKey));
+      if (scopes.size > 1)
+        throw new Error(
+          `Package ${anchor.packageId} has registered Skills with conflicting ownership; bind entries individually after resolving the package scopes.`,
+        );
+      for (const member of registered) assertSkillScopeForExpert(member, expertId);
+    }
+    for (const entry of manifest.entries) {
+      const key = `${manifest.packageId}\0${entry.entryPath}`,
+        previous = expanded.get(key);
+      expanded.set(key, {
+        packageId: manifest.packageId,
+        entryPath: entry.entryPath,
+        ...((binding.resourceMode ?? "shared-readonly") === "run-private" ||
+        previous?.resourceMode === "run-private"
+          ? { resourceMode: "run-private" as const }
+          : {}),
+      });
+    }
+  }
+  if (expanded.size > 5_000)
+    throw new Error("Expanded Skill bindings exceed the 5,000-entry limit.");
+  if (privatePackages.size) {
+    for (const [key, selection] of expanded)
+      if (privatePackages.has(selection.packageId))
+        expanded.set(key, { ...selection, resourceMode: "run-private" });
+  }
+  return [...expanded.values()];
 }
 
 async function renameEntry(file: string, name: string, description?: string): Promise<void> {
@@ -352,23 +407,78 @@ function makeSkillLibraryStore(stateDir: string) {
             "Skill revision changed; reload before publishing.",
             "revision_conflict",
           );
+        if (
+          previous &&
+          !item.deleted &&
+          previous.name.normalize("NFC").toLowerCase() !==
+            item.name.normalize("NFC").toLowerCase() &&
+          next.some(
+            (other) =>
+              !other.deleted &&
+              other.skillId !== item.skillId &&
+              other.name.normalize("NFC").toLowerCase() ===
+                item.name.normalize("NFC").toLowerCase(),
+          )
+        )
+          throw new Error(`Duplicate selected skill name in Expert assembly: ${item.name}.`);
       }
       // Expert saves share this lifecycle lock. Validate the proposed head while
       // both its package and the complete set of affected bindings are stable.
       for (const expert of await createExpertStore(stateDir).list()) {
         if (!expert.skillBindings?.some((binding) => ids.has(binding.skillId))) continue;
-        const selections: ExpertSkillSelection[] = [];
+        const selectedNames = new Map<
+          string,
+          { packageId: string; entryPath: string; name: string; skillId: string }
+        >();
         for (const binding of expert.skillBindings) {
+          if (!binding.enabled) continue;
           const skill =
             nextById.get(binding.skillId) ?? (await readSkillDefinition(stateDir, binding.skillId));
-          if (skill.deleted) throw new Error(`Skill not found or deleted: ${binding.skillId}`);
-          assertSkillScopeForExpert(skill, expert.id);
-          if (binding.enabled)
-            selections.push({
+          const key = skill.name.normalize("NFC").toLowerCase(),
+            previous = selectedNames.get(key);
+          if (
+            previous &&
+            previous.skillId !== skill.skillId &&
+            previous.packageId !== skill.packageId
+          )
+            throw new Error(`Duplicate selected skill name in Expert assembly: ${skill.name}.`);
+          selectedNames.set(key, {
+            packageId: skill.packageId,
+            entryPath: skill.entryPath,
+            name: skill.name,
+            skillId: skill.skillId,
+          });
+        }
+        const selections = await resolveSkillBindings(stateDir, expert.skillBindings, expert.id, {
+          skills: items,
+        });
+        const registeredByIdentity = new Map<string, SkillDefinition[]>();
+        for (const skill of next) {
+          if (skill.deleted) continue;
+          const identity = `${skill.packageId}\0${skill.entryPath}`;
+          registeredByIdentity.set(identity, [
+            ...(registeredByIdentity.get(identity) ?? []),
+            skill,
+          ]);
+        }
+        for (const selection of selections) {
+          const identity = `${selection.packageId}\0${selection.entryPath}`;
+          for (const skill of registeredByIdentity.get(identity) ?? []) {
+            const key = skill.name.normalize("NFC").toLowerCase(),
+              previous = selectedNames.get(key);
+            if (
+              previous &&
+              previous.skillId !== skill.skillId &&
+              previous.packageId !== skill.packageId
+            )
+              throw new Error(`Duplicate selected skill name in Expert assembly: ${skill.name}.`);
+            selectedNames.set(key, {
               packageId: skill.packageId,
               entryPath: skill.entryPath,
-              activation: binding.activation,
+              name: skill.name,
+              skillId: skill.skillId,
             });
+          }
         }
         await packages.resolveSelections(selections);
       }
@@ -429,8 +539,6 @@ function makeSkillLibraryStore(stateDir: string) {
     tags?: ReadonlyArray<string>;
     previous?: SkillDefinition;
     modified?: boolean;
-    actor?: string;
-    evolutionPolicy?: SkillEvolutionPolicy;
     scope?: SkillScope;
     derivedFrom?: SkillDerivation;
   }): SkillDefinition => {
@@ -454,12 +562,6 @@ function makeSkillLibraryStore(stateDir: string) {
             ...(input.previous.createdAt !== undefined
               ? { createdAt: input.previous.createdAt }
               : {}),
-            ...(input.previous.createdBy !== undefined
-              ? { createdBy: input.previous.createdBy }
-              : {}),
-            ...(input.previous.evolutionPolicy !== undefined
-              ? { evolutionPolicy: input.previous.evolutionPolicy }
-              : {}),
             ...(input.previous.scope !== undefined ? { scope: input.previous.scope } : {}),
             ...(input.previous.derivedFrom !== undefined
               ? { derivedFrom: input.previous.derivedFrom }
@@ -467,8 +569,6 @@ function makeSkillLibraryStore(stateDir: string) {
           }
         : {
             createdAt: new Date().toISOString(),
-            createdBy: input.actor ?? "owner",
-            evolutionPolicy: input.evolutionPolicy ?? "protected",
             scope: input.scope ?? { kind: "shared" },
             ...(input.derivedFrom !== undefined ? { derivedFrom: input.derivedFrom } : {}),
           }),
@@ -706,47 +806,6 @@ function makeSkillLibraryStore(stateDir: string) {
       await fs.rm(owned, { recursive: true, force: true });
     }
   };
-  const configureEvolution = async (
-    request: Extract<SkillLibraryRequest, { action: "configureEvolution" }>,
-    context: SkillLibraryExecutionContext,
-    journal?: { requestId: string; fingerprint: string },
-  ): Promise<{ skill: SkillDefinition }> => {
-    if (journal) {
-      const prior = await operations.read(journal.requestId);
-      if (prior?.plannedSkill) {
-        const recovered = await recoverPlannedSkills([prior.plannedSkill], context);
-        if (recovered) return { skill: recovered[0]! };
-      }
-    }
-    const current = await revision(request.skillId, request.expectedRevision);
-    assertSkillEvolutionConfiguration({
-      current,
-      evolutionPolicy: request.evolutionPolicy,
-      scope: request.scope,
-    });
-    if (
-      current.evolutionPolicy === request.evolutionPolicy &&
-      stableJson(current.scope) === stableJson(request.scope)
-    )
-      return { skill: current };
-    const planned: SkillDefinition = Schema.decodeUnknownSync(SkillDefinition)({
-      ...current,
-      evolutionPolicy: request.evolutionPolicy,
-      scope: request.scope,
-      revision: current.revision + 1,
-      updatedAt: new Date().toISOString(),
-    });
-    await context.beforeMutation?.();
-    if (journal)
-      await operations.recordPlan(journal.requestId, "configureEvolution", journal.fingerprint, {
-        plannedSkillId: planned.skillId,
-        plannedRevision: planned.revision,
-        plannedPackageId: planned.packageId,
-        plannedSkill: planned,
-      });
-    await commit([planned], false, context.beforeMutation);
-    return { skill: planned };
-  };
   const deriveSkill = async (
     request: Extract<SkillLibraryRequest, { action: "derive" }>,
     context: SkillLibraryExecutionContext,
@@ -780,8 +839,6 @@ function makeSkillLibraryStore(stateDir: string) {
       assertSkillScopeForExpert(current, request.expertId);
       const expert = await createExpertStore(stateDir).read(request.expertId);
       if (!expert || expert.archived) throw new Error("Active target Expert not found.");
-      if (needsLegacyConversion(expert))
-        throw new Error("Convert the target Expert's Skill configuration before deriving.");
       if (!expert.skillBindings?.some((binding) => binding.skillId === current.skillId))
         throw new Error("The source Skill must be bound to the target Expert before deriving.");
       assertNoActivePrivateDerivation(
@@ -892,8 +949,6 @@ function makeSkillLibraryStore(stateDir: string) {
             name: request.name,
             source: { kind: "manual", location: "", packageId: pkg.packageId, entryPath },
             modified: false,
-            ...(context.actor ? { actor: context.actor } : {}),
-            evolutionPolicy: "independent",
             scope: { kind: "expert", expertId: request.expertId },
             derivedFrom: {
               skillId: request.sourceSkillId,
@@ -950,8 +1005,6 @@ function makeSkillLibraryStore(stateDir: string) {
     for (const expertId of affected) {
       const expert = await experts.read(expertId);
       if (!expert) throw new Error("Expert changed during deletion.");
-      if (needsLegacyConversion(expert))
-        throw new Error(`Expert ${expert.id} needs skill binding conversion before deletion.`);
       const expectedBindings = expert.skillBindings ?? [];
       targets.push({
         expertId: expert.id,
@@ -1016,8 +1069,6 @@ function makeSkillLibraryStore(stateDir: string) {
     for (const target of intent.experts) {
       const expert = await experts.read(target.expertId);
       if (!expert) throw new Error("Expert changed during deletion.");
-      if (needsLegacyConversion(expert))
-        throw new Error(`Expert ${expert.id} needs skill binding conversion before deletion.`);
       const bindings = expert.skillBindings ?? [];
       if (
         expert.revision === target.expectedRevision &&
@@ -1058,7 +1109,6 @@ function makeSkillLibraryStore(stateDir: string) {
     }
     const normalizedSearch = query?.search?.trim().toLocaleLowerCase(),
       expertFilters = query?.expertIds?.length ? new Set(query.expertIds) : undefined,
-      creatorFilters = query?.createdBy?.length ? new Set(query.createdBy) : undefined,
       tagFilters = query?.tags?.length
         ? new Set(query.tags.map((tag) => tag.normalize("NFC").toLocaleLowerCase()))
         : undefined,
@@ -1077,7 +1127,6 @@ function makeSkillLibraryStore(stateDir: string) {
         if (sourceFilters && !sourceFilters.has(skillLibrarySourceFilter(skill)!)) return false;
         if (expertFilters && !skillUsage.expertIds.some((id) => expertFilters.has(id)))
           return false;
-        if (creatorFilters && !creatorFilters.has(skill.createdBy ?? "unknown")) return false;
         if (
           tagFilters &&
           !skill.tags.some((tag) => tagFilters.has(tag.normalize("NFC").toLocaleLowerCase()))
@@ -1117,7 +1166,6 @@ function makeSkillLibraryStore(stateDir: string) {
     const items: SkillLibraryItem[] = filtered.map((skill) => ({
       skillId: skill.skillId,
       ...(skill.createdAt !== undefined ? { createdAt: skill.createdAt } : {}),
-      ...(skill.createdBy !== undefined ? { createdBy: skill.createdBy } : {}),
       usage: usage.get(skill.skillId) ?? { expertIds: [], enabledExpertIds: [] },
     }));
     return { skills: filtered, items };
@@ -1129,7 +1177,6 @@ function makeSkillLibraryStore(stateDir: string) {
       expertId: expert.id,
       revision: expert.revision,
       bindings: expert.skillBindings ?? [],
-      ...(needsLegacyConversion(expert) ? { needsConversion: true } : {}),
     };
   };
   const applyBindingOperation = async (
@@ -1156,7 +1203,6 @@ function makeSkillLibraryStore(stateDir: string) {
       expertId: current.id,
       revision: current.revision,
       bindings: current.skillBindings ?? [],
-      ...(needsLegacyConversion(current) ? { needsConversion: true } : {}),
       ...(request.dryRun ? { dryRun: true } : {}),
     };
     const finish = async (result: SkillLibraryBindingState) => {
@@ -1164,21 +1210,18 @@ function makeSkillLibraryStore(stateDir: string) {
         await operations.recordBindingState(request.requestId, requestFingerprint, result);
       return result;
     };
-    if (needsLegacyConversion(current))
-      return finish({
-        ...initial,
-        status: "needs_conversion",
-        error: "Convert the existing Expert skill configuration before editing bindings.",
-      });
-
     const currentBindings = current.skillBindings ?? [];
     let nextBindings: ReadonlyArray<ExpertSkillBinding>;
     if (request.operation === "set") {
       nextBindings = request.bindings;
     } else if (request.operation === "add") {
       const byId = new Map(currentBindings.map((binding) => [binding.skillId, binding]));
-      for (const binding of request.bindings)
-        if (!byId.has(binding.skillId)) byId.set(binding.skillId, binding);
+      for (const binding of request.bindings) {
+        const existing = byId.get(binding.skillId);
+        if (!existing) byId.set(binding.skillId, binding);
+        else if (binding.allowEvolution !== undefined)
+          byId.set(binding.skillId, { ...existing, allowEvolution: binding.allowEvolution });
+      }
       nextBindings = [...byId.values()];
     } else if ("skillIds" in request) {
       const requested = new Set(request.skillIds);
@@ -1326,15 +1369,6 @@ function makeSkillLibraryStore(stateDir: string) {
           skippedSkillIds: request.skillIds,
           error: "Expert not found.",
         };
-      } else if (needsLegacyConversion(current)) {
-        result = {
-          expertId: current.id,
-          status: "needs_conversion",
-          oldRevision: current.revision,
-          addedSkillIds: [],
-          skippedSkillIds: request.skillIds,
-          error: "Convert the existing Expert skill configuration before adding bindings.",
-        };
       } else if (current.archived) {
         result = {
           expertId: current.id,
@@ -1433,7 +1467,6 @@ function makeSkillLibraryStore(stateDir: string) {
             ...addedSkillIds.map((skillId) => ({
               skillId,
               enabled: true,
-              activation: "on-demand" as const,
             })),
           ];
           try {
@@ -1704,8 +1737,10 @@ function makeSkillLibraryStore(stateDir: string) {
     context: SkillLibraryExecutionContext = {},
   ): Promise<SkillLibraryResponse> => {
     if (disposal) throw new Error("Skill library is closing; reconnect before continuing.");
-    const decodedRequest = Schema.decodeUnknownSync(SkillLibraryRequest)(raw),
-      generatedRequestId = hasOptionalWriteRequestId(decodedRequest)
+    const decodedRequest = Schema.decodeUnknownSync(SkillLibraryRequest)(raw);
+    if (context.createForExpertId !== undefined && decodedRequest.action !== "create")
+      throw new Error("Private Skill creation context is only valid for a create request.");
+    const generatedRequestId = hasOptionalWriteRequestId(decodedRequest)
         ? (decodedRequest.requestId ?? randomUUID())
         : undefined,
       request: SkillLibraryRequest = hasOptionalWriteRequestId(decodedRequest)
@@ -1751,6 +1786,9 @@ function makeSkillLibraryStore(stateDir: string) {
         ? fingerprint({
             actor: context.actor ?? "owner",
             ...(context.retainForEvolution ? { retainForEvolution: true } : {}),
+            ...(context.createForExpertId !== undefined
+              ? { createForExpertId: context.createForExpertId }
+              : {}),
             request: { ...request, dryRun: undefined },
           })
         : undefined;
@@ -1837,9 +1875,9 @@ function makeSkillLibraryStore(stateDir: string) {
             return { skill, resources: (await packages.read(skill.packageId)).resources };
           }
           case "create": {
-            const evolutionPolicy = request.evolutionPolicy ?? "protected",
-              scope = request.scope ?? { kind: "shared" };
-            assertSkillEvolutionConfiguration({ evolutionPolicy, scope });
+            const scope: SkillScope = context.createForExpertId
+              ? { kind: "expert", expertId: context.createForExpertId }
+              : { kind: "shared" };
             if (scope.kind === "expert") {
               const owner = await createExpertStore(stateDir).read(scope.expertId);
               if (!owner || owner.archived)
@@ -1916,8 +1954,6 @@ function makeSkillLibraryStore(stateDir: string) {
                   entryPath,
                   ...(plannedSkillId ? { skillId: plannedSkillId } : {}),
                   tags: request.tags,
-                  ...(context.actor ? { actor: context.actor } : {}),
-                  evolutionPolicy,
                   scope,
                   source: { kind: "manual", location: "", packageId: pkg.packageId, entryPath },
                 });
@@ -1938,14 +1974,6 @@ function makeSkillLibraryStore(stateDir: string) {
               await fs.rm(owned, { recursive: true, force: true });
             }
           }
-          case "configureEvolution":
-            return configureEvolution(
-              request,
-              context,
-              writeRequestId && writeFingerprint
-                ? { requestId: writeRequestId, fingerprint: writeFingerprint }
-                : undefined,
-            );
           case "derive":
             return deriveSkill(
               request,
@@ -2045,7 +2073,6 @@ function makeSkillLibraryStore(stateDir: string) {
                     : {}),
                   source: { ...pending.preview.source, entryPath: choice.entryPath },
                   name,
-                  ...(context.actor ? { actor: context.actor } : {}),
                   ...(previous ? { previous } : {}),
                 }),
               );

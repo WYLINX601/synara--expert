@@ -998,13 +998,13 @@ describe("ClaudeAdapterLive", () => {
       const fixture = makeClaudeExpertFixture();
       const expertSession = {
         ...fixture.expertSession,
-        persona: `${fixture.expertSession.persona}\n\nFixed selected skill index and startup text.`,
+        persona: `${fixture.expertSession.persona}\n\nFixed selected skill catalog.`,
         skillLoading: "index" as const,
         skillEntries: [
           {
             packageId: `pkg_${"b".repeat(64)}`,
             entryPath: "skills/reviewer/SKILL.md",
-            activation: "startup" as const,
+
             name: "reviewer",
             description: "Review code changes for correctness and safety.",
             path: fixture.skillPath,
@@ -1048,7 +1048,7 @@ describe("ClaudeAdapterLive", () => {
           mode: "catalog",
           snapshotId: expertSession.snapshotId,
           packageIds: [`pkg_${"b".repeat(64)}`],
-          startupEntryIds: [`pkg_${"b".repeat(64)}#skills/reviewer/SKILL.md`],
+
           lifecycleGeneration: "generation-expert-v2",
           instructionsHash: createHash("sha256").update(baseInstructions, "utf8").digest("hex"),
         });
@@ -16743,12 +16743,23 @@ describe("Claude fixed native Skill wiring", () => {
           kind: "file" as const,
           size: content.byteLength,
           sha256: createHash("sha256").update(content).digest("hex"),
+          executable: false,
         },
+        emptyHash = createHash("sha256").digest("hex"),
+        resources = [
+          ...["content", "content/skills", "content/skills/reviewer"].map((directory) => ({
+            path: directory,
+            kind: "directory" as const,
+            size: 0,
+            sha256: emptyHash,
+          })),
+          resource,
+        ].toSorted((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)),
         rootName = "claude-fixed-fixture",
         packageId = `pkg_${expertResourceFiles.hashJson({
           schemaVersion: 1,
           rootName,
-          resources: [resource],
+          resources,
         })}`,
         packageRoot = path.join(base.root, "state", "experts", "skill-packages", packageId),
         sourcePath = path.join(packageRoot, relativePath);
@@ -16758,7 +16769,7 @@ describe("Claude fixed native Skill wiring", () => {
         schemaVersion: 1,
         packageId,
         rootName,
-        resources: [resource],
+        resources,
         entries: [
           {
             entryPath: "skills/reviewer/SKILL.md",
@@ -16773,6 +16784,13 @@ describe("Claude fixed native Skill wiring", () => {
       writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify(manifest)}\n`, {
         mode: 0o400,
       });
+      for (const directory of [
+        path.dirname(sourcePath),
+        path.dirname(path.dirname(sourcePath)),
+        path.join(packageRoot, "content"),
+        packageRoot,
+      ])
+        chmodSync(directory, 0o500);
       entries = [
         {
           name: "reviewer",
@@ -16780,7 +16798,7 @@ describe("Claude fixed native Skill wiring", () => {
           description: manifest.entries[0]!.description,
           packageId,
           entryPath: manifest.entries[0]!.entryPath,
-          activation: "on-demand",
+
           sha256: resource.sha256,
         },
       ];

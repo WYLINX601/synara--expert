@@ -396,6 +396,26 @@ it("injects the Expert persona and snapshot skills through Pi's session Resource
   );
 });
 
+it("delivers explicit selected Skill chips to the actual Pi prompt", async () => {
+  responses("success");
+  await withAdapter(async (adapter, events) => {
+    await Effect.runPromise(
+      adapter.sendTurn({
+        threadId,
+        input: "Use the selected workflow.",
+        skills: [{ name: "selected", path: "/runtime/skills/selected/SKILL.md" }],
+      }),
+    );
+    await waitFor(() => expect(completions(events)).toHaveLength(1));
+    const userMessage = captured.sessions[0]!.messages.findLast(
+      (message) => message.role === "user",
+    );
+    expect(JSON.stringify(userMessage?.content)).toContain("<selected_skill_references>");
+    expect(JSON.stringify(userMessage?.content)).toContain("/runtime/skills/selected/SKILL.md");
+    expect(JSON.stringify(userMessage?.content)).not.toContain("SKILL.md\\n");
+  });
+});
+
 it("fails Pi startup when a required snapshot skill is missing", async () => {
   responses("success");
   const skillsRoot = mkdtempSync(path.join(tmpdir(), "synara-pi-missing-expert-skills-"));
@@ -1582,7 +1602,7 @@ it.each([false, true])(
             packageId: `pkg_${"a".repeat(64)}`,
             entryPath: "SKILL.md",
             description: "Selected A",
-            activation: "on-demand" as const,
+
             sha256: createHash("sha256").update(body).digest("hex"),
           },
         ];

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   SkillDefinition,
@@ -11,7 +11,13 @@ import type {
 } from "@synara/contracts";
 import { SKILL_UPLOAD_ROUTE_PATH } from "@synara/shared/binaryTransfer";
 import { ensureExpertClient } from "~/workbench/host/expertClient";
-import { ArrowLeftIcon, ChevronRightIcon, DownloadIcon, FolderIcon } from "~/lib/icons";
+import {
+  ArrowLeftIcon,
+  ChevronRightIcon,
+  DownloadIcon,
+  FolderIcon,
+  RefreshCwIcon,
+} from "~/lib/icons";
 import { formatShortDateTimestamp } from "~/timestampFormat";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
@@ -27,12 +33,7 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
-import {
-  SettingsCard,
-  SettingsEmptyState,
-  SettingsSectionShell,
-  SettingsSelectPopup,
-} from "./SettingsPanelPrimitives";
+import { SettingsCard, SettingsEmptyState, SettingsSelectPopup } from "./SettingsPanelPrimitives";
 import { SKILL_LIBRARY_QUERY_KEY } from "./ExpertSkillBindingsEditor";
 import { useSkillPackageConnection } from "./skillPackageSettingsQueries";
 import { DEFAULT_SKILL_LIBRARY_COLUMNS, SkillLibraryToolbar } from "./SkillLibraryToolbar";
@@ -59,7 +60,6 @@ export function SkillLibrarySettingsPanel() {
     [usage, setUsage] = useState<"all" | "used" | "unused">("all"),
     [sources, setSources] = useState<SkillLibrarySourceFilter[]>([]),
     [expertIds, setExpertIds] = useState<string[]>([]),
-    [creators, setCreators] = useState<string[]>([]),
     [filterTags, setFilterTags] = useState<string[]>([]),
     [sort, setSort] = useState<NonNullable<SkillLibraryQuery["sort"]>>({
       field: "updated",
@@ -72,7 +72,6 @@ export function SkillLibrarySettingsPanel() {
     ...(usage !== "all" ? { usage } : {}),
     ...(sources.length ? { sources } : {}),
     ...(expertIds.length ? { expertIds } : {}),
-    ...(creators.length ? { createdBy: creators } : {}),
     ...(filterTags.length ? { tags: filterTags } : {}),
     sort,
   };
@@ -94,6 +93,16 @@ export function SkillLibrarySettingsPanel() {
     enabled: connection.connected,
   });
   const [columns, setColumns] = useState(DEFAULT_SKILL_LIBRARY_COLUMNS);
+  const showUsage = columns.usage || columns.source;
+  const showDates = columns.updated || columns.created;
+  const rowColumnStyle = {
+    "--skill-library-columns": [
+      "minmax(0,1fr)",
+      ...(showUsage ? ["minmax(8rem,auto)"] : []),
+      ...(showDates ? ["minmax(10rem,auto)"] : []),
+      "auto",
+    ].join(" "),
+  } as CSSProperties;
   const skills = query.data?.skills ?? [],
     allSkills = allSkillsQuery.data?.skills ?? skills,
     metadata = new Map((query.data?.items ?? []).map((item) => [item.skillId, item]));
@@ -281,10 +290,6 @@ export function SkillLibrarySettingsPanel() {
     visibleIds = new Set(skills.map((skill) => skill.skillId)),
     hiddenSelectedCount = selectedItems.filter((skill) => !visibleIds.has(skill.skillId)).length,
     detail = allSkills.find((skill) => skill.skillId === detailId),
-    creatorOptions = [
-      ...(allSkills.some((skill) => !skill.createdBy) ? ["unknown"] : []),
-      ...new Set(allSkills.flatMap((skill) => (skill.createdBy ? [skill.createdBy] : []))),
-    ],
     tagOptions = [...new Set(allSkills.flatMap((skill) => skill.tags))].toSorted((a, b) =>
       a.localeCompare(b, "zh-Hans"),
     );
@@ -417,12 +422,9 @@ export function SkillLibrarySettingsPanel() {
     });
   return (
     <div className="space-y-6">
-      <SettingsSectionShell title="技能库">
+      <section aria-label="技能库" className="flex flex-col gap-1.5 not-first:mt-4">
         <SettingsCard divided={false} className="@container min-w-0 p-4">
           <div className="space-y-4">
-            <p className="text-ui-sm text-muted-foreground">
-              保存或来源更新在下一次运行生效；当前运行及其恢复仍使用原版本。包保存成功与运行就绪分别验证。
-            </p>
             {!connection.connected ? (
               <p role="status" className="text-ui-sm text-muted-foreground">
                 服务器未连接，管理操作已暂停。
@@ -443,52 +445,55 @@ export function SkillLibrarySettingsPanel() {
                 {notice}
               </p>
             ) : null}
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  disabled={busy || !connection.connected}
+                  onClick={() => setCreateOpen(true)}
+                >
+                  新建技能
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !connection.connected}
+                  onClick={() => {
+                    clearPreviewOwnership();
+                    setImportOpen(true);
+                    setImportStep("choose");
+                    setError(null);
+                    setPreview(null);
+                    setRefresh(null);
+                    setChoices([]);
+                  }}
+                >
+                  导入技能
+                </Button>
+              </div>
               <Button
-                size="sm"
-                disabled={busy || !connection.connected}
-                onClick={() => setCreateOpen(true)}
-              >
-                新建技能
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy || !connection.connected}
-                onClick={() => {
-                  clearPreviewOwnership();
-                  setImportOpen(true);
-                  setImportStep("choose");
-                  setError(null);
-                  setPreview(null);
-                  setRefresh(null);
-                  setChoices([]);
-                }}
-              >
-                导入技能
-              </Button>
-              <Button
-                size="sm"
+                size="icon-sm"
                 variant="ghost"
+                className="ml-auto"
+                aria-label="刷新列表"
+                title="刷新列表"
                 disabled={busy || !connection.connected || query.isFetching}
                 onClick={() => void reload()}
               >
-                刷新列表
+                <RefreshCwIcon aria-hidden="true" className="size-3.5" />
               </Button>
             </div>
             <SkillLibraryToolbar
               search={search}
               onSearchChange={setSearch}
-              filters={{ usage, sources, expertIds, creators, tags: filterTags }}
+              filters={{ usage, sources, expertIds, tags: filterTags }}
               onFiltersChange={(next) => {
                 setUsage(next.usage);
                 setSources(next.sources);
                 setExpertIds(next.expertIds);
-                setCreators(next.creators);
                 setFilterTags(next.tags);
               }}
               experts={(expertsQuery.data ?? []).filter((expert) => !expert.archived)}
-              creators={creatorOptions}
               tags={tagOptions}
               sort={sort}
               onSortChange={setSort}
@@ -631,7 +636,8 @@ export function SkillLibrarySettingsPanel() {
               {skills.map((skill) => (
                 <li
                   key={skill.skillId}
-                  className="flex min-w-0 flex-col gap-3 py-3 @xl:flex-row @xl:items-start"
+                  className="grid min-w-0 gap-3 py-3 @xl:grid-cols-[var(--skill-library-columns)] @xl:items-center"
+                  style={rowColumnStyle}
                 >
                   <div className="flex min-w-0 flex-1 items-start gap-3">
                     <Checkbox
@@ -655,37 +661,47 @@ export function SkillLibrarySettingsPanel() {
                       <span className="block break-words text-ui-sm text-muted-foreground">
                         {skill.description}
                       </span>
-                      <span className="flex flex-wrap gap-x-2 break-words text-ui-xs text-muted-foreground">
+                      <span className="mt-1 flex flex-wrap gap-x-2 break-all text-ui-xs text-muted-foreground">
                         {skill.tags.length ? <span>{skill.tags.join(" · ")}</span> : null}
                         {skill.locallyModified ? <span>有本地编辑</span> : null}
-                        {columns.source ? <span>来源：{skill.source.kind}</span> : null}
-                        {columns.usage ? (
-                          <span>
-                            {metadata.get(skill.skillId)?.usage.expertIds.length ?? 0} 个绑定专家 /{" "}
-                            {metadata.get(skill.skillId)?.usage.enabledExpertIds.length ?? 0}{" "}
-                            个已启用
-                          </span>
-                        ) : null}
-                      </span>
-                      <span className="flex flex-wrap gap-x-3 break-all text-ui-xs text-muted-foreground">
-                        {columns.creator ? <span>添加者：{skill.createdBy ?? "未知"}</span> : null}
-                        {columns.updated ? (
-                          <span>
-                            更新时间：{formatShortDateTimestamp(skill.updatedAt, "locale")}
-                          </span>
-                        ) : null}
-                        {columns.created ? (
-                          <span>
-                            创建时间：
-                            {skill.createdAt
-                              ? formatShortDateTimestamp(skill.createdAt, "locale")
-                              : "未知"}
-                          </span>
-                        ) : null}
                       </span>
                     </button>
                   </div>
-                  <div className="flex shrink-0 flex-wrap items-center gap-1 @xl:justify-end">
+                  {showUsage ? (
+                    <div
+                      role="group"
+                      aria-label={`${skill.name} 使用和来源`}
+                      className="flex min-w-0 flex-wrap gap-x-3 break-words text-ui-xs text-muted-foreground @xl:flex-col @xl:gap-1"
+                    >
+                      {columns.usage ? (
+                        <span>
+                          {metadata.get(skill.skillId)?.usage.expertIds.length ?? 0} 个绑定专家 /{" "}
+                          {metadata.get(skill.skillId)?.usage.enabledExpertIds.length ?? 0} 个已启用
+                        </span>
+                      ) : null}
+                      {columns.source ? <span>来源：{skill.source.kind}</span> : null}
+                    </div>
+                  ) : null}
+                  {showDates ? (
+                    <div
+                      role="group"
+                      aria-label={`${skill.name} 时间`}
+                      className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(8rem,1fr))] gap-x-3 gap-y-1 break-words text-ui-xs text-muted-foreground @xl:min-w-[10rem] @xl:grid-cols-1 @xl:justify-items-end @xl:text-right"
+                    >
+                      {columns.updated ? (
+                        <span>更新时间：{formatShortDateTimestamp(skill.updatedAt, "locale")}</span>
+                      ) : null}
+                      {columns.created ? (
+                        <span>
+                          创建时间：
+                          {skill.createdAt
+                            ? formatShortDateTimestamp(skill.createdAt, "locale")
+                            : "未知"}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  <div className="flex min-w-0 flex-wrap items-center gap-1 @xl:justify-end">
                     {supportsHostedUpdate(skill) ? (
                       <Button
                         size="sm"
@@ -721,7 +737,6 @@ export function SkillLibrarySettingsPanel() {
                 usage !== "all" ||
                 sources.length ||
                 expertIds.length ||
-                creators.length ||
                 filterTags.length
                   ? "没有匹配的托管技能。"
                   : "尚未创建或导入技能。"}
@@ -729,7 +744,7 @@ export function SkillLibrarySettingsPanel() {
             ) : null}
           </div>
         </SettingsCard>
-      </SettingsSectionShell>
+      </section>
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogPopup className="w-[min(44rem,calc(100vw-1.5rem))]">
           <DialogHeader>
@@ -1199,13 +1214,10 @@ export function SkillLibrarySettingsPanel() {
                       ? `${bindingApplied ? "已添加" : "将添加"} ${item.addedSkillIds.length} 项`
                       : item.status === "unchanged"
                         ? "无需更改"
-                        : item.status === "needs_conversion"
-                          ? "需先转换旧技能配置"
-                          : (item.error ?? item.status)}
+                        : (item.error ?? item.status)}
                     {item.skippedSkillIds.length
                       ? ` · ${item.skippedSkillIds.length} 项已绑定`
                       : ""}
-                    {item.error && item.status !== "needs_conversion" ? ` · ${item.error}` : ""}
                   </li>
                 ))}
               </ul>

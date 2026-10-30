@@ -57,7 +57,6 @@ const defaultFlags: ManagementCliFlagValues = {
   expertIds: undefined,
   skillId: [],
   skillIds: undefined,
-  createdBy: undefined,
   sort: undefined,
   direction: undefined,
   expectedRevision: undefined,
@@ -68,7 +67,9 @@ const defaultFlags: ManagementCliFlagValues = {
   overwriteLocalEdits: false,
   entry: undefined,
   duplicate: undefined,
-  activation: undefined,
+  allowEvolution: undefined,
+  selectionScope: undefined,
+  resourceMode: undefined,
   instanceId: undefined,
   flavor: undefined,
 };
@@ -527,16 +528,23 @@ describe("Skill management local HTTP and CLI e2e", () => {
       process.exitCode = 0;
       expect(created.exitCode).toBe(0);
       const createdResult = JSON.parse(createOutput.text()) as {
-        readonly result: { readonly skill: { readonly name: string; readonly skillId: string } };
+        readonly result: {
+          readonly skill: {
+            readonly name: string;
+            readonly skillId: string;
+            readonly createdAt: string;
+          };
+        };
       };
       expect(createdResult).toMatchObject({
         result: {
           skill: {
             name: "cli-created",
-            createdBy: `management-client:${storedCredential.credentialId}`,
           },
         },
       });
+      expect(createdResult.result.skill).not.toHaveProperty("createdBy");
+      expect(createdResult.result.skill.createdAt).toBeDefined();
 
       const replayOutput = capture();
       const replay = await executeManagementCli(
@@ -621,7 +629,6 @@ describe("Skill management local HTTP and CLI e2e", () => {
           {
             skillId: createdResult.result.skill.skillId,
             enabled: true,
-            activation: "on-demand",
           },
         ],
       });
@@ -765,6 +772,40 @@ describe("Skill management local HTTP and CLI e2e", () => {
       });
       expect(bindingAllowed.status).not.toBe(403);
 
+      const bindingSkill = (
+        await createSkillLibraryStore(stateDir).execute({
+          action: "create",
+          name: "Binding only capability",
+          body: "---\nname: Binding only capability\n---\nBind without Skill management access.\n",
+          tags: [],
+        })
+      ).skill!;
+      const currentExpert = (await createExpertStore(stateDir).read(boundExpert.id))!;
+      const bindingMutation = await fetch(`${origin}/api/skill-management/command`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${storedCredential.credential}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          request: {
+            action: "bindings",
+            operation: "add",
+            expertId: currentExpert.id,
+            expectedRevision: currentExpert.revision,
+            requestId: "binding-only-current-add",
+            bindings: [{ skillId: bindingSkill.skillId, enabled: true }],
+          },
+        }),
+      });
+      expect(bindingMutation.status).toBe(200);
+      await expect(bindingMutation.json()).resolves.toMatchObject({
+        bindingResult: { status: "applied", bindings: [{ skillId: bindingSkill.skillId }] },
+      });
+      expect((await createExpertStore(stateDir).read(boundExpert.id))?.skillBindings).toEqual([
+        { skillId: bindingSkill.skillId, enabled: true },
+      ]);
+
       const skillDenied = await executeManagementCli(
         makeCommand({
           namespace: "skill",
@@ -855,10 +896,7 @@ describe("Skill management local HTTP and CLI e2e", () => {
           ...definition,
           id: current.id,
           expectedRevision: current.revision,
-          skillBindings: [
-            ...(current.skillBindings ?? []),
-            { skillId, enabled: true, activation: "on-demand" },
-          ],
+          skillBindings: [...(current.skillBindings ?? []), { skillId, enabled: true }],
         });
       };
       library.execute = async (request, context) => {

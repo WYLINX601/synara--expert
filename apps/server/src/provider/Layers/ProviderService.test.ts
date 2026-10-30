@@ -248,7 +248,6 @@ async function makeStrictTestExpert(input: ProviderExpertSession): Promise<Provi
       imported.package.entries.map((entry) => ({
         packageId: imported.package.packageId,
         entryPath: entry.entryPath,
-        activation: "on-demand" as const,
       })),
     );
   }
@@ -266,10 +265,9 @@ async function makeStrictTestExpert(input: ProviderExpertSession): Promise<Provi
       persona: input.persona,
       outputRequirements: "",
       skills: [],
-      skillSelections: selections.map(({ packageId, entryPath, activation }) => ({
+      skillSelections: selections.map(({ packageId, entryPath }) => ({
         packageId,
         entryPath,
-        activation,
       })),
       references,
       connections: [],
@@ -347,7 +345,7 @@ async function makeExpertSkillPackageFixture(
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(
       path.join(directory, "SKILL.md"),
-      `---\nname: ${name}\ndescription: ${name} workflow\n---\n${name.toUpperCase()} BODY\n`,
+      `---\nname: ${name}\ndescription: ${name} workflow\n${name === "review" ? "hooks: { SessionStart: [] }\n" : ""}---\n${name.toUpperCase()} BODY\n`,
       "utf8",
     );
   }
@@ -358,12 +356,10 @@ async function makeExpertSkillPackageFixture(
     {
       packageId: imported.package.packageId,
       entryPath: "skills/review/SKILL.md",
-      activation: "startup",
     },
     {
       packageId: imported.package.packageId,
       entryPath: "skills/plan/SKILL.md",
-      activation: "on-demand",
     },
   ]);
   const experts = createExpertStore(stateDir);
@@ -379,12 +375,10 @@ async function makeExpertSkillPackageFixture(
       {
         packageId: imported.package.packageId,
         entryPath: "skills/review/SKILL.md",
-        activation: "startup",
       },
       {
         packageId: imported.package.packageId,
         entryPath: "skills/plan/SKILL.md",
-        activation: "on-demand",
       },
     ],
     references: [],
@@ -1671,8 +1665,14 @@ const skillEvolutionFixedModel: ModelSelection = {
   instanceId: "pi",
   model: "openai/gpt-4o",
 };
+const skillEvolutionOmpModel: ModelSelection = {
+  provider: "omp",
+  instanceId: "omp",
+  model: "openai/gpt-4o",
+};
 const skillEvolutionThreadIds = {
   start: asThreadId("thread-skill-evolution-provider-start"),
+  omp: asThreadId("thread-skill-evolution-provider-omp"),
   spoof: asThreadId("thread-skill-evolution-provider-spoof"),
   missingPurpose: asThreadId("thread-skill-evolution-provider-missing-purpose"),
   wrongModel: asThreadId("thread-skill-evolution-provider-wrong-model"),
@@ -1692,12 +1692,16 @@ const skillEvolutionExecutions = new Map<ThreadId, SkillEvolutionTestExecution>(
     skillEvolutionThreadIds.fork,
     skillEvolutionThreadIds.recovery,
     skillEvolutionThreadIds.missingRegistration,
+    skillEvolutionThreadIds.omp,
   ].map((threadId) => [
     threadId,
     {
       requestId: `evolution-${threadId}`,
       ownerId: "skill-evolution-owner",
-      modelSelection: skillEvolutionFixedModel,
+      modelSelection:
+        threadId === skillEvolutionThreadIds.omp
+          ? skillEvolutionOmpModel
+          : skillEvolutionFixedModel,
     },
   ]),
 );
@@ -1718,10 +1722,51 @@ const skillEvolutionContextAppliedRead = vi.spyOn(
 );
 const skillEvolutionRouting = makeProviderServiceLayer(undefined, {
   includePi: true,
+  includeOmp: true,
   contextRepository: skillEvolutionContextRepository.repository,
   skillEvolutionRepository: makeSkillEvolutionRepository(skillEvolutionExecution),
 });
 skillEvolutionRouting.layer("ProviderService Skill Evolution execution boundary", (it) => {
+  it.effect("admits only registered OMP extraction sessions and dispatches through OMP", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = skillEvolutionThreadIds.omp;
+      skillEvolutionRouting.omp.startSession.mockClear();
+      skillEvolutionRouting.omp.sendTurn.mockClear();
+
+      yield* provider.startSession(threadId, {
+        provider: "omp",
+        providerInstanceId: "omp" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionOmpModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      const adapterInput = skillEvolutionRouting.omp.startSession.mock.calls.at(-1)?.[0];
+      assert.equal(adapterInput?.provider, "omp");
+      assert.equal(adapterInput?.executionPurpose, "skill-evolution");
+      assert.deepEqual(adapterInput?.modelSelection, skillEvolutionOmpModel);
+      assert.equal(adapterInput?.runtimeMode, "approval-required");
+      assert.isUndefined(adapterInput?.contextSession);
+      assert.isUndefined(adapterInput?.expertSession);
+      assert.isUndefined(adapterInput?.additionalDirectories);
+
+      const sent = yield* provider.sendTurn({
+        threadId,
+        input: "Extract the reusable skill guidance.",
+        attachments: [],
+        modelSelection: skillEvolutionOmpModel,
+      });
+      assert.equal(sent.threadId, threadId);
+      assert.equal(skillEvolutionRouting.omp.sendTurn.mock.calls.length, 1);
+      assert.deepEqual(
+        skillEvolutionRouting.omp.sendTurn.mock.calls.at(-1)?.[0].modelSelection,
+        skillEvolutionOmpModel,
+      );
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
   it.effect("starts and sends registered extraction without reading or forwarding Context", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -12013,7 +12058,7 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
   );
 
   it.effect(
-    "submits selected startup catalog, resolves explicit entries, isolates selection, and recovers from pinned bytes",
+    "submits only selected metadata, resolves explicit entries, isolates selection, and recovers from pinned bytes",
     () =>
       Effect.gen(function* () {
         expertV2Runtime.codex.startSession.mockClear();
@@ -12051,7 +12096,7 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
           firstAdapterInput?.expertSession?.skillEntries?.map(({ entryPath }) => entryPath),
           ["skills/review/SKILL.md", "skills/plan/SKILL.md"],
         );
-        assert.ok(firstAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(!firstAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
         assert.ok(!firstAdapterInput?.expertSession?.persona.includes("PLAN BODY"));
         assert.ok(!firstAdapterInput?.expertSession?.persona.includes("UNSELECTED BODY"));
         assert.equal(initial.expertApplication, undefined);
@@ -12191,12 +12236,10 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
             {
               packageId: replacementPackage.package.packageId,
               entryPath: "skills/review/SKILL.md",
-              activation: "startup",
             },
             {
               packageId: replacementPackage.package.packageId,
               entryPath: "skills/plan/SKILL.md",
-              activation: "on-demand",
             },
           ]),
         );
@@ -12267,7 +12310,7 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
             skills: [],
             references: [],
             connections: [],
-            skillBindings: [{ skillId: skill.skillId, enabled: true, activation: "on-demand" }],
+            skillBindings: [{ skillId: skill.skillId, enabled: true }],
           }),
         );
         const binding = yield* Effect.promise(() => experts.prepareSnapshot(definition.id));
@@ -12388,7 +12431,7 @@ expertV2ForkRuntime.layer("ProviderService Expert V2 runtime notices and fork Co
         assert.deepEqual(sourcePayload.expertSession, fixture.session);
         assert.deepEqual(sourcePayload.expertRuntimeNotices, [notice]);
         const sourceAdapterInput = expertV2ForkRuntime.codex.startSession.mock.calls.at(-1)?.[0];
-        assert.ok(sourceAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(!sourceAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
         assert.ok(sourceAdapterInput?.expertSession?.persona.includes(notice));
         assert.isUndefined(sourceAdapterInput?.expertRuntimeNotices);
         const sourceApplied = expertV2ForkContextRepository.applied.get(source);
@@ -12411,7 +12454,7 @@ expertV2ForkRuntime.layer("ProviderService Expert V2 runtime notices and fork Co
           attachments: [],
         });
         const resumedAdapterInput = expertV2ForkRuntime.codex.startSession.mock.calls.at(-1)?.[0];
-        assert.ok(resumedAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(!resumedAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
         assert.ok(resumedAdapterInput?.expertSession?.persona.includes(notice));
         const resumedApplied = expertV2ForkContextRepository.applied.get(source);
         const resumedInstructions = composeProviderBaseInstructions({
@@ -12450,7 +12493,7 @@ expertV2ForkRuntime.layer("ProviderService Expert V2 runtime notices and fork Co
         });
         assert.equal(fork?.threadId, target);
         const forkInput = expertV2ForkRuntime.codex.forkThread.mock.calls.at(-1)?.[0];
-        assert.ok(forkInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(!forkInput?.expertSession?.persona.includes("REVIEW BODY"));
         assert.ok(forkInput?.expertSession?.persona.includes(notice));
         assert.isUndefined(forkInput?.expertRuntimeNotices);
         const targetBinding = Option.getOrThrow(yield* directory.getBinding(target));

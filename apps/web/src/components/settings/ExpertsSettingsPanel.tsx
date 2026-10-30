@@ -11,7 +11,6 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ExpertDefinition, ExpertSaveInput } from "@synara/contracts";
-import { ArrowLeftIcon } from "~/lib/icons";
 import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { Button } from "../ui/button";
 import {
@@ -28,6 +27,7 @@ import { ExpertList } from "./ExpertList";
 import { ExpertActionsMenu } from "./ExpertActionsMenu";
 import { ExpertPreviewPopover } from "./ExpertPreviewPopover";
 import { ExpertSaveBar } from "./ExpertSaveBar";
+import { SettingsEditorDialog } from "./SettingsEditorDialog";
 import { SettingsSegmentedControl } from "./SettingControls";
 import {
   expertDraftFromDefinition,
@@ -36,8 +36,8 @@ import {
   validateExpertDraft,
 } from "./expertSettingsModel";
 import type { ExpertDraftIssue } from "./expertSettingsModel";
+import { SKILL_LIBRARY_QUERY_KEY } from "./ExpertSkillBindingsEditor";
 import { EXPERT_CONNECTIONS_QUERY_KEY, EXPERTS_QUERY_KEY } from "./expertSettingsQueries";
-import { skillsCatalogQueryOptions } from "~/lib/providerDiscoveryReactQuery";
 import { useExpertDraftGuard } from "./useExpertDraftGuard";
 import {
   HubTeamsSettingsPanel,
@@ -127,7 +127,6 @@ export function ExpertsSettingsPanel(props: {
     queryFn: () => ensureExpertClient().listExpertConnections(),
     enabled: showEditorData,
   });
-  const skillsQuery = useQuery(skillsCatalogQueryOptions({ enabled: showEditorData }));
 
   const updateDraft = useCallback((patch: Partial<ExpertSaveInput>) => {
     setDraft((current) => (current ? { ...current, ...patch } : current));
@@ -153,6 +152,10 @@ export function ExpertsSettingsPanel(props: {
     const currentDraft = draftRef.current;
     const currentBaseline = baselineRef.current;
     if (!currentDraft || currentBaseline?.archived || savingRef.current) return null;
+    const skillBindingsChanged = currentBaseline
+      ? JSON.stringify(currentDraft.skillBindings ?? []) !==
+        JSON.stringify(currentBaseline.skillBindings ?? [])
+      : (currentDraft.skillBindings?.length ?? 0) > 0;
     if (
       currentBaseline &&
       expertDraftsEqual(currentDraft, expertDraftFromDefinition(currentBaseline))
@@ -181,6 +184,8 @@ export function ExpertsSettingsPanel(props: {
       });
       void queryClient.invalidateQueries({ queryKey: EXPERTS_QUERY_KEY });
       void queryClient.invalidateQueries({ queryKey: EXPERT_CONNECTIONS_QUERY_KEY });
+      if (skillBindingsChanged)
+        void queryClient.invalidateQueries({ queryKey: SKILL_LIBRARY_QUERY_KEY });
       if (generation !== generationRef.current) return null;
       const cleanDraft = expertDraftFromDefinition(saved);
       baselineRef.current = saved;
@@ -304,7 +309,7 @@ export function ExpertsSettingsPanel(props: {
       setBaseline(latest);
       setDraft(nextDraft);
       setSelectedId(latest.id);
-      setTab("capabilities");
+      setTab("settings");
       setActionError(null);
       setSettingsKind("experts");
       setView("editor");
@@ -334,7 +339,7 @@ export function ExpertsSettingsPanel(props: {
   const openExpert = async (expert: ExpertDefinition) => {
     if (!(await confirmLeave())) return;
     if (props.centerRoute) {
-      await props.centerRoute.navigate(expert.id, "capabilities");
+      await props.centerRoute.navigate(expert.id, "settings");
       return;
     }
     const latest =
@@ -347,7 +352,7 @@ export function ExpertsSettingsPanel(props: {
     setBaseline(latest);
     setDraft(nextDraft);
     setSelectedId(latest.id);
-    setTab("capabilities");
+    setTab("settings");
     setActionError(null);
     setView("editor");
   };
@@ -399,6 +404,7 @@ export function ExpertsSettingsPanel(props: {
   };
 
   const backToList = async () => {
+    if (pending || starting) return;
     if (!(await confirmLeave())) return;
     if (props.centerRoute) await props.centerRoute.navigate(null, "capabilities");
     setView("list");
@@ -540,12 +546,8 @@ export function ExpertsSettingsPanel(props: {
           return "专家角色与工作方式";
         case "outputRequirements":
           return "专家输出要求";
-        case "skills":
-          return issue.index === undefined
-            ? "添加技能"
-            : `技能 ${issue.index + 1} ${issue.subfield === "path" ? "路径" : "名称"}`;
-        case "skillSelections":
-          return issue.index === undefined ? "选择技能" : `选择技能 ${issue.index + 1}`;
+        case "skillBindings":
+          return "技能";
         case "references":
           return issue.index === undefined ? "添加参考资料" : `参考资料路径 ${issue.index + 1}`;
         case "connections":
@@ -578,7 +580,7 @@ export function ExpertsSettingsPanel(props: {
   ) : null;
 
   return (
-    <div className="space-y-5" onKeyDown={handleSaveKey}>
+    <div className="flex min-h-0 flex-1 flex-col gap-5" onKeyDown={handleSaveKey}>
       <div className={props.centerRoute ? "border-b border-border pb-3" : undefined}>
         <SettingsSegmentedControl
           value={settingsKind}
@@ -627,60 +629,48 @@ export function ExpertsSettingsPanel(props: {
         >
           <SkillLibrarySettingsPanel />
         </Suspense>
-      ) : view === "list" ? (
-        expertsQuery.isPending && !expertsQuery.data ? (
-          <SettingsEmptyState layout="status">正在读取专家…</SettingsEmptyState>
-        ) : expertsQuery.isError && !expertsQuery.data ? (
-          <SettingsEmptyState layout="status" tone="destructive">
-            无法读取专家：{errorText(expertsQuery.error)}
-          </SettingsEmptyState>
-        ) : (
-          <ExpertList
-            experts={experts}
-            selectedId={selectedId}
-            busy={pending}
-            onSelect={(expert) => void openExpert(expert)}
-            onNew={() => void startNew()}
-            status={
-              actionErrorMessage ??
-              (expertsQuery.isError ? (
-                <SettingsEmptyState layout="status" tone="destructive">
-                  无法刷新专家：{errorText(expertsQuery.error)}
-                </SettingsEmptyState>
-              ) : null)
-            }
-            {...expertActions}
-          />
-        )
-      ) : draft ? (
-        <>
+      ) : expertsQuery.isPending && !expertsQuery.data ? (
+        <SettingsEmptyState layout="status">正在读取专家…</SettingsEmptyState>
+      ) : expertsQuery.isError && !expertsQuery.data ? (
+        <SettingsEmptyState layout="status" tone="destructive">
+          无法读取专家：{errorText(expertsQuery.error)}
+        </SettingsEmptyState>
+      ) : (
+        <ExpertList
+          experts={experts}
+          selectedId={selectedId}
+          busy={pending}
+          onSelect={(expert) => void openExpert(expert)}
+          onNew={() => void startNew()}
+          status={
+            actionErrorMessage ??
+            (expertsQuery.isError ? (
+              <SettingsEmptyState layout="status" tone="destructive">
+                无法刷新专家：{errorText(expertsQuery.error)}
+              </SettingsEmptyState>
+            ) : null)
+          }
+          {...expertActions}
+        />
+      )}
+      {settingsKind === "experts" && draft && view === "editor" && active ? (
+        <SettingsEditorDialog
+          open
+          onClose={() => void backToList()}
+          closeButtonLabel="关闭专家编辑"
+        >
           <ExpertEditor
-            key={`${selectedId ?? "new-expert"}:${baseline?.revision ?? 0}`}
+            key={selectedId ?? `new-expert:${generationRef.current}`}
             header={
-              <div className="flex min-h-8 flex-wrap items-center justify-between gap-2">
+              <div className="flex min-h-8 flex-wrap items-center justify-between gap-2 pr-8">
                 <div className="flex min-w-32 flex-1 items-center gap-2">
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    className="shrink-0"
-                    aria-label="返回专家列表"
-                    title="返回专家列表"
-                    onClick={() => void backToList()}
-                    disabled={pending}
-                  >
-                    <ArrowLeftIcon aria-hidden="true" className="size-4" />
-                  </Button>
-                  <h1
+                  <DialogTitle
+                    render={<h1 />}
                     className="min-w-0 truncate text-ui-lg font-semibold"
                     title={baseline?.name ?? (draft.name.trim() || "新建专家")}
                   >
                     {baseline?.name ?? (draft.name.trim() || "新建专家")}
-                  </h1>
-                  {baseline ? (
-                    <span className="shrink-0 text-ui-xs tabular-nums text-muted-foreground">
-                      v{baseline.revision}
-                    </span>
-                  ) : null}
+                  </DialogTitle>
                   {baseline?.archived ? (
                     <span className="shrink-0 rounded-md bg-foreground/5 px-2 py-0.5 text-ui-xs text-muted-foreground">
                       已归档 · 只读
@@ -694,15 +684,9 @@ export function ExpertsSettingsPanel(props: {
                       disabled={pending || starting}
                       onClick={() => void useExpert()}
                     >
-                      {starting ? "准备中…" : "使用此专家"}
+                      {starting ? "准备中…" : "对话"}
                     </Button>
                   ) : null}
-                  <ExpertPreviewPopover
-                    expert={baseline}
-                    provider={previewProvider}
-                    active={active && view === "editor"}
-                    disabled={pending}
-                  />
                   {baseline?.archived ? (
                     <Button
                       size="sm"
@@ -712,8 +696,24 @@ export function ExpertsSettingsPanel(props: {
                     >
                       恢复专家
                     </Button>
-                  ) : baseline ? (
-                    <ExpertActionsMenu expert={baseline} busy={pending} {...expertActions} />
+                  ) : null}
+                  {baseline ? (
+                    <ExpertPreviewPopover
+                      expert={baseline}
+                      provider={previewProvider}
+                      active={active && view === "editor"}
+                      disabled={pending}
+                      renderTrigger={({ onCheck, disabled, anchorRef }) => (
+                        <ExpertActionsMenu
+                          expert={baseline}
+                          busy={pending}
+                          {...expertActions}
+                          triggerRef={anchorRef}
+                          checkConfiguration={{ onCheck, disabled }}
+                          showRestore={!baseline.archived}
+                        />
+                      )}
+                    />
                   ) : null}
                 </div>
               </div>
@@ -727,8 +727,7 @@ export function ExpertsSettingsPanel(props: {
                     className="rounded-lg border border-border bg-foreground/2 px-3 py-2 text-ui-sm text-muted-foreground"
                     role="status"
                   >
-                    服务端已有 v{latestBaseline?.revision}。当前更改仍基于 v{baseline.revision}
-                    ；保存可能遇到版本冲突。放弃更改会载入最新版。
+                    专家配置已在其他位置更新。当前草稿仍保留；保存前请核对更改，或放弃更改以载入最新配置。
                   </p>
                 ) : null}
               </>
@@ -753,19 +752,18 @@ export function ExpertsSettingsPanel(props: {
             connections={connectionsQuery.data ?? []}
             connectionsLoading={connectionsQuery.isPending && !connectionsQuery.data}
             connectionsError={connectionsQuery.isError ? errorText(connectionsQuery.error) : null}
-            experts={experts}
-            catalog={skillsQuery.data?.skills ?? []}
-            catalogLoading={skillsQuery.isPending && !skillsQuery.data}
-            catalogError={skillsQuery.isError ? errorText(skillsQuery.error) : null}
             onTabChange={changeTab}
             onChange={updateDraft}
             onOpenConnections={() => void openConnectionManager()}
           />
 
-          {isDirty && !readonly ? (
+          {!readonly ? (
             <ExpertSaveBar
+              evolution={tab === "evolution"}
               disabled={issues.length > 0}
               pending={pending}
+              dirty={isDirty}
+              onClose={() => void backToList()}
               issueCount={issues.length}
               {...(issues[0] ? { issueSummary: issues[0].message } : {})}
               onSave={() => void saveAndLocate()}
@@ -776,7 +774,7 @@ export function ExpertsSettingsPanel(props: {
               }}
             />
           ) : null}
-        </>
+        </SettingsEditorDialog>
       ) : null}
 
       {leaveDialog}

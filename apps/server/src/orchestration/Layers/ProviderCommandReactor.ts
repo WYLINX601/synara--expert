@@ -2421,7 +2421,7 @@ const make = Effect.gen(function* () {
     );
     if (
       evolutionExecution &&
-      (!["pi", "claudeAgent"].includes(desiredRoutedModelSelection.provider) ||
+      (!["pi", "claudeAgent", "omp"].includes(desiredRoutedModelSelection.provider) ||
         evolutionExecution.modelSelection.provider !== desiredRoutedModelSelection.provider ||
         evolutionExecution.modelSelection.model !== desiredRoutedModelSelection.model ||
         (evolutionExecution.modelSelection.instanceId ??

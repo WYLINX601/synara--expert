@@ -13,15 +13,16 @@ import {
   type ExpertDefinition,
   type ExpertPreview,
   type ExpertSnapshot,
+  type PinnedExpertSkillSelection,
   type ResolvedExpertSkillEntry,
 } from "@synara/contracts";
 import { Schema } from "effect";
 
 import { ensurePrivateDirectorySync, syncDirectoryEntry } from "../privatePathPermissions";
-import { inspectBmadWorkspace } from "./bmadSkillPreset.ts";
 import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
 import { readSkillDefinition, resolveSkillBindings } from "./SkillLibraryStore";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle.ts";
+import { verifyPinnedSkillReferences } from "./pinnedSkillReferences";
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024;
@@ -57,11 +58,9 @@ export type CollectedExpertResource = ResourceEntry & {
 };
 type CollectedResource = CollectedExpertResource;
 type TreeEntry = ResourceEntry & { readonly sourcePath: string; readonly bytes?: Buffer };
-type ExpertSkillSelections = NonNullable<(typeof ExpertSaveInput.Type)["skillSelections"]>;
-
 async function resolvePackageSelections(
   stateDir: string,
-  selections: ReadonlyArray<ExpertSkillSelections[number]>,
+  selections: ReadonlyArray<PinnedExpertSkillSelection>,
 ): Promise<ResolvedExpertSkillEntry[]> {
   // SkillPackageStore imports the resource collection capability from this module.
   // Load it only after ExpertStore has initialized to avoid an eager module cycle.
@@ -79,11 +78,6 @@ export interface ExpertStore {
   preview(input: typeof ExpertPreviewInput.Type): Promise<ExpertPreview>;
   prepareSnapshot(id: string): Promise<typeof ExpertBinding.Type>;
   readSnapshot(snapshotId: string): Promise<ExpertSnapshot>;
-  listStoredSnapshots(): Promise<ReadonlyArray<ExpertSnapshot>>;
-  removeLegacySkillSnapshots(
-    snapshotIds: ReadonlyArray<string>,
-    verifyNoReferences?: () => Promise<void>,
-  ): Promise<ReadonlyArray<string>>;
 }
 
 export class ExpertStoreError extends Error {
@@ -867,9 +861,22 @@ export async function readVerifiedStoredExpertSnapshot(
   }
   if (packageBased) {
     try {
-      await resolvePackageSelections(
-        path.resolve(snapshotRoot, "..", "..", ".."),
-        snapshot.skillSelections!,
+      const stateDir = path.resolve(snapshotRoot, "..", "..", "..");
+      await verifyPinnedSkillReferences(
+        stateDir,
+        snapshot.skillSelections!.map((selection) => ({
+          ...selection,
+          name: "Pinned Skill",
+          description: "",
+          path: path.join(
+            stateDir,
+            "experts",
+            "skill-packages",
+            selection.packageId,
+            "content",
+            ...selection.entryPath.split("/"),
+          ),
+        })),
       );
     } catch (cause) {
       throw new ExpertStoreError(
@@ -1174,86 +1181,12 @@ export function createExpertStore(stateDir: string): ExpertStore {
       snapshot.skills.length > 0
     ) {
       throw new ExpertStoreError(
-        "This task snapshot uses legacy skill paths; convert the Expert before starting it.",
+        "This task snapshot uses an unsupported Skill configuration and cannot start a new run.",
         "invalid_resource",
       );
     }
     return hydrateSnapshot(snapshot, snapshotRoot);
   };
-
-  const listStoredSnapshots = async (): Promise<ReadonlyArray<ExpertSnapshot>> => {
-    await ensureInitialized();
-    const entries = await fs.readdir(snapshotsDir, { withFileTypes: true });
-    const snapshots: ExpertSnapshot[] = [];
-    for (const entry of entries) {
-      if (!SNAPSHOT_ID_PATTERN.test(entry.name) || !entry.isDirectory() || entry.isSymbolicLink()) {
-        throw new ExpertStoreError(
-          "Snapshot inventory contains an unknown or unsafe entry: " + entry.name,
-          "snapshot_corrupt",
-        );
-      }
-      snapshots.push(
-        await readVerifiedStoredExpertSnapshot(path.join(snapshotsDir, entry.name), entry.name),
-      );
-    }
-    return snapshots.sort((left, right) => left.snapshotId.localeCompare(right.snapshotId));
-  };
-
-  const removeLegacySkillSnapshots = (
-    snapshotIds: ReadonlyArray<string>,
-    verifyNoReferences?: () => Promise<void>,
-  ): Promise<ReadonlyArray<string>> =>
-    withSkillPackageLifecycle(stateDir, () =>
-      withWriteLock(async () => {
-        await ensureInitialized();
-        // The host rechecks every durable reference while this shared lifecycle
-        // lock prevents concurrent definition/package/snapshot mutations.
-        await verifyNoReferences?.();
-        if (new Set(snapshotIds).size !== snapshotIds.length) {
-          throw new ExpertStoreError("Duplicate snapshot ID in cleanup request.", "invalid_input");
-        }
-        const verified: string[] = [];
-        for (const snapshotId of snapshotIds) {
-          if (!SNAPSHOT_ID_PATTERN.test(snapshotId)) {
-            throw new ExpertStoreError("Snapshot ID is invalid.", "invalid_input");
-          }
-          let snapshot: ExpertSnapshot;
-          try {
-            snapshot = await readVerifiedStoredExpertSnapshot(
-              path.join(snapshotsDir, snapshotId),
-              snapshotId,
-            );
-          } catch (cause) {
-            // A host-verified retry may arrive after a previous cleanup removed
-            // this entry but before durable switch progress was advanced.
-            if (
-              verifyNoReferences &&
-              cause instanceof ExpertStoreError &&
-              cause.code === "not_found"
-            ) {
-              continue;
-            }
-            throw cause;
-          }
-          if (
-            snapshot.schemaVersion === 2 ||
-            snapshot.schemaVersion === 3 ||
-            snapshot.skills.length === 0
-          ) {
-            throw new ExpertStoreError(
-              "Only verified legacy skill snapshots can be removed by migration cleanup.",
-              "invalid_input",
-            );
-          }
-          verified.push(snapshotId);
-        }
-        for (const snapshotId of verified) {
-          await safeRemoveTree(path.join(snapshotsDir, snapshotId));
-        }
-        if (verified.length > 0) await syncDirectoryEntry(snapshotsDir);
-        return verified;
-      }),
-    );
 
   const prepareSnapshot = (id: string): Promise<typeof ExpertBinding.Type> =>
     withSkillPackageLifecycle(stateDir, async () => {
@@ -1268,7 +1201,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
 
       if (definition.skillSelections === undefined && definition.skills.length > 0) {
         throw new ExpertStoreError(
-          "This Expert uses legacy skill paths; convert its skills to shared packages before starting it.",
+          "This Expert uses an unsupported Skill configuration. Configure its Skills through the Skill library before starting it.",
           "invalid_resource",
         );
       }
@@ -1448,7 +1381,6 @@ export function createExpertStore(stateDir: string): ExpertStore {
     if (definition.archived) issues.push("已归档专家不能用于新任务。");
     let inspectedBytes = 0;
     let inspectedEntries = 0;
-    let workspaceBlocked = false;
     let skillEntries: ResolvedExpertSkillEntry[] | undefined;
     const inspect = async (resourcePath: string, kind: "skill" | "reference"): Promise<void> => {
       const size = await validateResourceTree(resourcePath, kind);
@@ -1491,7 +1423,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
       }
     } else if (definition.skills.length > 0) {
       incompatible = true;
-      issues.push("此专家仍使用旧式本机技能路径；转换为共享技能包后才能启动。");
+      issues.push("技能配置格式已停止支持，请在技能库中配置技能。");
     } else {
       skillEntries = await resolvePackageSelections(stateDir, []);
     }
@@ -1504,18 +1436,6 @@ export function createExpertStore(stateDir: string): ExpertStore {
           `参考资料无法读取或包含不安全路径：${String(cause instanceof Error ? cause.message : cause)}`,
         );
       }
-    }
-    try {
-      const bmadPreflight = await inspectBmadWorkspace(skillEntries ?? [], input.cwd);
-      if (bmadPreflight?.issues.length) {
-        workspaceBlocked = true;
-        issues.push(...bmadPreflight.issues.map((issue) => `BMad workspace: ${issue}`));
-      }
-    } catch (cause) {
-      workspaceBlocked = true;
-      issues.push(
-        `BMad workspace preflight failed: ${String(cause instanceof Error ? cause.message : cause)}`,
-      );
     }
     let connectionBlocked = false;
     let connectionPartial = false;
@@ -1567,14 +1487,13 @@ export function createExpertStore(stateDir: string): ExpertStore {
         );
       }
     }
-    const status =
-      connectionBlocked || workspaceBlocked
-        ? "blocked"
-        : incompatible
-          ? "incompatible"
-          : connectionPartial
-            ? "partial"
-            : "available";
+    const status = connectionBlocked
+      ? "blocked"
+      : incompatible
+        ? "incompatible"
+        : connectionPartial
+          ? "partial"
+          : "available";
     return {
       definition,
       ...(skillEntries !== undefined ? { skillEntries } : {}),
@@ -1681,7 +1600,5 @@ export function createExpertStore(stateDir: string): ExpertStore {
     preview,
     prepareSnapshot,
     readSnapshot,
-    listStoredSnapshots,
-    removeLegacySkillSnapshots,
   };
 }

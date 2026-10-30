@@ -335,7 +335,6 @@ function queryFromFlags(flags: ManagementCliFlagValues): JsonRecord | undefined 
   if (flags.usage !== undefined) query.usage = flags.usage;
   if (sources.length) query.sources = sources;
   if (expertIdsFilter.length) query.expertIds = expertIdsFilter;
-  if (flags.createdBy !== undefined) query.createdBy = [flags.createdBy];
   if (tags.length) query.tags = tags;
   if (flags.sort !== undefined || flags.direction !== undefined) {
     query.sort = {
@@ -354,7 +353,7 @@ function resultExitCode(result: unknown): SkillManagementExitCode {
     if (typeof record.status === "string") {
       if (["applied", "would_change", "unchanged", "updated", "skipped"].includes(record.status)) {
         outcomes.push("success");
-      } else if (["conflict", "needs_conversion"].includes(record.status)) {
+      } else if (record.status === "conflict") {
         outcomes.push("conflict");
       } else if (record.status === "failed") {
         outcomes.push("failure");
@@ -927,6 +926,8 @@ async function expertSkillsCommand(input: ManagementCliInput): Promise<Managemen
   const { command, io } = input;
   const flags = command.flags;
   const action = command.operation.action;
+  if (flags.allowEvolution !== undefined && action !== "add" && action !== "set")
+    throw new ManagementCliUsageError("--allow-evolution applies to `expert skills add|set`.");
   const requestedExperts = expertIds(flags);
   const positionalExpertId = command.positional[0];
   const selectedExperts = requestedExperts.length
@@ -959,7 +960,9 @@ async function expertSkillsCommand(input: ManagementCliInput): Promise<Managemen
   if (
     action === "add" &&
     selectedExperts.length > 1 &&
-    (flags.activation === undefined || flags.activation === "on-demand")
+    flags.allowEvolution === undefined &&
+    (flags.selectionScope === undefined || flags.selectionScope === "entry") &&
+    (flags.resourceMode === undefined || flags.resourceMode === "shared-readonly")
   ) {
     const result = await mutationRequest(input, requestId!, intentHash, async () => {
       const targets: Array<{ expertId: string; expectedRevision: number }> = [];
@@ -1025,14 +1028,43 @@ async function expertSkillsCommand(input: ManagementCliInput): Promise<Managemen
         }
         const expectedRevision = flags.expectedRevision ?? Number(current.revision);
         if (action === "add" || action === "set") {
-          const activation = flags.activation ?? "on-demand";
+          const currentBindings =
+              action === "set" && Array.isArray(current.bindings)
+                ? (current.bindings as JsonRecord[])
+                : [],
+            currentById = new Map(
+              currentBindings
+                .filter((binding) => typeof binding.skillId === "string")
+                .map((binding) => [String(binding.skillId), binding]),
+            );
           return {
             action: "bindings",
             operation: action,
             expertId,
             expectedRevision,
             requestId: expertRequestId,
-            bindings: skillIds.map((skillId) => ({ skillId, enabled: true, activation })),
+            bindings: skillIds.map((skillId) => {
+              const existing = currentById.get(skillId),
+                allowEvolution =
+                  flags.allowEvolution === undefined
+                    ? typeof existing?.allowEvolution === "boolean"
+                      ? existing.allowEvolution
+                      : undefined
+                    : flags.allowEvolution === "true",
+                selectionScope =
+                  flags.selectionScope ??
+                  (existing?.selectionScope === "package" ? "package" : "entry"),
+                resourceMode =
+                  flags.resourceMode ??
+                  (existing?.resourceMode === "run-private" ? "run-private" : "shared-readonly");
+              return {
+                skillId,
+                enabled: true,
+                ...(allowEvolution !== undefined ? { allowEvolution } : {}),
+                selectionScope,
+                resourceMode,
+              };
+            }),
             dryRun,
           };
         }

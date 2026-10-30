@@ -246,7 +246,10 @@ function runtimeEntry(
   return { event, sequence };
 }
 
-function turnStarted(providerInstanceId: string | undefined = "omp"): ProviderRuntimeEvent {
+function turnStarted(
+  providerInstanceId: string | undefined = "omp",
+  selection: { readonly model?: string; readonly effort?: "medium" | "high" } = {},
+): ProviderRuntimeEvent {
   return {
     type: "turn.started",
     eventId: EventId.makeUnsafe("start-event"),
@@ -256,7 +259,24 @@ function turnStarted(providerInstanceId: string | undefined = "omp"): ProviderRu
     threadId,
     turnId,
     createdAt: requestedAt,
-    payload: { model: "gpt-5.4", effort: "medium" },
+    payload: {
+      model: selection.model ?? "gpt-5.4",
+      effort: selection.effort ?? "medium",
+    },
+  };
+}
+
+function modelRerouted(fromModel: string, toModel: string): ProviderRuntimeEvent {
+  return {
+    type: "model.rerouted",
+    eventId: EventId.makeUnsafe("model-rerouted-event"),
+    provider: "omp",
+    providerInstanceId: "omp",
+    lifecycleGeneration: "generation-learning-a",
+    threadId,
+    turnId,
+    createdAt: "2026-10-31T09:01:30.000Z",
+    payload: { fromModel, toModel, reason: "runtime fallback" },
   };
 }
 
@@ -327,6 +347,60 @@ describe("expert learning evidence capture", () => {
     expect(record.items.some((item) => item.text.includes("Must not leak"))).toBe(false);
     expect(record.items.some((item) => item.text.includes("private-secret"))).toBe(false);
     expect(record.coverage).toContain("run-assembly-unattributed");
+  });
+
+  it.each([
+    ["turn.started", [turnStarted("omp", { model: "gpt-5.5", effort: "high" })]],
+    [
+      "model.rerouted",
+      [
+        turnStarted("omp", { model: "gpt-5.4", effort: "high" }),
+        modelRerouted("gpt-5.4", "gpt-5.5"),
+      ],
+    ],
+  ] as const)(
+    "retains the model from %s across tool and completion events",
+    async (_source, selectionEvents) => {
+      const fixture = makeFixture();
+      const capture = await Effect.runPromise(
+        Effect.provide(makeExpertLearningEvidenceCapture, fixture.layer),
+      );
+      let sequence = 1;
+      for (const event of selectionEvents) {
+        await Effect.runPromise(capture(runtimeEntry(event, sequence++), turnId));
+      }
+      await Effect.runPromise(capture(runtimeEntry(toolCompleted(), sequence++), turnId));
+      await Effect.runPromise(capture(runtimeEntry(normalCompletion(), sequence), turnId));
+
+      const record = JSON.parse([...fixture.evidenceRows.values()][0]!.record) as {
+        readonly modelSelection: ModelSelectionType;
+      };
+      expect(record.modelSelection).toMatchObject({
+        provider: "omp",
+        instanceId: "omp",
+        model: "gpt-5.5",
+        options: { thinkingLevel: "high" },
+      });
+    },
+  );
+
+  it("ignores an event from a different provider instance despite a prior same-turn selection", async () => {
+    const fixture = makeFixture();
+    const capture = await Effect.runPromise(
+      Effect.provide(makeExpertLearningEvidenceCapture, fixture.layer),
+    );
+    await Effect.runPromise(
+      capture(runtimeEntry(turnStarted("omp", { model: "gpt-5.5" }), 1), turnId),
+    );
+    const mismatchedTool = { ...toolCompleted(), providerInstanceId: "omp-other" };
+    await Effect.runPromise(capture(runtimeEntry(mismatchedTool, 2), turnId));
+
+    const record = JSON.parse([...fixture.evidenceRows.values()][0]!.record) as {
+      readonly modelSelection: ModelSelectionType;
+      readonly items: ReadonlyArray<{ readonly id: string }>;
+    };
+    expect(record.modelSelection).toMatchObject({ model: "gpt-5.5", instanceId: "omp" });
+    expect(record.items.some((item) => item.id === "tool-result:tool-a")).toBe(false);
   });
 
   it.each([

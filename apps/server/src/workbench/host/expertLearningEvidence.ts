@@ -6,6 +6,7 @@ import {
   TurnId,
   type ExpertLearningEvidence as ExpertLearningEvidenceType,
   type ExpertLearningEvidenceItem,
+  type ExpertAppliedRuntimeRecord,
   type ProviderRuntimeEvent,
 } from "@synara/contracts";
 import { Effect, Option, Schema } from "effect";
@@ -16,6 +17,7 @@ import {
   learningEvidenceMessagesForTurn,
   LEARNING_EVIDENCE_TRANSCRIPT_TAIL_LIMIT,
   mergeLearningEvidenceItems,
+  type LearningEvidenceDelta,
 } from "../../experts/evolution/LearningEvidence.ts";
 import { ExpertLearningRepository } from "../../experts/evolution/ExpertLearningRepository.ts";
 import { SkillEvolutionRepository } from "../../experts/evolution/SkillEvolutionRepository.ts";
@@ -40,9 +42,34 @@ interface EnabledLearningState {
   readonly enabledAt: string;
 }
 
+export type LearningAppliedIdentity = Pick<
+  ExpertAppliedRuntimeRecord,
+  "threadId" | "snapshotId" | "provider" | "model" | "lifecycleGeneration"
+> & {
+  readonly skillApplication?:
+    | Pick<
+        NonNullable<ExpertAppliedRuntimeRecord["skillApplication"]>,
+        "snapshotId" | "lifecycleGeneration" | "skillRootRunId" | "skillAssemblyId"
+      >
+    | undefined;
+};
+
 export type ExpertLearningEvidenceCapture = (
   entry: PersistedProviderRuntimeEvent,
   resolvedTurnId?: TurnId,
+  prepared?: {
+    readonly delta: LearningEvidenceDelta;
+    readonly modelEvent?: ProviderRuntimeEvent;
+    readonly effort?: string;
+    readonly appliedIdentity?: LearningAppliedIdentity;
+    readonly source: {
+      readonly expertId: string;
+      readonly snapshotId: string;
+      readonly projectId: string;
+      readonly spaceId?: string | undefined;
+      readonly instanceId?: string | undefined;
+    };
+  },
 ) => Effect.Effect<void, unknown>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -125,6 +152,7 @@ function buildModelSelection(input: {
   readonly appliedModel?: string | undefined;
   readonly actualInstanceId: string;
   readonly previous?: ExpertLearningEvidenceType | undefined;
+  readonly observedEffort?: string | undefined;
 }): Effect.Effect<ExpertLearningEvidenceType["modelSelection"] | undefined> {
   const provider = input.event.provider;
   if (provider !== "omp" && provider !== "pi") return Effect.succeed(undefined);
@@ -137,11 +165,11 @@ function buildModelSelection(input: {
         : undefined;
   const model =
     eventModel ??
-    input.appliedModel ??
     (previousSelection?.provider === provider &&
     previousSelection.instanceId === input.actualInstanceId
       ? previousSelection.model
-      : undefined);
+      : undefined) ??
+    input.appliedModel;
   const instanceId = input.actualInstanceId;
   if (!model) return Effect.succeed(undefined);
   const retainedOptions =
@@ -149,13 +177,15 @@ function buildModelSelection(input: {
     previousSelection.instanceId === input.actualInstanceId
       ? previousSelection.options
       : undefined;
-  const options =
-    input.event.type === "turn.started" && input.event.payload.effort
-      ? {
-          ...(isRecord(retainedOptions) ? retainedOptions : {}),
-          thinkingLevel: input.event.payload.effort,
-        }
-      : retainedOptions;
+  const effort =
+    input.observedEffort ??
+    (input.event.type === "turn.started" ? input.event.payload.effort : undefined);
+  const options = effort
+    ? {
+        ...(isRecord(retainedOptions) ? retainedOptions : {}),
+        thinkingLevel: effort,
+      }
+    : retainedOptions;
   try {
     return Effect.succeed(
       Schema.decodeUnknownSync(ModelSelection)({
@@ -222,7 +252,7 @@ export const makeExpertLearningEvidenceCapture = Effect.gen(function* () {
     );
   }
 
-  const capture: ExpertLearningEvidenceCapture = (entry, resolvedTurnId) =>
+  const capture: ExpertLearningEvidenceCapture = (entry, resolvedTurnId, prepared) =>
     Effect.gen(function* () {
       const event = entry.event;
       if (
@@ -244,7 +274,7 @@ export const makeExpertLearningEvidenceCapture = Effect.gen(function* () {
         });
       let eventDelta;
       try {
-        eventDelta = learningEvidenceDeltaFromRuntimeEvent(entry);
+        eventDelta = prepared?.delta ?? learningEvidenceDeltaFromRuntimeEvent(entry);
       } catch {
         yield* skip("runtime-event-learning-metadata-invalid");
         return;
@@ -385,18 +415,22 @@ export const makeExpertLearningEvidenceCapture = Effect.gen(function* () {
         return;
       }
 
-      const appliedOption = yield* appliedRuntimeRepository.value
-        .getByThreadId({ threadId: event.threadId })
-        .pipe(
-          Effect.catch((error) =>
-            isDecodeFailure(error)
-              ? skip("applied-runtime-decode-failed").pipe(Effect.as(Option.none()))
-              : Effect.fail(error),
-          ),
-        );
-      const applied = Option.getOrUndefined(appliedOption);
+      let applied: LearningAppliedIdentity | undefined = prepared?.appliedIdentity;
+      if (!applied) {
+        const appliedOption = yield* appliedRuntimeRepository.value
+          .getByThreadId({ threadId: event.threadId })
+          .pipe(
+            Effect.catch((error) =>
+              isDecodeFailure(error)
+                ? skip("applied-runtime-decode-failed").pipe(Effect.as(Option.none()))
+                : Effect.fail(error),
+            ),
+          );
+        applied = Option.getOrUndefined(appliedOption);
+      }
       if (
         !applied ||
+        applied.threadId !== event.threadId ||
         applied.snapshotId !== binding.snapshotId ||
         applied.provider !== event.provider ||
         event.lifecycleGeneration === undefined ||
@@ -538,12 +572,25 @@ export const makeExpertLearningEvidenceCapture = Effect.gen(function* () {
         );
       const project = Option.getOrUndefined(projectOption);
       if (!project) coverage.push("space-identity-unavailable");
+      if (
+        prepared &&
+        (prepared.source.expertId !== binding.expertId ||
+          prepared.source.snapshotId !== binding.snapshotId ||
+          prepared.source.projectId !== shell.projectId ||
+          prepared.source.spaceId !== (project?.spaceId ?? undefined) ||
+          (prepared.source.instanceId !== undefined &&
+            prepared.source.instanceId !== actualInstanceId))
+      ) {
+        yield* skip("deferred-source-identity-changed");
+        return;
+      }
       if (previous && previous.spaceId !== (project?.spaceId ?? undefined)) {
         yield* skip("project-space-identity-changed");
         return;
       }
       const selectedModel = yield* buildModelSelection({
-        event,
+        event: prepared?.modelEvent ?? event,
+        observedEffort: prepared?.effort,
         appliedModel: applied.model,
         actualInstanceId,
         ...(previous !== undefined ? { previous } : {}),

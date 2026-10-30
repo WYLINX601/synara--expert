@@ -140,8 +140,10 @@ it.effect("uses stable expert checksums and rejects malformed or future extensio
     const complete = planWorkbenchHistory(workbenchRows(workbenchMigrationEntries.length));
     assert.isTrue(complete.ok);
     if (complete.ok) {
-      assert.strictEqual(complete.applied.at(-1)?.migrationId, 11);
-      assert.strictEqual(complete.applied.at(-1)?.name, "ExpertAutomaticLearning");
+      assert.strictEqual(complete.applied.at(-2)?.migrationId, 11);
+      assert.strictEqual(complete.applied.at(-2)?.name, "ExpertAutomaticLearning");
+      assert.strictEqual(complete.applied.at(-1)?.migrationId, 12);
+      assert.strictEqual(complete.applied.at(-1)?.name, "ExpertLearningEvidenceDelivery");
     }
   }),
 );
@@ -596,6 +598,131 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
         WHERE hub_id = 'hub-participants-test'
       `;
       assert.strictEqual(cascadedParticipants[0]?.count, 0);
+    }),
+  );
+});
+
+const evidenceDeliveryUpgradeLayer = it.layer(NodeSqliteClient.layerMemory());
+evidenceDeliveryUpgradeLayer("expert learning evidence delivery migration", (test) => {
+  test.effect("applies migration 12 to an 11-entry ledger and preserves learning data", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* runMigrations();
+      yield* sql.unsafe(`CREATE TABLE workbench_sql_migrations (
+        module_id TEXT NOT NULL,
+        migration_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        applied_at TEXT NOT NULL,
+        PRIMARY KEY (module_id, migration_id)
+      )`);
+      yield* sql.unsafe("CREATE TABLE workbench_schema_metadata (format_version INTEGER NOT NULL)");
+      yield* sql`INSERT INTO workbench_schema_metadata (format_version) VALUES (1)`;
+
+      for (const migration of workbenchMigrationEntries.slice(0, 11)) {
+        if (migration.effect !== undefined) yield* migration.effect;
+        else if (migration.statement !== undefined) yield* sql.unsafe(migration.statement);
+        else throw new Error(`Migration ${migration.name} has no implementation`);
+        yield* sql`
+          INSERT INTO workbench_sql_migrations (
+            module_id, migration_id, name, checksum, applied_at
+          ) VALUES (
+            ${migration.moduleId}, ${migration.migrationId}, ${migration.name},
+            ${migration.checksum}, '2026-10-31T00:00:00.000Z'
+          )
+        `;
+      }
+
+      yield* sql`
+        INSERT INTO expert_learning_states (owner_id, expert_id, record_json, revision, updated_at)
+        VALUES ('owner-1', 'expert-1', '{"status":"active"}', 1, 'before')
+      `;
+      yield* sql`
+        INSERT INTO expert_learning_evidence (
+          evidence_id, owner_id, expert_id, thread_id, turn_id, record_json, updated_at
+        ) VALUES ('evidence-1', 'owner-1', 'expert-1', 'thread-1', 'turn-1', '{"kind":"note"}', 'before')
+      `;
+      yield* sql`
+        INSERT INTO expert_learning_cycles (cycle_id, owner_id, expert_id, record_json, updated_at)
+        VALUES ('cycle-1', 'owner-1', 'expert-1', '{"status":"complete"}', 'before')
+      `;
+      const learningStateBefore =
+        yield* sql`SELECT * FROM expert_learning_states ORDER BY owner_id, expert_id`;
+      const learningEvidenceBefore =
+        yield* sql`SELECT * FROM expert_learning_evidence ORDER BY evidence_id`;
+      const learningCyclesBefore =
+        yield* sql`SELECT * FROM expert_learning_cycles ORDER BY cycle_id`;
+      const ledgerBefore = yield* sql<WorkbenchMigrationRecord>`
+        SELECT module_id, migration_id, name, checksum, applied_at
+        FROM workbench_sql_migrations ORDER BY module_id, migration_id
+      `;
+      assert.strictEqual(ledgerBefore.length, 11);
+
+      const upgrade = yield* runWorkbenchMigrations();
+      assert.deepStrictEqual(
+        upgrade.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
+        [
+          ["expert", 12],
+          ["context", 1],
+        ],
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM expert_learning_states ORDER BY owner_id, expert_id`,
+        learningStateBefore,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM expert_learning_evidence ORDER BY evidence_id`,
+        learningEvidenceBefore,
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT * FROM expert_learning_cycles ORDER BY cycle_id`,
+        learningCyclesBefore,
+      );
+
+      const pendingColumns = yield* sql<{
+        readonly name: string;
+        readonly type: string;
+        readonly notnull: number;
+        readonly pk: number;
+      }>`SELECT name, type, "notnull", pk FROM pragma_table_info('expert_learning_pending_evidence') ORDER BY cid`;
+      assert.deepStrictEqual(pendingColumns, [
+        { name: "capture_id", type: "TEXT", notnull: 0, pk: 1 },
+        { name: "source_json", type: "TEXT", notnull: 1, pk: 0 },
+        { name: "record_json", type: "TEXT", notnull: 1, pk: 0 },
+        { name: "first_sequence", type: "INTEGER", notnull: 1, pk: 0 },
+        { name: "last_sequence", type: "INTEGER", notnull: 1, pk: 0 },
+        { name: "pending", type: "INTEGER", notnull: 1, pk: 0 },
+        { name: "discarded", type: "INTEGER", notnull: 1, pk: 0 },
+        { name: "updated_at", type: "TEXT", notnull: 1, pk: 0 },
+      ]);
+      const invalidPendingFlag = yield* Effect.flip(sql`
+        INSERT INTO expert_learning_pending_evidence (
+          capture_id, source_json, record_json, first_sequence, last_sequence,
+          pending, discarded, updated_at
+        ) VALUES ('capture-invalid', '{}', '{}', 1, 1, 2, 0, 'before')
+      `);
+      assert.isTrue(invalidPendingFlag instanceof Error);
+      const pendingIndexColumns = yield* sql<{ readonly name: string }>`
+        SELECT name FROM pragma_index_info('expert_learning_pending_evidence_pending') ORDER BY seqno
+      `;
+      assert.deepStrictEqual(
+        pendingIndexColumns.map(({ name }) => name),
+        ["pending", "first_sequence", "capture_id"],
+      );
+
+      const currentLedger = yield* sql<WorkbenchMigrationRecord>`
+        SELECT module_id, migration_id, name, checksum, applied_at
+        FROM workbench_sql_migrations ORDER BY module_id, migration_id
+      `;
+      const currentExpertLedger = currentLedger.filter(({ module_id }) => module_id === "expert");
+      assert.deepStrictEqual(currentExpertLedger.slice(0, 11), ledgerBefore);
+      assert.deepStrictEqual(currentExpertLedger.at(-1), {
+        module_id: "expert",
+        migration_id: 12,
+        name: "ExpertLearningEvidenceDelivery",
+        checksum: "sha256:38b2eda40b36b010e44234a78232664299a7031ba98fafe9414557c1261a71a5",
+        applied_at: currentExpertLedger.at(-1)?.applied_at,
+      });
     }),
   );
 });

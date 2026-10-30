@@ -103,6 +103,7 @@ import {
   makeExpertLearningEvidenceCapture,
   type ExpertLearningEvidenceCapture,
 } from "../../workbench/host/expertLearningEvidence.ts";
+import { makeExpertLearningEvidenceDelivery } from "../../workbench/host/expertLearningEvidenceDelivery.ts";
 import { ExpertLearningRepositoryLive } from "../../workbench/host/expertLearningPersistence.ts";
 import { SkillEvolutionRepositoryLive } from "../../workbench/host/skillEvolutionPersistence.ts";
 import { ExpertAppliedRuntimeRepositoryLive } from "../../persistence/Layers/ExpertAppliedRuntimeRecords.ts";
@@ -323,7 +324,7 @@ function threadDetailFromShell(shell: OrchestrationThreadShell): OrchestrationTh
   };
 }
 
-/** Keep learning evidence inside the accepted-row boundary before cursor acknowledgement. */
+/** Persist the learning handoff before acknowledgement; evidence capture runs separately. */
 export function processProviderRuntimeRowBeforeAcknowledgement(
   input: Extract<RuntimeIngestionInput, { source: "runtime" }>,
   process: () => Effect.Effect<TurnId | undefined, unknown>,
@@ -847,6 +848,8 @@ const make = Effect.gen(function* () {
   const pendingInteractions = yield* ProjectionPendingInteractionRepository;
   const runtimeEvents = yield* ProviderRuntimeEventRepository;
   const captureLearningEvidence = yield* makeExpertLearningEvidenceCapture;
+  const learningEvidenceDelivery =
+    yield* makeExpertLearningEvidenceDelivery(captureLearningEvidence);
   const commandReceipts = yield* OrchestrationCommandReceiptRepository;
   // Throttle map for the durable last-runtime-activity timestamp: one row
   // write per thread per ~15s of observed activity instead of per event.
@@ -3843,7 +3846,7 @@ const make = Effect.gen(function* () {
       ? processProviderRuntimeRowBeforeAcknowledgement(
           input,
           () => processRuntimeEvent(input.event, input.sequence, input.suppressProgressActivity),
-          captureLearningEvidence,
+          learningEvidenceDelivery.enqueue,
           () =>
             Effect.sync(() => {
               pendingAckedSequence = Math.max(pendingAckedSequence ?? 0, input.sequence);
@@ -4315,6 +4318,7 @@ const make = Effect.gen(function* () {
       yield* drainRuntimeJournal;
       yield* Deferred.succeed(startupRuntimeReplayComplete, undefined);
       yield* Effect.forkScoped(pollRuntimeJournalSafely);
+      yield* Effect.forkScoped(learningEvidenceDelivery.run);
     }),
   ).pipe(Effect.orDie);
 

@@ -33,8 +33,8 @@ layer("Hub collaboration configuration store", (test) => {
         ORDER BY migration_id
       `;
         assert.strictEqual(ledgerRows.length, workbenchMigrationEntries.length);
-        assert.strictEqual(ledgerRows.at(-1)?.migrationId, 11);
-        assert.strictEqual(ledgerRows.at(-1)?.name, "ExpertAutomaticLearning");
+        assert.strictEqual(ledgerRows.at(-1)?.migrationId, 12);
+        assert.strictEqual(ledgerRows.at(-1)?.name, "ExpertLearningEvidenceDelivery");
         const createdTables = yield* sql<{ readonly name: string }>`
         SELECT name FROM sqlite_master
         WHERE type = 'table' AND name IN (

@@ -81,7 +81,7 @@ import {
   useComposerDraftStore,
 } from "../composerDraftStore";
 import { useStore } from "../store";
-import { EMPTY_THREAD_IDS } from "../storeState";
+import { EMPTY_THREAD_IDS, readShellSnapshotSyncCursor } from "../storeState";
 import { createAllThreadsSelector, createThreadSelector } from "../storeSelectors";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { terminalActivityFromEvent } from "../terminalActivity";
@@ -1346,8 +1346,9 @@ function EventRouter() {
     let queueingThreadReplayBatch = false;
     let providerDiscoveryInvalidationFingerprint: string | null = null;
     let shellSnapshotSequence = -1;
-    let shellSubscriptionGeneration = 0;
-    let shellSnapshotReceivedGeneration = -1;
+    const initialShellSyncCursor = readShellSnapshotSyncCursor(useStore.getState());
+    let shellSubscriptionGeneration = initialShellSyncCursor.subscriptionGeneration;
+    let shellSnapshotReceivedGeneration = initialShellSyncCursor.receivedGeneration;
     let pendingShellEvents: OrchestrationShellStreamEvent[] = [];
     const subscribedThreadIds = new Set<ThreadId>();
     const threadSnapshotSequenceById = new Map<ThreadId, number>();
@@ -1797,6 +1798,7 @@ function EventRouter() {
       }
       if (applyAuthoritativeShellSnapshot(snapshot)) {
         shellSnapshotReceivedGeneration = generation;
+        useStore.getState().setShellSnapshotSyncProgress(generation, generation);
       }
     };
 
@@ -1846,6 +1848,7 @@ function EventRouter() {
       scopedSubscriptionConnection = currentTransportConnection();
       shellSubscriptionGeneration += 1;
       const generation = shellSubscriptionGeneration;
+      useStore.getState().setShellSnapshotSyncProgress(generation, shellSnapshotReceivedGeneration);
       if (shellSnapshotFallbackTimer !== null) {
         window.clearTimeout(shellSnapshotFallbackTimer);
         shellSnapshotFallbackTimer = null;
@@ -2241,6 +2244,12 @@ function EventRouter() {
         const promotedDraftThreadIds = collectSubscribedDraftsInShell(item.snapshot.threads);
         shellSnapshotSequence = item.snapshot.snapshotSequence;
         syncServerShellSnapshot(item.snapshot);
+        useStore
+          .getState()
+          .setShellSnapshotSyncProgress(
+            shellSubscriptionGeneration,
+            shellSnapshotReceivedGeneration,
+          );
         reconcilePromotedDraftsFromShellThreads(item.snapshot.threads);
         flushShellBuffer(item.snapshot.snapshotSequence);
         removeOrphanedTerminalsForCurrentState();
@@ -2437,6 +2446,9 @@ function EventRouter() {
     });
     const unsubShellStreamFailure = onShellStreamFailure(() => {
       if (disposed) return;
+      useStore
+        .getState()
+        .setShellSnapshotSyncProgress(shellSubscriptionGeneration, shellSubscriptionGeneration - 1);
       const toastId = "stream-overflow:shell";
       toastManager.add({
         id: toastId,

@@ -1,4 +1,5 @@
 import { SkillLibraryRpcInput, SkillLibraryResponse } from "./skillLibrary";
+import { SkillEvolutionRpcInput, SkillEvolutionResponse } from "./skillEvolution";
 import {
   SkillManagementAccess,
   SkillManagementCredentialRevokeInput,
@@ -159,14 +160,6 @@ import {
   SkillPackageUpdatePreview,
   SkillPackageUpdatePreviewInput,
 } from "./skillPackage";
-import {
-  SkillPackageSwitchApplyInput,
-  SkillPackageSwitchApplyResult,
-  SkillPackageSwitchInput,
-  SkillPackageSwitchPreview,
-  SkillPackageSwitchProgressReadInput,
-  SkillPackageSwitchProgressResult,
-} from "./skillPackageSwitch";
 import {
   ContextCommandReadInput,
   ContextCommandResult,
@@ -1595,6 +1588,11 @@ export const WsServerSkillLibraryRpc = Rpc.make(WS_METHODS.serverSkillLibrary, {
   success: SkillLibraryResponse,
   error: WsRpcError,
 });
+export const WsServerSkillEvolutionRpc = Rpc.make(WS_METHODS.serverSkillEvolution, {
+  payload: SkillEvolutionRpcInput,
+  success: SkillEvolutionResponse,
+  error: WsRpcError,
+});
 
 export const WsServerListSkillPackagesRpc = Rpc.make(WS_METHODS.serverListSkillPackages, {
   payload: Schema.Struct({}),
@@ -1652,33 +1650,6 @@ export const WsServerRemoveSkillPackageRpc = Rpc.make(WS_METHODS.serverRemoveSki
   success: Schema.Void,
   error: WsRpcError,
 });
-
-export const WsServerPreviewSkillPackageSwitchRpc = Rpc.make(
-  WS_METHODS.serverPreviewSkillPackageSwitch,
-  {
-    payload: SkillPackageSwitchInput,
-    success: SkillPackageSwitchPreview,
-    error: WsRpcError,
-  },
-);
-
-export const WsServerApplySkillPackageSwitchRpc = Rpc.make(
-  WS_METHODS.serverApplySkillPackageSwitch,
-  {
-    payload: SkillPackageSwitchApplyInput,
-    success: SkillPackageSwitchApplyResult,
-    error: WsRpcError,
-  },
-);
-
-export const WsServerReadSkillPackageSwitchProgressRpc = Rpc.make(
-  WS_METHODS.serverReadSkillPackageSwitchProgress,
-  {
-    payload: SkillPackageSwitchProgressReadInput,
-    success: SkillPackageSwitchProgressResult,
-    error: WsRpcError,
-  },
-);
 
 export const WsServerReadExpertSnapshotRpc = Rpc.make(WS_METHODS.serverReadExpertSnapshot, {
   payload: ExpertSnapshotReadInput,
@@ -2524,6 +2495,7 @@ const WS_FEATURE_RPC_GROUP_3 = RpcGroup.make(
   WsServerDeleteExpertRpc,
   WsServerPreviewExpertRpc,
   WsServerSkillLibraryRpc,
+  WsServerSkillEvolutionRpc,
   WsServerReadSkillManagementAccessRpc,
   WsServerCreateSkillManagementPairingRpc,
   WsServerListSkillManagementCredentialsRpc,
@@ -2536,9 +2508,6 @@ const WS_FEATURE_RPC_GROUP_3 = RpcGroup.make(
   WsServerPreviewSkillPackageRemovalRpc,
   WsServerImportSkillPackageRpc,
   WsServerRemoveSkillPackageRpc,
-  WsServerPreviewSkillPackageSwitchRpc,
-  WsServerApplySkillPackageSwitchRpc,
-  WsServerReadSkillPackageSwitchProgressRpc,
   WsServerReadExpertSnapshotRpc,
   WsServerReadExpertAppliedRuntimeRpc,
   WsServerListExpertConnectionsRpc,

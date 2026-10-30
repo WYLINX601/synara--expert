@@ -119,7 +119,10 @@ import {
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
 } from "../composerDraftStore";
-import { composerDraftHasUnsentContent } from "../composerDraftDomain";
+import {
+  composerDraftHasUnsentContent,
+  isDraftThreadMappedToProjectSlot,
+} from "../composerDraftDomain";
 import { useComposerFocusRequestStore } from "../composerFocusRequestStore";
 import {
   buildGoalSlashCommandPrompt,
@@ -1382,6 +1385,18 @@ export default function ChatView({
         envMode: input.envMode,
         ...(input.lastKnownPr !== undefined ? { lastKnownPr: input.lastKnownPr } : {}),
       };
+      const activeDraftThread = getDraftThread(threadId);
+      const activeDraftIsStandalone = !isDraftThreadMappedToProjectSlot(
+        useComposerDraftStore.getState().projectDraftThreadIdByProjectId,
+        threadId,
+      );
+      if (!isServerThread && activeDraftThread?.entryPoint === "chat" && activeDraftIsStandalone) {
+        setDraftThreadContext(threadId, {
+          ...draftThreadContext,
+          projectId: activeProject.id,
+        });
+        return;
+      }
       const storedDraftThread = getDraftThreadByProjectId(activeProject.id);
       if (storedDraftThread) {
         setDraftThreadContext(storedDraftThread.threadId, draftThreadContext);
@@ -1395,14 +1410,12 @@ export default function ChatView({
         return;
       }
 
-      const activeDraftThread = getDraftThread(threadId);
       if (
         !isServerThread &&
         activeDraftThread?.projectId === activeProject.id &&
         activeDraftThread.entryPoint === "chat"
       ) {
         setDraftThreadContext(threadId, draftThreadContext);
-        setProjectDraftThreadId(activeProject.id, threadId, draftThreadContext);
         return;
       }
 

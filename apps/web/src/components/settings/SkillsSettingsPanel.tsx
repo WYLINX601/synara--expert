@@ -1,6 +1,6 @@
 import { SkillLibrarySettingsPanel } from "./SkillLibrarySettingsPanel";
 
-/** Settings > Skills is the single management entry. Native inventory is read-only. */
+/** Compatibility wrapper for the shared Skill Library panel. */
 export function SkillsSettingsPanel() {
   return <SkillLibrarySettingsPanel />;
 }

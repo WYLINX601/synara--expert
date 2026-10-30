@@ -52,11 +52,8 @@ describe("fixed native Expert assembly", () => {
         session,
         {
           root: "/not-used",
-          pluginName: "probe",
-          plugins: [],
           skillRoots: [],
-          agents: {},
-          allowedSubagentTypes: [],
+          packages: [],
           entries: [],
         },
         [{ name: "ambient", path: "/outside/SKILL.md" }],
@@ -84,7 +81,7 @@ describe("fixed native Expert assembly", () => {
     const entry = {
       packageId: `pkg_${"a".repeat(64)}`,
       entryPath: "SKILL.md",
-      activation: "on-demand" as const,
+
       name: "selected",
       description: "",
       path: file,

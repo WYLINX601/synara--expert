@@ -7,10 +7,23 @@ export type SkillPackageId = typeof SkillPackageId.Type;
 export const SkillSourceId = Schema.String.check(Schema.isPattern(/^src_[a-f0-9]{64}$/u));
 export type SkillSourceId = typeof SkillSourceId.Type;
 
+export const SkillResourceMode = Schema.Literals(["shared-readonly", "run-private"]);
+export type SkillResourceMode = typeof SkillResourceMode.Type;
+
+/** Local management diagnostics; never permission grants or telemetry payloads. */
+export const SkillDiagnostic = Schema.Struct({
+  code: TrimmedNonEmptyString,
+  severity: Schema.Literals(["warning", "error"]),
+  message: Schema.String,
+  entryPath: Schema.optional(TrimmedNonEmptyString),
+  provider: Schema.optional(TrimmedNonEmptyString),
+});
+export type SkillDiagnostic = typeof SkillDiagnostic.Type;
+
 /** Portable package-relative path; never a local absolute path or a provider projection. */
 export const SkillEntryPath = Schema.String.check(Schema.isMaxLength(4_096)).check(
   Schema.isPattern(
-    /^(?![\\/])(?!.*\\)(?!.*[\p{Cc}:])(?!(?:.*\/)?\.{1,2}(?:\/|$))(?!.*\/\/)(?:[^/]+\/)*SKILL\.md$/u,
+    /^(?![\\/])(?![A-Za-z]:\/)(?!.*\\)(?!.*[\p{Cc}])(?!(?:.*\/)?\.{1,2}(?:\/|$))(?!.*\/\/)(?:[^/]+\/)*SKILL\.md$/u,
   ),
 );
 export type SkillEntryPath = typeof SkillEntryPath.Type;
@@ -21,6 +34,7 @@ export const SkillEntry = Schema.Struct({
   description: Schema.String.check(Schema.isMaxLength(16_000)),
   /** Metadata warnings, not a claim that a provider has applied this skill. */
   issues: Schema.Array(Schema.String),
+  diagnostics: Schema.optional(Schema.Array(SkillDiagnostic)),
   disableModelInvocation: Schema.optional(Schema.Boolean),
   userInvocable: Schema.optional(Schema.Boolean),
   incompatibleReason: Schema.optional(Schema.String),
@@ -30,9 +44,17 @@ export type SkillEntry = typeof SkillEntry.Type;
 export const ExpertSkillSelection = Schema.Struct({
   packageId: SkillPackageId,
   entryPath: SkillEntryPath,
-  activation: Schema.Literals(["startup", "on-demand"]),
+  resourceMode: Schema.optional(SkillResourceMode),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type ExpertSkillSelection = typeof ExpertSkillSelection.Type;
+
+/** Immutable records retain former metadata so their existing hashes remain valid.
+ * New selections omit it; it never controls native skill loading. */
+export const PinnedExpertSkillSelection = Schema.Struct({
+  ...ExpertSkillSelection.fields,
+  activation: Schema.optional(Schema.Literals(["startup", "on-demand"])),
+});
+export type PinnedExpertSkillSelection = typeof PinnedExpertSkillSelection.Type;
 
 export const SkillPackageResource = Schema.Struct({
   path: TrimmedNonEmptyString,
@@ -135,7 +157,7 @@ export type SkillPackageImportResult = typeof SkillPackageImportResult.Type;
 
 export const ResolvedExpertSkillEntry = Schema.Struct({
   managedSkillId: Schema.optional(TrimmedNonEmptyString),
-  ...ExpertSkillSelection.fields,
+  ...PinnedExpertSkillSelection.fields,
   name: TrimmedNonEmptyString,
   description: Schema.String,
   path: TrimmedNonEmptyString,
@@ -144,6 +166,15 @@ export const ResolvedExpertSkillEntry = Schema.Struct({
   userInvocable: Schema.optional(Schema.Boolean),
 });
 export type ResolvedExpertSkillEntry = typeof ResolvedExpertSkillEntry.Type;
+
+/** A server-owned persistent working tree, inherited unchanged by continuations. */
+export const SkillRunResourceReference = Schema.Struct({
+  packageId: SkillPackageId,
+  mode: Schema.Literal("run-private"),
+  ownerRootRunId: TrimmedNonEmptyString,
+  rootPath: TrimmedNonEmptyString,
+});
+export type SkillRunResourceReference = typeof SkillRunResourceReference.Type;
 
 /** Evidence of catalog submission, not evidence that a model executed a skill. */
 export const ExpertSkillApplication = Schema.Struct({
@@ -154,7 +185,8 @@ export const ExpertSkillApplication = Schema.Struct({
   packageIds: Schema.Array(SkillPackageId),
   catalogHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
   instructionsHash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
-  startupEntryIds: Schema.Array(TrimmedNonEmptyString),
+  /** Read-only metadata from previously recorded applications. New receipts omit it. */
+  startupEntryIds: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   lifecycleGeneration: TrimmedNonEmptyString,
   enforcement: Schema.optional(Schema.Literal("native-fixed")),
   activeEntries: Schema.optional(

@@ -19,11 +19,17 @@ import {
   AlertDialogTitle,
 } from "~/components/ui/alert-dialog";
 import { Button } from "~/components/ui/button";
+import { SettingsSaveBar } from "~/components/settings/SettingsSaveBar";
+import { SettingsEditorDialog } from "~/components/settings/SettingsEditorDialog";
+import { DialogHeader, DialogPanel, DialogTitle } from "~/components/ui/dialog";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "~/components/ui/collapsible";
 import { DisclosureChevron } from "~/components/ui/DisclosureChevron";
 import { Input } from "~/components/ui/input";
 import { Textarea } from "~/components/ui/textarea";
-import { useExpertDraftGuard } from "~/components/settings/useExpertDraftGuard";
+import {
+  useExpertDraftGuard,
+  type UseExpertDraftGuardOptions,
+} from "~/components/settings/useExpertDraftGuard";
 import {
   SettingsCard,
   SettingsEmptyState,
@@ -83,6 +89,7 @@ export const HubTeamsSettingsPanel = forwardRef<
   HubTeamsSettingsPanelHandle,
   {
     readonly active: boolean;
+    readonly shouldGuardNavigation?: UseExpertDraftGuardOptions["shouldGuardNavigation"];
     readonly experts: ReadonlyArray<ExpertDefinition> | undefined;
     readonly expertsLoading: boolean;
     readonly expertsError: string | null;
@@ -273,7 +280,7 @@ export const HubTeamsSettingsPanel = forwardRef<
       const latest = teamsQuery.data?.find((team) => team.id === requestDraft.id);
       setActionError(
         currentBaseline && latest && latest.revision > currentBaseline.revision
-          ? `专家团已在其他位置保存为 v${latest.revision}；当前草稿仍保留。放弃更改可载入最新版。`
+          ? `专家团已在其他位置更新；当前草稿仍保留。放弃更改可载入最新配置。`
           : errorText(error),
       );
       void queryClient.invalidateQueries({ queryKey: hubTeamsQueryKey(requestGeneration) });
@@ -288,6 +295,7 @@ export const HubTeamsSettingsPanel = forwardRef<
 
   const { confirmLeave, dialog: leaveDialog } = useExpertDraftGuard({
     isDirty: props.active && isDirty,
+    ...(props.shouldGuardNavigation ? { shouldGuardNavigation: props.shouldGuardNavigation } : {}),
     canSave: validationError === null,
     ...(validationError ? { saveDisabledReason: validationError } : {}),
     onSave: async () => Boolean(await saveDraft()),
@@ -346,6 +354,7 @@ export const HubTeamsSettingsPanel = forwardRef<
   };
 
   const backToList = async () => {
+    if (pending || archivePending) return;
     if (!(await confirmLeave())) return;
     setView("list");
   };
@@ -402,165 +411,15 @@ export const HubTeamsSettingsPanel = forwardRef<
   );
 
   return (
-    <div className="space-y-5">
-      {view === "list" ? (
-        teamsQuery.isPending && !teamsQuery.data ? (
-          <SettingsEmptyState layout="status">正在读取专家团…</SettingsEmptyState>
-        ) : teamsQuery.isError && !teamsQuery.data ? (
-          <SettingsEmptyState layout="status" tone="destructive">
-            无法读取专家团：{errorText(teamsQuery.error)}
-          </SettingsEmptyState>
-        ) : (
-          <>
-            {actionError ? (
-              <div
-                className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-ui-sm text-destructive"
-                role="alert"
-              >
-                {actionError}
-              </div>
-            ) : null}
-            <SettingsSectionShell
-              title={archivedView ? "已归档的专家团" : "专家团"}
-              action={
-                archivedView ? (
-                  <Button size="sm" variant="outline" onClick={() => setArchivedView(false)}>
-                    返回专家团
-                  </Button>
-                ) : (
-                  <Button size="sm" onClick={() => void openNew()}>
-                    新建专家团
-                  </Button>
-                )
-              }
-            >
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Input
-                    type="search"
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                    placeholder="搜索专家团"
-                    aria-label="搜索专家团"
-                  />
-                  {!archivedView ? (
-                    <Button size="sm" variant="ghost" onClick={() => setArchivedView(true)}>
-                      查看已归档
-                    </Button>
-                  ) : null}
-                </div>
-                {visibleTeams.length > 0 ? (
-                  <SettingsCard>
-                    {visibleTeams.map((team) => {
-                      const members = team.expertIds
-                        .map((id) => expertNames.get(id) ?? `${id} · 不可用`)
-                        .join("、");
-                      const action = team.archivedAt ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => setArchiveAction({ team, archived: false })}
-                        >
-                          恢复
-                        </Button>
-                      ) : (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => setArchiveAction({ team, archived: true })}
-                        >
-                          归档
-                        </Button>
-                      );
-                      return (
-                        <SettingsListRow
-                          key={team.id}
-                          title={
-                            <button
-                              type="button"
-                              className="truncate text-left text-ui font-medium hover:underline"
-                              onClick={() => void openTeam(team)}
-                            >
-                              {team.name}{" "}
-                              <span className="text-ui-xs text-muted-foreground">
-                                v{team.revision}
-                              </span>
-                            </button>
-                          }
-                          description={
-                            <span>
-                              {team.purpose.trim() || "未设置用途"}
-                              {members ? ` · ${members}` : ""}
-                            </span>
-                          }
-                          actions={
-                            <div className="flex items-center gap-1">
-                              {action}
-                              <Button size="sm" variant="ghost" onClick={() => void openTeam(team)}>
-                                编辑
-                              </Button>
-                            </div>
-                          }
-                        />
-                      );
-                    })}
-                  </SettingsCard>
-                ) : (
-                  <SettingsEmptyState layout="status">
-                    {search.trim()
-                      ? "没有符合搜索条件的专家团。"
-                      : archivedView
-                        ? "没有已归档的专家团。"
-                        : "还没有专家团。"}
-                  </SettingsEmptyState>
-                )}
-              </div>
-            </SettingsSectionShell>
-          </>
-        )
-      ) : draft ? (
+    <div className="flex min-h-0 flex-1 flex-col gap-5">
+      {teamsQuery.isPending && !teamsQuery.data ? (
+        <SettingsEmptyState layout="status">正在读取专家团…</SettingsEmptyState>
+      ) : teamsQuery.isError && !teamsQuery.data ? (
+        <SettingsEmptyState layout="status" tone="destructive">
+          无法读取专家团：{errorText(teamsQuery.error)}
+        </SettingsEmptyState>
+      ) : (
         <>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => void backToList()}
-                disabled={pending}
-              >
-                返回列表
-              </Button>
-              <h2 className="truncate text-ui-lg font-semibold">
-                {baseline ? baseline.name : "新建专家团"}
-              </h2>
-              {baseline ? (
-                <span className="text-ui-xs tabular-nums text-muted-foreground">
-                  v{baseline.revision}
-                </span>
-              ) : null}
-              {readonly ? (
-                <span className="text-ui-xs text-muted-foreground">已归档 · 只读</span>
-              ) : null}
-            </div>
-            {baseline && !readonly ? (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => setArchiveAction({ team: baseline, archived: true })}
-              >
-                归档
-              </Button>
-            ) : null}
-            {readonly ? (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setArchiveAction({ team: baseline, archived: false })}
-              >
-                恢复专家团
-              </Button>
-            ) : null}
-          </div>
           {actionError ? (
             <div
               className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-ui-sm text-destructive"
@@ -569,115 +428,258 @@ export const HubTeamsSettingsPanel = forwardRef<
               {actionError}
             </div>
           ) : null}
-          {hasNewerRevision && latestBaseline ? (
-            <p
-              className="rounded-lg border border-border bg-foreground/2 px-3 py-2 text-ui-sm text-muted-foreground"
-              role="status"
-            >
-              服务端已有 v{latestBaseline.revision}。当前草稿仍基于 v{baseline?.revision}
-              ；保存会进行版本校验，放弃更改可载入最新版。
-            </p>
-          ) : null}
-          <fieldset disabled={readonly || pending} className="space-y-5 disabled:opacity-70">
-            <SettingsSectionShell title="基本信息">
-              <SettingsCard>
-                <label className="block space-y-1.5 px-4 py-3 text-ui-sm font-medium">
-                  名称
-                  <Input
-                    value={draft.name}
-                    maxLength={160}
-                    onChange={(event) => updateDraft({ name: event.target.value })}
-                    placeholder="例如：产品协作团"
-                    aria-label="专家团名称"
-                  />
-                </label>
-                <label className="block space-y-1.5 px-4 py-3 text-ui-sm font-medium">
-                  用途 <span className="font-normal text-muted-foreground">· 可选</span>
-                  <Textarea
-                    value={draft.purpose}
-                    maxLength={8000}
-                    onChange={(event) => updateDraft({ purpose: event.target.value })}
-                    placeholder="这支团队主要帮助你完成什么？"
-                    aria-label="专家团用途"
-                  />
-                </label>
-              </SettingsCard>
-            </SettingsSectionShell>
-            <SettingsSectionShell title="协调者">
-              <SettingsCard divided={false} className="px-4 py-3">
-                <Collapsible open={coordinatorOpen} onOpenChange={setCoordinatorOpen}>
-                  <CollapsibleTrigger className="flex w-full items-center gap-2 py-1 text-left text-ui font-medium">
-                    <DisclosureChevron open={coordinatorOpen} className="size-4 shrink-0" />
-                    <span>角色与协调方式</span>
-                    <span className="text-ui-sm font-normal text-muted-foreground">
-                      · {draft.coordinatorInstructions.trim() ? "已自定义" : "默认协调方式"}
-                    </span>
-                  </CollapsibleTrigger>
-                  <CollapsiblePanel>
-                    <div className="space-y-2 pt-3">
-                      <Textarea
-                        value={draft.coordinatorInstructions}
-                        maxLength={8000}
-                        onChange={(event) =>
-                          updateDraft({ coordinatorInstructions: event.target.value })
-                        }
-                        placeholder="可选。留空时使用默认协调方式。"
-                        aria-label="协调者角色与协调方式"
-                      />
-                      <p className="text-ui-xs text-muted-foreground">
-                        仅指导协调者组织工作，不替代成员专家的角色与能力。
-                      </p>
+          <SettingsSectionShell
+            title={archivedView ? "已归档的专家团" : "专家团"}
+            layout="compact"
+            count={visibleTeams.length}
+            action={
+              archivedView ? (
+                <Button size="sm" variant="outline" onClick={() => setArchivedView(false)}>
+                  返回专家团
+                </Button>
+              ) : (
+                <Button size="sm" onClick={() => void openNew()}>
+                  新建专家团
+                </Button>
+              )
+            }
+          >
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
+                  type="search"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="搜索专家团"
+                  aria-label="搜索专家团"
+                />
+                {!archivedView ? (
+                  <Button size="sm" variant="ghost" onClick={() => setArchivedView(true)}>
+                    查看已归档
+                  </Button>
+                ) : null}
+              </div>
+              {visibleTeams.length > 0 ? (
+                <SettingsCard>
+                  {visibleTeams.map((team) => {
+                    const members = team.expertIds
+                      .map((id) => expertNames.get(id) ?? `${id} · 不可用`)
+                      .join("、");
+                    const action = team.archivedAt ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setArchiveAction({ team, archived: false })}
+                      >
+                        恢复
+                      </Button>
+                    ) : (
                       <Button
                         size="sm"
                         variant="ghost"
-                        onClick={() => updateDraft({ coordinatorInstructions: "" })}
+                        onClick={() => setArchiveAction({ team, archived: true })}
                       >
-                        恢复默认
+                        归档
                       </Button>
-                    </div>
-                  </CollapsiblePanel>
-                </Collapsible>
-              </SettingsCard>
-            </SettingsSectionShell>
-            <HubExpertSelectionSection
-              expertIds={draft.expertIds}
-              experts={props.experts}
-              loading={props.expertsLoading}
-              error={props.expertsError}
-              showOrdinaryFallback={false}
-              onChange={(expertIds) => updateDraft({ expertIds })}
-            />
-            <SettingsSectionShell title="协作偏好">
-              <SettingsCard divided={false} className="space-y-2 px-4 py-3">
-                <Textarea
-                  value={draft.collaborationPreferences}
-                  maxLength={8000}
-                  onChange={(event) =>
-                    updateDraft({ collaborationPreferences: event.target.value })
-                  }
-                  placeholder="可选。留空时按任务需要安排协作。"
-                  aria-label="协作偏好"
-                />
-              </SettingsCard>
-            </SettingsSectionShell>
-          </fieldset>
-          {validationError ? (
-            <p className="text-ui-sm text-destructive" role="status">
-              {validationError}
-            </p>
-          ) : null}
-          <div className="sticky bottom-0 z-10 flex justify-end gap-2 border-t border-border bg-background/92 py-3 backdrop-blur-xl">
-            <Button variant="ghost" disabled={pending} onClick={discardDraft}>
-              放弃
-            </Button>
-            <Button
-              disabled={pending || readonly || validationError !== null || !isDirty}
-              onClick={() => void saveDraft()}
-            >
-              {pending ? "保存中…" : "保存专家团"}
-            </Button>
-          </div>
+                    );
+                    return (
+                      <SettingsListRow
+                        key={team.id}
+                        layout="compact"
+                        title={
+                          <button
+                            type="button"
+                            className="truncate text-left text-ui font-medium hover:underline"
+                            onClick={() => void openTeam(team)}
+                          >
+                            {team.name}
+                          </button>
+                        }
+                        description={
+                          <span>
+                            {team.purpose.trim() || "未设置用途"}
+                            {members ? ` · ${members}` : ""}
+                          </span>
+                        }
+                        actions={
+                          <div className="flex items-center gap-1">
+                            {action}
+                            <Button size="sm" variant="ghost" onClick={() => void openTeam(team)}>
+                              编辑
+                            </Button>
+                          </div>
+                        }
+                      />
+                    );
+                  })}
+                </SettingsCard>
+              ) : (
+                <SettingsEmptyState layout="status">
+                  {search.trim()
+                    ? "没有符合搜索条件的专家团。"
+                    : archivedView
+                      ? "没有已归档的专家团。"
+                      : "还没有专家团。"}
+                </SettingsEmptyState>
+              )}
+            </div>
+          </SettingsSectionShell>
         </>
+      )}
+      {draft && view === "editor" && props.active ? (
+        <SettingsEditorDialog
+          open
+          onClose={() => void backToList()}
+          closeButtonLabel="关闭专家团编辑"
+        >
+          <DialogHeader className="shrink-0 px-6 pt-5 pb-4 in-[[data-slot=dialog-popup]:has([data-slot=dialog-panel])]:pb-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 pr-8">
+              <div className="flex min-w-0 items-center gap-2">
+                <DialogTitle className="truncate text-ui-lg font-semibold">
+                  {baseline ? baseline.name : "新建专家团"}
+                </DialogTitle>
+                {readonly ? (
+                  <span className="text-ui-xs text-muted-foreground">已归档 · 只读</span>
+                ) : null}
+              </div>
+              {baseline && !readonly ? (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setArchiveAction({ team: baseline, archived: true })}
+                >
+                  归档
+                </Button>
+              ) : null}
+              {readonly ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setArchiveAction({ team: baseline, archived: false })}
+                >
+                  恢复专家团
+                </Button>
+              ) : null}
+            </div>
+          </DialogHeader>
+          <DialogPanel className="space-y-5 px-6 py-5">
+            {actionError ? (
+              <div
+                className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-ui-sm text-destructive"
+                role="alert"
+              >
+                {actionError}
+              </div>
+            ) : null}
+            {hasNewerRevision && latestBaseline ? (
+              <p
+                className="rounded-lg border border-border bg-foreground/2 px-3 py-2 text-ui-sm text-muted-foreground"
+                role="status"
+              >
+                专家团已在其他位置更新。当前草稿仍保留；保存前请核对更改，或放弃更改以载入最新配置。
+              </p>
+            ) : null}
+            <fieldset disabled={readonly || pending} className="space-y-5 disabled:opacity-70">
+              <SettingsSectionShell title="基本信息">
+                <SettingsCard>
+                  <label className="block space-y-1.5 px-4 py-3 text-ui-sm font-medium">
+                    名称
+                    <Input
+                      value={draft.name}
+                      maxLength={160}
+                      onChange={(event) => updateDraft({ name: event.target.value })}
+                      placeholder="例如：产品协作团"
+                      aria-label="专家团名称"
+                    />
+                  </label>
+                  <label className="block space-y-1.5 px-4 py-3 text-ui-sm font-medium">
+                    用途 <span className="font-normal text-muted-foreground">· 可选</span>
+                    <Textarea
+                      value={draft.purpose}
+                      maxLength={8000}
+                      onChange={(event) => updateDraft({ purpose: event.target.value })}
+                      placeholder="这支团队主要帮助你完成什么？"
+                      aria-label="专家团用途"
+                    />
+                  </label>
+                </SettingsCard>
+              </SettingsSectionShell>
+              <SettingsSectionShell title="协调者">
+                <SettingsCard divided={false} className="px-4 py-3">
+                  <Collapsible open={coordinatorOpen} onOpenChange={setCoordinatorOpen}>
+                    <CollapsibleTrigger className="flex w-full items-center gap-2 py-1 text-left text-ui font-medium">
+                      <DisclosureChevron open={coordinatorOpen} className="size-4 shrink-0" />
+                      <span>角色与协调方式</span>
+                      <span className="text-ui-sm font-normal text-muted-foreground">
+                        · {draft.coordinatorInstructions.trim() ? "已自定义" : "默认协调方式"}
+                      </span>
+                    </CollapsibleTrigger>
+                    <CollapsiblePanel>
+                      <div className="space-y-2 pt-3">
+                        <Textarea
+                          value={draft.coordinatorInstructions}
+                          maxLength={8000}
+                          onChange={(event) =>
+                            updateDraft({ coordinatorInstructions: event.target.value })
+                          }
+                          placeholder="可选。留空时使用默认协调方式。"
+                          aria-label="协调者角色与协调方式"
+                        />
+                        <p className="text-ui-xs text-muted-foreground">
+                          仅指导协调者组织工作，不替代成员专家的角色与能力。
+                        </p>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => updateDraft({ coordinatorInstructions: "" })}
+                        >
+                          恢复默认
+                        </Button>
+                      </div>
+                    </CollapsiblePanel>
+                  </Collapsible>
+                </SettingsCard>
+              </SettingsSectionShell>
+              <HubExpertSelectionSection
+                expertIds={draft.expertIds}
+                experts={props.experts}
+                loading={props.expertsLoading}
+                error={props.expertsError}
+                showOrdinaryFallback={false}
+                onChange={(expertIds) => updateDraft({ expertIds })}
+              />
+              <SettingsSectionShell title="协作偏好">
+                <SettingsCard divided={false} className="space-y-2 px-4 py-3">
+                  <Textarea
+                    value={draft.collaborationPreferences}
+                    maxLength={8000}
+                    onChange={(event) =>
+                      updateDraft({ collaborationPreferences: event.target.value })
+                    }
+                    placeholder="可选。留空时按任务需要安排协作。"
+                    aria-label="协作偏好"
+                  />
+                </SettingsCard>
+              </SettingsSectionShell>
+            </fieldset>
+            {validationError ? (
+              <p className="text-ui-sm text-destructive" role="status">
+                {validationError}
+              </p>
+            ) : null}
+          </DialogPanel>
+          {!readonly ? (
+            <SettingsSaveBar
+              pending={pending}
+              dirty={isDirty}
+              onClose={() => void backToList()}
+              disabled={validationError !== null}
+              saveLabel="保存专家团"
+              onDiscard={discardDraft}
+              onSave={() => void saveDraft()}
+            />
+          ) : null}
+        </SettingsEditorDialog>
       ) : null}
 
       {leaveDialog}

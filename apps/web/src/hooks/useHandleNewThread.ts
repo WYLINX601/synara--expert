@@ -54,6 +54,8 @@ import { useTemporaryThreadStore } from "../temporaryThreadStore";
 import { useTerminalStateStore } from "../terminalStateStore";
 
 export interface NewThreadNavigationOptions {
+  /** Reject a stale caller after asynchronous project preparation, before registering a draft. */
+  isCurrent?: () => boolean;
   /**
    * Search params applied when the hook navigates to the created thread.
    * Lets callers keep view-level state (e.g. the editor workspace view)
@@ -187,7 +189,7 @@ export function useHandleNewThread() {
       setProjectDraftThreadId,
       setModelSelection,
     } = useComposerDraftStore.getState();
-    const shouldForceFreshThread = options?.fresh === true;
+    const shouldForceFreshThread = options?.fresh === true || options?.standalone === true;
 
     const storedDraftThreadCandidate = getDraftThreadByProjectId(projectId, entryPoint);
     const latestActiveDraftThreadCandidate: DraftThreadState | null = focusedThreadId
@@ -395,77 +397,104 @@ export function useHandleNewThread() {
       })();
     }
 
-    return runDraftNavigationOnce(draftNavigationSlotKey(projectId, entryPoint), async (signal) => {
-      const threadId = newThreadId();
-      if (wantsTemporaryThread) {
-        markTemporaryThread(threadId);
-      }
-      const createdAt = new Date().toISOString();
-      const draftSeed = createFreshDraftThreadSeed({
-        createdAt,
-        entryPoint,
-        options,
-        defaultEnvMode,
-      });
-      const containerDefaults = await resolveGroupContainerThreadDefaults({
+    return runDraftNavigationOnce(
+      draftNavigationSlotKey(
         projectId,
-        entryPoint,
-      });
-      const committed = await stageDraftNavigation({
-        signal,
-        // Keep the previous routed draft alive while the destination loads. Replacing the
-        // project's primary slot earlier makes the route guard redirect the old URL to Home.
-        stage: () => {
-          registerDraftThread(threadId, { projectId, ...draftSeed });
-          activateThreadEntryPoint(threadId);
-          // Seed the draft from the sticky (last-used) selection so a new chat
-          // reopens with the model and options used most recently.
-          applyUsableStickyState(threadId);
-          if (containerDefaults) {
-            applyGroupWorkerRoutingDefaults({
-              threadId,
-              defaults: containerDefaults,
-              providerStatuses: providerStatusesReconciled ? providerStatuses : [],
+        options?.standalone ? `expert:${options.expertId ?? ""}` : entryPoint,
+      ),
+      async (signal) => {
+        const threadId = newThreadId();
+        if (wantsTemporaryThread) {
+          markTemporaryThread(threadId);
+        }
+        const createdAt = new Date().toISOString();
+        const draftSeed = createFreshDraftThreadSeed({
+          createdAt,
+          entryPoint,
+          options,
+          defaultEnvMode,
+        });
+        const containerDefaults = await resolveGroupContainerThreadDefaults({
+          projectId,
+          entryPoint,
+        });
+        if (navigation?.isCurrent && !navigation.isCurrent()) return null;
+        let stagedComposer: ComposerThreadDraftState | undefined;
+        let stagedDraftThread: DraftThreadState | null = null;
+        const committed = await stageDraftNavigation({
+          signal,
+          // Keep the previous routed draft alive while the destination loads. Replacing the
+          // project's primary slot earlier makes the route guard redirect the old URL to Home.
+          stage: () => {
+            registerDraftThread(threadId, {
+              projectId,
+              ...draftSeed,
+              ...(options?.expertId ? { expertId: options.expertId } : {}),
             });
-          }
-          applyProviderOverride(threadId);
-        },
-        // Mark the draft-landing navigation as a transition so the new route
-        // subtree renders interruptibly and the browser can paint the chat
-        // mount loader immediately instead of freezing on the synchronous commit.
-        navigate: () =>
-          new Promise<void>((resolve, reject) => {
-            startTransition(() => {
-              navigate({
-                to: "/$threadId",
-                params: { threadId },
-                ...(navigation?.search ? { search: navigation.search } : {}),
-              }).then(resolve, reject);
-            });
-          }),
-        // TanStack resolves an older navigate() promise when a newer navigation supersedes it.
-        // Verify the committed route before deleting the previous project draft.
-        isDestinationActive: () => router.state.location.pathname === `/${threadId}`,
-        finalize: () => setProjectDraftThreadId(projectId, threadId, draftSeed),
-        rollback: () => {
-          clearDraftThread(threadId);
-          clearTerminalState(threadId);
-          if (wantsTemporaryThread) {
-            clearTemporaryThread(threadId);
-          }
-        },
-      });
-      if (!committed) {
-        return null;
-      }
-      if (entryPoint === "terminal") {
-        await createTerminalThread(
-          threadId,
-          resolveCreationState(threadId, getDraftThread(threadId), options),
-        );
-      }
-      return threadId;
-    });
+            activateThreadEntryPoint(threadId);
+            // Seed the draft from the sticky (last-used) selection so a new chat
+            // reopens with the model and options used most recently.
+            applyUsableStickyState(threadId);
+            if (containerDefaults) {
+              applyGroupWorkerRoutingDefaults({
+                threadId,
+                defaults: containerDefaults,
+                providerStatuses: providerStatusesReconciled ? providerStatuses : [],
+              });
+            }
+            applyProviderOverride(threadId);
+            stagedComposer = useComposerDraftStore.getState().draftsByThreadId[threadId];
+            stagedDraftThread = getDraftThread(threadId);
+          },
+          // Mark the draft-landing navigation as a transition so the new route
+          // subtree renders interruptibly and the browser can paint the chat
+          // mount loader immediately instead of freezing on the synchronous commit.
+          navigate: () =>
+            new Promise<void>((resolve, reject) => {
+              startTransition(() => {
+                navigate({
+                  to: "/$threadId",
+                  params: { threadId },
+                  ...(navigation?.search ? { search: navigation.search } : {}),
+                }).then(resolve, reject);
+              });
+            }),
+          // TanStack resolves an older navigate() promise when a newer navigation supersedes it.
+          // Verify the committed route before deleting the previous project draft.
+          isDestinationActive: () => router.state.location.pathname === `/${threadId}`,
+          finalize: () => {
+            if (!options?.standalone) setProjectDraftThreadId(projectId, threadId, draftSeed);
+          },
+          rollback: () => {
+            // An independent draft can become editable while a newer navigation settles.
+            // Keep any user edits or accepted send rather than deleting recoverable content.
+            if (
+              options?.standalone &&
+              (useComposerDraftStore.getState().draftsByThreadId[threadId] !== stagedComposer ||
+                getDraftThread(threadId) !== stagedDraftThread ||
+                hasActiveComposerSend(threadId) ||
+                getDraftThread(threadId)?.promotedTo)
+            )
+              return;
+            clearDraftThread(threadId);
+            clearTerminalState(threadId);
+            if (wantsTemporaryThread) {
+              clearTemporaryThread(threadId);
+            }
+          },
+        });
+        if (!committed) {
+          return null;
+        }
+        if (entryPoint === "terminal") {
+          await createTerminalThread(
+            threadId,
+            resolveCreationState(threadId, getDraftThread(threadId), options),
+          );
+        }
+        return threadId;
+      },
+    );
   };
 
   return {

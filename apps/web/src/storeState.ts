@@ -24,6 +24,9 @@ export type ThreadDetailSyncState = "synced" | "failed";
 export interface AppState {
   /** Highest authoritative snapshot integrated by this store instance. */
   shellSnapshotSequence?: number;
+  /** Current root-owned shell subscription generation and its snapshot fence. */
+  shellSubscriptionGeneration?: number;
+  shellSnapshotReceivedGeneration?: number;
   spaces: Space[];
   projects: Project[];
   sidebarThreadSummaryById: Record<string, SidebarThreadSummary>;
@@ -54,6 +57,21 @@ export interface AppState {
   deletedThreadIdsById?: Record<ThreadId, number>;
 }
 
+export interface ShellSnapshotSyncCursor {
+  readonly subscriptionGeneration: number;
+  readonly receivedGeneration: number;
+}
+
+/** Seed root's effect-local counters from the store so effect remounts stay monotonic. */
+export function readShellSnapshotSyncCursor(
+  state: Pick<AppState, "shellSubscriptionGeneration" | "shellSnapshotReceivedGeneration">,
+): ShellSnapshotSyncCursor {
+  return {
+    subscriptionGeneration: state.shellSubscriptionGeneration ?? 0,
+    receivedGeneration: state.shellSnapshotReceivedGeneration ?? -1,
+  };
+}
+
 // These references are shared by selectors and projection writes. Keep them stable
 // so empty fallbacks cannot create render loops or needless outer-record churn.
 export const EMPTY_THREAD_IDS: ThreadId[] = [];
@@ -81,6 +99,8 @@ export const EMPTY_TURN_DIFF_BY_THREAD: Record<
 
 export const initialState: AppState = {
   shellSnapshotSequence: 0,
+  shellSubscriptionGeneration: 0,
+  shellSnapshotReceivedGeneration: -1,
   spaces: [],
   projects: [],
   sidebarThreadSummaryById: {},

@@ -194,13 +194,15 @@ import { ServerEnvironment } from "./environment/Services/ServerEnvironment";
 import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
 import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
 import { createExpertStore } from "./experts/ExpertStore";
+import { SkillEvolutionRepository } from "./experts/evolution/SkillEvolutionRepository";
+import { ProjectionTurnRepository } from "./persistence/Services/ProjectionTurns";
+import { makeSkillEvolutionRpcHandlers } from "./workbench/host/skillEvolutionRpc";
 import { readHubExpertCatalog } from "./agentGateway/hubExpertCatalog";
 import { buildAgentGatewayProviderAvailabilities } from "./agentGateway/providerAvailability";
 import {
   makeWorkbenchExpertRpcHandlers,
   makeWorkbenchExpertDiscoveryHandlers,
 } from "./workbench/host/expertRpc.ts";
-import { createSkillPackageSwitchHost } from "./workbench/host/skillPackageSwitchHost.ts";
 import { makeWorkbenchContextRpcHandlers } from "./workbench/host/contextRpc.ts";
 import { makeSkillManagementRpcHandlers } from "./workbench/host/skillManagementRpc.ts";
 import { readThreadContextDetails } from "./workbench/host/contextThreadDetails.ts";
@@ -594,6 +596,8 @@ const makeWsRpcHandlersLayer = () =>
       const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
       const expertAppliedRuntimeRepository = yield* ExpertAppliedRuntimeRepository;
       const contextRepository = yield* ContextRepository;
+      const evolutionRepository = yield* Effect.serviceOption(SkillEvolutionRepository);
+      const evolutionTurns = yield* Effect.serviceOption(ProjectionTurnRepository);
       const contextDeliveries = yield* OrchestrationEventDeliveryRepository;
       const workbenchExpertRuntime = createWorkbenchExpertRuntime({
         stateDir: config.stateDir,
@@ -1426,6 +1430,44 @@ const makeWsRpcHandlersLayer = () =>
         listCommands: (request) => providerDiscoveryService.listCommands(request),
         listSkills: (request) => providerDiscoveryService.listSkills(request),
       });
+      const evolutionRpc = makeSkillEvolutionRpcHandlers({
+        stateDir: config.stateDir,
+        runtime: workbenchExpertRuntime,
+        ...(Option.isSome(evolutionRepository) ? { repository: evolutionRepository.value } : {}),
+        requireOwner,
+        rpcEffect,
+        host: (principal) => ({
+          readThreads: () =>
+            Effect.runPromise(
+              projectionReadModelQuery
+                .getSnapshot()
+                .pipe(Effect.map((snapshot) => snapshot.threads)),
+            ),
+          readThread: (threadId) =>
+            Effect.runPromise(
+              projectionReadModelQuery
+                .getThreadDetailForExportById(threadId)
+                .pipe(Effect.map(Option.getOrUndefined)),
+            ),
+          readTaskState: (threadId) =>
+            Effect.runPromise(
+              projectionReadModelQuery
+                .getThreadShellById(threadId)
+                .pipe(Effect.map(Option.getOrUndefined)),
+            ),
+          readTurns: (threadId) =>
+            Option.isSome(evolutionTurns)
+              ? Effect.runPromise(evolutionTurns.value.listByThreadId({ threadId }))
+              : Promise.reject(new Error("回合来源服务不可用。")),
+          dispatch: (command) =>
+            Effect.runPromise(
+              dispatchOrchestrationCommand(command).pipe(
+                Effect.provideService(CurrentManagedAttachmentPrincipal, principal),
+              ),
+            ),
+        }),
+      });
+      yield* Effect.addFinalizer(() => Effect.promise(() => evolutionRpc.dispose()));
       const workbenchExpertRpcHandlers = makeWorkbenchExpertRpcHandlers({
         runtime: workbenchExpertRuntime,
         requireSkillOwner,
@@ -1436,28 +1478,6 @@ const makeWsRpcHandlersLayer = () =>
         requireOwner,
         rpcEffect,
         expertRpcEffect,
-        createSkillPackageSwitchHost: (principal) =>
-          createSkillPackageSwitchHost({
-            stateDir: config.stateDir,
-            experts: workbenchExpertRuntime.experts,
-            hubWorkRepository,
-            hubWorkService,
-            readThreads: () =>
-              Effect.runPromise(
-                projectionReadModelQuery
-                  .getSnapshot()
-                  .pipe(Effect.map((snapshot) => snapshot.threads)),
-              ),
-            readAppliedRuntimeRecords: () =>
-              Effect.runPromise(workbenchExpertRuntime.readAppliedRuntimeRecords()),
-            runEffect: Effect.runPromise,
-            dispatch: (command) =>
-              Effect.runPromise(
-                dispatchOrchestrationCommand(command).pipe(
-                  Effect.provideService(CurrentManagedAttachmentPrincipal, principal),
-                ),
-              ),
-          }),
         loadProjectionThreads: () =>
           projectionReadModelQuery.getSnapshot().pipe(Effect.map((snapshot) => snapshot.threads)),
       });
@@ -2525,6 +2545,7 @@ const makeWsRpcHandlersLayer = () =>
         [WS_METHODS.serverUpdateSettings]: (input) =>
           rpcEffect(serverSettings.updateSettingsView(input), "Failed to update server settings"),
         ...workbenchExpertRpcHandlers,
+        ...evolutionRpc.handlers,
         ...skillManagementRpcHandlers,
         ...makeHubPlanRpcHandlers({
           service: Option.getOrUndefined(hubPlanService),

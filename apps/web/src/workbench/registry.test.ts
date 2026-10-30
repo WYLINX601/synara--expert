@@ -51,6 +51,7 @@ describe("Workbench web registry", () => {
     expect(settingsSectionLabel(expertsModule!.id)).toBe("Experts");
     expect(workbenchSettingsPageForSection(expertsModule!.id)).toBe("experts-settings");
     expect(expertsModule!.settings.search.keywords).toContain("specialist");
+    expect(expertsModule!.settings.search.route).toBe("/experts");
   });
 
   it("registers one MCP settings entry and normalizes legacy section links", () => {

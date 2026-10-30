@@ -2,6 +2,65 @@
   "version": 1,
   "integrationPoints": [
     {
+      "id": "expert.skill-evolution",
+      "surface": "expert-evolution",
+      "entryFiles": [
+        "packages/contracts/src/skillEvolution.ts",
+        "packages/contracts/src/provider.ts",
+        "packages/contracts/src/ws.ts",
+        "packages/contracts/src/rpc.ts",
+        "packages/contracts/src/ipc.ts",
+        "apps/server/src/wsRpc.ts",
+        "apps/server/src/serverLayers.ts",
+        "apps/server/src/workbench/host/skillEvolutionRpc.ts",
+        "apps/server/src/workbench/host/skillEvolutionPersistence.ts",
+        "apps/server/src/workbench/host/skillEvolutionExecution.ts",
+        "apps/server/src/workbench/persistence/SkillEvolutionMigration.ts",
+        "apps/server/src/workbench/persistence/WorkbenchMigrations.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts",
+        "apps/server/src/provider/Layers/PiAdapter.ts",
+        "apps/server/src/provider/Layers/ClaudeAdapter.ts",
+        "apps/server/src/provider/Layers/ProviderService.ts",
+        "apps/server/src/provider/runtimeLayer.ts",
+        "apps/server/src/provider/skillEvolutionConstraints.ts",
+        "apps/server/src/experts/SkillLibraryStore.ts",
+        "apps/server/src/experts/RunSkillAssemblyStore.ts",
+        "apps/server/src/experts/skillEvolutionPackagePins.ts",
+        "apps/web/src/wsNativeApi.ts",
+        "apps/web/src/workbench/host/expertClient.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.ts",
+        "apps/server/src/provider/acp/OmpAcpSupport.ts",
+        "apps/server/src/provider/acp/OmpSkillEvolutionCompat.ts"
+      ],
+      "featureRoots": [
+        "apps/server/src/experts/evolution",
+        "apps/web/src/workbench/features/expert-evolution"
+      ],
+      "responsibility": "Owner-authorized manual extraction freezes selected completed Expert turns and targets. The host dispatches existing native create/turn/interrupt commands and persists their exact identities; there is no second executor. Server-registered execution purpose constrains Pi/Claude/OMP sessions and final prompts without ambient tools, Skills, Hub Memory or project context. Discovery reads frozen selected work and bound Skill metadata to produce evidenced experience opportunities without Skill files or writes. Generation freezes the chosen opportunity and feedback, inherits the parent account/model/source, and uses a separate registered native task. Generation indices prevent adopting superseded drafts; dismissal, permission revocation, cancellation and durable replay are checked by the existing service. Candidates require exact evidence, digest acknowledgement and revision checks. Expert binding allowEvolution defaults off and gates extraction targets, dispatch, adoption, private-content restore and mutation replay. Shared targets produce a full Expert-private copy on adoption, while subsequent changes reuse that identity; original shared content remains user-maintained. Library journals retain exact bindings, ownership-bound creation fingerprints and partial recovery. Scope and derivation are read-only facts; public global policy and ownership configuration are retired. Immutable package pins retain candidate bases and adopted history. The Expert tab reuses native model choice, task links, Skill editors and draft guards; its time rings display Skill identities and verified adoption events, not memory or inferred usage. Static checks and mocks do not prove real model execution. OMP extraction uses its verified native ACP compatibility build, empty native tool roster and fixed final prompt; it skips Gateway/MCP and ordinary harness-message injection. Native transport validation is separate from real-model evidence.",
+      "tests": [
+        "apps/server/src/experts/evolution/SkillEvolutionService.test.ts",
+        "apps/server/src/experts/evolution/SkillEvolutionPrompt.test.ts",
+        "packages/contracts/src/skillEvolution.test.ts",
+        "apps/server/src/workbench/host/skillEvolutionRpc.test.ts",
+        "apps/server/src/workbench/host/skillEvolutionPersistence.test.ts",
+        "apps/server/src/experts/SkillLibraryStore.test.ts",
+        "apps/server/src/experts/RunSkillAssemblyStore.test.ts",
+        "apps/server/src/experts/skillEvolutionPolicy.test.ts",
+        "apps/server/src/provider/skillEvolutionConstraints.test.ts",
+        "apps/server/src/provider/Layers/PiAdapter.test.ts",
+        "apps/server/src/provider/Layers/PiAdapter.lifecycle.test.ts",
+        "apps/server/src/provider/Layers/ClaudeAdapter.test.ts",
+        "apps/server/src/provider/Layers/ProviderService.test.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
+        "apps/web/src/workbench/features/expert-evolution/ExpertSkillEvolution.browser.tsx",
+        "apps/web/src/components/settings/SkillLibraryDetail.evolution.browser.tsx",
+        "apps/web/src/workbench/features/expert-evolution/model.test.ts",
+        "apps/server/src/provider/acp/OmpSkillEvolutionCompat.test.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.skillEvolution.test.ts",
+        "apps/server/src/provider/Layers/OmpAdapter.nativeSkillEvolution.test.ts"
+      ]
+    },
+    {
       "id": "provider.omp-user-input",
       "surface": "provider-session",
       "entryFiles": [
@@ -106,7 +165,7 @@
         "apps/server/src/provider/claudeExpertSession.ts",
         "apps/server/src/provider/acp/OmpExpertSession.ts"
       ],
-      "responsibility": "Recovery reuses the durable root Run Skill assembly and pinned task Persona/MCP identity. A new execution intent resolves current saved Skill bindings and heads before native initialization; a changed assembly rebuilds native continuation with prior-transcript bootstrap. Provider adapters own their protocol, discovery proof and native loading. Unknown initialization effects block automatic replay. Runtime receipts identify assembly and generation; they do not prove model execution.",
+      "responsibility": "Recovery reuses the durable root Run Skill assembly and pinned task Persona/MCP identity. A new execution intent resolves current saved Skill bindings and heads before native initialization; a changed assembly rebuilds native continuation with prior-transcript bootstrap. Provider adapters own their protocol, discovery proof and native loading. New Skill bindings omit loading-time settings; ProviderService submits catalog metadata without preloading bodies. Existing immutable records retain historical selection markers for identity and uncertain-replay validation only. Unknown initialization effects block automatic replay. Runtime receipts identify assembly and generation; they do not prove model execution.",
       "tests": [
         "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
         "apps/server/src/provider/Layers/ProviderService.test.ts",
@@ -171,10 +230,7 @@
         "apps/web/src/lib/draftThreadDispatch.ts",
         "apps/web/src/lib/expertSkillInvocation.ts",
         "apps/web/src/lib/queuedComposerDispatch.ts",
-        "packages/contracts/src/skillPackageSwitch.ts",
-        "apps/server/src/workbench/host/skillPackageSwitchHost.ts",
         "apps/server/src/wsRpc.ts",
-        "scripts/expert-p0/skill-package-switch.ts",
         "apps/server/src/orchestration/Layers/OrchestrationEngine.ts",
         "packages/contracts/src/skillLibrary.ts",
         "packages/contracts/src/expert.ts",
@@ -190,6 +246,8 @@
         "apps/server/src/provider/acp/OmpExpertSession.ts",
         "apps/server/src/provider/fixedSkillProjection.ts",
         "apps/web/src/components/settings/ExpertEditor.tsx",
+        "apps/web/src/components/settings/ExpertActionsMenu.tsx",
+        "apps/web/src/components/settings/ExpertPreviewPopover.tsx",
         "apps/web/src/components/chat/ExpertTaskControl.tsx",
         "apps/server/src/provider/acp/OmpAcpSupport.ts",
         "packages/contracts/src/runSkillAssembly.ts",
@@ -200,9 +258,12 @@
         "apps/web/src/lib/providerDiscoveryReactQuery.ts",
         "apps/server/src/codexHomePaths.ts",
         "apps/server/src/codexProcessEnv.ts",
-        "apps/server/src/provider/acp/OmpAcpIdleTaskCompat.ts"
+        "apps/server/src/provider/acp/OmpAcpIdleTaskCompat.ts",
+        "apps/server/src/experts/pinnedSkillReferences.ts",
+        "apps/server/src/experts/skillRunResources.ts",
+        "apps/server/src/provider/claudeSkillProjection.ts"
       ],
-      "responsibility": "The managed Skill library owns stable IDs, full immutable content heads, provenance, filters and per-Expert CAS binding operations. The lifecycle lock serializes publication and durable idempotency journals; multi-Expert commands report partial results. RunSkillAssemblyStore freezes latest saved bindings and content only at actual root execution; approvals/recovery/goal and same Hub work retain that root. Task Persona/MCP identity remains pinned. Run records retain package references. Owner RPC and authenticated binary HTTP share the same store. Composer discovery reads the running assembly or an unfrozen latest preview; stable managed IDs resolve again at actual start. Adapters own native exclusion, original-content views, hashes, invocation and subagent inheritance. Native receipts require proof and remain separate from model execution evidence. Ordinary harness behavior remains provider-native; historical records are preserved. Static boundary checks cover declared direct imports, not transitive runtime isolation or an OS filesystem sandbox. OMP async Task state remains active after dispatch until native terminal metadata, retaining task identity and deduplication across parent turns. Fixed OMP v2 inherited tasks use a private exact-bundle Bun preload to forward idle native Task updates; selected CLI bytes, preflight and actual ACP marker are verified before model execution. Unknown bundles fail closed. Fixed Codex home selection is separate from ordinary source adoption and image-root validation.",
+      "responsibility": "The managed Skill library owns stable IDs, full immutable content heads, provenance, filters and per-Expert CAS binding operations. The lifecycle lock serializes publication and durable idempotency journals; multi-Expert commands report partial results. RunSkillAssemblyStore freezes latest saved bindings and content only at actual root execution; approvals/recovery/goal and same Hub work retain that root. Task Persona/MCP identity remains pinned. Run records retain package references. Owner RPC and authenticated binary HTTP share the same store. Composer discovery reads the running assembly or an unfrozen latest preview; stable managed IDs resolve again at actual start. Adapters own native exclusion, original-content views, hashes, invocation and subagent inheritance. Native receipts require proof and remain separate from model execution evidence. Ordinary harness behavior remains provider-native; historical records are preserved. Static boundary checks cover declared direct imports, not transitive runtime isolation or an OS filesystem sandbox. OMP async Task state remains active after dispatch until native terminal metadata, retaining task identity and deduplication across parent turns. Fixed OMP v2 inherited tasks use a private exact-bundle Bun preload to forward idle native Task updates; selected CLI bytes, preflight and actual ACP marker are verified before model execution. Unknown bundles fail closed. Fixed Codex home selection is separate from ordinary source adoption and image-root validation. Content integrity is independent of the rebuildable entry index. Pinned references retain historical Run metadata and policy. Native adapters receive complete package trees and enforce the selected discovery set without deleting sibling SKILL.md files. Claude plugin and Agent interpretation is Claude-owned. Persistent Run-private copies have independent files and inherited owner references across Worker continuations; generated outputs never rewrite source packages. Current Expert editing and adoption use stable Skill bindings directly; legacy conversion endpoints and adapters are removed. Normal binding edits retain durable receipts, revision checks and management authorization.",
       "tests": [
         "packages/contracts/src/skillPackage.test.ts",
         "apps/server/src/experts/SkillPackageStore.test.ts",
@@ -211,20 +272,14 @@
         "apps/server/src/experts/bmadSkillPreset.test.ts",
         "apps/server/src/persistence/Layers/ExpertAppliedRuntimeRecords.test.ts",
         "apps/web/src/components/settings/SkillPackagesSettingsPanel.browser.tsx",
-        "apps/web/src/components/settings/ExpertSkillPackagesEditor.test.tsx",
-        "apps/web/src/components/settings/SkillPicker.browser.tsx",
-        "apps/web/src/components/settings/skillPickerModel.test.ts",
         "apps/web/src/lib/expertSkillInvocation.test.ts",
         "apps/web/src/components/chat/useComposerDiscovery.browser.tsx",
         "apps/web/src/lib/queuedComposerDispatch.test.ts",
         "apps/server/src/provider/expertSkillCatalog.test.ts",
-        "apps/server/src/experts/SkillPackageSwitch.test.ts",
-        "apps/server/src/workbench/host/skillPackageSwitchHost.test.ts",
         "apps/server/src/persistence/Layers/HubWorkRepository.test.ts",
         "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts",
         "apps/server/src/persistence/MigrationBackup.test.ts",
         "apps/web/src/components/ChatView.browser.tsx",
-        "scripts/expert-p0/skill-package-switch.test.ts",
         "apps/server/src/experts/SkillLibraryStore.test.ts",
         "apps/server/src/experts/skillLibraryArchive.test.ts",
         "apps/server/src/provider/fixedExpertAssembly.test.ts",
@@ -250,7 +305,10 @@
         "apps/server/src/codexProcessEnv.test.ts",
         "apps/server/src/codexNestedOverlay.test.ts",
         "apps/server/src/codexGeneratedImages.test.ts",
-        "apps/server/src/provider/acp/OmpAcpIdleTaskCompat.test.ts"
+        "apps/server/src/provider/acp/OmpAcpIdleTaskCompat.test.ts",
+        "apps/server/src/experts/pinnedSkillReferences.test.ts",
+        "apps/server/src/experts/skillRunResources.test.ts",
+        "apps/server/src/provider/claudeSkillProjection.test.ts"
       ],
       "featureFiles": [
         "apps/server/src/experts/skillPackageLifecycle.ts",
@@ -258,12 +316,7 @@
         "apps/server/src/experts/bmadSkillPreset.ts",
         "apps/web/src/components/settings/SkillPackagesSettingsPanel.tsx",
         "apps/web/src/components/settings/skillPackageSettingsQueries.ts",
-        "apps/web/src/components/settings/ExpertSkillPackagesEditor.tsx",
-        "apps/web/src/components/settings/SkillPicker.tsx",
-        "apps/web/src/components/settings/skillPickerModel.ts",
-        "apps/web/src/components/settings/expertSkillPackagesSettingsModel.ts",
         "apps/web/src/lib/expertSkillInvocation.ts",
-        "apps/server/src/experts/SkillPackageSwitch.ts",
         "apps/server/src/experts/SkillLibraryStore.ts",
         "apps/server/src/experts/skillLibraryArchive.ts",
         "apps/web/src/components/settings/SkillLibrarySettingsPanel.tsx",
@@ -826,6 +879,46 @@
         "apps/server/src/managementCli/requestEnvelope.ts",
         "apps/web/src/components/settings/SkillManagementPairingSettingsPanel.tsx",
         "apps/web/src/wsNativeApi.ts"
+      ]
+    },
+    {
+      "id": "web.expert-center",
+      "surface": "web-routes",
+      "entryFiles": [
+        "apps/web/src/routes/_chat.experts.tsx",
+        "apps/web/src/routes/_chat.experts.index.tsx",
+        "apps/web/src/routes/_chat.experts.$expertId.tsx",
+        "apps/web/src/workbench/ExpertCenterPage.tsx",
+        "apps/web/src/workbench/host/expertTaskActions.tsx",
+        "apps/web/src/workbench/host/expertTaskSource.ts",
+        "apps/web/src/hooks/useHandleNewThread.ts",
+        "apps/web/src/routes/__root.tsx"
+      ],
+      "featureFiles": [
+        "apps/web/src/components/settings/ExpertsSettingsPanel.tsx",
+        "apps/web/src/components/settings/ExpertEditor.tsx",
+        "apps/web/src/components/settings/ExpertSaveBar.tsx",
+        "apps/web/src/components/settings/SettingsSaveBar.tsx",
+        "apps/web/src/components/settings/SettingsEditorDialog.tsx",
+        "apps/web/src/components/settings/ExpertTaskHistory.tsx",
+        "apps/web/src/components/settings/ExpertTeamsSettingsPanel.tsx",
+        "apps/web/src/components/settings/SkillLibrarySettingsPanel.tsx",
+        "apps/web/src/components/settings/SkillsSettingsPanel.tsx",
+        "apps/web/src/features/hubCollaboration/HubTeamsSettingsPanel.tsx"
+      ],
+      "responsibility": "The _chat parent retains its existing shell and subscriptions. A single route-owned Expert editor reuses the current draft guard and save contract. The native new-thread host can stage an independent Expert draft without dispatching or claiming an existing project slot. History reads the existing shell binding and summary projections through a narrow adapter, including archive and synchronization state; it does not fetch task bodies or add server APIs. The Experts route owns personal experts, teams, and the existing Skill library as categories. Team and Skill editing reuse their existing owners and draft guards; query-only category changes are guarded. Expert, Team, and Skill editors reuse the shared SettingsEditorDialog surface with their lists kept behind the modal. Expert/Team content scrolls separately from the shared SettingsSaveBar footer. Existing owners retain protected dismissal, route links, CAS saves, and dirty drafts; hiding revision badges does not change revision checks or saved history. Skill creator attribution is removed from metadata, filters, and CLI flags while authentication and operation actors remain. Skill binding controls expose availability and a per-Expert copy-and-improve permission, default off. Skill detail displays ownership and derivation without a strategy tab or ownership editor. Startup preloading and its authoring/CLI setting are retired. Native discovery and explicit invocation keep their existing provider owners. Legacy Settings links redirect to the matching category; MCP return targets use the personal Expert route.",
+      "tests": [
+        "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
+        "apps/web/src/components/settings/WorkbenchSettingsPages.browser.tsx",
+        "apps/web/src/workbench/host/expertTaskSource.test.ts",
+        "apps/web/src/workbench/host/settings.test.ts",
+        "apps/web/src/composerDraftStore.test.ts",
+        "apps/web/src/lib/draftThreadCreate.test.ts",
+        "apps/web/src/components/chat/prepareChatSendWorkspace.test.ts",
+        "apps/web/src/hooks/useHandleNewThread.expert.browser.tsx",
+        "apps/web/src/components/settings/ExpertTaskHistory.browser.tsx",
+        "apps/web/src/storeState.test.ts",
+        "apps/web/src/components/settings/SkillLibrarySettingsPanel.browser.tsx"
       ]
     }
   ]

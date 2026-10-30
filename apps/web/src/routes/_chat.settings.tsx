@@ -82,7 +82,6 @@ import {
   SettingsSection,
   SettingsSectionShell,
 } from "../components/settings/SettingsPanelPrimitives";
-import { SkillsSettingsPanel } from "../components/settings/SkillsSettingsPanel";
 import { ThemeModePicker } from "../components/settings/ThemeModePicker";
 import { ThemePackEditor } from "../components/ThemePackEditor";
 import {
@@ -138,9 +137,9 @@ import { SETTINGS_PAGE_BACKGROUND_CLASS_NAME } from "../settingsPanelStyles";
 import { isAudioLevelAvailable } from "../lib/audioLevel";
 import {
   canonicalizeSettingsMcpSearch,
+  expertCenterRouteTarget,
+  expertCenterSectionRouteTarget,
   resolveSettingsHostRoute,
-  settingsSearchForExpertFromMcp,
-  settingsSearchForMcpFromExpert,
   settingsSearchForMcpTab,
 } from "../workbench/host/settings";
 import { WorkbenchSettingsPage } from "../workbench/settingsPages";
@@ -377,6 +376,31 @@ function SettingsRouteView() {
     rawRouteSearch.tab,
     settingsRoute.shouldCanonicalizeMcpRoute,
   ]);
+
+  useEffect(() => {
+    if (!settingsRoute.shouldRedirectExpertToCenter || settingsRoute.expertId === undefined) return;
+    void navigate({
+      ...expertCenterRouteTarget({
+        expertId: settingsRoute.expertId,
+        search: rawRouteSearch,
+      }),
+      replace: true,
+    } as never);
+  }, [
+    navigate,
+    rawRouteSearch,
+    settingsRoute.expertId,
+    settingsRoute.shouldRedirectExpertToCenter,
+  ]);
+
+  useEffect(() => {
+    const kind = settingsRoute.redirectExpertCenterKind;
+    if (kind === undefined) return;
+    void navigate({
+      ...expertCenterSectionRouteTarget(kind, rawRouteSearch),
+      replace: true,
+    } as never);
+  }, [navigate, rawRouteSearch, settingsRoute.redirectExpertCenterKind]);
 
   const {
     isDefaultActiveTheme,
@@ -1715,6 +1739,12 @@ function SettingsRouteView() {
   );
 
   const renderRouteOwnedPanel = () => {
+    if (
+      settingsRoute.shouldRedirectExpertToCenter ||
+      settingsRoute.redirectExpertCenterKind !== undefined
+    ) {
+      return null;
+    }
     const workbenchPageId = settingsRoute.pageId;
     if (workbenchPageId !== undefined) {
       const onReturnToSettings = () => {
@@ -1723,25 +1753,18 @@ function SettingsRouteView() {
           search: { section: "general" } as never,
         });
       };
-      const onOpenConnections = (expertId: string, connectionId?: string) => {
-        void navigate({
-          to: "/settings",
-          search: settingsSearchForMcpFromExpert({
-            expertId,
-            ...(connectionId ? { connectionId } : {}),
-          }) as never,
-        });
-      };
-
       if (workbenchPageId === "experts-settings") {
         return (
           <WorkbenchSettingsPage
             pageId="experts-settings"
             onReturnToSettings={onReturnToSettings}
-            onOpenConnections={onOpenConnections}
-            {...(settingsRoute.expertId === undefined
-              ? {}
-              : { initialExpertId: settingsRoute.expertId })}
+            onOpenExperts={(kind) => {
+              if (kind !== undefined) {
+                void navigate(expertCenterSectionRouteTarget(kind, rawRouteSearch) as never);
+                return;
+              }
+              void navigate({ to: "/experts", search: { tab: "capabilities" } } as never);
+            }}
           />
         );
       }
@@ -1772,12 +1795,12 @@ function SettingsRouteView() {
           }}
           onReturnToExpert={({ expertId, connectionId }) => {
             void navigate({
-              to: "/settings",
-              search: settingsSearchForExpertFromMcp({
+              ...expertCenterRouteTarget({
                 expertId,
+                search: rawRouteSearch,
                 ...(connectionId ? { connectionId } : {}),
-              }) as never,
-            });
+              }),
+            } as never);
           }}
         />
       );
@@ -1794,8 +1817,6 @@ function SettingsRouteView() {
         return <KeyboardShortcutsSettingsPanel />;
       case "profile":
         return <ProfileSettingsPanel />;
-      case "skills":
-        return <SkillsSettingsPanel />;
       case "usage":
         return <ProviderUsageSettingsPanel />;
       default:

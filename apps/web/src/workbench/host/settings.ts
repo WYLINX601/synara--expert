@@ -19,6 +19,8 @@ export interface SettingsHostRoute {
   /** The pre-normalized section, retained to distinguish old links from canonical routes. */
   readonly originalSection: unknown;
   readonly shouldCanonicalizeMcpRoute: boolean;
+  readonly shouldRedirectExpertToCenter: boolean;
+  readonly redirectExpertCenterKind?: "teams" | "skills";
   readonly expertId?: string;
   readonly connectionId?: string;
   readonly initialSearch?: string;
@@ -45,6 +47,12 @@ export function resolveSettingsHostRoute(routeSearch: Search, rawSearch: Search 
   const connectionId = searchString(routeSearch.connectionId);
   const initialSearch = searchString(routeSearch.search);
   const returnExpertId = searchString(routeSearch.returnExpertId);
+  const redirectExpertCenterKind =
+    activeSection === "skills"
+      ? "skills"
+      : activeSection === "experts" && expertId === undefined
+        ? "teams"
+        : undefined;
 
   return {
     activeSection,
@@ -52,6 +60,8 @@ export function resolveSettingsHostRoute(routeSearch: Search, rawSearch: Search 
     mcpTab,
     originalSection,
     shouldCanonicalizeMcpRoute,
+    shouldRedirectExpertToCenter: activeSection === "experts" && expertId !== undefined,
+    ...(redirectExpertCenterKind === undefined ? {} : { redirectExpertCenterKind }),
     ...(expertId === undefined ? {} : { expertId }),
     ...(connectionId === undefined ? {} : { connectionId }),
     ...(initialSearch === undefined ? {} : { initialSearch }),
@@ -78,6 +88,10 @@ export function settingsSearchForMcpTab(search: Search, tab: McpSettingsTab) {
 export function settingsSearchForMcpFromExpert(input: {
   readonly expertId: string;
   readonly connectionId?: string;
+  readonly projectId?: string;
+  readonly sourceThreadId?: string;
+  readonly search?: string;
+  readonly target?: string;
 }) {
   return {
     section: "mcp",
@@ -85,17 +99,65 @@ export function settingsSearchForMcpFromExpert(input: {
     expertId: input.expertId,
     returnExpertId: input.expertId,
     ...(input.connectionId ? { connectionId: input.connectionId } : {}),
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    ...(input.sourceThreadId ? { sourceThreadId: input.sourceThreadId } : {}),
+    ...(input.search ? { search: input.search } : {}),
+    ...(input.target ? { target: input.target } : {}),
   };
 }
 
 /** Return from MCP management to the requested expert while retaining its connection target. */
-export function settingsSearchForExpertFromMcp(target: {
+export function settingsSearchForExpertFromMcp(
+  target: {
+    readonly expertId: string;
+    readonly connectionId?: string;
+  },
+  currentSearch: Search = {},
+) {
+  const search = searchString(currentSearch.search);
+  const scrollTarget = searchString(currentSearch.target);
+  const projectId = searchString(currentSearch.projectId);
+  const sourceThreadId = searchString(currentSearch.sourceThreadId);
+  const connectionId = target.connectionId ?? searchString(currentSearch.connectionId);
+  return {
+    tab: "capabilities" as const,
+    ...(search === undefined ? {} : { search }),
+    ...(scrollTarget === undefined ? {} : { target: scrollTarget }),
+    ...(projectId === undefined ? {} : { projectId }),
+    ...(sourceThreadId === undefined ? {} : { sourceThreadId }),
+    ...(connectionId === undefined ? {} : { connectionId }),
+  };
+}
+
+/** Build the canonical route target used by legacy settings links and MCP return navigation. */
+export function expertCenterRouteTarget(input: {
   readonly expertId: string;
+  readonly search?: Search;
   readonly connectionId?: string;
 }) {
+  const search = settingsSearchForExpertFromMcp(input, input.search);
   return {
-    section: "experts" as const,
-    expertId: target.expertId,
-    ...(target.connectionId ? { connectionId: target.connectionId } : {}),
+    to: "/experts/$expertId" as const,
+    params: { expertId: input.expertId },
+    search,
+  };
+}
+
+/** Build an Experts section destination from legacy Settings, retaining supported context. */
+export function expertCenterSectionRouteTarget(kind: "teams" | "skills", search: Search = {}) {
+  const projectId = searchString(search.projectId);
+  const sourceThreadId = searchString(search.sourceThreadId);
+  const initialSearch = searchString(search.search);
+  const target = searchString(search.target);
+  return {
+    to: "/experts" as const,
+    search: {
+      kind,
+      tab: "capabilities" as const,
+      ...(projectId === undefined ? {} : { projectId }),
+      ...(sourceThreadId === undefined ? {} : { sourceThreadId }),
+      ...(initialSearch === undefined ? {} : { search: initialSearch }),
+      ...(target === undefined ? {} : { target }),
+    },
   };
 }

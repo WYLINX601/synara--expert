@@ -15,6 +15,7 @@ import { Route as ChatSettingsRouteImport } from './routes/_chat.settings'
 import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-requests'
 import { Route as ChatPluginsRouteImport } from './routes/_chat.plugins'
 import { Route as ChatInboxRouteImport } from './routes/_chat.inbox'
+import { Route as ChatExpertsRouteImport } from './routes/_chat.experts'
 import { Route as ChatAutomationsRouteImport } from './routes/_chat.automations'
 import { Route as ChatThreadIdRouteImport } from './routes/_chat.$threadId'
 import { Route as ChatTasksIndexRouteImport } from './routes/_chat.tasks.index'
@@ -23,8 +24,10 @@ import { Route as ChatPullRequestsIndexRouteImport } from './routes/_chat.pull-r
 import { Route as ChatKanbanIndexRouteImport } from './routes/_chat.kanban.index'
 import { Route as ChatHubsIndexRouteImport } from './routes/_chat.hubs.index'
 import { Route as ChatGroupsIndexRouteImport } from './routes/_chat.groups.index'
+import { Route as ChatExpertsIndexRouteImport } from './routes/_chat.experts.index'
 import { Route as ChatAutomationsIndexRouteImport } from './routes/_chat.automations.index'
 import { Route as ChatKanbanProjectIdRouteImport } from './routes/_chat.kanban.$projectId'
+import { Route as ChatExpertsExpertIdRouteImport } from './routes/_chat.experts.$expertId'
 import { Route as ChatAutomationsAutomationIdRouteImport } from './routes/_chat.automations.$automationId'
 
 const ChatRoute = ChatRouteImport.update({
@@ -54,6 +57,11 @@ const ChatPluginsRoute = ChatPluginsRouteImport.update({
 const ChatInboxRoute = ChatInboxRouteImport.update({
   id: '/inbox',
   path: '/inbox',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatExpertsRoute = ChatExpertsRouteImport.update({
+  id: '/experts',
+  path: '/experts',
   getParentRoute: () => ChatRoute,
 } as any)
 const ChatAutomationsRoute = ChatAutomationsRouteImport.update({
@@ -96,6 +104,11 @@ const ChatGroupsIndexRoute = ChatGroupsIndexRouteImport.update({
   path: '/groups/',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatExpertsIndexRoute = ChatExpertsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => ChatExpertsRoute,
+} as any)
 const ChatAutomationsIndexRoute = ChatAutomationsIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -105,6 +118,11 @@ const ChatKanbanProjectIdRoute = ChatKanbanProjectIdRouteImport.update({
   id: '/kanban/$projectId',
   path: '/kanban/$projectId',
   getParentRoute: () => ChatRoute,
+} as any)
+const ChatExpertsExpertIdRoute = ChatExpertsExpertIdRouteImport.update({
+  id: '/$expertId',
+  path: '/$expertId',
+  getParentRoute: () => ChatExpertsRoute,
 } as any)
 const ChatAutomationsAutomationIdRoute =
   ChatAutomationsAutomationIdRouteImport.update({
@@ -117,13 +135,16 @@ export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
   '/$threadId': typeof ChatThreadIdRoute
   '/automations': typeof ChatAutomationsRouteWithChildren
+  '/experts': typeof ChatExpertsRouteWithChildren
   '/inbox': typeof ChatInboxRoute
   '/plugins': typeof ChatPluginsRoute
   '/pull-requests': typeof ChatPullRequestsRouteWithChildren
   '/settings': typeof ChatSettingsRoute
   '/automations/$automationId': typeof ChatAutomationsAutomationIdRoute
+  '/experts/$expertId': typeof ChatExpertsExpertIdRoute
   '/kanban/$projectId': typeof ChatKanbanProjectIdRoute
   '/automations/': typeof ChatAutomationsIndexRoute
+  '/experts/': typeof ChatExpertsIndexRoute
   '/groups/': typeof ChatGroupsIndexRoute
   '/hubs/': typeof ChatHubsIndexRoute
   '/kanban/': typeof ChatKanbanIndexRoute
@@ -138,8 +159,10 @@ export interface FileRoutesByTo {
   '/settings': typeof ChatSettingsRoute
   '/': typeof ChatIndexRoute
   '/automations/$automationId': typeof ChatAutomationsAutomationIdRoute
+  '/experts/$expertId': typeof ChatExpertsExpertIdRoute
   '/kanban/$projectId': typeof ChatKanbanProjectIdRoute
   '/automations': typeof ChatAutomationsIndexRoute
+  '/experts': typeof ChatExpertsIndexRoute
   '/groups': typeof ChatGroupsIndexRoute
   '/hubs': typeof ChatHubsIndexRoute
   '/kanban': typeof ChatKanbanIndexRoute
@@ -152,14 +175,17 @@ export interface FileRoutesById {
   '/_chat': typeof ChatRouteWithChildren
   '/_chat/$threadId': typeof ChatThreadIdRoute
   '/_chat/automations': typeof ChatAutomationsRouteWithChildren
+  '/_chat/experts': typeof ChatExpertsRouteWithChildren
   '/_chat/inbox': typeof ChatInboxRoute
   '/_chat/plugins': typeof ChatPluginsRoute
   '/_chat/pull-requests': typeof ChatPullRequestsRouteWithChildren
   '/_chat/settings': typeof ChatSettingsRoute
   '/_chat/': typeof ChatIndexRoute
   '/_chat/automations/$automationId': typeof ChatAutomationsAutomationIdRoute
+  '/_chat/experts/$expertId': typeof ChatExpertsExpertIdRoute
   '/_chat/kanban/$projectId': typeof ChatKanbanProjectIdRoute
   '/_chat/automations/': typeof ChatAutomationsIndexRoute
+  '/_chat/experts/': typeof ChatExpertsIndexRoute
   '/_chat/groups/': typeof ChatGroupsIndexRoute
   '/_chat/hubs/': typeof ChatHubsIndexRoute
   '/_chat/kanban/': typeof ChatKanbanIndexRoute
@@ -173,13 +199,16 @@ export interface FileRouteTypes {
     | '/'
     | '/$threadId'
     | '/automations'
+    | '/experts'
     | '/inbox'
     | '/plugins'
     | '/pull-requests'
     | '/settings'
     | '/automations/$automationId'
+    | '/experts/$expertId'
     | '/kanban/$projectId'
     | '/automations/'
+    | '/experts/'
     | '/groups/'
     | '/hubs/'
     | '/kanban/'
@@ -194,8 +223,10 @@ export interface FileRouteTypes {
     | '/settings'
     | '/'
     | '/automations/$automationId'
+    | '/experts/$expertId'
     | '/kanban/$projectId'
     | '/automations'
+    | '/experts'
     | '/groups'
     | '/hubs'
     | '/kanban'
@@ -207,14 +238,17 @@ export interface FileRouteTypes {
     | '/_chat'
     | '/_chat/$threadId'
     | '/_chat/automations'
+    | '/_chat/experts'
     | '/_chat/inbox'
     | '/_chat/plugins'
     | '/_chat/pull-requests'
     | '/_chat/settings'
     | '/_chat/'
     | '/_chat/automations/$automationId'
+    | '/_chat/experts/$expertId'
     | '/_chat/kanban/$projectId'
     | '/_chat/automations/'
+    | '/_chat/experts/'
     | '/_chat/groups/'
     | '/_chat/hubs/'
     | '/_chat/kanban/'
@@ -269,6 +303,13 @@ declare module '@tanstack/react-router' {
       path: '/inbox'
       fullPath: '/inbox'
       preLoaderRoute: typeof ChatInboxRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/experts': {
+      id: '/_chat/experts'
+      path: '/experts'
+      fullPath: '/experts'
+      preLoaderRoute: typeof ChatExpertsRouteImport
       parentRoute: typeof ChatRoute
     }
     '/_chat/automations': {
@@ -327,6 +368,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatGroupsIndexRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/experts/': {
+      id: '/_chat/experts/'
+      path: '/'
+      fullPath: '/experts/'
+      preLoaderRoute: typeof ChatExpertsIndexRouteImport
+      parentRoute: typeof ChatExpertsRoute
+    }
     '/_chat/automations/': {
       id: '/_chat/automations/'
       path: '/'
@@ -340,6 +388,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/kanban/$projectId'
       preLoaderRoute: typeof ChatKanbanProjectIdRouteImport
       parentRoute: typeof ChatRoute
+    }
+    '/_chat/experts/$expertId': {
+      id: '/_chat/experts/$expertId'
+      path: '/$expertId'
+      fullPath: '/experts/$expertId'
+      preLoaderRoute: typeof ChatExpertsExpertIdRouteImport
+      parentRoute: typeof ChatExpertsRoute
     }
     '/_chat/automations/$automationId': {
       id: '/_chat/automations/$automationId'
@@ -365,6 +420,20 @@ const ChatAutomationsRouteWithChildren = ChatAutomationsRoute._addFileChildren(
   ChatAutomationsRouteChildren,
 )
 
+interface ChatExpertsRouteChildren {
+  ChatExpertsExpertIdRoute: typeof ChatExpertsExpertIdRoute
+  ChatExpertsIndexRoute: typeof ChatExpertsIndexRoute
+}
+
+const ChatExpertsRouteChildren: ChatExpertsRouteChildren = {
+  ChatExpertsExpertIdRoute: ChatExpertsExpertIdRoute,
+  ChatExpertsIndexRoute: ChatExpertsIndexRoute,
+}
+
+const ChatExpertsRouteWithChildren = ChatExpertsRoute._addFileChildren(
+  ChatExpertsRouteChildren,
+)
+
 interface ChatPullRequestsRouteChildren {
   ChatPullRequestsIndexRoute: typeof ChatPullRequestsIndexRoute
 }
@@ -379,6 +448,7 @@ const ChatPullRequestsRouteWithChildren =
 interface ChatRouteChildren {
   ChatThreadIdRoute: typeof ChatThreadIdRoute
   ChatAutomationsRoute: typeof ChatAutomationsRouteWithChildren
+  ChatExpertsRoute: typeof ChatExpertsRouteWithChildren
   ChatInboxRoute: typeof ChatInboxRoute
   ChatPluginsRoute: typeof ChatPluginsRoute
   ChatPullRequestsRoute: typeof ChatPullRequestsRouteWithChildren
@@ -395,6 +465,7 @@ interface ChatRouteChildren {
 const ChatRouteChildren: ChatRouteChildren = {
   ChatThreadIdRoute: ChatThreadIdRoute,
   ChatAutomationsRoute: ChatAutomationsRouteWithChildren,
+  ChatExpertsRoute: ChatExpertsRouteWithChildren,
   ChatInboxRoute: ChatInboxRoute,
   ChatPluginsRoute: ChatPluginsRoute,
   ChatPullRequestsRoute: ChatPullRequestsRouteWithChildren,

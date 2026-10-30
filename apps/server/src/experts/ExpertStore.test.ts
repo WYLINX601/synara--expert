@@ -432,7 +432,7 @@ describe("ExpertStore", () => {
     expect(restored.mcpBinding).toBeUndefined();
   });
 
-  it("requires legacy local skill paths to be converted before Expert use", async () => {
+  it("rejects unsupported local Skill configuration before Expert use", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
     const skill = path.join(root, "missing", "legacy", "SKILL.md");
@@ -445,10 +445,10 @@ describe("ExpertStore", () => {
     );
     const preview = await store.preview({ expertId: expert.id, provider: "codex" });
     expect(preview.status).toBe("incompatible");
-    expect(preview.issues).toEqual(["此专家仍使用旧式本机技能路径；转换为共享技能包后才能启动。"]);
+    expect(preview.issues).toEqual(["技能配置格式已停止支持，请在技能库中配置技能。"]);
     await expect(store.prepareSnapshot(expert.id)).rejects.toMatchObject({
       code: "invalid_resource",
-      message: expect.stringContaining("convert its skills to shared packages"),
+      message: expect.stringContaining("unsupported Skill configuration"),
     });
   });
 
@@ -538,7 +538,6 @@ describe("ExpertStore", () => {
           {
             packageId: manifest.packageId,
             entryPath: manifest.entries[0]!.entryPath,
-            activation: "startup",
           },
         ],
         references: [references],
@@ -651,7 +650,6 @@ describe("ExpertStore", () => {
           {
             packageId: firstPackage.packageId,
             entryPath: firstPackage.entries[0]!.entryPath,
-            activation: "startup",
           },
         ],
         references: [reference],
@@ -674,7 +672,6 @@ describe("ExpertStore", () => {
       {
         packageId: firstPackage.packageId,
         entryPath: firstPackage.entries[0]!.entryPath,
-        activation: "startup",
         name: "Writer",
         description: "Description for Writer.",
         sha256: firstPackage.resources.find((resource) => resource.path === "content/SKILL.md")!
@@ -688,7 +685,6 @@ describe("ExpertStore", () => {
         {
           packageId: firstPackage.packageId,
           entryPath: firstPackage.entries[0]!.entryPath,
-          activation: "startup",
         },
       ],
       skills: [{ name: "Writer", path: expectedSkillPath }],
@@ -696,7 +692,6 @@ describe("ExpertStore", () => {
         {
           packageId: firstPackage.packageId,
           entryPath: firstPackage.entries[0]!.entryPath,
-          activation: "startup",
           name: "Writer",
           description: "Description for Writer.",
           path: expectedSkillPath,
@@ -749,7 +744,111 @@ describe("ExpertStore", () => {
     });
   });
 
-  it("blocks BMad startup entries when the workspace is not configured", async () => {
+  it("preserves historical snapshot activation in its fingerprint but omits it from hydrated entries", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const sourceRoot = path.join(root, "source", "legacy-skill");
+    await writeSkill(sourceRoot, "SKILL.md", "Legacy skill");
+    const manifest = await importSkillPackage(stateDir, sourceRoot);
+    const store = createExpertStore(stateDir);
+    const definition = await store.save(
+      definitionInput("Historical activation", {
+        skillSelections: [
+          { packageId: manifest.packageId, entryPath: manifest.entries[0]!.entryPath },
+        ],
+      }),
+    );
+    const binding = await store.prepareSnapshot(definition.id);
+    const snapshotDir = path.join(stateDir, "experts", "snapshots", binding.snapshotId);
+    const manifestPath = path.join(snapshotDir, "snapshot.json");
+    const stored = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      snapshot: {
+        snapshotId: string;
+        schemaVersion: number;
+        expertId: string;
+        displayName: string;
+        revision: number;
+        description: string;
+        useCases: string;
+        persona: string;
+        outputRequirements: string;
+        skills: Array<{ name: string; path: string }>;
+        skillPolicy: unknown;
+        skillSelections: Array<{
+          packageId: string;
+          entryPath: string;
+          activation?: "startup" | "on-demand";
+        }>;
+        skillsRoot: string;
+        references: string[];
+        connections: ExpertSaveInput["connections"];
+        preferredProvider?: string;
+        mcpBinding: { createdAt: string; [key: string]: unknown };
+        createdAt: string;
+      };
+      resources: Array<{
+        path: string;
+        kind: "file" | "directory";
+        size: number;
+        sha256: string;
+        executable?: boolean;
+      }>;
+    };
+    stored.snapshot.skillSelections[0]!.activation = "startup";
+    const { createdAt: _createdAt, ...mcpBinding } = stored.snapshot.mcpBinding;
+    const payload = {
+      expertId: stored.snapshot.expertId,
+      displayName: stored.snapshot.displayName,
+      revision: stored.snapshot.revision,
+      description: stored.snapshot.description,
+      useCases: stored.snapshot.useCases,
+      persona: stored.snapshot.persona,
+      outputRequirements: stored.snapshot.outputRequirements,
+      skills: stored.snapshot.skills.map(({ name, path: skillPath }) => ({
+        name,
+        path: skillPath,
+      })),
+      skillsRoot: "skills",
+      references: stored.snapshot.references,
+      connections: stored.snapshot.connections,
+      preferredProvider: stored.snapshot.preferredProvider ?? null,
+      resources: [...stored.resources].sort((left, right) => left.path.localeCompare(right.path)),
+      schemaVersion: stored.snapshot.schemaVersion,
+      skillPolicy: stored.snapshot.skillPolicy,
+      skillSelections: stored.snapshot.skillSelections,
+      mcpBinding,
+    };
+    const stableJson = (value: unknown): string => {
+      const sort = (item: unknown): unknown =>
+        Array.isArray(item)
+          ? item.map(sort)
+          : item !== null && typeof item === "object"
+            ? Object.fromEntries(
+                Object.entries(item)
+                  .sort(([left], [right]) => left.localeCompare(right))
+                  .map(([key, child]) => [key, sort(child)]),
+              )
+            : item;
+      return JSON.stringify(sort(value));
+    };
+    stored.snapshot.snapshotId = `exp_${createHash("sha256")
+      .update(stableJson(payload))
+      .digest("hex")}`;
+    const legacySnapshotId = stored.snapshot.snapshotId;
+    const legacyDir = path.join(stateDir, "experts", "snapshots", legacySnapshotId);
+    await unlockTree(snapshotDir);
+    await writeFile(manifestPath, `${JSON.stringify(stored, null, 2)}\n`);
+    await rename(snapshotDir, legacyDir);
+    const legacyManifest = path.join(legacyDir, "snapshot.json");
+    const bytesBeforeRead = await readFile(legacyManifest, "utf8");
+
+    const restored = await store.readSnapshot(legacySnapshotId);
+    expect(restored.skillSelections?.[0]).toMatchObject({ activation: "startup" });
+    expect(restored.skillEntries?.[0]).not.toHaveProperty("activation");
+    expect(await readFile(legacyManifest, "utf8")).toBe(bytesBeforeRead);
+  });
+
+  it("keeps BMad native selections available without a workspace startup preflight", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
     const sourceRoot = path.join(root, "source", "bmad-role");
@@ -762,15 +861,14 @@ describe("ExpertStore", () => {
           {
             packageId: manifest.packageId,
             entryPath: manifest.entries[0]!.entryPath,
-            activation: "startup",
           },
         ],
       }),
     );
 
     const preview = await store.preview({ expertId: expert.id, provider: "codex", cwd: root });
-    expect(preview.status).toBe("blocked");
-    expect(preview.issues.some((issue) => issue.startsWith("BMad workspace:"))).toBe(true);
+    expect(preview.status).toBe("available");
+    expect(preview.issues).toEqual([]);
   });
 
   it("rejects invalid package selections and detects missing or corrupted packages", async () => {
@@ -781,15 +879,14 @@ describe("ExpertStore", () => {
     await writeSkill(sourceRoot, "two/SKILL.md", "Same name");
     const manifest = await importSkillPackage(stateDir, sourceRoot);
     const store = createExpertStore(stateDir);
-    const selections = manifest.entries.map((entry, index) => ({
+    const selections = manifest.entries.map((entry) => ({
       packageId: manifest.packageId,
       entryPath: entry.entryPath,
-      activation: index === 0 ? ("startup" as const) : ("on-demand" as const),
     }));
 
     await expect(
       store.save(definitionInput("Duplicate selected skill", { skillSelections: selections })),
-    ).rejects.toMatchObject({ code: "invalid_resource" });
+    ).resolves.toMatchObject({ skillSelections: selections });
     await expect(
       store.save(
         definitionInput("Missing package", {
@@ -797,7 +894,6 @@ describe("ExpertStore", () => {
             {
               packageId: `pkg_${"f".repeat(64)}`,
               entryPath: "one/SKILL.md",
-              activation: "startup",
             },
           ],
         }),
@@ -813,15 +909,17 @@ describe("ExpertStore", () => {
     ).rejects.toMatchObject({ code: "invalid_input" });
 
     await expect(
-      store.save(
-        definitionInput("Multiple startup skills", {
-          skillSelections: [
-            { ...selections[0]!, activation: "startup" },
-            { ...selections[1]!, activation: "startup" },
-          ],
-        }),
-      ),
-    ).rejects.toMatchObject({ code: "invalid_resource" });
+      store.save({
+        ...definitionInput("Removed activation"),
+        skillSelections: [
+          {
+            packageId: manifest.packageId,
+            entryPath: manifest.entries[0]!.entryPath,
+            activation: "startup",
+          },
+        ],
+      } as unknown as ExpertSaveInput),
+    ).rejects.toMatchObject({ code: "invalid_input" });
 
     const validPackage = await importSkillPackage(
       stateDir,
@@ -837,7 +935,6 @@ describe("ExpertStore", () => {
           {
             packageId: validPackage.packageId,
             entryPath: validPackage.entries[0]!.entryPath,
-            activation: "startup",
           },
         ],
       }),
@@ -877,7 +974,6 @@ describe("ExpertStore", () => {
           {
             packageId: firstPackage.packageId,
             entryPath: firstPackage.entries[0]!.entryPath,
-            activation: "startup",
           },
         ],
       }),
@@ -888,7 +984,6 @@ describe("ExpertStore", () => {
           {
             packageId: secondPackage.packageId,
             entryPath: secondPackage.entries[0]!.entryPath,
-            activation: "startup",
           },
         ],
       }),

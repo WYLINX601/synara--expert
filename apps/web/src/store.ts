@@ -285,6 +285,7 @@ export function setThreadWorkspace(
 // ── Zustand store ────────────────────────────────────────────────────
 
 interface AppStore extends AppState {
+  setShellSnapshotSyncProgress: (generation: number, receivedGeneration: number) => void;
   syncServerShellSnapshot: (snapshot: OrchestrationShellSnapshot) => void;
   syncServerThreadDetail: (thread: ReadModelThread) => void;
   syncServerThreadDetailHotPath: (
@@ -321,6 +322,22 @@ interface AppStore extends AppState {
 
 export const useStore = create<AppStore>((set) => ({
   ...readPersistedState(initialState),
+  setShellSnapshotSyncProgress: (generation, receivedGeneration) =>
+    set((state) => {
+      if (generation < (state.shellSubscriptionGeneration ?? 0)) return state;
+      const nextReceivedGeneration = Math.min(receivedGeneration, generation);
+      if (
+        state.shellSubscriptionGeneration === generation &&
+        state.shellSnapshotReceivedGeneration === nextReceivedGeneration
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        shellSubscriptionGeneration: generation,
+        shellSnapshotReceivedGeneration: nextReceivedGeneration,
+      };
+    }),
   syncServerShellSnapshot: (snapshot) => set((state) => syncServerShellSnapshot(state, snapshot)),
   syncServerThreadDetail: (thread) => set((state) => syncServerThreadDetail(state, thread)),
   syncServerThreadDetailHotPath: (thread, snapshotSequence, historyRevisionSequence) =>

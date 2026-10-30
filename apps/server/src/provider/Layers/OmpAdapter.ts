@@ -20,6 +20,9 @@ import {
   ThreadId,
   TurnId,
 } from "@synara/contracts";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import nodePath from "node:path";
 import {
   Cause,
   DateTime,
@@ -61,13 +64,17 @@ import { ServerConfig, type ServerConfigShape } from "../../config.ts";
 import {
   createExpertSkillApplication,
   isFixedExpertNativeCommandAllowed,
+  projectSelectedSkillReferences,
 } from "../expertSkillCatalog.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
 import { loadProviderPromptImageBlocks } from "../promptAttachments.ts";
 import { settleConcurrentTeardowns } from "../settleConcurrentTeardowns.ts";
 import { readOmpSessionHistory } from "../OmpSessionHistory.ts";
 import { snapshotProviderTurns } from "../snapshotProviderTurns.ts";
-import { appendProviderReferencesPromptBlock } from "../promptReferenceProjection.ts";
+import {
+  appendProviderReferencesPromptBlock,
+  appendProviderSkillReferencesPromptBlock,
+} from "../promptReferenceProjection.ts";
 import {
   ProviderAdapterRequestError,
   ProviderAdapterProcessError,
@@ -133,6 +140,14 @@ import {
   prepareOmpAcpIdleTaskCompat,
   verifyOmpAcpIdleTaskCompatProbe,
 } from "../acp/OmpAcpIdleTaskCompat.ts";
+import {
+  makeOmpSkillEvolutionCompatArgs,
+  OMP_SKILL_EVOLUTION_COMPAT_MARKER_TIMEOUT_MS,
+  prepareOmpSkillEvolutionCompat,
+  verifyOmpSkillEvolutionCompatProbe,
+  type OmpSkillEvolutionCompatLaunch,
+} from "../acp/OmpSkillEvolutionCompat.ts";
+import { SKILL_EVOLUTION_EXECUTION_PURPOSE } from "../skillEvolutionConstraints.ts";
 import { OMP_EXPERT_PROJECTION_VERSION, prepareOmpExpertSession } from "../acp/OmpExpertSession.ts";
 import { makeSessionTeardownGate } from "../acp/SessionTeardownGate.ts";
 import { cancelTurnAndWait } from "../acp/TurnCancellation.ts";
@@ -217,8 +232,10 @@ interface PendingUserInput {
 type OmpNestedTaskLifecycleState = "active" | "active-async" | "completed";
 
 interface OmpSessionContext {
+  readonly fixedExpertSession?: ProviderAdapterSessionStartInput["expertSession"];
   readonly verifyFixedSkills?: () => Effect.Effect<void, unknown>;
   readonly fixedSkillCommands?: ReadonlyArray<string>;
+  readonly skillEvolution: boolean;
   harnessPolicyDelivered?: boolean;
   readonly gatewaySessionLease?: AgentGatewaySessionLease;
   readonly threadId: ThreadId;
@@ -285,6 +302,29 @@ interface OmpSessionContext {
   // guard honors it so a cancelled turn is never prompted.
   pendingTurnInterrupted: boolean;
   stopped: boolean;
+}
+
+interface OmpSkillEvolutionWorkspace {
+  readonly rootDir: string;
+  readonly cwd: string;
+  readonly sessionDir: string;
+  readonly preloadDir: string;
+}
+
+async function makeOmpSkillEvolutionWorkspace(): Promise<OmpSkillEvolutionWorkspace> {
+  const rootDir = await mkdtemp(nodePath.join(tmpdir(), "synara-omp-skill-evolution-"));
+  try {
+    const cwd = nodePath.join(rootDir, "cwd");
+    const sessionDir = nodePath.join(rootDir, "sessions");
+    const preloadDir = nodePath.join(rootDir, "preload");
+    await Promise.all(
+      [cwd, sessionDir, preloadDir].map((directory) => mkdir(directory, { mode: 0o700 })),
+    );
+    return { rootDir, cwd, sessionDir, preloadDir };
+  } catch (cause) {
+    await rm(rootDir, { recursive: true, force: true }).catch(() => {});
+    throw cause;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1018,8 +1058,27 @@ export function makeOmpAdapter(
             });
           }
           yield* sessionTeardownGate.awaitPending(input.threadId);
-          const cwd = resolveOmpSessionCwd(input.cwd, serverConfig);
-          if (cwd === undefined) {
+          const skillEvolution = input.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE;
+          if (
+            skillEvolution &&
+            (input.runtimeMode !== "approval-required" ||
+              input.modelSelection?.provider !== PROVIDER ||
+              input.resumeCursor !== undefined ||
+              input.forkSourceResumeCursor !== undefined ||
+              input.expertSession !== undefined ||
+              input.contextSession !== undefined ||
+              input.additionalDirectories?.length ||
+              input.enableComputerControl ||
+              input.autoApproveSynaraTools)
+          ) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: "Skill extraction requires a registered, isolated OMP model session.",
+            });
+          }
+          let cwd = resolveOmpSessionCwd(input.cwd, serverConfig);
+          if (cwd === undefined && !skillEvolution) {
             return yield* new ProviderAdapterValidationError({
               provider: PROVIDER,
               operation: "startSession",
@@ -1038,12 +1097,46 @@ export function makeOmpAdapter(
           const pendingUserInputs = new Map<ApprovalRequestId, PendingUserInput>();
           const sessionScope = yield* Scope.make("sequential");
           let sessionScopeTransferred = false;
-          const gatewaySessionLease = acquireAgentGatewaySessionLease(
-            agentGatewayCredentials,
-            input.threadId,
-            PROVIDER,
-            input,
-          );
+          const skillEvolutionWorkspace = skillEvolution
+            ? yield* Effect.tryPromise({
+                try: makeOmpSkillEvolutionWorkspace,
+                catch: (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/start",
+                    detail:
+                      cause instanceof Error
+                        ? cause.message
+                        : "OMP Skill extraction could not create its isolated workspace.",
+                  }),
+              })
+            : undefined;
+          if (skillEvolutionWorkspace) {
+            cwd = skillEvolutionWorkspace.cwd;
+            yield* Scope.addFinalizer(
+              sessionScope,
+              Effect.promise(() =>
+                rm(skillEvolutionWorkspace.rootDir, { recursive: true, force: true }).then(
+                  () => undefined,
+                ),
+              ),
+            );
+          }
+          if (cwd === undefined) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "startSession",
+              issue: "cwd is required and no server cwd fallback is available.",
+            });
+          }
+          const gatewaySessionLease = skillEvolution
+            ? undefined
+            : acquireAgentGatewaySessionLease(
+                agentGatewayCredentials,
+                input.threadId,
+                PROVIDER,
+                input,
+              );
           yield* Effect.addFinalizer(() =>
             sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
           );
@@ -1169,6 +1262,71 @@ export function makeOmpAdapter(
             }
           }
 
+          let skillEvolutionCompat: OmpSkillEvolutionCompatLaunch | undefined;
+          if (skillEvolution) {
+            if (!skillEvolutionWorkspace) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/start",
+                detail:
+                  "OMP Skill extraction could not allocate its isolated compatibility workspace.",
+              });
+            }
+            const compatEnv = buildOmpProcessEnv(effectiveSettings);
+            const selectedCli = resolveOmpCliBinaryPath(effectiveSettings.binaryPath, {
+              env: compatEnv,
+              cwd,
+            });
+            skillEvolutionCompat = yield* Effect.tryPromise({
+              try: () =>
+                prepareOmpSkillEvolutionCompat({
+                  cliBinaryPath: selectedCli,
+                  cwd,
+                  env: compatEnv,
+                  privateTempDirectory: skillEvolutionWorkspace.preloadDir,
+                  sessionDir: skillEvolutionWorkspace.sessionDir,
+                }),
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/start",
+                  detail:
+                    cause instanceof Error
+                      ? cause.message
+                      : "OMP Skill extraction compatibility could not be verified.",
+                }),
+            });
+            const compatProbe = yield* runOmpAcpCliCommand({
+              childProcessSpawner,
+              binaryPath: skillEvolutionCompat.bunExecutable,
+              args: [...makeOmpSkillEvolutionCompatArgs(skillEvolutionCompat, ["--version"])],
+              cwd,
+              env: compatEnv,
+            }).pipe(
+              Effect.mapError(
+                () =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/start",
+                    detail: "OMP Skill extraction compatibility version probe failed.",
+                  }),
+              ),
+            );
+            if (
+              !verifyOmpSkillEvolutionCompatProbe({
+                ...compatProbe,
+                expectedMarker: skillEvolutionCompat.probeMarker,
+              })
+            ) {
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/start",
+                detail:
+                  "OMP Skill extraction compatibility did not prove the expected CLI version and session constraints.",
+              });
+            }
+          }
+
           yield* Effect.logInfo("omp.acp.start", {
             marker: OMP_ACP_TRANSPORT_DEBUG_MARKER,
             debugEnv: OMP_ACP_DEBUG_ENV,
@@ -1179,46 +1337,51 @@ export function makeOmpAdapter(
           });
 
           let idleTaskCompatMarkerResolve: (() => void) | undefined;
-          const idleTaskCompatMarkerPromise = idleTaskCompat
+          const requiredCompatMarker =
+            skillEvolutionCompat?.expectedMarker ?? idleTaskCompat?.expectedMarker;
+          const idleTaskCompatMarkerPromise = requiredCompatMarker
             ? new Promise<void>((resolve) => {
                 idleTaskCompatMarkerResolve = resolve;
               })
             : Promise.resolve();
 
-          const acp = yield* makeOmpAcpRuntime({
-            ompSettings: effectiveSettings,
+          const expertSessionSpawn = {
             ...(expertPreparation
               ? {
-                  expertSessionSpawn: {
-                    ...(input.expertSession?.skillPolicy?.discovery === "fixed"
-                      ? { disableExtensions: true }
-                      : {}),
-                    ...(expertPreparation.configOverlayPath
-                      ? { configOverlayPath: expertPreparation.configOverlayPath }
-                      : {}),
-                    ...(expertPreparation.appendSystemPromptPath
-                      ? { appendSystemPromptPath: expertPreparation.appendSystemPromptPath }
-                      : {}),
-                    ...(idleTaskCompat ? { idleTaskCompat } : {}),
-                  },
+                  ...(input.expertSession?.skillPolicy?.discovery === "fixed"
+                    ? { disableExtensions: true }
+                    : {}),
+                  ...(expertPreparation.configOverlayPath
+                    ? { configOverlayPath: expertPreparation.configOverlayPath }
+                    : {}),
+                  ...(expertPreparation.appendSystemPromptPath
+                    ? { appendSystemPromptPath: expertPreparation.appendSystemPromptPath }
+                    : {}),
                 }
               : {}),
+            ...(idleTaskCompat ? { idleTaskCompat } : {}),
+            ...(skillEvolutionCompat ? { disableExtensions: true, skillEvolutionCompat } : {}),
+          };
+
+          const acp = yield* makeOmpAcpRuntime({
+            ompSettings: effectiveSettings,
+            ...(Object.keys(expertSessionSpawn).length > 0 ? { expertSessionSpawn } : {}),
             childProcessSpawner,
             cwd,
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientCapabilities: { elicitation: { form: {} } },
             clientInfo: { name: "Synara", version: "0.0.0" },
             ...acpRuntimeLoggers,
-            ...(idleTaskCompat
+            ...(requiredCompatMarker
               ? {
                   onChildStderrLine: (line: string) => {
-                    if (line.trim() === idleTaskCompat!.expectedMarker) {
+                    if (line.trim() === requiredCompatMarker) {
                       idleTaskCompatMarkerResolve?.();
                     }
                   },
                 }
               : {}),
-            ...(agentGatewayCredentials
+            ...(!skillEvolution && agentGatewayCredentials
               ? {
                   buildMcpServers: (initializeResult: Acp.InitializeResponse) =>
                     buildAcpSynaraMcpServers({
@@ -1383,16 +1546,21 @@ export function makeOmpAdapter(
               onNone: () => Effect.fail(ompAcpTimeoutError("session/start")),
               onSome: Effect.succeed,
             });
-            if (idleTaskCompat) {
+            if (requiredCompatMarker) {
               const markerOption = yield* Effect.promise(() => idleTaskCompatMarkerPromise).pipe(
-                Effect.timeoutOption(OMP_ACP_IDLE_TASK_COMPAT_MARKER_TIMEOUT_MS),
+                Effect.timeoutOption(
+                  skillEvolutionCompat
+                    ? OMP_SKILL_EVOLUTION_COMPAT_MARKER_TIMEOUT_MS
+                    : OMP_ACP_IDLE_TASK_COMPAT_MARKER_TIMEOUT_MS,
+                ),
               );
               if (Option.isNone(markerOption)) {
                 return yield* new ProviderAdapterRequestError({
                   provider: PROVIDER,
                   method: "session/start",
-                  detail:
-                    "OMP fixed native task compatibility marker was missing from the ACP child.",
+                  detail: skillEvolutionCompat
+                    ? "OMP Skill extraction ACP child did not prove its constructed no-tool session."
+                    : "OMP fixed native task compatibility marker was missing from the ACP child.",
                 });
               }
             }
@@ -1462,6 +1630,7 @@ export function makeOmpAdapter(
           };
 
           ctx = {
+            ...(input.expertSession ? { fixedExpertSession: input.expertSession } : {}),
             ...(expertPreparation?.verify
               ? {
                   verifyFixedSkills: expertPreparation.verify,
@@ -1469,6 +1638,7 @@ export function makeOmpAdapter(
                 }
               : {}),
             threadId: input.threadId,
+            skillEvolution,
             ...(gatewaySessionLease ? { gatewaySessionLease } : {}),
             ...(input.lifecycleGeneration !== undefined
               ? { lifecycleGeneration: input.lifecycleGeneration }
@@ -1940,6 +2110,16 @@ export function makeOmpAdapter(
             threadId: input.threadId,
           });
         }
+        if (
+          ctx.skillEvolution &&
+          (input.attachments?.length || input.skills?.length || input.mentions?.length)
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "sendTurn",
+            issue: "Skill extraction accepts only the explicitly submitted text prompt.",
+          });
+        }
         if (ctx.verifyFixedSkills) {
           // ACP handles built-in slash commands before a model turn. An advisor
           // toggle changes its live session without changing the config overlay.
@@ -2016,21 +2196,29 @@ export function makeOmpAdapter(
           ),
         );
         const promptParts: Array<Acp.ContentBlock> = [];
-        const promptText = appendFileAttachmentsPromptBlock({
-          text: appendProviderReferencesPromptBlock({
-            text: input.input?.trim()
-              ? withAcpPlanModePrompt({
-                  text: input.input.trim(),
-                  interactionMode,
-                  promptPrefix: OMP_PLAN_MODE_PROMPT_PREFIX,
-                })
-              : undefined,
-            mentions: input.mentions,
-          }),
-          attachments: input.attachments,
-          attachmentsDir: serverConfig.attachmentsDir,
-          include: "all-files",
-        });
+        const selectedSkills = ctx.skillEvolution
+          ? []
+          : projectSelectedSkillReferences(ctx.fixedExpertSession, input.skills);
+        const promptText = ctx.skillEvolution
+          ? input.input?.trim()
+          : appendFileAttachmentsPromptBlock({
+              text: appendProviderSkillReferencesPromptBlock({
+                text: appendProviderReferencesPromptBlock({
+                  text: input.input?.trim()
+                    ? withAcpPlanModePrompt({
+                        text: input.input.trim(),
+                        interactionMode,
+                        promptPrefix: OMP_PLAN_MODE_PROMPT_PREFIX,
+                      })
+                    : undefined,
+                  mentions: input.mentions,
+                }),
+                skills: selectedSkills,
+              }),
+              attachments: input.attachments,
+              attachmentsDir: serverConfig.attachmentsDir,
+              include: "all-files",
+            });
         if (promptText) {
           promptParts.push({
             type: "text",
@@ -2054,10 +2242,9 @@ export function makeOmpAdapter(
             issue: "Turn requires non-empty text or attachments.",
           });
         }
-        const harnessPolicy = takeOmpSynaraHarnessPolicyTextPart(
-          ctx,
-          agentGatewayCredentials !== undefined,
-        );
+        const harnessPolicy = ctx.skillEvolution
+          ? null
+          : takeOmpSynaraHarnessPolicyTextPart(ctx, agentGatewayCredentials !== undefined);
         if (harnessPolicy) {
           promptParts.unshift(harnessPolicy);
         }
@@ -2438,6 +2625,13 @@ export function makeOmpAdapter(
 
     const forkThread: NonNullable<OmpAdapterShape["forkThread"]> = (input) =>
       Effect.gen(function* () {
+        if (sessions.get(input.sourceThreadId)?.skillEvolution) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "forkThread",
+            issue: "Skill extraction sessions cannot create native OMP forks.",
+          });
+        }
         if (
           input.expertSession?.skillPolicy ||
           sessions.get(input.sourceThreadId)?.verifyFixedSkills

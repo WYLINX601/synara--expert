@@ -16,7 +16,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SYNARA_COMPUTER_TOOL_NAMES } from "../../agentGateway/computerToolPermission.ts";
 import {
   applyPiRuntimeApiKeysFromEnvironment,
-  createPiModelRuntime,
+  createPiModelRuntime as createPiModelRuntimeImpl,
   ensurePiAnthropicCatalogModels,
   getPiDiscoverableModels,
   findModelInRegistry,
@@ -33,6 +33,23 @@ import {
   piResourceLoaderOptionsForSession,
 } from "./PiAdapter";
 import { makePiStoragePaths } from "../piStoragePaths.ts";
+import {
+  SKILL_EVOLUTION_EXECUTION_PURPOSE,
+  SKILL_EVOLUTION_SYSTEM_PROMPT,
+} from "../skillEvolutionConstraints.ts";
+
+// Model discovery fixtures must never repair permissions in the user's data home.
+const createPiModelRuntime = (...args: Parameters<typeof createPiModelRuntimeImpl>) => {
+  const [agentDir, sdk, signal, environment, instanceId, paths] = args;
+  return createPiModelRuntimeImpl(
+    agentDir,
+    sdk,
+    signal,
+    environment,
+    instanceId,
+    paths ?? { stateDir: path.join(agentDir, "provider-test-state"), homeDir: agentDir },
+  );
+};
 
 async function withoutAmbientAnthropicAuthToken<T>(action: () => Promise<T>): Promise<T> {
   vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
@@ -247,6 +264,37 @@ describe("Pi extension mode in-flight reservations", () => {
 });
 
 describe("Pi Expert resource loading", () => {
+  it("uses only the Skill evolution system prompt and disables every ambient resource", () => {
+    const options = piResourceLoaderOptionsForSession({
+      executionPurpose: SKILL_EVOLUTION_EXECUTION_PURPOSE,
+      expertSession: {
+        snapshotId: "must-not-load",
+        persona: "Must not be inherited.",
+        skillsRoot: "/tmp/skills",
+        skills: [{ name: "secret", path: "/tmp/skills/secret/SKILL.md" }],
+        references: [],
+      },
+      contextSession: {
+        snapshotId: "must-not-load-context",
+        snapshotHash: "context-hash",
+        text: "Must not be inherited.",
+        hasContent: true,
+      },
+    });
+
+    expect(options).toMatchObject({
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+      systemPrompt: SKILL_EVOLUTION_SYSTEM_PROMPT,
+      appendSystemPrompt: [],
+    });
+    expect(options).not.toHaveProperty("additionalSkillPaths");
+    expect(options?.appendSystemPrompt?.join("\n")).not.toContain("Must not be inherited");
+  });
+
   it("submits Expert V2 instructions without exposing the package parent to native discovery", () => {
     const options = piResourceLoaderOptionsForSession({
       expertSession: {
@@ -259,7 +307,7 @@ describe("Pi Expert resource loading", () => {
           {
             packageId: `pkg_${"d".repeat(64)}`,
             entryPath: "skills/reviewer/SKILL.md",
-            activation: "startup",
+
             name: "reviewer",
             description: "Review safely.",
             path: "/state/pkg/content/skills/reviewer/SKILL.md",

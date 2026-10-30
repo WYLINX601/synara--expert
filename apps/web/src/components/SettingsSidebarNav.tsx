@@ -24,6 +24,7 @@ import {
   type SettingsSearchContext,
   type SettingsSearchEntry,
 } from "../settingsSearchIndex";
+import type { WorkbenchSettingsSearchRoute } from "../workbench/registry";
 import {
   SIDEBAR_ROW_HOVER_CLASS_NAME,
   SIDEBAR_ROW_IDLE_TEXT_CLASS_NAME,
@@ -91,6 +92,7 @@ export function SettingsSidebarNav(props: {
     section: SettingsSectionId,
     options?: { target?: string; query?: Readonly<Record<string, string>> },
   ) => void;
+  onSelectRoute?: (route: WorkbenchSettingsSearchRoute) => void;
   /**
    * Which conditionally-rendered rows exist on this machine, so the search
    * cannot offer a row the panel does not draw. Passed in rather than read here:
@@ -110,6 +112,11 @@ export function SettingsSidebarNav(props: {
   );
 
   const handleSelectResult = (entry: SettingsSearchEntry) => {
+    if (entry.route && props.onSelectRoute) {
+      props.onSelectRoute(entry.route);
+      setQuery("");
+      return;
+    }
     const target = settingsSearchEntryTarget(entry);
     const options = {
       ...(target ? { target } : {}),

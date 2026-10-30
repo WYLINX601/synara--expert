@@ -19,8 +19,11 @@ type WorkbenchSettingsSearchEntry = {
   readonly query?: Readonly<Record<string, string>>;
 };
 
+export type WorkbenchSettingsSearchRoute = "/experts";
+
 type WorkbenchSettingsSearch = {
   readonly keywords: string;
+  readonly route?: WorkbenchSettingsSearchRoute;
   readonly entries?: readonly WorkbenchSettingsSearchEntry[];
 };
 
@@ -40,6 +43,7 @@ const expertsModule = {
     search: {
       keywords:
         "expert specialist reusable role persona skills references provider model new task agent configuration",
+      route: "/experts",
       entries: [] as readonly WorkbenchSettingsSearchEntry[],
     } satisfies WorkbenchSettingsSearch,
   },

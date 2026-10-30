@@ -26,7 +26,11 @@ import type { ProviderExpertSession, ProviderSkillReference } from "@synara/cont
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { Effect, Result } from "effect";
 import { stringify as stringifyYaml } from "yaml";
-import { createFixedSkillProjection, verifyProjectedSkillAssembly } from "../fixedSkillProjection";
+import {
+  createFixedSkillProjection,
+  verifyProjectedSkillAssembly,
+  type FixedSkillProjection,
+} from "../fixedSkillProjection";
 import { invalidateNativeSkillAssemblyVerification } from "../expertSkillCatalog";
 
 export const OMP_EXPERT_PROJECTION_VERSION = "omp-acp-native-v1" as const;
@@ -143,6 +147,8 @@ interface NativeSkill {
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
+
+const ordinal = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
 
 function asStringArray(value: unknown): ReadonlyArray<string> | undefined {
   if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
@@ -469,6 +475,71 @@ function hasSkillWarningForPath(warnings: ReadonlyArray<unknown>, skillPath: str
     }
   }
   return false;
+}
+
+function assertUniqueOmpSkillNames(projection: FixedSkillProjection): void {
+  const counts = new Map<string, number>();
+  for (const entry of projection.entries) counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1);
+  const duplicates = [...counts]
+    .filter(([, count]) => count > 1)
+    .map(([name]) => name)
+    .toSorted();
+  if (duplicates.length > 0)
+    throw new Error(
+      `OMP skills.includeSkills cannot disambiguate selected fixed Skills with duplicate names: ${duplicates.join(", ")}. Choose unique Skill names.`,
+    );
+}
+
+function ompNativeSkillContainerRoots(projection: FixedSkillProjection): string[] {
+  const packages = new Map(projection.packages.map((pkg) => [pkg.packageId, pkg]));
+  const roots = new Set<string>();
+  for (const entry of projection.entries) {
+    const pkg = packages.get(entry.packageId);
+    if (!pkg) throw new Error(`OMP fixed Skill package ${entry.packageId} is missing.`);
+    const parts = entry.entryPath.split("/");
+    if (parts.at(-1) !== "SKILL.md")
+      throw new Error(
+        `unsupported_entry_scope: OMP requires a package-relative SKILL.md entry, got "${entry.entryPath}".`,
+      );
+    const root = nodePath.resolve(pkg.sourceRoot);
+    const packageRoot = nodePath.dirname(root);
+    // OMP scans Skill directories one level below each custom directory. A
+    // root-level SKILL.md is the package content directory itself, so its
+    // parent package directory is the exact native container.
+    const container =
+      parts.length === 1 ? packageRoot : nodePath.resolve(root, ...parts.slice(0, -2));
+    const relative = nodePath.relative(packageRoot, container);
+    if (
+      relative === ".." ||
+      relative.startsWith(`..${nodePath.sep}`) ||
+      nodePath.isAbsolute(relative)
+    )
+      throw new Error(
+        `unsupported_entry_scope: OMP Skill entry "${entry.entryPath}" has no safe native container.`,
+      );
+    roots.add(container);
+  }
+  return [...roots].toSorted(ordinal);
+}
+
+async function rejectOmpNameCollisions(
+  projection: FixedSkillProjection,
+  skills: ReadonlyArray<NativeSkill>,
+): Promise<void> {
+  const selectedByName = new Map<string, ReadonlyArray<string>>();
+  for (const entry of projection.entries) {
+    const paths = selectedByName.get(entry.name) ?? [];
+    selectedByName.set(entry.name, [...paths, await realpath(entry.path)]);
+  }
+  for (const skill of skills) {
+    const selectedPaths = selectedByName.get(skill.name);
+    if (!selectedPaths) continue;
+    const actualPath = await realpath(skill.filePath).catch(() => undefined);
+    if (actualPath !== undefined && selectedPaths.includes(actualPath)) continue;
+    throw new Error(
+      `OMP cannot disambiguate the native Skill name "${skill.name}" because a different entry with that name is active. Choose a unique Skill name or adjust skills.includeSkills.`,
+    );
+  }
 }
 
 export function prepareOmpExpertSession(
@@ -805,6 +876,7 @@ function prepareFixedOmpExpertSession(
       mkdtemp(nodePath.join(input.tempDirectory ?? nodeOs.tmpdir(), OMP_EXPERT_TEMP_PREFIX)),
     );
     const projection = yield* Effect.promise(() => createFixedSkillProjection(temp!, session));
+    assertUniqueOmpSkillNames(projection);
     const configOverlayPath = nodePath.join(temp, "config.yml"),
       appendSystemPromptPath = nodePath.join(temp, "APPEND_SYSTEM.md");
     const skills = {
@@ -816,7 +888,7 @@ function prepareFixedOmpExpertSession(
       enablePiProject: false,
       enableAgentsUser: false,
       enableAgentsProject: false,
-      customDirectories: [...projection.skillRoots],
+      customDirectories: ompNativeSkillContainerRoots(projection),
       includeSkills: projection.entries.length
         ? projection.entries.map((entry) => entry.name)
         : ["__synara_empty_fixed_assembly__"],
@@ -867,8 +939,8 @@ function prepareFixedOmpExpertSession(
           throw new Error("OMP did not attest the fixed assembly and native task depth.");
         const result = yield* input.runCli(["skill", "list", input.cwd, "--json"], input.cwd, env),
           parsed = result.exitCode === 0 ? parseNativeSkillList(result.stdout) : undefined;
-        if (!parsed || parsed.warnings.length)
-          throw new Error("OMP could not resolve the exact fixed Skill assembly without warnings.");
+        if (!parsed) throw new Error("OMP could not resolve the exact fixed Skill assembly.");
+        yield* Effect.promise(() => rejectOmpNameCollisions(projection, parsed.skills));
         yield* Effect.promise(async () => {
           await verifyReadOnlyTempFile(configOverlayPath, overlay);
           await verifyReadOnlyTempFile(appendSystemPromptPath, projectedInstructions);

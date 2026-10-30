@@ -28,7 +28,6 @@ const flags: ManagementCliFlagValues = {
   expertIds: undefined,
   skillId: [],
   skillIds: undefined,
-  createdBy: undefined,
   sort: undefined,
   direction: undefined,
   expectedRevision: undefined,
@@ -39,7 +38,9 @@ const flags: ManagementCliFlagValues = {
   overwriteLocalEdits: false,
   entry: undefined,
   duplicate: undefined,
-  activation: undefined,
+  allowEvolution: undefined,
+  selectionScope: undefined,
+  resourceMode: undefined,
   instanceId: undefined,
   flavor: undefined,
 };
@@ -47,11 +48,49 @@ const flags: ManagementCliFlagValues = {
 describe("Skill management CLI parser", () => {
   it.each([
     ["unknown flag", ["skill", "list", "--bogus"], /Unrecognized flag: --bogus/u],
+    [
+      "removed activation flag",
+      ["expert", "skills", "add", "expert-a", "--activation", "startup"],
+      /Unrecognized flag: --activation/u,
+    ],
+    [
+      "removed creator flag",
+      ["skill", "list", "--created-by", "actor"],
+      /Unrecognized flag: --created-by/u,
+    ],
     ["invalid integer", ["skill", "update", "--expected-revision", "abc"], /integer/u],
     ["invalid choice", ["expert", "skills", "list", "--flavor", "other"], /Expected one of/u],
+    [
+      "invalid evolution permission",
+      ["expert", "skills", "add", "expert-a", "--allow-evolution", "maybe"],
+      /true, false/u,
+    ],
+    [
+      "invalid selection scope",
+      ["expert", "skills", "add", "--selection-scope", "all"],
+      /entry, package/u,
+    ],
+    [
+      "invalid resource mode",
+      ["expert", "skills", "add", "--resource-mode", "writable"],
+      /shared-readonly, run-private/u,
+    ],
     ["missing value", ["skill", "import", "--path"], /Missing value for flag --path/u],
   ])("preflights management parser failures: %s", (_name, args, message) => {
     expect(parseManagementCliFlagFailure(args as ReadonlyArray<string>)?.message).toMatch(message);
+  });
+
+  it.each(["true", "false"] as const)("accepts explicit --allow-evolution %s", (value) => {
+    expect(
+      parseManagementCliFlagFailure([
+        "expert",
+        "skills",
+        "set",
+        "expert-a",
+        "--allow-evolution",
+        value,
+      ]),
+    ).toBeUndefined();
   });
 
   it("parses Skill file and Expert binding command paths", () => {
@@ -76,6 +115,29 @@ describe("Skill management CLI parser", () => {
       operation: { area: "expert-skills", action: "add" },
       positional: ["expert-a"],
     });
+
+    expect(() =>
+      parseManagementCliCommand({
+        namespace: "expert",
+        args: ["skills", "convert", "expert-a"],
+        flags,
+      }),
+    ).toThrow(ManagementCliUsageError);
+    expect(
+      parseManagementCliFlagFailure(["expert", "skills", "add", "--expected-plan-digest", "a"])
+        ?.message,
+    ).toMatch(/Unrecognized flag: --expected-plan-digest/u);
+    expect(
+      parseManagementCliFlagFailure([
+        "expert",
+        "skills",
+        "add",
+        "--selection-scope",
+        "package",
+        "--resource-mode",
+        "run-private",
+      ]),
+    ).toBeUndefined();
   });
 
   it("deduplicates comma-separated and repeated filters while preserving order", () => {

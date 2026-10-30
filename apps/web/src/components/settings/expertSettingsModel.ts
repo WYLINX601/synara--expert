@@ -1,5 +1,4 @@
-import type { ExpertDefinition, ExpertSaveInput } from "@synara/contracts";
-import { expertSkillPathKey, validateExpertSkillReferences } from "./expertSkillsSettingsModel";
+import type { ExpertDefinition, ExpertSaveInput, ExpertSkillBinding } from "@synara/contracts";
 
 export type ExpertDraftField =
   | "name"
@@ -8,8 +7,6 @@ export type ExpertDraftField =
   | "persona"
   | "outputRequirements"
   | "preferredProvider"
-  | "skills"
-  | "skillSelections"
   | "skillBindings"
   | "references"
   | "connections";
@@ -19,13 +16,52 @@ export type ExpertDraftIssue = Readonly<{
   code: "required" | "too_long" | "too_many" | "duplicate" | "invalid";
   message: string;
   index?: number;
-  subfield?: "name" | "path";
 }>;
 
 const REFERENCE_TEXT_LIMIT = 32_000;
 
-function referenceKey(reference: string): string {
-  return expertSkillPathKey(reference);
+function copySkillBinding(binding: ExpertSkillBinding): ExpertSkillBinding {
+  return {
+    skillId: binding.skillId,
+    enabled: binding.enabled,
+    ...(binding.allowEvolution === undefined ? {} : { allowEvolution: binding.allowEvolution }),
+    ...(binding.selectionScope === undefined ? {} : { selectionScope: binding.selectionScope }),
+    ...(binding.resourceMode === undefined ? {} : { resourceMode: binding.resourceMode }),
+  };
+}
+
+function referenceKey(path: string): string {
+  const slashPath = path.trim().replaceAll("\\", "/");
+  if (!slashPath) return "";
+
+  const isUnc = slashPath.startsWith("//");
+  const drive = slashPath.match(/^([A-Za-z]:)(?:\/|$)/u)?.[1];
+  const isAbsolute = !isUnc && !drive && slashPath.startsWith("/");
+  const prefixLength = isUnc
+    ? 2
+    : drive
+      ? drive.length + (slashPath[2] === "/" ? 1 : 0)
+      : isAbsolute
+        ? 1
+        : 0;
+  const remainder = slashPath.slice(prefixLength);
+  const segments: string[] = [];
+
+  for (const segment of remainder.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      if (segments.length > 0 && segments.at(-1) !== "..") {
+        segments.pop();
+      } else if (!isAbsolute && !isUnc && !drive) {
+        segments.push(segment);
+      }
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  const normalizedPrefix = isUnc ? "//" : drive ? `${drive.toLowerCase()}/` : isAbsolute ? "/" : "";
+  return normalizedPrefix + segments.join("/");
 }
 
 export function normalizeExpertReferences(references: readonly string[]): string[] {
@@ -60,13 +96,8 @@ export function expertDraftFromDefinition(expert?: ExpertDefinition): ExpertSave
     useCases: expert?.useCases ?? "",
     persona: expert?.persona ?? "",
     outputRequirements: expert?.outputRequirements ?? "",
-    skills: expert?.skills.map((skill) => ({ ...skill })) ?? [],
-    ...(!expert || expert.skillBindings !== undefined
-      ? { skillBindings: expert?.skillBindings?.map((binding) => ({ ...binding })) ?? [] }
-      : {}),
-    ...(expert?.skillSelections === undefined
-      ? {}
-      : { skillSelections: expert.skillSelections.map((selection) => ({ ...selection })) }),
+    skills: [],
+    skillBindings: expert?.skillBindings?.map(copySkillBinding) ?? [],
     references: expert?.references.map((reference) => reference) ?? [],
     connections:
       expert?.connections.map((connection) => ({ ...connection, tools: [...connection.tools] })) ??
@@ -85,16 +116,8 @@ export function expertSaveInputForDraft(
     useCases: draft.useCases.trim(),
     persona: draft.persona.trim(),
     outputRequirements: draft.outputRequirements.trim(),
-    skills:
-      draft.skillSelections === undefined
-        ? draft.skills.map((skill) => ({ name: skill.name.trim(), path: skill.path.trim() }))
-        : [],
-    ...(draft.skillBindings === undefined
-      ? {}
-      : { skillBindings: draft.skillBindings.map((binding) => ({ ...binding })) }),
-    ...(draft.skillSelections === undefined
-      ? {}
-      : { skillSelections: draft.skillSelections.map((selection) => ({ ...selection })) }),
+    skills: [],
+    skillBindings: (draft.skillBindings ?? []).map(copySkillBinding),
     references: normalizeExpertReferences(draft.references),
     connections: draft.connections.map((connection) => ({
       ...connection,
@@ -114,9 +137,7 @@ export function expertDraftsEqual(a: ExpertSaveInput, b: ExpertSaveInput): boole
     a.persona === b.persona &&
     a.outputRequirements === b.outputRequirements &&
     a.preferredProvider === b.preferredProvider &&
-    JSON.stringify(a.skills) === JSON.stringify(b.skills) &&
-    JSON.stringify(a.skillSelections) === JSON.stringify(b.skillSelections) &&
-    JSON.stringify(a.skillBindings) === JSON.stringify(b.skillBindings) &&
+    JSON.stringify(a.skillBindings ?? []) === JSON.stringify(b.skillBindings ?? []) &&
     JSON.stringify(a.references) === JSON.stringify(b.references) &&
     JSON.stringify(a.connections) === JSON.stringify(b.connections)
   );
@@ -143,64 +164,18 @@ export function validateExpertDraft(draft: ExpertSaveInput): ExpertDraftIssue[] 
   addLengthIssue("persona", draft.persona, REFERENCE_TEXT_LIMIT);
   addLengthIssue("outputRequirements", draft.outputRequirements, REFERENCE_TEXT_LIMIT);
 
-  if (draft.skills.length > 100) {
-    issues.push({ field: "skills", code: "too_many", message: "最多可配置 100 项技能。" });
-  }
   if (draft.skillBindings !== undefined) {
     if (
       draft.skillBindings.length > 100 ||
       new Set(draft.skillBindings.map((binding) => binding.skillId)).size !==
-        draft.skillBindings.length ||
-      draft.skillBindings.filter((binding) => binding.enabled && binding.activation === "startup")
-        .length > 1
+        draft.skillBindings.length
     )
       issues.push({
         field: "skillBindings",
         code: "invalid",
-        message: "技能绑定须唯一，最多100个，且最多启用一个启动技能。",
+        message: "技能绑定须唯一，最多100个。",
       });
   }
-  if (draft.skillSelections !== undefined) {
-    if (draft.skillSelections.length > 100) {
-      issues.push({
-        field: "skillSelections",
-        code: "too_many",
-        message: "最多可选择 100 个版本包技能入口。",
-      });
-    }
-    if (
-      draft.skillSelections.filter((selection) => selection.activation === "startup").length > 1
-    ) {
-      issues.push({
-        field: "skillSelections",
-        code: "invalid",
-        message: "最多只能设置一个启动技能。",
-      });
-    }
-    const selectionKeys = new Set<string>();
-    draft.skillSelections.forEach((selection, index) => {
-      const key = `${selection.packageId}\u0000${selection.entryPath}`;
-      if (selectionKeys.has(key)) {
-        issues.push({
-          field: "skillSelections",
-          code: "duplicate",
-          message: "该版本包入口已选择。",
-          index,
-        });
-      }
-      selectionKeys.add(key);
-    });
-  }
-  for (const skillIssue of validateExpertSkillReferences(draft.skills)) {
-    issues.push({
-      field: "skills",
-      code: skillIssue.message.includes("重复") ? "duplicate" : "required",
-      message: skillIssue.message,
-      index: skillIssue.index,
-      subfield: skillIssue.field,
-    });
-  }
-
   if (draft.references.length > 100) {
     issues.push({ field: "references", code: "too_many", message: "最多可配置 100 条参考资料。" });
   }

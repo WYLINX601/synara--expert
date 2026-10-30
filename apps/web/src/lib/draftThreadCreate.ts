@@ -28,6 +28,7 @@ import { isRequestOutcomeUnknown } from "./requestOutcome";
 
 export interface DraftThreadInput {
   projectId: ProjectId;
+  expertId?: string;
   prompt: string;
   /** Optional scratch composer whose full transferable content seeds the new thread. */
   sourceComposerThreadId?: ThreadId;
@@ -37,6 +38,8 @@ export interface DraftThreadInput {
   envMode: DraftThreadEnvMode;
   /** Absolute folder the agent works in when it differs from the project root. */
   workingDirectory?: string | null;
+  branch?: string | null;
+  worktreePath?: string | null;
 }
 
 /**
@@ -49,10 +52,13 @@ export function createDraftThread(input: DraftThreadInput): ThreadId {
   const threadId = newThreadId();
   store.registerDraftThread(threadId, {
     projectId: input.projectId,
+    ...(input.expertId !== undefined ? { expertId: input.expertId } : {}),
     envMode: input.envMode,
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,
     ...(input.workingDirectory ? { workingDirectory: input.workingDirectory } : {}),
+    ...(input.branch !== undefined ? { branch: input.branch } : {}),
+    ...(input.worktreePath !== undefined ? { worktreePath: input.worktreePath } : {}),
   });
   // The source can be gone by now (its form unmounted while the create was pending);
   // copying from it would leave the new chat empty, so fall back to the prompt.

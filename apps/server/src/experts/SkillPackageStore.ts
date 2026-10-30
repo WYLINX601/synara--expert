@@ -1,19 +1,25 @@
 import { randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import {
   ExpertSkillSelection,
+  NonNegativeInt,
   SkillEntryPath,
   SkillPackage as SkillPackageSchema,
   SkillPackageId,
   SkillPackageImportInput,
   SkillPackageImportResult as SkillPackageImportResultSchema,
   SkillPackagePreviewInput,
+  SkillPackageResource as SkillPackageResourceSchema,
   SkillPackageSource as SkillPackageSourceSchema,
   SkillPackageUpdatePreviewInput,
   SkillSourceId,
+  TrimmedNonEmptyString,
+  type PinnedExpertSkillSelection,
   type ResolvedExpertSkillEntry,
+  type SkillDiagnostic,
   type SkillEntry,
   type SkillPackage,
   type SkillPackageImportResult,
@@ -37,15 +43,19 @@ import {
 
 const MAX_BYTES = 100 * 1024 * 1024;
 const MAX_ENTRIES = 5_000;
+const MAX_PACKAGE_MANIFEST_BYTES = 100 * 1024 * 1024;
 const PREVIEW_TTL_MS = 15 * 60 * 1_000;
 const MAX_PREVIEWS = 100;
 const ordinal = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
-const LEGACY_NATIVE_METADATA_REASON =
-  "Provider-native context, agent, model or hooks semantics are unsupported by the unified index.";
-const LEGACY_INVALID_YAML_NATIVE_REASON =
-  "Provider-native execution metadata is unsupported by the unified index.";
-const LEGACY_INVALID_YAML_ISSUE =
-  "Invalid YAML frontmatter; scalar metadata uses the existing discovery parser.";
+const SkillPackageContentManifest = Schema.Struct({
+  schemaVersion: Schema.Literal(1),
+  packageId: SkillPackageId,
+  rootName: TrimmedNonEmptyString,
+  resources: Schema.Array(SkillPackageResourceSchema).check(Schema.isMaxLength(MAX_ENTRIES)),
+  fileCount: NonNegativeInt,
+  totalBytes: NonNegativeInt,
+});
+type SkillPackageContentManifest = typeof SkillPackageContentManifest.Type;
 const SkillPackageRemovalRecord = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   packageId: SkillPackageId,
@@ -100,13 +110,17 @@ export interface SkillPackageStore {
   previewRemoval(packageId: string): Promise<{ packageId: string; references: string[] }>;
   remove(packageId: string): Promise<void>;
   resolveSelections(
-    selections: ReadonlyArray<typeof ExpertSkillSelection.Type>,
+    selections: ReadonlyArray<typeof PinnedExpertSkillSelection.Type>,
   ): Promise<ResolvedExpertSkillEntry[]>;
 }
 
 function assertPortablePath(relative: string): void {
+  const windowsTarget = process.platform === "win32";
   if (
+    !relative ||
     relative.length > 4_096 ||
+    path.posix.isAbsolute(relative) ||
+    path.win32.isAbsolute(relative) ||
     relative
       .split("/")
       .some(
@@ -114,9 +128,11 @@ function assertPortablePath(relative: string): void {
           !segment ||
           segment === "." ||
           segment === ".." ||
-          /[\\\p{Cc}:<>"|?*]/u.test(segment) ||
-          /[. ]$/u.test(segment) ||
-          /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(segment),
+          /[\\\p{Cc}]/u.test(segment) ||
+          (windowsTarget &&
+            (/[<>:"|?*]/u.test(segment) ||
+              /[. ]$/u.test(segment) ||
+              /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(segment))),
       )
   ) {
     throw new SkillPackageStoreError(`Non-portable package path: ${relative}`, "invalid_resource");
@@ -133,16 +149,19 @@ function manifestFromResources(
   const entries: SkillEntry[] = [];
   let fileCount = 0;
   let totalBytes = 0;
+  const windowsTarget = process.platform === "win32";
   for (const resource of collected) {
     assertPortablePath(resource.path);
-    const key = resource.path.normalize("NFC").toLowerCase();
-    if (seen.has(key)) {
-      throw new SkillPackageStoreError(
-        `Case or Unicode path collision: ${resource.path}`,
-        "invalid_resource",
-      );
+    if (windowsTarget) {
+      const key = resource.path.normalize("NFC").toLowerCase();
+      if (seen.has(key)) {
+        throw new SkillPackageStoreError(
+          `Case or Unicode path collision: ${resource.path}`,
+          "invalid_resource",
+        );
+      }
+      seen.add(key);
     }
-    seen.add(key);
     const { path: resourcePath, kind, size, sha256, executable } = resource;
     resources.push({
       path: resourcePath,
@@ -157,33 +176,120 @@ function manifestFromResources(
     if (path.posix.basename(resourcePath) !== "SKILL.md") continue;
     const entryPath = resourcePath.slice("content/".length);
     Schema.decodeUnknownSync(SkillEntryPath)(entryPath);
-    const metadata = parseSkillFrontmatter(resource.bytes!.toString("utf8"));
+    const markdown = resource.bytes!.toString("utf8");
+    const metadata = parseSkillFrontmatter(markdown);
     const issues: string[] = [];
+    const diagnostics: SkillDiagnostic[] = [];
     const metadataName = typeof metadata.name === "string" ? metadata.name : "";
     const directoryName = path.posix.basename(path.posix.dirname(resourcePath));
-    const name = metadataName || (directoryName === "content" ? rootName : directoryName);
-    if (!metadataName) issues.push("Missing frontmatter name; the directory name is used.");
+    const fallbackName = directoryName === "content" ? rootName : directoryName;
+    const boundedFallbackName = fallbackName.slice(0, 200).trim() || "Skill";
+    const validMetadataName = metadataName.trim().length > 0 && metadataName.length <= 200;
+    const name = validMetadataName ? metadataName : boundedFallbackName;
+    if (!metadataName) {
+      issues.push("Missing frontmatter name; the directory name is used.");
+    } else if (metadataName.length > 200) {
+      diagnostics.push({
+        code: "metadata_name_too_long",
+        severity: "warning",
+        message: "Frontmatter name exceeds 200 characters; a bounded directory name is shown.",
+        entryPath,
+      });
+    }
     if (metadataName && metadataName !== directoryName && directoryName !== "content")
       issues.push("Skill name differs from its directory name; original files are preserved.");
-    const description = typeof metadata.description === "string" ? metadata.description : "";
+    const parsedDescription = typeof metadata.description === "string" ? metadata.description : "";
+    const description = parsedDescription.slice(0, 16_000);
     if (!description) issues.push("Missing frontmatter description.");
-    const frontmatterBlock =
-      /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\s|$)/u.exec(resource.bytes!.toString("utf8"))?.[1] ?? "";
+    if (parsedDescription.length > 16_000) {
+      diagnostics.push({
+        code: "metadata_description_too_long",
+        severity: "warning",
+        message:
+          "Frontmatter description exceeds 16,000 characters; the displayed value is bounded.",
+        entryPath,
+      });
+    }
+    const frontmatterBlock = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\s|$)/u.exec(markdown)?.[1] ?? "";
+    if (/^---\s*\r?\n/u.test(markdown) && !frontmatterBlock) {
+      diagnostics.push({
+        code: "invalid_frontmatter_delimiters",
+        severity: "warning",
+        message:
+          "Frontmatter delimiters are incomplete; bounded discovery-compatible metadata is shown.",
+        entryPath,
+      });
+    }
+    if (frontmatterBlock) {
+      try {
+        const parsed: unknown = YAML.parse(frontmatterBlock, {
+          uniqueKeys: false,
+          logLevel: "error",
+        });
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+          const recognized = new Set([
+            "name",
+            "description",
+            "license",
+            "compatibility",
+            "metadata",
+            "allowed-tools",
+            "disable-model-invocation",
+            "user-invocable",
+          ]);
+          const unknown = Object.keys(parsed).filter((key) => !recognized.has(key));
+          if (unknown.length > 0) {
+            diagnostics.push({
+              code: "unknown_frontmatter_fields",
+              severity: "warning",
+              message: `Unrecognized frontmatter fields: ${unknown
+                .slice(0, 5)
+                .map((key) => key.slice(0, 80))
+                .join(", ")}${unknown.length > 5 ? ", …" : ""}`,
+              entryPath,
+            });
+          }
+          for (const field of ["name", "description"] as const) {
+            const value = (parsed as Record<string, unknown>)[field];
+            if (value !== undefined && typeof value !== "string") {
+              diagnostics.push({
+                code: "invalid_frontmatter_value",
+                severity: "warning",
+                message: `Frontmatter field ${field} must be a string; discovery-compatible fallback metadata is shown.`,
+                entryPath,
+              });
+            }
+          }
+        } else if (parsed !== null && parsed !== undefined) {
+          diagnostics.push({
+            code: "invalid_frontmatter_shape",
+            severity: "warning",
+            message:
+              "Frontmatter must be a YAML mapping; discovery-compatible fallback metadata is shown.",
+            entryPath,
+          });
+        }
+      } catch {
+        const issue = "Invalid YAML frontmatter; discovery-compatible fallback metadata is shown.";
+        issues.push(issue);
+        diagnostics.push({
+          code: "invalid_frontmatter_yaml",
+          severity: "warning",
+          message: issue,
+          entryPath,
+        });
+      }
+    }
     if (/^allowed-tools\s*:/mu.test(frontmatterBlock))
       issues.push(
         "allowed-tools grants no permissions; host approval and access rules still apply.",
       );
-    if (name.length > 200 || description.length > 16_000) {
-      throw new SkillPackageStoreError(
-        `Skill metadata exceeds its limit: ${entryPath}`,
-        "invalid_resource",
-      );
-    }
     entries.push({
       entryPath,
       name,
       description,
       issues,
+      ...(diagnostics.length > 0 ? { diagnostics } : {}),
       ...(typeof metadata["disable-model-invocation"] === "boolean"
         ? { disableModelInvocation: metadata["disable-model-invocation"] }
         : {}),
@@ -209,64 +315,6 @@ function manifestFromResources(
     fileCount,
     totalBytes,
   });
-}
-
-/**
- * Older package manifests persisted these derived incompatibility diagnostics.
- * Normalize only an exact diagnostic that the old derivation would have emitted
- * for the current immutable SKILL.md bytes; every other manifest field remains
- * an exact-match integrity input.
- */
-function historicalNativeMetadataDiagnostic(
-  content: string,
-): { readonly reason: string; readonly invalidYaml?: true } | undefined {
-  const frontmatter = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\s|$)/u.exec(content)?.[1] ?? "";
-  try {
-    const parsed: unknown = YAML.parse(frontmatter, { logLevel: "error" });
-    if (
-      parsed &&
-      typeof parsed === "object" &&
-      ["context", "agent", "model", "hooks"].some((key) => Object.hasOwn(parsed, key))
-    )
-      return { reason: LEGACY_NATIVE_METADATA_REASON };
-  } catch {
-    if (/^["']?(?:context|agent|model|hooks)["']?\s*:/mu.test(frontmatter))
-      return { reason: LEGACY_INVALID_YAML_NATIVE_REASON, invalidYaml: true };
-  }
-  return undefined;
-}
-
-function normalizeHistoricalManifest(
-  stored: SkillPackage,
-  resources: ReadonlyArray<CollectedExpertResource>,
-): SkillPackage {
-  const contentByEntry = new Map(
-    resources
-      .filter(
-        (resource) => resource.kind === "file" && path.posix.basename(resource.path) === "SKILL.md",
-      )
-      .map((resource) => [
-        resource.path.slice("content/".length),
-        resource.bytes!.toString("utf8"),
-      ]),
-  );
-  const entries = stored.entries.map((entry) => {
-    const content = contentByEntry.get(entry.entryPath);
-    const diagnostic = content ? historicalNativeMetadataDiagnostic(content) : undefined;
-    if (!diagnostic || entry.incompatibleReason !== diagnostic.reason) return entry;
-    const issues = [...entry.issues];
-    const reasonIndex = issues.indexOf(diagnostic.reason);
-    if (reasonIndex < 0) return entry;
-    issues.splice(reasonIndex, 1);
-    if (diagnostic.invalidYaml) {
-      const invalidYamlIndex = issues.indexOf(LEGACY_INVALID_YAML_ISSUE);
-      if (invalidYamlIndex < 0) return entry;
-      issues.splice(invalidYamlIndex, 1);
-    }
-    const { incompatibleReason: _legacyReason, ...current } = entry;
-    return { ...current, issues };
-  });
-  return { ...stored, entries };
 }
 
 async function collectSource(selectedPath: string): Promise<{
@@ -303,6 +351,199 @@ async function collectSource(selectedPath: string): Promise<{
     package: manifestFromResources(path.basename(realRoot), resources),
     resources,
   };
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === "" ||
+    (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))
+  );
+}
+
+async function readPackageManifestBytes(manifestPath: string, packageDirectory: string) {
+  const before = await fs.lstat(manifestPath);
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error("Unsafe package manifest.");
+  const realRoot = await fs.realpath(packageDirectory);
+  const realPath = await fs.realpath(manifestPath);
+  if (!isPathWithin(realRoot, realPath)) throw new Error("Package manifest escaped its root.");
+  const noFollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
+  const handle = await fs.open(manifestPath, fsConstants.O_RDONLY | noFollow);
+  try {
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      opened.size > MAX_PACKAGE_MANIFEST_BYTES
+    )
+      throw new Error("Package manifest is invalid or exceeds its size limit.");
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    const pathAfter = await fs.lstat(manifestPath);
+    const realAfter = await fs.realpath(manifestPath);
+    if (
+      bytes.byteLength > MAX_PACKAGE_MANIFEST_BYTES ||
+      !pathAfter.isFile() ||
+      pathAfter.isSymbolicLink() ||
+      pathAfter.dev !== opened.dev ||
+      pathAfter.ino !== opened.ino ||
+      after.dev !== opened.dev ||
+      after.ino !== opened.ino ||
+      after.size !== opened.size ||
+      after.mtimeMs !== opened.mtimeMs ||
+      !isPathWithin(realRoot, realAfter)
+    )
+      throw new Error("Package manifest changed while it was being read.");
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
+type ReadVerifiedSkillPackageContent = {
+  readonly content: SkillPackageContentManifest;
+  readonly contentRoot: string;
+  readonly collected: CollectedExpertResource[];
+};
+
+type VerifiedSkillPackageContent = {
+  readonly packageId: string;
+  readonly contentRoot: string;
+  readonly resources: ReadonlyArray<SkillPackageResource>;
+};
+
+async function readVerifiedSkillPackageContentAt(
+  packageId: string,
+  directory: string,
+): Promise<ReadVerifiedSkillPackageContent> {
+  const directoryStat = await fs.lstat(directory);
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink())
+    throw new Error("Unsafe package root.");
+  const names = (await fs.readdir(directory)).toSorted(ordinal);
+  if (JSON.stringify(names) !== JSON.stringify(["content", "package.json"]))
+    throw new Error("Unexpected package root entries.");
+  const parsed: unknown = JSON.parse(
+    (await readPackageManifestBytes(path.join(directory, "package.json"), directory)).toString(
+      "utf8",
+    ),
+  );
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error("Package manifest is not an object.");
+  const raw = parsed as Record<string, unknown>;
+  // The resource ledger is authoritative. Entries, warnings, names, descriptions,
+  // and unknown legacy fields are derived from immutable SKILL.md bytes below.
+  const content = Schema.decodeUnknownSync(SkillPackageContentManifest)({
+    schemaVersion: raw.schemaVersion,
+    packageId: raw.packageId,
+    rootName: raw.rootName,
+    resources: raw.resources,
+    fileCount: raw.fileCount,
+    totalBytes: raw.totalBytes,
+  });
+  if (content.packageId !== packageId) throw new Error("Package manifest identity mismatch.");
+  assertPortablePath(content.rootName);
+
+  let collected = await expertResourceFiles.collect(
+    { sourceRoot: path.join(directory, "content"), targetRoot: "content" },
+    { bytes: MAX_BYTES, entries: MAX_ENTRIES },
+  );
+  // Windows lacks POSIX execute-bit semantics. Preserve the recorded bit there,
+  // without inferring executability from extensions or synthetic stat modes.
+  if (process.platform === "win32") {
+    const expected = new Map(content.resources.map((entry) => [entry.path, entry]));
+    collected = collected.map((entry) =>
+      entry.kind === "file"
+        ? { ...entry, executable: expected.get(entry.path)?.executable ?? false }
+        : entry,
+    );
+  }
+  for (const resource of content.resources) assertPortablePath(resource.path);
+  for (const resource of collected) assertPortablePath(resource.path);
+
+  const actualResources = collected
+    .map(({ path: resourcePath, kind, size, sha256, executable }) => ({
+      path: resourcePath,
+      kind,
+      size,
+      sha256,
+      ...(executable !== undefined ? { executable } : {}),
+    }))
+    .toSorted((left, right) => ordinal(left.path, right.path));
+  if (process.platform === "win32") {
+    const seenPaths = new Set<string>();
+    for (const resource of actualResources) {
+      const key = resource.path.normalize("NFC").toLowerCase();
+      if (seenPaths.has(key)) throw new Error(`Case or Unicode path collision: ${resource.path}`);
+      seenPaths.add(key);
+    }
+  }
+  let fileCount = 0;
+  let totalBytes = 0;
+  for (const resource of actualResources) {
+    if (resource.kind !== "file") continue;
+    fileCount += 1;
+    totalBytes += resource.size;
+  }
+  if (actualResources.length > MAX_ENTRIES) throw new Error("Package resource limit exceeded.");
+  if (fileCount !== content.fileCount) throw new Error("Package file count mismatch.");
+  if (totalBytes !== content.totalBytes) throw new Error("Package total byte count mismatch.");
+  if (
+    expertResourceFiles.stableJson(actualResources) !==
+    expertResourceFiles.stableJson(
+      content.resources.toSorted((left, right) => ordinal(left.path, right.path)),
+    )
+  )
+    throw new Error("Package resource ledger mismatch.");
+  const actualPackageId = expertResourceFiles.hashJson({
+    schemaVersion: content.schemaVersion,
+    rootName: content.rootName,
+    resources: actualResources,
+  });
+  if (`pkg_${actualPackageId}` !== packageId) throw new Error("Package content identity mismatch.");
+
+  return { content, contentRoot: path.join(directory, "content"), collected };
+}
+
+/** Verify the immutable resource ledger and return current, byte-derived resource facts. */
+export async function verifySkillPackageContent(
+  stateDir: string,
+  packageId: string,
+): Promise<VerifiedSkillPackageContent> {
+  if (!path.isAbsolute(stateDir) || stateDir.includes("\0"))
+    throw new SkillPackageStoreError(
+      "State directory must be an absolute local path.",
+      "invalid_input",
+    );
+  if (!Schema.is(SkillPackageId)(packageId))
+    throw new SkillPackageStoreError("Invalid skill package ID.", "invalid_input");
+  const directory = path.join(path.resolve(stateDir), "experts", "skill-packages", packageId);
+  let directoryStat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    directoryStat = await fs.lstat(directory);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT")
+      throw new SkillPackageStoreError(`Skill package not found: ${packageId}`, "not_found", {
+        cause,
+      });
+    throw cause;
+  }
+  try {
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink())
+      throw new Error("Unsafe package root.");
+    const verified = await readVerifiedSkillPackageContentAt(packageId, directory);
+    return {
+      packageId,
+      contentRoot: verified.contentRoot,
+      resources: verified.content.resources,
+    };
+  } catch (cause) {
+    throw new SkillPackageStoreError(
+      `Skill package failed integrity validation: ${packageId}`,
+      "package_corrupt",
+      { cause },
+    );
+  }
 }
 
 /** Local immutable package storage. No scripts, dependency installers, provider scans or project writes. */
@@ -347,41 +588,8 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
     try {
       if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink())
         throw new Error("Unsafe package root.");
-      const names = (await fs.readdir(directory)).toSorted(ordinal);
-      if (JSON.stringify(names) !== JSON.stringify(["content", "package.json"]))
-        throw new Error("Unexpected package root entries.");
-      const stored = Schema.decodeUnknownSync(SkillPackageSchema)(
-        JSON.parse(
-          (
-            await expertResourceFiles.read(
-              path.join(directory, "package.json"),
-              await fs.realpath(directory),
-            )
-          ).toString("utf8"),
-        ) as unknown,
-      );
-      let collected = await expertResourceFiles.collect(
-        { sourceRoot: path.join(directory, "content"), targetRoot: "content" },
-        { bytes: MAX_BYTES, entries: MAX_ENTRIES },
-      );
-      // Windows lacks POSIX execute-bit semantics. Preserve the recorded bit there,
-      // without inferring executability from extensions or synthetic stat modes.
-      if (process.platform === "win32") {
-        const expected = new Map(stored.resources.map((entry) => [entry.path, entry]));
-        collected = collected.map((entry) =>
-          entry.kind === "file"
-            ? { ...entry, executable: expected.get(entry.path)?.executable ?? false }
-            : entry,
-        );
-      }
-      const actual = manifestFromResources(stored.rootName, collected);
-      const compatibleStored = normalizeHistoricalManifest(stored, collected);
-      if (
-        actual.packageId !== packageId ||
-        expertResourceFiles.stableJson(actual) !== expertResourceFiles.stableJson(compatibleStored)
-      )
-        throw new Error("Package manifest/content mismatch.");
-      return actual;
+      const verified = await readVerifiedSkillPackageContentAt(packageId, directory);
+      return manifestFromResources(verified.content.rootName, verified.collected);
     } catch (cause) {
       throw new SkillPackageStoreError(
         `Skill package failed integrity validation: ${packageId}`,
@@ -1013,16 +1221,19 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
         return result;
       }),
     resolveSelections: async (rawSelections) => {
-      const selections = Schema.decodeUnknownSync(
-        Schema.Array(ExpertSkillSelection).check(Schema.isMaxLength(100)),
+      const decodedSelections = Schema.decodeUnknownSync(
+        Schema.Array(Schema.Struct(ExpertSkillSelection.fields)).check(
+          Schema.isMaxLength(MAX_ENTRIES),
+        ),
       )(rawSelections);
-      if (selections.filter((entry) => entry.activation === "startup").length > 1)
-        throw new SkillPackageStoreError(
-          "An expert may select at most one startup skill.",
-          "invalid_input",
-        );
+      const seenSelections = new Set<string>();
+      const selections = decodedSelections.filter((selection) => {
+        const key = `${selection.packageId}\0${selection.entryPath}`;
+        if (seenSelections.has(key)) return false;
+        seenSelections.add(key);
+        return true;
+      });
       const packages = new Map<string, SkillPackage>();
-      const names = new Set<string>();
       const resolved: ResolvedExpertSkillEntry[] = [];
       for (const selection of selections) {
         let manifest = packages.get(selection.packageId);
@@ -1036,18 +1247,6 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
             `Skill entry is not in package ${selection.packageId}: ${selection.entryPath}`,
             "invalid_input",
           );
-        if (entry.disableModelInvocation && selection.activation === "startup")
-          throw new SkillPackageStoreError(
-            `Skill ${entry.name} disables automatic invocation and cannot be a startup entry.`,
-            "invalid_input",
-          );
-        const key = entry.name.normalize("NFC").toLowerCase();
-        if (names.has(key))
-          throw new SkillPackageStoreError(
-            `Duplicate selected skill name: ${entry.name}`,
-            "invalid_input",
-          );
-        names.add(key);
         resolved.push({
           ...selection,
           name: entry.name,

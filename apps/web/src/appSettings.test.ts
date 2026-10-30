@@ -65,6 +65,18 @@ describe("provider process priority settings", () => {
   });
 });
 
+describe("Expert center rail settings", () => {
+  it("keeps the new rail item in saved order and visibility settings", () => {
+    const decode = Schema.decodeSync(Schema.fromJsonString(AppSettingsSchema));
+    const decoded = decode(
+      JSON.stringify({ railItemOrder: ["experts", "home"], hiddenRailItems: ["experts"] }),
+    );
+
+    expect(decoded.railItemOrder).toEqual(["experts", "home"]);
+    expect(decoded.hiddenRailItems).toEqual(["experts"]);
+  });
+});
+
 describe("source control writing settings", () => {
   it("defaults old settings to repository conventions and saves both preferences to the server", () => {
     const settings = Schema.decodeSync(AppSettingsSchema)({});

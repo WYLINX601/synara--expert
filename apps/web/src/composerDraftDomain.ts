@@ -296,6 +296,7 @@ export interface ComposerDraftStoreState {
     threadId: ThreadId,
     options: {
       projectId: ProjectId;
+      expertId?: string;
       createdAt?: string;
       branch?: string | null;
       worktreePath?: string | null;
@@ -583,6 +584,13 @@ export function removeProjectDraftMappingsForThread(
     delete nextProjectDraftThreadIdByProjectId[mappingKey];
   }
   return nextProjectDraftThreadIdByProjectId;
+}
+
+export function isDraftThreadMappedToProjectSlot(
+  projectDraftThreadIdByProjectId: Record<string, ThreadId>,
+  threadId: ThreadId,
+): boolean {
+  return Object.values(projectDraftThreadIdByProjectId).includes(threadId);
 }
 
 export function createEmptyThreadDraft(): ComposerThreadDraftState {

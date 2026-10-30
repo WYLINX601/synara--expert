@@ -25,7 +25,11 @@ import {
 } from "./orchestration";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance";
 import { ProviderMentionReference, ProviderSkillReference } from "./providerDiscovery";
-import { ExpertSkillApplication, ResolvedExpertSkillEntry } from "./skillPackage";
+import {
+  ExpertSkillApplication,
+  ResolvedExpertSkillEntry,
+  SkillRunResourceReference,
+} from "./skillPackage";
 import { ExpertSkillPolicy } from "./skillLibrary";
 import { ContextSession } from "./context";
 
@@ -83,6 +87,7 @@ export const ProviderExpertSession = Schema.Struct({
   skills: Schema.Array(ProviderSkillReference),
   skillLoading: Schema.optional(Schema.Literal("index")),
   skillEntries: Schema.optional(Schema.Array(ResolvedExpertSkillEntry)),
+  skillResourceRefs: Schema.optional(Schema.Array(SkillRunResourceReference)),
   references: Schema.Array(TrimmedNonEmptyString),
 });
 export type ProviderExpertSession = typeof ProviderExpertSession.Type;
@@ -93,6 +98,8 @@ export type ProviderExpertRuntimeNotices = typeof ProviderExpertRuntimeNotices.T
 
 export const ProviderSessionStartInput = Schema.Struct({
   threadId: ThreadId,
+  /** Server-owned purpose used to constrain a native Skill evolution session. */
+  executionPurpose: Schema.optional(Schema.Literal("skill-evolution")),
   provider: Schema.optional(ProviderDriverKind),
   lifecycleGeneration: Schema.optional(TrimmedNonEmptyString),
   providerInstanceId: Schema.optional(ProviderInstanceId),

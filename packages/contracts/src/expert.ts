@@ -8,6 +8,7 @@ import { ExpertSkillBinding, ExpertSkillPolicy } from "./skillLibrary";
 import {
   ExpertSkillApplication,
   ExpertSkillSelection,
+  PinnedExpertSkillSelection,
   ResolvedExpertSkillEntry,
 } from "./skillPackage";
 
@@ -148,9 +149,11 @@ export const ExpertDefinition = Schema.Struct({
   persona: Schema.String,
   outputRequirements: Schema.String,
   skills: Schema.Array(ProviderSkillReference),
-  skillBindings: Schema.optional(Schema.Array(ExpertSkillBinding).check(Schema.isMaxLength(100))),
+  skillBindings: Schema.optional(
+    Schema.Array(Schema.Struct(ExpertSkillBinding.fields)).check(Schema.isMaxLength(100)),
+  ),
   skillSelections: Schema.optional(
-    Schema.Array(ExpertSkillSelection).check(Schema.isMaxLength(100)),
+    Schema.Array(Schema.Struct(ExpertSkillSelection.fields)).check(Schema.isMaxLength(5_000)),
   ),
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
@@ -172,7 +175,7 @@ export const ExpertSaveInput = Schema.Struct({
   skills: Schema.Array(ProviderSkillReference),
   skillBindings: Schema.optional(Schema.Array(ExpertSkillBinding).check(Schema.isMaxLength(100))),
   skillSelections: Schema.optional(
-    Schema.Array(ExpertSkillSelection).check(Schema.isMaxLength(100)),
+    Schema.Array(ExpertSkillSelection).check(Schema.isMaxLength(5_000)),
   ),
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
@@ -230,7 +233,7 @@ export const ExpertSnapshot = Schema.Struct({
   outputRequirements: Schema.String,
   skills: Schema.Array(ProviderSkillReference),
   skillSelections: Schema.optional(
-    Schema.Array(ExpertSkillSelection).check(Schema.isMaxLength(100)),
+    Schema.Array(PinnedExpertSkillSelection).check(Schema.isMaxLength(5_000)),
   ),
   skillEntries: Schema.optional(Schema.Array(ResolvedExpertSkillEntry)),
   skillsRoot: TrimmedNonEmptyString,

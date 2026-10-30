@@ -3,7 +3,6 @@ import * as path from "node:path";
 import { Schema } from "effect";
 import {
   IsoDateTime,
-  ExpertSkillBinding,
   ExpertDefinition,
   SkillDefinition,
   SkillLibraryBatchResult,
@@ -19,6 +18,7 @@ import {
   type SkillLibraryResponse as Response,
   type SkillLibraryUpdateResult as UpdateResult,
 } from "@synara/contracts";
+import { StoredExpertSkillBinding } from "./storedExpertSkillBinding.ts";
 
 import { ensurePrivateDirectorySync } from "../privatePathPermissions.ts";
 import {
@@ -32,7 +32,7 @@ const BindingIntent = Schema.Struct({
   expertId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   expectedRevision: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
   expectedExpert: ExpertDefinition,
-  bindings: Schema.Array(ExpertSkillBinding).check(Schema.isMaxLength(100)),
+  bindings: Schema.Array(StoredExpertSkillBinding).check(Schema.isMaxLength(100)),
   addedSkillIds: Schema.optional(Schema.Array(Schema.String)),
   skippedSkillIds: Schema.optional(Schema.Array(Schema.String)),
 });
@@ -44,8 +44,8 @@ const DeleteIntent = Schema.Struct({
       expertId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
       expectedRevision: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
       expectedExpert: ExpertDefinition,
-      expectedBindings: Schema.Array(ExpertSkillBinding).check(Schema.isMaxLength(100)),
-      bindings: Schema.Array(ExpertSkillBinding).check(Schema.isMaxLength(100)),
+      expectedBindings: Schema.Array(StoredExpertSkillBinding).check(Schema.isMaxLength(100)),
+      bindings: Schema.Array(StoredExpertSkillBinding).check(Schema.isMaxLength(100)),
     }),
   ).check(Schema.isMaxLength(1000)),
 });
@@ -58,6 +58,9 @@ const OperationRecord = Schema.Struct({
   requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
   operation: Schema.Literals([
     "create",
+    // Retained only so immutable journals from older versions remain readable.
+    "configureEvolution",
+    "derive",
     "save",
     "import",
     "refresh",
@@ -93,13 +96,17 @@ const OperationRecord = Schema.Struct({
   bindingResult: Schema.optional(SkillLibraryBindingState),
   updateResult: Schema.optional(SkillLibraryUpdateResult),
   plannedPackageId: Schema.optional(SkillPackageId),
+  /** Durable package references retained for pending or completed evolution history. */
+  evolutionPackageIds: Schema.optional(
+    Schema.Array(SkillPackageId).check(Schema.isMaxLength(10_000)),
+  ),
 });
 const OperationJournal = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   requests: Schema.Array(OperationRecord),
 });
 type OperationRecord = typeof OperationRecord.Type;
-type Operation = OperationRecord["operation"];
+type Operation = Exclude<OperationRecord["operation"], "configureEvolution">;
 export type SkillLibraryDeleteIntent = typeof DeleteIntent.Type;
 export type SkillLibraryBindingIntent = typeof BindingIntent.Type;
 
@@ -177,6 +184,7 @@ export function createSkillLibraryOperations(stateDir: string) {
         | "bindingResult"
         | "updateResult"
         | "plannedPackageId"
+        | "evolutionPackageIds"
       >
     >,
   ): Promise<OperationRecord> => {
@@ -298,6 +306,7 @@ export function createSkillLibraryOperations(stateDir: string) {
         | "plannedSkillIds"
         | "plannedRevision"
         | "plannedPackageId"
+        | "evolutionPackageIds"
         | "plannedSkill"
         | "plannedSkills"
       >,

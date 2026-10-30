@@ -16,6 +16,7 @@ describe("Workbench settings search metadata", () => {
         section: module.id,
         title: module.settings.navigation.label,
         target: null,
+        ...("route" in module.settings.search ? { route: module.settings.search.route } : {}),
       });
       expect(pageEntries[index]?.keywords).toContain(module.settings.search.keywords);
     }

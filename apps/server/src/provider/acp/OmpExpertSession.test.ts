@@ -511,16 +511,24 @@ describe("prepareOmpExpertSession", () => {
 });
 
 describe("OMP fixed native Skill preparation", () => {
-  async function fixedFixture(empty = false) {
+  async function fixedFixture(empty = false, duplicateSelectedNames = false) {
     const root = await makeRoot(),
       packageSource = path.join(root, "package"),
       skillPath = path.join(packageSource, "skills", "reviewer", "SKILL.md");
     await mkdir(path.join(path.dirname(skillPath), "assets"), { recursive: true });
     await writeFile(
       skillPath,
-      "---\nname: reviewer\ndescription: Review with care.\n---\nInstructions; read assets/guide.txt relative to this Skill.\n",
+      "---\nname: reviewer\ndescription: Review with care.\n---\nInstructions; read assets/guide.txt and ../../shared/guide.txt relative to this Skill.\n",
     );
     await writeFile(path.join(path.dirname(skillPath), "assets", "guide.txt"), "Fixture guide.\n");
+    const unselectedSkillPath = path.join(packageSource, "skills", "unselected", "SKILL.md");
+    await mkdir(path.dirname(unselectedSkillPath), { recursive: true });
+    await writeFile(
+      unselectedSkillPath,
+      `---\nname: ${duplicateSelectedNames ? "reviewer" : "unselected"}\ndescription: Unselected Skill.\n---\nKeep this entry in the full package tree.\n`,
+    );
+    await mkdir(path.join(packageSource, "shared"), { recursive: true });
+    await writeFile(path.join(packageSource, "shared", "guide.txt"), "Shared package guide.\n");
     const entries: Array<NonNullable<ProviderExpertSession["skillEntries"]>[number]> = [];
     let resources: ReadonlyArray<SkillPackageResource> = [];
     if (!empty) {
@@ -529,13 +537,16 @@ describe("OMP fixed native Skill preparation", () => {
       const imported = await store.import({ previewId: preview.previewId });
       resources = imported.package.resources;
       entries.push(
-        ...(await store.resolveSelections([
-          {
+        ...(await store.resolveSelections(
+          [
+            "skills/reviewer/SKILL.md",
+            ...(duplicateSelectedNames ? ["skills/unselected/SKILL.md"] : []),
+          ].map((entryPath) => ({
             packageId: imported.package.packageId,
-            entryPath: "skills/reviewer/SKILL.md",
-            activation: "on-demand",
-          },
-        ])),
+            entryPath,
+            activation: "on-demand" as const,
+          })),
+        )),
       );
     }
     const session: ProviderExpertSession = {
@@ -593,6 +604,8 @@ describe("OMP fixed native Skill preparation", () => {
   });
   function fixedRunner(control: {
     foreign?: boolean;
+    duplicateName?: boolean;
+    warnings?: ReadonlyArray<unknown>;
     subagents?: boolean;
     advisor?: boolean;
     ambientSource?: boolean;
@@ -620,21 +633,42 @@ describe("OMP fixed native Skill preparation", () => {
             if (control.ambientSource) values["skills.enableAgentsProject"] = { value: true };
             return result(JSON.stringify(values));
           }
-          const skills = [];
+          const allSkills: Array<{ name: string; description: string; filePath: string }> = [];
+          const walk = async (directory: string): Promise<void> => {
+            for (const item of await readdir(directory, { withFileTypes: true })) {
+              const child = path.join(directory, item.name);
+              if (item.isDirectory()) await walk(child);
+              else if (item.isFile() && item.name === "SKILL.md") {
+                const source = await readFile(child, "utf8");
+                const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(source)?.[1] ?? "";
+                const metadata = parseYaml(frontmatter) as { name?: string; description?: string };
+                allSkills.push({
+                  name: metadata.name ?? "",
+                  description: metadata.description ?? "",
+                  filePath: child,
+                });
+              }
+            }
+          };
           for (const directory of config.skills.customDirectories as string[])
-            for (const name of await readdir(directory))
-              skills.push({
-                name,
-                description: "Selected Skill",
-                filePath: path.join(directory, name, "SKILL.md"),
-              });
+            await walk(directory);
+          const includeNames = config.skills.includeSkills as string[];
+          const skills = allSkills.filter((skill) => includeNames.includes(skill.name));
+          if (control.duplicateName) {
+            const directory = (config.skills.customDirectories as string[])[0];
+            skills.push({
+              name: "reviewer",
+              description: "Duplicate native name from another package entry",
+              filePath: path.join(directory!, "unselected", "SKILL.md"),
+            });
+          }
           if (control.foreign)
             skills.push({
-              name: skills[0]?.name ?? "ambient-c",
+              name: "ambient-c",
               description: "Unselected impostor",
               filePath: "/outside/ambient/SKILL.md",
             });
-          return result(JSON.stringify({ skills, warnings: [] }));
+          return result(JSON.stringify({ skills, warnings: control.warnings ?? [] }));
         },
         catch: (error) => error,
       });
@@ -683,6 +717,190 @@ describe("OMP fixed native Skill preparation", () => {
       await expect(stat(preparation.configOverlayPath!)).rejects.toThrow();
     },
   );
+  it("keeps selected Skills active when OMP reports non-fatal loader warnings", async () => {
+    const { root, session } = await fixedFixture();
+    const preparation = await Effect.runPromise(
+      prepareOmpExpertSession({
+        cwd: root,
+        env: { HOME: root },
+        expertSession: session,
+        lifecycleGeneration: "fixed-warning-generation",
+        tempDirectory: root,
+        runCli: fixedRunner({
+          warnings: [
+            {
+              skillPath: session.skillEntries![0]!.path,
+              message: "Optional native metadata could not be read.",
+            },
+          ],
+        }),
+      }),
+    );
+
+    expect(preparation.issues).toEqual([]);
+    expect(preparation.loadedSkills).toEqual(session.skills);
+    await Effect.runPromise(preparation.verify!());
+    await Effect.runPromise(preparation.cleanup());
+  });
+  it("uses one native container per selected package-relative entry and keeps the full tree", async () => {
+    const root = await makeRoot();
+    const stateDir = path.join(root, "state");
+    const packageSource = path.join(root, "package");
+    const alphaPath = path.join(packageSource, "skills", "alpha", "SKILL.md");
+    const betaPath = path.join(packageSource, "nested", "beta", "SKILL.md");
+    await mkdir(path.dirname(alphaPath), { recursive: true });
+    await mkdir(path.dirname(betaPath), { recursive: true });
+    await writeFile(
+      alphaPath,
+      "---\nname: alpha\ndescription: alpha fixture\n---\nRead ../../shared/guide.txt.\n",
+    );
+    await writeFile(
+      betaPath,
+      "---\nname: beta\ndescription: beta fixture\n---\nRead ../../shared/guide.txt.\n",
+    );
+    await mkdir(path.join(packageSource, "shared"), { recursive: true });
+    await writeFile(path.join(packageSource, "shared", "guide.txt"), "Shared relative resource.\n");
+    const store = createSkillPackageStore(stateDir);
+    const preview = await store.preview({ path: packageSource });
+    const imported = await store.import({ previewId: preview.previewId });
+    const entries = await store.resolveSelections(
+      ["skills/alpha/SKILL.md", "nested/beta/SKILL.md"].map((entryPath) => ({
+        packageId: imported.package.packageId,
+        entryPath,
+        activation: "on-demand" as const,
+      })),
+    );
+    const session: ProviderExpertSession = {
+      snapshotId: `exp_${"f".repeat(64)}`,
+      persona: "Fixed Expert",
+      skillsRoot: path.join(stateDir, "experts", "skill-packages"),
+      skillPolicy: FIXED_EXPERT_SKILL_POLICY,
+      skillLoading: "index",
+      skills: entries.map(({ name, path }) => ({ name, path })),
+      skillEntries: entries,
+      references: [],
+    };
+
+    const preparation = await Effect.runPromise(
+      prepareOmpExpertSession({
+        cwd: root,
+        env: { HOME: root },
+        expertSession: session,
+        lifecycleGeneration: "fixed-multi-container-generation",
+        tempDirectory: root,
+        runCli: fixedRunner({}),
+      }),
+    );
+    expect(preparation.issues).toEqual([]);
+    expect(preparation.loadedSkills.map((entry) => entry.name).toSorted()).toEqual([
+      "alpha",
+      "beta",
+    ]);
+    const config = parseYaml(await readFile(preparation.configOverlayPath!, "utf8")) as {
+      skills: { customDirectories: string[]; includeSkills: string[] };
+    };
+    const contentRoot = path.join(
+      stateDir,
+      "experts",
+      "skill-packages",
+      imported.package.packageId,
+      "content",
+    );
+    expect(config.skills.customDirectories).toEqual(
+      [path.join(contentRoot, "skills"), path.join(contentRoot, "nested")].toSorted(),
+    );
+    expect(config.skills.includeSkills.toSorted()).toEqual(["alpha", "beta"]);
+    expect(await readFile(path.join(contentRoot, "nested", "beta", "SKILL.md"), "utf8")).toContain(
+      "name: beta",
+    );
+    expect(await readFile(path.join(contentRoot, "shared", "guide.txt"), "utf8")).toBe(
+      "Shared relative resource.\n",
+    );
+    await Effect.runPromise(preparation.cleanup());
+  });
+  it("uses the exact package parent as the native container for root-level SKILL.md", async () => {
+    const root = await makeRoot();
+    const stateDir = path.join(root, "state");
+    const packageSource = path.join(root, "package");
+    await mkdir(packageSource, { recursive: true });
+    await writeFile(
+      path.join(packageSource, "SKILL.md"),
+      "---\nname: root-skill\ndescription: root\n---\nInstructions.\n",
+    );
+    const store = createSkillPackageStore(stateDir);
+    const preview = await store.preview({ path: packageSource });
+    const imported = await store.import({ previewId: preview.previewId });
+    const entries = await store.resolveSelections([
+      { packageId: imported.package.packageId, entryPath: "SKILL.md", activation: "on-demand" },
+    ]);
+    const session: ProviderExpertSession = {
+      snapshotId: `exp_${"a".repeat(64)}`,
+      persona: "Fixed Expert",
+      skillsRoot: path.join(stateDir, "experts", "skill-packages"),
+      skillPolicy: FIXED_EXPERT_SKILL_POLICY,
+      skills: entries.map(({ name, path }) => ({ name, path })),
+      skillEntries: entries,
+      references: [],
+    };
+    const preparation = await Effect.runPromise(
+      prepareOmpExpertSession({
+        cwd: root,
+        env: { HOME: root },
+        expertSession: session,
+        lifecycleGeneration: "fixed-root-entry-generation",
+        tempDirectory: root,
+        runCli: fixedRunner({}),
+      }),
+    );
+    expect(preparation.issues).toEqual([]);
+    expect(preparation.loadedSkills).toEqual(session.skills);
+    const config = parseYaml(await readFile(preparation.configOverlayPath!, "utf8")) as {
+      skills: { customDirectories: string[]; includeSkills: string[] };
+    };
+    expect(config.skills.includeSkills).toEqual(["root-skill"]);
+    expect(config.skills.customDirectories).toEqual([
+      path.join(stateDir, "experts", "skill-packages", imported.package.packageId),
+    ]);
+    await Effect.runPromise(preparation.cleanup());
+  });
+  it("reports selected duplicate names that OMP includeSkills cannot disambiguate", async () => {
+    const { root, session } = await fixedFixture(false, true);
+    const preparation = await Effect.runPromise(
+      prepareOmpExpertSession({
+        cwd: root,
+        env: { HOME: root },
+        expertSession: session,
+        lifecycleGeneration: "fixed-duplicate-selected-generation",
+        tempDirectory: root,
+        runCli: fixedRunner({}),
+      }),
+    );
+
+    expect(preparation.issues.join(" ")).toMatch(
+      /includeSkills cannot disambiguate.*duplicate names/u,
+    );
+    expect(preparation.loadedSkills).toEqual([]);
+    expect((await readdir(root)).some((name) => name.startsWith("synara-omp-expert-"))).toBe(false);
+  });
+  it("reports a native Skill with a selected name from a different package path", async () => {
+    const { root, session } = await fixedFixture();
+    const preparation = await Effect.runPromise(
+      prepareOmpExpertSession({
+        cwd: root,
+        env: { HOME: root },
+        expertSession: session,
+        lifecycleGeneration: "fixed-duplicate-native-generation",
+        tempDirectory: root,
+        runCli: fixedRunner({ duplicateName: true }),
+      }),
+    );
+
+    expect(preparation.issues.join(" ")).toMatch(
+      /cannot disambiguate the native Skill name "reviewer"/u,
+    );
+    expect(preparation.loadedSkills).toEqual([]);
+    expect((await readdir(root)).some((name) => name.startsWith("synara-omp-expert-"))).toBe(false);
+  });
   it.each(["foreign", "subagents", "advisor", "ambientSource"] as const)(
     "fails closed on native %s and cleans its owned projection",
     async (failure) => {
@@ -722,6 +940,42 @@ describe("OMP fixed native Skill preparation", () => {
     const prompt = await readFile(preparation.appendSystemPromptPath!, "utf8");
     expect(prompt).toContain("Native project instructions.");
     expect(prompt).toContain("Fixed Expert");
+    const config = parseYaml(await readFile(preparation.configOverlayPath!, "utf8")) as {
+      skills: { customDirectories: string[]; includeSkills: string[] };
+    };
+    expect(config.skills.includeSkills).toEqual(["reviewer"]);
+    const packageContentRoot = path.join(
+      root,
+      "state",
+      "experts",
+      "skill-packages",
+      session.skillEntries![0]!.packageId,
+      "content",
+    );
+    const nativeContainerRoot = config.skills.customDirectories[0]!;
+    expect(config.skills.customDirectories).toEqual([path.join(packageContentRoot, "skills")]);
+    expect(nativeContainerRoot).toBe(
+      path.join(
+        root,
+        "state",
+        "experts",
+        "skill-packages",
+        session.skillEntries![0]!.packageId,
+        "content",
+        "skills",
+      ),
+    );
+    expect(
+      await readFile(path.join(nativeContainerRoot, "unselected", "SKILL.md"), "utf8"),
+    ).toContain("Keep this entry in the full package tree.");
+    expect(
+      await readFile(path.join(packageContentRoot, "skills", "reviewer", "SKILL.md"), "utf8"),
+    ).toContain(
+      "Instructions; read assets/guide.txt and ../../shared/guide.txt relative to this Skill.",
+    );
+    expect(await readFile(path.join(packageContentRoot, "shared", "guide.txt"), "utf8")).toBe(
+      "Shared package guide.\n",
+    );
     const entry = session.skillEntries![0]!;
     const packageRoot = path.join(
       root,
@@ -749,7 +1003,7 @@ describe("OMP fixed native Skill preparation", () => {
           };
         }),
     );
-    expect(immutableFiles).toHaveLength(2);
+    expect(immutableFiles).toHaveLength(4);
     expect(immutableFiles.every((file) => file.mode === 0o400)).toBe(true);
     const tempRoot = path.dirname(preparation.configOverlayPath!);
     await Effect.runPromise(preparation.cleanup());

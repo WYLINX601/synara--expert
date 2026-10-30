@@ -1,4 +1,5 @@
 import { SkillLibraryRequest, SkillLibraryResponse } from "./skillLibrary";
+import { SkillEvolutionRequest, SkillEvolutionResponse } from "./skillEvolution";
 import type {
   SkillManagementAccess,
   SkillManagementCredentialRevokeInput,
@@ -66,14 +67,6 @@ import type {
   SkillPackageUpdatePreview,
   SkillPackageUpdatePreviewInput,
 } from "./skillPackage";
-import type {
-  SkillPackageSwitchApplyInput,
-  SkillPackageSwitchApplyResult,
-  SkillPackageSwitchInput,
-  SkillPackageSwitchPreview,
-  SkillPackageSwitchProgressReadInput,
-  SkillPackageSwitchProgressResult,
-} from "./skillPackageSwitch";
 import type { ContextApi } from "./context";
 
 import type {
@@ -1373,6 +1366,7 @@ export interface NativeApi {
     deleteExpert: (input: ExpertDeleteInput) => Promise<void>;
     previewExpert: (input: ExpertPreviewInput) => Promise<ExpertPreview>;
     skillLibrary: (input: SkillLibraryRequest) => Promise<SkillLibraryResponse>;
+    skillEvolution: (input: SkillEvolutionRequest) => Promise<SkillEvolutionResponse>;
     readSkillManagementAccess: () => Promise<SkillManagementAccess>;
     createSkillManagementPairing: () => Promise<SkillManagementPairingResult>;
     listSkillManagementCredentials: () => Promise<ReadonlyArray<SkillManagementCredentialSummary>>;
@@ -1391,15 +1385,6 @@ export interface NativeApi {
     ) => Promise<SkillPackageRemovalPreview>;
     importSkillPackage: (input: SkillPackageImportInput) => Promise<SkillPackageImportResult>;
     removeSkillPackage: (input: SkillPackageRemoveInput) => Promise<void>;
-    previewSkillPackageSwitch: (
-      input: SkillPackageSwitchInput,
-    ) => Promise<SkillPackageSwitchPreview>;
-    applySkillPackageSwitch: (
-      input: SkillPackageSwitchApplyInput,
-    ) => Promise<SkillPackageSwitchApplyResult>;
-    readSkillPackageSwitchProgress: (
-      input: SkillPackageSwitchProgressReadInput,
-    ) => Promise<SkillPackageSwitchProgressResult>;
     readExpertSnapshot: (input: ExpertSnapshotReadInput) => Promise<ExpertSnapshot>;
     readExpertAppliedRuntime: (
       input: ExpertAppliedRuntimeReadInput,

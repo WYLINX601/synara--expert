@@ -1,6 +1,7 @@
 import { providerProcessPriorityEnabled } from "../../providerProcessPriority";
 import { refreshPiOpenCodeCatalog } from "../piOpenCodeCatalog";
 import crypto from "node:crypto";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 
@@ -28,10 +29,12 @@ import {
   type ProviderListModelsResult,
   type ProviderListSkillsResult,
   type ProviderExpertSession,
+  type ProviderSkillReference,
   type ContextSession,
   ProviderItemId,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type ProviderSessionStartInput,
   type ProviderUserInputAnswers,
   RuntimeItemId,
   RuntimeRequestId,
@@ -49,9 +52,15 @@ import { stripTerminalControlSequences } from "@synara/shared/text";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import {
   createExpertSkillApplication,
+  projectSelectedSkillReferences,
   recordVerifiedNativeSkillAssembly,
   invalidateNativeSkillAssemblyVerification,
 } from "../expertSkillCatalog.ts";
+import {
+  skillPackageStateDir,
+  skillRuntimeEntries,
+  verifySkillRunResources,
+} from "../../experts/skillRunResources";
 import { Effect, FileSystem, Layer, Option, Queue, Stream } from "effect";
 
 import {
@@ -94,6 +103,7 @@ import {
   type ProviderThreadSnapshot,
 } from "../Services/ProviderAdapter.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
+import { appendProviderSkillReferencesPromptBlock } from "../promptReferenceProjection.ts";
 import { makeBoundedCallbackIngress } from "../boundedCallbackIngress.ts";
 import { makeKeyedLock } from "../keyedLock.ts";
 import { settleConcurrentTeardowns } from "../settleConcurrentTeardowns.ts";
@@ -114,6 +124,11 @@ import {
 } from "../providerRuntimeEventIngress.ts";
 import { clampUsagePercent, nonNegativeFiniteNumber, positiveFiniteNumber } from "../tokenUsage.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import {
+  SKILL_EVOLUTION_EXECUTION_PURPOSE,
+  SKILL_EVOLUTION_SYSTEM_PROMPT,
+  providerSessionStartInputForSkillEvolution,
+} from "../skillEvolutionConstraints.ts";
 import {
   teardownChildProcessTree,
   teardownProviderProcessTree,
@@ -226,23 +241,40 @@ export function piResourceLoaderOptionsForSession(input: {
   readonly expertSession?: ProviderExpertSession;
   readonly contextSession?: ContextSession;
   readonly noExtensions?: boolean;
+  readonly executionPurpose?: ProviderSessionStartInput["executionPurpose"];
 }):
   | NonNullable<
       Parameters<PiCodingAgentModule["createAgentSessionServices"]>[0]["resourceLoaderOptions"]
     >
   | undefined {
+  if (input.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE) {
+    return {
+      noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      noContextFiles: true,
+      systemPrompt: SKILL_EVOLUTION_SYSTEM_PROMPT,
+      // An explicit empty list prevents the loader from discovering the
+      // process-wide append-system-prompt file.
+      appendSystemPrompt: [],
+    };
+  }
   if (!input.expertSession && !input.contextSession?.hasContent && !input.noExtensions) {
     return undefined;
   }
+  const fixedSkills = input.expertSession?.skillPolicy
+    ? skillRuntimeEntries(input.expertSession)
+    : [];
   return {
     ...(input.noExtensions || input.expertSession?.skillPolicy ? { noExtensions: true } : {}),
     ...(input.expertSession?.skillPolicy
       ? {
           noSkills: true,
-          additionalSkillPaths: input.expertSession.skills.map((skill) => skill.path),
+          additionalSkillPaths: fixedSkills.map((skill) => skill.path),
           skillsOverride: (base) => ({
             skills: base.skills.filter((skill) =>
-              input.expertSession!.skills.some(
+              fixedSkills.some(
                 (selected) =>
                   selected.name === skill.name &&
                   path.resolve(selected.path) === path.resolve(skill.filePath),
@@ -453,6 +485,7 @@ const loadPiCodingAgentModule: () => Promise<PiCodingAgentModule> = lazyModule(
 );
 
 interface PiSessionContext {
+  readonly executionPurpose?: ProviderSessionStartInput["executionPurpose"];
   readonly fixedExpertSession?: ProviderExpertSession;
   harnessPolicyDelivered?: boolean;
   readonly enableComputerControl?: boolean;
@@ -1005,12 +1038,18 @@ function getSessionFile(session: PiAgentSession): string | undefined {
   return session.sessionFile ?? session.sessionManager.getSessionFile();
 }
 
+function getContextResumeCursor(context: PiSessionContext): string | undefined {
+  return context.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE
+    ? undefined
+    : getSessionFile(context.runtime.session);
+}
+
 // Snapshot reads are not provider activity; transitions pass their actual timestamp.
 function makeSessionSnapshot(
   context: PiSessionContext,
   updatedAt = context.session.updatedAt,
 ): ProviderSession {
-  const resumeCursor = getSessionFile(context.runtime.session);
+  const resumeCursor = getContextResumeCursor(context);
   return {
     provider: PROVIDER,
     ...(context.session.providerInstanceId
@@ -2691,10 +2730,16 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
         if (context.promptCommit === committed) context.promptCommit = undefined;
         resolveCommit();
       };
+      if (context.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE) {
+        context.runtime.session.setActiveToolsByName([]);
+      }
       // A prompt owns all SDK retries, compaction and queued continuations.
       // agent_end is per attempt; agent_settled also fires before a rejection.
       void context.runtime.session
         .prompt(text, {
+          ...(context.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE
+            ? { expandPromptTemplates: false }
+            : {}),
           ...(images.length > 0 ? { images } : {}),
           // Release a waiting dispatch once prompt() either commits its own
           // run or handles the input without a run. A rejected preflight is
@@ -2739,10 +2784,12 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
     };
 
     const buildProviderText = (context: PiSessionContext, text: string) =>
-      buildPiTurnPrompt(context, {
-        text,
-        gatewayControlAvailable: context.gatewayControlAvailable,
-      });
+      context.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE
+        ? text
+        : buildPiTurnPrompt(context, {
+            text,
+            gatewayControlAvailable: context.gatewayControlAvailable,
+          });
 
     const sendTurnBusyError = () =>
       new ProviderAdapterValidationError({
@@ -2786,11 +2833,15 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       payload: { text: string; images: ImageContent[] },
     ) =>
       Effect.tryPromise({
-        try: () =>
-          context.runtime.session.followUp(
+        try: () => {
+          if (context.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE) {
+            context.runtime.session.setActiveToolsByName([]);
+          }
+          return context.runtime.session.followUp(
             buildProviderText(context, payload.text),
             payload.images,
-          ),
+          );
+        },
         catch: (cause) =>
           new ProviderAdapterRequestError({
             provider: PROVIDER,
@@ -2802,7 +2853,12 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
 
     const steerPiTurn = (context: PiSessionContext, text: string, images: ImageContent[]) =>
       Effect.tryPromise({
-        try: () => context.runtime.session.steer(text, images),
+        try: () => {
+          if (context.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE) {
+            context.runtime.session.setActiveToolsByName([]);
+          }
+          return context.runtime.session.steer(text, images);
+        },
         catch: (cause) =>
           new ProviderAdapterRequestError({
             provider: PROVIDER,
@@ -2872,7 +2928,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
     const dispatchResult = (context: PiSessionContext, turnId: TurnId) => ({
       threadId: context.session.threadId,
       turnId,
-      resumeCursor: getSessionFile(context.runtime.session),
+      resumeCursor: getContextResumeCursor(context),
     });
 
     const recordItem = (context: PiSessionContext, item: unknown, toolCallId?: string) => {
@@ -3278,11 +3334,18 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       processSupervisor: PiBashProcessSupervisor;
       gatewayTools?: ReadonlyArray<ToolDefinition>;
       expertSession?: Parameters<PiAdapterShape["startSession"]>[0]["expertSession"];
+      executionPurpose?: ProviderSessionStartInput["executionPurpose"];
       lifecycleGeneration?: string;
       contextSession?: Parameters<PiAdapterShape["startSession"]>[0]["contextSession"];
       signal?: AbortSignal;
       noExtensions?: boolean;
     }) => {
+      if (input.expertSession?.skillResourceRefs !== undefined)
+        await verifySkillRunResources(
+          skillPackageStateDir(input.expertSession),
+          input.expertSession.skillEntries ?? [],
+          input.expertSession.skillResourceRefs,
+        );
       const modelRuntime = await createPiModelRuntime(
         input.agentDir,
         input.sdk,
@@ -3302,6 +3365,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           ...(input.expertSession ? { expertSession: input.expertSession } : {}),
           ...(input.contextSession ? { contextSession: input.contextSession } : {}),
           ...(input.noExtensions ? { noExtensions: true } : {}),
+          ...(input.executionPurpose ? { executionPurpose: input.executionPurpose } : {}),
         });
         const services = await input.sdk.createAgentSessionServices({
           cwd,
@@ -3349,27 +3413,51 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             `Pi model '${input.modelId}' is not available. Use a discovered model or a provider-qualified custom model slug like 'openai/gpt-5.5'.`,
           );
         }
-        const shellPath = services.settingsManager.getShellPath();
-        const commandPrefix = services.settingsManager.getShellCommandPrefix();
-        input.processSupervisor.setShellPath(shellPath);
+        const skillEvolution = input.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE;
+        const shellPath = skillEvolution ? undefined : services.settingsManager.getShellPath();
+        const commandPrefix = skillEvolution
+          ? undefined
+          : services.settingsManager.getShellCommandPrefix();
+        if (!skillEvolution) input.processSupervisor.setShellPath(shellPath);
+        const sessionResult = await input.sdk.createAgentSessionFromServices({
+          services,
+          sessionManager,
+          ...(sessionStartEvent ? { sessionStartEvent } : {}),
+          ...(model ? { model } : {}),
+          thinkingLevel: input.thinkingLevel ?? DEFAULT_PI_THINKING_LEVEL,
+          ...(skillEvolution ? { noTools: "all" as const, tools: [] } : {}),
+          customTools: skillEvolution
+            ? []
+            : [
+                input.sdk.defineTool(
+                  input.sdk.createBashToolDefinition(cwd, {
+                    operations: input.processSupervisor.operations,
+                    ...(commandPrefix === undefined ? {} : { commandPrefix }),
+                    ...(shellPath === undefined ? {} : { shellPath }),
+                  }),
+                ),
+                ...(input.gatewayTools ?? []),
+              ],
+        });
+        if (skillEvolution) {
+          if (
+            sessionResult.session.getActiveToolNames().length > 0 ||
+            sessionResult.extensionsResult.extensions.length > 0 ||
+            services.resourceLoader.getSkills().skills.length > 0 ||
+            services.resourceLoader.getPrompts().prompts.length > 0 ||
+            services.resourceLoader.getThemes().themes.length > 0 ||
+            services.resourceLoader.getAgentsFiles().agentsFiles.length > 0 ||
+            services.resourceLoader.getSystemPrompt() !== SKILL_EVOLUTION_SYSTEM_PROMPT ||
+            services.resourceLoader.getAppendSystemPrompt().length > 0
+          ) {
+            throw new Error("Pi did not start an isolated Skill evolution session.");
+          }
+          // Keep the SDK roster empty even if session restoration or an internal
+          // lifecycle callback tries to reselect tools before the first turn.
+          sessionResult.session.setActiveToolsByName([]);
+        }
         return {
-          ...(await input.sdk.createAgentSessionFromServices({
-            services,
-            sessionManager,
-            ...(sessionStartEvent ? { sessionStartEvent } : {}),
-            ...(model ? { model } : {}),
-            thinkingLevel: input.thinkingLevel ?? DEFAULT_PI_THINKING_LEVEL,
-            customTools: [
-              input.sdk.defineTool(
-                input.sdk.createBashToolDefinition(cwd, {
-                  operations: input.processSupervisor.operations,
-                  ...(commandPrefix === undefined ? {} : { commandPrefix }),
-                  ...(shellPath === undefined ? {} : { shellPath }),
-                }),
-              ),
-              ...(input.gatewayTools ?? []),
-            ],
-          })),
+          ...sessionResult,
           services,
           diagnostics: services.diagnostics,
         };
@@ -3386,11 +3474,13 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
     };
 
     const startSessionUnlocked = (
-      input: Parameters<PiAdapterShape["startSession"]>[0],
+      startInput: Parameters<PiAdapterShape["startSession"]>[0],
       noExtensions: boolean,
       providerInstanceId: ProviderSession["providerInstanceId"],
     ) =>
       Effect.gen(function* () {
+        const input = providerSessionStartInputForSkillEvolution(startInput);
+        const skillEvolution = input.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE;
         if (input.expertSession?.skillLoading === "index" && !input.lifecycleGeneration) {
           return yield* new ProviderAdapterRequestError({
             provider: PROVIDER,
@@ -3423,13 +3513,18 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             }
           }
         }
-        const cwd = trimToUndefined(input.cwd) ?? serverConfig.cwd;
+        // Pi always adds the session cwd as a system-prompt section. Skill
+        // evolution has no project context, so bind its tool-less session to
+        // a neutral temporary cwd instead of disclosing the selected workspace.
+        const cwd = skillEvolution ? tmpdir() : (trimToUndefined(input.cwd) ?? serverConfig.cwd);
         const piOptions = input.providerOptions?.pi;
         const piEnvironment = piOptions?.environment;
         const isolatedAccount =
           piEnvironment !== undefined ||
           (providerInstanceId !== undefined && providerInstanceId !== PROVIDER);
-        const sessionFile = extractResumeSessionFile(input.resumeCursor);
+        const sessionFile = skillEvolution
+          ? undefined
+          : extractResumeSessionFile(input.resumeCursor);
         const modelId =
           input.modelSelection?.provider === "pi" ? input.modelSelection.model : undefined;
         const thinkingLevel =
@@ -3477,15 +3572,19 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           sdkAgentDir: piSdk.getAgentDir(),
         });
         const agentDir = storagePaths.agentDir;
-        const sessionManager = sessionFile
-          ? piSdk.SessionManager.open(sessionFile, undefined, cwd)
-          : piSdk.SessionManager.create(cwd, storagePaths.sessionDir);
-        const agentGatewaySessionLease = acquireAgentGatewaySessionLease(
-          agentGatewayCredentials,
-          input.threadId,
-          PROVIDER,
-          input,
-        );
+        const sessionManager = skillEvolution
+          ? piSdk.SessionManager.inMemory(cwd)
+          : sessionFile
+            ? piSdk.SessionManager.open(sessionFile, undefined, cwd)
+            : piSdk.SessionManager.create(cwd, storagePaths.sessionDir);
+        const agentGatewaySessionLease = skillEvolution
+          ? undefined
+          : acquireAgentGatewaySessionLease(
+              agentGatewayCredentials,
+              input.threadId,
+              PROVIDER,
+              input,
+            );
         const agentGatewayConnection = agentGatewaySessionLease?.connection;
         if (input.enableComputerControl === true && !agentGatewayConnection) {
           return yield* new ProviderAdapterRequestError({
@@ -3553,6 +3652,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
                 ...(providerInstanceId !== undefined ? { instanceId: providerInstanceId } : {}),
                 sessionManager,
                 ...(noExtensions ? { noExtensions: true } : {}),
+                ...(input.executionPurpose ? { executionPurpose: input.executionPurpose } : {}),
                 ...(modelId ? { modelId } : {}),
                 ...(thinkingLevel ? { thinkingLevel } : {}),
                 processSupervisor,
@@ -3579,7 +3679,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
         const model = runtime.session.model
           ? `${runtime.session.model.provider}/${runtime.session.model.id}`
           : modelId;
-        const resumeCursor = getSessionFile(runtime.session);
+        const resumeCursor = skillEvolution ? undefined : getSessionFile(runtime.session);
         const session: ProviderSession = {
           provider: PROVIDER,
           ...(providerInstanceId !== undefined ? { providerInstanceId } : {}),
@@ -3613,6 +3713,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           ...(resumeCursor ? { resumeCursor } : {}),
         };
         const context: PiSessionContext = {
+          ...(input.executionPurpose ? { executionPurpose: input.executionPurpose } : {}),
           ...(input.expertSession?.skillPolicy ? { fixedExpertSession: input.expertSession } : {}),
           enableComputerControl: input.enableComputerControl === true,
           gatewayCapabilityInput: captureAgentGatewayCapabilityInput(input),
@@ -3644,7 +3745,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           stopped: false,
           lastKnownTokenUsage: undefined,
           unsubscribe: undefined,
-          extensionsEnabled: !noExtensions && !input.expertSession?.skillPolicy,
+          extensionsEnabled: !skillEvolution && !noExtensions && !input.expertSession?.skillPolicy,
         };
         context.unsubscribe = runtime.session.subscribe((event) =>
           handleSessionEvent(context, event),
@@ -3740,7 +3841,9 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
     const startSession: PiAdapterShape["startSession"] = (input) => {
       const piEnvironment = input.providerOptions?.pi?.environment;
       const providerInstanceId = resolvePiStartInstanceId(input);
+      const skillEvolution = input.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE;
       const isolatedAccount =
+        skillEvolution ||
         piEnvironment !== undefined ||
         (providerInstanceId !== undefined && providerInstanceId !== PROVIDER);
       return Effect.acquireUseRelease(
@@ -3763,17 +3866,38 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       );
     };
 
-    const buildPromptPayload = (input: {
-      readonly input?: string | undefined;
-      readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
-    }) =>
+    const buildPromptPayload = (
+      input: {
+        readonly input?: string | undefined;
+        readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
+        readonly skills?: ReadonlyArray<ProviderSkillReference> | undefined;
+      },
+      expertSession?: ProviderExpertSession,
+      allowSelectedSkills = true,
+    ) =>
       Effect.gen(function* () {
-        const text =
+        const attachmentText =
           appendFileAttachmentsPromptBlock({
             text: input.input,
             attachments: input.attachments,
             attachmentsDir: serverConfig.attachmentsDir,
             include: "all-files",
+          }) ?? "";
+        const skills = yield* Effect.try({
+          try: () =>
+            allowSelectedSkills ? projectSelectedSkillReferences(expertSession, input.skills) : [],
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "turn/start",
+              detail: cause instanceof Error ? cause.message : String(cause),
+              cause,
+            }),
+        });
+        const text =
+          appendProviderSkillReferencesPromptBlock({
+            text: attachmentText,
+            skills,
           }) ?? "";
         const images = yield* Effect.forEach(
           input.attachments ?? [],
@@ -3858,7 +3982,11 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           if (input.modelSelection?.provider === "pi") {
             yield* applyPiModelSelection(context, input.modelSelection);
           }
-          const payload = yield* buildPromptPayload(input);
+          const payload = yield* buildPromptPayload(
+            input,
+            context.fixedExpertSession,
+            context.executionPurpose !== SKILL_EVOLUTION_EXECUTION_PURPOSE,
+          );
           if (context.stopped) {
             return yield* new ProviderAdapterSessionClosedError({
               provider: PROVIDER,
@@ -3871,7 +3999,11 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             // A turn is active: route the send through the SDK's follow-up
             // queue instead of prompt(), which would throw the raw "Agent is
             // already processing" error mid-run.
-            if (context.pendingAbortTurnId === liveTurnId || isPiReloadPayload(payload)) {
+            if (
+              context.pendingAbortTurnId === liveTurnId ||
+              (context.executionPurpose !== SKILL_EVOLUTION_EXECUTION_PURPOSE &&
+                isPiReloadPayload(payload))
+            ) {
               return yield* sendTurnBusyError();
             }
             yield* queuePiFollowUp(context, payload);
@@ -3885,7 +4017,10 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           context.activeTurnId = turnId;
           context.turns.push({ id: turnId, items: [], toolItemIndexes: new Map() });
           context.session = makeSessionSnapshot(context, new Date().toISOString());
-          if (isPiReloadPayload(payload)) {
+          if (
+            context.executionPurpose !== SKILL_EVOLUTION_EXECUTION_PURPOSE &&
+            isPiReloadPayload(payload)
+          ) {
             yield* runPiReload(context, payload.text);
             return dispatchResult(context, turnId);
           }
@@ -3915,7 +4050,11 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             });
           }
           yield* awaitPromptCommit(context);
-          const payload = yield* buildPromptPayload(input);
+          const payload = yield* buildPromptPayload(
+            input,
+            context.fixedExpertSession,
+            context.executionPurpose !== SKILL_EVOLUTION_EXECUTION_PURPOSE,
+          );
           if (context.stopped) {
             return yield* new ProviderAdapterSessionClosedError({
               provider: PROVIDER,
@@ -4172,8 +4311,19 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           }),
       });
 
-    const listSkills: NonNullable<PiAdapterShape["listSkills"]> = (input) =>
-      Effect.tryPromise({
+    const listSkills: NonNullable<PiAdapterShape["listSkills"]> = (input) => {
+      if (
+        input.threadId &&
+        sessions.get(ThreadId.makeUnsafe(input.threadId))?.executionPurpose ===
+          SKILL_EVOLUTION_EXECUTION_PURPOSE
+      ) {
+        return Effect.succeed({
+          skills: [],
+          source: "pi.sdk",
+          cached: false,
+        } satisfies ProviderListSkillsResult);
+      }
+      return Effect.tryPromise({
         try: (signal) =>
           withPiDiscoveryReservation(input.environment, input.instanceId, async (noExtensions) => {
             const active = input.threadId
@@ -4243,9 +4393,21 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             cause,
           }),
       });
+    };
 
-    const listCommands: NonNullable<PiAdapterShape["listCommands"]> = (input) =>
-      Effect.tryPromise({
+    const listCommands: NonNullable<PiAdapterShape["listCommands"]> = (input) => {
+      if (
+        input.threadId &&
+        sessions.get(ThreadId.makeUnsafe(input.threadId))?.executionPurpose ===
+          SKILL_EVOLUTION_EXECUTION_PURPOSE
+      ) {
+        return Effect.succeed({
+          commands: [],
+          source: "pi.sdk",
+          cached: false,
+        } satisfies ProviderListCommandsResult);
+      }
+      return Effect.tryPromise({
         try: (signal) =>
           withPiDiscoveryReservation(input.environment, input.instanceId, async (noExtensions) => {
             const active = input.threadId
@@ -4333,6 +4495,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
             cause,
           }),
       });
+    };
 
     const getComposerCapabilities: NonNullable<PiAdapterShape["getComposerCapabilities"]> = () =>
       Effect.succeed({

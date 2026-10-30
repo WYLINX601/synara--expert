@@ -5,8 +5,10 @@ import { parseManagementCliCommand, type ManagementCliFlagValues } from "./cli";
 
 const transport = vi.hoisted(() => ({
   requests: [] as Array<Record<string, unknown>>,
+  executeStore: undefined as ((request: Record<string, unknown>) => Promise<unknown>) | undefined,
   execute: vi.fn(async (input: { readonly request: Record<string, unknown> }) => {
     transport.requests.push(input.request);
+    if (transport.executeStore) return transport.executeStore(input.request);
     if (input.request.action === "bindings" && input.request.operation === "list") {
       return {
         bindingResult: {
@@ -100,7 +102,6 @@ const baseFlags: ManagementCliFlagValues = {
   expertIds: undefined,
   skillId: [],
   skillIds: undefined,
-  createdBy: undefined,
   sort: undefined,
   direction: undefined,
   expectedRevision: undefined,
@@ -111,7 +112,9 @@ const baseFlags: ManagementCliFlagValues = {
   overwriteLocalEdits: false,
   entry: undefined,
   duplicate: undefined,
-  activation: undefined,
+  allowEvolution: undefined,
+  selectionScope: undefined,
+  resourceMode: undefined,
   instanceId: undefined,
   flavor: undefined,
 };
@@ -131,6 +134,7 @@ function capture() {
 
 beforeEach(() => {
   transport.requests.length = 0;
+  transport.executeStore = undefined;
   transport.execute.mockClear();
   process.exitCode = 0;
 });
@@ -167,19 +171,17 @@ describe("Expert Skill CLI commands", () => {
     expect(JSON.parse(output.text())).toMatchObject({ ok: false, partial: true, exitCode: 5 });
   });
 
-  it("preserves startup activation and gives each Expert a distinct idempotency key", async () => {
+  it("constructs bindings with evolution disabled by default and preserves the per-Expert revision", async () => {
     const output = capture();
     const result = await executeManagementCli({
       baseDir: "/tmp/skill-cli-test-home",
       command: parseManagementCliCommand({
         namespace: "expert",
-        args: ["skills", "add"],
+        args: ["skills", "add", "expert-a"],
         flags: {
           ...baseFlags,
-          expertIds: "expert-a,expert-b",
           skillId: ["skl_0123456789abcdef0123456789abcdef"],
-          requestId: "startup-add-1",
-          activation: "startup",
+          requestId: "binding-add-1",
         },
       }),
       io: { stdout: output.stream, stderr: capture().stream },
@@ -189,23 +191,209 @@ describe("Expert Skill CLI commands", () => {
     const mutations = transport.requests.filter(
       (request) => request.action === "bindings" && request.operation === "add",
     );
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0]).toMatchObject({
+      expertId: "expert-a",
+      expectedRevision: 3,
+      requestId: "binding-add-1",
+      bindings: [
+        {
+          skillId: "skl_0123456789abcdef0123456789abcdef",
+          enabled: true,
+          selectionScope: "entry",
+          resourceMode: "shared-readonly",
+        },
+      ],
+    });
+    expect((mutations[0]?.bindings as Array<Record<string, unknown>>)[0]).not.toHaveProperty(
+      "activation",
+    );
+    expect((mutations[0]?.bindings as Array<Record<string, unknown>>)[0]).not.toHaveProperty(
+      "allowEvolution",
+    );
+  });
+
+  it.each([
+    ["true", true],
+    ["false", false],
+  ] as const)("passes explicit --allow-evolution %s to a new binding", async (value, expected) => {
+    const output = capture();
+    await executeManagementCli({
+      baseDir: "/tmp/skill-cli-test-home",
+      command: parseManagementCliCommand({
+        namespace: "expert",
+        args: ["skills", "add", "expert-a"],
+        flags: {
+          ...baseFlags,
+          skillId: ["skl_0123456789abcdef0123456789abcdef"],
+          requestId: `binding-add-evolution-${value}`,
+          allowEvolution: value,
+        },
+      }),
+      io: { stdout: output.stream, stderr: capture().stream },
+    });
+    const mutation = transport.requests.find(
+      (request) => request.action === "bindings" && request.operation === "add",
+    );
+    expect(mutation?.bindings).toEqual([
+      {
+        skillId: "skl_0123456789abcdef0123456789abcdef",
+        enabled: true,
+        allowEvolution: expected,
+        selectionScope: "entry",
+        resourceMode: "shared-readonly",
+      },
+    ]);
+  });
+
+  it("preserves evolution permission and package/private modes on set unless explicitly changed", async () => {
+    const skillId = "skl_0123456789abcdef0123456789abcdef",
+      existingBinding = {
+        skillId,
+        enabled: true,
+        allowEvolution: true,
+        selectionScope: "package",
+        resourceMode: "run-private",
+      };
+    transport.executeStore = async (request) =>
+      request.action === "bindings" && request.operation === "list"
+        ? {
+            bindingResult: { expertId: "expert-a", revision: 3, bindings: [existingBinding] },
+          }
+        : { bindingResult: { status: "applied", expertId: "expert-a" } };
+    for (const [requestId, modes] of [
+      ["set-preserve-modes", {}],
+      [
+        "set-switch-modes",
+        { selectionScope: "entry" as const, resourceMode: "shared-readonly" as const },
+      ],
+    ] as const) {
+      const output = capture();
+      await executeManagementCli({
+        baseDir: "/tmp/skill-cli-test-home",
+        command: parseManagementCliCommand({
+          namespace: "expert",
+          args: ["skills", "set", "expert-a"],
+          flags: { ...baseFlags, skillId: [skillId], requestId, ...modes },
+        }),
+        io: { stdout: output.stream, stderr: capture().stream },
+      });
+    }
+
+    const mutations = transport.requests.filter(
+      (request) => request.action === "bindings" && request.operation === "set",
+    );
+    expect(mutations).toHaveLength(2);
+    expect(mutations[0]?.bindings).toEqual([
+      {
+        skillId,
+        enabled: true,
+        allowEvolution: true,
+        selectionScope: "package",
+        resourceMode: "run-private",
+      },
+    ]);
+    expect(mutations[1]?.bindings).toEqual([
+      {
+        skillId,
+        enabled: true,
+        allowEvolution: true,
+        selectionScope: "entry",
+        resourceMode: "shared-readonly",
+      },
+    ]);
+  });
+
+  it("allows an explicit false value to clear an existing evolution permission", async () => {
+    const skillId = "skl_0123456789abcdef0123456789abcdef";
+    transport.executeStore = async (request) =>
+      request.action === "bindings" && request.operation === "list"
+        ? {
+            bindingResult: {
+              expertId: "expert-a",
+              revision: 3,
+              bindings: [
+                {
+                  skillId,
+                  enabled: true,
+                  allowEvolution: true,
+                  selectionScope: "package",
+                  resourceMode: "run-private",
+                },
+              ],
+            },
+          }
+        : { bindingResult: { status: "applied", expertId: "expert-a" } };
+    const output = capture();
+    await executeManagementCli({
+      baseDir: "/tmp/skill-cli-test-home",
+      command: parseManagementCliCommand({
+        namespace: "expert",
+        args: ["skills", "set", "expert-a"],
+        flags: {
+          ...baseFlags,
+          skillId: [skillId],
+          requestId: "set-clear-evolution-permission",
+          allowEvolution: "false",
+        },
+      }),
+      io: { stdout: output.stream, stderr: capture().stream },
+    });
+    expect(
+      transport.requests.find(
+        (request) => request.action === "bindings" && request.operation === "set",
+      )?.bindings,
+    ).toEqual([
+      {
+        skillId,
+        enabled: true,
+        allowEvolution: false,
+        selectionScope: "package",
+        resourceMode: "run-private",
+      },
+    ]);
+  });
+
+  it("passes custom modes through per-Expert CAS for multi-Expert add", async () => {
+    const output = capture(),
+      result = await executeManagementCli({
+        baseDir: "/tmp/skill-cli-test-home",
+        command: parseManagementCliCommand({
+          namespace: "expert",
+          args: ["skills", "add"],
+          flags: {
+            ...baseFlags,
+            expertIds: "expert-a,expert-b",
+            skillId: ["skl_0123456789abcdef0123456789abcdef"],
+            requestId: "multi-private-add",
+            selectionScope: "package",
+            resourceMode: "run-private",
+          },
+        }),
+        io: { stdout: output.stream, stderr: capture().stream },
+      });
+
+    expect(result.exitCode).toBe(0);
+    expect(transport.requests.some((request) => request.action === "bindExperts")).toBe(false);
+    const mutations = transport.requests.filter(
+      (request) => request.action === "bindings" && request.operation === "add",
+    );
     expect(mutations).toHaveLength(2);
     expect(mutations.map((request) => request.expertId)).toEqual(["expert-a", "expert-b"]);
-    expect(mutations.map((request) => request.expectedRevision)).toEqual([3, 7]);
-    expect(mutations.map((request) => request.requestId)).not.toEqual([
-      "startup-add-1",
-      "startup-add-1",
-    ]);
     expect(mutations[0]?.requestId).not.toBe(mutations[1]?.requestId);
-    expect(
-      mutations.every(
-        (request) =>
-          Array.isArray(request.bindings) &&
-          (request.bindings as Array<{ activation: string }>).every(
-            (binding) => binding.activation === "startup",
-          ),
-      ),
-    ).toBe(true);
+    for (const mutation of mutations)
+      expect(mutation.bindings).toEqual([
+        {
+          skillId: "skl_0123456789abcdef0123456789abcdef",
+          enabled: true,
+          selectionScope: "package",
+          resourceMode: "run-private",
+        },
+      ]);
+    expect(JSON.parse(output.text())).toMatchObject({
+      ok: true,
+      result: { results: [{ status: "applied" }, { status: "applied" }] },
+    });
   });
 
   it("refreshes multiple Skills through one server batch with per-item CAS and partial status", async () => {

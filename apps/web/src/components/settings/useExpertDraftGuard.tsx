@@ -17,6 +17,8 @@ export interface UseExpertDraftGuardOptions {
   shouldGuardNavigation?: (input: {
     readonly currentPathname: string;
     readonly nextPathname: string;
+    readonly currentSearch: Readonly<Record<string, unknown>>;
+    readonly nextSearch: Readonly<Record<string, unknown>>;
   }) => boolean;
   canSave?: boolean;
   saveDisabledReason?: string;
@@ -95,7 +97,12 @@ export function useExpertDraftGuard({
     shouldBlockFn: async ({ current, next }) => {
       if (
         shouldGuardNavigation &&
-        !shouldGuardNavigation({ currentPathname: current.pathname, nextPathname: next.pathname })
+        !shouldGuardNavigation({
+          currentPathname: current.pathname,
+          nextPathname: next.pathname,
+          currentSearch: { ...current.search },
+          nextSearch: { ...next.search },
+        })
       ) {
         return false;
       }

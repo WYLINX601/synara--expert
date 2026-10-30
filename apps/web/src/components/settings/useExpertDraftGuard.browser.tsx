@@ -145,6 +145,8 @@ it("skips the dirty guard for route changes accepted by an optional scope predic
   expect(shouldGuardNavigation).toHaveBeenCalledWith({
     currentPathname: "/edit",
     nextPathname: "/settings",
+    currentSearch: {},
+    nextSearch: {},
   });
   expect(document.body.textContent).not.toContain("未保存的更改");
   await mounted.close();

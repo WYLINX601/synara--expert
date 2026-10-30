@@ -780,6 +780,8 @@ export function createWsNativeApi(): NativeApi {
               ? { ...input, requestId: crypto.randomUUID() }
               : input,
         }),
+      skillEvolution: (input) =>
+        transport.request(WS_METHODS.serverSkillEvolution, { request: input }),
       readSkillManagementAccess: () =>
         transport.request(WS_METHODS.serverReadSkillManagementAccess),
       createSkillManagementPairing: () =>
@@ -799,12 +801,6 @@ export function createWsNativeApi(): NativeApi {
         transport.request(WS_METHODS.serverPreviewSkillPackageRemoval, input),
       importSkillPackage: (input) => transport.request(WS_METHODS.serverImportSkillPackage, input),
       removeSkillPackage: (input) => transport.request(WS_METHODS.serverRemoveSkillPackage, input),
-      previewSkillPackageSwitch: (input) =>
-        transport.request(WS_METHODS.serverPreviewSkillPackageSwitch, input),
-      applySkillPackageSwitch: (input) =>
-        transport.request(WS_METHODS.serverApplySkillPackageSwitch, input),
-      readSkillPackageSwitchProgress: (input) =>
-        transport.request(WS_METHODS.serverReadSkillPackageSwitchProgress, input),
       readExpertSnapshot: (input) => transport.request(WS_METHODS.serverReadExpertSnapshot, input),
       readExpertAppliedRuntime: (input) =>
         transport.request(WS_METHODS.serverReadExpertAppliedRuntime, input),

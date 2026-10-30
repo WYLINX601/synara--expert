@@ -1,6 +1,10 @@
 # 专家技能索引与共享版本包：实施与验收记录
 
-## 交付范围
+2026-10-29 当前范围补充：Synara 自有的 Skill 启动预加载、作者 `activation`、CLI `--activation` 及 startup-only BMad 预检已退役。绑定决定可用范围，正文与资源走原生按需／明确调用。下文旧启动模式与旧集中切换仅为历史实施记录；当前实现与检查见 [优化验收](./skill-management-optimization-acceptance-2026-10-29.md)。
+
+## 历史记录范围
+
+2026-10-29 用户要求删除未发布技能管理功能中的旧配置转换与数据适配。下文集中切换工具及其 RPC／CLI 已从当前源码退役，旧验证记录只保留历史依据；当前配置直接使用技能库绑定，见[最新优化验收](./skill-management-optimization-acceptance-2026-10-29.md)。
 
 按用户确认的[完整方案](expert-skill-package-design.md)实现共享不可变包、专家入口选择、V2 任务清单、四端统一目录、显式调用、配置界面、版本更新与引用保护删除、BMad 预设和集中切换工具。
 
@@ -10,15 +14,15 @@
 
 ## 实现与所有权
 
-| 范围       | 实现与边界                                                                                                                                                                                                      |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 资源包     | [SkillPackageStore](../apps/server/src/experts/SkillPackageStore.ts) 保存完整目录、内容寻址、只读发布、完整性复验；来源指针独立存储，任务不解析来源最新版                                                       |
-| 专家与任务 | [ExpertStore](../apps/server/src/experts/ExpertStore.ts) 保存包入口选择及 V2 清单；参考资料沿用原快照职责，技能不复制进任务目录                                                                                 |
-| 运行       | [目录构建器](../apps/server/src/provider/expertSkillCatalog.ts) 与 ProviderService 在启动、恢复和发送时核验固定快照、包和入口；Codex、Pi、Claude Code、oh-my-pi 使用各自指令通道                                |
-| UI         | 复用现有 Settings 父布局、Expert 编辑器、技能选择器和任务详情；增加受管理包导入/更新/删除、启动与按需入口、版本和目录提交状态，无新增顶级页面                                                                   |
-| 输入框     | 草稿先保存待绑定的包与入口；首次发送读取服务端接受的任务快照后补齐不可变身份；已有任务从固定快照发现技能                                                                                                        |
-| 切换       | [SkillPackageSwitch](../apps/server/src/experts/SkillPackageSwitch.ts) 管理具体预览、摘要、备份与进度；[宿主适配](../apps/server/src/workbench/host/skillPackageSwitchHost.ts) 调用原生停止、Hub 取消及删除能力 |
-| 协议与迁移 | WS revision 6；Expert 独立 ledger 新增迁移 6 保存技能目录提交回执；没有改写冻结的原生迁移                                                                                                                       |
+| 范围       | 实现与边界                                                                                                                                                                       |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 资源包     | [SkillPackageStore](../apps/server/src/experts/SkillPackageStore.ts) 保存完整目录、内容寻址、只读发布、完整性复验；来源指针独立存储，任务不解析来源最新版                        |
+| 专家与任务 | [ExpertStore](../apps/server/src/experts/ExpertStore.ts) 保存包入口选择及 V2 清单；参考资料沿用原快照职责，技能不复制进任务目录                                                  |
+| 运行       | [目录构建器](../apps/server/src/provider/expertSkillCatalog.ts) 与 ProviderService 在启动、恢复和发送时核验固定快照、包和入口；Codex、Pi、Claude Code、oh-my-pi 使用各自指令通道 |
+| UI         | 复用现有 Settings 父布局、Expert 编辑器、技能选择器和任务详情；增加受管理包导入/更新/删除、启动与按需入口、版本和目录提交状态，无新增顶级页面                                    |
+| 输入框     | 草稿先保存待绑定的包与入口；首次发送读取服务端接受的任务快照后补齐不可变身份；已有任务从固定快照发现技能                                                                         |
+| 切换       | 历史集中切换服务及专属宿主适配已于 2026-10-29 删除；不再提供旧配置转换及测试数据清理入口                                                                                         |
+| 协议与迁移 | WS revision 6；Expert 独立 ledger 新增迁移 6 保存技能目录提交回执；没有改写冻结的原生迁移                                                                                        |
 
 接入关系登记于[清单](../workbench/integration-points.json)，依赖扫描覆盖直接依赖与已登记宿主接口，不代表完整运行时隔离。
 
@@ -35,17 +39,11 @@
 - `skillApplication` 记录目录、实际配置指令哈希、启动入口、固定版本及 lifecycle generation。此回执证明适配器提交的配置一致，不证明模型执行了每项技能；UI 保留这一区别。
 - 包写入、定义/快照发布与删除使用同一 stateDir 的进程内串行队列。所有变更经拥有该 stateDir 的服务端执行，不宣称存在跨进程文件锁。
 
-## 集中切换
+## 历史集中切换（已退役）
 
-[一次性 CLI](../scripts/expert-p0/skill-package-switch.ts) 通过 owner RPC 运行，沿用当前服务端认证和数据归属。先准备明确的专家选择与测试任务/快照白名单 JSON，再依次执行：
+旧集中切换 CLI 已删除，不再执行历史 preview／apply／progress 操作。当前配置直接使用技能库绑定管理入口。
 
-```sh
-mise exec -- bun scripts/expert-p0/skill-package-switch.ts preview --input /absolute/request.json
-mise exec -- bun scripts/expert-p0/skill-package-switch.ts apply --switch-id <returned-id> --digest <returned-digest>
-mise exec -- bun scripts/expert-p0/skill-package-switch.ts progress --switch-id <returned-id>
-```
-
-认证 WebSocket 地址由当前进程的 `SYNARA_EXPERT_SWITCH_OWNER_URL` 提供；不要把实际 token 写入文档、日志或命令历史。工具不会自行选择日用数据或补全白名单。具体 preview 包含非技能字段摘要、Persona 精确前后值、任务、快照、Hub 工作、投影和引用；目标变化使旧摘要失效。备份完成后才发布新定义，并保存可恢复进度。
+历史工具的认证 WebSocket 地址由当时进程的 `SYNARA_EXPERT_SWITCH_OWNER_URL` 提供；不要把实际 token 写入文档、日志或命令历史。工具不会自行选择日用数据或补全白名单。具体 preview 包含非技能字段摘要、Persona 精确前后值、任务、快照、Hub 工作、投影和引用；目标变化使旧摘要失效。备份完成后才发布新定义，并保存可恢复进度。
 
 原生 `thread.delete` 先标记删除，再由 ThreadDeletionReactor 在停止会话、终端和统计归档完成后清除任务行与事件；若清理或 fence 未完成，软删除行可能保留至后续重试。切换不自行删除事件，也不假设 dispatch 返回即代表引用已消失。预览列为保留的快照采取保守策略，即使宿主随后清除了任务，仍保留这些快照并返回 `complete_with_retained_artifacts`。只有不在保留清单且经读回确认为无引用的旧快照与 Claude 受管理投影可清理；OMP 临时投影仍由原有会话 finalizer 负责。普通任务或无法解释的引用会阻止破坏性清理。
 

@@ -1,7 +1,7 @@
 "use client";
 
 // FILE: switch.tsx
-// Purpose: Shared accent-colored on/off switch primitive used by settings, menus, and dialogs.
+// Purpose: Shared themed on/off switch with an optional neutral tone for compact settings rows.
 // Layer: Base UI component
 // Exports: Switch plus track/thumb class names for compact switch-shaped controls
 
@@ -15,16 +15,26 @@ const SWITCH_TRACK_CLASS_NAME =
 const SWITCH_THUMB_CLASS_NAME =
   "pointer-events-none block aspect-square h-full origin-left translate-x-0 rounded-full bg-white shadow-sm ring-1 ring-black/5 will-change-transform [transition:translate_.2s_ease-out,border-radius_.15s,scale_.1s_.1s,transform-origin_.15s]";
 
-function Switch({ className, ...props }: SwitchPrimitive.Root.Props) {
+type SwitchProps = SwitchPrimitive.Root.Props & {
+  tone?: "accent" | "neutral";
+};
+
+function Switch({ className, tone = "accent", ...props }: SwitchProps) {
   return (
     <SwitchPrimitive.Root
-      className={cn(SWITCH_TRACK_CLASS_NAME, className)}
+      className={cn(
+        SWITCH_TRACK_CLASS_NAME,
+        tone === "neutral" &&
+          "data-checked:border-[var(--color-text-foreground)] data-checked:bg-[var(--color-text-foreground)]",
+        className,
+      )}
       data-slot="switch"
       {...props}
     >
       <SwitchPrimitive.Thumb
         className={cn(
           SWITCH_THUMB_CLASS_NAME,
+          tone === "neutral" && "data-checked:bg-[var(--color-background)]",
           "in-[[role=switch]:active,[data-slot=label]:active,[data-slot=field-label]:active]:not-data-disabled:scale-x-110 in-[[role=switch]:active,[data-slot=label]:active,[data-slot=field-label]:active]:rounded-[var(--thumb-size)/calc(var(--thumb-size)*1.1)] data-checked:origin-[var(--thumb-size)_50%] data-checked:translate-x-[calc(var(--thumb-size)-4px)]",
         )}
         data-slot="switch-thumb"

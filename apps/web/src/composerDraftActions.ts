@@ -49,6 +49,7 @@ import {
   createEmptyThreadDraft,
   draftThreadStatesEqual,
   fileCommentDedupKey,
+  isDraftThreadMappedToProjectSlot,
   normalizeAssistantSelection,
   normalizeAssistantSelections,
   normalizeDraftThreadEntryPoint,
@@ -226,6 +227,7 @@ export const createComposerDraftStoreState =
         const worktreePath = options.worktreePath ?? null;
         const nextDraftThread: DraftThreadState = {
           projectId: options.projectId,
+          ...(options.expertId?.trim() ? { expertId: options.expertId.trim() } : {}),
           createdAt: options.createdAt ?? new Date().toISOString(),
           runtimeMode: options.runtimeMode ?? DEFAULT_RUNTIME_MODE,
           interactionMode: options.interactionMode ?? DEFAULT_INTERACTION_MODE,
@@ -267,6 +269,16 @@ export const createComposerDraftStoreState =
         if (draftThreadStatesEqual(existing, nextDraftThread)) {
           return state;
         }
+        // Context edits migrate an existing slot owner; standalone drafts do not acquire
+        // ownership here. Explicit claims remain the responsibility of setProjectDraftThreadId.
+        if (!isDraftThreadMappedToProjectSlot(state.projectDraftThreadIdByProjectId, threadId)) {
+          return {
+            draftThreadsByThreadId: {
+              ...state.draftThreadsByThreadId,
+              [threadId]: nextDraftThread,
+            },
+          };
+        }
         const nextProjectDraftThreadIdByProjectId: Record<string, ThreadId> = {
           ...removeProjectDraftMappingsForThread(state.projectDraftThreadIdByProjectId, threadId),
           [projectDraftThreadMappingKey(nextProjectId, nextDraftThread.entryPoint)]: threadId,
@@ -295,6 +307,19 @@ export const createComposerDraftStoreState =
           options,
           createdAtMode: "preserve-existing-on-empty",
         });
+        // A workspace/project move changes standalone metadata without implicitly claiming
+        // the destination project's primary composer slot.
+        if (!isDraftThreadMappedToProjectSlot(state.projectDraftThreadIdByProjectId, threadId)) {
+          if (draftThreadStatesEqual(existing, nextDraftThread)) {
+            return state;
+          }
+          return {
+            draftThreadsByThreadId: {
+              ...state.draftThreadsByThreadId,
+              [threadId]: nextDraftThread,
+            },
+          };
+        }
         const targetMappingKey = projectDraftThreadMappingKey(
           projectId,
           nextDraftThread.entryPoint,

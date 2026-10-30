@@ -1,4 +1,5 @@
 import { SkillLibraryRpcInput } from "./skillLibrary";
+import { SkillEvolutionRpcInput } from "./skillEvolution";
 import { SkillManagementCredentialRevokeInput } from "./skillManagementAuth";
 import {
   HubPlanListInputSchema,
@@ -45,11 +46,6 @@ import {
   SkillPackageRemoveInput,
   SkillPackageUpdatePreviewInput,
 } from "./skillPackage";
-import {
-  SkillPackageSwitchApplyInput,
-  SkillPackageSwitchInput,
-  SkillPackageSwitchProgressReadInput,
-} from "./skillPackageSwitch";
 import { NonNegativeInt, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
 import {
   ContextCommandReadInput,
@@ -385,6 +381,7 @@ export const WS_METHODS = {
   serverDeleteExpert: "server.deleteExpert",
   serverPreviewExpert: "server.previewExpert",
   serverSkillLibrary: "server.skillLibrary",
+  serverSkillEvolution: "server.skillEvolution",
   serverReadSkillManagementAccess: "server.readSkillManagementAccess",
   serverCreateSkillManagementPairing: "server.createSkillManagementPairing",
   serverListSkillManagementCredentials: "server.listSkillManagementCredentials",
@@ -397,9 +394,6 @@ export const WS_METHODS = {
   serverPreviewSkillPackageRemoval: "server.previewSkillPackageRemoval",
   serverImportSkillPackage: "server.importSkillPackage",
   serverRemoveSkillPackage: "server.removeSkillPackage",
-  serverPreviewSkillPackageSwitch: "server.previewSkillPackageSwitch",
-  serverApplySkillPackageSwitch: "server.applySkillPackageSwitch",
-  serverReadSkillPackageSwitchProgress: "server.readSkillPackageSwitchProgress",
   serverReadExpertSnapshot: "server.readExpertSnapshot",
   serverReadExpertAppliedRuntime: "server.readExpertAppliedRuntime",
   serverListExpertConnections: "server.listExpertConnections",
@@ -736,6 +730,7 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverDeleteExpert, ExpertDeleteInput),
   tagRequestBody(WS_METHODS.serverPreviewExpert, ExpertPreviewInput),
   tagRequestBody(WS_METHODS.serverSkillLibrary, SkillLibraryRpcInput),
+  tagRequestBody(WS_METHODS.serverSkillEvolution, SkillEvolutionRpcInput),
   tagRequestBody(WS_METHODS.serverReadSkillManagementAccess, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverCreateSkillManagementPairing, Schema.Struct({})),
   tagRequestBody(WS_METHODS.serverListSkillManagementCredentials, Schema.Struct({})),
@@ -751,12 +746,6 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverPreviewSkillPackageRemoval, SkillPackageReadInput),
   tagRequestBody(WS_METHODS.serverImportSkillPackage, SkillPackageImportInput),
   tagRequestBody(WS_METHODS.serverRemoveSkillPackage, SkillPackageRemoveInput),
-  tagRequestBody(WS_METHODS.serverPreviewSkillPackageSwitch, SkillPackageSwitchInput),
-  tagRequestBody(WS_METHODS.serverApplySkillPackageSwitch, SkillPackageSwitchApplyInput),
-  tagRequestBody(
-    WS_METHODS.serverReadSkillPackageSwitchProgress,
-    SkillPackageSwitchProgressReadInput,
-  ),
   tagRequestBody(WS_METHODS.serverReadExpertSnapshot, ExpertSnapshotReadInput),
   tagRequestBody(WS_METHODS.serverReadExpertAppliedRuntime, ExpertAppliedRuntimeReadInput),
   tagRequestBody(WS_METHODS.serverListExpertConnections, Schema.Struct({})),

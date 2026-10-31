@@ -15,6 +15,8 @@ import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore
 import { ExpertLearningRepository } from "../../experts/evolution/ExpertLearningRepository";
 import { frozenLearningEntriesReader } from "../../experts/evolution/ExpertLearningState";
 import { expertSnapshotSession } from "../../experts/expertSnapshotSession";
+import { SpaceMemoryService } from "../../spaceMemory/SpaceMemoryService.ts";
+import { prepareRuntimeKnowledge } from "../../workbench/host/runtimeKnowledge.ts";
 import { ContextRepository } from "../../context/ContextRepository.ts";
 import { captureSkillEvolutionExecutionReader } from "../../workbench/host/skillEvolutionExecution";
 import { contextExecutionInputDigest } from "../contextDispatchEvidence.ts";
@@ -936,6 +938,7 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const computerService = yield* Effect.serviceOption(ComputerService);
+  const spaceMemoryService = yield* Effect.serviceOption(SpaceMemoryService);
   const gatewaySessions = yield* Effect.serviceOption(AgentGatewaySessionRegistry);
   // Resolved at make time: fibers that run turn dispatch do not inherit the
   // layer environment, so per-turn serviceOption lookups would see an empty
@@ -1016,6 +1019,7 @@ const make = Effect.gen(function* () {
       : {},
   );
   const threadSkillAssemblyIds = new Map<ThreadId, string>();
+  const threadKnowledgeManifestIds = new Map<ThreadId, string>();
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
     timeToLive: HANDLED_TURN_START_KEY_TTL,
@@ -2455,26 +2459,33 @@ const make = Effect.gen(function* () {
               }),
           })
         : undefined;
-    const runSkillAssembly = expertSnapshot
+    let managedSkillRunHadPredecessor = false;
+    let managedSkillRunIsFirstRoot = false;
+    let runSkillAssembly = expertSnapshot
       ? yield* Effect.tryPromise({
           try: async () => {
             const current = await runSkillAssemblies.current(threadId);
             const currentMatchesWork =
               !managedSkillRunKey || current?.rootRunId === `run:${threadId}:${managedSkillRunKey}`;
             if (preserveExpertSkillRun && current && currentMatchesWork) return current;
-            if (
-              (!current || !currentMatchesWork) &&
-              (preserveExpertSkillRun || options?.skillRun?.requireExisting || !options?.skillRun)
-            ) {
+            if (!current || !currentMatchesWork) {
               const managedContinuation = managedSkillRunKey
                 ? await runSkillAssemblies.continuation(threadId, managedSkillRunKey, true)
                 : undefined;
-              if (!managedContinuation)
+              managedSkillRunHadPredecessor = managedContinuation !== undefined;
+              if (
+                !managedContinuation &&
+                (preserveExpertSkillRun || options?.skillRun?.requireExisting || !options?.skillRun)
+              ) {
                 throw new Error(
                   "This recovery has no durable Run Skill assembly. Its historical snapshot is preserved; send a new user request to begin a new Run, or restore the original Run record before continuing.",
                 );
+              }
             }
             if (managedSkillRunKey || options?.skillRun) {
+              managedSkillRunIsFirstRoot = Boolean(
+                managedSkillRunKey && !currentMatchesWork && !managedSkillRunHadPredecessor,
+              );
               return runSkillAssemblies.prepare({
                 threadId,
                 rootRunId: managedSkillRunKey
@@ -2498,6 +2509,57 @@ const make = Effect.gen(function* () {
             }),
         })
       : undefined;
+    const allowCreateRunKnowledge = Boolean(
+      (options?.skillRun !== undefined &&
+        !options.skillRun.requireExisting &&
+        !preserveExpertSkillRun &&
+        managedSkillRunKey === undefined) ||
+      managedSkillRunIsFirstRoot,
+    );
+    const runtimeKnowledgeRequired = Boolean(
+      runSkillAssembly?.session.knowledge !== undefined ||
+      runSkillAssembly?.knowledgeSourceRunId !== undefined ||
+      allowCreateRunKnowledge,
+    );
+    const canRestoreRuntimeKnowledge =
+      Option.isSome(spaceMemoryService) && Option.isSome(learningRepository);
+    if (
+      runSkillAssembly &&
+      (preferredProvider === "omp" || preferredProvider === "pi") &&
+      (runtimeKnowledgeRequired || canRestoreRuntimeKnowledge)
+    ) {
+      if (Option.isNone(spaceMemoryService) || Option.isNone(learningRepository)) {
+        return yield* new ProviderAdapterValidationError({
+          provider: preferredProvider,
+          operation: "thread.turn.start",
+          issue:
+            "Run knowledge cannot be prepared or verified because Space Memory services are unavailable.",
+        });
+      }
+      runSkillAssembly = yield* Effect.tryPromise({
+        try: () =>
+          Effect.runPromise(
+            prepareRuntimeKnowledge({
+              stateDir: serverConfig.stateDir,
+              threadId,
+              provider: preferredProvider,
+              assembly: runSkillAssembly!,
+              allowCreate: allowCreateRunKnowledge,
+              memory: spaceMemoryService.value,
+              learningRepository: learningRepository.value,
+              projection: projectionSnapshotQuery,
+              attachKnowledge: (rootRunId, knowledge) =>
+                runSkillAssemblies.attachKnowledge(rootRunId, knowledge),
+            }),
+          ),
+        catch: (cause) =>
+          new ProviderAdapterValidationError({
+            provider: preferredProvider,
+            operation: "thread.turn.start",
+            issue: `Could not prepare or verify Run knowledge: ${String(cause instanceof Error ? cause.message : cause)}`,
+          }),
+      });
+    }
     const expertSession =
       runSkillAssembly?.session ??
       (expertSnapshot ? expertSnapshotSession(expertSnapshot) : undefined);
@@ -2506,6 +2568,11 @@ const make = Effect.gen(function* () {
       activeSessionBeforeEnsure !== undefined &&
       (activeSessionBeforeEnsure.skillApplication?.skillAssemblyId ??
         threadSkillAssemblyIds.get(threadId)) !== runSkillAssembly.assemblyId;
+    const desiredKnowledgeManifestId = runSkillAssembly?.session.knowledge?.manifestId;
+    const knowledgeManifestChanged =
+      runSkillAssembly !== undefined &&
+      activeSessionBeforeEnsure !== undefined &&
+      threadKnowledgeManifestIds.get(threadId) !== desiredKnowledgeManifestId;
     const effectiveCwd = yield* resolveProjectedThreadWorkspaceCwd(thread);
     const workspaceState = resolveThreadWorkspaceState({
       envMode: thread.envMode,
@@ -2642,6 +2709,9 @@ const make = Effect.gen(function* () {
         yield* Effect.sync(() => {
           if (runSkillAssembly) threadSkillAssemblyIds.set(threadId, runSkillAssembly.assemblyId);
           else threadSkillAssemblyIds.delete(threadId);
+          if (desiredKnowledgeManifestId)
+            threadKnowledgeManifestIds.set(threadId, desiredKnowledgeManifestId);
+          else threadKnowledgeManifestIds.delete(threadId);
         });
         return sessionOutcome;
       });
@@ -2765,7 +2835,8 @@ const make = Effect.gen(function* () {
         !computerControlChanged &&
         !autoApproveSynaraToolsChanged &&
         !providerOptionsChanged &&
-        !skillAssemblyChanged
+        !skillAssemblyChanged &&
+        !knowledgeManifestChanged
       ) {
         return {
           activeSessionBeforeEnsure,
@@ -2797,7 +2868,8 @@ const make = Effect.gen(function* () {
         !shouldRestartForModelChange &&
         !shouldRestartForModelSelectionChange &&
         !autoApproveSynaraToolsChanged &&
-        !skillAssemblyChanged;
+        !skillAssemblyChanged &&
+        !knowledgeManifestChanged;
       const deferComputerControlRestart = {
         activeSessionBeforeEnsure,
         activeSession: reusableSession,
@@ -2825,6 +2897,7 @@ const make = Effect.gen(function* () {
       // nothing.
       const resumeCursor =
         skillAssemblyChanged ||
+        knowledgeManifestChanged ||
         providerChanged ||
         providerInstanceChanged ||
         shouldRestartForModelChange ||
@@ -2865,6 +2938,7 @@ const make = Effect.gen(function* () {
       const restartedOutcome = yield* startProviderSessionWithOutcome(
         resumeCursor,
         (skillAssemblyChanged ||
+          knowledgeManifestChanged ||
           workspaceChanged ||
           providerChanged ||
           shouldRestartForModelChange) &&

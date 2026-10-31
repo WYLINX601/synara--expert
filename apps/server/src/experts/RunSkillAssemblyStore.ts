@@ -10,6 +10,7 @@ import {
   type ProviderExpertSession,
   type ResolvedExpertSkillEntry,
   type ExpertSkillBinding,
+  type LearningSessionContext,
 } from "@synara/contracts";
 import { ensurePrivateDirectorySync } from "../privatePathPermissions";
 import { createExpertStore, expertResourceFiles } from "./ExpertStore";
@@ -47,6 +48,13 @@ function validateRecord(record: RunSkillAssembly, rootRunId?: string): RunSkillA
     record.assemblyId !== skillAssemblyFingerprint(record.session)
   )
     throw new Error("Run Skill assembly identity is corrupt.");
+  if (
+    record.session.knowledge &&
+    (record.session.knowledge.rootRunId !== record.rootRunId ||
+      record.session.knowledge.snapshotId !== record.baseSnapshotId ||
+      record.session.knowledge.scope.expertId !== record.session.expertId)
+  )
+    throw new Error("Run knowledge reference does not match its Skill assembly.");
   return record;
 }
 
@@ -246,6 +254,21 @@ export function createRunSkillAssemblyStore(
   };
   const store = {
     read: (rootRunId: string) => readRunSkillAssembly(stateDir, rootRunId),
+    async attachKnowledge(rootRunId: string, knowledge: LearningSessionContext) {
+      return withSkillPackageLifecycle(stateDir, async () => {
+        const record = await readRunSkillAssembly(stateDir, rootRunId);
+        if (!record) throw new Error("Run Skill assembly is unavailable for knowledge binding.");
+        if (record.session.knowledge) {
+          if (!isDeepStrictEqual(record.session.knowledge, knowledge))
+            throw new Error("Run knowledge binding is already fixed to a different manifest.");
+          return record;
+        }
+        const updated = { ...record, session: { ...record.session, knowledge } };
+        validateRecord(updated, rootRunId);
+        await write(updated);
+        return updated;
+      });
+    },
     preview: (baseSnapshotId: string) =>
       withSkillPackageLifecycle(
         stateDir,
@@ -357,6 +380,7 @@ export function createRunSkillAssemblyStore(
           createdAt: input.createdAt,
           hasInitializationEffects,
           phase: "prepared",
+          ...(inherited?.session.knowledge ? { knowledgeSourceRunId: inherited.rootRunId } : {}),
           session: { ...session, skillAssemblyId: assemblyId },
         };
         await write(record);

@@ -28,6 +28,8 @@ export const ExpertLearningEvidenceItem = Schema.Struct({
   text: EvidenceText,
   role: Schema.optional(Schema.Literals(["user", "assistant"])),
   eventSequence: Schema.optional(NonNegativeInt),
+  /** Exact native journal event; item IDs may instead identify a tool-call projection. */
+  sourceEventId: Schema.optional(Id),
   toolCallId: Schema.optional(Id),
   truncated: Schema.optional(Schema.Boolean),
 });
@@ -42,7 +44,7 @@ export const ExpertLearningEvidence = Schema.Struct({
   expertId: Id,
   threadId: Id,
   turnId: Id,
-  rootRunId: Schema.optional(Id),
+  rootRunId: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(2_048))),
   snapshotId: Id,
   assemblyId: Schema.optional(Id),
   projectId: Id,

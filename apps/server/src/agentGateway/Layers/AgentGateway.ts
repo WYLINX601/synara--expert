@@ -131,11 +131,13 @@ import { makeThreadDiagnosticTools } from "../threadDiagnosticTools.ts";
 import { makeAgentGatewayKanbanTools } from "../kanbanTools.ts";
 import { makeAgentGatewayTodoTools } from "../todoTools.ts";
 import { makeAgentGatewayInlineVisualTools } from "../inlineVisualTools.ts";
+import { makeLearningTools } from "../learningTools.ts";
 import { TodoService } from "../../todo/Services/TodoService.ts";
 import { isServerBetaFeatureEnabled } from "../../betaFeatureGate.ts";
 import { pruneProjectedArchivedManagedWorktrees } from "../../managedWorktrees.ts";
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { makeExpertGatewayToolResolver } from "../../experts/ExpertGatewayTools.ts";
+import { ExpertLearningActions } from "../../experts/evolution/ExpertLearningActions.ts";
 
 import { buildAgentGatewayProviderAvailabilities } from "../providerAvailability";
 
@@ -185,6 +187,8 @@ export const makeAgentGateway = Effect.gen(function* () {
   const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
   const diagnostics = yield* ThreadDiagnosticsQuery;
   const serverConfig = yield* ServerConfig;
+  const learningActions = Option.getOrUndefined(yield* Effect.serviceOption(ExpertLearningActions));
+  const learningTools = learningActions ? makeLearningTools(learningActions) : [];
   const expertTools = makeExpertGatewayToolResolver({
     stateDir: serverConfig.stateDir,
   });
@@ -1873,6 +1877,7 @@ export const makeAgentGateway = Effect.gen(function* () {
 
   const tools: ReadonlyArray<ToolEntry> = [
     ...readTools,
+    ...learningTools,
     ...diagnosticTools,
     createThreads,
     createThread,

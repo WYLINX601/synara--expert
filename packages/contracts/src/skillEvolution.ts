@@ -11,6 +11,8 @@ import {
 } from "./baseSchemas";
 import { ModelSelection } from "./orchestration";
 import { ExpertLearningState } from "./expertLearning";
+import { LearningMemoryDraft } from "./learningTools";
+import { LearningChangeSet, SpaceMemoryEntry } from "./spaceMemory";
 import {
   SkillDefinition,
   SkillFileChange,
@@ -67,6 +69,7 @@ export const SkillEvolutionOpportunity = Schema.Struct({
     Schema.isMaxLength(20),
   ),
   targetSkillId: Schema.optional(SkillId),
+  memory: Schema.optional(LearningMemoryDraft),
   digest: Digest,
   status: Schema.Literals(["suggested", "dismissed"]),
 });
@@ -196,6 +199,29 @@ export const SkillEvolutionCapability = Schema.Struct({
 });
 export type SkillEvolutionCapability = typeof SkillEvolutionCapability.Type;
 
+const LearningSkillChangeSide = Schema.Struct({
+  size: NonNegativeInt,
+  sha256: Digest,
+  executable: Schema.Boolean,
+  text: Schema.optional(Schema.String.check(Schema.isMaxLength(128_000))),
+  omittedReason: Schema.optional(Schema.Literals(["binary", "budget"])),
+});
+export type LearningSkillChangeSide = typeof LearningSkillChangeSide.Type;
+const LearningSkillChangeFile = Schema.Struct({
+  path: Schema.String.check(Schema.isMaxLength(4_096)),
+  before: Schema.NullOr(LearningSkillChangeSide),
+  after: Schema.NullOr(LearningSkillChangeSide),
+});
+export type LearningSkillChangeFile = typeof LearningSkillChangeFile.Type;
+export const LearningSkillChangeDetail = Schema.Struct({
+  changeId: Id,
+  files: Schema.Array(LearningSkillChangeFile).check(Schema.isMaxLength(100)),
+  coverage: Schema.Array(Schema.String.check(Schema.isMaxLength(200))).check(
+    Schema.isMaxLength(20),
+  ),
+});
+export type LearningSkillChangeDetail = typeof LearningSkillChangeDetail.Type;
+
 const action = <T extends string, F extends Schema.Struct.Fields>(name: T, fields: F) =>
   Schema.Struct({ action: Schema.Literal(name), ...fields }).annotate({
     parseOptions: { onExcessProperty: "error" },
@@ -204,6 +230,23 @@ export const SkillEvolutionRequest = Schema.Union([
   action("sources", { expertId: Id }),
   action("capabilities", {}),
   action("learningRead", { expertId: Id }),
+  action("learningChanges", { expertId: Id }),
+  action("learningReadMemory", { expertId: Id, changeId: Id, revision: PositiveInt }),
+  action("learningReadSkillChange", { expertId: Id, changeId: Id }),
+  action("learningEditMemory", {
+    expertId: Id,
+    changeId: Id,
+    requestId: Id,
+    expectedRevision: PositiveInt,
+    content: TrimmedNonEmptyString.check(Schema.isMaxLength(4_000)),
+    validUntil: Schema.optional(IsoDateTime),
+  }),
+  action("learningRevert", {
+    expertId: Id,
+    changeId: Id,
+    operationId: Id,
+    expectedRevision: Schema.optional(NonNegativeInt),
+  }),
   action("learningSet", {
     expertId: Id,
     requestId: Id,
@@ -268,6 +311,13 @@ export const SkillEvolutionRequest = Schema.Union([
 ]);
 export type SkillEvolutionRequest = typeof SkillEvolutionRequest.Type;
 export const SkillEvolutionResponse = Schema.Struct({
+  learningChanges: Schema.optional(Schema.Array(LearningChangeSet)),
+  learningSkillChange: Schema.optional(LearningSkillChangeDetail),
+  memoryEntry: Schema.optional(SpaceMemoryEntry),
+  learningChange: Schema.optional(LearningChangeSet),
+  learningStatus: Schema.optional(
+    Schema.Literals(["committed", "saved_unbound", "deferred", "unchanged"]),
+  ),
   learningState: Schema.optional(ExpertLearningState),
   sources: Schema.optional(Schema.Array(SkillEvolutionSource)),
   capabilities: Schema.optional(Schema.Array(SkillEvolutionCapability)),
@@ -340,6 +390,7 @@ export const SkillEvolutionDiscoveryResult = Schema.Union([
           Schema.isMaxLength(20),
         ),
         targetSkillId: Schema.optional(SkillId),
+        memory: Schema.optional(LearningMemoryDraft),
       }).annotate({ parseOptions: { onExcessProperty: "error" } }),
     ).check(Schema.isMinLength(1), Schema.isMaxLength(3)),
   }),

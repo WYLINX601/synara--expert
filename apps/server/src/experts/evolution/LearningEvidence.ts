@@ -374,7 +374,10 @@ export function learningEvidenceDeltaFromRuntimeEvent(
   const lifecycle = lifecycleEvidence(entry);
   const terminal = terminalActivityEvidence(entry);
   return {
-    items: [...lifecycle.items, ...terminal.items],
+    items: [...lifecycle.items, ...terminal.items].map((item) => ({
+      ...item,
+      ...(entry.event.eventId.length <= 200 ? { sourceEventId: entry.event.eventId } : {}),
+    })),
     coverage: [...new Set([...lifecycle.coverage, ...terminal.coverage])],
   };
 }

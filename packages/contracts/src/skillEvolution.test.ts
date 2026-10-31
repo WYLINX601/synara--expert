@@ -1,10 +1,13 @@
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import {
+  LearningSkillChangeDetail,
   SkillEvolutionDiscoveryResult,
   SkillEvolutionRequest,
+  SkillEvolutionResponse,
   SkillEvolutionRun,
 } from "./skillEvolution";
+import { LearningChangeSet } from "./spaceMemory";
 
 const skillId = `skl_${"a".repeat(32)}`;
 const digest = "b".repeat(64);
@@ -16,6 +19,90 @@ const opportunity = {
 };
 
 describe("Expert experience discovery contracts", () => {
+  it("accepts only an exact historical Skill change read and bounded file result", () => {
+    const request = {
+      action: "learningReadSkillChange",
+      expertId: "expert-a",
+      changeId: "change-a",
+    };
+    expect(Schema.decodeUnknownSync(SkillEvolutionRequest)(request)).toEqual(request);
+    expect(() =>
+      Schema.decodeUnknownSync(SkillEvolutionRequest)({ ...request, packageId: "pkg_arbitrary" }),
+    ).toThrow();
+
+    const detail = {
+      changeId: "change-a",
+      files: [
+        {
+          path: "SKILL.md",
+          before: {
+            size: 3,
+            sha256: "a".repeat(64),
+            executable: false,
+            text: "old",
+          },
+          after: {
+            size: 4,
+            sha256: "b".repeat(64),
+            executable: true,
+            text: "new!",
+          },
+        },
+        {
+          path: "resources/data.bin",
+          before: null,
+          after: {
+            size: 5,
+            sha256: "c".repeat(64),
+            executable: false,
+            omittedReason: "binary",
+          },
+        },
+      ],
+      coverage: ["package-integrity-validated"],
+    };
+    expect(Schema.decodeUnknownSync(LearningSkillChangeDetail)(detail)).toEqual(detail);
+    expect(
+      Schema.decodeUnknownSync(SkillEvolutionResponse)({ learningSkillChange: detail }),
+    ).toEqual({ learningSkillChange: detail });
+    expect(() =>
+      Schema.decodeUnknownSync(LearningSkillChangeDetail)({
+        ...detail,
+        files: Array.from({ length: 101 }, (_, index) => ({
+          path: `file-${index}`,
+          before: null,
+          after: null,
+        })),
+      }),
+    ).toThrow();
+
+    const inverseReceipt = {
+      changeId: "inverse-change",
+      requestId: "inverse-request",
+      requestFingerprint: `sha256:${"d".repeat(64)}`,
+      ownerId: "owner-a",
+      expertId: "expert-a",
+      sourceScope: {
+        ownerId: "owner-a",
+        spaceId: "space-a",
+        expertId: "expert-a",
+        projectId: "project-a",
+      },
+      assetKind: "skill",
+      before: null,
+      after: null,
+      revertsChangeId: "source-change",
+      sourceRefs: [],
+      status: "committed",
+      summary: "Inverse receipt.",
+      createdAt: "2026-10-31T00:00:00.000Z",
+      updatedAt: "2026-10-31T00:00:00.000Z",
+    };
+    expect(Schema.decodeUnknownSync(LearningChangeSet)(inverseReceipt).revertsChangeId).toBe(
+      "source-change",
+    );
+  });
+
   it("starts from Expert work without an upfront Skill target", () => {
     const start = {
       action: "start",
@@ -48,6 +135,24 @@ describe("Expert experience discovery contracts", () => {
       ).toEqual({ action: "opportunities", opportunities: [candidate] });
     },
   );
+
+  it("accepts an automatic Memory opportunity with bounded draft and exact evidence fields", () => {
+    const candidate = {
+      ...opportunity,
+      memory: {
+        kind: "rule",
+        key: "response.concise",
+        content: "Put the decision first in reports.",
+        expectedRevision: 0,
+      },
+    };
+    expect(
+      Schema.decodeUnknownSync(SkillEvolutionDiscoveryResult)({
+        action: "opportunities",
+        opportunities: [candidate],
+      }),
+    ).toMatchObject({ opportunities: [{ memory: candidate.memory }] });
+  });
 
   it.each([
     { files: [{ path: "SKILL.md", text: "Premature file" }] },

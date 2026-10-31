@@ -3971,6 +3971,9 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           // carry no per-turn override; the session fact is the only source.
           context.gatewayCapabilityInput = captureAgentGatewayCapabilityInput({
             enableComputerControl: context.enableComputerControl === true,
+            ...(context.fixedExpertSession?.knowledge
+              ? { expertSession: { knowledge: context.fixedExpertSession.knowledge } }
+              : {}),
           });
           if (
             context.pendingAbortTurnId !== undefined &&
@@ -4038,6 +4041,9 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           // rotates from current facts.
           context.gatewayCapabilityInput = captureAgentGatewayCapabilityInput({
             enableComputerControl: context.enableComputerControl === true,
+            ...(context.fixedExpertSession?.knowledge
+              ? { expertSession: { knowledge: context.fixedExpertSession.knowledge } }
+              : {}),
           });
           if (
             context.pendingAbortTurnId !== undefined &&

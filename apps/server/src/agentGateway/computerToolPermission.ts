@@ -261,6 +261,65 @@ const SYNARA_GATEWAY_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>([
 const SYNARA_MCP_QUALIFIED_PREFIX = "mcp__synara__";
 const SYNARA_MCP_SERVER_PREFIX = "synara_";
 
+/** Exact learning operations kept outside the general gateway pre-approval catalog. */
+export const SYNARA_LEARNING_TOOL_NAMES = [
+  "synara_learning_read",
+  "synara_learning_commit",
+  "synara_learning_revert",
+] as const;
+
+export type SynaraLearningToolName = (typeof SYNARA_LEARNING_TOOL_NAMES)[number];
+
+const SYNARA_LEARNING_TOOL_NAME_SET: ReadonlySet<string> = new Set(SYNARA_LEARNING_TOOL_NAMES);
+
+/** Accept only an exact catalog spelling or its exact Synara server qualification. */
+export function canonicalSynaraLearningToolName(
+  value: unknown,
+): SynaraLearningToolName | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  const canonical = normalized.startsWith(SYNARA_MCP_QUALIFIED_PREFIX)
+    ? normalized.slice(SYNARA_MCP_QUALIFIED_PREFIX.length)
+    : SYNARA_LEARNING_TOOL_NAME_SET.has(normalized)
+      ? normalized
+      : normalized.startsWith(SYNARA_MCP_SERVER_PREFIX)
+        ? normalized.slice(SYNARA_MCP_SERVER_PREFIX.length)
+        : normalized;
+  return SYNARA_LEARNING_TOOL_NAME_SET.has(canonical)
+    ? (canonical as SynaraLearningToolName)
+    : undefined;
+}
+
+/**
+ * Resolve the authoritative OMP tool identity. This field is inserted by the
+ * exact-build ACP bridge after raw input; model-controlled arguments are never
+ * consulted here.
+ */
+export function synaraLearningToolNameFromPermission(input: {
+  readonly metadata?: unknown;
+}): SynaraLearningToolName | undefined {
+  return canonicalSynaraLearningToolName(recordString(input.metadata, "synaraToolName"));
+}
+
+/**
+ * Detect learning-name claims in any provider name field so the broad gateway
+ * pre-approval path cannot authorize a learning tool using raw-input spoofing.
+ */
+export function claimsSynaraLearningTool(input: {
+  readonly name?: unknown;
+  readonly rawInput?: unknown;
+  readonly metadata?: unknown;
+}): boolean {
+  const toolNameKeys = ["_toolName", "toolName", "tool_name"];
+  const candidates = [
+    input.name,
+    ...toolNameKeys.map((key) => recordString(input.rawInput, key)),
+    recordString(input.metadata, "synaraToolName"),
+    ...toolNameKeys.map((key) => recordString(input.metadata, key)),
+  ];
+  return candidates.some((candidate) => canonicalSynaraLearningToolName(candidate) !== undefined);
+}
+
 /**
  * Any tool Synara's agent gateway serves under its reserved MCP server name —
  * the whole gateway catalog (thread, project, automation, diagnostics,
@@ -281,6 +340,7 @@ const SYNARA_MCP_SERVER_PREFIX = "synara_";
  */
 export function isSynaraGatewayToolName(value: unknown): boolean {
   if (typeof value !== "string") return false;
+  if (canonicalSynaraLearningToolName(value) !== undefined) return false;
   const normalized = value.trim().toLowerCase();
   if (normalized.startsWith(SYNARA_MCP_QUALIFIED_PREFIX)) {
     // The `mcp__synara__` prefix pins the server, not the tool — only a real
@@ -312,6 +372,8 @@ export function isSynaraGatewayToolCall(input: {
   readonly rawInput?: unknown;
   readonly metadata?: unknown;
 }): boolean {
+  if (claimsSynaraLearningTool(input)) return false;
+
   const explicitName = typeof input.name === "string" ? input.name : undefined;
   if (explicitName !== undefined) return isSynaraGatewayToolName(explicitName);
 

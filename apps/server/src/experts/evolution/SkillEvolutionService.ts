@@ -107,6 +107,7 @@ interface StoredRequest {
   readonly messages: readonly EvolutionSourceMessage[];
   readonly runtimeEvidence?: readonly EvolutionRuntimeEvidence[];
   readonly evidenceCoverage?: readonly string[];
+  readonly memoryEnabled?: boolean;
   readonly prompt: string;
   readonly repairCount: number;
   readonly intents: readonly ApplyIntent[];
@@ -163,7 +164,16 @@ export function createSkillEvolutionService(input: {
   readonly timeoutMs?: number;
   readonly pollMs?: number;
   /** Trusted host capability; unavailable to public request payloads. */
-  readonly authorizeAutomatic?: (run: SkillEvolutionRun) => Promise<void>;
+  readonly authorizeAutomatic?: (
+    run: SkillEvolutionRun,
+    opportunity?: Pick<SkillEvolutionOpportunity, "targetSkillId" | "memory" | "evidence">,
+  ) => Promise<void>;
+  readonly readSourceChanges?: (
+    evidence: import("@synara/contracts").ExpertLearningEvidence,
+  ) => Promise<readonly import("@synara/contracts").LearningChangeSet[]>;
+  readonly readMemoryCatalog?: (
+    evidence: import("@synara/contracts").ExpertLearningEvidence,
+  ) => Promise<readonly import("@synara/contracts").SpaceMemoryEntry[] | undefined>;
 }) {
   const now = () => (input.now?.() ?? new Date()).toISOString();
   const runEffect = <A>(effect: Effect.Effect<A, unknown>) => Effect.runPromise(effect);
@@ -230,7 +240,15 @@ export function createSkillEvolutionService(input: {
   const assertMutationPermission = async (record: StoredRequest, result?: SkillDefinition) => {
     if (record.run.origin === "automatic") {
       if (!input.authorizeAutomatic) throw new Error("自动学习授权服务不可用。");
-      await input.authorizeAutomatic(record.run);
+      const parent = record.run.discoveryRequestId
+        ? await load(record.run.discoveryRequestId)
+        : undefined;
+      const opportunity = parent?.run.opportunities?.find(
+        (item) => item.opportunityId === record.run.opportunityId,
+      );
+      if (record.run.stage === "generation" && !opportunity)
+        throw new Error("自动生成缺少准确的来源进化点。");
+      await input.authorizeAutomatic(record.run, opportunity);
     }
     const expert = await activeExpert(record.run.expertId);
     if (record.base) {
@@ -257,6 +275,7 @@ export function createSkillEvolutionService(input: {
     outcomes: opportunity.outcomes,
     evidence: opportunity.evidence,
     ...(opportunity.targetSkillId ? { targetSkillId: opportunity.targetSkillId } : {}),
+    ...(opportunity.memory ? { memory: opportunity.memory } : {}),
   });
   const opportunityDigest = (opportunity: SkillEvolutionOpportunity) =>
     evolutionDigest(opportunityContent(opportunity));
@@ -569,6 +588,13 @@ export function createSkillEvolutionService(input: {
       if (!candidate.reason.trim() || candidate.outcomes.some((outcome) => !outcome.trim()))
         throw new Error("经验机会的原因和预期结果必须填写具体内容。");
       validateEvolutionEvidence(candidate.evidence, record.messages, record.runtimeEvidence);
+      if (candidate.memory && candidate.evidence.length > 5)
+        throw new Error("单项记忆最多引用五个准确片段。");
+      if (
+        candidate.memory &&
+        (record.run.origin !== "automatic" || !record.memoryEnabled || candidate.targetSkillId)
+      )
+        throw new Error("记忆学习只接受宿主自动用途，且不能借它绕过已有 Skill 目标授权。");
       if (candidate.targetSkillId && !catalogIds.has(candidate.targetSkillId))
         throw new Error("经验机会引用了不属于当前专家绑定目录的 Skill，请使用目录中的准确 ID。");
       const content = {
@@ -580,6 +606,7 @@ export function createSkillEvolutionService(input: {
         outcomes: candidate.outcomes,
         evidence: candidate.evidence,
         ...(candidate.targetSkillId ? { targetSkillId: candidate.targetSkillId } : {}),
+        ...(candidate.memory ? { memory: candidate.memory } : {}),
       };
       const opportunity = {
         ...content,
@@ -1315,6 +1342,12 @@ export function createSkillEvolutionService(input: {
       return { capabilities: [...SKILL_EVOLUTION_CAPABILITIES] };
     return serialize(input.stateDir, async () => {
       switch (request.action) {
+        case "learningChanges":
+        case "learningReadMemory":
+        case "learningReadSkillChange":
+        case "learningEditMemory":
+        case "learningRevert":
+          throw new Error("学习记忆操作必须通过宿主共享能力处理。");
         case "learningRead":
         case "learningSet":
           throw new Error("自学习设置由宿主学习服务处理。");
@@ -1399,7 +1432,7 @@ export function createSkillEvolutionService(input: {
                 .slice(-20)
                 .map((item) => ({
                   threadId: ThreadId.makeUnsafe(automatic.evidence.threadId),
-                  eventId: item.id,
+                  eventId: item.sourceEventId ?? item.id,
                   kind: item.kind,
                   text: item.text.slice(0, 1_500),
                   ...(item.toolCallId ? { toolCallId: item.toolCallId } : {}),
@@ -1420,10 +1453,41 @@ export function createSkillEvolutionService(input: {
               ]
             : [];
           const catalog = await boundSkillCatalog(expert);
+          const rawMemoryCatalog =
+            automatic && input.readMemoryCatalog
+              ? await input.readMemoryCatalog(automatic.evidence)
+              : undefined;
+          if (rawMemoryCatalog && rawMemoryCatalog.length > 12)
+            evidenceCoverage.push("prompt-memory-catalog-items-truncated");
+          const memoryCatalog = rawMemoryCatalog
+            ? rawMemoryCatalog
+                .slice(0, 12)
+                .map(({ memoryId, revision, kind, key, content, projectBound, scope }) => ({
+                  memoryId,
+                  revision,
+                  kind,
+                  key,
+                  projectOnly: projectBound ?? (kind !== "rule" || scope.spaceId === null),
+                  content: content.slice(0, 2_000),
+                  truncated: content.length > 2_000,
+                }))
+            : undefined;
+          const rawHandledSourceChanges =
+            automatic && input.readSourceChanges
+              ? await input.readSourceChanges(automatic.evidence)
+              : undefined;
+          const handledSourceChanges = rawHandledSourceChanges
+            ?.toSorted((a, b) => Number(b.status === "reverted") - Number(a.status === "reverted"))
+            .slice(0, 8)
+            .map((change) => ({ ...change, summary: change.summary.slice(0, 500) }));
+          if (rawHandledSourceChanges && rawHandledSourceChanges.length > 8)
+            evidenceCoverage.push("source-change-receipts-truncated");
           const sourceDigest = evolutionDigest({
             messages,
             focus: request.focus ?? "",
             catalog,
+            ...(memoryCatalog ? { memoryCatalog } : {}),
+            ...(handledSourceChanges ? { handledSourceChanges } : {}),
             ...(automatic ? { runtimeEvidence, evidenceCoverage } : {}),
           });
           const prompt = buildSkillEvolutionDiscoveryPrompt({
@@ -1432,6 +1496,8 @@ export function createSkillEvolutionService(input: {
             ...(request.focus ? { focus: request.focus } : {}),
             messages,
             catalog,
+            ...(memoryCatalog ? { memoryCatalog } : {}),
+            ...(handledSourceChanges ? { handledSourceChanges } : {}),
           });
           let record: StoredRequest = {
             requestId: request.requestId,
@@ -1439,6 +1505,7 @@ export function createSkillEvolutionService(input: {
             fingerprint,
             sourceDigest,
             catalogSkillIds: catalog.map((skill) => skill.skillId),
+            ...(memoryCatalog ? { memoryEnabled: true } : {}),
             taskThreadId: ThreadId.makeUnsafe(nativeId(request.requestId, "task")),
             projectId: selected[0]!.source.projectId,
             run: {

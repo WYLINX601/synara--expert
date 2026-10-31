@@ -24,6 +24,10 @@ import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderComma
 import { ContextRepositoryLive } from "./context/ContextRepository.ts";
 import { SkillEvolutionRepositoryLive } from "./workbench/host/skillEvolutionPersistence.ts";
 import { ExpertLearningRepositoryLive } from "./workbench/host/expertLearningPersistence.ts";
+import { SpaceMemoryLive } from "./workbench/host/spaceMemoryPersistence.ts";
+import { ExpertLearningActionsLive } from "./workbench/host/expertLearningActions.ts";
+import { ExpertAppliedRuntimeRepositoryLive } from "./persistence/Layers/ExpertAppliedRuntimeRecords.ts";
+import { WorkbenchExpertRuntimeLive } from "./workbench/runtimeLayer.ts";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus";
 import { SidechatExpiryReactorLive } from "./orchestration/Layers/SidechatExpiryReactor";
@@ -155,6 +159,7 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(runtimeServicesLayer),
   );
   const providerCommandReactorLayer = ProviderCommandReactorLive.pipe(
+    Layer.provideMerge(SpaceMemoryLive),
     Layer.provideMerge(ExpertLearningRepositoryLive),
     Layer.provideMerge(SkillEvolutionRepositoryLive),
     Layer.provideMerge(ContextRepositoryLive),
@@ -256,6 +261,18 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(ServerSecretStoreLive),
     Layer.provideMerge(agentGatewayCredentialsLayer),
   );
+  const expertLearningActionsLayer = ExpertLearningActionsLive.pipe(
+    Layer.provideMerge(WorkbenchExpertRuntimeLive),
+    Layer.provideMerge(SpaceMemoryLive),
+    Layer.provideMerge(ExpertLearningRepositoryLive),
+    Layer.provideMerge(ExpertAppliedRuntimeRepositoryLive),
+    Layer.provideMerge(ProviderRuntimeEventRepositoryLive),
+    Layer.provideMerge(ProjectionTurnRepositoryLive),
+    Layer.provideMerge(ManagedAttachmentRepositoryLive),
+    Layer.provideMerge(WorkspaceLayerLive),
+    Layer.provideMerge(runtimeServicesLayer),
+    Layer.provideMerge(GitLayerLive),
+  );
   const agentGatewayLayer = AgentGatewayLive.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
@@ -287,7 +304,7 @@ export function makeServerRuntimeServicesLayer(
     // resolves the service on every platform to make that decision.
     Layer.provideMerge(DeviceServiceLive),
     Layer.provideMerge(ComputerServiceLive),
-  );
+  ).pipe(Layer.provideMerge(expertLearningActionsLayer));
   // The inbox owns the repository inventory, GitHub read queue, and snapshots; the pull request
   // service shares them so detail reads and mutations stay consistent with the list.
   const githubInboxServiceLayer = GitHubInboxServiceLive.pipe(
@@ -310,6 +327,7 @@ export function makeServerRuntimeServicesLayer(
   );
 
   return Layer.mergeAll(
+    expertLearningActionsLayer,
     ExpertLearningRepositoryLive,
     HubCollaborationConfigLive,
     hubPlanServiceLayer,

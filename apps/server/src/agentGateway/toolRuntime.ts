@@ -1,4 +1,4 @@
-import type { ProviderKind } from "@synara/contracts";
+import type { LearningSessionContext, ProviderKind } from "@synara/contracts";
 import type { Effect } from "effect";
 
 import type { AgentGatewayTargetError } from "./targetResolver.ts";
@@ -53,6 +53,8 @@ export interface ToolContext {
   readonly callerSessionKey: string;
   readonly callerProvider: ProviderKind;
   readonly callerCapabilities: ReadonlySet<AgentGatewayCapability>;
+  /** Present only when the verified Gateway lease carried a host-issued context. */
+  readonly learningSession?: LearningSessionContext;
   readonly callerTurnId: string | null;
   readonly assertCallerTurnActive: () => Effect.Effect<void, GatewayToolError>;
   readonly jsonRpcRequestId: JsonRpcId;

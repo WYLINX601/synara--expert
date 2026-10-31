@@ -4,6 +4,7 @@ import {
   buildSkillEvolutionDiscoveryPrompt,
   buildSkillEvolutionPrompt,
   parseSkillEvolutionDiscoveryResult,
+  validateEvolutionEvidence,
   type EvolutionSourceMessage,
 } from "./SkillEvolutionPrompt";
 
@@ -35,11 +36,62 @@ describe("SkillEvolutionPrompt stages", () => {
 
     expect(prompt).toContain("Verified evidence: preserve the decision log before retrying.");
     expect(prompt).toContain(catalogSkillId);
-    expect(prompt).toContain("Do not call tools, execute scripts, create memory, read Skill files");
+    expect(prompt).toContain(
+      "Do not call tools, execute scripts, read environment Memory or Skill files",
+    );
     expect(prompt).toContain("Never invent or alter catalog IDs");
     expect(prompt).not.toContain('"files"');
     expect(prompt).not.toContain('"allowEvolution"');
     expect(prompt).not.toContain('"ownerId"');
+  });
+
+  it("offers bounded automatic Memory choices with the right categories and exclusions", () => {
+    const prompt = buildSkillEvolutionDiscoveryPrompt({
+      automatic: true,
+      expert: { name: "Research Expert", description: "Collects verified procedures." },
+      messages,
+      catalog: [],
+      memoryCatalog: [
+        {
+          memoryId: "memory-response-style",
+          revision: 2,
+          kind: "rule",
+          key: "response.style",
+          content: "Lead with the verified conclusion.",
+          truncated: true,
+        },
+      ],
+    });
+
+    expect(prompt).toContain('"memoryId":"memory-response-style"');
+    expect(prompt).toContain('"truncated":true');
+    expect(prompt).toContain("Stable output preferences are rule");
+    expect(prompt).toContain("supported project facts are fact");
+    expect(prompt).toContain("supported environment configuration is environment");
+    expect(prompt).toContain("One-off requests and task state are not Memory");
+    expect(prompt).toContain("credentials, unresolved attempts, or session diaries");
+    expect(prompt).not.toContain('kind:"rule|fact|environment"');
+  });
+
+  it("requires automatic Memory citations to quote selected evidence exactly", () => {
+    const exact = {
+      threadId: messages[0]!.threadId,
+      messageId: messages[0]!.messageId,
+      quote: "preserve the decision log before retrying",
+    };
+    expect(() => validateEvolutionEvidence([exact], messages)).not.toThrow();
+    expect(() =>
+      validateEvolutionEvidence(
+        [{ ...exact, quote: "preserve the decision log after retrying" }],
+        messages,
+      ),
+    ).toThrow(/证据/u);
+    expect(() =>
+      validateEvolutionEvidence(
+        [{ ...exact, messageId: "message-other" as typeof exact.messageId }],
+        messages,
+      ),
+    ).toThrow(/证据/u);
   });
 
   it("accepts normal discovery outcomes and rejects file, ownership, and permission fields", () => {

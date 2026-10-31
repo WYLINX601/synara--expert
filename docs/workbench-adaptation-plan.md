@@ -92,6 +92,24 @@ Context 页面、自动保存与旧指令迁移通过 `workbench/host/contextCli
 
 实现范围和实际验收分别见[实施计划](../context/expert-autolearning-implementation-plan-2026-10-30.md)及[自动学习验收](./expert-autolearning-acceptance-2026-10-31.md)。静态边界、受控测试、真实 Provider 与平台验收分别记录，不能互相替代。
 
+### Space Memory 与前台正式学习接入（第二阶段，2026-10-31）
+
+`space.memory` 管理有来源的不可变记忆修订、规则清单、读取回执及跨资产学习回执。没有独立页面或第二套任务源。契约位于 `packages/contracts`；`SpaceMemoryService` 保留范围、版本和撤回规则，`workbench/host/spaceMemoryPersistence` 注入现有 SQL 连接。Expert ledger 仅追加 13 `SpaceMemory`；不回填旧经验、不转换旧作者配置、不改写已有 Space 指令。
+
+- 正式范围由实际 owner、Space、Expert 与 Project 派生。行为规则默认同 Expert／Space 共用，项目限定规则可覆盖同主题共享规则；事实、环境及 Void 规则始终仅当前 Project。既有条目不能改身份、种类或扩大边界。新条目原子检查相同逻辑范围的重复主题；撤回局部覆盖后可继续使用共享规则。有效期按实际时间判断，新值规范化为 UTC；历史无效值失效处理，不重写旧修订或 hash。
+- 宿主在新独立 Run 接受时固定 `RunKnowledgeManifest`，保存准确规则修订、渲染版本、正文、hash 和捕获的学习代次，并将引用写入既有 Run Skill 装配与 Provider 会话。没有学习状态的普通 Expert 缺省关闭，正常启动且不创建匿名 owner。已有 Run、恢复和跨 Worker continuation 沿用原规则与授权；旧 Run 没有知识引用时不补发最新代次。清单已保存但装配尚未附加的恢复仅重接准确旧清单，不重建当前版本。
+- 规则正文进入受管上下文但不授予工具或文件权限。事实和环境仅经窄工具按任务读取最新值，记录准确版本，作为不可信数据交付；关闭学习不阻止这些读取。关闭在同一 SQL 事务保存规则水位和状态；显式编辑／撤回只覆盖对应条目，不整体推进水位。
+- 前台 Gateway 的 `synara_learning_read`、`synara_learning_commit`、`synara_learning_revert` 仅对支持的 OMP/Pi 原生会话注册相应能力。凭证捕获宿主固定知识身份，恢复与轮换保留该身份；每次调用重新核对活跃 turn、原生装配、范围及当前 epoch。客户端和模型不能自报 owner、运行身份或新的授权代次。后台正式 Skill 与 Memory 提交同样需要原 Run 的准确清单与授权，缺失时不能借当前状态补发。
+- Skill 正常运行仍从本 Run 的固定原生目录按需读取。学习工具的 `skillId` 只接受明确 `mode=edit`，返回标记为编辑基线的当前完整入口正文和 Expert／Skill 版本；默认／runtime 不以 Library 最新头冒充运行版本。正文预检 1,000,000 字节、返回文本最多 128,000 UTF-16 字符，资源索引最多 100 并标覆盖；超预算不伪装完整正文。此为返回预算，既有 Library 仍先按原整包上限验证包，不宣称全部物理读取只需 1 MB。
+- `ExpertLearningActions` 是 owner RPC、前台工具和后台学习的共享正式提交能力。它复用单一 `WorkbenchExpertRuntime`、资产服务和提交门。Memory 与回执在 SQL 内提交；Skill 在首次写入前保存不可改写的准确意图，通过既有持久操作完成保存、完整派生及绑定，保存未绑定单独返回并恢复同一意图。每个实际写操作重查当前绑定和改进许可；已完成的准确幂等回执可读，不因此重新绑定。Memory 不伪造 Skill 提炼任务，Skill 文件与 SQL 不宣称跨存储原子事务。
+- 首次共享派生在现有提交门内按 Library 的 NFC／大小写规则选择未占用的专家专属名称，处理序号及 UTF-16 长度；模型沿用源名称不需要额外命名决策。最终名称写进原 mutation intent，重试不重选、不改原请求指纹或公共 Library 校验。
+- 来源只接受宿主核对的当前消息、已持久接受的运行事件、指定工作区资料和受管附件。读取复用 WorkspaceFileSystem、真实路径边界和附件归属；实际原生读取证明只认支持的成功 DTO，文件名必须精确匹配。运行事件在 SQL 查询阶段限制准确 ID 和累计字节，再解码；UTF-8 前缀保留有效字符。所有前台提交都需要宿主核对的原句／范围及片段 hash，无法核对时返回延后回执，不声称保存成功。自动证据保留原生 eventId，通过既有持久交接固定的原运行身份核对 continuation，不从展示标题或新回合消息猜测原根。
+- OMP 普通会话复用既有精确 18.12.1 bundle 的私有兼容 preload v2，将原生工具名传入受支持的 `_meta.synaraToolName`。仅捕获有效 Expert 知识、有 Gateway lease 和活跃默认 turn 的三个准确学习工具可获一次原生许可；标题、工具参数、其他服务器和 execute 请求不能伪造该身份，通用自动许可匹配器不接纳学习工具。Gateway 仍核对实时授权；不修改全局 OMP、模型、账户或其他 Provider 的权限策略。后台无工具提炼继续使用原专用兼容层。
+- 学习变更回执记录实际来源与前后引用。Memory 撤回产生修订／停用；Skill 按确定文件或唯一文本片段做逆向修改，冲突保持当前内容，模式位恢复保留实际字节。撤回意图先固定实际当前 C2 基线，逆向回执与原回执的 reverted 标记在同一 SQL 事务完成；重试不重复解绑。新建 Skill 已有后续有效改进时不能直接解绑丢失成果。原信号去重查询完整回执历史，按准确片段、目标和全部引用判断，不因同一消息包含后续新信息而整条跳过；超预算明确拒绝，不回填旧的未知片段。
+- 派生 Skill 的学习撤回保留当前专属身份、名称与绑定，在逆向 entry YAML 中只规范化该身份名称，保留逆向计算得到的描述和正文；新反馈继续更新同一副本。它不自动恢复共享绑定，既有显式恢复绑定能力保留。从零创建且无后续有效变化的撤回仍可解绑。旧意图按原冻结含义重试，不回写为新含义。
+
+页面继续挂在既有 `_chat`／Expert 编辑器和进化页，仅通过窄客户端消费类型化变化；原布局订阅、草稿保护和保存语义保持既有所有权。成长详情通过准确 Memory 修订及 owner-only `learningReadSkillChange` 读取历史差异：Skill 文件只来自正式回执前后包的不可变 manifest，不使用 Library 最新头，不接受任意包或路径选择。返回最多 100 对文件、合计 1,000,000 字节／128,000 UTF-16 字符正文，二进制或超预算保留元数据并标明省略；既有整包完整性验证仍使用原上限。撤回关系由宿主从同 owner／Expert／资产的准确原回执投影为 `revertsChangeId`，不向界面公开操作意图或内部数据。新增局部详情交互的授权及实际实现状态以[第二阶段实施计划](../context/expert-autolearning-phase2-plan-2026-10-31.md)与专项验收为准。
+
 ### Skill 文件交付与 OMP 提炼接缝（2026-10-29 候选）
 
 内容校验和固定引用是 Expert 领域的只读能力，派生索引不参与源文件完整性。`fixedSkillProjection` 只定位完整资源树；`claudeSkillProjection` 独占 Claude 插件、Agent 和命名规则。Run 私有工作树由 Run 资源能力持久化，原生适配器使用其实际路径；continuation 继承资源所有者引用，不能用新的 Worker Run ID 重建或覆盖旧输出。

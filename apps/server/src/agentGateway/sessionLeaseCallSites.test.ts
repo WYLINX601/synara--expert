@@ -152,6 +152,12 @@ describe("agent gateway lease call sites", () => {
     );
   });
 
+  it("retains Pi's fixed knowledge context when refreshing the turn lease facts", () => {
+    const source = readAdapterSource("PiAdapter.ts");
+    expect(source.match(/context\.fixedExpertSession\?\.knowledge/gu)).toHaveLength(2);
+    expect(source).toContain("expertSession: { knowledge: context.fixedExpertSession.knowledge }");
+  });
+
   it("grants computer control through every carrier a site uses", () => {
     const enabled = { enableComputerControl: true, cwd: "/tmp/project" };
     // The start input passed straight through.

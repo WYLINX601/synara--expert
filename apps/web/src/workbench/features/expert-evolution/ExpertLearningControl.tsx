@@ -80,7 +80,7 @@ export function ExpertLearningControl({
         ? "正在读取自学习状态…"
         : !enabled
           ? state?.revision
-            ? "已关闭 · 当前技能版本已固定"
+            ? "已关闭 · 技能与行为规则已固定"
             : "已关闭"
           : state?.status === "failed"
             ? "本轮暂未完成，后续任务不受影响。"
@@ -97,7 +97,7 @@ export function ExpertLearningControl({
             自学习
           </label>
           <p className="text-ui-xs text-muted-foreground">
-            从后续工作与反馈中自动更新技能；关闭后固定当前版本。
+            从后续工作与反馈中自动更新技能和记忆；关闭后固定技能与行为规则。
           </p>
         </div>
         <Switch

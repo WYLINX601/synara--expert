@@ -6,6 +6,8 @@ import {
   acquireAgentGatewaySessionLease,
   AGENT_GATEWAY_NO_CAPABILITIES,
   agentGatewayCapabilitiesFor,
+  agentGatewaySessionLeaseOptionsFor,
+  captureAgentGatewayCapabilityInput,
   cancelAgentGatewayTurn,
   releaseAgentGatewaySessionLeaseOnInterrupt,
   startAgentGatewaySessionLeaseExitWatcher,
@@ -13,6 +15,86 @@ import {
 } from "./sessionLease.ts";
 
 describe("AgentGatewaySessionLease", () => {
+  it("captures frozen learning knowledge and separates read-only from write-enabled capabilities", () => {
+    const knowledge = {
+      manifestId: "manifest-1",
+      rootRunId: "run-1",
+      snapshotId: "snapshot-1",
+      scope: {
+        ownerId: "owner-1",
+        spaceId: null,
+        expertId: "expert-1",
+        projectId: "project-1",
+      },
+      knowledgeHash: `sha256:${"a".repeat(64)}`,
+    } as const;
+    const closed = captureAgentGatewayCapabilityInput({
+      expertSession: { knowledge },
+    });
+    const enabled = captureAgentGatewayCapabilityInput({
+      expertSession: { knowledge: { ...knowledge, learningEpoch: 3 } },
+    });
+
+    expect(agentGatewayCapabilitiesFor(closed)).toEqual(["learning:read"]);
+    expect(agentGatewayCapabilitiesFor(enabled)).toEqual(["learning:read", "learning:write"]);
+    expect(closed.expertSession?.knowledge).toEqual(knowledge);
+    expect(Object.isFrozen(closed.expertSession?.knowledge)).toBe(true);
+    expect(Object.isFrozen(closed.expertSession?.knowledge?.scope)).toBe(true);
+    expect(agentGatewaySessionLeaseOptionsFor(closed)).toMatchObject({
+      additionalCapabilities: ["learning:read"],
+      learningSession: knowledge,
+    });
+  });
+
+  it("reuses the captured learning context for credential rotations", () => {
+    const knowledge = {
+      manifestId: "manifest-rotate",
+      rootRunId: "root-run",
+      snapshotId: "snapshot-rotate",
+      scope: {
+        ownerId: "owner-1",
+        spaceId: "space-1",
+        expertId: "expert-1",
+        projectId: "project-1",
+      },
+      knowledgeHash: `sha256:${"b".repeat(64)}`,
+      learningEpoch: 11,
+    } as const;
+    const captured = captureAgentGatewayCapabilityInput({
+      expertSession: { knowledge },
+    });
+    const connectionForThread = vi.fn((_threadId, _provider, options) => ({
+      url: "http://127.0.0.1:48123/mcp",
+      bearerToken: `gateway-token-${connectionForThread.mock.calls.length}`,
+      issuedOptions: options,
+    }));
+    const credentials = {
+      connectionForThread,
+      revokeSessionToken: vi.fn(),
+    };
+    const first = acquireAgentGatewaySessionLease(
+      credentials,
+      ThreadId.makeUnsafe("thread-1"),
+      "pi",
+      captured,
+    );
+    first?.release();
+    const replacement = acquireAgentGatewaySessionLease(
+      credentials,
+      ThreadId.makeUnsafe("thread-1"),
+      "pi",
+      captured,
+    );
+
+    expect(connectionForThread).toHaveBeenCalledTimes(2);
+    expect(connectionForThread.mock.calls[0]?.[2]).toMatchObject({
+      learningSession: knowledge,
+      additionalCapabilities: ["learning:read", "learning:write"],
+    });
+    expect(connectionForThread.mock.calls[1]?.[2]).toEqual(connectionForThread.mock.calls[0]?.[2]);
+    replacement?.release();
+  });
+
   it("cancels one exact turn while the provider session lease is live", async () => {
     const cancelSessionTurnRequests = vi.fn(() => Promise.resolve());
     const lease = acquireAgentGatewaySessionLease(

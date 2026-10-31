@@ -140,10 +140,10 @@ it.effect("uses stable expert checksums and rejects malformed or future extensio
     const complete = planWorkbenchHistory(workbenchRows(workbenchMigrationEntries.length));
     assert.isTrue(complete.ok);
     if (complete.ok) {
-      assert.strictEqual(complete.applied.at(-2)?.migrationId, 11);
-      assert.strictEqual(complete.applied.at(-2)?.name, "ExpertAutomaticLearning");
-      assert.strictEqual(complete.applied.at(-1)?.migrationId, 12);
-      assert.strictEqual(complete.applied.at(-1)?.name, "ExpertLearningEvidenceDelivery");
+      assert.strictEqual(complete.applied.at(-2)?.migrationId, 12);
+      assert.strictEqual(complete.applied.at(-2)?.name, "ExpertLearningEvidenceDelivery");
+      assert.strictEqual(complete.applied.at(-1)?.migrationId, 13);
+      assert.strictEqual(complete.applied.at(-1)?.name, "SpaceMemory");
     }
   }),
 );
@@ -602,9 +602,9 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
   );
 });
 
-const evidenceDeliveryUpgradeLayer = it.layer(NodeSqliteClient.layerMemory());
-evidenceDeliveryUpgradeLayer("expert learning evidence delivery migration", (test) => {
-  test.effect("applies migration 12 to an 11-entry ledger and preserves learning data", () =>
+const spaceMemoryUpgradeLayer = it.layer(NodeSqliteClient.layerMemory());
+spaceMemoryUpgradeLayer("Space Memory migration", (test) => {
+  test.effect("applies migration 13 to a 12-entry ledger and preserves learning data", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations();
@@ -619,7 +619,7 @@ evidenceDeliveryUpgradeLayer("expert learning evidence delivery migration", (tes
       yield* sql.unsafe("CREATE TABLE workbench_schema_metadata (format_version INTEGER NOT NULL)");
       yield* sql`INSERT INTO workbench_schema_metadata (format_version) VALUES (1)`;
 
-      for (const migration of workbenchMigrationEntries.slice(0, 11)) {
+      for (const migration of workbenchMigrationEntries.slice(0, 12)) {
         if (migration.effect !== undefined) yield* migration.effect;
         else if (migration.statement !== undefined) yield* sql.unsafe(migration.statement);
         else throw new Error(`Migration ${migration.name} has no implementation`);
@@ -656,13 +656,13 @@ evidenceDeliveryUpgradeLayer("expert learning evidence delivery migration", (tes
         SELECT module_id, migration_id, name, checksum, applied_at
         FROM workbench_sql_migrations ORDER BY module_id, migration_id
       `;
-      assert.strictEqual(ledgerBefore.length, 11);
+      assert.strictEqual(ledgerBefore.length, 12);
 
       const upgrade = yield* runWorkbenchMigrations();
       assert.deepStrictEqual(
         upgrade.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
         [
-          ["expert", 12],
+          ["expert", 13],
           ["context", 1],
         ],
       );
@@ -715,12 +715,12 @@ evidenceDeliveryUpgradeLayer("expert learning evidence delivery migration", (tes
         FROM workbench_sql_migrations ORDER BY module_id, migration_id
       `;
       const currentExpertLedger = currentLedger.filter(({ module_id }) => module_id === "expert");
-      assert.deepStrictEqual(currentExpertLedger.slice(0, 11), ledgerBefore);
+      assert.deepStrictEqual(currentExpertLedger.slice(0, 12), ledgerBefore);
       assert.deepStrictEqual(currentExpertLedger.at(-1), {
         module_id: "expert",
-        migration_id: 12,
-        name: "ExpertLearningEvidenceDelivery",
-        checksum: "sha256:38b2eda40b36b010e44234a78232664299a7031ba98fafe9414557c1261a71a5",
+        migration_id: 13,
+        name: "SpaceMemory",
+        checksum: "sha256:0b828a9503f2cde719ceaaaf6411f21c593999585262a0d8b20afc7a73bc1767",
         applied_at: currentExpertLedger.at(-1)?.applied_at,
       });
     }),

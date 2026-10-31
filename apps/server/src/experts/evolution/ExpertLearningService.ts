@@ -6,6 +6,7 @@ import {
   TurnId,
   type SkillEvolutionRequest,
   type SkillEvolutionRun,
+  type SkillEvolutionOpportunity,
 } from "@synara/contracts";
 import { Effect, Schema } from "effect";
 import type { ManagedAttachmentPrincipal } from "../../managedAttachmentPrincipal";
@@ -18,8 +19,12 @@ import {
   decodeLearningState,
   reconcileExplicitLearningEdits,
   saveLearningState,
+  writeLearningState,
   type StoredLearningState,
 } from "./ExpertLearningState";
+import type { SpaceMemoryServiceShape } from "../../spaceMemory/SpaceMemoryService";
+import type { ExpertLearningActionsShape } from "./ExpertLearningActions";
+import { handledLearningSignal, learningSignalSources } from "./LearningSignals";
 
 const Id = Schema.String.check(Schema.isMaxLength(200));
 const Cycle = Schema.Struct({
@@ -76,6 +81,8 @@ export function createExpertLearningService(input: {
   readonly now?: () => Date;
   readonly pollMs?: number;
   readonly reportError?: (error: unknown) => void;
+  readonly memory?: SpaceMemoryServiceShape;
+  readonly actions?: ExpertLearningActionsShape;
 }) {
   const now = () => (input.now?.() ?? new Date()).toISOString();
   const run = <T>(effect: Effect.Effect<T, unknown>) => Effect.runPromise(effect);
@@ -170,7 +177,39 @@ export function createExpertLearningService(input: {
     )
       throw new Error("学习来源的 Project/Space 归属已改变或无法确认。");
   };
-  const authorize = async (principal: ManagedAttachmentPrincipal, request: SkillEvolutionRun) => {
+  const assertRunGrant = async (
+    principal: ManagedAttachmentPrincipal,
+    evidence: ExpertLearningEvidence,
+    epoch: number | undefined,
+  ) => {
+    if (!input.memory) return;
+    if (!evidence.rootRunId || !evidence.assemblyId)
+      throw new Error("学习来源缺少原 Run 的固定授权，不为旧工作换发新代次。");
+    const manifest = await run(
+      input.memory.findRunManifest(
+        {
+          ownerId: principal.ownerId,
+          expertId: evidence.expertId,
+          projectId: evidence.projectId,
+          spaceId: evidence.spaceId ?? null,
+        },
+        evidence.rootRunId,
+      ),
+    );
+    if (
+      !manifest ||
+      manifest.learningEpoch === undefined ||
+      manifest.learningEpoch !== epoch ||
+      manifest.snapshotId !== evidence.snapshotId ||
+      manifest.skillAssemblyId !== evidence.assemblyId
+    )
+      throw new Error("原 Run 的学习授权已结束，不为旧工作换发新代次。");
+  };
+  const authorize = async (
+    principal: ManagedAttachmentPrincipal,
+    request: SkillEvolutionRun,
+    opportunity?: Pick<SkillEvolutionOpportunity, "targetSkillId" | "memory" | "evidence">,
+  ) => {
     const record = await readStored(principal.ownerId, request.expertId);
     if (
       disposed ||
@@ -190,6 +229,15 @@ export function createExpertLearningService(input: {
     const sourceRow = await run(input.repository.readEvidence(value.evidenceId));
     if (!sourceRow) throw new Error("自动学习来源不可用。");
     const evidence = Schema.decodeUnknownSync(ExpertLearningEvidence)(JSON.parse(sourceRow.record));
+    await assertRunGrant(principal, evidence, request.learningEpoch);
+    if (input.memory && opportunity) {
+      const sources = learningSignalSources(evidence, opportunity.evidence);
+      const changes = await run(
+        input.memory.findSourceChanges(principal.ownerId, request.expertId, sources),
+      );
+      if (handledLearningSignal(changes, sources, opportunity))
+        throw new Error("该来源的相同学习已经处理或撤回，不重复写回。");
+    }
     const source = await input.host(principal).readThread(ThreadId.makeUnsafe(evidence.threadId));
     await assertProjectIdentity(input.host(principal), evidence);
     if (
@@ -276,6 +324,32 @@ export function createExpertLearningService(input: {
                       ),
               }),
         };
+        if (input.memory) {
+          const memory = input.memory;
+          return await run(
+            memory.withTransaction(
+              Effect.gen(function* () {
+                const stored = request.enabled
+                  ? next
+                  : {
+                      ...next,
+                      frozenRuleSequence:
+                        old && !old.state.enabled
+                          ? (old.frozenRuleSequence ?? 0)
+                          : yield* memory.ruleSequence(principal.ownerId),
+                      ruleOverrides: old && !old.state.enabled ? (old.ruleOverrides ?? []) : [],
+                    };
+                yield* writeLearningState(
+                  input.repository,
+                  principal.ownerId,
+                  stored,
+                  request.expectedRevision,
+                );
+                return stored.state;
+              }),
+            ),
+          );
+        }
         await saveLearningState(
           input.repository,
           principal.ownerId,
@@ -322,6 +396,7 @@ export function createExpertLearningService(input: {
       evidence.modelSelection.provider !== record.state.harnessKind
     )
       throw new Error("学习证据与专家运行器或已结束工作不符。");
+    await assertRunGrant(principal, evidence, cycle.epoch);
     const host = input.host(principal);
     await assertProjectIdentity(host, evidence);
     const source = await host.readThread(ThreadId.makeUnsafe(evidence.threadId));
@@ -362,6 +437,37 @@ export function createExpertLearningService(input: {
     }
     if (discovery.status !== "opportunity_ready")
       throw new Error(discovery.error ?? "本轮未能完成经验发现。");
+    const changes = input.memory
+      ? await run(
+          input.memory.findSourceChanges(
+            principal.ownerId,
+            expert.id,
+            learningSignalSources(evidence),
+          ),
+        )
+      : [];
+    const handled = (opportunity: SkillEvolutionOpportunity) =>
+      handledLearningSignal(
+        changes,
+        learningSignalSources(evidence, opportunity.evidence),
+        opportunity,
+      );
+    const pendingOpportunity = cycle.opportunityId
+      ? discovery.opportunities?.find((item) => item.opportunityId === cycle.opportunityId)
+      : undefined;
+    if (pendingOpportunity && handled(pendingOpportunity)) {
+      if (cycle.generationId)
+        await evolution.execute({ action: "cancel", requestId: cycle.generationId });
+      await saveCycle({
+        ...cycle,
+        status: "discovery",
+        processed: [...cycle.processed, pendingOpportunity.opportunityId],
+        generationId: undefined,
+        opportunityId: undefined,
+        attempt: 0,
+      });
+      return;
+    }
     if (cycle.generationId && cycle.opportunityId) {
       const processedOpportunityId = cycle.opportunityId;
       let generation: SkillEvolutionRun;
@@ -419,6 +525,33 @@ export function createExpertLearningService(input: {
     );
     if (!opportunity) {
       await saveCycle({ ...cycle, status: cycle.applied ? "applied" : "no_change" });
+      return;
+    }
+    if (handled(opportunity)) {
+      await saveCycle({ ...cycle, processed: [...cycle.processed, opportunity.opportunityId] });
+      return;
+    }
+    if (opportunity.memory) {
+      if (!input.actions) throw new Error("记忆学习提交能力不可用。");
+      if (await hasForeground(host, expert.id)) return;
+      const result = await run(
+        input.actions.commitAutomaticMemory({
+          ownerId: principal.ownerId,
+          expertId: expert.id,
+          epoch: cycle.epoch,
+          requestId: key(cycle.cycleId + ":memory:" + opportunity.opportunityId),
+          evidence,
+          draft: opportunity.memory,
+          citations: opportunity.evidence,
+        }),
+      );
+      if (result.status !== "committed" && result.status !== "unchanged")
+        throw new Error("记忆修订尚未正式提交。");
+      await saveCycle({
+        ...cycle,
+        applied: cycle.applied + (result.status === "committed" ? 1 : 0),
+        processed: [...cycle.processed, opportunity.opportunityId],
+      });
       return;
     }
     const target = opportunity.targetSkillId;

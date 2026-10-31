@@ -2,6 +2,7 @@ import {
   ExpertLearningState,
   ExpertSkillBinding,
   ResolvedExpertSkillEntry,
+  SpaceMemoryRevisionRef,
 } from "@synara/contracts";
 import { Effect, Schema } from "effect";
 import { expertResourceFiles, type ExpertStore } from "../ExpertStore";
@@ -20,6 +21,10 @@ export const StoredLearningState = Schema.Struct({
   state: ExpertLearningState,
   ownerKind: Schema.Literals(["session", "local-loopback"]),
   frozenBindings: Schema.optional(Schema.Array(FrozenBinding).check(Schema.isMaxLength(100))),
+  frozenRuleSequence: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0))),
+  ruleOverrides: Schema.optional(
+    Schema.Array(SpaceMemoryRevisionRef).check(Schema.isMaxLength(256)),
+  ),
   lastRequestId: Schema.optional(Schema.String),
   lastRequestFingerprint: Schema.optional(Schema.String),
   /** Sources older than this authorization are never replayed when learning is re-enabled. */
@@ -100,28 +105,33 @@ export async function captureLearningBindings(
   return frozen;
 }
 
-export const saveLearningState = (
+export const writeLearningState = (
   repository: ExpertLearningRepositoryShape,
   ownerId: string,
   record: StoredLearningState,
   expectedRevision: number,
 ) =>
-  Effect.runPromise(
-    repository.writeState(
-      {
-        ownerId,
-        expertId: record.state.expertId,
-        revision: record.state.revision,
-        updatedAt: record.state.updatedAt,
-        record: serializeJsonWithinByteLimit(
-          record,
-          16 * 1024 * 1024,
-          "Expert learning state exceeds its storage budget.",
-        ),
-      },
-      expectedRevision,
-    ),
+  repository.writeState(
+    {
+      ownerId,
+      expertId: record.state.expertId,
+      revision: record.state.revision,
+      updatedAt: record.state.updatedAt,
+      record: serializeJsonWithinByteLimit(
+        record,
+        16 * 1024 * 1024,
+        "Expert learning state exceeds its storage budget.",
+      ),
+    },
+    expectedRevision,
   );
+
+export const saveLearningState = (
+  repository: ExpertLearningRepositoryShape,
+  ownerId: string,
+  record: StoredLearningState,
+  expectedRevision: number,
+) => Effect.runPromise(writeLearningState(repository, ownerId, record, expectedRevision));
 
 /** Pure runtime lookup: never takes the commit gate while the Run holds package lifecycle. */
 export function frozenLearningEntriesReader(repository: ExpertLearningRepositoryShape) {

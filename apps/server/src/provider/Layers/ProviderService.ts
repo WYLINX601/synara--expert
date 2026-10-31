@@ -93,6 +93,12 @@ import { ExpertLearningRepository } from "../../experts/evolution/ExpertLearning
 import { frozenLearningEntriesReader } from "../../experts/evolution/ExpertLearningState";
 import { acquireExpertLearningAdmission } from "../../experts/expertLearningCommit";
 import { expertSnapshotSession } from "../../experts/expertSnapshotSession";
+import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { SpaceMemoryService } from "../../spaceMemory/SpaceMemoryService.ts";
+import {
+  renderRuntimeKnowledge,
+  verifyRuntimeKnowledge,
+} from "../../workbench/host/runtimeKnowledge.ts";
 import { captureSkillEvolutionExecutionReader } from "../../workbench/host/skillEvolutionExecution";
 import {
   buildExpertSkillInstructions,
@@ -1053,6 +1059,8 @@ function runtimeLastErrorForEvent(event: ProviderRuntimeEvent): string | null | 
 const makeProviderService = (options?: ProviderServiceLiveOptions) =>
   Effect.gen(function* () {
     const learningRepository = yield* Effect.serviceOption(ExpertLearningRepository);
+    const spaceMemoryService = yield* Effect.serviceOption(SpaceMemoryService);
+    const projectionSnapshotQuery = yield* Effect.serviceOption(ProjectionSnapshotQuery);
     const skillPackageStore: SkillPackageStore | undefined = options?.stateDir
       ? createSkillPackageStore(options.stateDir)
       : undefined;
@@ -1161,6 +1169,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       expertSession: ProviderExpertSession | undefined,
       input: {
         readonly operation: string;
+        readonly threadId: string;
         readonly cwd?: string;
         readonly runtimeNotices?: ReadonlyArray<string>;
       },
@@ -1210,6 +1219,30 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             );
           }
 
+          let runtimeKnowledgeInstructions = "";
+          if (expertSession.knowledge) {
+            if (
+              Option.isNone(spaceMemoryService) ||
+              Option.isNone(learningRepository) ||
+              Option.isNone(projectionSnapshotQuery)
+            ) {
+              throw new Error(
+                "The persisted Run has a Space Memory reference, but its verification services are unavailable.",
+              );
+            }
+            const manifest = await Effect.runPromise(
+              verifyRuntimeKnowledge({
+                threadId: input.threadId,
+                expertSession,
+                memory: spaceMemoryService.value,
+                learningRepository: learningRepository.value,
+                projection: projectionSnapshotQuery.value,
+              }),
+            );
+            if (!manifest) throw new Error("The persisted Run knowledge manifest is unavailable.");
+            runtimeKnowledgeInstructions = renderRuntimeKnowledge(manifest);
+          }
+
           const entries = expertSession.skillEntries!;
           await verifySkillRunResources(
             options!.stateDir!,
@@ -1231,7 +1264,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             snapshotId: expertSession.snapshotId,
             entries: skillRuntimeEntries(expertSession),
           });
-          const instructions = [compiled.text, runtimeNoticeInstructions]
+          const instructions = [
+            compiled.text,
+            runtimeKnowledgeInstructions,
+            runtimeNoticeInstructions,
+          ]
             .filter(Boolean)
             .join("\n\n");
           return {
@@ -3192,6 +3229,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               persistedExpertSession ?? undefined,
               {
                 operation: input.operation,
+                threadId,
                 ...(persistedCwd ? { cwd: persistedCwd } : {}),
                 runtimeNotices: persistedExpertRuntimeNotices,
               },
@@ -3872,6 +3910,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           persistedExpertSession ?? undefined,
           {
             operation: input.operation,
+            threadId: input.threadId,
             ...(boundCwd ? { cwd: boundCwd } : {}),
             runtimeNotices: persistedExpertRuntimeNotices,
           },
@@ -4051,6 +4090,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           );
         const verifiedExpertSession = yield* prepareExpertSession(input.expertSession, {
           operation: "ProviderService.startSession",
+          threadId,
           ...(input.cwd ? { cwd: input.cwd } : {}),
           runtimeNotices: input.expertRuntimeNotices ?? [],
         });
@@ -4567,6 +4607,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                           previousExpertSession ?? undefined,
                           {
                             operation: "ProviderService.startSession.restore",
+                            threadId,
                             ...(previousCwd ? { cwd: previousCwd } : {}),
                             runtimeNotices: previousExpertRuntimeNotices,
                           },
@@ -4977,6 +5018,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           effectiveExpertSession ?? undefined,
           {
             operation: "ProviderService.forkThread",
+            threadId: input.threadId,
             ...(targetCwd ? { cwd: targetCwd } : {}),
             runtimeNotices: effectiveExpertRuntimeNotices,
           },

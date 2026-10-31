@@ -87,6 +87,8 @@ function stateRow(input: {
   ownerId: string;
   expertId: string;
   frozenBindings: NonNullable<StoredLearningState["frozenBindings"]>;
+  frozenRuleSequence?: number;
+  ruleOverrides?: StoredLearningState["ruleOverrides"];
 }): LearningStateRow {
   const record: StoredLearningState = {
     ownerKind: "session",
@@ -98,6 +100,10 @@ function stateRow(input: {
       updatedAt: timestamp,
     },
     frozenBindings: input.frozenBindings,
+    ...(input.frozenRuleSequence !== undefined
+      ? { frozenRuleSequence: input.frozenRuleSequence }
+      : {}),
+    ...(input.ruleOverrides !== undefined ? { ruleOverrides: input.ruleOverrides } : {}),
   };
   return {
     ownerId: input.ownerId,
@@ -229,5 +235,32 @@ describe("ExpertLearningState frozen references", () => {
     await expect(
       frozenLearningEntriesReader(f.repository)("frozen-reader-expert", [binding(updated.skillId)]),
     ).rejects.toThrow(/need reconciliation/u);
+  });
+
+  it("round-trips the close-time Memory rule watermark and explicit revision overrides", async () => {
+    const f = await fixture();
+    const skill = await createSkill(f.library, "Memory watermark binding");
+    const frozenBindings = await captureLearningBindings(
+      f.stateDir,
+      [binding(skill.skillId)],
+      "memory-watermark-expert",
+    );
+    const override = {
+      memoryId: "memory-explicit-override",
+      revision: 3,
+      contentHash: `sha256:${"d".repeat(64)}`,
+    };
+    const row = stateRow({
+      ownerId: "memory-watermark-owner",
+      expertId: "memory-watermark-expert",
+      frozenBindings,
+      frozenRuleSequence: 9,
+      ruleOverrides: [override],
+    });
+    const decoded = decodeLearningState(row);
+
+    expect(decoded.frozenRuleSequence).toBe(9);
+    expect(decoded.ruleOverrides).toEqual([override]);
+    expect(decoded.frozenBindings).toEqual(frozenBindings);
   });
 });

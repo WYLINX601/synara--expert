@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   canonicalSynaraComputerToolName,
+  canonicalSynaraLearningToolName,
+  claimsSynaraLearningTool,
   computerToolNameFromProviderPermission,
   isSynaraComputerToolFamilyName,
   isSynaraGatewayToolCall,
   isSynaraGatewayToolName,
   qualifiedSynaraComputerToolName,
   shouldAllowSynaraComputerProviderTool,
+  synaraLearningToolNameFromPermission,
 } from "./computerToolPermission.ts";
 
 describe("Synara Computer provider permission", () => {
@@ -158,6 +161,50 @@ describe("Synara gateway tool permission name", () => {
     "synara_e2e_review",
   ])("recognizes a Synara gateway tool: %s", (providerName) => {
     expect(isSynaraGatewayToolName(providerName)).toBe(true);
+  });
+
+  it.each(["synara_learning_read", "synara_learning_commit", "synara_learning_revert"])(
+    "keeps learning tools out of the general gateway pre-approval catalog: %s",
+    (toolName) => {
+      expect(isSynaraGatewayToolName(toolName)).toBe(false);
+      expect(isSynaraGatewayToolCall({ name: toolName })).toBe(false);
+      expect(isSynaraGatewayToolCall({ rawInput: { _toolName: toolName } })).toBe(false);
+      expect(canonicalSynaraLearningToolName(toolName)).toBe(toolName);
+    },
+  );
+
+  it("uses only exact Synara tool names for learning identity and spoof detection", () => {
+    expect(canonicalSynaraLearningToolName("mcp__synara__synara_learning_commit")).toBe(
+      "synara_learning_commit",
+    );
+    expect(canonicalSynaraLearningToolName("mcp__other__synara_learning_commit")).toBeUndefined();
+    expect(canonicalSynaraLearningToolName("synara_learning_commit; rm -rf x")).toBeUndefined();
+    expect(
+      synaraLearningToolNameFromPermission({
+        metadata: { synaraToolName: "synara_learning_commit" },
+      }),
+    ).toBe("synara_learning_commit");
+    expect(
+      synaraLearningToolNameFromPermission({
+        metadata: { toolName: "synara_learning_commit" },
+      }),
+    ).toBeUndefined();
+    expect(claimsSynaraLearningTool({ rawInput: { _toolName: "synara_learning_commit" } })).toBe(
+      true,
+    );
+    expect(
+      isSynaraGatewayToolCall({
+        rawInput: {
+          _toolName: "synara_list_threads",
+          toolName: "synara_learning_commit",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      claimsSynaraLearningTool({
+        metadata: { synaraToolName: "mcp__synara__synara_learning_revert" },
+      }),
+    ).toBe(true);
   });
 
   it.each([

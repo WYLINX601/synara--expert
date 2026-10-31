@@ -32,6 +32,7 @@ import {
 } from "./skillPackage";
 import { ExpertSkillPolicy } from "./skillLibrary";
 import { ContextSession } from "./context";
+import { LearningSessionContext } from "./learningTools";
 
 const ProviderSessionStatus = Schema.Literals([
   "connecting",
@@ -88,6 +89,8 @@ export const ProviderExpertSession = Schema.Struct({
   skillLoading: Schema.optional(Schema.Literal("index")),
   skillEntries: Schema.optional(Schema.Array(ResolvedExpertSkillEntry)),
   skillResourceRefs: Schema.optional(Schema.Array(SkillRunResourceReference)),
+  /** Host-owned knowledge reference; excluded from legacy Skill assembly identity. */
+  knowledge: Schema.optional(LearningSessionContext),
   references: Schema.Array(TrimmedNonEmptyString),
 });
 export type ProviderExpertSession = typeof ProviderExpertSession.Type;

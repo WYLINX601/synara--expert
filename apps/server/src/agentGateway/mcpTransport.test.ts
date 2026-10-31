@@ -1,7 +1,13 @@
 import { createServer } from "node:http";
 
 import { assert, describe, it } from "@effect/vitest";
-import { ProjectId, ThreadId, TurnId, type OrchestrationThreadShell } from "@synara/contracts";
+import {
+  ProjectId,
+  ThreadId,
+  TurnId,
+  type OrchestrationThreadShell,
+  type ProviderKind,
+} from "@synara/contracts";
 import { Deferred, Effect, Fiber, Option } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -63,12 +69,12 @@ function makeKanbanTool(
   }).find((entry) => entry.definition.name === name)!;
 }
 
-function makeThread(threadId: string): OrchestrationThreadShell {
+function makeThread(threadId: string, provider: ProviderKind = "codex"): OrchestrationThreadShell {
   return {
     id: ThreadId.makeUnsafe(threadId),
     projectId: ProjectId.makeUnsafe("project-mcp-cancellation"),
     title: threadId,
-    modelSelection: { provider: "codex", model: "gpt-5.6-sol" },
+    modelSelection: { provider, model: "gpt-5.6-sol" },
     runtimeMode: "full-access",
     interactionMode: "default",
     envMode: "local",
@@ -114,6 +120,7 @@ function makeTransport(input: {
   readonly tools: ReadonlyArray<ToolEntry>;
   readonly threads: ReadonlyArray<OrchestrationThreadShell>;
   readonly leaseCapabilities?: AgentGatewayCapabilityInput;
+  readonly provider?: ProviderKind;
   /** Thread ids that hold a session lease but no longer exist in the snapshot. */
   readonly ghostThreads?: ReadonlyArray<string>;
   /** Computer family names threaded to the transport (absent from tools). */
@@ -167,7 +174,7 @@ function makeTransport(input: {
       _provider: unknown,
       options?: AgentGatewaySessionLeaseOptions,
     ) => {
-      const issued = sessionRegistry.issue(threadId, "codex", options);
+      const issued = sessionRegistry.issue(threadId, input.provider ?? "codex", options);
       return {
         url: "http://127.0.0.1:48123/mcp",
         bearerToken: issued.token,
@@ -182,7 +189,7 @@ function makeTransport(input: {
     const lease = acquireAgentGatewaySessionLease(
       credentials,
       ThreadId.makeUnsafe(threadId),
-      "codex",
+      input.provider ?? "codex",
       input.leaseCapabilities ?? AGENT_GATEWAY_NO_CAPABILITIES,
     );
     if (!lease) throw new Error("Expected gateway session lease");
@@ -1196,6 +1203,84 @@ const authorityDataOf = (response: { body?: unknown }): { code: string; retry: s
   (response.body as { data: { code: string; retry: string } }).data;
 
 describe("makeAgentGatewayMcpTransport capability truth", () => {
+  it.effect("copies only the verified learning context and fences a rotated old turn", () =>
+    Effect.gen(function* () {
+      const learningSession = {
+        manifestId: "manifest-transport",
+        rootRunId: "root-run-transport",
+        snapshotId: "snapshot-transport",
+        scope: {
+          ownerId: "owner-transport",
+          spaceId: null,
+          expertId: "expert-transport",
+          projectId: "project-transport",
+        },
+        knowledgeHash: `sha256:${"d".repeat(64)}`,
+        learningEpoch: 8,
+      } as const;
+      const received: unknown[] = [];
+      const learningTool: ToolEntry = {
+        definition: {
+          name: "synara_learning_read",
+          description: "Read learning",
+          inputSchema: { type: "object" },
+        },
+        requiredCapability: "learning:read",
+        requiresActiveTurn: true,
+        handler: (_args, context) =>
+          Effect.sync(() => {
+            received.push(context.learningSession);
+            return {
+              content: [
+                { type: "text" as const, text: JSON.stringify(context.learningSession ?? null) },
+              ],
+            };
+          }),
+      };
+      const transport = makeTransport({
+        provider: "pi",
+        leaseCapabilities: { expertSession: { knowledge: learningSession } },
+        threads: [makeThread("thread-learning", "pi")],
+        tools: [learningTool],
+      });
+      const callBody = toolCallBody("synara_learning_read", {
+        learningSession: { scope: { ownerId: "forged-owner" }, learningEpoch: 999 },
+      });
+
+      const first = yield* post(transport, "token-1", callBody);
+      assert.equal(received.length, 1, JSON.stringify(first.body));
+      assert.deepEqual(received[0], learningSession);
+      assert.deepEqual(
+        JSON.parse(
+          (first.body as { result: { content: Array<{ text: string }> } }).result.content[0]!.text,
+        ),
+        learningSession,
+      );
+
+      yield* Effect.promise(() =>
+        transport.completeTurnAndRestartRuntime(
+          "thread-learning",
+          "turn-thread-learning",
+          "token-learning-b",
+        ),
+      );
+      transport.setThreadTurn("thread-learning", "turn-learning-b");
+      const lateOldTurn = yield* post(transport, "token-1", callBody);
+      assert.equal(lateOldTurn.status, 401);
+      assert.equal(received.length, 1);
+
+      const replacement = yield* post(transport, "token-learning-b", callBody);
+      assert.deepEqual(received[1], learningSession);
+      assert.deepEqual(
+        JSON.parse(
+          (replacement.body as { result: { content: Array<{ text: string }> } }).result.content[0]!
+            .text,
+        ),
+        learningSession,
+      );
+    }),
+  );
+
   const computerClick: ToolEntry = {
     definition: {
       name: "computer_click",

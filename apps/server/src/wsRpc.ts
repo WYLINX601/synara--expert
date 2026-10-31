@@ -196,6 +196,9 @@ import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
 import { createExpertStore } from "./experts/ExpertStore";
 import { SkillEvolutionRepository } from "./experts/evolution/SkillEvolutionRepository";
 import { ExpertLearningRepository } from "./experts/evolution/ExpertLearningRepository";
+import { SpaceMemoryService } from "./spaceMemory/SpaceMemoryService";
+import { ExpertLearningActions } from "./experts/evolution/ExpertLearningActions";
+import { WorkbenchExpertRuntime } from "./workbench/runtimeLayer";
 import { frozenLearningEntriesReader } from "./experts/evolution/ExpertLearningState";
 import { ProjectionTurnRepository } from "./persistence/Services/ProjectionTurns";
 import { makeSkillEvolutionRpcHandlers } from "./workbench/host/skillEvolutionRpc";
@@ -600,15 +603,21 @@ const makeWsRpcHandlersLayer = () =>
       const contextRepository = yield* ContextRepository;
       const evolutionRepository = yield* Effect.serviceOption(SkillEvolutionRepository);
       const learningRepository = yield* Effect.serviceOption(ExpertLearningRepository);
+      const spaceMemory = yield* Effect.serviceOption(SpaceMemoryService);
+      const learningActions = yield* Effect.serviceOption(ExpertLearningActions);
       const evolutionTurns = yield* Effect.serviceOption(ProjectionTurnRepository);
       const contextDeliveries = yield* OrchestrationEventDeliveryRepository;
-      const workbenchExpertRuntime = createWorkbenchExpertRuntime({
-        stateDir: config.stateDir,
-        expertAppliedRuntimeRepository,
-      });
-      yield* Effect.addFinalizer(() =>
-        Effect.promise(() => workbenchExpertRuntime.skillLibrary.dispose()),
-      );
+      const sharedExpertRuntime = yield* Effect.serviceOption(WorkbenchExpertRuntime);
+      const workbenchExpertRuntime =
+        Option.getOrUndefined(sharedExpertRuntime) ??
+        createWorkbenchExpertRuntime({
+          stateDir: config.stateDir,
+          expertAppliedRuntimeRepository,
+        });
+      if (Option.isNone(sharedExpertRuntime))
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(() => workbenchExpertRuntime.skillLibrary.dispose()),
+        );
       const readOwnerThreadDiagnostics = makeOwnerThreadDiagnosticReader({
         eventStore,
         providerRuntimeEvents,
@@ -1445,6 +1454,8 @@ const makeWsRpcHandlersLayer = () =>
         listSkills: (request) => providerDiscoveryService.listSkills(request),
       });
       const evolutionRpc = makeSkillEvolutionRpcHandlers({
+        ...(Option.isSome(spaceMemory) ? { memory: spaceMemory.value } : {}),
+        ...(Option.isSome(learningActions) ? { actions: learningActions.value } : {}),
         stateDir: config.stateDir,
         runtime: workbenchExpertRuntime,
         ...(Option.isSome(evolutionRepository) ? { repository: evolutionRepository.value } : {}),

@@ -13,6 +13,9 @@ import type {
   ProviderExpertSession,
   ExpertAppliedRuntimeRecord,
   ContextAppliedRuntimeRecord,
+  LearningSessionContext,
+  MemoryScope,
+  RunKnowledgeManifest,
   ModelSelection,
   ProviderApprovalDecision,
   ProviderForkThreadResult,
@@ -33,6 +36,7 @@ import {
   RuntimeItemId,
   RuntimeTaskId,
   RuntimeRequestId,
+  ProjectId,
   ThreadId,
   TurnId,
 } from "@synara/contracts";
@@ -122,8 +126,18 @@ import {
 import {
   ExpertLearningRepository,
   type ExpertLearningRepositoryShape,
+  type LearningStateRow,
 } from "../../experts/evolution/ExpertLearningRepository";
 import { withExpertLearningCommit } from "../../experts/expertLearningCommit";
+import {
+  SpaceMemoryService,
+  type SpaceMemoryServiceShape,
+} from "../../spaceMemory/SpaceMemoryService.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { stableJsonStringify } from "@synara/shared/browserAutomationCatalogue";
 
 // The fake adapter never prepares Codex storage. Give lifecycle tests real
 // continuation metadata without reading or writing the developer's Codex home.
@@ -875,6 +889,11 @@ function makeProviderServiceLayer(
     readonly contextRepository?: ContextRepositoryShape;
     readonly skillEvolutionRepository?: SkillEvolutionRepositoryShape;
     readonly expertLearningRepository?: ExpertLearningRepositoryShape;
+    readonly spaceMemoryService?: SpaceMemoryServiceShape;
+    readonly projectionSnapshotQuery?: Pick<
+      ProjectionSnapshotQueryShape,
+      "getThreadShellById" | "getProjectShellById"
+    >;
     readonly codexDidResumeSession?: NonNullable<
       ProviderAdapterShape<ProviderAdapterError>["didResumeSession"]
     >;
@@ -968,6 +987,12 @@ function makeProviderServiceLayer(
   const expertLearningRepositoryLayer = providers?.expertLearningRepository
     ? Layer.succeed(ExpertLearningRepository, providers.expertLearningRepository)
     : Layer.empty;
+  const spaceMemoryServiceLayer = providers?.spaceMemoryService
+    ? Layer.succeed(SpaceMemoryService, providers.spaceMemoryService)
+    : Layer.empty;
+  const projectionSnapshotQueryLayer = providers?.projectionSnapshotQuery
+    ? Layer.succeed(ProjectionSnapshotQuery, providers.projectionSnapshotQuery as never)
+    : Layer.empty;
 
   const rawLayer = Layer.mergeAll(
     makeProviderServiceLiveRaw({ stateDir: strictExpertTestState, ...options }).pipe(
@@ -978,6 +1003,8 @@ function makeProviderServiceLayer(
       Layer.provide(serverSettingsLayer),
       Layer.provide(skillEvolutionRepositoryLayer),
       Layer.provide(expertLearningRepositoryLayer),
+      Layer.provide(spaceMemoryServiceLayer),
+      Layer.provide(projectionSnapshotQueryLayer),
     ),
     directoryLayer,
     runtimeRepositoryLayer,
@@ -12095,6 +12122,112 @@ const expertV2ForkRuntime = makeProviderServiceLayer(
   },
 );
 
+let providerKnowledgeScope: MemoryScope | undefined;
+let providerKnowledgeSnapshotId: string | undefined;
+let providerKnowledgeManifest: RunKnowledgeManifest | undefined;
+let providerKnowledgeStateRow: LearningStateRow | undefined;
+const providerKnowledgeLearningRepository = {
+  listStates: () => Effect.succeed(providerKnowledgeStateRow ? [providerKnowledgeStateRow] : []),
+} as unknown as ExpertLearningRepositoryShape;
+const providerKnowledgeMemory = {
+  readManifest: (scope: MemoryScope, manifestId: string) => {
+    const manifest = providerKnowledgeManifest;
+    if (!manifest || manifest.id !== manifestId) return Effect.fail(new Error("missing manifest"));
+    if (
+      scope.ownerId !== manifest.scope.ownerId ||
+      scope.spaceId !== manifest.scope.spaceId ||
+      scope.expertId !== manifest.scope.expertId ||
+      scope.projectId !== manifest.scope.projectId
+    ) {
+      return Effect.fail(new Error("manifest scope mismatch"));
+    }
+    return Effect.succeed(manifest);
+  },
+} as unknown as SpaceMemoryServiceShape;
+const providerKnowledgeProjection = {
+  getThreadShellById: (id: ThreadId) => {
+    const scope = providerKnowledgeScope;
+    const snapshotId = providerKnowledgeSnapshotId;
+    if (!scope || !snapshotId) return Effect.succeed(Option.none());
+    return Effect.succeed(
+      Option.some({
+        id,
+        projectId: ProjectId.makeUnsafe(scope.projectId),
+        expertBinding: { expertId: scope.expertId, snapshotId },
+      } as never),
+    );
+  },
+  getProjectShellById: (id: ProjectId) => {
+    const scope = providerKnowledgeScope;
+    return scope
+      ? Effect.succeed(Option.some({ id, spaceId: scope.spaceId } as never))
+      : Effect.succeed(Option.none());
+  },
+} as unknown as Pick<ProjectionSnapshotQueryShape, "getThreadShellById" | "getProjectShellById">;
+const expertV2KnowledgeRuntime = makeProviderServiceLayer(
+  {
+    stateDir: path.join(expertV2RuntimeRoot, "state"),
+    persistExpertAppliedRuntime: (record) =>
+      Effect.sync(() => {
+        expertV2AppliedWrites.push(record);
+      }),
+  },
+  {
+    includeOmp: true,
+    confirmSkillApplication: true,
+    expertLearningRepository: providerKnowledgeLearningRepository,
+    spaceMemoryService: providerKnowledgeMemory,
+    projectionSnapshotQuery: providerKnowledgeProjection,
+  },
+);
+
+function buildProviderKnowledgeManifest(input: {
+  readonly id: string;
+  readonly rootRunId: string;
+  readonly scope: MemoryScope;
+  readonly snapshotId: string;
+  readonly skillAssemblyId: string;
+}): RunKnowledgeManifest {
+  const base = {
+    ...input,
+    learningEpoch: 13,
+    frozenRuleSequence: 8,
+    rules: [
+      {
+        memoryId: "memory-rule-provider-test",
+        revision: 2,
+        contentHash: `sha256:${"a".repeat(64)}`,
+      },
+    ],
+    renderVersion: 1 as const,
+    text: "- output.concise: Lead with the result and preserve evidence.\n",
+    createdAt: "2026-10-31T00:00:00.000Z",
+  };
+  const hash = `sha256:${createHash("sha256").update(stableJsonStringify(base)).digest("hex")}`;
+  return { ...base, hash };
+}
+
+function setProviderKnowledgeFixture(expertId: string, snapshotId: string, scope: MemoryScope) {
+  providerKnowledgeScope = scope;
+  providerKnowledgeSnapshotId = snapshotId;
+  providerKnowledgeStateRow = {
+    ownerId: scope.ownerId,
+    expertId,
+    record: JSON.stringify({
+      ownerKind: "session",
+      state: {
+        expertId,
+        enabled: true,
+        epoch: 13,
+        revision: 1,
+        updatedAt: "2026-10-31T00:00:00.000Z",
+      },
+    }),
+    revision: 1,
+    updatedAt: "2026-10-31T00:00:00.000Z",
+  };
+}
+
 expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
   it.effect("marks failed Expert recovery uncertain and blocks its next native startup", () =>
     Effect.gen(function* () {
@@ -12665,6 +12798,134 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
         assert.equal(expertV2Runtime.codex.sendTurn.mock.calls.length, before);
         yield* service.stopSession({ threadId });
         yield* Effect.promise(() => library.dispose());
+      }),
+  );
+});
+
+expertV2KnowledgeRuntime.layer("ProviderService pinned Run knowledge", (it) => {
+  it.effect(
+    "attaches verified knowledge to native startup and preserves its reference through recovery",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => expertV2FixturePromise);
+        const scope: MemoryScope = {
+          ownerId: "owner-provider-knowledge",
+          spaceId: "space-provider-knowledge",
+          expertId: fixture.session.expertId!,
+          projectId: "project-provider-knowledge",
+        };
+        const snapshotId = fixture.session.snapshotId;
+        setProviderKnowledgeFixture(fixture.session.expertId!, snapshotId, scope);
+        const threadId = asThreadId("expert-v2-knowledge-start-and-recovery");
+        const rootRunId = `run:${threadId}:knowledge`;
+        const assemblies = createRunSkillAssemblyStore(fixture.stateDir);
+        const assembly = yield* Effect.promise(() =>
+          assemblies.prepare({
+            threadId,
+            rootRunId,
+            baseSnapshotId: snapshotId,
+            createdAt: "2026-10-31T00:00:00.000Z",
+          }),
+        );
+        const manifest = buildProviderKnowledgeManifest({
+          id: "manifest-provider-knowledge",
+          rootRunId,
+          scope,
+          snapshotId,
+          skillAssemblyId: assembly.assemblyId,
+        });
+        providerKnowledgeManifest = manifest;
+        const knowledge: LearningSessionContext = {
+          manifestId: manifest.id,
+          rootRunId,
+          snapshotId,
+          scope,
+          knowledgeHash: manifest.hash,
+          learningEpoch: manifest.learningEpoch,
+        };
+        const boundAssembly = yield* Effect.promise(() =>
+          assemblies.attachKnowledge(rootRunId, knowledge),
+        );
+        const service = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const adapter = expertV2KnowledgeRuntime.omp;
+        adapter.startSession.mockClear();
+
+        yield* service.startSession(threadId, {
+          provider: "omp",
+          threadId,
+          runtimeMode: "full-access",
+          expertSession: boundAssembly.session,
+        });
+        const initialInput = adapter.startSession.mock.calls.at(-1)?.[0];
+        assert.deepEqual(initialInput?.expertSession?.knowledge, knowledge);
+        assert.include(
+          initialInput?.expertSession?.persona ?? "",
+          "Lead with the result and preserve evidence.",
+        );
+        assert.include(initialInput?.expertSession?.persona ?? "", "memory-rule-provider-test@2");
+        assert.include(initialInput?.expertSession?.persona ?? "", "learning tools");
+        const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.deepEqual(
+          asRuntimePayloadRecord(binding.runtimePayload).expertSession,
+          boundAssembly.session,
+        );
+
+        yield* adapter.stopSession(threadId);
+        yield* service.sendTurn({
+          threadId,
+          input: "Continue with pinned memory",
+          attachments: [],
+        });
+        const restoredInput = adapter.startSession.mock.calls.at(-1)?.[0];
+        assert.deepEqual(restoredInput?.expertSession?.knowledge, knowledge);
+        assert.include(
+          restoredInput?.expertSession?.persona ?? "",
+          "Lead with the result and preserve evidence.",
+        );
+        assert.include(restoredInput?.expertSession?.persona ?? "", "memory-rule-provider-test@2");
+
+        const driftThread = asThreadId("expert-v2-knowledge-hash-drift");
+        const driftRoot = `run:${driftThread}:knowledge`;
+        const driftAssembly = yield* Effect.promise(() =>
+          assemblies.prepare({
+            threadId: driftThread,
+            rootRunId: driftRoot,
+            baseSnapshotId: snapshotId,
+            createdAt: "2026-10-31T00:00:01.000Z",
+          }),
+        );
+        const driftManifest = buildProviderKnowledgeManifest({
+          id: "manifest-provider-knowledge-drift",
+          rootRunId: driftRoot,
+          scope,
+          snapshotId,
+          skillAssemblyId: driftAssembly.assemblyId,
+        });
+        const driftKnowledge: LearningSessionContext = {
+          manifestId: driftManifest.id,
+          rootRunId: driftRoot,
+          snapshotId,
+          scope,
+          knowledgeHash: driftManifest.hash,
+          learningEpoch: driftManifest.learningEpoch,
+        };
+        const boundDriftAssembly = yield* Effect.promise(() =>
+          assemblies.attachKnowledge(driftRoot, driftKnowledge),
+        );
+        providerKnowledgeManifest = { ...driftManifest, text: "mutated after authorization" };
+        const startCount = adapter.startSession.mock.calls.length;
+        const rejected = yield* Effect.exit(
+          service.startSession(driftThread, {
+            provider: "omp",
+            threadId: driftThread,
+            runtimeMode: "full-access",
+            expertSession: boundDriftAssembly.session,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(rejected));
+        assert.equal(adapter.startSession.mock.calls.length, startCount);
+        yield* service.stopSession({ threadId });
       }),
   );
 });

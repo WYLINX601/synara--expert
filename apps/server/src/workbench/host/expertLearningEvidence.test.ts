@@ -1,9 +1,17 @@
+import { createHash } from "node:crypto";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
   EventId,
   MessageId,
   RuntimeItemId,
   ThreadId,
   TurnId,
+  type ExpertAppliedRuntimeRecord,
+  type LearningSessionContext,
+  type MemoryScope,
+  type RunKnowledgeManifest,
   type ModelSelection as ModelSelectionType,
   type OrchestrationMessage,
   type OrchestrationProjectShell,
@@ -11,7 +19,10 @@ import {
   type ProviderRuntimeEvent,
 } from "@synara/contracts";
 import { Cause, Effect, Layer, Option } from "effect";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { stableJsonStringify } from "@synara/shared/browserAutomationCatalogue";
+import { createExpertStore } from "../../experts/ExpertStore.ts";
+import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore.ts";
 import {
   ExpertLearningRepository,
   type ExpertLearningRepositoryShape,
@@ -34,6 +45,12 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { PersistedProviderRuntimeEvent } from "../../persistence/Services/ProviderRuntimeEvents.ts";
+import { ServerConfig, type ServerConfigShape } from "../../config.ts";
+import {
+  SpaceMemoryService,
+  type SpaceMemoryServiceShape,
+} from "../../spaceMemory/SpaceMemoryService.ts";
+import { learningEvidenceDeltaFromRuntimeEvent } from "../../experts/evolution/LearningEvidence.ts";
 import { makeExpertLearningEvidenceCapture } from "./expertLearningEvidence.ts";
 
 const enabledAt = "2026-10-31T09:00:00.000Z";
@@ -48,6 +65,23 @@ const modelSelection: ModelSelectionType = {
   instanceId: "omp",
   model: "gpt-5.4",
 };
+const nativeLifecycleGeneration = "generation-learning-a";
+const nativeRoots: string[] = [];
+
+afterEach(async () => {
+  const makeWritable = async (entry: string): Promise<void> => {
+    const stat = await fs.lstat(entry);
+    if (stat.isSymbolicLink()) return;
+    await fs.chmod(entry, stat.isDirectory() ? 0o700 : 0o600);
+    if (stat.isDirectory()) {
+      for (const child of await fs.readdir(entry)) await makeWritable(path.join(entry, child));
+    }
+  };
+  for (const root of nativeRoots.splice(0)) {
+    await makeWritable(root);
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 
 function enabledState(ownerId = "owner-a", revision = 3) {
   return {
@@ -56,13 +90,14 @@ function enabledState(ownerId = "owner-a", revision = 3) {
     revision,
     updatedAt: enabledAt,
     record: JSON.stringify({
-      ownerKind: "principal",
+      ownerKind: "session",
       enabledAt,
       state: {
         expertId,
         enabled: true,
         epoch: 2,
         revision,
+        updatedAt: enabledAt,
         harnessKind: "omp",
       },
     }),
@@ -78,6 +113,8 @@ function makeFixture(options?: {
   readonly omitRequestInstanceId?: boolean;
   readonly sessionInstanceId?: string;
   readonly includeAppliedRuntimeRepository?: boolean;
+  readonly snapshotId?: string;
+  readonly skillApplication?: ExpertAppliedRuntimeRecord["skillApplication"];
 }) {
   const evidenceRows = new Map<
     string,
@@ -116,7 +153,12 @@ function makeFixture(options?: {
   const thread = {
     id: threadId,
     projectId: "project-learning-a",
-    expertBinding: { expertId, snapshotId, displayName: "Test Expert", revision: 1 },
+    expertBinding: {
+      expertId,
+      snapshotId: options?.snapshotId ?? snapshotId,
+      displayName: "Test Expert",
+      revision: 1,
+    },
     modelSelection: threadModelSelection,
     ...(options?.sessionInstanceId
       ? {
@@ -201,10 +243,11 @@ function makeFixture(options?: {
       Effect.succeed(
         Option.some({
           threadId,
-          snapshotId,
+          snapshotId: options?.snapshotId ?? snapshotId,
           provider: "omp",
           ...(!options?.omitAppliedModel ? { model: "gpt-5.4" } : {}),
-          lifecycleGeneration: "generation-learning-a",
+          lifecycleGeneration: nativeLifecycleGeneration,
+          ...(options?.skillApplication ? { skillApplication: options.skillApplication } : {}),
           appliedAt: requestedAt,
         }),
       ),
@@ -237,6 +280,143 @@ function makeFixture(options?: {
     ...(layers as [(typeof layers)[number], ...(typeof layers)[number][]]),
   );
   return { evidenceRows, writes, layer };
+}
+
+function manifestHash(value: Omit<RunKnowledgeManifest, "hash">): string {
+  return `sha256:${createHash("sha256").update(stableJsonStringify(value)).digest("hex")}`;
+}
+
+async function prepareNativeAssembly(input: {
+  readonly rootRunId: string;
+  readonly includeKnowledge?: boolean;
+  readonly knowledgeEpoch?: number;
+  readonly knowledgeScope?: Partial<MemoryScope>;
+}) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "expert-learning-assembly-"));
+  nativeRoots.push(root);
+  const stateDir = path.join(root, "state");
+  const experts = createExpertStore(stateDir);
+  await experts.save({
+    id: expertId,
+    name: "Learning capture fixture",
+    description: "",
+    useCases: "",
+    persona: "A pinned learning fixture.",
+    outputRequirements: "",
+    skills: [],
+    references: [],
+    connections: [],
+    skillBindings: [],
+  });
+  const binding = await experts.prepareSnapshot(expertId);
+  const assemblies = createRunSkillAssemblyStore(stateDir);
+  let record = await assemblies.prepare({
+    threadId,
+    rootRunId: input.rootRunId,
+    baseSnapshotId: binding.snapshotId,
+    createdAt: enabledAt,
+  });
+  const attempt = await assemblies.beginInitialization(record.rootRunId);
+  await assemblies.finishInitialization(record.rootRunId, attempt);
+  record = (await assemblies.read(record.rootRunId))!;
+
+  let manifest: RunKnowledgeManifest | undefined;
+  let memory: SpaceMemoryServiceShape | undefined;
+  if (input.includeKnowledge) {
+    const scope: MemoryScope = {
+      ownerId: "owner-a",
+      spaceId: "space-learning-a",
+      expertId,
+      projectId: "project-learning-a",
+      ...input.knowledgeScope,
+    };
+    const body: Omit<RunKnowledgeManifest, "hash"> = {
+      id: `manifest-${input.rootRunId}`,
+      rootRunId: input.rootRunId,
+      scope,
+      snapshotId: binding.snapshotId,
+      skillAssemblyId: record.assemblyId,
+      learningEpoch: input.knowledgeEpoch ?? 2,
+      frozenRuleSequence: 0,
+      rules: [],
+      renderVersion: 1,
+      text: "",
+      createdAt: enabledAt,
+    };
+    manifest = { ...body, hash: manifestHash(body) };
+    const knowledge: LearningSessionContext = {
+      manifestId: manifest.id,
+      rootRunId: manifest.rootRunId,
+      snapshotId: manifest.snapshotId,
+      scope,
+      knowledgeHash: manifest.hash,
+      learningEpoch: input.knowledgeEpoch ?? 2,
+    };
+    record = await assemblies.attachKnowledge(record.rootRunId, knowledge);
+    memory = {
+      readManifest: (requestedScope: MemoryScope, manifestId: string) =>
+        requestedScope.ownerId === scope.ownerId &&
+        requestedScope.spaceId === scope.spaceId &&
+        requestedScope.expertId === scope.expertId &&
+        requestedScope.projectId === scope.projectId &&
+        manifestId === manifest!.id
+          ? Effect.succeed(manifest!)
+          : Effect.fail(new Error("Run knowledge manifest identity mismatch.")),
+    } as unknown as SpaceMemoryServiceShape;
+  }
+
+  return {
+    stateDir,
+    binding,
+    record,
+    manifest,
+    memory,
+    skillApplication: {
+      mode: "catalog" as const,
+      snapshotId: record.baseSnapshotId,
+      packageIds: [],
+      catalogHash: "a".repeat(64),
+      instructionsHash: "b".repeat(64),
+      skillRootRunId: record.rootRunId,
+      skillAssemblyId: record.assemblyId,
+      lifecycleGeneration: nativeLifecycleGeneration,
+    },
+  };
+}
+
+function preparedCaptureInput(
+  entry: PersistedProviderRuntimeEvent,
+  native: Awaited<ReturnType<typeof prepareNativeAssembly>>,
+) {
+  return {
+    delta: learningEvidenceDeltaFromRuntimeEvent(entry),
+    appliedIdentity: {
+      threadId,
+      snapshotId: native.binding.snapshotId,
+      provider: "omp" as const,
+      model: "gpt-5.4",
+      lifecycleGeneration: nativeLifecycleGeneration,
+      skillApplication: native.skillApplication,
+    },
+    source: {
+      expertId,
+      snapshotId: native.binding.snapshotId,
+      projectId: "project-learning-a",
+      spaceId: "space-learning-a",
+      instanceId: "omp",
+    },
+  };
+}
+
+function nativeCaptureLayer(
+  fixtureLayer: ReturnType<typeof makeFixture>["layer"],
+  native: Awaited<ReturnType<typeof prepareNativeAssembly>>,
+) {
+  return Layer.mergeAll(
+    fixtureLayer,
+    Layer.succeed(ServerConfig, { stateDir: native.stateDir } as ServerConfigShape),
+    ...(native.memory ? [Layer.succeed(SpaceMemoryService, native.memory)] : []),
+  );
 }
 
 function runtimeEntry(
@@ -347,6 +527,163 @@ describe("expert learning evidence capture", () => {
     expect(record.items.some((item) => item.text.includes("Must not leak"))).toBe(false);
     expect(record.items.some((item) => item.text.includes("private-secret"))).toBe(false);
     expect(record.coverage).toContain("run-assembly-unattributed");
+  });
+
+  it.each(["goal", "managed-hub"] as const)(
+    "attributes a trusted accepted %s continuation with its prepared native Memory identity",
+    async (continuationKind) => {
+      const native = await prepareNativeAssembly({
+        rootRunId: `run:${threadId}:${continuationKind}-continuation`,
+        includeKnowledge: true,
+        knowledgeEpoch: 2,
+      });
+      const fixture = makeFixture({
+        snapshotId: native.binding.snapshotId,
+        skillApplication: native.skillApplication,
+      });
+      const capture = await Effect.runPromise(
+        Effect.provide(
+          makeExpertLearningEvidenceCapture,
+          nativeCaptureLayer(fixture.layer, native),
+        ),
+      );
+      const entry = runtimeEntry(turnStarted(), 1);
+      await Effect.runPromise(capture(entry, turnId, preparedCaptureInput(entry, native)));
+
+      const record = JSON.parse([...fixture.evidenceRows.values()][0]!.record) as {
+        readonly rootRunId?: string;
+        readonly assemblyId?: string;
+        readonly learningEpoch?: number;
+        readonly coverage: ReadonlyArray<string>;
+      };
+      expect(record).toMatchObject({
+        rootRunId: native.record.rootRunId,
+        assemblyId: native.record.assemblyId,
+        learningEpoch: 2,
+      });
+      expect(record.coverage).not.toContain("run-assembly-unattributed");
+      expect(record.coverage).not.toContain("run-assembly-unavailable");
+      expect(record.coverage).not.toContain("run-knowledge-unavailable");
+    },
+  );
+
+  it("accepts direct fallback only when its applied root is the exact expected root", async () => {
+    const expectedRoot = `run:${threadId}:source-user-message`;
+    const native = await prepareNativeAssembly({ rootRunId: expectedRoot });
+    const fixture = makeFixture({
+      snapshotId: native.binding.snapshotId,
+      skillApplication: native.skillApplication,
+    });
+    const capture = await Effect.runPromise(
+      Effect.provide(makeExpertLearningEvidenceCapture, nativeCaptureLayer(fixture.layer, native)),
+    );
+    await Effect.runPromise(capture(runtimeEntry(turnStarted(), 1), turnId));
+
+    const record = JSON.parse([...fixture.evidenceRows.values()][0]!.record) as {
+      readonly rootRunId?: string;
+      readonly assemblyId?: string;
+    };
+    expect(record).toMatchObject({ rootRunId: expectedRoot, assemblyId: native.record.assemblyId });
+  });
+
+  it("does not attribute an older direct fallback event to the thread's newer applied root", async () => {
+    const native = await prepareNativeAssembly({
+      rootRunId: `run:${threadId}:newer-applied-message`,
+    });
+    const fixture = makeFixture({
+      snapshotId: native.binding.snapshotId,
+      skillApplication: native.skillApplication,
+    });
+    const capture = await Effect.runPromise(
+      Effect.provide(makeExpertLearningEvidenceCapture, nativeCaptureLayer(fixture.layer, native)),
+    );
+    await Effect.runPromise(capture(runtimeEntry(turnStarted(), 1), turnId));
+
+    const record = JSON.parse([...fixture.evidenceRows.values()][0]!.record) as {
+      readonly rootRunId?: string;
+      readonly assemblyId?: string;
+      readonly coverage: ReadonlyArray<string>;
+    };
+    expect(record).not.toHaveProperty("rootRunId");
+    expect(record).not.toHaveProperty("assemblyId");
+    expect(record.coverage).toContain("run-assembly-unattributed");
+  });
+
+  it("skips an old verified Memory grant after close and reopen advances the learning epoch", async () => {
+    const native = await prepareNativeAssembly({
+      rootRunId: `run:${threadId}:old-memory-grant`,
+      includeKnowledge: true,
+      knowledgeEpoch: 1,
+    });
+    const fixture = makeFixture({
+      snapshotId: native.binding.snapshotId,
+      skillApplication: native.skillApplication,
+    });
+    const capture = await Effect.runPromise(
+      Effect.provide(makeExpertLearningEvidenceCapture, nativeCaptureLayer(fixture.layer, native)),
+    );
+    const entry = runtimeEntry(turnStarted(), 1);
+    await Effect.runPromise(capture(entry, turnId, preparedCaptureInput(entry, native)));
+
+    expect(fixture.evidenceRows.size).toBe(0);
+  });
+
+  it.each([
+    ["owner", { ownerId: "previous-owner" }],
+    ["space", { spaceId: "previous-space" }],
+    ["project", { projectId: "previous-project" }],
+  ] as const)(
+    "skips a Run Memory grant from a different trusted %s scope",
+    async (_label, scope) => {
+      const native = await prepareNativeAssembly({
+        rootRunId: `run:${threadId}:mismatched-${_label}-scope`,
+        includeKnowledge: true,
+        knowledgeScope: scope,
+      });
+      const fixture = makeFixture({
+        snapshotId: native.binding.snapshotId,
+        skillApplication: native.skillApplication,
+      });
+      const capture = await Effect.runPromise(
+        Effect.provide(
+          makeExpertLearningEvidenceCapture,
+          nativeCaptureLayer(fixture.layer, native),
+        ),
+      );
+      const entry = runtimeEntry(turnStarted(), 1);
+      await Effect.runPromise(capture(entry, turnId, preparedCaptureInput(entry, native)));
+
+      expect(fixture.evidenceRows.size).toBe(0);
+    },
+  );
+
+  it("retains a verified no-Memory native Run without fabricating a Memory grant", async () => {
+    const native = await prepareNativeAssembly({ rootRunId: `run:${threadId}:legacy-no-memory` });
+    expect(native.record.session.knowledge).toBeUndefined();
+    const fixture = makeFixture({
+      snapshotId: native.binding.snapshotId,
+      skillApplication: native.skillApplication,
+    });
+    const capture = await Effect.runPromise(
+      Effect.provide(makeExpertLearningEvidenceCapture, nativeCaptureLayer(fixture.layer, native)),
+    );
+    const entry = runtimeEntry(turnStarted(), 1);
+    await Effect.runPromise(capture(entry, turnId, preparedCaptureInput(entry, native)));
+
+    const record = JSON.parse([...fixture.evidenceRows.values()][0]!.record) as {
+      readonly rootRunId?: string;
+      readonly assemblyId?: string;
+      readonly learningEpoch?: number;
+      readonly coverage: ReadonlyArray<string>;
+    };
+    expect(record).toMatchObject({
+      rootRunId: native.record.rootRunId,
+      assemblyId: native.record.assemblyId,
+      learningEpoch: 2,
+    });
+    expect(record.coverage).toContain("run-knowledge-unavailable");
+    expect(record).not.toHaveProperty("manifestId");
+    expect(record).not.toHaveProperty("knowledgeHash");
   });
 
   it.each([

@@ -45,6 +45,8 @@ import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { buildModelSelection, formatProviderModelOptionName } from "~/providerModelOptions";
 import {
   evolutionTimelineEntries,
+  growthTimelineEntries,
+  stableEvolutionOperationId as stableOperationId,
   isSkillEvolutionRunActive,
   defaultSkillEvolutionSources,
   isLatestOpportunityGeneration,
@@ -59,8 +61,6 @@ import {
 } from "./model";
 import {
   CircleAlertIcon,
-  CircleCheckIcon,
-  ClockIcon,
   ExternalLinkIcon,
   FileIcon,
   LoaderCircleIcon,
@@ -78,6 +78,8 @@ import {
 } from "~/components/ui/dialog";
 
 import { ExpertLearningControl } from "./ExpertLearningControl";
+import { EvolutionTimelineNode } from "./EvolutionTimelineNode";
+import { LearningChangeDetails, learningChangesQueryOptions } from "./LearningChangeDetails";
 
 const RUNS_QUERY_SUFFIX = "runs";
 const SOURCES_QUERY_SUFFIX = "sources";
@@ -88,16 +90,6 @@ const ACTIVE_POLL_MS = 2_000;
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
-}
-
-async function stableOperationId(
-  kind: "apply" | "restore" | "bind-restore" | "generate",
-  parts: ReadonlyArray<string>,
-) {
-  const bytes = new TextEncoder().encode(parts.join("\u0000"));
-  const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes));
-  const hex = [...digest].map((value) => value.toString(16).padStart(2, "0")).join("");
-  return `skill-evolution-${kind}-${hex}`;
 }
 
 function sourceKey(source: { threadId: string; turnId: string }) {
@@ -1431,6 +1423,11 @@ export function ExpertSkillEvolution({
     enabled: active,
     staleTime: 30_000,
   });
+  const learningChangesQuery = useQuery({
+    ...learningChangesQueryOptions(expertId),
+    enabled: active,
+  });
+  const [selectedChangeId, setSelectedChangeId] = useState<string | null>(null);
   const runsQuery = useQuery({
     queryKey: runKey,
     queryFn: () => ensureExpertClient().skillEvolution({ action: "list", expertId }),
@@ -1991,21 +1988,26 @@ export function ExpertSkillEvolution({
   };
   const timeline = useMemo(
     () =>
-      evolutionTimelineEntries(runs).map((entry) => {
-        const failedRequest = entry.opportunity
-          ? generationErrors[entry.opportunity.opportunityId]
-          : undefined;
-        if (!entry.opportunity || !failedRequest) return entry;
-        const latest = latestOpportunityGeneration(
-          runs,
-          entry.run.requestId,
-          entry.opportunity.opportunityId,
-        );
-        return failedRequest.previousRequestId === (latest?.requestId ?? null)
-          ? { ...entry, pending: false, failed: true, label: "提取失败" }
-          : entry;
-      }),
-    [runs, generationErrors],
+      growthTimelineEntries(
+        evolutionTimelineEntries(runs).map((entry) => {
+          const failedRequest = entry.opportunity
+            ? generationErrors[entry.opportunity.opportunityId]
+            : undefined;
+          if (!entry.opportunity || !failedRequest) return entry;
+          const latest = latestOpportunityGeneration(
+            runs,
+            entry.run.requestId,
+            entry.opportunity.opportunityId,
+          );
+          return failedRequest.previousRequestId === (latest?.requestId ?? null)
+            ? { ...entry, pending: false, failed: true, label: "提取失败" }
+            : entry;
+        }),
+        learningChangesQuery.data ?? [],
+        currentGraph?.events ?? [],
+        runs,
+      ),
+    [runs, generationErrors, learningChangesQuery.data, currentGraph?.events],
   );
   const recentApplied = new Set(
     timeline
@@ -2026,7 +2028,9 @@ export function ExpertSkillEvolution({
   const pendingCount = timeline.filter((entry) => entry.pending).length;
   useEffect(() => {
     if (!expandedEntryId || timeline.some((entry) => entry.id === expandedEntryId)) return;
-    const replacement = timeline.find((entry) => entry.run.requestId === expandedEntryId);
+    const replacement = timeline.find(
+      (entry) => entry.kind === "experience" && entry.run.requestId === expandedEntryId,
+    );
     if (replacement) {
       setExpandedEntryId(replacement.id);
       setVisitedEntries((current) => new Set([...current, replacement.id]));
@@ -2087,9 +2091,9 @@ export function ExpertSkillEvolution({
           </Button>
         </div>
         <p className="text-ui-xs text-muted-foreground">
-          已保存并绑定的能力变化；实际效果仍需在后续工作中验证。
+          已生效的技能与记忆变化；实际效果仍需在后续工作中验证。
         </p>
-        {runsQuery.isPending ? (
+        {runsQuery.isPending || learningChangesQuery.isPending ? (
           <p role="status" className="text-ui-sm text-muted-foreground">
             正在读取经验…
           </p>
@@ -2099,7 +2103,12 @@ export function ExpertSkillEvolution({
             无法读取提炼记录：{errorText(runsQuery.error)}
           </p>
         ) : null}
-        {!visibleTimeline.length && !runsQuery.isPending ? (
+        {learningChangesQuery.isError ? (
+          <p role="alert" className="text-ui-sm text-destructive">
+            无法读取学习变化：{errorText(learningChangesQuery.error)}
+          </p>
+        ) : null}
+        {!visibleTimeline.length && !runsQuery.isPending && learningChangesQuery.isSuccess ? (
           <p className="rounded-xl border border-dashed border-border px-4 py-6 text-ui-sm text-muted-foreground">
             {timeline.length
               ? "暂时没有待处理经验，历史记录已保留。"
@@ -2110,6 +2119,42 @@ export function ExpertSkillEvolution({
           {timeline.map((entry) => {
             const visible = visibleTimeline.some((item) => item.id === entry.id);
             const expanded = visible && (entry.failed || entry.id === expandedEntryId);
+            if (entry.kind === "learning")
+              return (
+                <EvolutionTimelineNode
+                  key={entry.id}
+                  id={entry.id}
+                  visible={visible}
+                  expanded={expanded}
+                  applied={entry.applied}
+                  muted={
+                    entry.change.status === "reverted" || Boolean(entry.change.revertsChangeId)
+                  }
+                  title={entry.title}
+                  label={entry.label}
+                  assetLabel={entry.change.assetKind === "memory" ? "记忆" : "技能"}
+                  createdAt={entry.createdAt}
+                  hasNext={visibleTimeline.at(-1)?.id !== entry.id}
+                  onToggle={() => setExpandedEntryId(expanded ? null : entry.id)}
+                >
+                  <div className="min-w-0 space-y-3 pb-5 pr-2">
+                    <p className="break-words text-ui-sm text-muted-foreground">
+                      {entry.change.assetKind === "memory"
+                        ? "查看本次保存的内容与来源。"
+                        : entry.change.summary}
+                    </p>
+                    <div className="flex justify-end">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setSelectedChangeId(entry.change.changeId)}
+                      >
+                        查看变化
+                      </Button>
+                    </div>
+                  </div>
+                </EvolutionTimelineNode>
+              );
             const selectedRun =
               hydratedSelectedRun?.requestId === entry.run.requestId
                 ? hydratedSelectedRun
@@ -2128,220 +2173,157 @@ export function ExpertSkillEvolution({
                     : !isLatestOpportunityGeneration(selectedRun, runs)
                       ? "此候选已被更新的生成结果替代，不能继续编辑或采用。"
                       : undefined;
-            const StatusIcon = entry.active
-              ? LoaderCircleIcon
-              : entry.applied
-                ? CircleCheckIcon
-                : entry.pending
-                  ? ClockIcon
-                  : CircleAlertIcon;
-            const detailId = `experience-detail-${encodeURIComponent(entry.id)}`;
-            const nodeSummary = (
-              <>
-                <span className="min-w-0 flex-1 basis-full break-words text-ui font-medium sm:basis-auto">
-                  {entry.title}
-                </span>
-                {!entry.failed ? (
-                  <span
-                    className={`rounded-md px-2 py-1 text-ui-xs ${entry.applied ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-muted text-muted-foreground"}`}
-                  >
-                    {entry.label}
-                  </span>
-                ) : null}
-
-                {entry.run.origin === "automatic" ? (
-                  <span className="text-ui-xs text-muted-foreground">自动学习</span>
-                ) : null}
-                <time
-                  dateTime={entry.run.createdAt}
-                  className="flex items-center gap-1 text-ui-xs text-muted-foreground"
-                >
-                  <ClockIcon aria-hidden="true" className="size-3.5" />
-                  {new Date(entry.run.createdAt).toLocaleString(undefined, {
-                    month: "short",
-                    day: "numeric",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </time>
-                {!entry.failed ? <DisclosureChevron open={expanded} /> : null}
-              </>
-            );
             return (
-              <li
+              <EvolutionTimelineNode
                 key={entry.id}
-                hidden={!visible}
-                className="relative min-w-0 pl-9"
-                data-testid={`experience-node:${entry.id}`}
+                id={entry.id}
+                visible={visible}
+                expanded={expanded}
+                applied={entry.applied}
+                failed={entry.failed}
+                active={entry.active}
+                pending={entry.pending}
+                title={entry.title}
+                label={entry.label}
+                automatic={entry.run.origin === "automatic"}
+                createdAt={entry.createdAt}
+                hasNext={visibleTimeline.at(-1)?.id !== entry.id}
+                onToggle={() => {
+                  setExpandedEntryId(expanded ? null : entry.id);
+                  setSelectedRunId(expanded ? null : entry.run.requestId);
+                  setVisitedEntries((current) => new Set([...current, entry.id]));
+                }}
               >
-                {visibleTimeline.at(-1)?.id !== entry.id || expanded ? (
-                  <div
-                    aria-hidden="true"
-                    className="absolute bottom-0 left-3 top-7 border-l border-border"
-                  />
-                ) : null}
-                <StatusIcon
-                  aria-hidden="true"
-                  className={`absolute left-0.5 top-4 size-5 bg-background ${entry.applied ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"} ${entry.active ? "animate-spin motion-reduce:animate-none" : ""}`}
-                />
-                {entry.failed ? (
-                  <div className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1 py-3 pr-2">
-                    {nodeSummary}
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    aria-expanded={expanded}
-                    aria-controls={detailId}
-                    className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-lg py-3 pr-2 text-left outline-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-ring"
-                    onClick={() => {
-                      setExpandedEntryId(expanded ? null : entry.id);
-                      setSelectedRunId(expanded ? null : entry.run.requestId);
-                      setVisitedEntries((current) => new Set([...current, entry.id]));
-                    }}
-                  >
-                    {nodeSummary}
-                  </button>
-                )}
-
-                <div id={detailId}>
-                  <DisclosureRegion open={expanded}>
-                    {entry.failed || visitedEntries.has(entry.id) ? (
-                      <div className="min-w-0 space-y-3 pb-5">
-                        {expanded && !entry.failed && selectedRunQuery.isError ? (
-                          <p role="alert" className="text-ui-sm text-destructive">
-                            请求详情不可用：{errorText(selectedRunQuery.error)}
+                {entry.failed || visitedEntries.has(entry.id) ? (
+                  <div className="min-w-0 space-y-3 pb-5">
+                    {expanded && !entry.failed && selectedRunQuery.isError ? (
+                      <p role="alert" className="text-ui-sm text-destructive">
+                        请求详情不可用：{errorText(selectedRunQuery.error)}
+                      </p>
+                    ) : null}
+                    {entry.opportunity ? (
+                      (() => {
+                        const opportunity =
+                          selectedRun.opportunities?.find(
+                            (item) => item.opportunityId === entry.opportunity?.opportunityId,
+                          ) ?? entry.opportunity;
+                        const latestGeneration = latestOpportunityGeneration(
+                          runs,
+                          selectedRun.requestId,
+                          opportunity.opportunityId,
+                        );
+                        const generationBlockReason = generationBlockReasonFor(opportunity);
+                        const generationError = generationErrors[opportunity.opportunityId];
+                        const failureReason =
+                          generationError &&
+                          generationError.previousRequestId ===
+                            (latestGeneration?.requestId ?? null)
+                            ? generationError.reason
+                            : undefined;
+                        return (
+                          <div className="min-w-0 pr-2">
+                            <OpportunityCard
+                              generations={runs.filter(
+                                (run) =>
+                                  run.discoveryRequestId === selectedRun.requestId &&
+                                  run.opportunityId === opportunity.opportunityId,
+                              )}
+                              opportunity={opportunity}
+                              {...(failureReason ? { failureReason } : {})}
+                              {...(latestGeneration ? { latestGeneration } : {})}
+                              {...(generationBlockReason ? { generationBlockReason } : {})}
+                              expertArchived={expertArchived}
+                              busy={working}
+                              feedback={
+                                feedbackDrafts[opportunity.opportunityId] ??
+                                latestGeneration?.feedback ??
+                                ""
+                              }
+                              onFeedbackChange={(value) =>
+                                setFeedbackDrafts((current) => ({
+                                  ...current,
+                                  [opportunity.opportunityId]: value,
+                                }))
+                              }
+                              onGenerate={() =>
+                                void generateOpportunity(selectedRun, opportunity).catch(() => {})
+                              }
+                              onDismiss={() =>
+                                void dismissOpportunity(selectedRun, opportunity).catch(() => {})
+                              }
+                              {...(onOpenAbilities ? { onOpenAbilities } : {})}
+                              ownerName={expertNameById.get(expertId) ?? expertName}
+                              onEdit={performProposalEdit}
+                              onApply={performApply}
+                              onViewResult={viewResult}
+                              onReject={performReject}
+                              {...(onOpenTask ? { onOpenTask } : {})}
+                            />
+                          </div>
+                        );
+                      })()
+                    ) : selectedRun.status === "failed" ? (
+                      <ExtractionFailure
+                        reason={selectedRun.error ?? selectedRun.summary ?? "未能完成提取。"}
+                      />
+                    ) : (
+                      <div className="space-y-3 rounded-xl border border-border p-4">
+                        <h3 className="text-ui font-medium">
+                          {skillEvolutionRunPresentation(selectedRun).label}
+                        </h3>
+                        {skillEvolutionRunPresentation(selectedRun).detail ? (
+                          <p role="status" className="text-ui-sm text-muted-foreground">
+                            {skillEvolutionRunPresentation(selectedRun).detail}
                           </p>
                         ) : null}
-                        {entry.opportunity ? (
-                          (() => {
-                            const opportunity =
-                              selectedRun.opportunities?.find(
-                                (item) => item.opportunityId === entry.opportunity?.opportunityId,
-                              ) ?? entry.opportunity;
-                            const latestGeneration = latestOpportunityGeneration(
-                              runs,
-                              selectedRun.requestId,
-                              opportunity.opportunityId,
-                            );
-                            const generationBlockReason = generationBlockReasonFor(opportunity);
-                            const generationError = generationErrors[opportunity.opportunityId];
-                            const failureReason =
-                              generationError &&
-                              generationError.previousRequestId ===
-                                (latestGeneration?.requestId ?? null)
-                                ? generationError.reason
-                                : undefined;
-                            return (
-                              <div className="min-w-0 pr-2">
-                                <OpportunityCard
-                                  generations={runs.filter(
-                                    (run) =>
-                                      run.discoveryRequestId === selectedRun.requestId &&
-                                      run.opportunityId === opportunity.opportunityId,
-                                  )}
-                                  opportunity={opportunity}
-                                  {...(failureReason ? { failureReason } : {})}
-                                  {...(latestGeneration ? { latestGeneration } : {})}
-                                  {...(generationBlockReason ? { generationBlockReason } : {})}
-                                  expertArchived={expertArchived}
-                                  busy={working}
-                                  feedback={
-                                    feedbackDrafts[opportunity.opportunityId] ??
-                                    latestGeneration?.feedback ??
-                                    ""
-                                  }
-                                  onFeedbackChange={(value) =>
-                                    setFeedbackDrafts((current) => ({
-                                      ...current,
-                                      [opportunity.opportunityId]: value,
-                                    }))
-                                  }
-                                  onGenerate={() =>
-                                    void generateOpportunity(selectedRun, opportunity).catch(
-                                      () => {},
-                                    )
-                                  }
-                                  onDismiss={() =>
-                                    void dismissOpportunity(selectedRun, opportunity).catch(
-                                      () => {},
-                                    )
-                                  }
-                                  {...(onOpenAbilities ? { onOpenAbilities } : {})}
-                                  ownerName={expertNameById.get(expertId) ?? expertName}
-                                  onEdit={performProposalEdit}
-                                  onApply={performApply}
-                                  onViewResult={viewResult}
-                                  onReject={performReject}
-                                  {...(onOpenTask ? { onOpenTask } : {})}
-                                />
-                              </div>
-                            );
-                          })()
-                        ) : selectedRun.status === "failed" ? (
-                          <ExtractionFailure
-                            reason={selectedRun.error ?? selectedRun.summary ?? "未能完成提取。"}
-                          />
-                        ) : (
-                          <div className="space-y-3 rounded-xl border border-border p-4">
-                            <h3 className="text-ui font-medium">
-                              {skillEvolutionRunPresentation(selectedRun).label}
-                            </h3>
-                            {skillEvolutionRunPresentation(selectedRun).detail ? (
-                              <p role="status" className="text-ui-sm text-muted-foreground">
-                                {skillEvolutionRunPresentation(selectedRun).detail}
-                              </p>
-                            ) : null}
-                            {selectedRun.summary &&
-                            !skillEvolutionRunPresentation(selectedRun).detail ? (
-                              <p className="break-words text-ui-sm text-muted-foreground">
-                                {selectedRun.summary}
-                              </p>
-                            ) : null}
-                            {selectedRun.error ? (
-                              <p role="alert" className="break-words text-ui-sm text-destructive">
-                                {selectedRun.error}
-                              </p>
-                            ) : null}
-                            {selectedRun.status === "no_change" ? (
-                              <p role="status" className="text-ui-sm text-muted-foreground">
-                                {selectedRun.stage === "generation"
-                                  ? "此次生成没有形成可采用的 Skill。正式 Skill、修订和绑定不变。"
-                                  : "没有发现值得提炼的可复用经验。正式 Skill、修订和绑定不变。"}
-                              </p>
-                            ) : null}
-                            {selectedRun.status === "insufficient_evidence" ? (
-                              <p role="status" className="text-ui-sm text-muted-foreground">
-                                证据不足：当前来源无法支撑可复用结论。你可以补充来源后再次主动提炼。
-                              </p>
-                            ) : null}
-                            {selectedRun.stage !== "discovery"
-                              ? selectedRun.proposals.map((proposal) => (
-                                  <ProposalCard
-                                    key={proposal.proposalId}
-                                    proposal={proposal}
-                                    expertArchived={expertArchived}
-                                    readOnly={Boolean(readOnlyReason)}
-                                    {...(readOnlyReason ? { readOnlyReason } : {})}
-                                    ownerName={
-                                      expertNameById.get(proposal.expertId) ?? proposal.expertId
-                                    }
-                                    busy={working}
-                                    onEdit={performProposalEdit}
-                                    onApply={performApply}
-                                    onViewResult={viewResult}
-                                    onReject={performReject}
-                                    {...(onOpenTask ? { onOpenTask } : {})}
-                                  />
-                                ))
-                              : null}
-                          </div>
-                        )}
+                        {selectedRun.summary &&
+                        !skillEvolutionRunPresentation(selectedRun).detail ? (
+                          <p className="break-words text-ui-sm text-muted-foreground">
+                            {selectedRun.summary}
+                          </p>
+                        ) : null}
+                        {selectedRun.error ? (
+                          <p role="alert" className="break-words text-ui-sm text-destructive">
+                            {selectedRun.error}
+                          </p>
+                        ) : null}
+                        {selectedRun.status === "no_change" ? (
+                          <p role="status" className="text-ui-sm text-muted-foreground">
+                            {selectedRun.stage === "generation"
+                              ? "此次生成没有形成可采用的 Skill。正式 Skill、修订和绑定不变。"
+                              : "没有发现值得提炼的可复用经验。正式 Skill、修订和绑定不变。"}
+                          </p>
+                        ) : null}
+                        {selectedRun.status === "insufficient_evidence" ? (
+                          <p role="status" className="text-ui-sm text-muted-foreground">
+                            证据不足：当前来源无法支撑可复用结论。你可以补充来源后再次主动提炼。
+                          </p>
+                        ) : null}
+                        {selectedRun.stage !== "discovery"
+                          ? selectedRun.proposals.map((proposal) => (
+                              <ProposalCard
+                                key={proposal.proposalId}
+                                proposal={proposal}
+                                expertArchived={expertArchived}
+                                readOnly={Boolean(readOnlyReason)}
+                                {...(readOnlyReason ? { readOnlyReason } : {})}
+                                ownerName={
+                                  expertNameById.get(proposal.expertId) ?? proposal.expertId
+                                }
+                                busy={working}
+                                onEdit={performProposalEdit}
+                                onApply={performApply}
+                                onViewResult={viewResult}
+                                onReject={performReject}
+                                {...(onOpenTask ? { onOpenTask } : {})}
+                              />
+                            ))
+                          : null}
                       </div>
-                    ) : null}
-                  </DisclosureRegion>
-                </div>
-              </li>
+                    )}
+                  </div>
+                ) : null}
+              </EvolutionTimelineNode>
             );
           })}
         </ol>
@@ -2357,6 +2339,18 @@ export function ExpertSkillEvolution({
           </Button>
         ) : null}
       </section>
+
+      <LearningChangeDetails
+        change={
+          learningChangesQuery.data?.find((change) => change.changeId === selectedChangeId) ?? null
+        }
+        expertId={expertId}
+        expertName={expertName}
+        sourceTitles={new Map(sources.map((source) => [source.threadId, source.title]))}
+        {...(onOpenTask ? { onOpenTask } : {})}
+        disabled={expertArchived || working}
+        onClose={() => setSelectedChangeId(null)}
+      />
 
       <DisclosureRegion open={graphOpen}>
         <section className="min-w-0 space-y-4" aria-label="进化星图与版本详情">

@@ -24,6 +24,7 @@ import {
   EXPERT_LEARNING_EVIDENCE_DELIVERY_SQL,
   EXPERT_LEARNING_EVIDENCE_DELIVERY_EFFECT,
 } from "./ExpertLearningEvidenceDeliveryMigration.ts";
+import { SPACE_MEMORY_EFFECT, SPACE_MEMORY_SQL } from "./SpaceMemoryMigration.ts";
 import {
   CONTEXT_SCHEMA_OBJECTS_QUERY,
   validateFrozenContextSchema,
@@ -415,6 +416,14 @@ export const workbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] 
     checksum: "sha256:38b2eda40b36b010e44234a78232664299a7031ba98fafe9414557c1261a71a5",
     statement: EXPERT_LEARNING_EVIDENCE_DELIVERY_SQL,
     effect: EXPERT_LEARNING_EVIDENCE_DELIVERY_EFFECT,
+  },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 13,
+    name: "SpaceMemory",
+    checksum: "sha256:0b828a9503f2cde719ceaaaf6411f21c593999585262a0d8b20afc7a73bc1767",
+    statement: SPACE_MEMORY_SQL,
+    effect: SPACE_MEMORY_EFFECT,
   },
 ];
 

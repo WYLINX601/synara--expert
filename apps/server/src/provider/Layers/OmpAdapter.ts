@@ -15,6 +15,7 @@ import {
   type ProviderSkillReference,
   type ProviderSession,
   type ProviderUserInputAnswers,
+  LearningSessionContext,
   RuntimeRequestId,
   RuntimeTaskId,
   ThreadId,
@@ -37,6 +38,7 @@ import {
   Random,
   Semaphore,
   Scope,
+  Schema,
   Stream,
 } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -657,9 +659,13 @@ export function makeOmpAdapter(
         input.expertSession?.skillPolicy?.version === 2 &&
         input.expertSession.skillPolicy.discovery === "fixed" &&
         input.expertSession.skillPolicy.nativeSubagents === "inherit";
-      const binaryPath = inheritNativeTasks
-        ? resolveOmpCliBinaryPath(input.settings.binaryPath, { env, cwd: input.cwd })
-        : resolveOmpCliBinaryPath(input.settings.binaryPath);
+      const hasLearningKnowledge = Schema.is(LearningSessionContext)(
+        input.expertSession?.knowledge,
+      );
+      const binaryPath =
+        inheritNativeTasks || hasLearningKnowledge
+          ? resolveOmpCliBinaryPath(input.settings.binaryPath, { env, cwd: input.cwd })
+          : resolveOmpCliBinaryPath(input.settings.binaryPath);
       return prepareOmpExpertSession({
         cwd: input.cwd,
         env,
@@ -1137,6 +1143,9 @@ export function makeOmpAdapter(
                 PROVIDER,
                 input,
               );
+          const learningPermissionContext =
+            gatewaySessionLease !== undefined &&
+            Schema.is(LearningSessionContext)(input.expertSession?.knowledge);
           yield* Effect.addFinalizer(() =>
             sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
           );
@@ -1199,7 +1208,7 @@ export function makeOmpAdapter(
             input.expertSession.skillPolicy.discovery === "fixed" &&
             input.expertSession.skillPolicy.nativeSubagents === "inherit";
           let idleTaskCompat: Awaited<ReturnType<typeof prepareOmpAcpIdleTaskCompat>> | undefined;
-          if (inheritNativeTasks) {
+          if (inheritNativeTasks || learningPermissionContext) {
             if (!expertPreparation?.ownedTempDirectory) {
               return yield* new ProviderAdapterRequestError({
                 provider: PROVIDER,
@@ -1407,6 +1416,15 @@ export function makeOmpAdapter(
                   runtimeMode: input.runtimeMode,
                   interactionMode: ctx?.activeInteractionMode,
                   options: params.options,
+                  activeTurn: ctx?.activeTurnId !== undefined,
+                  gatewaySessionActive: gatewaySessionLease !== undefined,
+                  learningKnowledgeCaptured: learningPermissionContext,
+                  toolCall: {
+                    kind: params.toolCall.kind,
+                    title: params.toolCall.title,
+                    rawInput: params.toolCall.rawInput,
+                    metadata: params.toolCall._meta,
+                  },
                 });
                 if (policyOutcome !== undefined) {
                   if (policyOutcome.outcome === "selected") {

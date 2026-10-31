@@ -22,6 +22,9 @@ import { createExpertStore } from "../experts/ExpertStore.ts";
 import { createSkillLibraryStore } from "../experts/SkillLibraryStore";
 import { createSkillPackageStore } from "../experts/SkillPackageStore.ts";
 import type { ExpertAppliedRuntimeRepositoryShape } from "../persistence/Services/ExpertAppliedRuntimeRecords.ts";
+import { ExpertAppliedRuntimeRepository } from "../persistence/Services/ExpertAppliedRuntimeRecords.ts";
+import { Effect, Layer, ServiceMap } from "effect";
+import { ServerConfig } from "../config";
 
 export function createWorkbenchExpertRuntime(input: {
   readonly stateDir: string;
@@ -90,3 +93,23 @@ export function createWorkbenchExpertRuntime(input: {
     },
   };
 }
+
+/** One host-owned formal asset runtime shared by RPC and learning tools. */
+export class WorkbenchExpertRuntime extends ServiceMap.Service<
+  WorkbenchExpertRuntime,
+  ReturnType<typeof createWorkbenchExpertRuntime>
+>()("synara/WorkbenchExpertRuntime") {}
+
+export const WorkbenchExpertRuntimeLive = Layer.effect(
+  WorkbenchExpertRuntime,
+  Effect.gen(function* () {
+    const config = yield* ServerConfig;
+    const applied = yield* ExpertAppliedRuntimeRepository;
+    const runtime = createWorkbenchExpertRuntime({
+      stateDir: config.stateDir,
+      expertAppliedRuntimeRepository: applied,
+    });
+    yield* Effect.addFinalizer(() => Effect.promise(() => runtime.skillLibrary.dispose()));
+    return runtime;
+  }),
+);

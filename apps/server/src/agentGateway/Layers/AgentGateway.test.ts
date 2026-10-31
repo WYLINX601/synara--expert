@@ -81,7 +81,10 @@ import { ProviderDiscoveryServiceLive } from "../../provider/Layers/ProviderDisc
 import { ProviderHealth } from "../../provider/Services/ProviderHealth.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import { isSynaraGatewayToolName } from "../computerToolPermission.ts";
+import {
+  canonicalSynaraLearningToolName,
+  isSynaraGatewayToolName,
+} from "../computerToolPermission.ts";
 import { AgentGateway } from "../Services/AgentGateway.ts";
 import { AgentGatewayCredentials } from "../Services/AgentGatewayCredentials.ts";
 import {
@@ -1828,31 +1831,50 @@ describe("AgentGateway", () => {
     }).pipe(Effect.provide(gatewayLayer));
   });
 
-  it.effect("covers every served tool under the auto-approve matcher", () => {
-    const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
-    return Effect.gen(function* () {
-      const harness = yield* makeHarness;
-      const response = yield* harness.postRaw({
-        authorizationHeader: "Bearer token-parent",
-        body: { jsonrpc: "2.0", id: 1, method: "tools/list" },
-      });
-      assert.equal(response.status, 200);
-      const tools =
-        (response.body as { result?: { tools?: Array<{ name: string }> } } | undefined)?.result
-          ?.tools ?? [];
-      assert.isAbove(tools.length, 0);
-      for (const tool of tools) {
-        assert.isTrue(
-          isSynaraGatewayToolName(`synara_${tool.name}`),
-          `synara_${tool.name} must auto-approve`,
-        );
-        assert.isTrue(
-          isSynaraGatewayToolName(`mcp__synara__${tool.name}`),
-          `mcp__synara__${tool.name} must auto-approve`,
-        );
-      }
-    }).pipe(Effect.provide(gatewayLayer));
-  });
+  it.effect(
+    "keeps learning tools on their narrow matcher and covers other auto-approve tools",
+    () => {
+      const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);
+      return Effect.gen(function* () {
+        const harness = yield* makeHarness;
+        const response = yield* harness.postRaw({
+          authorizationHeader: "Bearer token-parent",
+          body: { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        });
+        assert.equal(response.status, 200);
+        const tools =
+          (response.body as { result?: { tools?: Array<{ name: string }> } } | undefined)?.result
+            ?.tools ?? [];
+        assert.isAbove(tools.length, 0);
+        for (const tool of tools) {
+          if (
+            tool.name === "synara_learning_read" ||
+            tool.name === "synara_learning_commit" ||
+            tool.name === "synara_learning_revert"
+          ) {
+            assert.equal(canonicalSynaraLearningToolName(tool.name), tool.name);
+            assert.isFalse(
+              isSynaraGatewayToolName(`synara_${tool.name}`),
+              `${tool.name} must not use the general auto-approve matcher`,
+            );
+            assert.isFalse(
+              isSynaraGatewayToolName(`mcp__synara__${tool.name}`),
+              `${tool.name} must not use the general auto-approve matcher`,
+            );
+            continue;
+          }
+          assert.isTrue(
+            isSynaraGatewayToolName(`synara_${tool.name}`),
+            `synara_${tool.name} must auto-approve`,
+          );
+          assert.isTrue(
+            isSynaraGatewayToolName(`mcp__synara__${tool.name}`),
+            `mcp__synara__${tool.name} must auto-approve`,
+          );
+        }
+      }).pipe(Effect.provide(gatewayLayer));
+    },
+  );
 
   it.effect("rejects malformed JSON-RPC ids before invoking a tool", () => {
     const { gatewayLayer, makeHarness } = makeHarnessLayer(baseThreads);

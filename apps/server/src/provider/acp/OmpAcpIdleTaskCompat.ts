@@ -9,7 +9,7 @@ import * as nodePath from "node:path";
 
 import { resolveExecutable } from "@synara/shared/executable";
 
-export const OMP_ACP_IDLE_TASK_COMPAT_VERSION = "v1" as const;
+export const OMP_ACP_IDLE_TASK_COMPAT_VERSION = "v2" as const;
 export const OMP_ACP_IDLE_TASK_COMPAT_BUNDLE_SHA256 =
   "c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d" as const;
 export const OMP_ACP_IDLE_TASK_COMPAT_BUNDLE_SIZE = 17_638_974;
@@ -20,6 +20,8 @@ export const OMP_ACP_IDLE_TASK_COMPAT_MARKER =
 
 const OMP_ACP_IDLE_TASK_COMPAT_ANCHOR =
   'async#k(e,t){if(t.type!=="thinking_level_changed"&&t.type!=="model_changed")return;';
+const OMP_ACP_PERMISSION_BRIDGE_ANCHOR =
+  "async function BXc(e,t,n,r,i){let o={toolCallId:n.toolCallId,title:n.title,...n.kind?{kind:n.kind}:{},...n.status?{status:n.status}:{},...n.rawInput!==void 0?{rawInput:n.rawInput}:{},...n.content?{content:n.content}:{},...n.locations?{locations:n.locations}:{}}";
 const OMP_ACP_IDLE_TASK_COMPAT_PRELOAD_FILENAME = "omp-acp-idle-task-compat.mjs";
 
 export interface OmpAcpIdleTaskCompatLaunch {
@@ -152,6 +154,9 @@ export function verifyOmpAcpIdleTaskBundle(
   if (countOccurrences(text, OMP_ACP_IDLE_TASK_COMPAT_ANCHOR) !== 1) {
     throw new Error("OMP idle-task compatibility requires one exact native handler anchor.");
   }
+  if (countOccurrences(text, OMP_ACP_PERMISSION_BRIDGE_ANCHOR) !== 1) {
+    throw new Error("OMP idle-task compatibility requires one exact permission bridge anchor.");
+  }
 }
 
 /** Testable source transform used by the private preload's onLoad callback. */
@@ -161,7 +166,9 @@ export function transformVerifiedOmpAcpIdleTaskBundle(
 ): string {
   const bytes = Buffer.from(source, "utf8");
   verifyOmpAcpIdleTaskBundle(bytes, expected);
-  return source.replace(OMP_ACP_IDLE_TASK_COMPAT_ANCHOR, makeHandlerReplacement());
+  return source
+    .replace(OMP_ACP_IDLE_TASK_COMPAT_ANCHOR, makeHandlerReplacement())
+    .replace(OMP_ACP_PERMISSION_BRIDGE_ANCHOR, makePermissionBridgeReplacement());
 }
 
 function resolveSelectedOmpEntrypoint(
@@ -191,6 +198,7 @@ export function buildOmpAcpIdleTaskCompatPreload(sourcePath: string): string {
   const markerLiteral = JSON.stringify(OMP_ACP_IDLE_TASK_COMPAT_MARKER);
   const shaLiteral = JSON.stringify(OMP_ACP_IDLE_TASK_COMPAT_BUNDLE_SHA256);
   const anchorLiteral = JSON.stringify(OMP_ACP_IDLE_TASK_COMPAT_ANCHOR);
+  const permissionBridgeAnchorLiteral = JSON.stringify(OMP_ACP_PERMISSION_BRIDGE_ANCHOR);
   const exactPathPattern = `^${sourcePath.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`;
   const exactPathPatternLiteral = JSON.stringify(exactPathPattern);
   return `import { createHash } from "node:crypto";
@@ -200,12 +208,13 @@ const expectedPath = ${entryLiteral};
 const expectedHash = ${shaLiteral};
 const marker = ${markerLiteral};
 const anchor = ${anchorLiteral};
+const permissionBridgeAnchor = ${permissionBridgeAnchorLiteral};
 let markerWritten = false;
 
 ${buildOmpAcpIdleTaskCompatMainGuard()}
 
 Bun.plugin({
-  name: "synara-omp-acp-idle-task-compat-v1",
+  name: "synara-omp-acp-learning-permission-compat-v2",
   setup(builder) {
     builder.onLoad({ filter: new RegExp(${exactPathPatternLiteral}) }, async ({ path }) => {
       let resolvedPath;
@@ -226,7 +235,11 @@ Bun.plugin({
       if (firstLine !== "#!/usr/bin/env bun") throw new Error("OMP idle-task compatibility requires the verified Bun CLI shebang.");
       const occurrences = source.split(anchor).length - 1;
       if (occurrences !== 1) throw new Error("OMP idle-task compatibility handler anchor changed.");
-      const transformed = source.replace(anchor, ${JSON.stringify(makeHandlerReplacement())});
+      const permissionBridgeOccurrences = source.split(permissionBridgeAnchor).length - 1;
+      if (permissionBridgeOccurrences !== 1) throw new Error("OMP idle-task compatibility permission bridge anchor changed.");
+      const transformed = source
+        .replace(anchor, ${JSON.stringify(makeHandlerReplacement())})
+        .replace(permissionBridgeAnchor, ${JSON.stringify(makePermissionBridgeReplacement())});
       if (!markerWritten) {
         markerWritten = true;
         process.stderr.write(marker + "\\n");
@@ -279,6 +292,10 @@ function makeHandlerReplacement(): string {
     }
   }
   if(t.type!=="thinking_level_changed"&&t.type!=="model_changed")return;`;
+}
+
+function makePermissionBridgeReplacement(): string {
+  return `${OMP_ACP_PERMISSION_BRIDGE_ANCHOR.slice(0, -1)},...(typeof n.toolName==="string"?{_meta:{...(n._meta??{}),synaraToolName:n.toolName}}:{})}`;
 }
 
 function countOccurrences(source: string, needle: string): number {

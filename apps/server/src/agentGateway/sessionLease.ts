@@ -1,5 +1,10 @@
-import type { ProviderKind, ThreadId } from "@synara/contracts";
-import { Effect, Exit } from "effect";
+import {
+  LearningSessionContext,
+  type ProviderExpertSession,
+  type ProviderKind,
+  type ThreadId,
+} from "@synara/contracts";
+import { Effect, Exit, Schema } from "effect";
 
 import type {
   AgentGatewayCredentialsShape,
@@ -9,6 +14,7 @@ import type { AgentGatewayCapability } from "./Services/AgentGatewaySessionRegis
 
 export interface AgentGatewaySessionLeaseOptions {
   readonly additionalCapabilities?: readonly AgentGatewayCapability[];
+  readonly learningSession?: typeof LearningSessionContext.Type;
 }
 
 /**
@@ -23,7 +29,16 @@ export interface AgentGatewaySessionLeaseOptions {
  */
 export interface AgentGatewayCapabilityInput {
   readonly enableComputerControl?: boolean | undefined;
+  readonly expertSession?: Pick<ProviderExpertSession, "knowledge"> | undefined;
 }
+
+const learningSessionFor = (
+  expertSession: AgentGatewayCapabilityInput["expertSession"],
+): typeof LearningSessionContext.Type | undefined => {
+  const knowledge = expertSession?.knowledge;
+  if (!knowledge || !Schema.is(LearningSessionContext)(knowledge)) return undefined;
+  return Object.freeze({ ...knowledge, scope: Object.freeze({ ...knowledge.scope }) });
+};
 
 /** Lease no optional capabilities. Spelled out so an omission reads as a choice. */
 export const AGENT_GATEWAY_NO_CAPABILITIES: AgentGatewayCapabilityInput = {};
@@ -34,6 +49,11 @@ export function agentGatewayCapabilitiesFor(
 ): readonly AgentGatewayCapability[] {
   const capabilities: AgentGatewayCapability[] = [];
   if (input.enableComputerControl === true) capabilities.push("computer:control");
+  const learningSession = learningSessionFor(input.expertSession);
+  if (learningSession) {
+    capabilities.push("learning:read");
+    if (learningSession.learningEpoch !== undefined) capabilities.push("learning:write");
+  }
   return capabilities;
 }
 
@@ -41,7 +61,13 @@ export function agentGatewaySessionLeaseOptionsFor(
   input: AgentGatewayCapabilityInput,
 ): AgentGatewaySessionLeaseOptions | undefined {
   const additionalCapabilities = agentGatewayCapabilitiesFor(input);
-  return additionalCapabilities.length === 0 ? undefined : { additionalCapabilities };
+  const learningSession = learningSessionFor(input.expertSession);
+  return additionalCapabilities.length === 0
+    ? undefined
+    : {
+        additionalCapabilities,
+        ...(learningSession ? { learningSession } : {}),
+      };
 }
 
 /**
@@ -55,7 +81,11 @@ export function agentGatewaySessionLeaseOptionsFor(
 export function captureAgentGatewayCapabilityInput(
   input: AgentGatewayCapabilityInput,
 ): AgentGatewayCapabilityInput {
-  return { enableComputerControl: input.enableComputerControl === true };
+  const learningSession = learningSessionFor(input.expertSession);
+  return {
+    enableComputerControl: input.enableComputerControl === true,
+    ...(learningSession ? { expertSession: { knowledge: learningSession } } : {}),
+  };
 }
 
 type AgentGatewaySessionLeaseCredentials = Pick<

@@ -1,4 +1,5 @@
 import type {
+  LearningChangeSet,
   SkillEvolutionGraph,
   SkillEvolutionRun,
   SkillEvolutionSource,
@@ -6,6 +7,9 @@ import type {
 import { describe, expect, it } from "vitest";
 import {
   evolutionTimelineEntries,
+  growthTimelineEntries,
+  learningSkillCoverageLabel,
+  stableEvolutionOperationId,
   isSkillEvolutionRunActive,
   isLatestOpportunityGeneration,
   defaultSkillEvolutionSources,
@@ -349,5 +353,124 @@ describe("experience timeline grouping", () => {
       title: "复核方法",
       applied: true,
     });
+  });
+});
+
+describe("typed learning growth", () => {
+  const receipt: LearningChangeSet = {
+    changeId: "change-1",
+    requestId: "request-1",
+    requestFingerprint: `sha256:${"a".repeat(64)}`,
+    ownerId: "owner",
+    expertId: "expert",
+    sourceScope: { ownerId: "owner", expertId: "expert", spaceId: "space", projectId: "project" },
+    assetKind: "memory",
+    before: null,
+    after: {
+      assetKind: "memory",
+      memoryId: "memory-1",
+      revision: 1,
+      contentHash: `sha256:${"b".repeat(64)}`,
+    },
+    sourceRefs: [],
+    status: "committed",
+    summary: "rule: report.preference",
+    createdAt: "2026-10-31T01:00:00.000Z",
+    updatedAt: "2026-10-31T01:00:00.000Z",
+  };
+  it("shows only committed changes, preserves typed inverse history and hides internal Memory topics", () => {
+    const entries = growthTimelineEntries(
+      [],
+      [
+        receipt,
+        { ...receipt, changeId: "inverse", revertsChangeId: receipt.changeId },
+        { ...receipt, changeId: "reverted", status: "reverted" },
+        ...(["prepared", "saved_unbound", "failed"] as const).map((status) => ({
+          ...receipt,
+          changeId: status,
+          status,
+        })),
+      ],
+      [],
+      [],
+    );
+    expect(entries).toHaveLength(3);
+    expect(entries.find((entry) => entry.id === "learning:change-1")).toMatchObject({
+      kind: "learning",
+      title: "已更新记忆",
+      change: { assetKind: "memory" },
+    });
+    expect(entries.find((entry) => entry.id === "learning:inverse")).toMatchObject({
+      title: "已撤回一次学习",
+      label: "撤回记录",
+    });
+    expect(entries.find((entry) => entry.id === "learning:reverted")).toMatchObject({
+      label: "已撤回",
+    });
+  });
+  it("deduplicates legacy automatic Skill growth only with exact before/after event identities", () => {
+    const skillId = graph.nodes[0]!.skillId;
+    const packageId = graph.nodes[0]!.packageId;
+    const previousPackageId = graph.nodes[1]!.packageId;
+    const run = {
+      requestId: "legacy",
+      expertId: "expert",
+      origin: "automatic",
+      createdAt: receipt.createdAt,
+      proposals: [{ status: "applied", resultSkillId: skillId, resultRevision: 2, name: "review" }],
+    } as unknown as SkillEvolutionRun;
+    const event: SkillEvolutionGraph["events"][number] = {
+      eventId: "event",
+      operationId: "operation",
+      requestId: "legacy",
+      expertId: "expert",
+      skillId,
+      name: "review",
+      kind: "updated",
+      createdAt: receipt.createdAt,
+      revision: 2,
+      packageId,
+      previousRevision: 1,
+      previousPackageId,
+      affectedExpertIds: ["expert"],
+    };
+    const change: LearningChangeSet = {
+      ...receipt,
+      assetKind: "skill",
+      before: { assetKind: "skill", skillId, revision: 1, packageId: previousPackageId },
+      after: { assetKind: "skill", skillId, revision: 2, packageId },
+    };
+    const experiences = evolutionTimelineEntries([run]);
+    expect(growthTimelineEntries(experiences, [change], [event], [run])).toHaveLength(1);
+    expect(
+      growthTimelineEntries(
+        experiences,
+        [change],
+        [{ ...event, previousPackageId: packageId }],
+        [run],
+      ),
+    ).toHaveLength(2);
+    expect(growthTimelineEntries(experiences, [change], [], [run])).toHaveLength(2);
+    const manual = { ...run, origin: "manual" as const };
+    expect(
+      growthTimelineEntries(evolutionTimelineEntries([manual]), [change], [event], [manual]),
+    ).toHaveLength(2);
+  });
+  it("keeps undo identities stable across remounts and different for separate changes", async () => {
+    expect(await stableEvolutionOperationId("learning-revert", ["expert", "change"])).toBe(
+      await stableEvolutionOperationId("learning-revert", ["expert", "change"]),
+    );
+    expect(await stableEvolutionOperationId("learning-revert", ["expert", "change"])).not.toBe(
+      await stableEvolutionOperationId("learning-revert", ["expert", "other"]),
+    );
+  });
+  it("translates bounded coverage without exposing protocol codes", () => {
+    expect(learningSkillCoverageLabel("additional-file-pairs-omitted:3")).toContain("3 个文件");
+    expect(learningSkillCoverageLabel("file-text-omitted-by-content-budget:2")).toContain(
+      "2 份版本正文",
+    );
+    expect(learningSkillCoverageLabel("no-file-differences")).toBeNull();
+    expect(learningSkillCoverageLabel("exact-historical-packages-integrity-validated")).toBeNull();
+    expect(learningSkillCoverageLabel("unknown-code")).toBe("本次详情仅展示部分内容。");
   });
 });

@@ -8,6 +8,10 @@ import { Effect, Layer, Stream } from "effect";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { describe, expect, it, vi } from "vitest";
 import { ServerConfig } from "../../config";
+import {
+  AgentGatewayCredentials,
+  type AgentGatewayCredentialsShape,
+} from "../../agentGateway/Services/AgentGatewayCredentials.ts";
 import { recordVerifiedNativeSkillAssembly } from "../expertSkillCatalog";
 import { OmpAdapter } from "../Services/OmpAdapter";
 
@@ -80,7 +84,7 @@ vi.mock("../acp/OmpAcpSupport.ts", async (original) => ({
     Effect.succeed({
       stdout: "omp/18.12.1",
       stderr:
-        "SYNARA_OMP_ACP_IDLE_TASK_COMPAT v1 sha256=c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d",
+        "SYNARA_OMP_ACP_IDLE_TASK_COMPAT v2 sha256=c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d",
       exitCode: 0,
     }),
   makeOmpAcpRuntime: (input: {
@@ -97,7 +101,7 @@ vi.mock("../acp/OmpAcpSupport.ts", async (original) => ({
         Effect.sync(() => {
           if (preparation.compatChildMarker) {
             input.onChildStderrLine?.(
-              "SYNARA_OMP_ACP_IDLE_TASK_COMPAT v1 sha256=c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d",
+              "SYNARA_OMP_ACP_IDLE_TASK_COMPAT v2 sha256=c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d",
             );
           }
           return {
@@ -140,7 +144,7 @@ vi.mock("../acp/OmpAcpIdleTaskCompat.ts", async (original) => ({
       cliEntrypoint: "/bin/omp/cli.js",
       preloadPath: "/private/omp-fixed-test/compat.mjs",
       expectedMarker:
-        "SYNARA_OMP_ACP_IDLE_TASK_COMPAT v1 sha256=c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d",
+        "SYNARA_OMP_ACP_IDLE_TASK_COMPAT v2 sha256=c5d51fbb4d787035f3cec7b3579234de4c55b169574a094e2a672bb68970992d",
     };
   },
 }));
@@ -419,6 +423,92 @@ describe("OMP adapter fixed Skill admission", () => {
       }
     },
   );
+
+  it("prepares the exact OMP compatibility for captured learning without native task inheritance", async () => {
+    preparation.reject = false;
+    preparation.reloadChanged = false;
+    preparation.compatChildMarker = true;
+    preparation.resolveCalls.length = 0;
+    preparation.compatPreparations = 0;
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-learning-permission-"));
+    const spawner = ChildProcessSpawner.make(() =>
+      Effect.die("The mocked ACP seam owns this test; CLI probing must stay mocked"),
+    );
+    const gatewayCredentials = {
+      connectionForThread: () => ({ url: "http://127.0.0.1:1/mcp", bearerToken: "test-token" }),
+      revokeSessionToken: () => undefined,
+      stdioProxy: { command: process.execPath, args: [] },
+    } as unknown as AgentGatewayCredentialsShape;
+    const layer = makeOmpAdapterLive({ binaryPath: process.execPath }).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(root, path.join(root, "state"))),
+      Layer.provideMerge(NodeServices.layer),
+      Layer.provideMerge(Layer.succeed(AgentGatewayCredentials, gatewayCredentials)),
+      Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+    );
+    const session: ProviderExpertSession = {
+      snapshotId: `exp_${"a".repeat(64)}`,
+      persona: "Learning Expert",
+      skills: [],
+      skillEntries: [],
+      skillLoading: "index",
+      skillPolicy: { version: 1, discovery: "fixed", nativeSubagents: "blocked" },
+      knowledge: {
+        manifestId: "manifest-1",
+        rootRunId: "root-run-1",
+        snapshotId: "snapshot-1",
+        scope: {
+          ownerId: "owner-1",
+          spaceId: null,
+          expertId: "expert-1",
+          projectId: "project-1",
+        },
+        knowledgeHash: `sha256:${"b".repeat(64)}`,
+        learningEpoch: 2,
+      },
+      references: [],
+    };
+
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const adapter = yield* OmpAdapter;
+          const threadId = ThreadId.makeUnsafe("omp-learning-compat");
+          yield* adapter.startSession({
+            threadId,
+            provider: "omp",
+            cwd: root,
+            runtimeMode: "approval-required",
+            lifecycleGeneration: "learning-compat-generation",
+            expertSession: session,
+            providerOptions: { omp: { environment: { PATH: "/selected/omp-account-bin" } } },
+          });
+
+          expect(preparation.compatPreparations).toBe(1);
+          expect(preparation.spawnInputs.at(-1)).toMatchObject({
+            expertSessionSpawn: {
+              idleTaskCompat: {
+                bunExecutable: "/bin/bun",
+                cliEntrypoint: "/bin/omp/cli.js",
+                preloadPath: "/private/omp-fixed-test/compat.mjs",
+              },
+            },
+          });
+          expect(preparation.resolveCalls.length).toBeGreaterThan(0);
+          expect(
+            preparation.resolveCalls.every((call) => {
+              const options = call.options as { cwd?: string; env?: NodeJS.ProcessEnv } | undefined;
+              return options?.cwd === root && options.env?.PATH === "/selected/omp-account-bin";
+            }),
+          ).toBe(true);
+          yield* adapter.stopSession(threadId);
+        }).pipe(Effect.provide(layer), Effect.scoped),
+      );
+    } finally {
+      preparation.reject = true;
+      preparation.compatChildMarker = true;
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 
   it("fails fixed inherited-task startup when the actual ACP child omits the compatibility marker", async () => {
     preparation.reject = false;

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ExpertLearningEvidence,
   ExpertLearningState,
+  LearningSourceReference,
   SkillEvolutionRequest,
   SkillEvolutionResponse,
 } from "./index";
@@ -126,6 +127,29 @@ describe("Expert automatic learning contracts", () => {
     ).toThrow();
     expect(() =>
       Schema.decodeUnknownSync(SkillEvolutionRequest)({ ...set, automatic: true }),
+    ).toThrow();
+  });
+
+  it("preserves composite Run identities through captured evidence and runtime provenance", () => {
+    const rootRunId = `run:${"t".repeat(200)}:${"m".repeat(200)}`;
+    expect(
+      Schema.decodeUnknownSync(ExpertLearningEvidence)({ ...evidence, rootRunId }).rootRunId,
+    ).toBe(rootRunId);
+    const ref = {
+      kind: "runtime",
+      runId: rootRunId,
+      eventId: "event-b",
+      contentHash: `sha256:${"a".repeat(64)}`,
+    };
+    expect(Schema.decodeUnknownSync(LearningSourceReference)(ref)).toEqual(ref);
+    expect(() =>
+      Schema.decodeUnknownSync(ExpertLearningEvidence)({
+        ...evidence,
+        rootRunId: "x".repeat(2049),
+      }),
+    ).toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(LearningSourceReference)({ ...ref, runId: "x".repeat(2049) }),
     ).toThrow();
   });
 

@@ -47,6 +47,10 @@ export interface ProviderRuntimeEventRepositoryShape {
     readonly limit: number;
     readonly turnId?: string;
     readonly eventTypes?: ReadonlyArray<string>;
+    /** Restrict exact source identities before limiting or decoding. */
+    readonly eventIds?: ReadonlyArray<string>;
+    /** Optional aggregate UTF-8 JSON budget, enforced in SQL before decoding. */
+    readonly maxBytes?: number;
   }) => Effect.Effect<
     ReadonlyArray<PersistedProviderRuntimeEvent>,
     ProviderRuntimeEventRepositoryError

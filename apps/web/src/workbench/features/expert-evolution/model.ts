@@ -1,4 +1,5 @@
 import type {
+  LearningChangeSet,
   SkillEvolutionGraph,
   SkillEvolutionGraphNode,
   SkillEvolutionRun,
@@ -347,4 +348,118 @@ export function evolutionTimelineEntries(
     (left, right) =>
       right.run.createdAt.localeCompare(left.run.createdAt) || left.id.localeCompare(right.id),
   );
+}
+
+export type LearningTimelineEntry = {
+  readonly kind: "learning";
+  readonly id: string;
+  readonly change: LearningChangeSet;
+  readonly title: string;
+  readonly label: string;
+  readonly createdAt: string;
+  readonly applied: true;
+  readonly pending: false;
+  readonly failed: false;
+};
+export type GrowthTimelineEntry =
+  | LearningTimelineEntry
+  | (EvolutionTimelineEntry & { readonly kind: "experience"; readonly createdAt: string });
+
+/** Only exact asset-version receipts replace legacy automatic growth; never match prose. */
+export function growthTimelineEntries(
+  experiences: ReadonlyArray<EvolutionTimelineEntry>,
+  changes: ReadonlyArray<LearningChangeSet>,
+  events: SkillEvolutionGraph["events"],
+  runs: ReadonlyArray<SkillEvolutionRun>,
+): GrowthTimelineEntry[] {
+  const committed = changes.filter(
+    (change) => change.status === "committed" || change.status === "reverted",
+  );
+  const entries: GrowthTimelineEntry[] = experiences
+    .filter((entry) => {
+      const run = entry.opportunity
+        ? latestOpportunityGeneration(runs, entry.run.requestId, entry.opportunity.opportunityId)
+        : entry.run;
+      if (
+        !entry.applied ||
+        !run ||
+        (entry.run.origin !== "automatic" && run.origin !== "automatic")
+      )
+        return true;
+      return !run.proposals.every((proposal) =>
+        events.some(
+          (event) =>
+            event.requestId === run.requestId &&
+            event.skillId === proposal.resultSkillId &&
+            event.revision === proposal.resultRevision &&
+            committed.some((change) => {
+              const after = change.after;
+              if (
+                change.assetKind !== "skill" ||
+                after?.assetKind !== "skill" ||
+                after.skillId !== event.skillId ||
+                !after.packageId ||
+                after.packageId !== event.packageId
+              )
+                return false;
+              const before = change.before;
+              if (before === undefined) return false;
+              if (before === null) return event.kind === "created" && !event.previousPackageId;
+              return (
+                before.assetKind === "skill" &&
+                before.skillId ===
+                  (event.previousSkillId ?? event.derivedFromSkillId ?? event.skillId) &&
+                Boolean(before.packageId) &&
+                before.packageId === event.previousPackageId &&
+                (before.revision === undefined || before.revision === event.previousRevision)
+              );
+            }),
+        ),
+      );
+    })
+    .map((entry) => ({ ...entry, kind: "experience", createdAt: entry.run.createdAt }));
+  for (const change of committed)
+    entries.push({
+      kind: "learning",
+      id: `learning:${change.changeId}`,
+      change,
+      title: change.revertsChangeId
+        ? "已撤回一次学习"
+        : change.assetKind === "memory"
+          ? "已更新记忆"
+          : change.summary || "已更新技能",
+      label: change.revertsChangeId
+        ? "撤回记录"
+        : change.status === "reverted"
+          ? "已撤回"
+          : "已生效",
+      createdAt: change.createdAt,
+      applied: true,
+      pending: false,
+      failed: false,
+    });
+  return entries.sort(
+    (left, right) =>
+      right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id),
+  );
+}
+
+export async function stableEvolutionOperationId(
+  kind: "apply" | "restore" | "bind-restore" | "generate" | "learning-revert",
+  parts: ReadonlyArray<string>,
+) {
+  const bytes = new TextEncoder().encode(parts.join("\u0000"));
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes));
+  const hex = [...digest].map((value) => value.toString(16).padStart(2, "0")).join("");
+  return `skill-evolution-${kind}-${hex}`;
+}
+
+export function learningSkillCoverageLabel(code: string): string | null {
+  if (code === "no-file-differences" || code === "exact-historical-packages-integrity-validated")
+    return null;
+  const files = /^additional-file-pairs-omitted:(\d+)$/u.exec(code);
+  if (files) return `另有 ${files[1]} 个文件变化超出本次展示上限，未展示。`;
+  const text = /^file-text-omitted-by-content-budget:(\d+)$/u.exec(code);
+  if (text) return `${text[1]} 份版本正文超出本次展示上限，已省略。`;
+  return "本次详情仅展示部分内容。";
 }

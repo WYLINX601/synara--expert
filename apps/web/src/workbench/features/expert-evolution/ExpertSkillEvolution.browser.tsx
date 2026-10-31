@@ -2,6 +2,7 @@ import "../../../index.css";
 
 import type {
   ExpertDefinition,
+  LearningChangeSet,
   ExpertLearningState,
   ProviderKind,
   ThreadId,
@@ -40,6 +41,7 @@ const harness = vi.hoisted(() => ({
   learningReadFailure: false,
   configuredProvider: "pi" as ProviderKind,
   runs: [] as SkillEvolutionRun[],
+  learningChanges: [] as LearningChangeSet[],
   startStatus: "no_change" as SkillEvolutionRun["status"],
   startUnknownOutcomeOnce: "none" as "none" | "before-persist" | "after-persist",
   startGate: null as Promise<void> | null,
@@ -572,6 +574,7 @@ beforeEach(() => {
   harness.learningReadFailure = false;
   harness.configuredProvider = "pi";
   harness.runs = [];
+  harness.learningChanges = [];
   graphForTest = graph;
   harness.startStatus = "no_change";
   harness.startUnknownOutcomeOnce = "none";
@@ -586,6 +589,8 @@ beforeEach(() => {
   harness.server.skillEvolution.mockReset().mockImplementation(async (request) => {
     harness.calls.push(request);
     switch (request.action) {
+      case "learningChanges":
+        return { learningChanges: harness.learningChanges };
       case "learningRead":
         if (harness.learningReadFailure) throw new Error("offline");
         return harness.learningState ? { learningState: harness.learningState } : {};
@@ -858,7 +863,7 @@ describe("Expert Skill evolution browser flow", () => {
     await expect.element(toggle).toBeChecked();
     await toggle.click();
     await expect.element(toggle).not.toBeChecked();
-    await expect.element(page.getByText("已关闭 · 当前技能版本已固定")).toBeVisible();
+    await expect.element(page.getByText("已关闭 · 技能与行为规则已固定")).toBeVisible();
     await expect.element(toggle).toBeEnabled();
     await toggle.click();
     await expect.element(toggle).toBeChecked();
@@ -920,7 +925,7 @@ describe("Expert Skill evolution browser flow", () => {
     await expect.element(page.getByText("暂时无法确认自学习状态，请稍后重试。")).toBeVisible();
     await expect.element(toggle).toBeChecked();
     await expect.element(toggle).toBeDisabled();
-    await expect.element(page.getByText("已关闭 · 当前技能版本已固定")).not.toBeInTheDocument();
+    await expect.element(page.getByText("已关闭 · 技能与行为规则已固定")).not.toBeInTheDocument();
   });
 
   it("keeps unsupported learning isolated from manual extraction and never switches providers", async () => {
@@ -1041,6 +1046,53 @@ describe("Expert Skill evolution browser flow", () => {
       .element(page.getByTestId("experience-node:automatic-no-change"))
       .not.toBeInTheDocument();
     expect(harness.calls.filter((request) => request.action === "list").length).toBeGreaterThan(1);
+  });
+
+  it("adds typed Memory growth on background refresh without losing feedback or creating a Skill", async () => {
+    harness.runs = [discoveryRun()];
+    const client = await mount();
+    await openRun("request-discovery");
+    const feedback = page.getByRole("textbox", { name: "生成反馈：修复后复核" });
+    await feedback.fill("保留这条尚未提交的反馈");
+    harness.learningChanges = [
+      {
+        changeId: "memory-growth",
+        requestId: "learning-1",
+        requestFingerprint: `sha256:${"a".repeat(64)}`,
+        ownerId: "owner",
+        expertId: expert.id,
+        sourceScope: {
+          ownerId: "owner",
+          expertId: expert.id,
+          spaceId: "space",
+          projectId: "project",
+        },
+        assetKind: "memory",
+        before: null,
+        after: {
+          assetKind: "memory",
+          memoryId: "memory-1",
+          revision: 1,
+          contentHash: `sha256:${"b".repeat(64)}`,
+        },
+        sourceRefs: [],
+        status: "committed",
+        summary: "rule: report.preference",
+        createdAt: "2026-10-31T00:00:00.000Z",
+        updatedAt: "2026-10-31T00:00:00.000Z",
+      },
+    ];
+    await client.invalidateQueries({ queryKey: skillEvolutionQueryKey(expert.id) });
+    await expect.element(feedback).toHaveValue("保留这条尚未提交的反馈");
+    const node = page.getByTestId("experience-node:learning:memory-growth");
+    await expect.element(node).toHaveTextContent("已更新记忆");
+    await expect.element(node).toHaveTextContent("记忆");
+    await expect.element(node).not.toHaveTextContent("report.preference");
+    expect(
+      harness.calls.some(
+        (request) => request.action === "apply" || request.action === "learningRevert",
+      ),
+    ).toBe(false);
   });
 
   it("opens one timeline node at a time, preserves draft edits and collapses secondary controls", async () => {

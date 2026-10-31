@@ -30,6 +30,8 @@ import {
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
 import { PersistenceDecodeError } from "../../persistence/Errors.ts";
+import { SpaceMemoryService } from "../../spaceMemory/SpaceMemoryService.ts";
+import { verifyRuntimeKnowledge } from "./runtimeKnowledge.ts";
 
 interface EnabledLearningState {
   readonly ownerId: string;
@@ -234,6 +236,7 @@ export const makeExpertLearningEvidenceCapture = Effect.gen(function* () {
   const turnRepository = yield* Effect.serviceOption(ProjectionTurnRepository);
   const projectionQuery = yield* Effect.serviceOption(ProjectionSnapshotQuery);
   const serverConfig = yield* Effect.serviceOption(ServerConfig);
+  const spaceMemory = yield* Effect.serviceOption(SpaceMemoryService);
 
   if (Option.isNone(learningRepository)) {
     return (_entry: PersistedProviderRuntimeEvent, _resolvedTurnId?: TurnId) => Effect.void;
@@ -442,28 +445,62 @@ export const makeExpertLearningEvidenceCapture = Effect.gen(function* () {
 
       const previousRootRunId = `run:${shell.id}:${turn.pendingMessageId ?? ""}`;
       const application = applied.skillApplication;
+      const candidateRootRunId = prepared?.appliedIdentity
+        ? application?.skillRootRunId
+        : application?.skillRootRunId === previousRootRunId
+          ? application.skillRootRunId
+          : undefined;
       let rootRunId: string | undefined;
       let assemblyId: string | undefined;
       const assemblyCoverage: string[] = [];
       if (
+        candidateRootRunId !== undefined &&
         Option.isSome(serverConfig) &&
-        turn.pendingMessageId !== null &&
         application?.snapshotId === binding.snapshotId &&
         application.lifecycleGeneration === applied.lifecycleGeneration &&
-        application.skillRootRunId === previousRootRunId &&
         typeof application.skillAssemblyId === "string"
       ) {
         const assembly = yield* Effect.tryPromise({
-          try: () => readRunSkillAssembly(serverConfig.value.stateDir, previousRootRunId),
+          try: () => readRunSkillAssembly(serverConfig.value.stateDir, candidateRootRunId),
           catch: () => undefined,
         });
         if (
           assembly &&
-          assembly.rootRunId === previousRootRunId &&
+          assembly.rootRunId === candidateRootRunId &&
           assembly.threadId === shell.id &&
           assembly.baseSnapshotId === binding.snapshotId &&
-          assembly.assemblyId === application.skillAssemblyId
+          assembly.assemblyId === application.skillAssemblyId &&
+          assembly.phase === "ready" &&
+          assembly.session.expertId === binding.expertId &&
+          assembly.session.snapshotId === binding.snapshotId &&
+          assembly.session.skillRootRunId === candidateRootRunId &&
+          assembly.session.skillAssemblyId === application.skillAssemblyId
         ) {
+          if (assembly.session.knowledge) {
+            if (!Option.isSome(spaceMemory)) {
+              yield* skip("run-knowledge-verification-unavailable");
+              return;
+            }
+            const manifest = yield* verifyRuntimeKnowledge({
+              threadId: shell.id,
+              expertSession: assembly.session,
+              memory: spaceMemory.value,
+              learningRepository: learningRepository.value,
+              projection: query,
+            }).pipe(
+              Effect.catch(() => skip("run-knowledge-identity-invalid").pipe(Effect.as(undefined))),
+            );
+            if (
+              !manifest ||
+              assembly.session.knowledge.learningEpoch !== state.epoch ||
+              manifest.learningEpoch !== state.epoch
+            ) {
+              yield* skip("run-knowledge-learning-epoch-mismatch");
+              return;
+            }
+          } else {
+            assemblyCoverage.push("run-knowledge-unavailable");
+          }
           rootRunId = assembly.rootRunId;
           assemblyId = assembly.assemblyId;
         } else {

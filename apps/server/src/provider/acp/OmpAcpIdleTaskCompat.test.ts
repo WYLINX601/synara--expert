@@ -23,9 +23,11 @@ import {
 
 const handlerAnchor =
   'async#k(e,t){if(t.type!=="thinking_level_changed"&&t.type!=="model_changed")return;';
+const permissionBridgeAnchor =
+  "async function BXc(e,t,n,r,i){let o={toolCallId:n.toolCallId,title:n.title,...n.kind?{kind:n.kind}:{},...n.status?{status:n.status}:{},...n.rawInput!==void 0?{rawInput:n.rawInput}:{},...n.content?{content:n.content}:{},...n.locations?{locations:n.locations}:{}}";
 
 function fixtureBundle() {
-  return `#!/usr/bin/env bun\nconst bundle = "${handlerAnchor}";\n`;
+  return `#!/usr/bin/env bun\nconst bundle = "${handlerAnchor}";\n${permissionBridgeAnchor},s=[],a={};}\n`;
 }
 
 function fixtureExpectations(source: string) {
@@ -48,6 +50,7 @@ class SyntheticOmpLifetimeHandler {
   ${handlerAnchor}this.fallbackEvents.push(t);}
   dispatch(e, t) { return this.#k(e, t); }
 }
+${permissionBridgeAnchor},s=r.map((u)=>({optionId:u.optionId,name:u.name,kind:u.kind})),a={sessionId:t,toolCall:o,options:s};return e.requestPermission(a);}
 return SyntheticOmpLifetimeHandler;
 `;
 }
@@ -160,6 +163,50 @@ describe("OMP ACP idle task compatibility", () => {
     expect(transformed).toContain("vWe(t,e.session.sessionId");
     expect(transformed).toContain("Qde(this.#l,s)");
     expect(transformed).toContain("this.#e.sessionUpdate(s)");
+    expect(transformed).toContain(
+      '...(typeof n.toolName==="string"?{_meta:{...(n._meta??{}),synaraToolName:n.toolName}}:{})',
+    );
+    expect(transformed.indexOf("synaraToolName:n.toolName")).toBeGreaterThan(
+      transformed.indexOf("rawInput:n.rawInput"),
+    );
+  });
+
+  it("carries the actual OMP tool name after raw input so arguments cannot replace it", async () => {
+    const source = makeRunnableBundle();
+    const transformed = transformVerifiedOmpAcpIdleTaskBundle(source, fixtureExpectations(source));
+    const executable = transformed
+      .slice(transformed.indexOf("\n") + 1)
+      .replace("return SyntheticOmpLifetimeHandler;", "");
+    const getBridge = new Function(`${executable}\nreturn BXc;`) as () => (
+      client: { requestPermission: (request: unknown) => unknown },
+      sessionId: string,
+      toolCall: Record<string, unknown>,
+      options: ReadonlyArray<unknown>,
+    ) => Promise<unknown>;
+    const requests: Array<Record<string, any>> = [];
+    const bridge = getBridge();
+
+    await bridge(
+      {
+        requestPermission: async (request) => {
+          requests.push(request as Record<string, any>);
+          return { outcome: { outcome: "cancelled" } };
+        },
+      },
+      "session-1",
+      {
+        toolCallId: "call-1",
+        toolName: "synara_learning_commit",
+        title: "Learning",
+        rawInput: { _meta: { synaraToolName: "synara_learning_revert" } },
+      },
+      [],
+    );
+
+    expect(requests[0]?.toolCall).toMatchObject({
+      rawInput: { _meta: { synaraToolName: "synara_learning_revert" } },
+      _meta: { synaraToolName: "synara_learning_commit" },
+    });
   });
 
   it("forwards valid idle, settled, and cancelled task updates without duplicating active turns", async () => {
@@ -236,6 +283,22 @@ describe("OMP ACP idle task compatibility", () => {
     expect(() =>
       verifyOmpAcpIdleTaskBundle(Buffer.from(changedAnchor), fixtureExpectations(changedAnchor)),
     ).toThrow(/handler anchor/u);
+
+    const missingPermissionAnchor = source.replace(permissionBridgeAnchor, "async function BXc(){");
+    expect(() =>
+      verifyOmpAcpIdleTaskBundle(
+        Buffer.from(missingPermissionAnchor),
+        fixtureExpectations(missingPermissionAnchor),
+      ),
+    ).toThrow(/permission bridge anchor/u);
+
+    const repeatedPermissionAnchor = `${source}\n${permissionBridgeAnchor},s=[],a={};}`;
+    expect(() =>
+      verifyOmpAcpIdleTaskBundle(
+        Buffer.from(repeatedPermissionAnchor),
+        fixtureExpectations(repeatedPermissionAnchor),
+      ),
+    ).toThrow(/permission bridge anchor/u);
   });
 
   it("builds a private preload with a literal Unicode and spaced entry path", () => {
@@ -245,6 +308,10 @@ describe("OMP ACP idle task compatibility", () => {
     expect(preload).toContain(`const expectedPath = ${JSON.stringify(entryPath)};`);
     expect(preload).toContain(`const marker = ${JSON.stringify(OMP_ACP_IDLE_TASK_COMPAT_MARKER)};`);
     expect(preload).toContain("builder.onLoad({ filter: new RegExp(");
+    expect(preload).toContain("const permissionBridgeAnchor =");
+    expect(preload).toContain("permissionBridgeOccurrences !== 1");
+    expect(preload).toContain("synara-omp-acp-learning-permission-compat-v2");
+    expect(preload).toContain("synaraToolName:n.toolName");
     expect(preload).toContain("process.stderr.write(marker");
     expect(preload).toContain(
       'throw new Error("OMP idle-task compatibility entry point became unavailable.")',

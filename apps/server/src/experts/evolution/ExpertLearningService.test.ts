@@ -1,19 +1,25 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import {
   MessageId,
   ThreadId,
   TurnId,
   type ExpertDefinition,
   type ExpertLearningEvidence,
+  type LearningChangeSet,
+  type LearningMemoryDraft,
+  type LearningSourceReference,
   type OrchestrationCommand,
   type OrchestrationMessage,
   type OrchestrationThread,
+  type SkillEvolutionEvidence,
   type SkillEvolutionEvent,
   type SkillEvolutionRun,
 } from "@synara/contracts";
-import { Effect } from "effect";
+import { it as effectIt } from "@effect/vitest";
+import { Effect, Layer } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import { createExpertStore, expertResourceFiles } from "../ExpertStore";
 import { createSkillLibraryStore } from "../SkillLibraryStore";
@@ -26,8 +32,17 @@ import type {
   LearningStateRow,
 } from "./ExpertLearningRepository";
 import type { SkillEvolutionRepositoryShape } from "./SkillEvolutionRepository";
+import type { ExpertLearningActionsShape } from "./ExpertLearningActions";
+import type { SpaceMemoryServiceShape } from "../../spaceMemory/SpaceMemoryService";
+import { ExpertLearningRepository } from "./ExpertLearningRepository";
+import { ExpertLearningRepositoryLive } from "../../workbench/host/expertLearningPersistence";
+import { SpaceMemoryService, SpaceMemoryServiceLive } from "../../spaceMemory/SpaceMemoryService";
+import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite";
+import { SpaceMemoryRepositoryLive } from "../../workbench/host/spaceMemoryPersistence";
 import { decodeLearningState, frozenLearningEntriesReader } from "./ExpertLearningState";
 import { createSkillEvolutionService, type SkillEvolutionHost } from "./SkillEvolutionService";
+import { evolutionDigest } from "./SkillEvolutionPrompt";
+import { learningSourceIdentity } from "./LearningSignals";
 
 const owner = { ownerKind: "session", ownerId: "learning-owner" } as const;
 const modelSelection = { provider: "pi", instanceId: "pi-local", model: "test-model" } as const;
@@ -36,6 +51,12 @@ const roots: string[] = [];
 const learningServices: Array<ReturnType<typeof createExpertLearningService>> = [];
 const evolutionServices: Array<ReturnType<typeof createSkillEvolutionService>> = [];
 const libraries: Array<ReturnType<typeof createSkillLibraryStore>> = [];
+const memoryLearningLayer = effectIt.layer(
+  Layer.mergeAll(
+    ExpertLearningRepositoryLive,
+    SpaceMemoryServiceLive.pipe(Layer.provideMerge(SpaceMemoryRepositoryLive)),
+  ).pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+);
 
 function clone<T>(value: T): T {
   return value === undefined ? value : (JSON.parse(JSON.stringify(value)) as T);
@@ -232,6 +253,100 @@ function cycleRow(input: {
   };
 }
 
+function sourceFragment(
+  sourceRef: LearningSourceReference,
+  quote: string,
+): LearningSourceReference {
+  return {
+    ...sourceRef,
+    quote,
+    fragmentHash: `sha256:${createHash("sha256").update(quote, "utf8").digest("hex")}`,
+  };
+}
+
+function sourceChange(input: {
+  readonly expertId: string;
+  readonly assetKind: LearningChangeSet["assetKind"];
+  readonly status: LearningChangeSet["status"];
+  readonly sourceRefs: readonly LearningSourceReference[];
+  readonly memoryKind?: string;
+  readonly memoryKey?: string;
+  readonly skillId?: string;
+}): LearningChangeSet {
+  const skillRef = input.skillId
+    ? {
+        assetKind: "skill" as const,
+        skillId: input.skillId,
+        packageId: "package-source-change",
+        revision: 1,
+        expertRevision: 1,
+      }
+    : undefined;
+  return {
+    changeId: `change-${input.assetKind}-${input.status}`,
+    requestId: `request-${input.assetKind}-${input.status}`,
+    requestFingerprint: `sha256:${"c".repeat(64)}`,
+    ownerId: owner.ownerId,
+    expertId: input.expertId,
+    sourceScope: {
+      ownerId: owner.ownerId,
+      spaceId: "space-learning",
+      expertId: input.expertId,
+      projectId: "project-learning",
+    },
+    assetKind: input.assetKind,
+    ...(skillRef ? { before: skillRef } : {}),
+    sourceRefs: [...input.sourceRefs],
+    status: input.status,
+    summary: "Existing source-backed learning receipt.",
+    ...(input.memoryKind !== undefined || input.memoryKey !== undefined
+      ? { data: { kind: input.memoryKind, key: input.memoryKey } }
+      : {}),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+}
+
+function sourceHistoryMemory(input: {
+  readonly expertId: string;
+  readonly changes: readonly LearningChangeSet[];
+}) {
+  const queries: Array<{
+    ownerId: string;
+    expertId: string;
+    sources: readonly LearningSourceReference[];
+  }> = [];
+  const memory = {
+    withTransaction: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+    findRunManifest: (_scope: unknown, rootRunId: string) =>
+      Effect.succeed({
+        rootRunId,
+        snapshotId: `snapshot-${input.expertId}`,
+        skillAssemblyId: "assembly-learning",
+        learningEpoch: 1,
+      }),
+    findSourceChanges: (
+      ownerId: string,
+      expertId: string,
+      sources: readonly LearningSourceReference[],
+    ) => {
+      queries.push({ ownerId, expertId, sources });
+      const identities = new Set(sources.map(learningSourceIdentity));
+      return Effect.succeed(
+        input.changes.filter(
+          (change) =>
+            change.ownerId === ownerId &&
+            change.expertId === expertId &&
+            change.sourceRefs.some((sourceRef) =>
+              identities.has(learningSourceIdentity(sourceRef)),
+            ),
+        ),
+      );
+    },
+  } as unknown as SpaceMemoryServiceShape;
+  return { memory, queries };
+}
+
 function makeSet(input: {
   expertId: string;
   requestId: string;
@@ -248,6 +363,8 @@ async function serviceFixture(input?: {
   thread?: OrchestrationThread;
   spaceId?: string | null;
   evolution?: ReturnType<typeof fakeEvolution>;
+  memory?: SpaceMemoryServiceShape;
+  actions?: ExpertLearningActionsShape;
 }) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "expert-learning-service-"));
   roots.push(root);
@@ -272,6 +389,8 @@ async function serviceFixture(input?: {
     host: () => host,
     now: () => new Date(timestamp),
     pollMs: 60_000,
+    ...(input?.memory ? { memory: input.memory } : {}),
+    ...(input?.actions ? { actions: input.actions } : {}),
   });
   learningServices.push(service);
   return { root, stateDir, repository, expert, expertId, host, evolution, service };
@@ -940,6 +1059,575 @@ describe("ExpertLearningService", () => {
     },
   );
 
+  it.each(["missing-root", "missing-manifest", "stale-epoch", "wrong-assembly", "valid"] as const)(
+    "requires the original Run grant for automatic Skill dispatch and adoption (%s)",
+    async (scenario) => {
+      const expertId = `expert-run-grant-${scenario}`;
+      const thread = sourceThread({ expertId, threadId: `thread-run-grant-${scenario}` });
+      let lookups = 0;
+      const memory = {
+        withTransaction: <A, E, R>(effect: Effect.Effect<A, E, R>) => effect,
+        findRunManifest: () => {
+          lookups++;
+          return Effect.succeed(
+            scenario === "missing-manifest"
+              ? undefined
+              : {
+                  rootRunId: "root-run-learning",
+                  snapshotId: `snapshot-${expertId}`,
+                  skillAssemblyId:
+                    scenario === "wrong-assembly" ? "another-assembly" : "assembly-learning",
+                  learningEpoch: scenario === "stale-epoch" ? 0 : 1,
+                },
+          );
+        },
+        findSourceChanges: () => Effect.succeed([]),
+      } as unknown as SpaceMemoryServiceShape;
+      const fixture = await serviceFixture({ expertId, thread, memory });
+      await enable(fixture);
+      const full = {
+        ...evidence({ expertId, threadId: String(thread.id) }),
+        assemblyId: "assembly-learning",
+      };
+      const { rootRunId: _root, ...withoutRoot } = full;
+      const source = scenario === "missing-root" ? withoutRoot : full;
+      putEvidence(fixture.repository, source);
+      const cycle = cycleRow({
+        cycleId: `cycle-${scenario}`,
+        expertId,
+        evidenceId: source.evidenceId,
+        epoch: 1,
+        status: "queued",
+      });
+      fixture.repository.cycles.set(cycle.cycleId, cycle);
+      const request = {
+        requestId: "discovery-learning",
+        expertId,
+        cycleId: cycle.cycleId,
+        learningEpoch: 1,
+        modelSelection,
+      } as SkillEvolutionRun;
+      if (scenario === "valid")
+        await expect(fixture.service.authorize(owner, request)).resolves.toBeUndefined();
+      else
+        await expect(fixture.service.authorize(owner, request)).rejects.toThrow(/原 Run|旧工作/u);
+      await fixture.service.tick();
+      if (scenario === "valid")
+        expect(fixture.evolution.calls.some((call) => call.action === "startAutomatic")).toBe(true);
+      else expect(fixture.evolution.calls).toEqual([]);
+      expect(lookups).toBe(scenario === "missing-root" ? 0 : 2);
+    },
+  );
+
+  it("skips a previously committed or reverted Memory topic for the same source signal", async () => {
+    const expertId = "expert-learning-source-memory-skip";
+    const thread = sourceThread({ expertId, threadId: "thread-learning-source-memory-skip" });
+    const item = {
+      ...evidence({ expertId, threadId: String(thread.id) }),
+      assemblyId: "assembly-learning",
+    };
+    const sourceRef = sourceFragment(
+      {
+        kind: "message",
+        threadId: item.threadId,
+        turnId: item.turnId,
+        messageId: "message-learning",
+        contentHash: `sha256:${"d".repeat(64)}`,
+      },
+      "Use verified evidence and keep a decision log.",
+    );
+    const prior = sourceChange({
+      expertId,
+      assetKind: "memory",
+      status: "reverted",
+      sourceRefs: [sourceRef],
+      memoryKind: "rule",
+      memoryKey: "evidence.decisions",
+    });
+    const { memory, queries } = sourceHistoryMemory({ expertId, changes: [prior] });
+    const evolution = fakeEvolution();
+    const fixture = await serviceFixture({ expertId, thread, evolution, memory });
+    await enable(fixture);
+    putEvidence(fixture.repository, item);
+    const draft: LearningMemoryDraft = {
+      kind: "rule",
+      key: "evidence.decisions",
+      content: "Keep verified evidence before decisions.",
+      expectedRevision: 0,
+    };
+    const opportunity = {
+      opportunityId: "memory-source-skip-opportunity",
+      requestId: "discovery-learning",
+      expertId,
+      name: "Evidence-backed decisions",
+      reason: "This source already produced the same Memory topic.",
+      outcomes: ["Keep verified evidence before decisions."],
+      evidence: [
+        {
+          threadId: ThreadId.makeUnsafe(item.threadId),
+          messageId: MessageId.makeUnsafe("message-learning"),
+          quote: "Use verified evidence and keep a decision log.",
+        },
+      ],
+      memory: draft,
+      digest: "a".repeat(64),
+      status: "suggested",
+    };
+    evolution.runs.set("discovery-learning", {
+      requestId: "discovery-learning",
+      expertId,
+      status: "opportunity_ready",
+      modelSelection,
+      proposals: [],
+      opportunities: [opportunity],
+    } as unknown as SkillEvolutionRun);
+    const row = cycleRow({
+      cycleId: "cycle-learning-source-memory-skip",
+      expertId,
+      evidenceId: item.evidenceId,
+      epoch: 1,
+      status: "discovery",
+    });
+    fixture.repository.cycles.set(row.cycleId, row);
+
+    await fixture.service.tick();
+
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toMatchObject({ ownerId: owner.ownerId, expertId });
+    expect(
+      evolution.calls.filter((call) => ["generate", "apply"].includes(String(call.action))),
+    ).toEqual([]);
+    const cycle = JSON.parse(fixture.repository.cycles.get(row.cycleId)!.record);
+    expect(cycle.processed).toContain(opportunity.opportunityId);
+    expect(cycle.status).toBe("discovery");
+  });
+
+  it("cancels an in-flight Skill generation when the same source and target were withdrawn", async () => {
+    const expertId = "expert-learning-source-skill-cancel";
+    const thread = sourceThread({ expertId, threadId: "thread-learning-source-skill-cancel" });
+    const item = {
+      ...evidence({ expertId, threadId: String(thread.id) }),
+      assemblyId: "assembly-learning",
+    };
+    const targetSkillId = "skl_source_signal_target";
+    const sourceRef = sourceFragment(
+      {
+        kind: "message",
+        threadId: item.threadId,
+        turnId: item.turnId,
+        messageId: "message-learning",
+        contentHash: `sha256:${"d".repeat(64)}`,
+      },
+      "Use verified evidence and keep a decision log.",
+    );
+    const prior = sourceChange({
+      expertId,
+      assetKind: "skill",
+      status: "reverted",
+      sourceRefs: [sourceRef],
+      skillId: targetSkillId,
+    });
+    const { memory } = sourceHistoryMemory({ expertId, changes: [prior] });
+    const evolution = fakeEvolution();
+    const fixture = await serviceFixture({ expertId, thread, evolution, memory });
+    await enable(fixture);
+    putEvidence(fixture.repository, item);
+    const opportunity = {
+      opportunityId: "skill-source-cancel-opportunity",
+      requestId: "discovery-learning",
+      expertId,
+      name: "Update the source Skill",
+      reason: "The exact Skill target was already withdrawn for this source.",
+      outcomes: ["Update the existing workflow."],
+      evidence: [
+        {
+          threadId: ThreadId.makeUnsafe(item.threadId),
+          messageId: MessageId.makeUnsafe("message-learning"),
+          quote: "Use verified evidence and keep a decision log.",
+        },
+      ],
+      targetSkillId,
+      digest: "b".repeat(64),
+      status: "suggested",
+    };
+    evolution.runs.set("discovery-learning", {
+      requestId: "discovery-learning",
+      expertId,
+      status: "opportunity_ready",
+      modelSelection,
+      proposals: [],
+      opportunities: [opportunity],
+    } as unknown as SkillEvolutionRun);
+    const row = cycleRow({
+      cycleId: "cycle-learning-source-skill-cancel",
+      expertId,
+      evidenceId: item.evidenceId,
+      epoch: 1,
+      status: "generation",
+    });
+    const cycleRecord = {
+      ...JSON.parse(row.record),
+      opportunityId: opportunity.opportunityId,
+      generationId: "generation-learning-source-skill-cancel",
+      targets: [targetSkillId],
+    };
+    fixture.repository.cycles.set(row.cycleId, {
+      ...row,
+      record: JSON.stringify(cycleRecord),
+    });
+
+    await fixture.service.tick();
+
+    expect(evolution.calls).toContainEqual({
+      action: "cancel",
+      requestId: "generation-learning-source-skill-cancel",
+    });
+    expect(
+      evolution.calls.filter((call) => ["generate", "apply"].includes(String(call.action))),
+    ).toEqual([]);
+    const cycle = JSON.parse(fixture.repository.cycles.get(row.cycleId)!.record);
+    expect(cycle).toMatchObject({ status: "discovery", processed: [opportunity.opportunityId] });
+    expect(cycle.generationId).toBeUndefined();
+  });
+
+  it("keeps final Memory and Skill authorization source and target scoped", async () => {
+    const expertId = "expert-learning-source-final-auth";
+    const thread = sourceThread({ expertId, threadId: "thread-learning-source-final-auth" });
+    const base = evidence({ expertId, threadId: String(thread.id) });
+    const item = {
+      ...base,
+      assemblyId: "assembly-learning",
+      items: [
+        ...base.items,
+        {
+          id: "message-new-learning",
+          kind: "message" as const,
+          role: "user" as const,
+          text: "For the next report, also include an explicit limitation section.",
+        },
+      ],
+    };
+    const oldSource = sourceFragment(
+      {
+        kind: "message",
+        threadId: item.threadId,
+        turnId: item.turnId,
+        messageId: "message-learning",
+        contentHash: `sha256:${"d".repeat(64)}`,
+      },
+      "Use verified evidence and keep a decision log.",
+    );
+    const newSource = sourceFragment(
+      {
+        kind: "message",
+        threadId: item.threadId,
+        turnId: item.turnId,
+        messageId: "message-new-learning",
+        contentHash: `sha256:${"e".repeat(64)}`,
+      },
+      "For the next report, also include an explicit limitation section.",
+    );
+    const prior = sourceChange({
+      expertId,
+      assetKind: "memory",
+      status: "committed",
+      sourceRefs: [oldSource],
+      memoryKind: "rule",
+      memoryKey: "evidence.decisions",
+    });
+    const targetSkillId = "skl_final_auth_target";
+    const priorSkill = sourceChange({
+      expertId,
+      assetKind: "skill",
+      status: "reverted",
+      sourceRefs: [oldSource],
+      skillId: targetSkillId,
+    });
+    const { memory, queries } = sourceHistoryMemory({
+      expertId,
+      changes: [prior, priorSkill],
+    });
+    const fixture = await serviceFixture({
+      expertId,
+      thread,
+      memory,
+      evolution: fakeEvolution(),
+    });
+    await enable(fixture);
+    putEvidence(fixture.repository, item);
+    const row = cycleRow({
+      cycleId: "cycle-learning-source-final-auth",
+      expertId,
+      evidenceId: item.evidenceId,
+      epoch: 1,
+      status: "discovery",
+    });
+    fixture.repository.cycles.set(row.cycleId, row);
+    const request = {
+      requestId: "discovery-learning",
+      expertId,
+      cycleId: row.cycleId,
+      learningEpoch: 1,
+      modelSelection,
+    } as SkillEvolutionRun;
+    const memoryOpportunity = (
+      citationSources: readonly LearningSourceReference[],
+      key: string,
+    ) => ({
+      targetSkillId: undefined,
+      memory: {
+        kind: "rule" as const,
+        key,
+        content: "Use an evidence-backed report structure.",
+        expectedRevision: 0,
+      },
+      evidence: citationSources.map((sourceRef) => ({
+        threadId: ThreadId.makeUnsafe(
+          sourceRef.kind === "message" ? sourceRef.threadId : item.threadId,
+        ),
+        messageId: MessageId.makeUnsafe(
+          sourceRef.kind === "message" ? sourceRef.messageId : "message-learning",
+        ),
+        quote:
+          sourceRef.kind === "message"
+            ? (sourceRef.quote ?? "Use verified evidence and keep a decision log.")
+            : "Use verified evidence and keep a decision log.",
+      })),
+    });
+    const skillOpportunity = (
+      citationSources: readonly LearningSourceReference[],
+      target: string,
+    ) => ({
+      targetSkillId: target,
+      evidence: citationSources.map((sourceRef) => ({
+        threadId: ThreadId.makeUnsafe(
+          sourceRef.kind === "message" ? sourceRef.threadId : item.threadId,
+        ),
+        messageId: MessageId.makeUnsafe(
+          sourceRef.kind === "message" ? sourceRef.messageId : "message-learning",
+        ),
+        quote:
+          sourceRef.kind === "message"
+            ? (sourceRef.quote ?? "Use verified evidence and keep a decision log.")
+            : "Use verified evidence and keep a decision log.",
+      })),
+    });
+
+    await expect(
+      fixture.service.authorize(
+        owner,
+        request,
+        memoryOpportunity([oldSource], "evidence.decisions"),
+      ),
+    ).rejects.toThrow(/相同学习已经处理或撤回/u);
+    await expect(
+      fixture.service.authorize(owner, request, memoryOpportunity([oldSource], "different.topic")),
+    ).resolves.toBeUndefined();
+    await expect(
+      fixture.service.authorize(
+        owner,
+        request,
+        memoryOpportunity([newSource], "evidence.decisions"),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      fixture.service.authorize(
+        owner,
+        request,
+        memoryOpportunity([oldSource, newSource], "evidence.decisions"),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      fixture.service.authorize(owner, request, skillOpportunity([oldSource], targetSkillId)),
+    ).rejects.toThrow(/相同学习已经处理或撤回/u);
+    await expect(
+      fixture.service.authorize(owner, request, skillOpportunity([oldSource], "skl_new_target")),
+    ).resolves.toBeUndefined();
+    await expect(
+      fixture.service.authorize(owner, request, skillOpportunity([newSource], targetSkillId)),
+    ).resolves.toBeUndefined();
+    await expect(
+      fixture.service.authorize(
+        owner,
+        request,
+        skillOpportunity([oldSource, newSource], targetSkillId),
+      ),
+    ).resolves.toBeUndefined();
+    expect(queries).toHaveLength(8);
+    expect(queries.at(-1)?.sources.map(learningSourceIdentity)).toContain(
+      learningSourceIdentity(newSource),
+    );
+  });
+
+  it("does not mark an old withdrawn opportunity processed when it also cites a new source", async () => {
+    const expertId = "expert-learning-source-new-increment";
+    const thread = sourceThread({ expertId, threadId: "thread-learning-source-new-increment" });
+    const base = evidence({ expertId, threadId: String(thread.id) });
+    const item = {
+      ...base,
+      assemblyId: "assembly-learning",
+      items: [
+        ...base.items,
+        {
+          id: "message-new-increment",
+          kind: "message" as const,
+          role: "user" as const,
+          text: "Add the new regulatory constraint to the workflow.",
+        },
+      ],
+    };
+    const oldSource = sourceFragment(
+      {
+        kind: "message",
+        threadId: item.threadId,
+        turnId: item.turnId,
+        messageId: "message-learning",
+        contentHash: `sha256:${"d".repeat(64)}`,
+      },
+      "Use verified evidence and keep a decision log.",
+    );
+    const prior = sourceChange({
+      expertId,
+      assetKind: "skill",
+      status: "reverted",
+      sourceRefs: [oldSource],
+    });
+    const { memory } = sourceHistoryMemory({ expertId, changes: [prior] });
+    const evolution = fakeEvolution();
+    const fixture = await serviceFixture({ expertId, thread, evolution, memory });
+    await enable(fixture);
+    putEvidence(fixture.repository, item);
+    const opportunity = {
+      opportunityId: "skill-new-source-opportunity",
+      requestId: "discovery-learning",
+      expertId,
+      name: "Add the current constraint",
+      reason: "The new evidence changes the existing method.",
+      outcomes: ["Account for the current constraint."],
+      evidence: [
+        {
+          threadId: ThreadId.makeUnsafe(item.threadId),
+          messageId: MessageId.makeUnsafe("message-learning"),
+          quote: oldSource.quote!,
+        },
+        {
+          threadId: ThreadId.makeUnsafe(item.threadId),
+          messageId: MessageId.makeUnsafe("message-new-increment"),
+          quote: "Add the new regulatory constraint to the workflow.",
+        },
+      ],
+      digest: "f".repeat(64),
+      status: "suggested",
+    };
+    evolution.runs.set("discovery-learning", {
+      requestId: "discovery-learning",
+      expertId,
+      status: "opportunity_ready",
+      modelSelection,
+      proposals: [],
+      opportunities: [opportunity],
+    } as unknown as SkillEvolutionRun);
+    const row = cycleRow({
+      cycleId: "cycle-learning-source-new-increment",
+      expertId,
+      evidenceId: item.evidenceId,
+      epoch: 1,
+      status: "discovery",
+    });
+    fixture.repository.cycles.set(row.cycleId, row);
+
+    await fixture.service.tick();
+
+    const cycle = JSON.parse(fixture.repository.cycles.get(row.cycleId)!.record);
+    expect(cycle.processed).not.toContain(opportunity.opportunityId);
+    expect(cycle.status).toBe("generation");
+    expect(cycle.opportunityId).toBe(opportunity.opportunityId);
+    expect(cycle.generationId).toBeDefined();
+  });
+
+  it.each([
+    { result: "committed" as const, applied: 1, status: "applied" },
+    { result: "unchanged" as const, applied: 0, status: "no_change" },
+  ])("commits one automatic Memory opportunity with citations ($result)", async (expected) => {
+    const expertId = "expert-learning-memory-cycle";
+    const thread = sourceThread({ expertId, threadId: "thread-learning-memory-cycle" });
+    const evolution = fakeEvolution();
+    const memoryCalls: Array<Record<string, unknown>> = [];
+    const actions = {
+      commitAutomaticMemory: (request: Record<string, unknown>) =>
+        Effect.sync(() => {
+          memoryCalls.push(request);
+          return { status: expected.result };
+        }),
+    } as unknown as ExpertLearningActionsShape;
+    const fixture = await serviceFixture({ expertId, thread, evolution, actions });
+    await enable(fixture);
+    const item = evidence({ expertId, threadId: String(thread.id) });
+    putEvidence(fixture.repository, item);
+
+    await fixture.service.tick();
+    await fixture.service.tick();
+    const discoveryId = String(
+      (
+        evolution.calls.find((call) => call.action === "startAutomatic")?.request as Record<
+          string,
+          unknown
+        >
+      )?.requestId,
+    );
+    const citation: SkillEvolutionEvidence = {
+      threadId: ThreadId.makeUnsafe(item.threadId),
+      messageId: MessageId.makeUnsafe("message-learning"),
+      quote: "Use verified evidence and keep a decision log.",
+    };
+    const draft: LearningMemoryDraft = {
+      kind: "rule",
+      key: "evidence.decisions",
+      content: "Keep verified evidence before decisions.",
+      expectedRevision: 0,
+    };
+    evolution.runs.set(discoveryId, {
+      requestId: discoveryId,
+      expertId,
+      status: "opportunity_ready",
+      modelSelection,
+      proposals: [],
+      opportunities: [
+        {
+          opportunityId: "memory-opportunity",
+          requestId: discoveryId,
+          expertId,
+          name: "Evidence-backed decisions",
+          reason: "The completed work contains a durable decision procedure.",
+          outcomes: ["Keep verified evidence before decisions."],
+          evidence: [citation],
+          memory: draft,
+          digest: "a".repeat(64),
+          status: "suggested",
+        },
+      ],
+    } as unknown as SkillEvolutionRun);
+
+    await fixture.service.tick();
+    await fixture.service.tick();
+
+    expect(memoryCalls).toHaveLength(1);
+    expect(memoryCalls[0]).toMatchObject({
+      ownerId: owner.ownerId,
+      expertId,
+      epoch: 1,
+      evidence: { evidenceId: item.evidenceId },
+      draft,
+      citations: [citation],
+    });
+    expect(
+      evolution.calls.filter((call) => ["generate", "apply"].includes(String(call.action))),
+    ).toEqual([]);
+    const cycle = JSON.parse(fixture.repository.cycles.values().next().value!.record);
+    expect(cycle).toMatchObject({ status: expected.status, applied: expected.applied });
+    expect(cycle.processed).toContain("memory-opportunity");
+  });
+
   it("ends no_change discovery without scheduling generation or applying a Skill", async () => {
     const expertId = "expert-learning-no-change";
     const thread = sourceThread({ expertId, threadId: "thread-learning-no-change" });
@@ -1156,7 +1844,11 @@ function proposalText(threadId: string, messageId: string) {
   });
 }
 
-async function automaticFixture() {
+async function automaticFixture(input?: {
+  readonly readMemoryCatalog?: Parameters<
+    typeof createSkillEvolutionService
+  >[0]["readMemoryCatalog"];
+}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "expert-learning-adoption-"));
   roots.push(root);
   const stateDir = path.join(root, "state");
@@ -1215,6 +1907,7 @@ async function automaticFixture() {
     host,
     now: () => new Date(timestamp),
     authorizeAutomatic: async () => undefined,
+    ...(input?.readMemoryCatalog ? { readMemoryCatalog: input.readMemoryCatalog } : {}),
   });
   evolutionServices.push(service);
   const sourceEvidence = {
@@ -1291,7 +1984,217 @@ async function startAutomaticDiscovery(
   return response.run;
 }
 
+async function startManualDiscovery(
+  fixture: Awaited<ReturnType<typeof automaticFixture>>,
+  requestId: string,
+) {
+  const response = await fixture.service.execute({
+    action: "start",
+    requestId,
+    expertId: fixture.expertId,
+    sources: [
+      {
+        threadId: ThreadId.makeUnsafe(fixture.sourceThreadId),
+        turnId: TurnId.makeUnsafe("turn-automatic-adoption-source"),
+      },
+    ],
+    modelSelection,
+  });
+  if (!response.run) throw new Error("manual discovery did not start");
+  return response.run;
+}
+
+function memoryOpportunityText(
+  fixture: Awaited<ReturnType<typeof automaticFixture>>,
+  options: { readonly quote?: string; readonly targetSkillId?: string } = {},
+) {
+  return JSON.stringify({
+    action: "opportunities",
+    opportunities: [
+      {
+        name: "Evidence-backed decisions",
+        reason: "The selected work contains a durable decision procedure.",
+        outcomes: ["Keep verified evidence before decisions."],
+        evidence: [
+          {
+            threadId: fixture.sourceThreadId,
+            messageId: fixture.sourceAssistantId,
+            quote: options.quote ?? "Verified evidence: keep a decision log.",
+          },
+        ],
+        ...(options.targetSkillId ? { targetSkillId: options.targetSkillId } : {}),
+        memory: {
+          kind: "rule",
+          key: "evidence.decisions",
+          content: "Keep verified evidence before decisions.",
+          expectedRevision: 0,
+        },
+      },
+    ],
+  });
+}
+
+async function finishDiscoveryWithResponse(
+  fixture: Awaited<ReturnType<typeof automaticFixture>>,
+  discovery: SkillEvolutionRun,
+  responseText: string,
+) {
+  const taskThreadId = String(discovery.taskThreadId);
+  let completedTurns = 0;
+  fixture.host.complete(taskThreadId, responseText);
+  completedTurns += 1;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const run = (await fixture.service.execute({ action: "read", requestId: discovery.requestId }))
+      .run;
+    if (!run) throw new Error("discovery run disappeared");
+    if (!new Set(["queued", "running", "waiting_authorization"]).has(run.status)) return run;
+    const dispatchedTurns = fixture.host.dispatches.filter(
+      (command) =>
+        command.type === "thread.turn.start" && command.threadId === discovery.taskThreadId,
+    ).length;
+    if (dispatchedTurns > completedTurns) {
+      fixture.host.complete(taskThreadId, responseText);
+      completedTurns += 1;
+    }
+  }
+  throw new Error("discovery did not settle after its bounded repair attempt");
+}
+
 describe("automatic adoption follow-up permission", () => {
+  it("limits the automatic Memory catalog and records metadata when a value is truncated", async () => {
+    const catalogReads: ExpertLearningEvidence[] = [];
+    const catalog = Array.from({ length: 13 }, (_, index) => ({
+      memoryId: `memory-catalog-${index}`,
+      revision: 1,
+      kind: "rule",
+      key: `rule-${index}`,
+      content: `${index}:` + "x".repeat(2_500),
+      scope: { ownerId: "owner", expertId: "expert", projectId: "project", spaceId: "space" },
+      projectBound: index % 2 === 0,
+    }));
+    const fixture = await automaticFixture({
+      readMemoryCatalog: async (source) => {
+        catalogReads.push(source);
+        return catalog as never;
+      },
+    });
+    const discovery = await startAutomaticDiscovery(fixture, "automatic-memory-catalog");
+    const turn = fixture.host.dispatches.find((command) => command.type === "thread.turn.start");
+    if (!turn || turn.type !== "thread.turn.start")
+      throw new Error("discovery turn was not dispatched");
+    const sourceDataMarker = "\nSOURCE_DATA\n";
+    const payload = JSON.parse(
+      turn.message.text.slice(
+        turn.message.text.lastIndexOf(sourceDataMarker) + sourceDataMarker.length,
+      ),
+    ) as {
+      memoryCatalog: readonly { memoryId: string; content: string; truncated?: boolean }[];
+    };
+
+    expect(catalogReads).toHaveLength(1);
+    expect(catalogReads[0]?.evidenceId).toBe(fixture.sourceEvidence.evidenceId);
+    expect(payload.memoryCatalog).toHaveLength(12);
+    expect(payload.memoryCatalog[0]).toMatchObject({
+      memoryId: "memory-catalog-0",
+      projectOnly: true,
+      truncated: true,
+    });
+    expect(payload.memoryCatalog[0]!.content).toHaveLength(2_000);
+    expect(turn.message.text).toContain("prompt-memory-catalog-items-truncated");
+    expect(payload.memoryCatalog.some((entry) => entry.memoryId === "memory-catalog-12")).toBe(
+      false,
+    );
+    expect(discovery.status).toBe("queued");
+  });
+
+  it("accepts only catalog-enabled automatic Memory opportunities with exact citations", async () => {
+    const withCatalog = await automaticFixture({ readMemoryCatalog: async () => [] });
+    const acceptedDiscovery = await startAutomaticDiscovery(
+      withCatalog,
+      "automatic-memory-candidate-accepted",
+    );
+    const accepted = await finishDiscoveryWithResponse(
+      withCatalog,
+      acceptedDiscovery,
+      memoryOpportunityText(withCatalog),
+    );
+    expect(accepted.status).toBe("opportunity_ready");
+    const acceptedOpportunity = accepted.opportunities?.[0];
+    expect(acceptedOpportunity?.memory).toMatchObject({
+      kind: "rule",
+      key: "evidence.decisions",
+    });
+    if (!acceptedOpportunity?.memory) throw new Error("Memory opportunity was not retained");
+    const opportunityContent = {
+      opportunityId: acceptedOpportunity.opportunityId,
+      requestId: acceptedOpportunity.requestId,
+      expertId: acceptedOpportunity.expertId,
+      name: acceptedOpportunity.name,
+      reason: acceptedOpportunity.reason,
+      outcomes: acceptedOpportunity.outcomes,
+      evidence: acceptedOpportunity.evidence,
+    };
+    expect(acceptedOpportunity.digest).toBe(
+      evolutionDigest({ ...opportunityContent, memory: acceptedOpportunity.memory }),
+    );
+    expect(acceptedOpportunity.digest).not.toBe(evolutionDigest(opportunityContent));
+
+    const withoutCatalog = await automaticFixture();
+    const noCatalogDiscovery = await startAutomaticDiscovery(
+      withoutCatalog,
+      "automatic-memory-candidate-without-catalog",
+    );
+    const noCatalog = await finishDiscoveryWithResponse(
+      withoutCatalog,
+      noCatalogDiscovery,
+      memoryOpportunityText(withoutCatalog),
+    );
+    expect(noCatalog.status).toBe("failed");
+    expect(noCatalog.error).toContain("记忆学习只接受宿主自动用途");
+
+    const withTarget = await automaticFixture({ readMemoryCatalog: async () => [] });
+    const targetDiscovery = await startAutomaticDiscovery(
+      withTarget,
+      "automatic-memory-candidate-with-target",
+    );
+    const targetResult = await finishDiscoveryWithResponse(
+      withTarget,
+      targetDiscovery,
+      memoryOpportunityText(withTarget, { targetSkillId: `skl_${"f".repeat(32)}` }),
+    );
+    expect(targetResult.status).toBe("failed");
+    expect(targetResult.error).toContain("不能借它绕过已有 Skill 目标授权");
+
+    const invalidCitation = await automaticFixture({ readMemoryCatalog: async () => [] });
+    const citationDiscovery = await startAutomaticDiscovery(
+      invalidCitation,
+      "automatic-memory-candidate-invalid-citation",
+    );
+    const citationResult = await finishDiscoveryWithResponse(
+      invalidCitation,
+      citationDiscovery,
+      memoryOpportunityText(invalidCitation, { quote: "Verified evidence: make up a decision." }),
+    );
+    expect(citationResult.status).toBe("failed");
+    expect(citationResult.error).toContain("候选引用了不属于所选来源的证据");
+
+    let manualCatalogReads = 0;
+    const manual = await automaticFixture({
+      readMemoryCatalog: async () => {
+        manualCatalogReads += 1;
+        return [];
+      },
+    });
+    const manualDiscovery = await startManualDiscovery(manual, "manual-memory-candidate");
+    const manualResult = await finishDiscoveryWithResponse(
+      manual,
+      manualDiscovery,
+      memoryOpportunityText(manual),
+    );
+    expect(manualResult.status).toBe("failed");
+    expect(manualCatalogReads).toBe(0);
+  });
+
   it("grants follow-up evolution permission to an automatically created Expert Skill", async () => {
     const fixture = await automaticFixture();
     const discovery = await startAutomaticDiscovery(fixture, "automatic-adoption-discovery");
@@ -1303,6 +2206,18 @@ describe("automatic adoption follow-up permission", () => {
       await fixture.service.execute({ action: "read", requestId: discovery.requestId })
     ).run!;
     const opportunity = ready.opportunities![0]!;
+    expect(opportunity).not.toHaveProperty("memory");
+    expect(opportunity.digest).toBe(
+      evolutionDigest({
+        opportunityId: opportunity.opportunityId,
+        requestId: opportunity.requestId,
+        expertId: opportunity.expertId,
+        name: opportunity.name,
+        reason: opportunity.reason,
+        outcomes: opportunity.outcomes,
+        evidence: opportunity.evidence,
+      }),
+    );
     const generation = (
       await fixture.service.execute({
         action: "generate",
@@ -1363,4 +2278,117 @@ describe("automatic adoption follow-up permission", () => {
       fixture.host.dispatches.filter((command) => command.type === "thread.turn.start"),
     ).toHaveLength(1);
   });
+});
+
+memoryLearningLayer("ExpertLearningService Memory rule watermark", (test) => {
+  test.effect("freezes rules at close so later Memory revisions are excluded", () =>
+    Effect.gen(function* () {
+      const repository = yield* ExpertLearningRepository;
+      const memory = yield* SpaceMemoryService;
+      const root = yield* Effect.promise(() =>
+        fs.mkdtemp(path.join(os.tmpdir(), "expert-learning-memory-watermark-")),
+      );
+      roots.push(root);
+      const stateDir = path.join(root, "state");
+      const experts = createExpertStore(stateDir);
+      const expertId = "expert-learning-memory-watermark";
+      yield* Effect.promise(() =>
+        experts.save({
+          id: expertId,
+          name: "Memory watermark Expert",
+          description: "",
+          useCases: "",
+          persona: "Use evidence.",
+          outputRequirements: "",
+          skills: [],
+          skillBindings: [],
+          references: [],
+          connections: [],
+          preferredProvider: "pi",
+        }),
+      );
+      const service = createExpertLearningService({
+        stateDir,
+        repository,
+        experts,
+        memory,
+        evolution: () => fakeEvolution() as never,
+        host: () => new CoordinatorHost(),
+        now: () => new Date(timestamp),
+        pollMs: 60_000,
+      });
+      learningServices.push(service);
+      const scope = {
+        ownerId: owner.ownerId,
+        expertId,
+        projectId: "project-learning",
+        spaceId: null,
+      } as const;
+      const commitRule = (requestId: string, key: string, content: string) =>
+        memory.commit({
+          scope,
+          expectedRevision: 0,
+          kind: "rule",
+          key,
+          content,
+          sources: [
+            {
+              kind: "message",
+              messageId: `message-${requestId}`,
+              threadId: `thread-${requestId}`,
+              role: "user",
+              contentHash: `sha256:${"a".repeat(64)}`,
+              quote: content,
+            },
+          ],
+          requestId,
+          requestFingerprint: `sha256:${"b".repeat(64)}`,
+          observedAt: timestamp,
+        });
+
+      const beforeClose = yield* commitRule("rule-before-close", "style.before", "Before close.");
+      yield* Effect.promise(() =>
+        service.set(
+          owner,
+          makeSet({
+            expertId,
+            requestId: "enable-memory-watermark",
+            expectedRevision: 0,
+            enabled: true,
+          }),
+        ),
+      );
+      const atClose = yield* commitRule("rule-at-close", "style.at-close", "At close.");
+      yield* Effect.promise(() =>
+        service.set(
+          owner,
+          makeSet({
+            expertId,
+            requestId: "close-memory-watermark",
+            expectedRevision: 1,
+            enabled: false,
+          }),
+        ),
+      );
+      const row = yield* repository.readState(owner.ownerId, expertId);
+      if (!row) throw new Error("close did not persist the learning state");
+      const stored = decodeLearningState(row);
+      const frozenRuleSequence = stored.frozenRuleSequence;
+      if (frozenRuleSequence === undefined) throw new Error("close omitted its rule watermark");
+      expect(frozenRuleSequence).toBe(atClose.entry.commitSequence);
+
+      yield* commitRule("rule-after-close", "style.after-close", "After close.");
+      const frozenRules = yield* memory.readApplicable({
+        scope,
+        kinds: ["rule"],
+        ruleSequence: frozenRuleSequence,
+      });
+      const currentRules = yield* memory.readApplicable({ scope, kinds: ["rule"] });
+      expect(frozenRules.map((entry) => entry.memoryId)).toEqual([
+        beforeClose.entry.memoryId,
+        atClose.entry.memoryId,
+      ]);
+      expect(currentRules).toHaveLength(3);
+    }),
+  );
 });

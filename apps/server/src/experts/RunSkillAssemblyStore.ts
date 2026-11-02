@@ -8,6 +8,9 @@ import {
   FIXED_EXPERT_SKILL_POLICY,
   RunSkillAssembly,
   type ProviderExpertSession,
+  type ResolvedExpertSkillEntry,
+  type ExpertSkillBinding,
+  type LearningSessionContext,
 } from "@synara/contracts";
 import { ensurePrivateDirectorySync } from "../privatePathPermissions";
 import { createExpertStore, expertResourceFiles } from "./ExpertStore";
@@ -16,6 +19,8 @@ import { readSkillDefinition, resolveSkillBindings } from "./SkillLibraryStore";
 import { writePrivateFileAtomically, serializeJsonWithinByteLimit } from "./ExpertMcpStorage";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle";
 import { expertSnapshotSession } from "./expertSnapshotSession";
+import { verifyPinnedSkillReferences } from "./pinnedSkillReferences";
+import { prepareSkillRunResources, verifySkillRunResources } from "./skillRunResources";
 
 const LIMIT = 16 * 1024 * 1024;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -29,6 +34,7 @@ export function skillAssemblyFingerprint(session: ProviderExpertSession): string
       policy: session.skillPolicy,
       entries: session.skillEntries,
       skills: session.skills,
+      ...(session.skillResourceRefs !== undefined ? { resources: session.skillResourceRefs } : {}),
     }),
   )}`;
 }
@@ -42,6 +48,13 @@ function validateRecord(record: RunSkillAssembly, rootRunId?: string): RunSkillA
     record.assemblyId !== skillAssemblyFingerprint(record.session)
   )
     throw new Error("Run Skill assembly identity is corrupt.");
+  if (
+    record.session.knowledge &&
+    (record.session.knowledge.rootRunId !== record.rootRunId ||
+      record.session.knowledge.snapshotId !== record.baseSnapshotId ||
+      record.session.knowledge.scope.expertId !== record.session.expertId)
+  )
+    throw new Error("Run knowledge reference does not match its Skill assembly.");
   return record;
 }
 
@@ -91,7 +104,15 @@ const pointers = Schema.Struct({
   continuations: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 });
 
-export function createRunSkillAssemblyStore(stateDir: string) {
+export function createRunSkillAssemblyStore(
+  stateDir: string,
+  options: {
+    readonly frozenEntries?: (
+      expertId: string,
+      bindings: readonly ExpertSkillBinding[] | undefined,
+    ) => Promise<readonly ResolvedExpertSkillEntry[] | undefined>;
+  } = {},
+) {
   const experts = createExpertStore(stateDir);
   const packages = createSkillPackageStore(stateDir);
   const initializationHasEffects = async (session: ProviderExpertSession): Promise<boolean> => {
@@ -99,8 +120,8 @@ export function createRunSkillAssemblyStore(stateDir: string) {
     for (const packageId of new Set(entries.map((entry) => entry.packageId))) {
       const manifest = await packages.read(packageId);
       // Native plugin resources are retained by the projection. SessionStart
-      // hooks (including a custom path in plugin.json) and startup integrations
-      // can run before a model prompt, independently of the selected entry's YAML.
+      // hooks (including a custom path in plugin.json) can run before a model prompt,
+      // independently of the selected entry's YAML.
       if (
         manifest.resources.some(
           (resource) =>
@@ -115,11 +136,20 @@ export function createRunSkillAssemblyStore(stateDir: string) {
         return true;
     }
     for (const entry of entries) {
+      // Only old durable Run records can carry this removed marker. It is a
+      // conservative uncertain-replay signal; it never activates or loads a Skill.
       if (entry.activation === "startup") return true;
       const bytes = await expertResourceFiles.read(entry.path);
       const block = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\s|$)/u.exec(bytes.toString("utf8"));
-      const metadata: unknown = block ? YAML.parse(block[1]!, { logLevel: "error" }) : undefined;
-      if (metadata && typeof metadata === "object" && Object.hasOwn(metadata, "hooks")) return true;
+      try {
+        const metadata: unknown = block ? YAML.parse(block[1]!, { logLevel: "error" }) : undefined;
+        if (metadata && typeof metadata === "object" && Object.hasOwn(metadata, "hooks"))
+          return true;
+      } catch {
+        // Malformed display metadata is not an initialization failure. A
+        // possible hook declaration still receives conservative replay protection.
+        if (block && /^[\s"']*hooks["']?\s*:/mu.test(block[1]!)) return true;
+      }
     }
     return false;
   };
@@ -164,21 +194,28 @@ export function createRunSkillAssemblyStore(stateDir: string) {
     if (!definition || definition.archived)
       throw new Error("The Expert definition is unavailable or archived.");
     const bindings = definition.skillBindings;
+    const frozen = await options.frozenEntries?.(definition.id, bindings);
     const selections =
-      bindings !== undefined
-        ? await resolveSkillBindings(stateDir, bindings, definition.id)
-        : (definition.skillSelections ?? snapshot.skillSelections ?? []);
+      frozen !== undefined
+        ? []
+        : bindings !== undefined
+          ? await resolveSkillBindings(stateDir, bindings, definition.id)
+          : (definition.skillSelections ?? snapshot.skillSelections ?? []);
     const managedSkills = await Promise.all(
       (bindings ?? [])
         .filter((binding) => binding.enabled)
         .map((binding) => readSkillDefinition(stateDir, binding.skillId)),
     );
-    const entries = (await packages.resolveSelections(selections)).map((entry) => {
-      const managed = managedSkills.find(
-        (skill) => skill.packageId === entry.packageId && skill.entryPath === entry.entryPath,
-      );
-      return { ...entry, ...(managed ? { managedSkillId: managed.skillId } : {}) };
-    });
+    const entries =
+      frozen !== undefined
+        ? [...frozen]
+        : (await packages.resolveSelections(selections)).map((entry) => {
+            const managed = managedSkills.find(
+              (skill) => skill.packageId === entry.packageId && skill.entryPath === entry.entryPath,
+            );
+            return { ...entry, ...(managed ? { managedSkillId: managed.skillId } : {}) };
+          });
+    if (frozen !== undefined) await verifyPinnedSkillReferences(stateDir, entries);
     const session: ProviderExpertSession = {
       ...expertSnapshotSession(snapshot),
       skillPolicy: FIXED_EXPERT_SKILL_POLICY,
@@ -217,6 +254,21 @@ export function createRunSkillAssemblyStore(stateDir: string) {
   };
   const store = {
     read: (rootRunId: string) => readRunSkillAssembly(stateDir, rootRunId),
+    async attachKnowledge(rootRunId: string, knowledge: LearningSessionContext) {
+      return withSkillPackageLifecycle(stateDir, async () => {
+        const record = await readRunSkillAssembly(stateDir, rootRunId);
+        if (!record) throw new Error("Run Skill assembly is unavailable for knowledge binding.");
+        if (record.session.knowledge) {
+          if (!isDeepStrictEqual(record.session.knowledge, knowledge))
+            throw new Error("Run knowledge binding is already fixed to a different manifest.");
+          return record;
+        }
+        const updated = { ...record, session: { ...record.session, knowledge } };
+        validateRecord(updated, rootRunId);
+        await write(updated);
+        return updated;
+      });
+    },
     preview: (baseSnapshotId: string) =>
       withSkillPackageLifecycle(
         stateDir,
@@ -292,19 +344,29 @@ export function createRunSkillAssemblyStore(stateDir: string) {
                     skillPolicy: inherited.session.skillPolicy,
                     skills: inherited.session.skills,
                     skillEntries: entries,
+                    ...(inherited.session.skillResourceRefs !== undefined
+                      ? { skillResourceRefs: inherited.session.skillResourceRefs }
+                      : {}),
                   },
                 };
               });
             })()
           : resolveLatest(input.baseSnapshotId);
         const { definition, entries, session: base } = await resolved;
+        const resources = await prepareSkillRunResources(
+          stateDir,
+          input.rootRunId,
+          entries,
+          inherited ? (inherited.session.skillResourceRefs ?? []) : undefined,
+        );
         const session: ProviderExpertSession = {
           ...base,
-          skillPolicy: FIXED_EXPERT_SKILL_POLICY,
+          skillPolicy: base.skillPolicy ?? FIXED_EXPERT_SKILL_POLICY,
           skillsRoot: path.join(stateDir, "experts", "skill-packages"),
           skills: entries.map(({ name, path: skillPath }) => ({ name, path: skillPath })),
           skillEntries: entries,
           skillRootRunId: input.rootRunId,
+          ...(resources.length ? { skillResourceRefs: resources } : {}),
         };
         const assemblyId = skillAssemblyFingerprint(session);
         const hasInitializationEffects = await initializationHasEffects(session);
@@ -318,6 +380,7 @@ export function createRunSkillAssemblyStore(stateDir: string) {
           createdAt: input.createdAt,
           hasInitializationEffects,
           phase: "prepared",
+          ...(inherited?.session.knowledge ? { knowledgeSourceRunId: inherited.rootRunId } : {}),
           session: { ...session, skillAssemblyId: assemblyId },
         };
         await write(record);
@@ -343,18 +406,12 @@ export function createRunSkillAssemblyStore(stateDir: string) {
       });
       if (!isDeepStrictEqual(identity(base), identity(session)))
         throw new Error("Run assembly changed the pinned Expert identity.");
-      const resolved = await packages.resolveSelections(
-        (session.skillEntries ?? []).map(({ packageId, entryPath, activation }) => ({
-          packageId,
-          entryPath,
-          activation,
-        })),
+      await verifyPinnedSkillReferences(stateDir, session.skillEntries ?? []);
+      await verifySkillRunResources(
+        stateDir,
+        session.skillEntries ?? [],
+        session.skillResourceRefs,
       );
-      const canonical = (session.skillEntries ?? []).map(
-        ({ managedSkillId: _managedSkillId, ...entry }) => entry,
-      );
-      if (!isDeepStrictEqual(resolved, canonical))
-        throw new Error("Run assembly entries do not match immutable packages.");
       return record.session;
     },
     async beginInitialization(rootRunId: string) {

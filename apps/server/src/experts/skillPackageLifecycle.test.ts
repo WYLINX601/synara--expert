@@ -39,7 +39,6 @@ async function fixture() {
       {
         packageId: imported.package.packageId,
         entryPath: "SKILL.md",
-        activation: "startup" as const,
       },
     ],
     references: [],
@@ -116,10 +115,9 @@ describe("skill package lifecycle", () => {
       {
         packageId: imported.package.packageId,
         entryPath: "SKILL.md",
-        activation: "on-demand",
       },
     ]);
-    expect(resolved[0]).toMatchObject({ name: "role", activation: "on-demand" });
+    expect(resolved[0]).toMatchObject({ name: "role" });
     expect(imported.package.entries[0]?.incompatibleReason).toBeUndefined();
     expect(await fs.readFile(resolved[0]!.path, "utf8")).toBe(nativeContent);
     await fs.writeFile(
@@ -131,14 +129,13 @@ describe("skill package lifecycle", () => {
     const selected = {
       packageId: nextPackage.package.packageId,
       entryPath: "SKILL.md",
-      activation: "on-demand" as const,
+      activation: "startup" as const,
     };
-    expect((await packages.resolveSelections([selected]))[0]).toMatchObject({
+    const resolvedSelection = (await packages.resolveSelections([selected]))[0]!;
+    expect(resolvedSelection).toMatchObject({
       disableModelInvocation: true,
       userInvocable: false,
     });
-    await expect(
-      packages.resolveSelections([{ ...selected, activation: "startup" }]),
-    ).rejects.toThrow("automatic invocation");
+    expect(Object.hasOwn(resolvedSelection, "activation")).toBe(false);
   });
 });

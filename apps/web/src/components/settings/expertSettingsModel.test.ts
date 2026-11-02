@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ExpertDefinition } from "@synara/contracts";
 import {
   expertDraftFromDefinition,
   expertDraftsEqual,
@@ -45,6 +46,10 @@ describe("expertSettingsModel", () => {
       parseExpertReferences("C:\\workspace\\guide.md\nC:/workspace/guide.md\n./notes.md"),
     ).toEqual({
       references: ["C:\\workspace\\guide.md", "./notes.md"],
+      duplicateCount: 1,
+    });
+    expect(parseExpertReferences("/research/notes/../brief.md\n/research/brief.md")).toEqual({
+      references: ["/research/notes/../brief.md"],
       duplicateCount: 1,
     });
   });
@@ -128,44 +133,140 @@ describe("expertSettingsModel", () => {
     ).toBe(false);
   });
 
-  it("keeps legacy skill drafts visible until package mode is explicitly enabled", () => {
+  it("uses an empty current binding list and serializes no legacy Skill configuration", () => {
     const legacy = {
       ...definition,
       skills: [{ name: "old skill", path: "/skills/old/SKILL.md" }],
-    };
-    const draft = expertDraftFromDefinition(legacy);
-    expect(draft.skills).toEqual(legacy.skills);
-    expect(draft).not.toHaveProperty("skillSelections");
-    expect(expertSaveInputForDraft(draft, legacy)).toMatchObject({ skills: legacy.skills });
-
-    const packageDraft = { ...draft, skills: [], skillSelections: [] };
-    expect(expertSaveInputForDraft(packageDraft, legacy)).toMatchObject({
-      skills: [],
-      skillSelections: [],
-    });
-    expect(expertDraftsEqual(draft, packageDraft)).toBe(false);
-  });
-
-  it("round-trips fixed package selections through Expert drafts and clones", () => {
-    const expert = {
-      ...definition,
       skillSelections: [
         {
           packageId: `pkg_${"a".repeat(64)}`,
-          entryPath: "skills/planner/SKILL.md",
+          entryPath: "skills/old/SKILL.md",
           activation: "startup" as const,
         },
       ],
     };
-    const draft = expertDraftFromDefinition(expert);
-
-    expect(expertDraftFromDefinition(expert).skillSelections).toEqual(expert.skillSelections);
-    expect(expertDraftsEqual(draft, { ...draft, skillSelections: [] })).toBe(false);
-    expect(expertSaveInputForDraft(draft, expert)).toMatchObject({
+    const draft = expertDraftFromDefinition(legacy);
+    expect(draft.skills).toEqual([]);
+    expect(draft.skillBindings).toEqual([]);
+    expect(draft).not.toHaveProperty("skillSelections");
+    expect(expertSaveInputForDraft(draft, legacy)).toMatchObject({
       skills: [],
-      skillSelections: expert.skillSelections,
+      skillBindings: [],
+      id: legacy.id,
+      expectedRevision: legacy.revision,
+    });
+    expect(expertSaveInputForDraft(draft, legacy)).not.toHaveProperty("skillSelections");
+  });
+
+  it("preserves current binding fields and omits historical activation from new saves", () => {
+    const expert = {
+      ...definition,
+      skillBindings: [
+        {
+          skillId: `skl_${"a".repeat(32)}`,
+          enabled: true,
+          allowEvolution: true,
+          selectionScope: "package" as const,
+          resourceMode: "run-private" as const,
+          activation: "startup" as const,
+        },
+      ],
+    } as unknown as ExpertDefinition;
+    const draft = expertDraftFromDefinition(expert),
+      saved = expertSaveInputForDraft(draft, expert);
+
+    expect(expertDraftFromDefinition(expert).skillBindings).toEqual([
+      {
+        skillId: `skl_${"a".repeat(32)}`,
+        enabled: true,
+        allowEvolution: true,
+        selectionScope: "package",
+        resourceMode: "run-private",
+      },
+    ]);
+    expect(expertDraftsEqual(draft, { ...draft, skillBindings: [] })).toBe(false);
+    expect(saved).toMatchObject({
+      skills: [],
+      skillBindings: [
+        {
+          skillId: `skl_${"a".repeat(32)}`,
+          enabled: true,
+          allowEvolution: true,
+          selectionScope: "package",
+          resourceMode: "run-private",
+        },
+      ],
       id: expert.id,
       expectedRevision: expert.revision,
     });
+    expect(saved.skillBindings?.[0]).not.toHaveProperty("activation");
+    expect(saved).not.toHaveProperty("skillSelections");
+  });
+
+  it("defaults missing evolution permission to off and preserves it with other binding fields in drafts", () => {
+    const skillId = `skl_${"d".repeat(32)}`;
+    const withoutPermission = expertDraftFromDefinition({
+      ...definition,
+      skillBindings: [{ skillId, enabled: true }],
+    } as ExpertDefinition);
+    expect(withoutPermission.skillBindings?.[0]?.allowEvolution).toBeUndefined();
+    expect(withoutPermission.skillBindings?.[0]?.allowEvolution === true).toBe(false);
+
+    const withPermission = {
+      ...definition,
+      skillBindings: [
+        {
+          skillId,
+          enabled: false,
+          allowEvolution: true,
+          selectionScope: "package" as const,
+          resourceMode: "run-private" as const,
+        },
+      ],
+    } as ExpertDefinition;
+    const draft = expertDraftFromDefinition(withPermission);
+    const toggledDraft = {
+      ...draft,
+      skillBindings: draft.skillBindings?.map((binding) => ({
+        ...binding,
+        allowEvolution: false,
+      })),
+    };
+    expect(expertDraftsEqual(draft, toggledDraft)).toBe(false);
+    expect(expertSaveInputForDraft(toggledDraft, withPermission).skillBindings).toEqual([
+      {
+        skillId,
+        enabled: false,
+        allowEvolution: false,
+        selectionScope: "package",
+        resourceMode: "run-private",
+      },
+    ]);
+  });
+
+  it("validates current Skill binding identities without imposing an activation limit", () => {
+    const draft = expertDraftFromDefinition(definition),
+      skillId = `skl_${"b".repeat(32)}`;
+    const duplicateIssues = validateExpertDraft({
+      ...draft,
+      skillBindings: [
+        { skillId, enabled: true },
+        { skillId, enabled: false },
+      ],
+    });
+    expect(duplicateIssues).toContainEqual({
+      field: "skillBindings",
+      code: "invalid",
+      message: "技能绑定须唯一，最多100个。",
+    });
+    expect(
+      validateExpertDraft({
+        ...draft,
+        skillBindings: [
+          { skillId, enabled: true },
+          { skillId: `skl_${"c".repeat(32)}`, enabled: true },
+        ],
+      }).filter((issue) => issue.field === "skillBindings"),
+    ).toEqual([]);
   });
 });

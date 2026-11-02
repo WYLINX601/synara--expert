@@ -13,6 +13,9 @@ import type {
   ProviderExpertSession,
   ExpertAppliedRuntimeRecord,
   ContextAppliedRuntimeRecord,
+  LearningSessionContext,
+  MemoryScope,
+  RunKnowledgeManifest,
   ModelSelection,
   ProviderApprovalDecision,
   ProviderForkThreadResult,
@@ -33,6 +36,7 @@ import {
   RuntimeItemId,
   RuntimeTaskId,
   RuntimeRequestId,
+  ProjectId,
   ThreadId,
   TurnId,
 } from "@synara/contracts";
@@ -119,6 +123,21 @@ import {
   SkillEvolutionRepository,
   type SkillEvolutionRepositoryShape,
 } from "../../experts/evolution/SkillEvolutionRepository";
+import {
+  ExpertLearningRepository,
+  type ExpertLearningRepositoryShape,
+  type LearningStateRow,
+} from "../../experts/evolution/ExpertLearningRepository";
+import { withExpertLearningCommit } from "../../experts/expertLearningCommit";
+import {
+  SpaceMemoryService,
+  type SpaceMemoryServiceShape,
+} from "../../spaceMemory/SpaceMemoryService.ts";
+import {
+  ProjectionSnapshotQuery,
+  type ProjectionSnapshotQueryShape,
+} from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { stableJsonStringify } from "@synara/shared/browserAutomationCatalogue";
 
 // The fake adapter never prepares Codex storage. Give lifecycle tests real
 // continuation metadata without reading or writing the developer's Codex home.
@@ -248,7 +267,6 @@ async function makeStrictTestExpert(input: ProviderExpertSession): Promise<Provi
       imported.package.entries.map((entry) => ({
         packageId: imported.package.packageId,
         entryPath: entry.entryPath,
-        activation: "on-demand" as const,
       })),
     );
   }
@@ -266,10 +284,9 @@ async function makeStrictTestExpert(input: ProviderExpertSession): Promise<Provi
       persona: input.persona,
       outputRequirements: "",
       skills: [],
-      skillSelections: selections.map(({ packageId, entryPath, activation }) => ({
+      skillSelections: selections.map(({ packageId, entryPath }) => ({
         packageId,
         entryPath,
-        activation,
       })),
       references,
       connections: [],
@@ -347,7 +364,7 @@ async function makeExpertSkillPackageFixture(
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(
       path.join(directory, "SKILL.md"),
-      `---\nname: ${name}\ndescription: ${name} workflow\n---\n${name.toUpperCase()} BODY\n`,
+      `---\nname: ${name}\ndescription: ${name} workflow\n${name === "review" ? "hooks: { SessionStart: [] }\n" : ""}---\n${name.toUpperCase()} BODY\n`,
       "utf8",
     );
   }
@@ -358,12 +375,10 @@ async function makeExpertSkillPackageFixture(
     {
       packageId: imported.package.packageId,
       entryPath: "skills/review/SKILL.md",
-      activation: "startup",
     },
     {
       packageId: imported.package.packageId,
       entryPath: "skills/plan/SKILL.md",
-      activation: "on-demand",
     },
   ]);
   const experts = createExpertStore(stateDir);
@@ -379,12 +394,10 @@ async function makeExpertSkillPackageFixture(
       {
         packageId: imported.package.packageId,
         entryPath: "skills/review/SKILL.md",
-        activation: "startup",
       },
       {
         packageId: imported.package.packageId,
         entryPath: "skills/plan/SKILL.md",
-        activation: "on-demand",
       },
     ],
     references: [],
@@ -875,6 +888,12 @@ function makeProviderServiceLayer(
     readonly confirmSkillApplication?: boolean;
     readonly contextRepository?: ContextRepositoryShape;
     readonly skillEvolutionRepository?: SkillEvolutionRepositoryShape;
+    readonly expertLearningRepository?: ExpertLearningRepositoryShape;
+    readonly spaceMemoryService?: SpaceMemoryServiceShape;
+    readonly projectionSnapshotQuery?: Pick<
+      ProjectionSnapshotQueryShape,
+      "getThreadShellById" | "getProjectShellById"
+    >;
     readonly codexDidResumeSession?: NonNullable<
       ProviderAdapterShape<ProviderAdapterError>["didResumeSession"]
     >;
@@ -965,6 +984,15 @@ function makeProviderServiceLayer(
   const skillEvolutionRepositoryLayer = providers?.skillEvolutionRepository
     ? Layer.succeed(SkillEvolutionRepository, providers.skillEvolutionRepository)
     : Layer.empty;
+  const expertLearningRepositoryLayer = providers?.expertLearningRepository
+    ? Layer.succeed(ExpertLearningRepository, providers.expertLearningRepository)
+    : Layer.empty;
+  const spaceMemoryServiceLayer = providers?.spaceMemoryService
+    ? Layer.succeed(SpaceMemoryService, providers.spaceMemoryService)
+    : Layer.empty;
+  const projectionSnapshotQueryLayer = providers?.projectionSnapshotQuery
+    ? Layer.succeed(ProjectionSnapshotQuery, providers.projectionSnapshotQuery as never)
+    : Layer.empty;
 
   const rawLayer = Layer.mergeAll(
     makeProviderServiceLiveRaw({ stateDir: strictExpertTestState, ...options }).pipe(
@@ -974,6 +1002,9 @@ function makeProviderServiceLayer(
       Layer.provide(ProviderServiceTestSecretStoreLayer),
       Layer.provide(serverSettingsLayer),
       Layer.provide(skillEvolutionRepositoryLayer),
+      Layer.provide(expertLearningRepositoryLayer),
+      Layer.provide(spaceMemoryServiceLayer),
+      Layer.provide(projectionSnapshotQueryLayer),
     ),
     directoryLayer,
     runtimeRepositoryLayer,
@@ -1671,8 +1702,14 @@ const skillEvolutionFixedModel: ModelSelection = {
   instanceId: "pi",
   model: "openai/gpt-4o",
 };
+const skillEvolutionOmpModel: ModelSelection = {
+  provider: "omp",
+  instanceId: "omp",
+  model: "openai/gpt-4o",
+};
 const skillEvolutionThreadIds = {
   start: asThreadId("thread-skill-evolution-provider-start"),
+  omp: asThreadId("thread-skill-evolution-provider-omp"),
   spoof: asThreadId("thread-skill-evolution-provider-spoof"),
   missingPurpose: asThreadId("thread-skill-evolution-provider-missing-purpose"),
   wrongModel: asThreadId("thread-skill-evolution-provider-wrong-model"),
@@ -1692,12 +1729,16 @@ const skillEvolutionExecutions = new Map<ThreadId, SkillEvolutionTestExecution>(
     skillEvolutionThreadIds.fork,
     skillEvolutionThreadIds.recovery,
     skillEvolutionThreadIds.missingRegistration,
+    skillEvolutionThreadIds.omp,
   ].map((threadId) => [
     threadId,
     {
       requestId: `evolution-${threadId}`,
       ownerId: "skill-evolution-owner",
-      modelSelection: skillEvolutionFixedModel,
+      modelSelection:
+        threadId === skillEvolutionThreadIds.omp
+          ? skillEvolutionOmpModel
+          : skillEvolutionFixedModel,
     },
   ]),
 );
@@ -1718,10 +1759,141 @@ const skillEvolutionContextAppliedRead = vi.spyOn(
 );
 const skillEvolutionRouting = makeProviderServiceLayer(undefined, {
   includePi: true,
+  includeOmp: true,
   contextRepository: skillEvolutionContextRepository.repository,
   skillEvolutionRepository: makeSkillEvolutionRepository(skillEvolutionExecution),
 });
+const automaticAdmissionThreadIds = {
+  closeDuringWitness: asThreadId("thread-learning-admission-close-during-witness"),
+  acceptedSend: asThreadId("thread-learning-admission-accepted-send"),
+  cancelledSend: asThreadId("thread-learning-admission-cancelled-send"),
+} as const;
+const automaticAdmissionExecutions = new Map(
+  [
+    [automaticAdmissionThreadIds.closeDuringWitness, "witness"],
+    [automaticAdmissionThreadIds.acceptedSend, "accepted"],
+    [automaticAdmissionThreadIds.cancelledSend, "cancelled"],
+  ].map(
+    ([threadId, suffix]) =>
+      [
+        threadId,
+        {
+          requestId: `automatic-admission-${suffix}`,
+          ownerId: "automatic-admission-owner",
+          expertId: "automatic-admission-expert",
+          origin: "automatic" as const,
+          cycleId: `automatic-admission-cycle-${suffix}`,
+          learningEpoch: 1,
+          modelSelection: skillEvolutionOmpModel,
+        },
+      ] as const,
+  ),
+);
+const automaticAdmissionExecution = (threadId: ThreadId) =>
+  Effect.succeed(automaticAdmissionExecutions.get(threadId));
+const automaticAdmissionLearningState = { enabled: true, epoch: 1, revision: 1 };
+const automaticAdmissionUpdatedAt = "2026-10-31T00:00:00.000Z";
+const automaticAdmissionLearningRepository: ExpertLearningRepositoryShape = {
+  readState: (ownerId, expertId) =>
+    Effect.succeed({
+      ownerId,
+      expertId,
+      revision: automaticAdmissionLearningState.revision,
+      updatedAt: automaticAdmissionUpdatedAt,
+      record: JSON.stringify({
+        ownerKind: "session",
+        state: {
+          expertId,
+          enabled: automaticAdmissionLearningState.enabled,
+          epoch: automaticAdmissionLearningState.epoch,
+          revision: automaticAdmissionLearningState.revision,
+          harnessKind: "omp",
+          updatedAt: automaticAdmissionUpdatedAt,
+        },
+      }),
+    }),
+  listStates: () => Effect.succeed([]),
+  writeState: () => Effect.void,
+  readEvidence: () => Effect.succeed(undefined),
+  listEvidence: () => Effect.succeed([]),
+  writeEvidence: () => Effect.void,
+  readCycle: (cycleId) => {
+    const execution = [...automaticAdmissionExecutions.values()].find(
+      (candidate) => candidate.cycleId === cycleId,
+    );
+    return Effect.succeed(
+      execution
+        ? {
+            cycleId,
+            ownerId: execution.ownerId,
+            expertId: execution.expertId!,
+            updatedAt: automaticAdmissionUpdatedAt,
+            record: JSON.stringify({
+              status: "generation",
+              generationId: execution.requestId,
+            }),
+          }
+        : undefined,
+    );
+  },
+  listCycles: () => Effect.succeed([]),
+  writeCycle: () => Effect.void,
+};
+const automaticAdmissionStateDir = path.join(strictExpertTestRoot, "automatic-learning-admission");
+const automaticAdmissionRouting = makeProviderServiceLayer(
+  { stateDir: automaticAdmissionStateDir },
+  {
+    includeOmp: true,
+    skillEvolutionRepository: makeSkillEvolutionRepository(automaticAdmissionExecution),
+    expertLearningRepository: automaticAdmissionLearningRepository,
+  },
+);
+const resetAutomaticAdmissionState = () => {
+  automaticAdmissionLearningState.enabled = true;
+  automaticAdmissionLearningState.epoch = 1;
+  automaticAdmissionLearningState.revision = 1;
+};
 skillEvolutionRouting.layer("ProviderService Skill Evolution execution boundary", (it) => {
+  it.effect("admits only registered OMP extraction sessions and dispatches through OMP", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const threadId = skillEvolutionThreadIds.omp;
+      skillEvolutionRouting.omp.startSession.mockClear();
+      skillEvolutionRouting.omp.sendTurn.mockClear();
+
+      yield* provider.startSession(threadId, {
+        provider: "omp",
+        providerInstanceId: "omp" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionOmpModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      const adapterInput = skillEvolutionRouting.omp.startSession.mock.calls.at(-1)?.[0];
+      assert.equal(adapterInput?.provider, "omp");
+      assert.equal(adapterInput?.executionPurpose, "skill-evolution");
+      assert.deepEqual(adapterInput?.modelSelection, skillEvolutionOmpModel);
+      assert.equal(adapterInput?.runtimeMode, "approval-required");
+      assert.isUndefined(adapterInput?.contextSession);
+      assert.isUndefined(adapterInput?.expertSession);
+      assert.isUndefined(adapterInput?.additionalDirectories);
+
+      const sent = yield* provider.sendTurn({
+        threadId,
+        input: "Extract the reusable skill guidance.",
+        attachments: [],
+        modelSelection: skillEvolutionOmpModel,
+      });
+      assert.equal(sent.threadId, threadId);
+      assert.equal(skillEvolutionRouting.omp.sendTurn.mock.calls.length, 1);
+      assert.deepEqual(
+        skillEvolutionRouting.omp.sendTurn.mock.calls.at(-1)?.[0].modelSelection,
+        skillEvolutionOmpModel,
+      );
+      yield* provider.stopSession({ threadId });
+    }),
+  );
+
   it.effect("starts and sends registered extraction without reading or forwarding Context", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -1998,6 +2170,179 @@ skillEvolutionRouting.layer("ProviderService Skill Evolution execution boundary"
       yield* provider.stopSession({ threadId });
       yield* provider.stopSession({ threadId: ordinarySourceThreadId });
       skillEvolutionExecutions.set(threadId, registration);
+    }),
+  );
+});
+
+automaticAdmissionRouting.layer("ProviderService automatic learning admission", (it) => {
+  it.effect("rechecks the closed epoch after beforeDispatch and skips native send", () =>
+    Effect.gen(function* () {
+      resetAutomaticAdmissionState();
+      const provider = yield* ProviderService;
+      const threadId = automaticAdmissionThreadIds.closeDuringWitness;
+      yield* provider.startSession(threadId, {
+        provider: "omp",
+        providerInstanceId: "omp" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionOmpModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      automaticAdmissionRouting.omp.sendTurn.mockClear();
+
+      const witnessEntered = yield* Deferred.make<void>();
+      const resumeWitness = yield* Deferred.make<void>();
+      const send = yield* provider
+        .sendTurn(
+          {
+            threadId,
+            input: "Automatic extraction request",
+            attachments: [],
+            modelSelection: skillEvolutionOmpModel,
+          },
+          {
+            beforeDispatch: Effect.gen(function* () {
+              yield* Deferred.succeed(witnessEntered, undefined);
+              yield* Deferred.await(resumeWitness);
+            }),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(witnessEntered);
+
+      yield* Effect.promise(() =>
+        withExpertLearningCommit(
+          automaticAdmissionStateDir,
+          async () => {
+            automaticAdmissionLearningState.enabled = false;
+            automaticAdmissionLearningState.epoch += 1;
+            automaticAdmissionLearningState.revision += 1;
+          },
+          {},
+          "control",
+        ),
+      );
+      yield* Deferred.succeed(resumeWitness, undefined);
+      const outcome = yield* Effect.exit(Fiber.join(send));
+
+      assert.isTrue(Exit.isFailure(outcome));
+      assert.equal(automaticAdmissionRouting.omp.sendTurn.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("holds close behind native send acceptance, then releases the admission", () =>
+    Effect.gen(function* () {
+      resetAutomaticAdmissionState();
+      const provider = yield* ProviderService;
+      const threadId = automaticAdmissionThreadIds.acceptedSend;
+      yield* provider.startSession(threadId, {
+        provider: "omp",
+        providerInstanceId: "omp" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionOmpModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      const sendStarted = yield* Deferred.make<void>();
+      const acceptSend = yield* Deferred.make<void>();
+      const events: string[] = [];
+      automaticAdmissionRouting.omp.sendTurn.mockImplementationOnce(() =>
+        Effect.gen(function* () {
+          events.push("native-send-started");
+          yield* Deferred.succeed(sendStarted, undefined);
+          yield* Deferred.await(acceptSend);
+          events.push("native-send-accepted");
+          return {
+            threadId,
+            turnId: TurnId.makeUnsafe(`automatic-admission-turn-${threadId}`),
+          };
+        }),
+      );
+
+      const send = yield* provider
+        .sendTurn({
+          threadId,
+          input: "Automatic extraction request",
+          attachments: [],
+          modelSelection: skillEvolutionOmpModel,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(sendStarted);
+      const closeRequested = yield* Deferred.make<void>();
+      const close = yield* Effect.gen(function* () {
+        yield* Deferred.succeed(closeRequested, undefined);
+        return yield* Effect.promise(() =>
+          withExpertLearningCommit(
+            automaticAdmissionStateDir,
+            async () => {
+              events.push("learning-closed");
+              automaticAdmissionLearningState.enabled = false;
+              automaticAdmissionLearningState.epoch += 1;
+              automaticAdmissionLearningState.revision += 1;
+            },
+            {},
+            "control",
+          ),
+        );
+      }).pipe(Effect.forkChild);
+      yield* Deferred.await(closeRequested);
+      yield* Effect.yieldNow;
+      assert.deepEqual(events, ["native-send-started"]);
+
+      yield* Deferred.succeed(acceptSend, undefined);
+      yield* Fiber.join(send);
+      yield* Fiber.join(close);
+
+      assert.deepEqual(events, ["native-send-started", "native-send-accepted", "learning-closed"]);
+      assert.equal(automaticAdmissionLearningState.enabled, false);
+    }),
+  );
+
+  it.effect("releases native admission when its Effect is interrupted", () =>
+    Effect.gen(function* () {
+      resetAutomaticAdmissionState();
+      const provider = yield* ProviderService;
+      const threadId = automaticAdmissionThreadIds.cancelledSend;
+      yield* provider.startSession(threadId, {
+        provider: "omp",
+        providerInstanceId: "omp" as ProviderInstanceId,
+        threadId,
+        modelSelection: skillEvolutionOmpModel,
+        runtimeMode: "approval-required",
+        executionPurpose: "skill-evolution",
+      });
+      const sendStarted = yield* Deferred.make<void>();
+      automaticAdmissionRouting.omp.sendTurn.mockImplementationOnce(() =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(sendStarted, undefined);
+          return yield* Effect.never;
+        }),
+      );
+
+      const send = yield* provider
+        .sendTurn({
+          threadId,
+          input: "Automatic extraction request",
+          attachments: [],
+          modelSelection: skillEvolutionOmpModel,
+        })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(sendStarted);
+      yield* Fiber.interrupt(send);
+
+      yield* Effect.promise(() =>
+        withExpertLearningCommit(
+          automaticAdmissionStateDir,
+          async () => {
+            automaticAdmissionLearningState.enabled = false;
+            automaticAdmissionLearningState.epoch += 1;
+            automaticAdmissionLearningState.revision += 1;
+          },
+          {},
+          "control",
+        ),
+      );
+      assert.equal(automaticAdmissionLearningState.enabled, false);
     }),
   );
 });
@@ -11777,6 +12122,112 @@ const expertV2ForkRuntime = makeProviderServiceLayer(
   },
 );
 
+let providerKnowledgeScope: MemoryScope | undefined;
+let providerKnowledgeSnapshotId: string | undefined;
+let providerKnowledgeManifest: RunKnowledgeManifest | undefined;
+let providerKnowledgeStateRow: LearningStateRow | undefined;
+const providerKnowledgeLearningRepository = {
+  listStates: () => Effect.succeed(providerKnowledgeStateRow ? [providerKnowledgeStateRow] : []),
+} as unknown as ExpertLearningRepositoryShape;
+const providerKnowledgeMemory = {
+  readManifest: (scope: MemoryScope, manifestId: string) => {
+    const manifest = providerKnowledgeManifest;
+    if (!manifest || manifest.id !== manifestId) return Effect.fail(new Error("missing manifest"));
+    if (
+      scope.ownerId !== manifest.scope.ownerId ||
+      scope.spaceId !== manifest.scope.spaceId ||
+      scope.expertId !== manifest.scope.expertId ||
+      scope.projectId !== manifest.scope.projectId
+    ) {
+      return Effect.fail(new Error("manifest scope mismatch"));
+    }
+    return Effect.succeed(manifest);
+  },
+} as unknown as SpaceMemoryServiceShape;
+const providerKnowledgeProjection = {
+  getThreadShellById: (id: ThreadId) => {
+    const scope = providerKnowledgeScope;
+    const snapshotId = providerKnowledgeSnapshotId;
+    if (!scope || !snapshotId) return Effect.succeed(Option.none());
+    return Effect.succeed(
+      Option.some({
+        id,
+        projectId: ProjectId.makeUnsafe(scope.projectId),
+        expertBinding: { expertId: scope.expertId, snapshotId },
+      } as never),
+    );
+  },
+  getProjectShellById: (id: ProjectId) => {
+    const scope = providerKnowledgeScope;
+    return scope
+      ? Effect.succeed(Option.some({ id, spaceId: scope.spaceId } as never))
+      : Effect.succeed(Option.none());
+  },
+} as unknown as Pick<ProjectionSnapshotQueryShape, "getThreadShellById" | "getProjectShellById">;
+const expertV2KnowledgeRuntime = makeProviderServiceLayer(
+  {
+    stateDir: path.join(expertV2RuntimeRoot, "state"),
+    persistExpertAppliedRuntime: (record) =>
+      Effect.sync(() => {
+        expertV2AppliedWrites.push(record);
+      }),
+  },
+  {
+    includeOmp: true,
+    confirmSkillApplication: true,
+    expertLearningRepository: providerKnowledgeLearningRepository,
+    spaceMemoryService: providerKnowledgeMemory,
+    projectionSnapshotQuery: providerKnowledgeProjection,
+  },
+);
+
+function buildProviderKnowledgeManifest(input: {
+  readonly id: string;
+  readonly rootRunId: string;
+  readonly scope: MemoryScope;
+  readonly snapshotId: string;
+  readonly skillAssemblyId: string;
+}): RunKnowledgeManifest {
+  const base = {
+    ...input,
+    learningEpoch: 13,
+    frozenRuleSequence: 8,
+    rules: [
+      {
+        memoryId: "memory-rule-provider-test",
+        revision: 2,
+        contentHash: `sha256:${"a".repeat(64)}`,
+      },
+    ],
+    renderVersion: 1 as const,
+    text: "- output.concise: Lead with the result and preserve evidence.\n",
+    createdAt: "2026-10-31T00:00:00.000Z",
+  };
+  const hash = `sha256:${createHash("sha256").update(stableJsonStringify(base)).digest("hex")}`;
+  return { ...base, hash };
+}
+
+function setProviderKnowledgeFixture(expertId: string, snapshotId: string, scope: MemoryScope) {
+  providerKnowledgeScope = scope;
+  providerKnowledgeSnapshotId = snapshotId;
+  providerKnowledgeStateRow = {
+    ownerId: scope.ownerId,
+    expertId,
+    record: JSON.stringify({
+      ownerKind: "session",
+      state: {
+        expertId,
+        enabled: true,
+        epoch: 13,
+        revision: 1,
+        updatedAt: "2026-10-31T00:00:00.000Z",
+      },
+    }),
+    revision: 1,
+    updatedAt: "2026-10-31T00:00:00.000Z",
+  };
+}
+
 expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
   it.effect("marks failed Expert recovery uncertain and blocks its next native startup", () =>
     Effect.gen(function* () {
@@ -12013,7 +12464,7 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
   );
 
   it.effect(
-    "submits selected startup catalog, resolves explicit entries, isolates selection, and recovers from pinned bytes",
+    "submits only selected metadata, resolves explicit entries, isolates selection, and recovers from pinned bytes",
     () =>
       Effect.gen(function* () {
         expertV2Runtime.codex.startSession.mockClear();
@@ -12051,7 +12502,7 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
           firstAdapterInput?.expertSession?.skillEntries?.map(({ entryPath }) => entryPath),
           ["skills/review/SKILL.md", "skills/plan/SKILL.md"],
         );
-        assert.ok(firstAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(!firstAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
         assert.ok(!firstAdapterInput?.expertSession?.persona.includes("PLAN BODY"));
         assert.ok(!firstAdapterInput?.expertSession?.persona.includes("UNSELECTED BODY"));
         assert.equal(initial.expertApplication, undefined);
@@ -12191,12 +12642,10 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
             {
               packageId: replacementPackage.package.packageId,
               entryPath: "skills/review/SKILL.md",
-              activation: "startup",
             },
             {
               packageId: replacementPackage.package.packageId,
               entryPath: "skills/plan/SKILL.md",
-              activation: "on-demand",
             },
           ]),
         );
@@ -12267,7 +12716,7 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
             skills: [],
             references: [],
             connections: [],
-            skillBindings: [{ skillId: skill.skillId, enabled: true, activation: "on-demand" }],
+            skillBindings: [{ skillId: skill.skillId, enabled: true }],
           }),
         );
         const binding = yield* Effect.promise(() => experts.prepareSnapshot(definition.id));
@@ -12353,6 +12802,134 @@ expertV2Runtime.layer("ProviderService Expert V2 skill index", (it) => {
   );
 });
 
+expertV2KnowledgeRuntime.layer("ProviderService pinned Run knowledge", (it) => {
+  it.effect(
+    "attaches verified knowledge to native startup and preserves its reference through recovery",
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* Effect.promise(() => expertV2FixturePromise);
+        const scope: MemoryScope = {
+          ownerId: "owner-provider-knowledge",
+          spaceId: "space-provider-knowledge",
+          expertId: fixture.session.expertId!,
+          projectId: "project-provider-knowledge",
+        };
+        const snapshotId = fixture.session.snapshotId;
+        setProviderKnowledgeFixture(fixture.session.expertId!, snapshotId, scope);
+        const threadId = asThreadId("expert-v2-knowledge-start-and-recovery");
+        const rootRunId = `run:${threadId}:knowledge`;
+        const assemblies = createRunSkillAssemblyStore(fixture.stateDir);
+        const assembly = yield* Effect.promise(() =>
+          assemblies.prepare({
+            threadId,
+            rootRunId,
+            baseSnapshotId: snapshotId,
+            createdAt: "2026-10-31T00:00:00.000Z",
+          }),
+        );
+        const manifest = buildProviderKnowledgeManifest({
+          id: "manifest-provider-knowledge",
+          rootRunId,
+          scope,
+          snapshotId,
+          skillAssemblyId: assembly.assemblyId,
+        });
+        providerKnowledgeManifest = manifest;
+        const knowledge: LearningSessionContext = {
+          manifestId: manifest.id,
+          rootRunId,
+          snapshotId,
+          scope,
+          knowledgeHash: manifest.hash,
+          learningEpoch: manifest.learningEpoch,
+        };
+        const boundAssembly = yield* Effect.promise(() =>
+          assemblies.attachKnowledge(rootRunId, knowledge),
+        );
+        const service = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const adapter = expertV2KnowledgeRuntime.omp;
+        adapter.startSession.mockClear();
+
+        yield* service.startSession(threadId, {
+          provider: "omp",
+          threadId,
+          runtimeMode: "full-access",
+          expertSession: boundAssembly.session,
+        });
+        const initialInput = adapter.startSession.mock.calls.at(-1)?.[0];
+        assert.deepEqual(initialInput?.expertSession?.knowledge, knowledge);
+        assert.include(
+          initialInput?.expertSession?.persona ?? "",
+          "Lead with the result and preserve evidence.",
+        );
+        assert.include(initialInput?.expertSession?.persona ?? "", "memory-rule-provider-test@2");
+        assert.include(initialInput?.expertSession?.persona ?? "", "learning tools");
+        const binding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.deepEqual(
+          asRuntimePayloadRecord(binding.runtimePayload).expertSession,
+          boundAssembly.session,
+        );
+
+        yield* adapter.stopSession(threadId);
+        yield* service.sendTurn({
+          threadId,
+          input: "Continue with pinned memory",
+          attachments: [],
+        });
+        const restoredInput = adapter.startSession.mock.calls.at(-1)?.[0];
+        assert.deepEqual(restoredInput?.expertSession?.knowledge, knowledge);
+        assert.include(
+          restoredInput?.expertSession?.persona ?? "",
+          "Lead with the result and preserve evidence.",
+        );
+        assert.include(restoredInput?.expertSession?.persona ?? "", "memory-rule-provider-test@2");
+
+        const driftThread = asThreadId("expert-v2-knowledge-hash-drift");
+        const driftRoot = `run:${driftThread}:knowledge`;
+        const driftAssembly = yield* Effect.promise(() =>
+          assemblies.prepare({
+            threadId: driftThread,
+            rootRunId: driftRoot,
+            baseSnapshotId: snapshotId,
+            createdAt: "2026-10-31T00:00:01.000Z",
+          }),
+        );
+        const driftManifest = buildProviderKnowledgeManifest({
+          id: "manifest-provider-knowledge-drift",
+          rootRunId: driftRoot,
+          scope,
+          snapshotId,
+          skillAssemblyId: driftAssembly.assemblyId,
+        });
+        const driftKnowledge: LearningSessionContext = {
+          manifestId: driftManifest.id,
+          rootRunId: driftRoot,
+          snapshotId,
+          scope,
+          knowledgeHash: driftManifest.hash,
+          learningEpoch: driftManifest.learningEpoch,
+        };
+        const boundDriftAssembly = yield* Effect.promise(() =>
+          assemblies.attachKnowledge(driftRoot, driftKnowledge),
+        );
+        providerKnowledgeManifest = { ...driftManifest, text: "mutated after authorization" };
+        const startCount = adapter.startSession.mock.calls.length;
+        const rejected = yield* Effect.exit(
+          service.startSession(driftThread, {
+            provider: "omp",
+            threadId: driftThread,
+            runtimeMode: "full-access",
+            expertSession: boundDriftAssembly.session,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(rejected));
+        assert.equal(adapter.startSession.mock.calls.length, startCount);
+        yield* service.stopSession({ threadId });
+      }),
+  );
+});
+
 expertV2ForkRuntime.layer("ProviderService Expert V2 runtime notices and fork Context", (it) => {
   it.effect(
     "keeps optional notices outside the pinned identity and preserves compiled instructions through a native fork",
@@ -12388,7 +12965,7 @@ expertV2ForkRuntime.layer("ProviderService Expert V2 runtime notices and fork Co
         assert.deepEqual(sourcePayload.expertSession, fixture.session);
         assert.deepEqual(sourcePayload.expertRuntimeNotices, [notice]);
         const sourceAdapterInput = expertV2ForkRuntime.codex.startSession.mock.calls.at(-1)?.[0];
-        assert.ok(sourceAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(!sourceAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
         assert.ok(sourceAdapterInput?.expertSession?.persona.includes(notice));
         assert.isUndefined(sourceAdapterInput?.expertRuntimeNotices);
         const sourceApplied = expertV2ForkContextRepository.applied.get(source);
@@ -12411,7 +12988,7 @@ expertV2ForkRuntime.layer("ProviderService Expert V2 runtime notices and fork Co
           attachments: [],
         });
         const resumedAdapterInput = expertV2ForkRuntime.codex.startSession.mock.calls.at(-1)?.[0];
-        assert.ok(resumedAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(!resumedAdapterInput?.expertSession?.persona.includes("REVIEW BODY"));
         assert.ok(resumedAdapterInput?.expertSession?.persona.includes(notice));
         const resumedApplied = expertV2ForkContextRepository.applied.get(source);
         const resumedInstructions = composeProviderBaseInstructions({
@@ -12450,7 +13027,7 @@ expertV2ForkRuntime.layer("ProviderService Expert V2 runtime notices and fork Co
         });
         assert.equal(fork?.threadId, target);
         const forkInput = expertV2ForkRuntime.codex.forkThread.mock.calls.at(-1)?.[0];
-        assert.ok(forkInput?.expertSession?.persona.includes("REVIEW BODY"));
+        assert.ok(!forkInput?.expertSession?.persona.includes("REVIEW BODY"));
         assert.ok(forkInput?.expertSession?.persona.includes(notice));
         assert.isUndefined(forkInput?.expertRuntimeNotices);
         const targetBinding = Option.getOrThrow(yield* directory.getBinding(target));

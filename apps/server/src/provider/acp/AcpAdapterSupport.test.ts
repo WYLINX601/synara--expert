@@ -154,6 +154,72 @@ describe("AcpAdapterSupport", () => {
     ).toBeUndefined();
   });
 
+  it("allows only exact host-identified learning calls for a live trusted turn", () => {
+    const options = [
+      { kind: "allow_always", optionId: "allow-session" },
+      { kind: "allow_once", optionId: "allow-this-call" },
+      { kind: "reject_once", optionId: "deny-now" },
+    ] as const;
+    const base = {
+      runtimeMode: "approval-required" as const,
+      interactionMode: "default" as const,
+      options,
+      activeTurn: true,
+      gatewaySessionActive: true,
+      learningKnowledgeCaptured: true,
+      toolCall: { metadata: { synaraToolName: "synara_learning_commit" } },
+    };
+
+    expect(resolveAcpPermissionPolicy(base)).toEqual({
+      outcome: "selected",
+      optionId: "allow-this-call",
+    });
+    expect(
+      resolveAcpPermissionPolicy({
+        ...base,
+        options: [{ kind: "allow_always", optionId: "allow-session" }],
+      }),
+    ).toBeUndefined();
+
+    for (const denied of [
+      { learningKnowledgeCaptured: false },
+      { gatewaySessionActive: false },
+      { activeTurn: false },
+      { toolCall: { kind: "execute", metadata: { synaraToolName: "synara_learning_commit" } } },
+      { toolCall: { title: "synara_learning_commit" } },
+      { toolCall: { metadata: { synaraToolName: "mcp__other__synara_learning_commit" } } },
+      {
+        autoApproveSynaraTools: true,
+        learningKnowledgeCaptured: false,
+        toolCall: { rawInput: { _toolName: "synara_learning_commit" } },
+      },
+    ]) {
+      expect(resolveAcpPermissionPolicy({ ...base, ...denied })).toBeUndefined();
+    }
+  });
+
+  it("keeps Plan and ownerless requests above the learning permission exception", () => {
+    const base = {
+      runtimeMode: "approval-required" as const,
+      activeTurn: true,
+      gatewaySessionActive: true,
+      learningKnowledgeCaptured: true,
+      options: [
+        { kind: "allow_once", optionId: "allow" },
+        { kind: "reject_once", optionId: "deny" },
+      ] as const,
+      toolCall: { metadata: { synaraToolName: "synara_learning_read" } },
+    };
+
+    expect(resolveAcpPermissionPolicy({ ...base, interactionMode: "plan" })).toEqual({
+      outcome: "selected",
+      optionId: "deny",
+    });
+    expect(resolveAcpPermissionPolicy({ ...base, interactionMode: undefined })).toEqual({
+      outcome: "cancelled",
+    });
+  });
+
   it("preserves ACP Plan, Auto, disabled, and namespace boundaries for Computer calls", () => {
     const options = [
       { kind: "allow_once", optionId: "allow-this-call" },

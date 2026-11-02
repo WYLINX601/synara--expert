@@ -88,9 +88,17 @@ import {
   createSkillPackageStore,
   type SkillPackageStore,
 } from "../../experts/SkillPackageStore.ts";
-import { inspectBmadWorkspace } from "../../experts/bmadSkillPreset.ts";
 import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore";
+import { ExpertLearningRepository } from "../../experts/evolution/ExpertLearningRepository";
+import { frozenLearningEntriesReader } from "../../experts/evolution/ExpertLearningState";
+import { acquireExpertLearningAdmission } from "../../experts/expertLearningCommit";
 import { expertSnapshotSession } from "../../experts/expertSnapshotSession";
+import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { SpaceMemoryService } from "../../spaceMemory/SpaceMemoryService.ts";
+import {
+  renderRuntimeKnowledge,
+  verifyRuntimeKnowledge,
+} from "../../workbench/host/runtimeKnowledge.ts";
 import { captureSkillEvolutionExecutionReader } from "../../workbench/host/skillEvolutionExecution";
 import {
   buildExpertSkillInstructions,
@@ -100,6 +108,7 @@ import {
   expertSkillEntryId,
   sha256Utf8,
 } from "../expertSkillCatalog.ts";
+import { skillRuntimeEntries, verifySkillRunResources } from "../../experts/skillRunResources";
 
 import {
   type ProviderAdapterError,
@@ -1049,12 +1058,23 @@ function runtimeLastErrorForEvent(event: ProviderRuntimeEvent): string | null | 
 
 const makeProviderService = (options?: ProviderServiceLiveOptions) =>
   Effect.gen(function* () {
+    const learningRepository = yield* Effect.serviceOption(ExpertLearningRepository);
+    const spaceMemoryService = yield* Effect.serviceOption(SpaceMemoryService);
+    const projectionSnapshotQuery = yield* Effect.serviceOption(ProjectionSnapshotQuery);
     const skillPackageStore: SkillPackageStore | undefined = options?.stateDir
       ? createSkillPackageStore(options.stateDir)
       : undefined;
     const expertStore = options?.stateDir ? createExpertStore(options.stateDir) : undefined;
     const runSkillAssemblyStore = options?.stateDir
-      ? createRunSkillAssemblyStore(options.stateDir)
+      ? createRunSkillAssemblyStore(
+          options.stateDir,
+          Option.isSome(learningRepository)
+            ? {
+                frozenEntries: (expertId, bindings) =>
+                  frozenLearningEntriesReader(learningRepository.value)(expertId, bindings ?? []),
+              }
+            : {},
+        )
       : undefined;
     const canonicalEventLogger =
       options?.canonicalEventLogger ??
@@ -1078,6 +1098,42 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           ),
         ),
       );
+    const withAutomaticLearningAdmission = <A, E, R>(
+      threadId: ThreadId,
+      operation: string,
+      action: Effect.Effect<A, E, R>,
+    ) =>
+      Effect.gen(function* () {
+        const execution = yield* evolutionExecutionFor(threadId, operation);
+        if (execution?.origin !== "automatic") return yield* action;
+        if (!options?.stateDir)
+          return yield* toValidationError(
+            operation,
+            "Automatic learning admission requires durable state.",
+          );
+        return yield* Effect.acquireUseRelease(
+          Effect.tryPromise({
+            try: () => acquireExpertLearningAdmission(options.stateDir!),
+            catch: (cause) =>
+              toValidationError(operation, "Cannot acquire automatic learning admission.", cause),
+          }),
+          () =>
+            Effect.gen(function* () {
+              const current = yield* evolutionExecutionFor(threadId, operation);
+              if (
+                current?.origin !== "automatic" ||
+                current.requestId !== execution.requestId ||
+                current.learningEpoch !== execution.learningEpoch
+              )
+                return yield* toValidationError(
+                  operation,
+                  "Automatic learning execution identity changed before admission.",
+                );
+              return yield* action;
+            }),
+          (release) => Effect.sync(release),
+        );
+      });
     const sameEvolutionModel = (expected: ModelSelection, actual: ModelSelection | undefined) =>
       actual !== undefined &&
       expected.provider === actual.provider &&
@@ -1086,10 +1142,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       isDeepStrictEqual(expected.options ?? {}, actual.options ?? {});
     const readVerifiedExpertSkillBody = async (
       entry: ResolvedExpertSkillEntry,
-      knownPackage?: Awaited<ReturnType<SkillPackageStore["read"]>>,
     ): Promise<string> => {
       if (!skillPackageStore) throw new Error("Expert V2 skill package storage is unavailable.");
-      const manifest = knownPackage ?? (await skillPackageStore.read(entry.packageId));
+      const manifest = await skillPackageStore.read(entry.packageId);
       const stat = await fs.lstat(entry.path);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > EXPERT_SKILL_ENTRY_MAX_BYTES) {
         throw new Error(`Expert skill exceeds 64 KiB or is not a regular file: ${entry.entryPath}`);
@@ -1114,6 +1169,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       expertSession: ProviderExpertSession | undefined,
       input: {
         readonly operation: string;
+        readonly threadId: string;
         readonly cwd?: string;
         readonly runtimeNotices?: ReadonlyArray<string>;
       },
@@ -1163,24 +1219,37 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             );
           }
 
-          const entries = expertSession.skillEntries!;
-          const selections = entries.map(({ packageId, entryPath, activation }) => ({
-            packageId,
-            entryPath,
-            activation,
-          }));
-          const resolved = (await skillPackageStore.resolveSelections(selections)).map((entry) => {
-            const managedSkillId = entries.find(
-              (selected) =>
-                selected.packageId === entry.packageId && selected.entryPath === entry.entryPath,
-            )?.managedSkillId;
-            return { ...entry, ...(managedSkillId ? { managedSkillId } : {}) };
-          });
-          if (!isDeepStrictEqual(resolved, entries)) {
-            throw new Error(
-              "Persisted Expert V2 entry metadata or paths do not match its packages.",
+          let runtimeKnowledgeInstructions = "";
+          if (expertSession.knowledge) {
+            if (
+              Option.isNone(spaceMemoryService) ||
+              Option.isNone(learningRepository) ||
+              Option.isNone(projectionSnapshotQuery)
+            ) {
+              throw new Error(
+                "The persisted Run has a Space Memory reference, but its verification services are unavailable.",
+              );
+            }
+            const manifest = await Effect.runPromise(
+              verifyRuntimeKnowledge({
+                threadId: input.threadId,
+                expertSession,
+                memory: spaceMemoryService.value,
+                learningRepository: learningRepository.value,
+                projection: projectionSnapshotQuery.value,
+              }),
             );
+            if (!manifest) throw new Error("The persisted Run knowledge manifest is unavailable.");
+            runtimeKnowledgeInstructions = renderRuntimeKnowledge(manifest);
           }
+
+          const entries = expertSession.skillEntries!;
+          await verifySkillRunResources(
+            options!.stateDir!,
+            entries,
+            expertSession.skillResourceRefs,
+          );
+          const resolved = [...entries];
           const canonicalSkills = resolved.map(({ name, path: skillPath }) => ({
             name,
             path: skillPath,
@@ -1191,35 +1260,15 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             );
           }
 
-          const packages = new Map(
-            await Promise.all(
-              [...new Set(resolved.map((entry) => entry.packageId))].map(
-                async (packageId) => [packageId, await skillPackageStore.read(packageId)] as const,
-              ),
-            ),
-          );
-          const startupBodies = new Map<string, string>();
-          for (const entry of resolved) {
-            if (entry.activation !== "startup") continue;
-            startupBodies.set(
-              expertSkillEntryId(entry),
-              await readVerifiedExpertSkillBody(entry, packages.get(entry.packageId)),
-            );
-          }
-
           const compiled = buildExpertSkillInstructions({
             snapshotId: expertSession.snapshotId,
-            entries: resolved,
-            bodies: startupBodies,
+            entries: skillRuntimeEntries(expertSession),
           });
-          const bmad = await inspectBmadWorkspace(resolved, input.cwd ?? options?.defaultCwd);
-          if (bmad?.issues.length) {
-            throw new Error(bmad.issues.join(" "));
-          }
-          const bmadEvidence = bmad
-            ? `BMad workspace preflight evidence (this does not grant tools or authorization): ${JSON.stringify({ projectRoot: bmad.projectRoot, configurationHash: bmad.configurationHash })}.`
-            : "";
-          const instructions = [compiled.text, bmadEvidence, runtimeNoticeInstructions]
+          const instructions = [
+            compiled.text,
+            runtimeKnowledgeInstructions,
+            runtimeNoticeInstructions,
+          ]
             .filter(Boolean)
             .join("\n\n");
           return {
@@ -1322,19 +1371,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             };
           }
 
-          const startupBodies = new Map<string, string>();
-          for (const entry of selectedEntries) {
-            if (entry.activation === "startup") {
-              startupBodies.set(
-                expertSkillEntryId(entry),
-                await readVerifiedExpertSkillBody(entry),
-              );
-            }
-          }
           const compiled = buildExpertSkillInstructions({
             snapshotId: input.expertSession!.snapshotId,
-            entries: selectedEntries,
-            bodies: startupBodies,
+            entries: skillRuntimeEntries(input.expertSession!),
           });
           const explicitBlocks = await Promise.all(
             expertSkills.map(async (entry) => {
@@ -3190,6 +3229,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               persistedExpertSession ?? undefined,
               {
                 operation: input.operation,
+                threadId,
                 ...(persistedCwd ? { cwd: persistedCwd } : {}),
                 runtimeNotices: persistedExpertRuntimeNotices,
               },
@@ -3826,7 +3866,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             !evolution ||
             !providerBinding ||
             persistedPurpose !== "skill-evolution" ||
-            !["pi", "claudeAgent"].includes(providerBinding.provider) ||
+            !["pi", "claudeAgent", "omp"].includes(providerBinding.provider) ||
             providerBinding.provider !== evolution.modelSelection.provider ||
             (providerBinding.providerInstanceId ?? providerBinding.provider) !==
               (evolution.modelSelection.instanceId ?? evolution.modelSelection.provider) ||
@@ -3870,6 +3910,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           persistedExpertSession ?? undefined,
           {
             operation: input.operation,
+            threadId: input.threadId,
             ...(boundCwd ? { cwd: boundCwd } : {}),
             runtimeNotices: persistedExpertRuntimeNotices,
           },
@@ -4004,7 +4045,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           if (
             !evolution ||
             input.executionPurpose !== "skill-evolution" ||
-            !["pi", "claudeAgent"].includes(input.provider) ||
+            !["pi", "claudeAgent", "omp"].includes(input.provider) ||
             !sameEvolutionModel(evolution.modelSelection, input.modelSelection) ||
             input.provider !== evolution.modelSelection.provider ||
             (input.providerInstanceId ?? input.modelSelection?.instanceId ?? input.provider) !==
@@ -4049,6 +4090,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           );
         const verifiedExpertSession = yield* prepareExpertSession(input.expertSession, {
           operation: "ProviderService.startSession",
+          threadId,
           ...(input.cwd ? { cwd: input.cwd } : {}),
           runtimeNotices: input.expertRuntimeNotices ?? [],
         });
@@ -4314,10 +4356,14 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 // The lifecycle is updated inside observeProviderStartup; these taps
                 // only log the already-recorded outcome.
                 const started = yield* observeProviderStartup(
-                  startAdapterWithStaleDevinFallback(
-                    adapter,
-                    resolvedAdapterStartInput,
-                    preparedStart,
+                  withAutomaticLearningAdmission(
+                    threadId,
+                    "ProviderService.startSession",
+                    startAdapterWithStaleDevinFallback(
+                      adapter,
+                      resolvedAdapterStartInput,
+                      preparedStart,
+                    ),
                   ),
                   { lifecycle: startupLifecycle, timeout: PROVIDER_START_SESSION_TIMEOUT },
                 ).pipe(
@@ -4561,6 +4607,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                           previousExpertSession ?? undefined,
                           {
                             operation: "ProviderService.startSession.restore",
+                            threadId,
                             ...(previousCwd ? { cwd: previousCwd } : {}),
                             runtimeNotices: previousExpertRuntimeNotices,
                           },
@@ -4971,6 +5018,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           effectiveExpertSession ?? undefined,
           {
             operation: "ProviderService.forkThread",
+            threadId: input.threadId,
             ...(targetCwd ? { cwd: targetCwd } : {}),
             runtimeNotices: effectiveExpertRuntimeNotices,
           },
@@ -5433,9 +5481,15 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 : {}),
             };
             if (dispatchOptions?.beforeDispatch) yield* dispatchOptions.beforeDispatch;
-            const turn = yield* dispatchOptions
-              ? routed.adapter.sendTurn(routedInput, dispatchOptions)
-              : routed.adapter.sendTurn(routedInput);
+            const turn = yield* withAutomaticLearningAdmission(
+              input.threadId,
+              "ProviderService.sendTurn",
+              Effect.suspend(() =>
+                dispatchOptions
+                  ? routed.adapter.sendTurn(routedInput, dispatchOptions)
+                  : routed.adapter.sendTurn(routedInput),
+              ),
+            );
             const persistenceInput: StartedTurnPersistenceInput = {
               threadId: input.threadId,
               provider: routed.adapter.provider,
@@ -5540,9 +5594,16 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 : {}),
             };
             if (dispatchOptions?.beforeDispatch) yield* dispatchOptions.beforeDispatch;
-            const turn = yield* dispatchOptions
-              ? routed.adapter.steerTurn(routedInput, dispatchOptions)
-              : routed.adapter.steerTurn(routedInput);
+            const nativeSteerTurn = routed.adapter.steerTurn;
+            const turn = yield* withAutomaticLearningAdmission(
+              input.threadId,
+              "ProviderService.steerTurn",
+              Effect.suspend(() =>
+                dispatchOptions
+                  ? nativeSteerTurn(routedInput, dispatchOptions)
+                  : nativeSteerTurn(routedInput),
+              ),
+            );
             const persistenceInput: StartedTurnPersistenceInput = {
               threadId: input.threadId,
               provider: routed.adapter.provider,

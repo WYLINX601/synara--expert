@@ -1,5 +1,25 @@
 # Synara 专家技能索引与共享版本包研发方案
 
+## 2026-10-29 优化候选：内容、索引与原生执行分层
+
+本轮基于 `f879925a4`，实现和实际检查统一见[优化验收](./skill-management-optimization-acceptance-2026-10-29.md)。下列规则描述本轮候选，不自动成为 main、安装版或跨平台验收结论。
+
+- **内容与索引**：既有包 ID 仍由内容清单决定。读取只验证资源路径、类型、大小、哈希、执行位和统计；入口名称、描述、解析字段和诊断从已验证字节重建。旧清单的派生字段不是完整性依据，原文件不重写。安全路径与容量仍严格检查，目标平台名称限制不扩大到所有宿主。
+- **固定引用**：快照、Run 恢复和 Provider 二次校验共用包／入口／文件引用验证。已持久化 Run 保留其解析元数据和策略，continuation 不接受新的默认策略覆盖；新独立 Run 才解析当前库头版本。既有指纹保持兼容。
+- **完整交付**：公共投影只提供完整资源树和选定入口身份，不删除未选的 `SKILL.md`。Claude 插件、Agent 定义、名称空间与 manifest 处理留在 Claude 适配；其它端使用各自原生允许名单或路径配置，并确认实际启用集合。不能精确筛选时明确报告，不自动扩大入口。
+- **绑定与资源**：`selectionScope` 缺省为 `entry`，`package` 按锚点当前包展开。100 条配置绑定与最多 5000 个展开入口分别检查。`resourceMode` 缺省共享只读；`run-private` 生成独立文件的持久工作树，同包按启用绑定统一模式。私有根引用及原所有者随跨 Worker continuation 继承，原生实际读写同一工作树，恢复不覆盖输出；固定输入漂移单独报告，不标为源包损坏。
+- **当前配置**：本功能尚未发布，直接使用当前技能库绑定。删除旧配置转换入口、接口、CLI 命令、映射摘要和采用时兼容分支，不建立自动迁移；普通绑定继续使用修订检查和持久操作回执。
+- **界面收敛**：用户否决新增板块、技术选项和更多菜单。沿用原有技能选择与启停；专家直接编辑当前技能库绑定，诊断只在现有详情或检查中按需显示。整套选择继续使用原有多选，运行器和资源模式能力留在后台及高级 CLI。
+- **提炼与采用**：候选采用直接针对保存的技能库绑定；新增与派生继续按同一操作收据恢复保存和绑定，不经过旧配置转换。OMP 仅在已注册用途下启用精确 bundle／私有 preload 约束，并在原生会话创建后及发送前验证空工具和固定系统提示；与普通 Gateway、MCP 及环境技能分开。Codex 提炼仍未支持。Pi／OMP 的显式技能引用只交付已核对的名称和实际资源路径，不以引用文本替代原生能力执行证据。
+
+Run 私有工作树包含用户产生的输出，不作为可任意重建的缓存。引用仍在时保留工作树和源包；本轮没有建立自动清理历史输出的服务。
+
+2026-10-29 界面与元数据收敛：专家、专家团、技能复用同一弹窗表层，草稿／CAS／路由保护保留各自归属。技能定义与列表契约移除 `createdBy`，写入、筛选、CLI 和界面同步删除；`createdAt` 与用于鉴权及操作身份校验的 actor 保留。不新增数据转换或历史记录批量改写。下方历史方案中的添加者能力不再适用。
+
+2026-10-29 用户最终取消“启动时加载”：新 `ExpertSkillBinding`、`ExpertSkillSelection` 不含 `activation`，严格作者接口拒绝该退役字段，CLI 删除 `--activation`；绑定展开不再区分锚点启动、也无最多一个启动技能的限制。公共运行接入只提交名称、用途和固定入口的目录，删除正文预加载及 startup-only BMad 工作区预检；显式指定、原生工具／子代理／资源声明按原接入保留。
+
+不可变快照／Run 的旧选择标记只作为历史数据读取，以保持旧 ID、内容指纹与未决初始化副作用保护；新原生入口与回执不产生该字段，不据此调用或加载正文。可变定义、操作日志和候选恢复的绑定读入时投影当前字段，保留范围、资源方式、启用状态及原请求身份；不新增转换操作、不批量改写历史快照或实例数据。下方旧方案中的启动加载与加载时机控制已退役。
+
 <a id="iteration-plan-20261026"></a>
 
 ## 2026-10-26 研发修订方案：四端可用、管理效率与按运行更新
@@ -30,7 +50,7 @@
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SkillDefinition` 扩展         | 增加可缺省的 `createdAt/createdBy` 等元数据；新记录按真实调用上下文写入，旧记录未知，不从更新时间猜测；创建者不引入工作区用户表                                                                                  |
 | `SkillListQuery/SkillListItem` | 服务端聚合 Skill、来源细类及 Expert 绑定摘要；返回匹配的库/Expert revision 信息；桌面与 CLI 使用同一谓词、统计和排序口径                                                                                         |
-| `SkillBindingBatchPlan/Result` | N 个 Skill/M 个 Expert、目标 revision、计划新增/已存在/需转换项及逐目标执行结果；服务端拥有计划校验和提交                                                                                                        |
+| `SkillBindingBatchPlan/Result` | N 个 Skill/M 个 Expert、目标 revision、计划新增/已存在项及逐目标执行结果；服务端拥有计划校验和提交                                                                                                               |
 | `RunSkillAssembly`             | 根 Run 的执行准备记录，含 rootRunId、assemblyId、基础 Expert snapshot ID、绑定来源 Expert revision、初始化意图/状态及已解析 session；session 固定稳定 Skill ID、packageId/entryPath/内容 hash、原生语义/策略版本 |
 | 现有不可变包                   | 继续存储完整内容，不直接修改旧包；手工编辑和来源刷新发布新包，只原子切换稳定头引用                                                                                                                               |
 | 管理命令能力                   | 服务端统一执行业务规则，桌面/RPC、CLI 及将来管理 Agent 共用；本轮不增加新的自动管理 Agent 或 MCP 授权范围                                                                                                        |
@@ -99,9 +119,9 @@ SDK 的主会话 Skill allowlist 不自动等于子代理排他继承；已核�
 
 新增批量追加命令，不仅前端循环保存：输入确定 Skill ID 集合、目标 Expert revision 和 requestId；dry-run 与 apply 均由同一服务端规则生成计划。已有绑定跳过，不重启 disabled；新绑定 enabled + on-demand；保留单 Expert startup 约束与所有无关字段。
 
-每个 Expert 的新增集合在现有 ExpertStore 的 CAS/队列内一次提交，多 Expert 逐项执行而非宣称跨对象事务。全部先做结构校验；每个提交点重验目标、Skill 存在与 revision；冲突不覆盖其他会话更改。重试相同 requestId 幂等，部分成功重试只处理未完成项。旧式绑定需要显式转换时返回 `needs_conversion`，不清空旧选择。
+每个 Expert 的新增集合在现有 ExpertStore 的 CAS/队列内一次提交，多 Expert 逐项执行而非宣称跨对象事务。全部先做结构校验；每个提交点重验目标、Skill 存在与 revision；冲突不覆盖其他会话更改。重试相同 requestId 幂等，部分成功重试只处理未完成项。当前配置直接使用技能库绑定，不提供旧配置转换状态。
 
-结果至少含 `expertId/status/oldRevision/newRevision/addedSkillIds/skippedSkillIds/error`；状态区分 applied/unchanged/conflict/needs_conversion/failed。桌面确认页、批量结果和 CLI 使用相同结果对象，刷新双方缓存及使用统计。筛选变化不改变已确认的批量目标集合。
+结果至少含 `expertId/status/oldRevision/newRevision/addedSkillIds/skippedSkillIds/error`；状态区分 applied/unchanged/conflict/failed。桌面确认页、批量结果和 CLI 使用相同结果对象，刷新双方缓存及使用统计。筛选变化不改变已确认的批量目标集合。
 
 ### 7. G7：CLI 与未来管理 Agent 接口
 
@@ -150,7 +170,7 @@ CLI 鉴权增加明确的本机 management 配对用途，不能只复用现有�
 | 更新时序     | A 用 r3；更新为 r4；A 审批/恢复/自动 goal/同工作项 Hub 续跑仍 r3，未启动 B 和新根 Run C 用 r4；初始化后、prompt 前崩溃不换版/不自动重复未知副作用       |
 | 更新原子性   | 名称/正文/支持文件同版；ID/标签/绑定保留；本地编辑覆盖确认；固定来源、不变、无源、损坏、同名和 CAS 冲突均有确定结果                                     |
 | G4           | 每个筛选维度、AND/OR、disabled 计数、未知创建信息、同值排序、筛选外选择及 CLI 一致性                                                                    |
-| G6           | N×M 追加、重复调用、已有 disabled、startup 不变、CAS 冲突、部分成功重试及 legacy needs_conversion                                                       |
+| G6           | N×M 追加、重复调用、已有 disabled、startup 不变、CAS 冲突、部分成功重试及绑定资源方式保留                                                               |
 | G7           | owner 首次授权、普通 MCP/client 无管理权、配对私存/过期撤销/错实例、窄绑定权限、JSON 无日志污染、退出码、stdin/文件、二进制、dry-run 无写入和无脚本执行 |
 
 开发时先跑受影响 Vitest/真实编辑器与管理流程回归；最终 fmt:check、lint、typecheck、完整 bun run test、受影响 Chromium 和 boundary 检查。涉及进程边界运行 windows-runtime:check；涉及迁移运行 migrations:check。同步 integration-points 清单及架构标准中的实际宿主能力接缝，不复制整份规范到功能模块。

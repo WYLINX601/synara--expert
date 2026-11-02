@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
-import { Layer } from "effect";
+import { LearningSessionContext } from "@synara/contracts";
+import { Layer, Schema } from "effect";
 
 import {
   AgentGatewaySessionRegistry,
@@ -18,6 +19,16 @@ const PROVIDER_SESSION_CAPABILITIES = [
   "browser:control",
   "device:control",
 ] as const;
+const LEARNING_PROVIDERS = new Set(["omp", "pi"]);
+
+function trustedLearningSession(
+  provider: string,
+  value: unknown,
+): AgentGatewaySessionIdentity["learningSession"] {
+  if (!LEARNING_PROVIDERS.has(provider) || !Schema.is(LearningSessionContext)(value))
+    return undefined;
+  return Object.freeze({ ...value, scope: Object.freeze({ ...value.scope }) });
+}
 
 export function makeAgentGatewaySessionRegistry(options?: {
   readonly now?: () => number;
@@ -74,6 +85,13 @@ export function makeAgentGatewaySessionRegistry(options?: {
       const issuedAt = now();
       const sessionKey = `gateway-session:${randomId()}`;
       const token = `sagw_session_${randomId()}`;
+      const learningSession = trustedLearningSession(provider, issueOptions?.learningSession);
+      const additionalCapabilities = (issueOptions?.additionalCapabilities ?? []).filter(
+        (capability) =>
+          capability !== "learning:read" &&
+          capability !== "learning:write" &&
+          (capability !== "computer:control" || !disabledComputerThreads.has(threadId)),
+      );
       const identity: AgentGatewaySessionIdentity = {
         sessionKey,
         threadId,
@@ -81,11 +99,15 @@ export function makeAgentGatewaySessionRegistry(options?: {
         issuedAt,
         capabilities: new Set<AgentGatewayCapability>([
           ...PROVIDER_SESSION_CAPABILITIES,
-          ...(issueOptions?.additionalCapabilities ?? []).filter(
-            (capability) =>
-              capability !== "computer:control" || !disabledComputerThreads.has(threadId),
-          ),
+          ...additionalCapabilities,
+          ...(learningSession
+            ? [
+                "learning:read" as const,
+                ...(learningSession.learningEpoch === undefined ? [] : ["learning:write" as const]),
+              ]
+            : []),
         ]),
+        ...(learningSession ? { learningSession } : {}),
       };
       const registered: RegisteredSession = {
         identity,

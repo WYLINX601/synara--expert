@@ -30,6 +30,9 @@ import { ProviderRuntimeEventRepositoryLive } from "../persistence/Layers/Provid
 import { ExpertAppliedRuntimeRepositoryLive } from "../persistence/Layers/ExpertAppliedRuntimeRecords";
 import { ContextRepositoryLive } from "../context/ContextRepository";
 import { SkillEvolutionRepositoryLive } from "../workbench/host/skillEvolutionPersistence";
+import { ExpertLearningRepositoryLive } from "../workbench/host/expertLearningPersistence";
+import { SpaceMemoryLive } from "../workbench/host/spaceMemoryPersistence";
+import { OrchestrationProjectionSnapshotQueryLive } from "../orchestration/Layers/ProjectionSnapshotQuery";
 
 export function makeServerProviderLayer(
   options: {
@@ -53,6 +56,9 @@ export function makeServerProviderLayer(
       : undefined;
     const providerSessionDirectoryLayer = ProviderSessionDirectoryLive.pipe(
       Layer.provide(ProviderSessionRuntimeRepositoryLive),
+    );
+    const projectionSnapshotQueryLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+      Layer.provide(Layer.succeed(ServerSettingsService, serverSettings)),
     );
     // Gives gateway-capable sessions their thread-scoped synara_* credentials.
     // OpenCode isolates managed servers before installing MCP; Pi projects
@@ -120,6 +126,9 @@ export function makeServerProviderLayer(
       Layer.provide(ExpertAppliedRuntimeRepositoryLive),
       Layer.provideMerge(ContextRepositoryLive),
       Layer.provideMerge(SkillEvolutionRepositoryLive),
+      Layer.provideMerge(ExpertLearningRepositoryLive),
+      Layer.provideMerge(SpaceMemoryLive),
+      Layer.provideMerge(projectionSnapshotQueryLayer),
       // Provider sessions resolve persisted provider-instance settings before launch.
       Layer.provide(Layer.succeed(ServerSettingsService, serverSettings)),
       Layer.provide(ServerSecretStoreLive),

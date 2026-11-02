@@ -28,14 +28,12 @@ export interface SkillLibraryFilters {
   usage: "all" | "used" | "unused";
   sources: SkillLibrarySourceFilter[];
   expertIds: string[];
-  creators: string[];
   tags: string[];
 }
 
 export interface SkillLibraryColumns {
   usage: boolean;
   source: boolean;
-  creator: boolean;
   updated: boolean;
   created: boolean;
 }
@@ -43,7 +41,6 @@ export interface SkillLibraryColumns {
 export const DEFAULT_SKILL_LIBRARY_COLUMNS: SkillLibraryColumns = {
   usage: true,
   source: false,
-  creator: true,
   updated: true,
   created: false,
 };
@@ -68,7 +65,6 @@ const SOURCE_OPTIONS: readonly { value: SkillLibrarySourceFilter; label: string 
 const COLUMN_OPTIONS: readonly { value: keyof SkillLibraryColumns; label: string }[] = [
   { value: "usage", label: "被谁使用" },
   { value: "source", label: "来源" },
-  { value: "creator", label: "添加者" },
   { value: "updated", label: "更新时间" },
   { value: "created", label: "创建时间" },
 ];
@@ -127,7 +123,6 @@ export function SkillLibraryToolbar({
   filters,
   onFiltersChange,
   experts,
-  creators,
   tags,
   sort,
   onSortChange,
@@ -139,7 +134,6 @@ export function SkillLibraryToolbar({
   filters: SkillLibraryFilters;
   onFiltersChange: (value: SkillLibraryFilters) => void;
   experts: readonly { id: string; name: string }[];
-  creators: readonly string[];
   tags: readonly string[];
   sort: NonNullable<SkillLibraryQuery["sort"]>;
   onSortChange: (value: NonNullable<SkillLibraryQuery["sort"]>) => void;
@@ -150,7 +144,6 @@ export function SkillLibraryToolbar({
     Number(filters.usage !== "all") +
     filters.sources.length +
     filters.expertIds.length +
-    filters.creators.length +
     filters.tags.length;
   const sortLabel = SORT_OPTIONS.find((option) => option.value === sort.field)!.label;
   const DirectionIcon = sort.direction === "asc" ? ArrowUpIcon : ArrowDownIcon;
@@ -212,15 +205,6 @@ export function SkillLibraryToolbar({
                 onChange={(expertIds) => onFiltersChange({ ...filters, expertIds })}
               />
               <FilterChoices
-                title="添加者"
-                options={creators.map((creator) => ({
-                  value: creator,
-                  label: creator === "unknown" ? "未知" : creator,
-                }))}
-                selected={filters.creators}
-                onChange={(nextCreators) => onFiltersChange({ ...filters, creators: nextCreators })}
-              />
-              <FilterChoices
                 title="标签"
                 options={tags.map((tag) => ({ value: tag, label: tag }))}
                 selected={filters.tags}
@@ -236,7 +220,6 @@ export function SkillLibraryToolbar({
                       usage: "all",
                       sources: [],
                       expertIds: [],
-                      creators: [],
                       tags: [],
                     })
                   }

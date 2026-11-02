@@ -10,6 +10,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   readFileSync,
   readdirSync,
   readlinkSync,
@@ -41,6 +42,7 @@ import {
 } from "./codexProcessEnv";
 import {
   buildFixedNativeCodexConfigOverrides,
+  fixedCodexSkillRoots,
   buildCodexCollaborationMode,
   buildCodexThreadOpenRequest,
   resolveCodexThreadOpenMinimumVersion,
@@ -78,6 +80,7 @@ import {
   CODEX_CLI_UNPARSEABLE_VERSION_MESSAGE,
 } from "./provider/codexCliVersion.ts";
 import { createSkillPackageStore } from "./experts/SkillPackageStore.ts";
+import type { FixedSkillProjection } from "./provider/fixedSkillProjection.ts";
 
 const asThreadId = (value: string): ThreadId => ThreadId.makeUnsafe(value);
 
@@ -94,6 +97,7 @@ function createSyntheticCodexAppServer(options?: {
   readonly expertSkills?: ReadonlyArray<{ readonly name: string; readonly path: string }>;
   readonly fixedNative?: {
     readonly ambient: Array<{ name: string; path: string }>;
+    readonly canonicalizePaths?: boolean;
     readonly wrongConfig?: boolean;
     readonly wrongPlugins?: boolean;
     readonly impostor?: boolean;
@@ -187,13 +191,22 @@ function createSyntheticCodexAppServer(options?: {
           );
           const projected = options?.fixedNative
             ? extraRoots.flatMap((root) => {
-                const plugin = JSON.parse(
-                  readFileSync(path.join(path.dirname(root), ".claude-plugin/plugin.json"), "utf8"),
-                ) as { name: string };
-                return readdirSync(root).map((entry) => ({
-                  name: `${plugin.name}:${entry}`,
-                  path: path.join(root, entry, "SKILL.md"),
-                }));
+                const skills: Array<{ name: string; path: string }> = [];
+                const walk = (directory: string): void => {
+                  for (const item of readdirSync(directory, { withFileTypes: true })) {
+                    const file = path.join(directory, item.name);
+                    if (item.isDirectory()) {
+                      walk(file);
+                    } else if (item.isFile() && item.name === "SKILL.md") {
+                      const source = readFileSync(file, "utf8");
+                      const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/u.exec(source)?.[1] ?? "";
+                      const name = /^name:\s*(.+?)\s*$/mu.exec(frontmatter)?.[1]?.trim();
+                      skills.push({ name: name ?? path.basename(directory), path: file });
+                    }
+                  }
+                };
+                walk(root);
+                return skills;
               })
             : [];
           const native = options?.fixedNative
@@ -205,6 +218,9 @@ function createSyntheticCodexAppServer(options?: {
                   : []),
               ].map((skill) => ({
                 ...skill,
+                ...(options.fixedNative?.canonicalizePaths && existsSync(skill.path)
+                  ? { path: realpathSync(skill.path) }
+                  : {}),
                 enabled: !input?.strictSkillDisabledPaths?.includes(skill.path),
               }))
             : (options?.expertSkills ?? []);
@@ -2446,7 +2462,7 @@ describe("startSession", () => {
             {
               packageId: `pkg_${"a".repeat(64)}`,
               entryPath: "skills/reviewer/SKILL.md",
-              activation: "startup",
+
               name: "reviewer",
               description: "Review safely.",
               path: fixedEntryPath,
@@ -2468,7 +2484,7 @@ describe("startSession", () => {
       expect(session.skillApplication).toMatchObject({
         mode: "catalog",
         snapshotId: "snapshot-expert-v2",
-        startupEntryIds: [`pkg_${"a".repeat(64)}#skills/reviewer/SKILL.md`],
+
         lifecycleGeneration: "generation-expert-v2",
         instructionsHash: createHash("sha256")
           .update(startInstructions ?? "", "utf8")
@@ -3258,6 +3274,117 @@ describe("startSession", () => {
 });
 
 describe("sendTurn", () => {
+  it("maps fixed Skill references to their runtime roots for send and steer", async () => {
+    const { manager, context, sendRequest } = createSendTurnHarness();
+    const sourcePath = "/state/experts/skill-packages/pkg_a/content/skills/reviewer/SKILL.md";
+    const runtimePath =
+      "/state/experts/run-skill-resources/run_a/pkg_a/content/skills/reviewer/SKILL.md";
+    const projection: FixedSkillProjection = {
+      root: "/state/codex-fixed-view",
+      skillRoots: ["/state/runtime-package"],
+      packages: [],
+      entries: [
+        {
+          packageId: `pkg_${"a".repeat(64)}`,
+          entryPath: "skills/reviewer/SKILL.md",
+          name: "reviewer",
+          nativeName: "reviewer",
+          path: runtimePath,
+          originalPath: sourcePath,
+          runtimePath,
+          sha256: "a".repeat(64),
+          originalName: "reviewer",
+        },
+      ],
+    };
+    Object.assign(context, {
+      fixedExpertSession: { skillPolicy: FIXED_EXPERT_SKILL_POLICY },
+      fixedSkillProjection: projection,
+    });
+    vi.spyOn(
+      manager as unknown as {
+        registerSessionSkillRoots: (context: unknown, session: unknown) => Promise<void>;
+      },
+      "registerSessionSkillRoots",
+    ).mockResolvedValue();
+
+    await manager.sendTurn({
+      threadId: asThreadId("thread_1"),
+      input: "Use the selected skill",
+      skills: [{ name: "reviewer", path: sourcePath }],
+    });
+
+    expect(sendRequest).toHaveBeenCalledWith(
+      context,
+      "turn/start",
+      expect.objectContaining({
+        input: expect.arrayContaining([{ type: "skill", name: "reviewer", path: runtimePath }]),
+      }),
+    );
+
+    context.session.status = "running";
+    context.session.activeTurnId = "turn_active";
+    sendRequest.mockResolvedValueOnce({ turnId: "turn_steered" });
+    await manager.steerTurn({
+      threadId: asThreadId("thread_1"),
+      input: "Continue with that skill",
+      skills: [{ name: "reviewer", path: sourcePath }],
+    });
+    expect(sendRequest).toHaveBeenCalledWith(
+      context,
+      "turn/steer",
+      expect.objectContaining({
+        input: expect.arrayContaining([{ type: "skill", name: "reviewer", path: runtimePath }]),
+      }),
+    );
+  });
+
+  it("rejects fixed Skill references outside the selected assembly", async () => {
+    const { manager, context, sendRequest } = createSendTurnHarness();
+    Object.assign(context, {
+      fixedExpertSession: { skillPolicy: FIXED_EXPERT_SKILL_POLICY },
+      fixedSkillProjection: {
+        root: "/state/codex-fixed-view",
+        skillRoots: [],
+        packages: [],
+        entries: [],
+      } satisfies FixedSkillProjection,
+    });
+    vi.spyOn(
+      manager as unknown as {
+        registerSessionSkillRoots: (context: unknown, session: unknown) => Promise<void>;
+      },
+      "registerSessionSkillRoots",
+    ).mockResolvedValue();
+
+    await expect(
+      manager.sendTurn({
+        threadId: asThreadId("thread_1"),
+        input: "Use a different skill",
+        skills: [{ name: "not-selected", path: "/outside/SKILL.md" }],
+      }),
+    ).rejects.toThrow(/unselected Skill/u);
+    expect(sendRequest).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary task Skill references unchanged", async () => {
+    const { manager, context, sendRequest } = createSendTurnHarness();
+    await manager.sendTurn({
+      threadId: asThreadId("thread_1"),
+      input: "Use this task skill",
+      skills: [{ name: "task-skill", path: "/task/SKILL.md" }],
+    });
+    expect(sendRequest).toHaveBeenCalledWith(
+      context,
+      "turn/start",
+      expect.objectContaining({
+        input: expect.arrayContaining([
+          { type: "skill", name: "task-skill", path: "/task/SKILL.md" },
+        ]),
+      }),
+    );
+  });
+
   it("keeps collaboration receiver routing for live children across a new turn", async () => {
     const { manager, context } = createSendTurnHarness();
     context.collabReceiverTurns.set("live-child", "old-turn");
@@ -7662,6 +7789,49 @@ describe("collab child routing after the parent turn ends", () => {
 });
 
 describe("Codex fixed native Skill wiring", () => {
+  it("maps root and nested Skill paths to safe native containers", () => {
+    const packageRoot = path.resolve(os.tmpdir(), "codex-fixed-roots", "pkg");
+    const sourceRoot = path.join(packageRoot, "content");
+    const projection = {
+      packages: [
+        {
+          packageId: "pkg_fixture",
+          sourceRoot,
+          contentRoot: sourceRoot,
+        },
+      ],
+      entries: [
+        {
+          packageId: "pkg_fixture",
+          entryPath: "SKILL.md",
+          path: path.join(sourceRoot, "SKILL.md"),
+        },
+        {
+          packageId: "pkg_fixture",
+          entryPath: "nested/beta/SKILL.md",
+          path: path.join(sourceRoot, "nested", "beta", "SKILL.md"),
+        },
+      ],
+    } as unknown as FixedSkillProjection;
+
+    expect(fixedCodexSkillRoots(projection)).toEqual([
+      packageRoot,
+      path.join(sourceRoot, "nested"),
+    ]);
+    expect(() =>
+      fixedCodexSkillRoots({
+        ...projection,
+        entries: [
+          {
+            ...projection.entries[0]!,
+            entryPath: "nested/SKILL.md",
+            path: path.resolve(os.tmpdir(), "outside", "SKILL.md"),
+          },
+        ],
+      }),
+    ).toThrow(/path differs from package/u);
+  });
+
   it("places plugin-engine disable at the fixed-process CLI override layer", () => {
     expect(buildFixedNativeCodexConfigOverrides([], true)).toContain("features.plugins=false");
     expect(buildFixedNativeCodexConfigOverrides(["/selected/SKILL.md"], false)).toEqual(
@@ -7691,7 +7861,6 @@ describe("Codex fixed native Skill wiring", () => {
         {
           packageId: imported.package.packageId,
           entryPath: "skills/selected/SKILL.md",
-          activation: "on-demand",
         },
       ]);
       entries.push(...resolved);
@@ -7728,7 +7897,9 @@ describe("Codex fixed native Skill wiring", () => {
           { name: "selected", path: path.join(selected.root, "project-impostor/SKILL.md") },
           { name: "global-c", path: path.join(selected.root, "global/SKILL.md") },
         ];
-      const fake = createSyntheticCodexAppServer({ fixedNative: { ambient } }),
+      const fake = createSyntheticCodexAppServer({
+          fixedNative: { ambient, canonicalizePaths: true },
+        }),
         { manager, buildSessionProcessEnv } = createSyntheticCodexManager(
           fake,
           undefined,
@@ -7780,6 +7951,15 @@ describe("Codex fixed native Skill wiring", () => {
               ),
             ),
         ).toBe(true);
+        const selectedEntry = selected.expertSession.skillEntries![0]!;
+        expect(
+          fake.requests
+            .filter((request) => request.method === "skills/extraRoots/set")
+            .map((request) => request.params?.extraRoots),
+        ).toEqual([
+          [path.dirname(path.dirname(selectedEntry.path))],
+          [path.dirname(path.dirname(selectedEntry.path))],
+        ]);
         expect(session.skillApplication).toMatchObject({
           enforcement: "native-fixed",
           nativeSubagents: "inherit",

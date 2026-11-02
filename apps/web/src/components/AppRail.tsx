@@ -21,6 +21,7 @@ import { createCentralIconComponent } from "~/lib/central-icons";
 import {
   ClockIcon,
   CodeReviewIcon,
+  EXPERT_ICON_NAME,
   FoldersIcon,
   HomeIcon,
   HubIcon,
@@ -107,7 +108,7 @@ const RAIL_HUGEICON_GLYPHS: Record<HugeiconRailItemId, AppRailGlyphs> = {
 /** Central glyphs matching the Codex rail for the remaining fixed rail items. */
 const RAIL_ITEM_GLYPH_NAMES: Record<Exclude<RailItemId, HugeiconRailItemId>, string> = {
   kanban: "columns-3-wide",
-  experts: "brain",
+  experts: EXPERT_ICON_NAME,
   settings: "settings-gear-4",
 };
 

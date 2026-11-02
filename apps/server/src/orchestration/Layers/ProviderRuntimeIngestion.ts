@@ -99,6 +99,14 @@ import {
   pendingInteractionRequestKind,
 } from "../stalePendingInteractions.ts";
 import { isExpiredSidechat } from "../sidechatLifecycle.ts";
+import {
+  makeExpertLearningEvidenceCapture,
+  type ExpertLearningEvidenceCapture,
+} from "../../workbench/host/expertLearningEvidence.ts";
+import { makeExpertLearningEvidenceDelivery } from "../../workbench/host/expertLearningEvidenceDelivery.ts";
+import { ExpertLearningRepositoryLive } from "../../workbench/host/expertLearningPersistence.ts";
+import { SkillEvolutionRepositoryLive } from "../../workbench/host/skillEvolutionPersistence.ts";
+import { ExpertAppliedRuntimeRepositoryLive } from "../../persistence/Layers/ExpertAppliedRuntimeRecords.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import {
   ProjectionSnapshotQuery,
@@ -314,6 +322,20 @@ function threadDetailFromShell(shell: OrchestrationThreadShell): OrchestrationTh
     activities: [],
     checkpoints: [],
   };
+}
+
+/** Persist the learning handoff before acknowledgement; evidence capture runs separately. */
+export function processProviderRuntimeRowBeforeAcknowledgement(
+  input: Extract<RuntimeIngestionInput, { source: "runtime" }>,
+  process: () => Effect.Effect<TurnId | undefined, unknown>,
+  capture: ExpertLearningEvidenceCapture,
+  acknowledge: () => Effect.Effect<void, unknown>,
+): Effect.Effect<void, unknown> {
+  const entry: PersistedProviderRuntimeEvent = { sequence: input.sequence, event: input.event };
+  return process().pipe(
+    Effect.flatMap((resolvedTurnId) => capture(entry, resolvedTurnId)),
+    Effect.andThen(Effect.suspend(acknowledge)),
+  );
 }
 
 function readModelSelectionProviderInstanceId(
@@ -825,6 +847,9 @@ const make = Effect.gen(function* () {
   const projectionThreadMessageRepository = yield* ProjectionThreadMessageRepository;
   const pendingInteractions = yield* ProjectionPendingInteractionRepository;
   const runtimeEvents = yield* ProviderRuntimeEventRepository;
+  const captureLearningEvidence = yield* makeExpertLearningEvidenceCapture;
+  const learningEvidenceDelivery =
+    yield* makeExpertLearningEvidenceDelivery(captureLearningEvidence);
   const commandReceipts = yield* OrchestrationCommandReceiptRepository;
   // Throttle map for the durable last-runtime-activity timestamp: one row
   // write per thread per ~15s of observed activity instead of per event.
@@ -2328,7 +2353,7 @@ const make = Effect.gen(function* () {
       const parentThread = needsHeavyThreadDetail
         ? yield* getThreadDetail(event.threadId)
         : yield* getThreadShellDetail(event.threadId);
-      if (!parentThread) return;
+      if (!parentThread) return undefined;
 
       // A subagent launched from inside another subagent's conversation (a
       // nested spawn) still hangs off the main thread, but records the spawning
@@ -3707,6 +3732,7 @@ const make = Effect.gen(function* () {
       if (event.type === "session.exited" || event.type === "runtime.error") {
         yield* clearAssistantDeliveryModeBindingsForThread(thread.id);
       }
+      return eventTurnId;
     });
 
   const processDomainEvent = (event: RuntimeIngestionDomainEvent) =>
@@ -3817,12 +3843,14 @@ const make = Effect.gen(function* () {
 
   const processInput = (input: RuntimeIngestionInput) =>
     input.source === "runtime"
-      ? processRuntimeEvent(input.event, input.sequence, input.suppressProgressActivity).pipe(
-          Effect.andThen(
+      ? processProviderRuntimeRowBeforeAcknowledgement(
+          input,
+          () => processRuntimeEvent(input.event, input.sequence, input.suppressProgressActivity),
+          learningEvidenceDelivery.enqueue,
+          () =>
             Effect.sync(() => {
               pendingAckedSequence = Math.max(pendingAckedSequence ?? 0, input.sequence);
             }),
-          ),
         )
       : processDomainEvent(input.event);
 
@@ -4290,6 +4318,7 @@ const make = Effect.gen(function* () {
       yield* drainRuntimeJournal;
       yield* Deferred.succeed(startupRuntimeReplayComplete, undefined);
       yield* Effect.forkScoped(pollRuntimeJournalSafely);
+      yield* Effect.forkScoped(learningEvidenceDelivery.run);
     }),
   ).pipe(Effect.orDie);
 
@@ -4320,6 +4349,9 @@ export const ProviderRuntimeIngestionLive = Layer.effect(
 ).pipe(
   Layer.provide(
     Layer.mergeAll(
+      ExpertLearningRepositoryLive,
+      SkillEvolutionRepositoryLive,
+      ExpertAppliedRuntimeRepositoryLive,
       ProjectionTurnRepositoryLive,
       ProjectionThreadActivityRepositoryLive,
       ProjectionPendingInteractionRepositoryLive,

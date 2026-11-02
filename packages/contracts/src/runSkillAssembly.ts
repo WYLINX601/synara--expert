@@ -18,6 +18,8 @@ export const RunSkillAssembly = Schema.Struct({
   phase: Schema.Literals(["prepared", "initializing", "ready", "uncertain"]),
   initializationAttempt: Schema.optional(TrimmedNonEmptyString),
   initializationError: Schema.optional(Schema.String),
+  /** Exact predecessor for knowledge inheritance across Worker continuation. */
+  knowledgeSourceRunId: Schema.optional(TrimmedNonEmptyString),
   session: ProviderExpertSession,
 });
 export type RunSkillAssembly = typeof RunSkillAssembly.Type;

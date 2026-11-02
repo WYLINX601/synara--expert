@@ -16,8 +16,10 @@ import * as AcpErrors from "./AcpErrors.ts";
 
 import { ProviderAdapterRequestError, type ProviderAdapterError } from "../Errors.ts";
 import {
+  claimsSynaraLearningTool,
   isSynaraGatewayToolCall,
   shouldAllowSynaraComputerProviderTool,
+  synaraLearningToolNameFromPermission,
 } from "../../agentGateway/computerToolPermission.ts";
 
 // Synara-internal ACP tool kind for provider-native subagent runs. ACP's ToolKind has
@@ -161,6 +163,8 @@ export function resolveAcpPermissionPolicy(input: {
   readonly activeTurn?: boolean;
   readonly autoApproveSynaraTools?: boolean;
   readonly gatewaySessionActive?: boolean;
+  /** True only when OMP received host-captured and schema-validated Expert knowledge. */
+  readonly learningKnowledgeCaptured?: boolean;
   readonly toolCall?: {
     readonly kind?: unknown;
     readonly title?: unknown;
@@ -175,6 +179,18 @@ export function resolveAcpPermissionPolicy(input: {
 
   if (input.interactionMode === undefined) {
     return { outcome: "cancelled" };
+  }
+
+  if (
+    input.interactionMode === "default" &&
+    input.activeTurn === true &&
+    input.gatewaySessionActive === true &&
+    input.learningKnowledgeCaptured === true &&
+    input.toolCall?.kind !== "execute" &&
+    synaraLearningToolNameFromPermission({ metadata: input.toolCall?.metadata }) !== undefined
+  ) {
+    const optionId = input.options.find((option) => option.kind === "allow_once")?.optionId.trim();
+    if (optionId) return { outcome: "selected", optionId };
   }
 
   if (
@@ -203,6 +219,10 @@ export function resolveAcpPermissionPolicy(input: {
     input.autoApproveSynaraTools === true &&
     input.gatewaySessionActive === true &&
     input.toolCall?.kind !== "execute" &&
+    !claimsSynaraLearningTool({
+      rawInput: input.toolCall?.rawInput,
+      metadata: input.toolCall?.metadata,
+    }) &&
     isSynaraGatewayToolCall({
       rawInput: input.toolCall?.rawInput,
       metadata: input.toolCall?.metadata,

@@ -139,6 +139,63 @@ describe("buildOmpAcpSpawnInput", () => {
     expect(spawn.env).toBeDefined();
   });
 
+  it("uses the isolated no-tool CLI path only for Skill extraction compatibility", () => {
+    const launch = {
+      bunExecutable: "/tool path/бин/bun",
+      cliEntrypoint: "/tool path/omp/cli.js",
+      preloadPath: "/private/tmp/omp-skill-evolution-compat.mjs",
+      sessionDir: "/private/tmp/skill-evolution-sessions",
+      probeMarker:
+        "SYNARA_OMP_ACP_SKILL_EVOLUTION_COMPAT v1 nonce=12345678901234567890123456789012 sha256=test phase=source-verified",
+      expectedMarker:
+        "SYNARA_OMP_ACP_SKILL_EVOLUTION_COMPAT v1 nonce=12345678901234567890123456789012 sha256=test phase=session-verified",
+    };
+    const spawn = buildOmpAcpSpawnInput(
+      { binaryPath: "/selected/omp", agentDir: "/selected/account/agent" },
+      "/private/tmp/skill-evolution-cwd",
+      { skillEvolutionCompat: launch },
+    );
+
+    expect(spawn.command).toBe(launch.bunExecutable);
+    expect(spawn.args).toEqual([
+      "--preload",
+      launch.preloadPath,
+      launch.cliEntrypoint,
+      "acp",
+      "--no-tools",
+      "--no-skills",
+      "--no-rules",
+      "--no-extensions",
+      "--session-dir",
+      launch.sessionDir,
+    ]);
+    expect(spawn.cwd).toBe("/private/tmp/skill-evolution-cwd");
+    expect(spawn.env?.PI_CODING_AGENT_DIR).toBe("/selected/account/agent");
+
+    expect(buildOmpAcpSpawnInput(undefined, "/tmp/ordinary-project").args).toEqual(["acp"]);
+  });
+
+  it("rejects composing the independent idle-task and Skill extraction preloads", () => {
+    expect(() =>
+      buildOmpAcpSpawnInput(undefined, "/tmp/project", {
+        idleTaskCompat: {
+          bunExecutable: "/bun",
+          cliEntrypoint: "/omp/cli.js",
+          preloadPath: "/tmp/idle.mjs",
+          expectedMarker: "idle-marker",
+        },
+        skillEvolutionCompat: {
+          bunExecutable: "/bun",
+          cliEntrypoint: "/omp/cli.js",
+          preloadPath: "/tmp/evolution.mjs",
+          sessionDir: "/tmp/evolution-sessions",
+          probeMarker: "evolution-probe-marker",
+          expectedMarker: "evolution-marker",
+        },
+      }),
+    ).toThrow(/cannot share one ACP process/u);
+  });
+
   it("passes a configured agent dir through PI_CODING_AGENT_DIR", () => {
     const spawn = buildOmpAcpSpawnInput({ agentDir: "/profiles/work" }, "/tmp/project");
     expect(spawn.env?.PI_CODING_AGENT_DIR).toBe("/profiles/work");

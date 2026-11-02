@@ -38,11 +38,6 @@ import {
   SkillPackageRemoveInput,
   SkillPackageUpdatePreviewInput,
 } from "./skillPackage";
-import {
-  SkillPackageSwitchApplyInput,
-  SkillPackageSwitchInput,
-  SkillPackageSwitchProgressReadInput,
-} from "./skillPackageSwitch";
 import { NonNegativeInt, ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
 import {
   ContextCommandReadInput,
@@ -382,9 +377,6 @@ export const WS_METHODS = {
   serverPreviewSkillPackageRemoval: "server.previewSkillPackageRemoval",
   serverImportSkillPackage: "server.importSkillPackage",
   serverRemoveSkillPackage: "server.removeSkillPackage",
-  serverPreviewSkillPackageSwitch: "server.previewSkillPackageSwitch",
-  serverApplySkillPackageSwitch: "server.applySkillPackageSwitch",
-  serverReadSkillPackageSwitchProgress: "server.readSkillPackageSwitchProgress",
   serverReadExpertSnapshot: "server.readExpertSnapshot",
   serverReadExpertAppliedRuntime: "server.readExpertAppliedRuntime",
   serverListExpertConnections: "server.listExpertConnections",
@@ -722,12 +714,6 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverPreviewSkillPackageRemoval, SkillPackageReadInput),
   tagRequestBody(WS_METHODS.serverImportSkillPackage, SkillPackageImportInput),
   tagRequestBody(WS_METHODS.serverRemoveSkillPackage, SkillPackageRemoveInput),
-  tagRequestBody(WS_METHODS.serverPreviewSkillPackageSwitch, SkillPackageSwitchInput),
-  tagRequestBody(WS_METHODS.serverApplySkillPackageSwitch, SkillPackageSwitchApplyInput),
-  tagRequestBody(
-    WS_METHODS.serverReadSkillPackageSwitchProgress,
-    SkillPackageSwitchProgressReadInput,
-  ),
   tagRequestBody(WS_METHODS.serverReadExpertSnapshot, ExpertSnapshotReadInput),
   tagRequestBody(WS_METHODS.serverReadExpertAppliedRuntime, ExpertAppliedRuntimeReadInput),
   tagRequestBody(WS_METHODS.serverListExpertConnections, Schema.Struct({})),

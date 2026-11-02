@@ -430,6 +430,48 @@ it.effect("journals image metadata and replays it without the model image body",
   ),
 );
 
+it.effect("bounds exact-source journal bytes in SQL before JSON decoding", () =>
+  Effect.gen(function* () {
+    const repository = yield* ProviderRuntimeEventRepository;
+    const sql = yield* SqlClient.SqlClient;
+    const older = yield* repository.append(runtimeEvent("bounded-source-older", "old"));
+    const newer = yield* repository.append(runtimeEvent("bounded-source-newer", "界".repeat(500)));
+    const sizes = yield* sql<{
+      bytes: number;
+    }>`SELECT length(CAST(event_json AS BLOB)) AS bytes FROM provider_runtime_events WHERE sequence=${newer.sequence}`;
+    const request = {
+      threadId: "thread-runtime-journal",
+      turnId: "turn-runtime-journal",
+      throughSequenceInclusive: newer.sequence,
+      limit: 128,
+    };
+    assert.deepStrictEqual(
+      (yield* repository.readThreadEvents({ ...request, maxBytes: sizes[0]!.bytes })).map(
+        (row) => row.event.eventId,
+      ),
+      ["bounded-source-newer"],
+    );
+    assert.deepStrictEqual(yield* repository.readThreadEvents({ ...request, maxBytes: 0 }), []);
+    // An oversized invalid row must be excluded before the decoder can observe it.
+    yield* sql`UPDATE provider_runtime_events SET event_json=${"invalid-json".repeat(1000)} WHERE sequence=${newer.sequence}`;
+    assert.deepStrictEqual(yield* repository.readThreadEvents({ ...request, maxBytes: 1000 }), []);
+    assert.deepStrictEqual(
+      (yield* repository.readThreadEvents({
+        ...request,
+        eventIds: ["bounded-source-older"],
+        maxBytes: 1000,
+      })).map((row) => row.sequence),
+      [older.sequence],
+    );
+    const unbounded = yield* Effect.flip(repository.readThreadEvents(request));
+    assert.strictEqual(unbounded._tag, "PersistenceDecodeError");
+  }).pipe(
+    Effect.provide(
+      ProviderRuntimeEventRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    ),
+  ),
+);
+
 layer("ProviderRuntimeEventRepository", (it) => {
   it.effect("journals exact events and advances its consumer cursor contiguously", () =>
     Effect.gen(function* () {

@@ -269,14 +269,22 @@ const make = Effect.gen(function* () {
     );
 
   const readThreadEvents: ProviderRuntimeEventRepositoryShape["readThreadEvents"] = (input) => {
+    if (
+      (input.eventIds !== undefined && input.eventIds.length === 0) ||
+      (input.maxBytes !== undefined &&
+        (!Number.isSafeInteger(input.maxBytes) || input.maxBytes <= 0))
+    )
+      return Effect.succeed([]);
     const beforeSequence = input.beforeSequenceExclusive ?? Number.MAX_SAFE_INTEGER;
     const turnFilter = input.turnId === undefined ? sql`` : sql`AND turn_id = ${input.turnId}`;
     const typeFilter =
       input.eventTypes === undefined || input.eventTypes.length === 0
         ? sql``
         : sql`AND event_type IN ${sql.in(input.eventTypes)}`;
+    const idFilter =
+      input.eventIds === undefined ? sql`` : sql`AND event_id IN ${sql.in(input.eventIds)}`;
     return Effect.gen(function* () {
-      const rows = yield* sql<Record<string, unknown>>`
+      const candidates = sql<Record<string, unknown>>`
         SELECT sequence, event_json AS "eventJson"
         FROM provider_runtime_events
         WHERE thread_id = ${input.threadId}
@@ -284,9 +292,25 @@ const make = Effect.gen(function* () {
           AND sequence < ${beforeSequence}
           ${turnFilter}
           ${typeFilter}
+          ${idFilter}
         ORDER BY sequence DESC
         LIMIT ${Math.max(1, Math.min(201, Math.floor(input.limit)))}
-      `.pipe(Effect.mapError(toPersistenceSqlError("ProviderRuntimeEvent.readThreadEvents")));
+      `;
+      const bounded =
+        input.maxBytes === undefined
+          ? candidates
+          : sql<Record<string, unknown>>`
+        WITH candidates AS (${candidates}), bounded AS (
+          SELECT sequence,"eventJson",
+            SUM(length(CAST("eventJson" AS BLOB))) OVER (ORDER BY sequence DESC) AS running_bytes
+          FROM candidates
+        )
+        SELECT sequence,"eventJson" FROM bounded
+        WHERE running_bytes<=${input.maxBytes} ORDER BY sequence DESC
+      `;
+      const rows = yield* bounded.pipe(
+        Effect.mapError(toPersistenceSqlError("ProviderRuntimeEvent.readThreadEvents")),
+      );
       return yield* Effect.forEach(
         rows,
         (unknownRow) =>

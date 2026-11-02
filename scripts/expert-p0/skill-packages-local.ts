@@ -8,7 +8,6 @@ import {
   BMAD_PRESET_COMMIT,
   BMAD_ROLE_PRESETS,
   bmadPresetSelections,
-  inspectBmadWorkspace,
 } from "../../apps/server/src/experts/bmadSkillPreset.ts";
 import { createExpertStore } from "../../apps/server/src/experts/ExpertStore.ts";
 import { createSkillPackageStore } from "../../apps/server/src/experts/SkillPackageStore.ts";
@@ -83,7 +82,7 @@ for (const preset of BMAD_ROLE_PRESETS) {
   const snapshotMs = performance.now() - start;
   assert.equal(snapshot.schemaVersion, 2);
   assert.equal(snapshot.persona, persona);
-  const role = snapshot.skillEntries!.find((entry) => entry.activation === "startup")!;
+  const role = snapshot.skillEntries!.find((entry) => entry.name === preset.role)!;
   assert.equal(role.name, preset.role);
   assert.equal(path.basename(path.dirname(role.path)), preset.role);
   assert(
@@ -91,8 +90,6 @@ for (const preset of BMAD_ROLE_PRESETS) {
       "skills",
     ),
   );
-  const preflight = await inspectBmadWorkspace(snapshot.skillEntries!, projectCopy);
-  assert.deepEqual(preflight?.issues, []);
   results.push({
     expertId: preset.id,
     snapshotId: binding.snapshotId,

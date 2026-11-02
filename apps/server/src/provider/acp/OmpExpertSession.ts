@@ -26,7 +26,11 @@ import type { ProviderExpertSession, ProviderSkillReference } from "@synara/cont
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { Effect, Result } from "effect";
 import { stringify as stringifyYaml } from "yaml";
-import { createFixedSkillProjection, verifyProjectedSkillAssembly } from "../fixedSkillProjection";
+import {
+  createFixedSkillProjection,
+  verifyProjectedSkillAssembly,
+  type FixedSkillProjection,
+} from "../fixedSkillProjection";
 import { invalidateNativeSkillAssemblyVerification } from "../expertSkillCatalog";
 
 export const OMP_EXPERT_PROJECTION_VERSION = "omp-acp-native-v1" as const;
@@ -133,6 +137,11 @@ interface EffectiveOmpConfig {
   readonly disabledProviders: ReadonlyArray<string>;
 }
 
+interface EffectiveOmpAutoLearnConfig {
+  readonly enabled: boolean;
+  readonly autoContinue: boolean;
+}
+
 interface NativeSkill {
   readonly name: string;
   readonly description: string;
@@ -143,6 +152,8 @@ interface NativeSkill {
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
+
+const ordinal = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
 
 function asStringArray(value: unknown): ReadonlyArray<string> | undefined {
   if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
@@ -193,6 +204,20 @@ function parseConfigGet(stdout: string): ReadonlyArray<string> | undefined {
     const parsed: unknown = JSON.parse(stdout);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
     return asStringArray((parsed as { readonly value?: unknown }).value);
+  } catch {
+    return undefined;
+  }
+}
+
+function parseAutoLearnConfig(stdout: string): EffectiveOmpAutoLearnConfig | undefined {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+    const values = parsed as Record<string, { readonly value?: unknown }>;
+    const enabled = values["autolearn.enabled"]?.value;
+    const autoContinue = values["autolearn.autoContinue"]?.value;
+    if (typeof enabled !== "boolean" || typeof autoContinue !== "boolean") return undefined;
+    return { enabled, autoContinue };
   } catch {
     return undefined;
   }
@@ -471,6 +496,71 @@ function hasSkillWarningForPath(warnings: ReadonlyArray<unknown>, skillPath: str
   return false;
 }
 
+function assertUniqueOmpSkillNames(projection: FixedSkillProjection): void {
+  const counts = new Map<string, number>();
+  for (const entry of projection.entries) counts.set(entry.name, (counts.get(entry.name) ?? 0) + 1);
+  const duplicates = [...counts]
+    .filter(([, count]) => count > 1)
+    .map(([name]) => name)
+    .toSorted();
+  if (duplicates.length > 0)
+    throw new Error(
+      `OMP skills.includeSkills cannot disambiguate selected fixed Skills with duplicate names: ${duplicates.join(", ")}. Choose unique Skill names.`,
+    );
+}
+
+function ompNativeSkillContainerRoots(projection: FixedSkillProjection): string[] {
+  const packages = new Map(projection.packages.map((pkg) => [pkg.packageId, pkg]));
+  const roots = new Set<string>();
+  for (const entry of projection.entries) {
+    const pkg = packages.get(entry.packageId);
+    if (!pkg) throw new Error(`OMP fixed Skill package ${entry.packageId} is missing.`);
+    const parts = entry.entryPath.split("/");
+    if (parts.at(-1) !== "SKILL.md")
+      throw new Error(
+        `unsupported_entry_scope: OMP requires a package-relative SKILL.md entry, got "${entry.entryPath}".`,
+      );
+    const root = nodePath.resolve(pkg.sourceRoot);
+    const packageRoot = nodePath.dirname(root);
+    // OMP scans Skill directories one level below each custom directory. A
+    // root-level SKILL.md is the package content directory itself, so its
+    // parent package directory is the exact native container.
+    const container =
+      parts.length === 1 ? packageRoot : nodePath.resolve(root, ...parts.slice(0, -2));
+    const relative = nodePath.relative(packageRoot, container);
+    if (
+      relative === ".." ||
+      relative.startsWith(`..${nodePath.sep}`) ||
+      nodePath.isAbsolute(relative)
+    )
+      throw new Error(
+        `unsupported_entry_scope: OMP Skill entry "${entry.entryPath}" has no safe native container.`,
+      );
+    roots.add(container);
+  }
+  return [...roots].toSorted(ordinal);
+}
+
+async function rejectOmpNameCollisions(
+  projection: FixedSkillProjection,
+  skills: ReadonlyArray<NativeSkill>,
+): Promise<void> {
+  const selectedByName = new Map<string, ReadonlyArray<string>>();
+  for (const entry of projection.entries) {
+    const paths = selectedByName.get(entry.name) ?? [];
+    selectedByName.set(entry.name, [...paths, await realpath(entry.path)]);
+  }
+  for (const skill of skills) {
+    const selectedPaths = selectedByName.get(skill.name);
+    if (!selectedPaths) continue;
+    const actualPath = await realpath(skill.filePath).catch(() => undefined);
+    if (actualPath !== undefined && selectedPaths.includes(actualPath)) continue;
+    throw new Error(
+      `OMP cannot disambiguate the native Skill name "${skill.name}" because a different entry with that name is active. Choose a unique Skill name or adjust skills.includeSkills.`,
+    );
+  }
+}
+
 export function prepareOmpExpertSession(
   input: OmpExpertSessionPreparationInput,
 ): Effect.Effect<OmpExpertSessionPreparation> {
@@ -495,6 +585,7 @@ export function prepareOmpExpertSession(
   });
 
   const isIndexedExpert = input.expertSession?.skillLoading === "index";
+  const isManagedExpertSession = input.expertSession !== undefined;
   const requestedSkills = isIndexedExpert
     ? []
     : (input.expertSession?.skills ?? input.skills ?? []);
@@ -606,7 +697,8 @@ export function prepareOmpExpertSession(
       nativeAppend = nativeAppendEither.success;
     }
 
-    const needsTempDirectory = expectedSkills.length > 0 || baseInstructions.length > 0;
+    const needsTempDirectory =
+      expectedSkills.length > 0 || baseInstructions.length > 0 || isManagedExpertSession;
     if (!needsTempDirectory) {
       return noResources([], instructionsHash);
     }
@@ -617,13 +709,23 @@ export function prepareOmpExpertSession(
           nodePath.join(input.tempDirectory ?? nodeOs.tmpdir(), OMP_EXPERT_TEMP_PREFIX),
         );
         const configOverlayPath =
-          expectedSkills.length > 0 ? nodePath.join(tempPath, "config.yml") : undefined;
+          expectedSkills.length > 0 || isManagedExpertSession
+            ? nodePath.join(tempPath, "config.yml")
+            : undefined;
         const appendSystemPromptPath =
           baseInstructions.length > 0 ? nodePath.join(tempPath, "APPEND_SYSTEM.md") : undefined;
 
         if (configOverlayPath) {
-          const customDirectories = [...skillCustomDirectories, ...config.customDirectories];
-          const overlay = stringifyYaml({ skills: { customDirectories } }, { lineWidth: 0 });
+          const overlayConfig: Record<string, unknown> = {};
+          if (expectedSkills.length > 0) {
+            const customDirectories = [...skillCustomDirectories, ...config.customDirectories];
+            overlayConfig.skills = { customDirectories };
+          }
+          if (isManagedExpertSession) {
+            // Synara owns Expert learning; suppress OMP's independent durable capture path per session.
+            overlayConfig.autolearn = { enabled: false, autoContinue: false };
+          }
+          const overlay = stringifyYaml(overlayConfig, { lineWidth: 0 });
           await writeFile(configOverlayPath, overlay, { encoding: "utf8", mode: 0o400 });
           await chmod(configOverlayPath, 0o400);
           await verifyReadOnlyTempFile(configOverlayPath, overlay);
@@ -648,13 +750,55 @@ export function prepareOmpExpertSession(
     const { configOverlayPath, appendSystemPromptPath } = prepareFiles.success;
 
     const loadedSkills: ProviderSkillReference[] = [];
+    const overlayEnv: NodeJS.ProcessEnv | undefined = configOverlayPath
+      ? { ...input.env }
+      : undefined;
     if (configOverlayPath) {
-      const overlayEnv: NodeJS.ProcessEnv = { ...input.env };
-      const inheritedConfigFiles = overlayEnv.PI_CONFIG_FILES?.trim();
-      overlayEnv.PI_CONFIG_FILES = [inheritedConfigFiles, configOverlayPath]
-        .filter((entry): entry is string => Boolean(entry))
-        .join(nodePath.delimiter);
+      const inheritedConfigFiles = overlayEnv?.PI_CONFIG_FILES?.trim();
+      if (overlayEnv) {
+        overlayEnv.PI_CONFIG_FILES = [inheritedConfigFiles, configOverlayPath]
+          .filter((entry): entry is string => Boolean(entry))
+          .join(nodePath.delimiter);
+      }
+    }
 
+    if (isManagedExpertSession && !overlayEnv) {
+      return noResources(
+        [
+          "OMP session-local Auto-Learn settings could not be prepared; native learning isolation is unavailable.",
+        ],
+        instructionsHash,
+      );
+    }
+
+    if (isManagedExpertSession && overlayEnv) {
+      const autoLearnConfigEither = yield* input
+        .runCli(["config", "list", "--json"], input.cwd, overlayEnv)
+        .pipe(Effect.result);
+      const autoLearnConfig = Result.isSuccess(autoLearnConfigEither)
+        ? requireExitZero(autoLearnConfigEither.success, "effective Auto-Learn settings")
+          ? undefined
+          : parseAutoLearnConfig(autoLearnConfigEither.success.stdout)
+        : undefined;
+      if (!autoLearnConfig) {
+        return noResources(
+          [
+            "OMP effective Auto-Learn settings could not be read; native learning isolation is unavailable.",
+          ],
+          instructionsHash,
+        );
+      }
+      if (autoLearnConfig.enabled || autoLearnConfig.autoContinue) {
+        return noResources(
+          [
+            "OMP did not confirm autolearn.enabled=false and autolearn.autoContinue=false; native learning isolation is unavailable.",
+          ],
+          instructionsHash,
+        );
+      }
+    }
+
+    if (expectedSkills.length > 0 && configOverlayPath && overlayEnv) {
       const effectiveDirectoriesEither = yield* input
         .runCli(["config", "get", "skills.customDirectories", "--json"], input.cwd, overlayEnv)
         .pipe(Effect.result);
@@ -805,6 +949,7 @@ function prepareFixedOmpExpertSession(
       mkdtemp(nodePath.join(input.tempDirectory ?? nodeOs.tmpdir(), OMP_EXPERT_TEMP_PREFIX)),
     );
     const projection = yield* Effect.promise(() => createFixedSkillProjection(temp!, session));
+    assertUniqueOmpSkillNames(projection);
     const configOverlayPath = nodePath.join(temp, "config.yml"),
       appendSystemPromptPath = nodePath.join(temp, "APPEND_SYSTEM.md");
     const skills = {
@@ -816,7 +961,7 @@ function prepareFixedOmpExpertSession(
       enablePiProject: false,
       enableAgentsUser: false,
       enableAgentsProject: false,
-      customDirectories: [...projection.skillRoots],
+      customDirectories: ompNativeSkillContainerRoots(projection),
       includeSkills: projection.entries.length
         ? projection.entries.map((entry) => entry.name)
         : ["__synara_empty_fixed_assembly__"],
@@ -824,7 +969,12 @@ function prepareFixedOmpExpertSession(
     };
     const maxRecursionDepth = session.skillPolicy?.nativeSubagents === "inherit" ? 1 : 0;
     const overlay = stringifyYaml(
-      { skills, task: { maxRecursionDepth }, advisor: { enabled: false } },
+      {
+        skills,
+        task: { maxRecursionDepth },
+        advisor: { enabled: false },
+        autolearn: { enabled: false, autoContinue: false },
+      },
       { lineWidth: 0 },
     );
     yield* Effect.promise(async () => {
@@ -842,7 +992,9 @@ function prepareFixedOmpExpertSession(
         invalidateNativeSkillAssemblyVerification(session);
         const configResult = yield* input.runCli(["config", "list", "--json"], input.cwd, env);
         if (configResult.exitCode !== 0)
-          throw new Error("OMP could not verify the fixed Skill configuration.");
+          throw new Error(
+            "OMP could not verify the fixed Skill and native Auto-Learn configuration.",
+          );
         const config = JSON.parse(configResult.stdout) as Record<string, { value?: unknown }>;
         for (const key of [
           "enableCodexUser",
@@ -856,6 +1008,8 @@ function prepareFixedOmpExpertSession(
           if (config[`skills.${key}`]?.value !== false)
             throw new Error(`OMP did not disable ambient Skill source ${key}.`);
         if (
+          config["autolearn.enabled"]?.value !== false ||
+          config["autolearn.autoContinue"]?.value !== false ||
           config["task.maxRecursionDepth"]?.value !== maxRecursionDepth ||
           config["advisor.enabled"]?.value !== false ||
           config["skills.enabled"]?.value !== true ||
@@ -864,11 +1018,13 @@ function prepareFixedOmpExpertSession(
           JSON.stringify(config["skills.includeSkills"]?.value) !==
             JSON.stringify(skills.includeSkills)
         )
-          throw new Error("OMP did not attest the fixed assembly and native task depth.");
+          throw new Error(
+            "OMP did not attest native Auto-Learn isolation, the fixed assembly, and native task depth.",
+          );
         const result = yield* input.runCli(["skill", "list", input.cwd, "--json"], input.cwd, env),
           parsed = result.exitCode === 0 ? parseNativeSkillList(result.stdout) : undefined;
-        if (!parsed || parsed.warnings.length)
-          throw new Error("OMP could not resolve the exact fixed Skill assembly without warnings.");
+        if (!parsed) throw new Error("OMP could not resolve the exact fixed Skill assembly.");
+        yield* Effect.promise(() => rejectOmpNameCollisions(projection, parsed.skills));
         yield* Effect.promise(async () => {
           await verifyReadOnlyTempFile(configOverlayPath, overlay);
           await verifyReadOnlyTempFile(appendSystemPromptPath, projectedInstructions);

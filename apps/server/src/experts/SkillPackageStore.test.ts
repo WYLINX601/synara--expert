@@ -128,7 +128,6 @@ describe("SkillPackageStore", () => {
                   {
                     packageId: manifest.packageId,
                     entryPath: manifest.entries[0]!.entryPath,
-                    activation: "startup",
                   },
                 ],
                 references: [],
@@ -330,7 +329,6 @@ describe("SkillPackageStore", () => {
       {
         packageId: imported.package.packageId,
         entryPath: entry.entryPath,
-        activation: "on-demand",
       },
     ]);
     expect(resolved).toBeDefined();
@@ -350,21 +348,21 @@ describe("SkillPackageStore", () => {
     ).toBe("exit 0\n");
   });
 
-  it("selects only requested entries without projecting or renaming siblings", async () => {
+  it("selects only requested entries and preserves resource mode", async () => {
     const { source, stateDir, store } = await fixture();
     const result = await importSource(store, source);
     const entries = await store.resolveSelections([
       {
         packageId: result.package.packageId,
         entryPath: "skills/pm/SKILL.md",
-        activation: "startup",
+        resourceMode: "run-private",
       },
     ]);
     expect(entries).toEqual([
       {
         packageId: result.package.packageId,
         entryPath: "skills/pm/SKILL.md",
-        activation: "startup",
+        resourceMode: "run-private",
         name: "bmad-pm",
         description: "PM role",
         sha256: result.package.resources.find(
@@ -379,113 +377,144 @@ describe("SkillPackageStore", () => {
         ),
       },
     ]);
+    const deduplicated = await store.resolveSelections([
+      {
+        packageId: result.package.packageId,
+        entryPath: "skills/pm/SKILL.md",
+        resourceMode: "run-private",
+      },
+      {
+        packageId: result.package.packageId,
+        entryPath: "skills/pm/SKILL.md",
+        resourceMode: "shared-readonly",
+      },
+    ]);
+    expect(deduplicated).toHaveLength(1);
+    expect(deduplicated[0]?.resourceMode).toBe("run-private");
     expect(await store.resolveSelections([])).toEqual([]);
   });
 
-  it.each([
-    {
-      kind: "valid native metadata",
-      body: [
-        "---",
-        "name: bmad-pm",
-        "description: PM role",
-        "context: fork",
-        "agent: reviewer",
-        "model: inherit",
-        "hooks:",
-        "  PreToolUse: []",
-        "---",
-        "Use the provider-native metadata.",
-        "",
-      ].join("\n"),
-      reason:
-        "Provider-native context, agent, model or hooks semantics are unsupported by the unified index.",
-      previousIssues: [],
-    },
-    {
-      kind: "malformed native metadata",
-      body: [
-        "---",
-        "name: bmad-pm",
-        "description: PM role",
-        "context: [fork",
-        "---",
-        "Use the provider-native metadata.",
-        "",
-      ].join("\n"),
-      reason: "Provider-native execution metadata is unsupported by the unified index.",
-      previousIssues: [
-        "Invalid YAML frontmatter; scalar metadata uses the existing discovery parser.",
-      ],
-    },
-  ])(
-    "reads and reuses a baseline package with exact historical diagnostics ($kind)",
-    async ({ body, reason, previousIssues }) => {
-      const { source, stateDir, store } = await fixture();
-      await writeFile(path.join(source, "skills", "pm", "SKILL.md"), body);
-      const originalPreview = await store.preview({ path: source });
-      const originalImport = await store.import({ previewId: originalPreview.previewId });
-      const directory = packageDir(stateDir, originalImport.package.packageId);
-      const manifestPath = path.join(directory, "package.json");
-      await chmod(manifestPath, 0o600);
-      const baselineManifest = JSON.parse(await readFile(manifestPath, "utf8"));
-      baselineManifest.entries[0].incompatibleReason = reason;
-      baselineManifest.entries[0].issues.push(...previousIssues, reason);
-      await writeFile(manifestPath, `${JSON.stringify(baselineManifest)}\n`);
-      await chmod(manifestPath, 0o400);
+  it("rebuilds the current index from bytes despite invalid YAML and damaged legacy derived fields", async () => {
+    const { source, stateDir, store } = await fixture();
+    const malformed = "---\nname: legacy-pm\ndescription: [invalid\n---\nUse the fallback.\n";
+    await writeFile(path.join(source, "skills", "pm", "SKILL.md"), malformed);
+    const originalPreview = await store.preview({ path: source });
+    const brokenEntry = originalPreview.package.entries.find(
+      (entry) => entry.entryPath === "skills/pm/SKILL.md",
+    )!;
+    const healthyEntry = originalPreview.package.entries.find(
+      (entry) => entry.entryPath === "skills/prd/SKILL.md",
+    )!;
+    expect(brokenEntry.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "invalid_frontmatter_yaml" })]),
+    );
+    expect(healthyEntry.diagnostics).toBeUndefined();
 
-      expect(await store.list()).toHaveLength(1);
-      const [resolved] = await store.resolveSelections([
-        {
-          packageId: originalImport.package.packageId,
-          entryPath: "skills/pm/SKILL.md",
-          activation: "on-demand",
-        },
-      ]);
-      expect(resolved?.name).toBe("bmad-pm");
-      expect(resolved?.path).toContain(originalImport.package.packageId);
+    const imported = await store.import({ previewId: originalPreview.previewId });
+    const directory = packageDir(stateDir, imported.package.packageId);
+    const manifestPath = path.join(directory, "package.json");
+    await chmod(manifestPath, 0o600);
+    const legacyManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    legacyManifest.entries = { broken: true };
+    legacyManifest.unknownDerivedField = ["ignored"];
+    await writeFile(manifestPath, `${JSON.stringify(legacyManifest)}\n`);
+    await chmod(manifestPath, 0o400);
 
-      const reusedPreview = await store.preview({ path: source });
-      const reused = await store.import({ previewId: reusedPreview.previewId });
-      expect(reused.reused).toBe(true);
-      expect(reused.package.packageId).toBe(originalImport.package.packageId);
-      expect(reused.package.entries[0]?.incompatibleReason).toBeUndefined();
-      expect(reused.package.entries[0]?.issues).not.toContain(reason);
-      for (const issue of previousIssues)
-        expect(reused.package.entries[0]?.issues).not.toContain(issue);
+    const read = await store.read(imported.package.packageId);
+    expect(read.packageId).toBe(imported.package.packageId);
+    expect(read.entries.find((entry) => entry.entryPath === brokenEntry.entryPath)).toMatchObject({
+      name: "legacy-pm",
+      description: "[invalid",
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({ code: "invalid_frontmatter_yaml" }),
+      ]),
+    });
+    expect(read.entries.find((entry) => entry.entryPath === healthyEntry.entryPath)?.name).toBe(
+      "bmad-prd",
+    );
+    const [resolved] = await store.resolveSelections([
+      {
+        packageId: imported.package.packageId,
+        entryPath: "skills/pm/SKILL.md",
+      },
+    ]);
+    expect(resolved?.name).toBe("legacy-pm");
+  });
 
-      await chmod(manifestPath, 0o600);
-      const tampered = JSON.parse(await readFile(manifestPath, "utf8"));
-      tampered.entries[0].description = "unrelated manifest damage";
-      await writeFile(manifestPath, `${JSON.stringify(tampered)}\n`);
-      await chmod(manifestPath, 0o400);
-      await expect(store.read(originalImport.package.packageId)).rejects.toMatchObject({
-        code: "package_corrupt",
-      });
-    },
-  );
+  it("keeps unknown and overlong frontmatter local to the affected entry", async () => {
+    const { source, store } = await fixture();
+    const longName = "n".repeat(201);
+    const longDescription = "d".repeat(16_001);
+    await writeFile(
+      path.join(source, "skills", "pm", "SKILL.md"),
+      `---\nname: ${longName}\ndescription: ${longDescription}\ncustom-field: ignored\n---\nBody\n`,
+    );
+    const preview = await store.preview({ path: source });
+    const entry = preview.package.entries.find((item) => item.entryPath === "skills/pm/SKILL.md")!;
+    expect(entry.name).toBe("pm");
+    expect(entry.description).toHaveLength(16_000);
+    expect(entry.diagnostics?.map((diagnostic) => diagnostic.code)).toEqual(
+      expect.arrayContaining([
+        "metadata_name_too_long",
+        "metadata_description_too_long",
+        "unknown_frontmatter_fields",
+      ]),
+    );
+    expect(
+      preview.package.entries.find((item) => item.entryPath === "skills/prd/SKILL.md")?.diagnostics,
+    ).toBeUndefined();
+  });
 
-  it("allows one startup entry and many on-demand entries, but rejects two startup entries", async () => {
+  it("ignores historical activation metadata and resolves every valid selection", async () => {
     const { source, store } = await fixture();
     const {
       package: { packageId },
     } = await importSource(store, source);
-    const first = { packageId, entryPath: "skills/pm/SKILL.md", activation: "startup" as const };
+    const first = {
+      packageId,
+      entryPath: "skills/pm/SKILL.md",
+      activation: "startup" as const,
+    };
     const second = {
       packageId,
       entryPath: "skills/prd/SKILL.md",
-      activation: "on-demand" as const,
+      activation: "startup" as const,
     };
-    expect((await store.resolveSelections([first, second])).length).toBe(2);
-    await expect(
-      store.resolveSelections([first, { ...second, activation: "startup" }]),
-    ).rejects.toMatchObject({ code: "invalid_input" });
+    const resolved = await store.resolveSelections([first, second]);
+    expect(resolved).toHaveLength(2);
+    expect(resolved.every((entry) => !Object.hasOwn(entry, "activation"))).toBe(true);
     await expect(
       store.resolveSelections([{ ...first, entryPath: "modules/SKILL.md" }]),
     ).rejects.toMatchObject({ code: "invalid_input" });
   });
 
-  it("warns about duplicate names in preview but rejects selecting them together, including across versions", async () => {
+  it("resolves more than 100 selected entries within the package expansion limit", async () => {
+    const { source, store } = await fixture();
+    const selectedPaths = Array.from({ length: 101 }, (_, index) => {
+      const directory = `skills/expanded-${String(index).padStart(3, "0")}`;
+      return { directory, entryPath: `${directory}/SKILL.md` };
+    });
+    await Promise.all(
+      selectedPaths.map(async ({ directory, entryPath }) => {
+        const skillDirectory = path.dirname(path.join(source, entryPath));
+        await mkdir(skillDirectory, { recursive: true });
+        await writeFile(
+          path.join(source, entryPath),
+          `---\nname: ${path.basename(directory)}\ndescription: Expanded entry\n---\nBody\n`,
+        );
+      }),
+    );
+    const result = await importSource(store, source);
+    const resolved = await store.resolveSelections(
+      selectedPaths.map(({ entryPath }) => ({
+        packageId: result.package.packageId,
+        entryPath,
+      })),
+    );
+    expect(resolved).toHaveLength(101);
+  });
+
+  it("warns about duplicate names in preview without rejecting provider namespace conflicts", async () => {
     const { source, store } = await fixture();
     const first = await importSource(store, source);
     await writeFile(
@@ -500,15 +529,13 @@ describe("SkillPackageStore", () => {
         {
           packageId: first.package.packageId,
           entryPath: "skills/pm/SKILL.md",
-          activation: "on-demand",
         },
         {
           packageId: second.package.packageId,
           entryPath: "skills/prd/SKILL.md",
-          activation: "on-demand",
         },
       ]),
-    ).rejects.toMatchObject({ code: "invalid_input" });
+    ).resolves.toHaveLength(2);
   });
 
   it("publishes updates as separate versions and keeps old selection bytes after source deletion", async () => {
@@ -524,7 +551,6 @@ describe("SkillPackageStore", () => {
       {
         packageId: first.package.packageId,
         entryPath: "skills/pm/SKILL.md",
-        activation: "startup",
       },
     ]);
     expect(
@@ -739,28 +765,20 @@ describe("SkillPackageStore", () => {
     await expect(store.remove("../../elsewhere")).rejects.toMatchObject({ code: "invalid_input" });
   });
 
-  it.skipIf(process.platform !== "linux")(
-    "rejects case-colliding names on case-sensitive filesystems",
-    async () => {
-      const { source, store } = await fixture();
-      await writeFile(path.join(source, "case.txt"), "one");
-      await writeFile(path.join(source, "CASE.txt"), "two");
-      await expect(store.preview({ path: source })).rejects.toMatchObject({
-        code: "invalid_resource",
-      });
-    },
-  );
+  it.skipIf(process.platform === "win32")("allows POSIX paths whose case differs", async () => {
+    const { source, store } = await fixture();
+    await writeFile(path.join(source, "case.txt"), "one");
+    await writeFile(path.join(source, "CASE.txt"), "two");
+    await expect(store.preview({ path: source })).resolves.toBeDefined();
+  });
 
   it.each(["bad:name", "NUL.txt", "trailing."])(
-    "rejects non-portable resource names: %s",
+    "allows POSIX-only resource names: %s",
     async (name) => {
       const { source, store } = await fixture();
-      // These names are themselves forbidden by Windows; creation is only tested on POSIX.
       if (process.platform === "win32") return;
       await writeFile(path.join(source, name), "data");
-      await expect(store.preview({ path: source })).rejects.toMatchObject({
-        code: "invalid_resource",
-      });
+      await expect(store.preview({ path: source })).resolves.toBeDefined();
     },
   );
 
@@ -781,38 +799,57 @@ describe("SkillPackageStore", () => {
     });
   });
 
-  it.each(["bytes", "manifest", "extra-file", "execute-bit"])(
-    "fails closed on corrupt published packages without repairing them: %s",
-    async (damage) => {
-      const { source, stateDir, store } = await fixture();
-      const result = await importSource(store, source);
-      const directory = packageDir(stateDir, result.package.packageId);
-      const manifest = path.join(directory, "package.json");
-      if (damage === "bytes") {
-        const file = path.join(directory, "content", "modules", "config.yaml");
-        await chmod(file, 0o600);
-        await writeFile(file, "corrupt");
-      } else if (damage === "manifest") {
-        await chmod(manifest, 0o600);
-        const value = JSON.parse(await readFile(manifest, "utf8"));
-        value.entries[0].description = "tampered index";
-        await writeFile(manifest, JSON.stringify(value));
-      } else if (damage === "extra-file") {
-        await chmod(path.join(directory, "content"), 0o700);
-        await writeFile(path.join(directory, "content", "unexpected"), "extra");
-      } else {
-        if (process.platform === "win32") return; // no POSIX execute-bit semantics
-        await chmod(path.join(directory, "content", "run.sh"), 0o400);
-      }
-      await expect(store.read(result.package.packageId)).rejects.toMatchObject({
-        code: "package_corrupt",
-      });
-      await expect(importSource(store, source)).rejects.toMatchObject({ code: "package_corrupt" });
-      expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([
-        result.package.packageId,
-      ]);
-    },
-  );
+  it.each([
+    "bytes",
+    "resource-ledger",
+    "resource-path",
+    "file-count",
+    "total-bytes",
+    "extra-file",
+    "execute-bit",
+  ])("fails closed on corrupt published packages without repairing them: %s", async (damage) => {
+    const { source, stateDir, store } = await fixture();
+    const result = await importSource(store, source);
+    const directory = packageDir(stateDir, result.package.packageId);
+    const manifest = path.join(directory, "package.json");
+    if (damage === "bytes") {
+      const file = path.join(directory, "content", "modules", "config.yaml");
+      await chmod(file, 0o600);
+      await writeFile(file, "corrupt");
+    } else if (damage === "resource-ledger") {
+      await chmod(manifest, 0o600);
+      const value = JSON.parse(await readFile(manifest, "utf8"));
+      value.resources.find(
+        (resource: { path: string }) => resource.path === "content/run.sh",
+      )!.sha256 = "0".repeat(64);
+      await writeFile(manifest, JSON.stringify(value));
+    } else if (damage === "resource-path") {
+      await chmod(manifest, 0o600);
+      const value = JSON.parse(await readFile(manifest, "utf8"));
+      value.resources.find(
+        (resource: { path: string }) => resource.path === "content/run.sh",
+      )!.path = "content/renamed.sh";
+      await writeFile(manifest, JSON.stringify(value));
+    } else if (damage === "file-count" || damage === "total-bytes") {
+      await chmod(manifest, 0o600);
+      const value = JSON.parse(await readFile(manifest, "utf8"));
+      value[damage === "file-count" ? "fileCount" : "totalBytes"] += 1;
+      await writeFile(manifest, JSON.stringify(value));
+    } else if (damage === "extra-file") {
+      await chmod(path.join(directory, "content"), 0o700);
+      await writeFile(path.join(directory, "content", "unexpected"), "extra");
+    } else {
+      if (process.platform === "win32") return; // no POSIX execute-bit semantics
+      await chmod(path.join(directory, "content", "run.sh"), 0o400);
+    }
+    await expect(store.read(result.package.packageId)).rejects.toMatchObject({
+      code: "package_corrupt",
+    });
+    await expect(importSource(store, source)).rejects.toMatchObject({ code: "package_corrupt" });
+    expect(await readdir(path.join(stateDir, "experts", "skill-packages"))).toEqual([
+      result.package.packageId,
+    ]);
+  });
 
   it("rejects corrupted source pointers instead of silently replacing them", async () => {
     const { source, stateDir, store } = await fixture();
@@ -1022,7 +1059,6 @@ describe("SkillPackageStore", () => {
           {
             packageId: referencedReplacement.package.packageId,
             entryPath: referencedReplacement.package.entries[0]!.entryPath,
-            activation: "startup",
           },
         ],
         references: [],
@@ -1116,7 +1152,6 @@ describe("SkillPackageStore", () => {
           {
             packageId: imported.package.packageId,
             entryPath: imported.package.entries[0]!.entryPath,
-            activation: "startup",
           },
         ],
         references: [],

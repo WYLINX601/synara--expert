@@ -112,4 +112,101 @@ describe("AgentGatewaySessionRegistry", () => {
     assert.isFalse(ordinary.capabilities.has("computer:control"));
     assert.isTrue(optedIn.capabilities.has("computer:control"));
   });
+
+  it("grants read-only learning to a closed epoch and read/write to an enabled OMP epoch", () => {
+    const registry = makeAgentGatewaySessionRegistry({
+      randomId: (() => {
+        let next = 0;
+        return () => String(++next);
+      })(),
+    });
+    const thread = ThreadId.makeUnsafe("learning-thread");
+    const base = {
+      manifestId: "manifest-1",
+      rootRunId: "run-1",
+      snapshotId: "snapshot-1",
+      scope: {
+        ownerId: "owner-1",
+        spaceId: null,
+        expertId: "expert-1",
+        projectId: "project-1",
+      },
+      knowledgeHash: `sha256:${"a".repeat(64)}`,
+    } as const;
+    const closed = registry.issue(thread, "pi", {
+      learningSession: base,
+      additionalCapabilities: ["learning:write"],
+    });
+    const enabled = registry.issue(thread, "omp", {
+      learningSession: { ...base, learningEpoch: 4 },
+      additionalCapabilities: ["learning:read"],
+    });
+
+    assert.isTrue(closed.capabilities.has("learning:read"));
+    assert.isFalse(closed.capabilities.has("learning:write"));
+    assert.isTrue(enabled.capabilities.has("learning:read"));
+    assert.isTrue(enabled.capabilities.has("learning:write"));
+    assert.deepEqual(registry.verify(closed.token)?.learningSession, base);
+    assert.deepEqual(registry.verify(enabled.token)?.learningSession, {
+      ...base,
+      learningEpoch: 4,
+    });
+  });
+
+  it("ignores learning grants for unsupported providers and contexts without exact scope", () => {
+    const registry = makeAgentGatewaySessionRegistry({
+      randomId: (() => {
+        let next = 0;
+        return () => String(++next);
+      })(),
+    });
+    const thread = ThreadId.makeUnsafe("learning-thread");
+    const forged = {
+      manifestId: "manifest-1",
+      rootRunId: "run-1",
+      snapshotId: "snapshot-1",
+      knowledgeHash: `sha256:${"b".repeat(64)}`,
+      learningEpoch: 4,
+    };
+    const unsupported = registry.issue(thread, "codex", {
+      learningSession: {
+        ...forged,
+        scope: { ownerId: "owner-1", spaceId: null, expertId: "expert-1", projectId: "project-1" },
+      } as never,
+      additionalCapabilities: ["learning:read", "learning:write"],
+    });
+    const missingScope = registry.issue(thread, "pi", {
+      learningSession: forged as never,
+      additionalCapabilities: ["learning:read", "learning:write"],
+    });
+
+    for (const issued of [unsupported, missingScope]) {
+      assert.isFalse(issued.capabilities.has("learning:read"));
+      assert.isFalse(issued.capabilities.has("learning:write"));
+      assert.isUndefined(registry.verify(issued.token)?.learningSession);
+    }
+  });
+
+  it("keeps the captured learning context independent between credentials", () => {
+    const registry = makeAgentGatewaySessionRegistry();
+    const thread = ThreadId.makeUnsafe("learning-thread");
+    const input = {
+      manifestId: "manifest-1",
+      rootRunId: "run-1",
+      snapshotId: "snapshot-1",
+      scope: {
+        ownerId: "owner-1",
+        spaceId: null,
+        expertId: "expert-1",
+        projectId: "project-1",
+      },
+      knowledgeHash: `sha256:${"c".repeat(64)}`,
+      learningEpoch: 5,
+    };
+    const first = registry.issue(thread, "pi", { learningSession: input });
+    const replacement = registry.issue(thread, "pi", { learningSession: input });
+    assert.notEqual(first.token, replacement.token);
+    assert.deepEqual(registry.verify(first.token)?.learningSession, input);
+    assert.deepEqual(registry.verify(replacement.token)?.learningSession, input);
+  });
 });

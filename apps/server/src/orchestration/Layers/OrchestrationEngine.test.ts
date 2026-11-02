@@ -335,7 +335,6 @@ describe("acceptance-frozen Hub Expert creation", () => {
           {
             packageId: imported.package.packageId,
             entryPath: "bmad-agent-analyst/SKILL.md",
-            activation: "startup",
           },
         ],
         references: [],

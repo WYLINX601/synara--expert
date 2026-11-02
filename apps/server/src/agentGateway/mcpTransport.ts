@@ -427,6 +427,9 @@ export function makeAgentGatewayMcpTransport(input: {
         callerSessionKey: callerSession.sessionKey,
         callerProvider: callerSession.provider,
         callerCapabilities: callerSession.capabilities,
+        ...(callerSession.learningSession
+          ? { learningSession: callerSession.learningSession }
+          : {}),
         callerTurnId: callerWriteAuthority?.turnId ?? null,
         assertCallerTurnActive,
       };

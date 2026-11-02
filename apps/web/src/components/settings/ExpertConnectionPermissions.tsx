@@ -187,7 +187,9 @@ export function ExpertConnectionPermissions({
             })}
           </ul>
         ) : loading || error ? null : (
-          <SettingsEmptyState layout="status">尚未添加 MCP 连接。</SettingsEmptyState>
+          <p className="border-t border-border py-3 text-ui-sm text-muted-foreground">
+            尚未添加 MCP 连接。
+          </p>
         )}
       </SettingsSectionShell>
 

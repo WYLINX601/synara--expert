@@ -4,7 +4,10 @@
 
 import { describe, expect, it } from "vitest";
 
-import { appendProviderReferencesPromptBlock } from "./promptReferenceProjection.ts";
+import {
+  appendProviderReferencesPromptBlock,
+  appendProviderSkillReferencesPromptBlock,
+} from "./promptReferenceProjection.ts";
 
 describe("appendProviderReferencesPromptBlock", () => {
   it("projects Factory plugin and local path mentions without changing the user text", () => {
@@ -25,5 +28,23 @@ describe("appendProviderReferencesPromptBlock", () => {
 
   it("returns the original text when no references were selected", () => {
     expect(appendProviderReferencesPromptBlock({ text: "Hello", mentions: [] })).toBe("Hello");
+  });
+});
+
+describe("appendProviderSkillReferencesPromptBlock", () => {
+  it("delivers only selected Skill names and runtime paths", () => {
+    const result = appendProviderSkillReferencesPromptBlock({
+      text: "Use the workflow.",
+      skills: [{ name: "writer", path: "/run/private/pkg/skills/writer/SKILL.md" }],
+    });
+    expect(result).toContain("Use the workflow.");
+    expect(result).toContain("<selected_skill_references>");
+    expect(result).toContain('"name":"writer"');
+    expect(result).toContain("/run/private/pkg/skills/writer/SKILL.md");
+    expect(result).not.toContain("SKILL.md\n");
+  });
+
+  it("does not change text when no Skills are selected", () => {
+    expect(appendProviderSkillReferencesPromptBlock({ text: "Hello", skills: [] })).toBe("Hello");
   });
 });

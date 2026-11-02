@@ -1,4 +1,4 @@
-import type { ProviderKind, ThreadId } from "@synara/contracts";
+import type { LearningSessionContext, ProviderKind, ThreadId } from "@synara/contracts";
 import { ServiceMap } from "effect";
 
 export type AgentGatewayCapability =
@@ -8,7 +8,9 @@ export type AgentGatewayCapability =
   | "diagnostics:read"
   | "browser:control"
   | "device:control"
-  | "computer:control";
+  | "computer:control"
+  | "learning:read"
+  | "learning:write";
 
 export interface AgentGatewaySessionIdentity {
   readonly sessionKey: string;
@@ -16,6 +18,8 @@ export interface AgentGatewaySessionIdentity {
   readonly provider: ProviderKind;
   readonly issuedAt: number;
   readonly capabilities: ReadonlySet<AgentGatewayCapability>;
+  /** Trusted immutable run context captured by the host before lease issuance. */
+  readonly learningSession?: LearningSessionContext;
 }
 
 export interface AgentGatewayIssuedSession extends AgentGatewaySessionIdentity {
@@ -41,7 +45,10 @@ export interface AgentGatewaySessionRegistryShape {
   readonly issue: (
     threadId: ThreadId,
     provider: ProviderKind,
-    options?: { readonly additionalCapabilities?: readonly AgentGatewayCapability[] },
+    options?: {
+      readonly additionalCapabilities?: readonly AgentGatewayCapability[];
+      readonly learningSession?: LearningSessionContext;
+    },
   ) => AgentGatewayIssuedSession;
   readonly verify: (token: string) => AgentGatewaySessionIdentity | null;
   readonly bindWriteAuthority: (token: string, turnId: string) => AgentGatewayWriteAuthority | null;

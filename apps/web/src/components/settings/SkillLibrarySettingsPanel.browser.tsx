@@ -38,10 +38,14 @@ const harness = vi.hoisted(() => ({
     getConfig: vi.fn(async () => ({ keybindings: [] })),
   },
 }));
-vi.mock("~/nativeApi", () => ({
-  ensureNativeApi: () => ({ server: harness.server }),
-  readNativeApiServerCapabilityState: () => "supported",
-}));
+vi.mock("~/nativeApi", () => {
+  const api = { server: harness.server };
+  return {
+    ensureNativeApi: () => api,
+    readNativeApi: () => api,
+    readNativeApiServerCapabilityState: () => "supported",
+  };
+});
 vi.mock("~/hooks/useNativeApiServerCapability", () => ({
   useNativeApiServerCapabilitySnapshot: () => ({
     generation: harness.generation,
@@ -54,7 +58,8 @@ vi.mock("~/components/settings/ExpertTaskHistory", () => ({ ExpertTaskHistory: (
 vi.mock("~/workbench/host/expertTaskActions", () => ({
   useExpertTaskActions: () => ({ startExpertDraft: vi.fn(), projectPicker: null }),
 }));
-vi.mock("~/lib/providerDiscoveryReactQuery", () => ({
+vi.mock("~/lib/providerDiscoveryReactQuery", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/lib/providerDiscoveryReactQuery")>()),
   skillsCatalogQueryOptions: ({
     enabled,
     provider,
@@ -159,8 +164,6 @@ function listResponse(query?: SkillLibraryQuery): SkillLibraryResponse {
     )
       return false;
     if (query?.sources?.length && !query.sources.includes("github")) return false;
-    if (query?.createdBy?.length && !query.createdBy.includes(skill.createdBy ?? "unknown"))
-      return false;
     if (query?.tags?.length && !skill.tags.some((tag) => query.tags?.includes(tag))) return false;
     if (
       query?.expertIds?.length &&
@@ -185,7 +188,6 @@ function listResponse(query?: SkillLibraryQuery): SkillLibraryResponse {
     items: sorted.map((skill) => ({
       skillId: skill.skillId,
       ...(skill.createdAt ? { createdAt: skill.createdAt } : {}),
-      ...(skill.createdBy ? { createdBy: skill.createdBy } : {}),
       usage: {
         expertIds: harness.experts
           .filter((item) =>
@@ -512,9 +514,10 @@ describe("Skill library management browser flows", () => {
       harness.skills = [];
       await page.viewport(width, 844);
       await mountPanel(undefined, true);
+      await expect.element(page.getByRole("region", { name: "技能库", exact: true })).toBeVisible();
       await expect
         .element(page.getByRole("heading", { name: "技能库", exact: true }))
-        .toBeVisible();
+        .not.toBeInTheDocument();
       const route = page.getByTestId("route-column").element();
       const main = page.getByRole("main").element();
       expect(main.getBoundingClientRect().width).toBeGreaterThanOrEqual(
@@ -595,7 +598,7 @@ describe("Skill library management browser flows", () => {
     await page
       .getByRole("textbox", { name: "技能描述", exact: true })
       .fill("Use this Skill to review source material.");
-    await page.getByRole("button", { name: "保存新版本", exact: true }).click();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
     await expect
       .poll(() => resources.current().description)
       .toBe("Use this Skill to review source material.");
@@ -610,7 +613,7 @@ describe("Skill library management browser flows", () => {
       "Use this Skill to review source material.",
     );
     await expect
-      .element(page.getByRole("button", { name: "保存新版本", exact: true }))
+      .element(page.getByRole("button", { name: "保存更改", exact: true }))
       .toBeDisabled();
   });
 
@@ -634,7 +637,7 @@ describe("Skill library management browser flows", () => {
     await replaceEditor(
       "---{Enter}name: Alpha{Enter}description: Review Alpha{Enter}---{Enter}Submitted body.",
     );
-    const save = page.getByRole("button", { name: "保存新版本", exact: true });
+    const save = page.getByRole("button", { name: "保存更改", exact: true });
     await save.click();
     await expect.poll(() => uploadCount).toBe(1);
 
@@ -672,7 +675,7 @@ describe("Skill library management browser flows", () => {
     await mountPanel();
     await page.getByText("Alpha", { exact: true }).click();
     const input = page.getByRole("combobox", { name: "技能标签", exact: true });
-    const save = page.getByRole("button", { name: "保存新版本", exact: true });
+    const save = page.getByRole("button", { name: "保存更改", exact: true });
     await expect.element(save).toBeDisabled();
     await input.fill("design");
     await userEvent.keyboard("{Enter}");
@@ -779,7 +782,7 @@ describe("Skill library management browser flows", () => {
       .element(page.getByRole("textbox", { name: "references/new.md", exact: true }))
       .toBeVisible();
     await replaceEditor("# New support file{Enter}{Enter}Support body.", "references/new.md");
-    await page.getByRole("button", { name: "保存新版本", exact: true }).click();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
     await expect
       .poll(() => resources.files.get("references/new.md"))
       .toBe("# New support file\n\nSupport body.");
@@ -1108,7 +1111,12 @@ describe("Skill library management browser flows", () => {
   it("fits a narrow settings column and keeps selected actions above long Skill rows", async () => {
     const longName = "Skill".repeat(35);
     harness.skills = [
-      { ...alpha, name: longName, description: "Description".repeat(40), tags: ["tag".repeat(35)] },
+      {
+        ...alpha,
+        name: longName,
+        description: "Description".repeat(40),
+        tags: ["tag".repeat(35)],
+      },
     ];
     await mountPanel(360);
     const search = page.getByRole("textbox", { name: "搜索技能" }).element();
@@ -1118,6 +1126,11 @@ describe("Skill library management browser flows", () => {
       control.getBoundingClientRect().left - section.getBoundingClientRect().left,
     ).toBeGreaterThanOrEqual(12);
     expect(control.getBoundingClientRect().width).toBeGreaterThan(250);
+    const skillList = page.getByRole("list", { name: "托管技能" });
+    await expect.element(skillList).not.toHaveTextContent("添加者");
+    expect(skillList.element().scrollWidth).toBeLessThanOrEqual(
+      skillList.element().clientWidth + 1,
+    );
     await expect.element(page.getByRole("group", { name: "批量操作" })).not.toBeInTheDocument();
     await page.getByRole("checkbox", { name: `选择 ${longName}` }).click();
     const actions = page.getByRole("group", { name: "批量操作" }).element();
@@ -1133,12 +1146,22 @@ describe("Skill library management browser flows", () => {
   it("refreshes the library and filter options together", async () => {
     await mountPanel();
     await expect.element(page.getByRole("checkbox", { name: "选择 Alpha" })).toBeVisible();
+    const refreshButton = page.getByRole("button", { name: "刷新列表", exact: true });
+    await expect.element(refreshButton).toHaveAttribute("title", "刷新列表");
+    expect(refreshButton.element().textContent?.trim()).toBe("");
+    const refreshRow = refreshButton.element().parentElement!;
+    expect(
+      Math.abs(
+        refreshButton.element().getBoundingClientRect().right -
+          refreshRow.getBoundingClientRect().right,
+      ),
+    ).toBeLessThanOrEqual(1);
     const facetReads = () =>
       harness.server.skillLibrary.mock.calls.filter(
         ([request]) => request.action === "list" && !request.query,
       ).length;
     const before = facetReads();
-    await page.getByRole("button", { name: "刷新列表", exact: true }).click();
+    await refreshButton.click();
     await expect.poll(facetReads).toBeGreaterThan(before);
   });
 
@@ -1161,7 +1184,6 @@ describe("Skill library management browser flows", () => {
     await choose("来源", "GitHub");
     await choose("来源", "手动创建");
     await choose("专家", "Review Expert");
-    await choose("添加者", "未知");
     await choose("标签", "review");
     await expect
       .poll(() =>
@@ -1173,14 +1195,13 @@ describe("Skill library management browser flows", () => {
             request.query.sources?.includes("github") &&
             request.query.sources.includes("manual") &&
             request.query.expertIds?.includes(expert.id) &&
-            request.query.createdBy?.includes("unknown") &&
             request.query.tags?.includes("review"),
         ),
       )
       .toBe(true);
     await expect
       .element(page.getByRole("button", { name: "筛选条件", exact: true }))
-      .toHaveTextContent("6");
+      .toHaveTextContent("5");
     await page.getByRole("button", { name: "筛选条件", exact: true }).click();
     await page.getByRole("menuitem", { name: "清除筛选", exact: true }).click();
     await expect.element(page.getByRole("textbox", { name: "搜索技能" })).toHaveValue("Alpha");
@@ -1192,7 +1213,7 @@ describe("Skill library management browser flows", () => {
       });
     await expect
       .element(page.getByRole("button", { name: "筛选条件", exact: true }))
-      .not.toHaveTextContent("6");
+      .not.toHaveTextContent("5");
   });
 
   it("controls sorting and displayed metadata in the compact sort panel", async () => {
@@ -1202,12 +1223,13 @@ describe("Skill library management browser flows", () => {
     await expect.element(list).not.toHaveTextContent("来源：");
     await expect.element(list).not.toHaveTextContent("创建时间：");
     await page.getByRole("button", { name: "排序与显示", exact: true }).click();
+    await expect
+      .element(page.getByRole("switch", { name: "添加者", exact: true }))
+      .not.toBeInTheDocument();
     await page.getByRole("switch", { name: "来源", exact: true }).click();
     await page.getByRole("switch", { name: "创建时间", exact: true }).click();
-    await page.getByRole("switch", { name: "添加者", exact: true }).click();
     await expect.element(list).toHaveTextContent("来源：url");
     await expect.element(list).toHaveTextContent("创建时间：未知");
-    await expect.element(list).not.toHaveTextContent("添加者：");
     await page.getByRole("combobox", { name: "排序字段" }).click();
     await page.getByRole("option", { name: "绑定专家数", exact: true }).click();
     await page.getByRole("button", { name: "降序，切换为升序", exact: true }).click();
@@ -1228,6 +1250,50 @@ describe("Skill library management browser flows", () => {
     expect(
       harness.server.skillLibrary.mock.calls.every(([request]) => request.action === "list"),
     ).toBe(true);
+  });
+
+  it("groups usage and date metadata into secondary columns", async () => {
+    harness.skills = [
+      {
+        ...alpha,
+        createdAt: "2026-10-20T00:00:00.000Z",
+      },
+    ];
+    await mountPanel(900);
+    const list = page.getByRole("list", { name: "托管技能" });
+    await expect.element(list).not.toHaveTextContent("添加者");
+    await expect
+      .element(
+        page.getByText(
+          "保存或来源更新在下一次运行生效；当前运行及其恢复仍使用原版本。包保存成功与运行就绪分别验证。",
+          { exact: true },
+        ),
+      )
+      .not.toBeInTheDocument();
+
+    const row = list.element().querySelector("li")!;
+    const primary = row.querySelector('button[type="button"]')!;
+    const usage = page.getByRole("group", { name: "Alpha 使用和来源" }).element();
+    const dates = page.getByRole("group", { name: "Alpha 时间" }).element();
+    expect(usage.getBoundingClientRect().left).toBeGreaterThanOrEqual(
+      primary.getBoundingClientRect().right,
+    );
+    expect(dates.getBoundingClientRect().left).toBeGreaterThanOrEqual(
+      usage.getBoundingClientRect().right,
+    );
+    expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1);
+    for (const hiddenColumns of [["被谁使用"], ["更新时间"], ["被谁使用"]]) {
+      await page.getByRole("button", { name: "排序与显示", exact: true }).click();
+      for (const name of hiddenColumns) {
+        await page.getByRole("switch", { name, exact: true }).click();
+      }
+      await userEvent.keyboard("{Escape}");
+      const action = list.getByRole("button", { name: "删除", exact: true }).element();
+      expect(
+        Math.abs(action.getBoundingClientRect().right - row.getBoundingClientRect().right),
+      ).toBeLessThanOrEqual(1);
+      expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth + 1);
+    }
   });
 
   it("keeps compact filter and sort popups inside a narrow viewport", async () => {
@@ -1267,7 +1333,7 @@ describe("Skill library management browser flows", () => {
       .toHaveTextContent("name: Alpha");
     await page.getByRole("tab", { name: "概览", exact: true }).click();
     await page.getByRole("textbox", { name: "技能名称" }).fill("Renamed Alpha");
-    await page.getByRole("button", { name: "保存新版本", exact: true }).click();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
     await showFiles(true);
     await expect
       .element(page.getByRole("textbox", { name: "alpha/SKILL.md", exact: true }))
@@ -1275,7 +1341,7 @@ describe("Skill library management browser flows", () => {
     await replaceEditor(
       "---{Enter}name: Renamed Alpha{Enter}description: Review Alpha{Enter}---{Enter}Edited body.",
     );
-    await page.getByRole("button", { name: "保存新版本", exact: true }).click();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
     await expect.poll(() => resources.current().revision).toBe(4);
     expect(resources.files.get("alpha/SKILL.md")).toContain("name: Renamed Alpha");
     expect(resources.files.get("alpha/SKILL.md")).toContain("Edited body.");
@@ -1639,7 +1705,7 @@ describe("Skill library management browser flows", () => {
     await page.getByRole("button", { name: "关闭", exact: true }).click();
     await expect.element(page.getByText("未保存的更改", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "取消", exact: true }).click();
-    await page.getByRole("button", { name: "保存新版本", exact: true }).click();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
     await expect
       .poll(() =>
         harness.server.skillLibrary.mock.calls.some(
@@ -1650,12 +1716,17 @@ describe("Skill library management browser flows", () => {
     await page.getByRole("button", { name: "添加到专家", exact: true }).click();
     await page.getByRole("button", { name: "绑定", exact: true }).click();
     await expect.element(page.getByRole("switch", { name: "启用绑定技能" })).toBeChecked();
+    const bindingSwitch = page.getByRole("switch", { name: "启用绑定技能" }).element();
+    expect(bindingSwitch.className).toContain("data-checked:bg-[var(--color-text-foreground)]");
+    expect(bindingSwitch.querySelector('[data-slot="switch-thumb"]')?.className).toContain(
+      "data-checked:bg-[var(--color-background)]",
+    );
     expect(harness.server.skillLibrary).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "bindings",
         operation: "set",
         expectedRevision: 1,
-        bindings: [{ skillId: alpha.skillId, enabled: true, activation: "on-demand" }],
+        bindings: [{ skillId: alpha.skillId, enabled: true }],
       }),
     );
     await showFiles();
@@ -1676,24 +1747,30 @@ describe("Skill library management browser flows", () => {
     await page.screenshot({ path: "../../../../../_bmad-output/skill-library-narrow.png" });
   });
 
-  it("preserves old Expert selections and requires reviewed reassembly before binding from the Skill side", async () => {
+  it("binds directly from the Skill side when an Expert has no current bindings", async () => {
     const old = {
       ...expert,
       skillBindings: undefined,
-      skills: [{ name: "Existing role", path: "/old/role/SKILL.md" }],
+      skills: [],
       skillSelections: undefined,
     };
     harness.experts = [old];
     await mountPanel();
     await page.getByText("Alpha", { exact: true }).click();
     await page.getByRole("button", { name: "添加到专家", exact: true }).click();
-    await expect.element(page.getByText(/请先在专家页“改用技能库装配”/u)).toBeVisible();
-    await expect
-      .element(page.getByRole("button", { name: "绑定", exact: true }))
-      .not.toBeInTheDocument();
+    await page.getByRole("button", { name: "绑定", exact: true }).click();
+    await expect.element(page.getByRole("switch", { name: "启用绑定技能" })).toBeChecked();
+    expect(harness.server.skillLibrary).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "bindings",
+        operation: "set",
+        expertId: old.id,
+        expectedRevision: old.revision,
+        bindings: [{ skillId: alpha.skillId, enabled: true }],
+      }),
+    );
     expect(harness.server.saveExpert).not.toHaveBeenCalled();
-    expect(harness.experts[0]?.skills).toEqual(old.skills);
-    expect(harness.experts[0]?.skillBindings).toBeUndefined();
+    expect(harness.experts[0]?.skillBindings).toEqual([{ skillId: alpha.skillId, enabled: true }]);
   });
   it("cancels a pending import without allowing a late preview to re-open it", async () => {
     const response = deferred<SkillLibraryResponse>();

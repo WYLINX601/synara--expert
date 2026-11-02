@@ -22,7 +22,6 @@ export const managementCliFlags = {
   expertIds: Flag.string("expert-ids").pipe(Flag.optional),
   skillId: Flag.atMost(Flag.string("skill-id"), 5_000),
   skillIds: Flag.string("skill-ids").pipe(Flag.optional),
-  createdBy: Flag.string("created-by").pipe(Flag.optional),
   sort: Flag.choice("sort", ["name", "used-by", "created", "updated"]).pipe(Flag.optional),
   direction: Flag.choice("direction", ["asc", "desc"]).pipe(Flag.optional),
   expectedRevision: Flag.integer("expected-revision").pipe(Flag.optional),
@@ -33,7 +32,11 @@ export const managementCliFlags = {
   overwriteLocalEdits: Flag.boolean("overwrite-local-edits").pipe(Flag.withDefault(false)),
   entry: Flag.string("entry").pipe(Flag.optional),
   duplicate: Flag.choice("duplicate", ["skip", "rename", "replace"]).pipe(Flag.optional),
-  activation: Flag.choice("activation", ["startup", "on-demand"]).pipe(Flag.optional),
+  allowEvolution: Flag.choice("allow-evolution", ["true", "false"]).pipe(Flag.optional),
+  selectionScope: Flag.choice("selection-scope", ["entry", "package"]).pipe(Flag.optional),
+  resourceMode: Flag.choice("resource-mode", ["shared-readonly", "run-private"]).pipe(
+    Flag.optional,
+  ),
   instanceId: Flag.string("instance-id").pipe(Flag.optional),
   flavor: Flag.choice("flavor", [
     "production",
@@ -65,7 +68,6 @@ export type ManagementCliFlagValues = {
   readonly expertIds: string | undefined;
   readonly skillId: ReadonlyArray<string>;
   readonly skillIds: string | undefined;
-  readonly createdBy: string | undefined;
   readonly sort: "name" | "used-by" | "created" | "updated" | undefined;
   readonly direction: "asc" | "desc" | undefined;
   readonly expectedRevision: number | undefined;
@@ -76,7 +78,9 @@ export type ManagementCliFlagValues = {
   readonly overwriteLocalEdits: boolean;
   readonly entry: string | undefined;
   readonly duplicate: "skip" | "rename" | "replace" | undefined;
-  readonly activation: "startup" | "on-demand" | undefined;
+  readonly allowEvolution: "true" | "false" | undefined;
+  readonly selectionScope: "entry" | "package" | undefined;
+  readonly resourceMode: "shared-readonly" | "run-private" | undefined;
   readonly instanceId: string | undefined;
   readonly flavor: ManagementCliFlagValuesFlavor | undefined;
 };
@@ -122,7 +126,6 @@ const MANAGEMENT_FLAG_SYNTAX: Readonly<Record<string, FlagSyntax>> = {
   "expert-ids": { kind: "string" },
   "skill-id": { kind: "string", maximumOccurrences: 5_000 },
   "skill-ids": { kind: "string" },
-  "created-by": { kind: "string" },
   sort: { kind: "choice", choices: ["name", "used-by", "created", "updated"] },
   direction: { kind: "choice", choices: ["asc", "desc"] },
   "expected-revision": { kind: "integer" },
@@ -133,7 +136,9 @@ const MANAGEMENT_FLAG_SYNTAX: Readonly<Record<string, FlagSyntax>> = {
   "overwrite-local-edits": { kind: "boolean" },
   entry: { kind: "string" },
   duplicate: { kind: "choice", choices: ["skip", "rename", "replace"] },
-  activation: { kind: "choice", choices: ["startup", "on-demand"] },
+  "allow-evolution": { kind: "choice", choices: ["true", "false"] },
+  "selection-scope": { kind: "choice", choices: ["entry", "package"] },
+  "resource-mode": { kind: "choice", choices: ["shared-readonly", "run-private"] },
   "instance-id": { kind: "string" },
   flavor: {
     kind: "choice",

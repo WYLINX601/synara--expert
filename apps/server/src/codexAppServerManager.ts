@@ -2,6 +2,7 @@ import { providerProcessPriorityEnabled } from "./providerProcessPriority";
 import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { realpath } from "node:fs/promises";
 import * as nodePath from "node:path";
 
 import {
@@ -143,6 +144,24 @@ const MCP_TOOL_CALL_APPROVAL_KIND = "mcp_tool_call";
 
 type PendingRequestKey = string;
 type PendingRequest = JsonRpcPendingRequest;
+
+function buildSessionCodexTurnInput(
+  input: CodexAppServerSendTurnInput,
+  projection: FixedSkillProjection | undefined,
+): CodexTurnInputItem[] {
+  if (!projection || !input.skills?.length) return buildCodexTurnInput(input);
+  const skills = input.skills.map((skill) => {
+    const matches = projection.entries.filter(
+      (entry) =>
+        entry.name === skill.name &&
+        nodePath.resolve(entry.originalPath) === nodePath.resolve(skill.path),
+    );
+    if (matches.length !== 1)
+      throw new Error(`Codex fixed Expert turn references an unselected Skill: ${skill.name}.`);
+    return { ...skill, path: matches[0]!.path };
+  });
+  return buildCodexTurnInput({ ...input, skills });
+}
 
 interface PendingApprovalRequest {
   requestId: ApprovalRequestId;
@@ -985,6 +1004,61 @@ export function buildFixedNativeCodexConfigOverrides(
   ];
 }
 
+/** Codex discovers Skills one directory below each extra root. Keep the full
+ * package tree in place and register only the containers needed by selections. */
+export function fixedCodexSkillRoots(projection: FixedSkillProjection): string[] {
+  const packages = new Map(projection.packages.map((pkg) => [pkg.packageId, pkg]));
+  const roots = new Set<string>();
+  for (const entry of projection.entries) {
+    const pkg = packages.get(entry.packageId);
+    if (!pkg) throw new Error(`Codex fixed Skill package ${entry.packageId} is missing.`);
+    const parts = entry.entryPath.split("/");
+    if (parts.at(-1) !== "SKILL.md")
+      throw new Error(
+        `unsupported_entry_scope: Codex requires a package-relative SKILL.md entry, got "${entry.entryPath}".`,
+      );
+    const sourceRoot = nodePath.resolve(pkg.sourceRoot);
+    const packageRoot = nodePath.dirname(sourceRoot);
+    const expectedEntry = nodePath.resolve(sourceRoot, ...parts);
+    if (nodePath.resolve(entry.path) !== expectedEntry)
+      throw new Error(`Codex fixed Skill path differs from package ${entry.packageId}.`);
+    const root = nodePath.dirname(nodePath.dirname(expectedEntry));
+    const relative = nodePath.relative(packageRoot, root);
+    if (
+      relative === ".." ||
+      relative.startsWith(`..${nodePath.sep}`) ||
+      nodePath.isAbsolute(relative)
+    )
+      throw new Error(
+        `unsupported_entry_scope: Codex Skill entry "${entry.entryPath}" has no safe native container.`,
+      );
+    roots.add(root);
+  }
+  return [...roots].toSorted((left, right) => (left < right ? -1 : left > right ? 1 : 0));
+}
+
+async function fixedCodexEntryForNativeSkill(
+  projection: FixedSkillProjection,
+  skill: { readonly name: string; readonly path: string },
+): Promise<FixedSkillProjection["entries"][number] | undefined> {
+  const candidates = projection.entries.filter(
+    (entry) => entry.name === skill.name || entry.nativeName === skill.name,
+  );
+  for (const entry of candidates) {
+    if (nodePath.resolve(entry.path) === nodePath.resolve(skill.path)) return entry;
+    try {
+      const [entryPath, nativePath] = await Promise.all([
+        realpath(entry.path),
+        realpath(skill.path),
+      ]);
+      if (entryPath === nativePath) return entry;
+    } catch {
+      // A native path alias is accepted only when both paths resolve to the same file.
+    }
+  }
+  return undefined;
+}
+
 export function normalizeCodexModelSlug(
   model: string | undefined | null,
   preferredId?: string,
@@ -1478,7 +1552,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       const projection = context.fixedSkillProjection;
       if (!projection) throw new Error("Fixed Codex Skill projection is missing.");
       await this.sendRequest(context, "skills/extraRoots/set", {
-        extraRoots: [...projection.skillRoots],
+        extraRoots: fixedCodexSkillRoots(projection),
       });
       const cwd = context.session.cwd ?? process.cwd();
       const response = await this.sendRequest<Record<string, unknown>>(context, "skills/list", {
@@ -1526,16 +1600,11 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       });
       const active = strictSkills.filter((skill) => skill.enabled);
       if (!context.strictSkillConfigurationFinal) {
-        context.strictDiscoveredDisabledPaths = active
-          .filter(
-            (skill) =>
-              !projection.entries.some(
-                (entry) =>
-                  (entry.name === skill.name || entry.nativeName === skill.name) &&
-                  nodePath.resolve(entry.path) === nodePath.resolve(skill.path),
-              ),
-          )
-          .map((skill) => skill.path);
+        const unselectedActivePaths: string[] = [];
+        for (const skill of active)
+          if (!(await fixedCodexEntryForNativeSkill(projection, skill)))
+            unselectedActivePaths.push(skill.path);
+        context.strictDiscoveredDisabledPaths = unselectedActivePaths;
         return;
       }
       const configuration = this.readObject(
@@ -1561,10 +1630,16 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         );
       if (!context.lifecycleGeneration)
         throw new Error("Fixed native verification requires a lifecycle generation.");
+      const normalizedActive = await Promise.all(
+        active.map(async (skill) => {
+          const entry = await fixedCodexEntryForNativeSkill(projection, skill);
+          return entry ? { ...skill, name: entry.name, path: entry.path } : skill;
+        }),
+      );
       await verifyProjectedSkillAssembly(
         expertSession,
         projection,
-        active,
+        normalizedActive,
         context.lifecycleGeneration,
       );
       return;
@@ -2090,7 +2165,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
     // Normal sends never interrupt active work. The orchestration layer decides
     // when a queued follow-up is ready to become a provider turn.
-    const turnInput = buildCodexTurnInput(input);
+    const turnInput = buildSessionCodexTurnInput(input, context.fixedSkillProjection);
     if (turnInput.length === 0) {
       throw new Error("Turn input must include text or attachments.");
     }
@@ -2193,7 +2268,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       return this.sendTurn(input);
     }
 
-    const turnInput = buildCodexTurnInput(input);
+    const turnInput = buildSessionCodexTurnInput(input, context.fixedSkillProjection);
     if (turnInput.length === 0) {
       throw new Error("Turn input must include text or attachments.");
     }

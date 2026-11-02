@@ -39,6 +39,10 @@ import {
   makeOmpAcpIdleTaskCompatArgs,
   type OmpAcpIdleTaskCompatLaunch,
 } from "./OmpAcpIdleTaskCompat.ts";
+import {
+  makeOmpSkillEvolutionCompatArgs,
+  type OmpSkillEvolutionCompatLaunch,
+} from "./OmpSkillEvolutionCompat.ts";
 
 export interface OmpAcpRuntimeSettings extends OmpAccountBoundary {
   readonly binaryPath?: string;
@@ -140,6 +144,7 @@ export interface OmpAcpExpertSessionSpawnOptions {
   readonly configOverlayPath?: string;
   readonly appendSystemPromptPath?: string;
   readonly idleTaskCompat?: OmpAcpIdleTaskCompatLaunch;
+  readonly skillEvolutionCompat?: OmpSkillEvolutionCompatLaunch;
 }
 
 export interface OmpAcpCliCommandResult {
@@ -283,7 +288,19 @@ export function buildOmpAcpSpawnInput(
   expertSessionSpawn?: OmpAcpExpertSessionSpawnOptions,
 ): AcpSpawnInput {
   const cliArgs = ["acp"];
-  if (expertSessionSpawn?.disableExtensions) cliArgs.push("--no-extensions");
+  const skillEvolutionCompat = expertSessionSpawn?.skillEvolutionCompat;
+  if (skillEvolutionCompat) {
+    cliArgs.push(
+      "--no-tools",
+      "--no-skills",
+      "--no-rules",
+      "--no-extensions",
+      "--session-dir",
+      skillEvolutionCompat.sessionDir,
+    );
+  } else if (expertSessionSpawn?.disableExtensions) {
+    cliArgs.push("--no-extensions");
+  }
   if (expertSessionSpawn?.configOverlayPath) {
     cliArgs.push("--config", expertSessionSpawn.configOverlayPath);
   }
@@ -291,9 +308,21 @@ export function buildOmpAcpSpawnInput(
     cliArgs.push("--append-system-prompt", expertSessionSpawn.appendSystemPromptPath);
   }
   const idleTaskCompat = expertSessionSpawn?.idleTaskCompat;
+  if (idleTaskCompat && skillEvolutionCompat) {
+    throw new Error(
+      "OMP idle-task and Skill extraction compatibility cannot share one ACP process.",
+    );
+  }
   return {
-    command: idleTaskCompat?.bunExecutable ?? resolveOmpCliBinaryPath(ompSettings?.binaryPath),
-    args: idleTaskCompat ? [...makeOmpAcpIdleTaskCompatArgs(idleTaskCompat, cliArgs)] : cliArgs,
+    command:
+      idleTaskCompat?.bunExecutable ??
+      skillEvolutionCompat?.bunExecutable ??
+      resolveOmpCliBinaryPath(ompSettings?.binaryPath),
+    args: idleTaskCompat
+      ? [...makeOmpAcpIdleTaskCompatArgs(idleTaskCompat, cliArgs)]
+      : skillEvolutionCompat
+        ? [...makeOmpSkillEvolutionCompatArgs(skillEvolutionCompat, cliArgs)]
+        : cliArgs,
     cwd,
     env: buildOmpProcessEnv(ompSettings ?? {}),
   };

@@ -10,7 +10,7 @@ import {
   BotIcon,
   CircleQuestionIcon,
   ClockIcon,
-  BrainIcon,
+  ExpertIcon,
   CodeReviewIcon,
   CopyIcon,
   CustomizeIcon,
@@ -4550,7 +4550,7 @@ export default function Sidebar() {
         },
       },
       experts: {
-        icon: BrainIcon,
+        icon: ExpertIcon,
         label: "Experts",
         active: pathname === "/experts" || pathname.startsWith("/experts/"),
         badge: null,

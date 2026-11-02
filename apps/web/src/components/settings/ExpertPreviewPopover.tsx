@@ -1,9 +1,8 @@
-import { useMemo, useState } from "react";
-import { CircleAlertIcon, CircleCheckIcon, LoaderCircleIcon } from "~/lib/icons";
+import { useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { ExpertDefinition, ExpertPreview, ExpertPreviewInput } from "@synara/contracts";
 import { Button } from "../ui/button";
-import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { Popover, PopoverPopup } from "../ui/popover";
 import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { expertPreviewQueryKey } from "./expertSettingsQueries";
 
@@ -23,14 +22,21 @@ export function ExpertPreviewPopover({
   provider,
   active,
   disabled = false,
+  renderTrigger,
 }: {
   expert: ExpertDefinition | null;
   provider: ExpertPreviewInput["provider"];
   active: boolean;
   disabled?: boolean;
+  renderTrigger: (props: {
+    onCheck: () => void;
+    disabled: boolean;
+    anchorRef: RefObject<HTMLButtonElement | null>;
+  }) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const [requestedKey, setRequestedKey] = useState<string | null>(null);
+  const anchorRef = useRef<HTMLButtonElement>(null);
   const targetKey = useMemo(
     () => (expert ? `${expert.id}:${expert.revision}:${provider}` : null),
     [expert, provider],
@@ -71,33 +77,11 @@ export function ExpertPreviewPopover({
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger
-        render={
-          <Button
-            size="sm"
-            variant="outline"
-            className="min-w-23"
-            disabled={!expert || !active || disabled}
-            aria-label={status === "未检查" ? "检查配置" : `检查配置：${status}`}
-            aria-busy={query.isFetching}
-            title={status === "未检查" ? undefined : status}
-            onClick={openPopover}
-          >
-            {query.isFetching ? (
-              <LoaderCircleIcon
-                aria-hidden="true"
-                className="size-3.5 animate-spin motion-reduce:animate-none"
-              />
-            ) : status === "配置预检通过" ? (
-              <CircleCheckIcon aria-hidden="true" className={`size-3.5 ${statusTone}`} />
-            ) : status !== "未检查" ? (
-              <CircleAlertIcon aria-hidden="true" className={`size-3.5 ${statusTone}`} />
-            ) : null}
-            检查配置
-          </Button>
-        }
-      />
+      {renderTrigger({ onCheck: openPopover, disabled: !expert || !active || disabled, anchorRef })}
       <PopoverPopup
+        anchor={anchorRef}
+        finalFocus={anchorRef}
+        aria-label="检查配置"
         align="end"
         className="w-[min(26rem,calc(100vw-1rem))] p-0 [&_[data-slot=popover-viewport]]:p-0"
       >
@@ -112,9 +96,13 @@ export function ExpertPreviewPopover({
             <Button
               size="xs"
               variant="outline"
-              disabled={!expert || disabled || query.isFetching}
+              disabled={!expert || disabled}
+              aria-disabled={query.isFetching || !expert || disabled}
+              className="aria-disabled:opacity-64"
               onClick={() => {
-                if (expert) setRequestedKey(targetKey);
+                // Retain focus during a refresh so Escape dismisses only this popover.
+                if (!expert || disabled || query.isFetching) return;
+                setRequestedKey(targetKey);
                 void query.refetch();
               }}
             >

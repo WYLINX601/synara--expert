@@ -10,9 +10,11 @@ import {
   TurnId,
 } from "./baseSchemas";
 import { ModelSelection } from "./orchestration";
+import { ExpertLearningState } from "./expertLearning";
+import { LearningMemoryDraft } from "./learningTools";
+import { LearningChangeSet, SpaceMemoryEntry } from "./spaceMemory";
 import {
   SkillDefinition,
-  SkillEvolutionPolicy,
   SkillFileChange,
   SkillId,
   SkillScope,
@@ -23,6 +25,7 @@ import { SkillPackageId } from "./skillPackage";
 const Id = TrimmedNonEmptyString.check(Schema.isMaxLength(200));
 const Digest = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const ShortText = Schema.String.check(Schema.isMaxLength(8_000));
+const OpportunityText = TrimmedNonEmptyString.check(Schema.isMaxLength(8_000));
 
 export const SkillEvolutionSourceSelection = Schema.Struct({
   threadId: ThreadId,
@@ -42,12 +45,35 @@ export const SkillEvolutionSource = Schema.Struct({
 });
 export type SkillEvolutionSource = typeof SkillEvolutionSource.Type;
 
-export const SkillEvolutionEvidence = Schema.Struct({
-  threadId: ThreadId,
-  messageId: MessageId,
-  quote: ShortText,
-});
+export const SkillEvolutionEvidence = Schema.Union([
+  Schema.Struct({ threadId: ThreadId, messageId: MessageId, quote: ShortText }),
+  Schema.Struct({
+    kind: Schema.Literal("runtime"),
+    threadId: ThreadId,
+    eventId: Id,
+    quote: ShortText,
+  }),
+]);
 export type SkillEvolutionEvidence = typeof SkillEvolutionEvidence.Type;
+
+/** A reviewable learning opportunity, before any Skill files are generated. */
+export const SkillEvolutionOpportunity = Schema.Struct({
+  opportunityId: Id,
+  requestId: Id,
+  expertId: Id,
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+  reason: OpportunityText,
+  outcomes: Schema.Array(OpportunityText).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
+  evidence: Schema.Array(SkillEvolutionEvidence).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(20),
+  ),
+  targetSkillId: Schema.optional(SkillId),
+  memory: Schema.optional(LearningMemoryDraft),
+  digest: Digest,
+  status: Schema.Literals(["suggested", "dismissed"]),
+});
+export type SkillEvolutionOpportunity = typeof SkillEvolutionOpportunity.Type;
 export const SkillEvolutionProposal = Schema.Struct({
   proposalId: Id,
   requestId: Id,
@@ -59,7 +85,6 @@ export const SkillEvolutionProposal = Schema.Struct({
   baseSkillId: Schema.optional(SkillId),
   baseRevision: Schema.optional(PositiveInt),
   basePackageId: Schema.optional(SkillPackageId),
-  policy: SkillEvolutionPolicy,
   affectedExpertIds: Schema.optional(Schema.Array(Id)),
   changes: Schema.Array(SkillFileChange).check(Schema.isMaxLength(100)),
   digest: Digest,
@@ -81,6 +106,18 @@ export type SkillEvolutionProposal = typeof SkillEvolutionProposal.Type;
 export const SkillEvolutionRun = Schema.Struct({
   requestId: Id,
   expertId: Id,
+  origin: Schema.optional(Schema.Literals(["manual", "automatic"])),
+  cycleId: Schema.optional(Id),
+  learningEpoch: Schema.optional(NonNegativeInt),
+  /** Missing on historical generation records; all new requests set their stage. */
+  stage: Schema.optional(Schema.Literals(["discovery", "generation"])),
+  discoveryRequestId: Schema.optional(Id),
+  opportunityId: Schema.optional(Id),
+  generationIndex: Schema.optional(PositiveInt),
+  feedback: Schema.optional(ShortText),
+  sourceSelections: Schema.optional(
+    Schema.Array(SkillEvolutionSourceSelection).check(Schema.isMaxLength(5)),
+  ),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   modelSelection: ModelSelection,
@@ -92,6 +129,7 @@ export const SkillEvolutionRun = Schema.Struct({
     "queued",
     "running",
     "waiting_authorization",
+    "opportunity_ready",
     "proposal_ready",
     "no_change",
     "insufficient_evidence",
@@ -102,6 +140,9 @@ export const SkillEvolutionRun = Schema.Struct({
   summary: Schema.optional(ShortText),
   error: Schema.optional(ShortText),
   proposals: Schema.Array(SkillEvolutionProposal),
+  opportunities: Schema.optional(
+    Schema.Array(SkillEvolutionOpportunity).check(Schema.isMaxLength(3)),
+  ),
 });
 export type SkillEvolutionRun = typeof SkillEvolutionRun.Type;
 
@@ -127,9 +168,7 @@ export const SkillEvolutionEvent = Schema.Struct({
   previousPackageId: Schema.optional(SkillPackageId),
   derivedFromSkillId: Schema.optional(SkillId),
   previousSkillId: Schema.optional(SkillId),
-  policy: Schema.optional(SkillEvolutionPolicy),
   scope: Schema.optional(SkillScope),
-  previousPolicy: Schema.optional(SkillEvolutionPolicy),
   previousScope: Schema.optional(SkillScope),
   affectedExpertIds: Schema.Array(Id),
 });
@@ -140,7 +179,6 @@ export const SkillEvolutionGraphNode = Schema.Struct({
   name: Schema.String,
   revision: PositiveInt,
   packageId: SkillPackageId,
-  policy: SkillEvolutionPolicy,
   ownerExpertId: Schema.optional(Id),
   timestamp: Schema.NullOr(IsoDateTime),
   baseline: Schema.Boolean,
@@ -161,6 +199,29 @@ export const SkillEvolutionCapability = Schema.Struct({
 });
 export type SkillEvolutionCapability = typeof SkillEvolutionCapability.Type;
 
+const LearningSkillChangeSide = Schema.Struct({
+  size: NonNegativeInt,
+  sha256: Digest,
+  executable: Schema.Boolean,
+  text: Schema.optional(Schema.String.check(Schema.isMaxLength(128_000))),
+  omittedReason: Schema.optional(Schema.Literals(["binary", "budget"])),
+});
+export type LearningSkillChangeSide = typeof LearningSkillChangeSide.Type;
+const LearningSkillChangeFile = Schema.Struct({
+  path: Schema.String.check(Schema.isMaxLength(4_096)),
+  before: Schema.NullOr(LearningSkillChangeSide),
+  after: Schema.NullOr(LearningSkillChangeSide),
+});
+export type LearningSkillChangeFile = typeof LearningSkillChangeFile.Type;
+export const LearningSkillChangeDetail = Schema.Struct({
+  changeId: Id,
+  files: Schema.Array(LearningSkillChangeFile).check(Schema.isMaxLength(100)),
+  coverage: Schema.Array(Schema.String.check(Schema.isMaxLength(200))).check(
+    Schema.isMaxLength(20),
+  ),
+});
+export type LearningSkillChangeDetail = typeof LearningSkillChangeDetail.Type;
+
 const action = <T extends string, F extends Schema.Struct.Fields>(name: T, fields: F) =>
   Schema.Struct({ action: Schema.Literal(name), ...fields }).annotate({
     parseOptions: { onExcessProperty: "error" },
@@ -168,6 +229,31 @@ const action = <T extends string, F extends Schema.Struct.Fields>(name: T, field
 export const SkillEvolutionRequest = Schema.Union([
   action("sources", { expertId: Id }),
   action("capabilities", {}),
+  action("learningRead", { expertId: Id }),
+  action("learningChanges", { expertId: Id }),
+  action("learningReadMemory", { expertId: Id, changeId: Id, revision: PositiveInt }),
+  action("learningReadSkillChange", { expertId: Id, changeId: Id }),
+  action("learningEditMemory", {
+    expertId: Id,
+    changeId: Id,
+    requestId: Id,
+    expectedRevision: PositiveInt,
+    content: TrimmedNonEmptyString.check(Schema.isMaxLength(4_000)),
+    validUntil: Schema.optional(IsoDateTime),
+  }),
+  action("learningRevert", {
+    expertId: Id,
+    changeId: Id,
+    operationId: Id,
+    expectedRevision: Schema.optional(NonNegativeInt),
+  }),
+  action("learningSet", {
+    expertId: Id,
+    requestId: Id,
+    expectedRevision: NonNegativeInt,
+    enabled: Schema.Boolean,
+    harnessKind: Schema.optional(Schema.Literals(["omp", "pi"])),
+  }),
   action("list", { expertId: Id }),
   action("start", {
     requestId: Id,
@@ -176,10 +262,20 @@ export const SkillEvolutionRequest = Schema.Union([
       Schema.isMinLength(1),
       Schema.isMaxLength(5),
     ),
-    targetSkillId: Schema.optional(SkillId),
-    protectedAction: Schema.optional(Schema.Literals(["update", "derive"])),
     focus: Schema.optional(ShortText),
     modelSelection: ModelSelection,
+  }),
+  action("generate", {
+    requestId: Id,
+    discoveryRequestId: Id,
+    opportunityId: Id,
+    expectedDigest: Digest,
+    feedback: Schema.optional(ShortText),
+  }),
+  action("dismissOpportunity", {
+    requestId: Id,
+    opportunityId: Id,
+    expectedDigest: Digest,
   }),
   action("read", { requestId: Id }),
   action("cancel", { requestId: Id }),
@@ -195,7 +291,6 @@ export const SkillEvolutionRequest = Schema.Union([
     proposalId: Id,
     expectedDigest: Digest,
     operationId: Id,
-    approveProtected: Schema.optional(Schema.Boolean),
   }),
   action("reject", { requestId: Id, proposalId: Id, expectedDigest: Digest }),
   action("graph", { expertId: Id, at: Schema.optional(IsoDateTime) }),
@@ -212,12 +307,18 @@ export const SkillEvolutionRequest = Schema.Union([
     expertId: Id,
     operationId: Id,
     expectedRevision: PositiveInt,
-    expectedAffectedExpertIds: Schema.optional(Schema.Array(Id)),
-    approveProtected: Schema.optional(Schema.Boolean),
   }),
 ]);
 export type SkillEvolutionRequest = typeof SkillEvolutionRequest.Type;
 export const SkillEvolutionResponse = Schema.Struct({
+  learningChanges: Schema.optional(Schema.Array(LearningChangeSet)),
+  learningSkillChange: Schema.optional(LearningSkillChangeDetail),
+  memoryEntry: Schema.optional(SpaceMemoryEntry),
+  learningChange: Schema.optional(LearningChangeSet),
+  learningStatus: Schema.optional(
+    Schema.Literals(["committed", "saved_unbound", "deferred", "unchanged"]),
+  ),
+  learningState: Schema.optional(ExpertLearningState),
   sources: Schema.optional(Schema.Array(SkillEvolutionSource)),
   capabilities: Schema.optional(Schema.Array(SkillEvolutionCapability)),
   runs: Schema.optional(Schema.Array(SkillEvolutionRun)),
@@ -273,3 +374,25 @@ export const SkillEvolutionModelResult = Schema.Union([
   }),
 ]);
 export type SkillEvolutionModelResult = typeof SkillEvolutionModelResult.Type;
+
+/** Discovery proposes experience, never files, approvals, ownership or a write action. */
+export const SkillEvolutionDiscoveryResult = Schema.Union([
+  action("no_change", { reason: ShortText }),
+  action("insufficient_evidence", { reason: ShortText }),
+  action("opportunities", {
+    opportunities: Schema.Array(
+      Schema.Struct({
+        name: TrimmedNonEmptyString.check(Schema.isMaxLength(200)),
+        reason: OpportunityText,
+        outcomes: Schema.Array(OpportunityText).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
+        evidence: Schema.Array(SkillEvolutionEvidence).check(
+          Schema.isMinLength(1),
+          Schema.isMaxLength(20),
+        ),
+        targetSkillId: Schema.optional(SkillId),
+        memory: Schema.optional(LearningMemoryDraft),
+      }).annotate({ parseOptions: { onExcessProperty: "error" } }),
+    ).check(Schema.isMinLength(1), Schema.isMaxLength(3)),
+  }),
+]);
+export type SkillEvolutionDiscoveryResult = typeof SkillEvolutionDiscoveryResult.Type;

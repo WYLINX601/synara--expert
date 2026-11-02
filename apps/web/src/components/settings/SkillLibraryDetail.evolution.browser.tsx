@@ -22,7 +22,6 @@ import { render } from "vitest-browser-react";
 
 const harness = vi.hoisted(() => ({
   skill: undefined as SkillDefinition | undefined,
-  configureCalls: [] as SkillLibraryRequest[],
   server: {
     skillLibrary: vi.fn<(request: SkillLibraryRequest) => Promise<SkillLibraryResponse>>(),
     listExperts: vi.fn<() => Promise<ExpertDefinition[]>>(),
@@ -60,7 +59,7 @@ const expert: ExpertDefinition = {
   persona: "Review work.",
   outputRequirements: "",
   skills: [],
-  skillBindings: [{ skillId: baseSkill.skillId, enabled: true, activation: "on-demand" }],
+  skillBindings: [{ skillId: baseSkill.skillId, enabled: true }],
   references: [],
   connections: [],
   revision: 2,
@@ -112,19 +111,8 @@ async function mount() {
 
 beforeEach(() => {
   harness.skill = { ...baseSkill };
-  harness.configureCalls = [];
   harness.server.skillLibrary.mockReset().mockImplementation(async (request) => {
     if (request.action === "read") return { skill: harness.skill };
-    if (request.action === "configureEvolution") {
-      harness.configureCalls.push(request);
-      harness.skill = {
-        ...harness.skill!,
-        revision: harness.skill!.revision + 1,
-        evolutionPolicy: request.evolutionPolicy,
-        scope: request.scope,
-      };
-      return { skill: harness.skill };
-    }
     return {};
   });
   harness.server.listExperts.mockReset().mockResolvedValue([expert]);
@@ -137,56 +125,68 @@ afterEach(async () => {
 });
 
 describe("SkillLibraryDetail evolution settings", () => {
-  it("saves policy through configureEvolution with the expected revision", async () => {
+  it("shows shared scope as read-only information and removes policy controls", async () => {
     await mount();
-    await page.getByRole("tab", { name: "进化策略" }).click();
-    await page.getByRole("combobox", { name: "Skill 进化策略" }).click();
-    await page.getByRole("option", { name: "共享进化" }).click();
-    await page.getByRole("button", { name: "保存进化策略" }).click();
-    await expect.poll(() => harness.configureCalls.length).toBe(1);
-    expect(harness.configureCalls[0]).toMatchObject({
-      action: "configureEvolution",
-      skillId: baseSkill.skillId,
-      expectedRevision: 4,
-      evolutionPolicy: "shared",
-      scope: { kind: "shared" },
-    });
-  });
-
-  it("keeps shared scope when a shared source is configured for independent evolution", async () => {
-    await mount();
-    await page.getByRole("tab", { name: "进化策略" }).click();
-    await page.getByRole("combobox", { name: "Skill 进化策略" }).click();
-    await page.getByRole("option", { name: "独立进化" }).click();
-    await page.getByRole("button", { name: "保存进化策略" }).click();
-    await expect.poll(() => harness.configureCalls.length).toBe(1);
-    expect(harness.configureCalls[0]).toMatchObject({
-      action: "configureEvolution",
-      evolutionPolicy: "independent",
-      scope: { kind: "shared" },
-    });
-  });
-
-  it("requires explicit confirmation before changing an expert-only scope", async () => {
-    await mount();
-    await page.getByRole("tab", { name: "进化策略" }).click();
-    await page.getByRole("combobox", { name: "Skill 可用范围" }).click();
-    await page.getByRole("option", { name: "Review Expert" }).click();
-    await page.getByRole("button", { name: "保存进化策略" }).click();
+    await expect.element(page.getByText("共享技能", { exact: true })).toBeVisible();
+    await expect.element(page.getByRole("tab", { name: "进化策略" })).not.toBeInTheDocument();
     await expect
-      .element(page.getByRole("heading", { name: "确认更改 Skill 可用范围" }))
-      .toBeVisible();
-    await expect.element(page.getByText(/当前有 1 个专家引用此 Skill/)).toBeVisible();
-    await page.getByRole("button", { name: "取消" }).click();
-    await expect.poll(() => harness.configureCalls.length).toBe(0);
+      .element(page.getByRole("combobox", { name: "Skill 进化策略" }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("combobox", { name: "Skill 可用范围" }))
+      .not.toBeInTheDocument();
+  });
 
-    await page.getByRole("button", { name: "保存进化策略" }).click();
-    await page.getByRole("button", { name: "确认并保存范围" }).click();
-    await expect.poll(() => harness.configureCalls.length).toBe(1);
-    expect(harness.configureCalls[0]).toMatchObject({
-      action: "configureEvolution",
-      expectedRevision: 4,
-      scope: { kind: "expert", expertId: expert.id },
+  it("shows an entry diagnostic in the existing source details without treating it as package corruption", async () => {
+    harness.server.readSkillPackage.mockResolvedValue({
+      ...pkg,
+      entries: [
+        {
+          ...pkg.entries[0]!,
+          diagnostics: [
+            {
+              code: "unknown_frontmatter_field",
+              severity: "warning",
+              message: "存在未识别的 frontmatter 字段。",
+              entryPath: "SKILL.md",
+              provider: "codex",
+            },
+          ],
+        },
+      ],
     });
+    await mount();
+    await expect
+      .element(page.getByRole("status", { name: "入口配置提醒" }))
+      .toHaveTextContent(/当前入口 SKILL\.md 有 1 条配置提醒/u);
+    await expect.element(page.getByRole("tab", { name: "文件" })).toBeEnabled();
+    await expect.element(page.getByRole("alert")).not.toBeInTheDocument();
+    await page.getByRole("button", { name: "来源与版本" }).click();
+    await expect
+      .element(page.getByText("警告 · 存在未识别的 frontmatter 字段。", { exact: true }))
+      .toBeVisible();
+  });
+
+  it("shows Expert ownership and derivation provenance as read-only facts", async () => {
+    const sourceSkillId = `skl_${"b".repeat(32)}` as SkillDefinition["skillId"];
+    const sourcePackageId = `pkg_${"b".repeat(64)}` as SkillDefinition["packageId"];
+    harness.skill = {
+      ...baseSkill,
+      scope: { kind: "expert", expertId: expert.id },
+      derivedFrom: {
+        skillId: sourceSkillId,
+        revision: 3,
+        packageId: sourcePackageId,
+      },
+    };
+    await mount();
+    await expect.element(page.getByText("专家专用 · Review Expert", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText(`${sourceSkillId} · v3 · ${sourcePackageId}`, { exact: true }))
+      .toBeVisible();
+    await expect.element(page.getByRole("tab", { name: "进化策略" })).not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("combobox", { name: "Skill 可用范围" }))
+      .not.toBeInTheDocument();
   });
 });

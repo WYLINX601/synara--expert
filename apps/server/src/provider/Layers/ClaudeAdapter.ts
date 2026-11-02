@@ -98,11 +98,11 @@ import { approvalSessionGrantWidensSessionPolicy } from "@synara/shared/approval
 import { approvalRequestKindFromRequestType } from "@synara/shared/threadSummary";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import type { ProviderExpertSession } from "@synara/contracts";
+import { verifyProjectedSkillAssembly } from "../fixedSkillProjection";
 import {
-  createFixedSkillProjection,
-  verifyProjectedSkillAssembly,
-  type FixedSkillProjection,
-} from "../fixedSkillProjection";
+  createClaudeFixedSkillProjection as createFixedSkillProjection,
+  type ClaudeFixedSkillProjection as FixedSkillProjection,
+} from "../claudeSkillProjection";
 import {
   createExpertSkillApplication,
   invalidateNativeSkillAssemblyVerification,

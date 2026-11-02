@@ -30,7 +30,7 @@ describe("fixed Expert discovery RPC host wiring", () => {
         persona: "Fixed",
         outputRequirements: "",
         skills: [],
-        skillBindings: [{ skillId: skill.skillId, enabled: true, activation: "on-demand" }],
+        skillBindings: [{ skillId: skill.skillId, enabled: true }],
         references: [],
         connections: [],
       });

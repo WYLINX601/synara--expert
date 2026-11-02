@@ -16,7 +16,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SYNARA_COMPUTER_TOOL_NAMES } from "../../agentGateway/computerToolPermission.ts";
 import {
   applyPiRuntimeApiKeysFromEnvironment,
-  createPiModelRuntime,
+  createPiModelRuntime as createPiModelRuntimeImpl,
   ensurePiAnthropicCatalogModels,
   getPiDiscoverableModels,
   findModelInRegistry,
@@ -37,6 +37,19 @@ import {
   SKILL_EVOLUTION_EXECUTION_PURPOSE,
   SKILL_EVOLUTION_SYSTEM_PROMPT,
 } from "../skillEvolutionConstraints.ts";
+
+// Model discovery fixtures must never repair permissions in the user's data home.
+const createPiModelRuntime = (...args: Parameters<typeof createPiModelRuntimeImpl>) => {
+  const [agentDir, sdk, signal, environment, instanceId, paths] = args;
+  return createPiModelRuntimeImpl(
+    agentDir,
+    sdk,
+    signal,
+    environment,
+    instanceId,
+    paths ?? { stateDir: path.join(agentDir, "provider-test-state"), homeDir: agentDir },
+  );
+};
 
 async function withoutAmbientAnthropicAuthToken<T>(action: () => Promise<T>): Promise<T> {
   vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "");
@@ -294,7 +307,7 @@ describe("Pi Expert resource loading", () => {
           {
             packageId: `pkg_${"d".repeat(64)}`,
             entryPath: "skills/reviewer/SKILL.md",
-            activation: "startup",
+
             name: "reviewer",
             description: "Review safely.",
             path: "/state/pkg/content/skills/reviewer/SKILL.md",

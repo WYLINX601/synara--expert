@@ -193,6 +193,11 @@ import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
 import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
 import { createExpertStore } from "./experts/ExpertStore";
 import { SkillEvolutionRepository } from "./experts/evolution/SkillEvolutionRepository";
+import { ExpertLearningRepository } from "./experts/evolution/ExpertLearningRepository";
+import { SpaceMemoryService } from "./spaceMemory/SpaceMemoryService";
+import { ExpertLearningActions } from "./experts/evolution/ExpertLearningActions";
+import { WorkbenchExpertRuntime } from "./workbench/runtimeLayer";
+import { frozenLearningEntriesReader } from "./experts/evolution/ExpertLearningState";
 import { ProjectionTurnRepository } from "./persistence/Services/ProjectionTurns";
 import { makeSkillEvolutionRpcHandlers } from "./workbench/host/skillEvolutionRpc";
 import { readHubExpertCatalog } from "./agentGateway/hubExpertCatalog";
@@ -201,7 +206,6 @@ import {
   makeWorkbenchExpertRpcHandlers,
   makeWorkbenchExpertDiscoveryHandlers,
 } from "./workbench/host/expertRpc.ts";
-import { createSkillPackageSwitchHost } from "./workbench/host/skillPackageSwitchHost.ts";
 import { makeWorkbenchContextRpcHandlers } from "./workbench/host/contextRpc.ts";
 import { makeSkillManagementRpcHandlers } from "./workbench/host/skillManagementRpc.ts";
 import { readThreadContextDetails } from "./workbench/host/contextThreadDetails.ts";
@@ -592,15 +596,22 @@ const makeWsRpcHandlersLayer = () =>
       const expertAppliedRuntimeRepository = yield* ExpertAppliedRuntimeRepository;
       const contextRepository = yield* ContextRepository;
       const evolutionRepository = yield* Effect.serviceOption(SkillEvolutionRepository);
+      const learningRepository = yield* Effect.serviceOption(ExpertLearningRepository);
+      const spaceMemory = yield* Effect.serviceOption(SpaceMemoryService);
+      const learningActions = yield* Effect.serviceOption(ExpertLearningActions);
       const evolutionTurns = yield* Effect.serviceOption(ProjectionTurnRepository);
       const contextDeliveries = yield* OrchestrationEventDeliveryRepository;
-      const workbenchExpertRuntime = createWorkbenchExpertRuntime({
-        stateDir: config.stateDir,
-        expertAppliedRuntimeRepository,
-      });
-      yield* Effect.addFinalizer(() =>
-        Effect.promise(() => workbenchExpertRuntime.skillLibrary.dispose()),
-      );
+      const sharedExpertRuntime = yield* Effect.serviceOption(WorkbenchExpertRuntime);
+      const workbenchExpertRuntime =
+        Option.getOrUndefined(sharedExpertRuntime) ??
+        createWorkbenchExpertRuntime({
+          stateDir: config.stateDir,
+          expertAppliedRuntimeRepository,
+        });
+      if (Option.isNone(sharedExpertRuntime))
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(() => workbenchExpertRuntime.skillLibrary.dispose()),
+        );
       const readOwnerThreadDiagnostics = makeOwnerThreadDiagnosticReader({
         eventStore,
         providerRuntimeEvents,
@@ -1415,7 +1426,18 @@ const makeWsRpcHandlersLayer = () =>
               shell?.session?.status === "starting" ||
               hasBackground,
             );
-            const assemblies = createRunSkillAssemblyStore(config.stateDir);
+            const assemblies = createRunSkillAssemblyStore(
+              config.stateDir,
+              Option.isSome(learningRepository)
+                ? {
+                    frozenEntries: (expertId, bindings) =>
+                      frozenLearningEntriesReader(learningRepository.value)(
+                        expertId,
+                        bindings ?? [],
+                      ),
+                  }
+                : {},
+            );
             return yield* Effect.tryPromise(async () => {
               if (!running) return assemblies.preview(snapshot.snapshotId);
               const current = await assemblies.current(threadId);
@@ -1426,12 +1448,29 @@ const makeWsRpcHandlersLayer = () =>
         listSkills: (request) => providerDiscoveryService.listSkills(request),
       });
       const evolutionRpc = makeSkillEvolutionRpcHandlers({
+        ...(Option.isSome(spaceMemory) ? { memory: spaceMemory.value } : {}),
+        ...(Option.isSome(learningActions) ? { actions: learningActions.value } : {}),
         stateDir: config.stateDir,
         runtime: workbenchExpertRuntime,
         ...(Option.isSome(evolutionRepository) ? { repository: evolutionRepository.value } : {}),
+        ...(Option.isSome(learningRepository)
+          ? { learningRepository: learningRepository.value }
+          : {}),
         requireOwner,
         rpcEffect,
         host: (principal) => ({
+          readProjectIdentity: (projectId) =>
+            Effect.runPromise(
+              projectionReadModelQuery
+                .getProjectShellById(projectId as ProjectId)
+                .pipe(
+                  Effect.map((project) =>
+                    Option.isSome(project)
+                      ? { projectId: project.value.id, spaceId: project.value.spaceId ?? null }
+                      : undefined,
+                  ),
+                ),
+            ),
           readThreads: () =>
             Effect.runPromise(
               projectionReadModelQuery
@@ -1463,6 +1502,7 @@ const makeWsRpcHandlersLayer = () =>
         }),
       });
       yield* Effect.addFinalizer(() => Effect.promise(() => evolutionRpc.dispose()));
+      yield* Effect.promise(() => evolutionRpc.start());
       const workbenchExpertRpcHandlers = makeWorkbenchExpertRpcHandlers({
         runtime: workbenchExpertRuntime,
         requireSkillOwner,
@@ -1473,28 +1513,6 @@ const makeWsRpcHandlersLayer = () =>
         requireOwner,
         rpcEffect,
         expertRpcEffect,
-        createSkillPackageSwitchHost: (principal) =>
-          createSkillPackageSwitchHost({
-            stateDir: config.stateDir,
-            experts: workbenchExpertRuntime.experts,
-            hubWorkRepository,
-            hubWorkService,
-            readThreads: () =>
-              Effect.runPromise(
-                projectionReadModelQuery
-                  .getSnapshot()
-                  .pipe(Effect.map((snapshot) => snapshot.threads)),
-              ),
-            readAppliedRuntimeRecords: () =>
-              Effect.runPromise(workbenchExpertRuntime.readAppliedRuntimeRecords()),
-            runEffect: Effect.runPromise,
-            dispatch: (command) =>
-              Effect.runPromise(
-                dispatchOrchestrationCommand(command).pipe(
-                  Effect.provideService(CurrentManagedAttachmentPrincipal, principal),
-                ),
-              ),
-          }),
         loadProjectionThreads: () =>
           projectionReadModelQuery.getSnapshot().pipe(Effect.map((snapshot) => snapshot.threads)),
       });

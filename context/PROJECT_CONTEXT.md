@@ -42,6 +42,10 @@ Expert Skill 主动进化已按用户确认的[产品方案](../docs/expert-skil
 
 ## 桌面应用日用与独立预览（配置与历史）
 
+2026-10-29 用户要求四个私有交付目录只保留最新一个；三个旧交付已清理，必要证据归入最新目录 `history/`，现行安装与恢复入口已更新为 0.1.10／0.1.9 配套组合。实测磁盘可用空间增加 7.37 GiB，日用数据未改动，见[存储收口记录](../docs/storage-management-2026-10-24.md#delivery-cleanup-20261029)。
+
+同日用户确认将防堆积要求纳入长期规范：[单一交付目录与轮换](../docs/workbench-development-workflow.md#single-delivery-root)要求跨任务复用一个长期交付根，复制前盘点、验证替代并更新入口后轮换、交付时清理暂存；AGENTS 已加入入口约束。现阶段为人工门禁，不代表自动清理已实现。
+
 2026-10-24 用户确认以桌面应用作为唯一日用数据主源，在应用内浏览器批注独立预览，并明确允许最新版本打包更新安装；取代此前浏览器日用／预览／应用三角色。流程以[开发规范](../docs/workbench-development-workflow.md#browser-daily-preview)为准，实际配置、安装与恢复依据统一见[应用与预览环境](../docs/application-preview-environments-2026-10-24.md)。
 
 Personal Workbench 已更新为 0.1.5，源码 `8f7143cf6f001aa495d57f0e3867a91c3cb9f351`；使用 `~/.synara-workbench/userdata`，原 23 线程及模型／权限保留，旧 3 个 Hub 和 4 个自动化暂停／停用。当时建立的独立预览使用浏览器 19842／后端 19841；该源码树曾被用户误操作移除、数据保留，后续已恢复受管源码及旧项目路径兼容链接，见下节。

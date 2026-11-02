@@ -6,8 +6,6 @@ import type {
   SkillManagementCredentialSummary,
   SkillManagementPairingResult,
 } from "./skillManagementAuth";
-import type { HubPlansApi } from "./hubPlan";
-import type { HubTeamsApi } from "./hubCollaboration";
 import { Schema } from "effect";
 import type {
   ProjectAgentDeliverablesListInput,
@@ -1219,8 +1217,6 @@ export interface DesktopBridge {
 }
 
 export interface NativeApi {
-  hubTeams?: HubTeamsApi;
-  hubPlans?: HubPlansApi;
   /** Optional while older and isolated test clients are upgraded. */
   context?: ContextApi;
   dialogs: {

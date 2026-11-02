@@ -21,7 +21,6 @@ import { parseHubReferenceUri } from "@synara/shared/hubReferences";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery";
 import type { OrchestrationCommandReceiptRepositoryShape } from "../persistence/Services/OrchestrationCommandReceipts";
 import type { ProjectionThreadMessageRepositoryShape } from "../persistence/Services/ProjectionThreadMessages";
-import type { ProjectionTurnRepositoryShape } from "../persistence/Services/ProjectionTurns";
 import type { QueuedTurnPromotionRepositoryShape } from "../persistence/Services/QueuedTurnPromotions";
 import {
   HubWorkRepositoryError,
@@ -30,7 +29,6 @@ import {
 import type { ProjectAgentRepositoryShape } from "../persistence/Services/ProjectAgentRepository";
 import { ProjectAgentServiceError } from "./Errors";
 import { resolveHubWorkLifecycle } from "./hubWorkLifecycle";
-import { reserveHubWorkAdmission, rollbackHubWorkAdmission } from "./hubWorkAdmission.ts";
 import { resolveHubTargetProjectId } from "./hubTarget";
 import { GROUPS_BETA_ONLY_MESSAGE, isServerGroupsEnabled } from "./groupsBetaGate";
 import type { ProjectAgentPrincipal } from "./principal";
@@ -44,7 +42,6 @@ type HubWorkDependencies = {
   >;
   readonly projectAgentRepository: ProjectAgentRepositoryShape;
   readonly messages?: Pick<ProjectionThreadMessageRepositoryShape, "getByThreadAndMessageId">;
-  readonly projectionTurns?: Pick<ProjectionTurnRepositoryShape, "getByTurnId">;
   readonly commandReceipts?: Pick<OrchestrationCommandReceiptRepositoryShape, "getByCommandId">;
   readonly snapshotQuery?: Pick<ProjectionSnapshotQueryShape, "getThreadShellsByIds">;
   readonly resolveCreationSpec?: (input: {
@@ -53,15 +50,6 @@ type HubWorkDependencies = {
     readonly spec: SynaraCreateThreadSpec;
   }) => Effect.Effect<SynaraResolvedCreateThreadSpec, unknown>;
   readonly queuedTurnPromotions?: Pick<QueuedTurnPromotionRepositoryShape, "listPendingThreadIds">;
-  readonly planExecution?: {
-    readonly assertWorkAllowed: (record: HubWorkRecord) => Effect.Effect<void, unknown>;
-    readonly authorizeInputResponseFollowup?: (input: {
-      readonly inputRequestId: string;
-      readonly threadId: ThreadId;
-      readonly commandId: string;
-      readonly messageId: string;
-    }) => Effect.Effect<void, unknown>;
-  };
 };
 
 export interface HubWorkSubmitInput {
@@ -90,7 +78,6 @@ export interface HubWorkService {
     readonly threadId: ThreadId;
     readonly commandId: string;
     readonly messageId: string;
-    readonly inputRequestId?: string | undefined;
   }) => Effect.Effect<HubWorkRecord | null, ProjectAgentServiceError>;
   readonly releaseFailedFollowup: (input: {
     readonly workItemId: string;
@@ -198,10 +185,15 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
       .pipe(Effect.mapError(serviceError), Effect.tap(notify));
 
   const restoreFollowupAdmission = (record: HubWorkRecord) =>
-    rollbackHubWorkAdmission(repository, record).pipe(
-      Effect.mapError(serviceError),
-      Effect.tap(notify),
-    );
+    save(record, {
+      state: record.admissionPreviousState ?? "idle",
+      slotHeld: record.admissionPreviousSlotHeld,
+      admittedAt: null,
+      admissionCommandId: null,
+      admissionMessageId: null,
+      admissionPreviousState: null,
+      admissionPreviousSlotHeld: false,
+    });
 
   const assertProject = (projectId: ProjectId, principal: ProjectAgentPrincipal) => {
     if (principal.kind !== "user" && principal.projectId !== projectId)
@@ -233,14 +225,6 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
           }
         }
         const config = yield* requireConfig(principal.projectId);
-        if (config.collaboration !== undefined) {
-          return yield* Effect.fail(
-            fail(
-              "New-mode Hub work must be authorized by a confirmed collaboration plan.",
-              "forbidden",
-            ),
-          );
-        }
         if (!config.enabled || config.pausedAt !== null || config.archivedAt !== null)
           return yield* Effect.fail(fail("Resume this hub before starting work.", "conflict"));
         if (
@@ -413,28 +397,8 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
     claimNext: (projectId) =>
       Effect.gen(function* () {
         if (!isServerGroupsEnabled()) return null;
-        const config = yield* requireConfig(projectId);
-        let claimed: HubWorkRecord | null = null;
-        if (config.collaboration === undefined) {
-          claimed = yield* repository.claimNext(projectId).pipe(Effect.mapError(serviceError));
-        } else {
-          if (!dependencies.planExecution) {
-            return yield* Effect.fail(
-              fail("Plan execution is unavailable for this Hub.", "forbidden"),
-            );
-          }
-          const queued = (yield* repository
-            .list(projectId)
-            .pipe(Effect.mapError(serviceError))).filter((record) => record.state === "queued");
-          for (const record of queued) {
-            const gate = yield* Effect.exit(dependencies.planExecution.assertWorkAllowed(record));
-            if (gate._tag === "Failure") continue;
-            claimed = yield* repository
-              .claimNext(projectId, record.id)
-              .pipe(Effect.mapError(serviceError));
-            if (claimed) break;
-          }
-        }
+        yield* requireConfig(projectId);
+        const claimed = yield* repository.claimNext(projectId).pipe(Effect.mapError(serviceError));
         if (claimed) yield* notify(claimed);
         return claimed;
       }),
@@ -446,27 +410,6 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
           .pipe(Effect.mapError(serviceError));
         if (!record) return null;
         const config = yield* requireConfig(record.projectId);
-        if (config.collaboration !== undefined) {
-          if (
-            !input.inputRequestId ||
-            !dependencies.planExecution?.authorizeInputResponseFollowup
-          ) {
-            return yield* Effect.fail(
-              fail(
-                "Plan workers can only resume through an answered directed input request.",
-                "forbidden",
-              ),
-            );
-          }
-          yield* dependencies.planExecution
-            .authorizeInputResponseFollowup({
-              inputRequestId: input.inputRequestId,
-              threadId: input.threadId,
-              commandId: input.commandId,
-              messageId: input.messageId,
-            })
-            .pipe(Effect.mapError(serviceError));
-        }
         if (!config.enabled || config.pausedAt !== null || config.archivedAt !== null)
           return yield* Effect.fail(fail("Resume this hub before starting work.", "conflict"));
         if (record.state === "cancelled")
@@ -475,21 +418,11 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
           callerThreadId: config.coordinatorThreadId,
           targetProjectId: record.targetProjectId,
         });
-        if (record.admissionCommandId === input.commandId) {
-          if (record.admissionMessageId !== input.messageId) {
-            return yield* Effect.fail(
-              fail(
-                "This Hub work admission command is already bound to another message.",
-                "conflict",
-              ),
-            );
-          }
-          return record;
-        }
-        const admitted = yield* reserveHubWorkAdmission(repository, input).pipe(
-          Effect.mapError(serviceError),
-        );
+        if (record.admissionCommandId === input.commandId) return record;
+        const admitted = yield* repository.reserveWorker(input).pipe(Effect.mapError(serviceError));
         if (!admitted) {
+          const current = yield* repository.get(record.id).pipe(Effect.mapError(serviceError));
+          if (current?.admissionCommandId === input.commandId) return current;
           return yield* Effect.fail(
             fail("All hub worker slots are busy. Try again when a worker finishes.", "limit"),
           );
@@ -607,39 +540,12 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
                   })
                   .pipe(Effect.mapError(serviceError), Effect.map(Option.getOrNull))
               : null;
-          const workerShell = shellById.get(record.workerThreadId!) ?? null;
-          let resolvedAdmissionTurn = null;
-          if (
-            admissionMessage?.startsNewTurn === true &&
-            admissionMessage.turnId === null &&
-            record.admittedAt !== null &&
-            record.admissionMessageId !== null &&
-            workerShell?.latestTurn?.state === "completed" &&
-            workerShell.latestTurn.completedAt !== null &&
-            workerShell.latestTurn.completedAt >= record.admittedAt &&
-            dependencies.projectionTurns
-          ) {
-            const nativeTurn = yield* dependencies.projectionTurns
-              .getByTurnId({
-                threadId: record.workerThreadId!,
-                turnId: workerShell.latestTurn.turnId,
-              })
-              .pipe(Effect.mapError(serviceError), Effect.map(Option.getOrNull));
-            if (
-              nativeTurn?.threadId === record.workerThreadId &&
-              nativeTurn.turnId === workerShell.latestTurn.turnId &&
-              nativeTurn.pendingMessageId === record.admissionMessageId
-            ) {
-              resolvedAdmissionTurn = nativeTurn;
-            }
-          }
           const update = resolveHubWorkLifecycle({
             record,
-            shell: workerShell,
+            shell: shellById.get(record.workerThreadId!) ?? null,
             worker: workerById.get(record.workerThreadId!) ?? null,
             hasPendingTurn: pending.has(record.workerThreadId!),
             admissionMessage,
-            resolvedAdmissionTurn,
           });
           if (
             update &&
@@ -660,18 +566,6 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
     attachWorker: (input) =>
       Effect.gen(function* () {
         const record = yield* requireRecord(input.workItemId);
-        if (dependencies.planExecution) {
-          yield* dependencies.planExecution
-            .assertWorkAllowed(record)
-            .pipe(Effect.mapError(serviceError));
-        } else {
-          const config = yield* requireConfig(record.projectId);
-          if (config.collaboration !== undefined) {
-            return yield* Effect.fail(
-              fail("Plan execution is unavailable for this Hub.", "forbidden"),
-            );
-          }
-        }
         if (record.workerThreadId === input.workerThreadId) return record;
         if (record.workerThreadId !== null || record.state !== "starting")
           return yield* Effect.fail(fail("This hub task is not awaiting a worker.", "conflict"));
@@ -704,15 +598,6 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
     updateProgress: (input) =>
       Effect.gen(function* () {
         const record = yield* requireRecord(input.workItemId);
-        if (dependencies.planExecution) {
-          yield* dependencies.planExecution
-            .assertWorkAllowed(record)
-            .pipe(Effect.mapError(serviceError));
-        } else if ((yield* requireConfig(record.projectId)).collaboration !== undefined) {
-          return yield* Effect.fail(
-            fail("Plan execution is unavailable for this Hub.", "forbidden"),
-          );
-        }
         const principal = yield* projectAgentService.resolvePrincipalForThread(
           input.callerThreadId,
         );
@@ -736,20 +621,6 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
       Effect.gen(function* () {
         const record = yield* requireRecord(input.workItemId);
         yield* assertProject(record.projectId, principal);
-        const config = yield* requireConfig(record.projectId);
-        if (config.collaboration !== undefined) {
-          if (!dependencies.planExecution) {
-            return yield* Effect.fail(
-              fail("Plan execution is unavailable; plan-bound work cannot be cancelled directly."),
-            );
-          }
-          yield* dependencies.planExecution
-            .assertWorkAllowed(record)
-            .pipe(Effect.mapError(serviceError));
-          return yield* Effect.fail(
-            fail("Plan-bound work must be stopped through Hub plan controls."),
-          );
-        }
         if (principal.kind !== "user" && principal.kind !== "coordinator")
           return yield* Effect.fail(fail("Only the user or coordinator can cancel queued work."));
         if (record.state === "cancelled") return record;

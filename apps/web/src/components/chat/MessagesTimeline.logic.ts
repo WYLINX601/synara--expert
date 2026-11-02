@@ -4,7 +4,6 @@
 // Exports: row derivation, structural sharing, copy/timer helpers
 
 import {
-  type HubPlanEvent,
   type InlineVisualActivityPayload,
   type MessageId,
   type OrchestrationLatestTurn,
@@ -631,12 +630,6 @@ export type MessagesTimelineRow =
       id: string;
       createdAt: string;
       proposedPlan: ProposedPlan;
-    }
-  | {
-      kind: "hub-plan-event";
-      id: string;
-      createdAt: string;
-      event: HubPlanEvent;
     }
   | {
       // An answered agent question shown as a question/answer exchange. Like
@@ -2121,16 +2114,6 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
 
     case "proposed-plan":
       return a.proposedPlan === (b as typeof a).proposedPlan;
-
-    case "hub-plan-event": {
-      const bh = b as typeof a;
-      return (
-        a.createdAt === bh.createdAt &&
-        a.event.sequence === bh.event.sequence &&
-        a.event.kind === bh.event.kind &&
-        a.event.payload === bh.event.payload
-      );
-    }
 
     case "user-input":
       return a.entry.userInputExchange === (b as typeof a).entry.userInputExchange;

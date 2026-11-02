@@ -145,11 +145,7 @@ import { resolveTextGenerationInputForSelection } from "../../git/textGeneration
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderHealth } from "../../provider/Services/ProviderHealth.ts";
 import { isServerGroupsEnabled } from "../../projectAgent/groupsBetaGate.ts";
-import {
-  ProjectAgentService,
-  type ProjectAgentTurnStartAuthorization,
-} from "../../projectAgent/Services/ProjectAgentService.ts";
-import { isHubPlanInputResponseCommandId } from "../../hubCollaboration/hubPlanInput.ts";
+import { ProjectAgentService } from "../../projectAgent/Services/ProjectAgentService.ts";
 import { ProjectAgentRepository } from "../../persistence/Services/ProjectAgentRepository.ts";
 import { resolveProviderDispatchAttachments } from "../../provider/providerAttachmentPaths.ts";
 import { OrchestrationEventDeliveryRepositoryLive } from "../../persistence/Layers/OrchestrationEventDeliveries.ts";
@@ -2174,7 +2170,6 @@ const make = Effect.gen(function* () {
       readonly providerOptions?: ProviderStartOptions;
       readonly enableComputerControl?: boolean;
       readonly runtimeMode?: RuntimeMode;
-      readonly turnStartAuthorization?: ProjectAgentTurnStartAuthorization;
       readonly registerPriorTranscriptBootstrapOnFreshStart?: boolean;
       readonly skillRun?: {
         readonly rootRunId: string;
@@ -2189,6 +2184,18 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${threadId}' was not found in projection state.`),
       );
     }
+    if (Option.isSome(projectAgentService)) {
+      yield* projectAgentService.value.assertGroupCoordinatorTurnAllowed({ threadId }).pipe(
+        Effect.mapError(
+          (error) =>
+            new ProviderAdapterValidationError({
+              provider: thread.modelSelection.provider,
+              operation: "thread.turn.start",
+              issue: error.message,
+            }),
+        ),
+      );
+    }
     const evolutionExecution = yield* readSkillEvolutionExecution(threadId).pipe(
       Effect.mapError(
         () =>
@@ -2199,59 +2206,8 @@ const make = Effect.gen(function* () {
           }),
       ),
     );
-    let preserveExpertSkillRun = false;
+    const preserveExpertSkillRun = false;
     let managedSkillRunKey: string | undefined;
-    if (Option.isSome(projectAgentService)) {
-      const planTurnAuthorization = yield* projectAgentService.value
-        .assertGroupCoordinatorTurnAllowed({
-          threadId,
-          ...(options?.turnStartAuthorization ? { turnStart: options.turnStartAuthorization } : {}),
-        })
-        .pipe(
-          Effect.mapError(
-            (error) =>
-              new ProviderAdapterValidationError({
-                provider: thread.modelSelection.provider,
-                operation: "thread.turn.start",
-                issue: error.message,
-              }),
-          ),
-        );
-      // Directed Hub replies are admitted against the persisted attempt above.
-      // Recheck native interaction/capacity state at actual start without
-      // changing ordinary user-turn or native-steering behavior.
-      const turnStartAuthorization = options?.turnStartAuthorization;
-      const isDirectedHubInputResponse = Boolean(
-        turnStartAuthorization?.dispatchOrigin === "user" &&
-        isHubPlanInputResponseCommandId(turnStartAuthorization.commandId),
-      );
-      // The in-process gate returns this kind only after matching the exact
-      // persisted plan attempt, recovery episode, command/message, task prompt,
-      // frozen target/settings, and native admission reservation.
-      const isPlanWorkerRecoveryResume = planTurnAuthorization === "plan-recovery";
-      const isPlanWorkerRecoverySteer = planTurnAuthorization === "plan-recovery-steer";
-      preserveExpertSkillRun =
-        isDirectedHubInputResponse || isPlanWorkerRecoveryResume || isPlanWorkerRecoverySteer;
-      if (isDirectedHubInputResponse || isPlanWorkerRecoveryResume || isPlanWorkerRecoverySteer) {
-        const pending = yield* pendingInteractions.getPendingCountsByThreadId({ threadId });
-        const liveTurn = yield* hasLiveProviderTurn(threadId);
-        if (
-          pending.pendingApprovalCount > 0 ||
-          pending.pendingUserInputCount > 0 ||
-          (isPlanWorkerRecoverySteer ? !liveTurn : liveTurn)
-        ) {
-          return yield* Effect.fail(
-            new ProviderAdapterValidationError({
-              provider: thread.modelSelection.provider,
-              operation: "thread.turn.start",
-              issue: isPlanWorkerRecoverySteer
-                ? "Recovery steering requires the original active Worker turn without pending approval or user input."
-                : "The Worker has a native approval, user input, or active turn pending.",
-            }),
-          );
-        }
-      }
-    }
     if (!evolutionExecution && thread.expertBinding && Option.isSome(projectAgentRepository)) {
       const worker = yield* projectAgentRepository.value.findManagedWorkerByThread(threadId).pipe(
         Effect.mapError(
@@ -3294,7 +3250,6 @@ const make = Effect.gen(function* () {
     readonly computerControlMode?: "off" | "request" | "chat";
     readonly computerControlGeneration?: number;
     readonly runtimeMode?: RuntimeMode;
-    readonly turnStartAuthorization?: ProjectAgentTurnStartAuthorization;
     readonly interactionMode?: ProviderInteractionMode;
     readonly dispatchMode?: "queue" | "steer";
     readonly turnKind?: "user" | "goal-continuation";
@@ -3721,9 +3676,6 @@ const make = Effect.gen(function* () {
         ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {}),
         ...(input.dispatchMode === "steer" ? {} : { enableComputerControl }),
         ...(input.runtimeMode !== undefined ? { runtimeMode: input.runtimeMode } : {}),
-        ...(input.turnStartAuthorization !== undefined
-          ? { turnStartAuthorization: input.turnStartAuthorization }
-          : {}),
         ...(registerPriorTranscriptBootstrapOnFreshStart
           ? { registerPriorTranscriptBootstrapOnFreshStart: true }
           : {}),
@@ -5385,35 +5337,6 @@ const make = Effect.gen(function* () {
         cacheReviewSource: event,
         sourceEventSequence: event.sequence,
         completionEventSequence: deliveryEventSequence ?? event.sequence,
-        ...(event.commandId !== null
-          ? {
-              turnStartAuthorization: {
-                commandId: event.commandId,
-                messageId: message.id,
-                messageText: message.text,
-                attachments: message.attachments,
-                skills: message.skills,
-                mentions: message.mentions,
-                runtimeMode: event.payload.runtimeMode,
-                interactionMode: event.payload.interactionMode,
-                ...(event.payload.modelSelection !== undefined
-                  ? { modelSelection: event.payload.modelSelection }
-                  : {}),
-                providerOptions: event.payload.providerOptions,
-                enableComputerControl: event.payload.enableComputerControl,
-                computerControlMode: event.payload.computerControlMode,
-                computerControlGeneration: event.payload.computerControlGeneration,
-                reviewTarget: event.payload.reviewTarget,
-                assistantDeliveryMode: event.payload.assistantDeliveryMode,
-                dispatchMode: event.payload.dispatchMode,
-                ...(event.payload.dispatchOrigin !== undefined
-                  ? { dispatchOrigin: event.payload.dispatchOrigin }
-                  : {}),
-                sourceProposedPlan: event.payload.sourceProposedPlan,
-                createdAt: event.payload.createdAt,
-              },
-            }
-          : {}),
         ...(acceptedCacheReview ? { acceptedCacheReview } : {}),
         threadId: event.payload.threadId,
         messageId: message.id,

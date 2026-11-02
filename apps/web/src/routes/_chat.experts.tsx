@@ -13,7 +13,7 @@ export const Route = createFileRoute("/_chat/experts")({
     target?: string;
     sourceThreadId?: string;
   } => ({
-    ...(search.kind === "teams" || search.kind === "skills" ? { kind: search.kind } : {}),
+    ...(search.kind === "skills" ? { kind: search.kind } : {}),
     tab:
       search.tab === "settings" || search.tab === "history" || search.tab === "evolution"
         ? search.tab

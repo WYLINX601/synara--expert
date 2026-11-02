@@ -66,34 +66,16 @@ function attachmentFromBlob(blob: ManagedAttachmentBlob): BinaryChatAttachment {
   };
 }
 
-export function delegatedAttachmentId(input: {
-  readonly dispatchKey: string;
-  readonly targetThreadId: string;
-  readonly targetMessageId: string;
-  readonly sourceThreadId: string;
-  readonly sourceMessageId: string;
-  readonly sourceAttachmentId: string;
-}): string {
+function cloneIdentity(input: CloneInput, source: SourceAttachment): string {
   const identity = JSON.stringify([
     input.dispatchKey,
     input.targetThreadId,
     input.targetMessageId,
-    input.sourceThreadId,
-    input.sourceMessageId,
-    input.sourceAttachmentId,
+    source.threadId,
+    source.messageId,
+    source.attachment.id,
   ]);
   return `att_v2_${createHash("sha256").update(identity).digest("hex").slice(0, 32)}`;
-}
-
-function cloneIdentity(input: CloneInput, source: SourceAttachment): string {
-  return delegatedAttachmentId({
-    dispatchKey: input.dispatchKey,
-    targetThreadId: input.targetThreadId,
-    targetMessageId: input.targetMessageId,
-    sourceThreadId: source.threadId,
-    sourceMessageId: source.messageId,
-    sourceAttachmentId: source.attachment.id,
-  });
 }
 
 function readBinaryAttachment(input: {

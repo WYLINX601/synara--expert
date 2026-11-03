@@ -5070,9 +5070,23 @@ export default function ChatView({
     (expertId: string | undefined) => {
       if (isLocalDraftThread) {
         setDraftThreadContext(threadId, { expertId: expertId ?? "" });
+        if (expertId !== composerExpertId) {
+          const selection = composerExpertsQuery.data?.find(
+            (expert) => expert.id === expertId,
+          )?.defaultModelSelection;
+          if (selection) {
+            useComposerDraftStore.getState().setModelSelection(threadId, selection);
+          }
+        }
       }
     },
-    [isLocalDraftThread, setDraftThreadContext, threadId],
+    [
+      isLocalDraftThread,
+      setDraftThreadContext,
+      threadId,
+      composerExpertId,
+      composerExpertsQuery.data,
+    ],
   );
   // Event handlers handed to children below. Their closures read live thread and draft
   // state, so they are recreated with every streamed token and keystroke; one identity

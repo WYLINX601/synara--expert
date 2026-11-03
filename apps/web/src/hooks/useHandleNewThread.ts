@@ -137,6 +137,10 @@ export function useHandleNewThread() {
     }
     const wantsTemporaryThread = options?.temporary === true;
     const applyProviderOverride = (threadId: ThreadId) => {
+      if (options?.modelSelection) {
+        setModelSelection(threadId, options.modelSelection);
+        return;
+      }
       if (!options?.provider) {
         return;
       }
@@ -222,7 +226,11 @@ export function useHandleNewThread() {
         ?.defaultModelSelection ?? null;
     const applyUsableStickyState = (threadId: ThreadId) => {
       applyStickyState(threadId);
-      if (options?.provider || !hasReconciledServerProviderStatuses(queryClient)) {
+      if (
+        options?.provider ||
+        options?.modelSelection ||
+        !hasReconciledServerProviderStatuses(queryClient)
+      ) {
         return;
       }
 

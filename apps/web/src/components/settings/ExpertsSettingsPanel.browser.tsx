@@ -21,6 +21,8 @@ import type {
   SkillLibraryRequest,
   SkillLibraryResponse,
 } from "@synara/contracts";
+import type * as AppSettingsModule from "~/appSettings";
+import { useComposerDraftStore } from "~/composerDraftStore";
 
 const harness = vi.hoisted(() => {
   const makeExpert = (overrides: Record<string, unknown> = {}): ExpertDefinition => ({
@@ -58,6 +60,15 @@ const harness = vi.hoisted(() => {
     connectionState: "active" as "active" | "disabled" | "retired",
   };
   const server = {
+    getConfig: vi.fn(async () => ({
+      cwd: "/workspace",
+      providers: ["codex", "claudeAgent", "pi", "omp"].map((provider) => ({
+        provider,
+        available: true,
+        status: "ready",
+        authStatus: "authenticated",
+      })),
+    })),
     skillLibrary: vi.fn(
       async (_request: SkillLibraryRequest): Promise<SkillLibraryResponse> => ({ skills: [] }),
     ),
@@ -74,7 +85,7 @@ const harness = vi.hoisted(() => {
       const previous = data.experts.find((expert) => expert.id === id);
       const { expectedRevision: _expectedRevision, ...fields } = input;
       const saved = {
-        ...(previous ?? makeExpert({ id, name: "" })),
+        ...makeExpert({ id, name: "" }),
         ...fields,
         id,
         revision: (previous?.revision ?? 0) + 1,
@@ -111,9 +122,42 @@ const harness = vi.hoisted(() => {
 });
 
 vi.mock("~/nativeApi", () => ({
-  ensureNativeApi: () => ({ server: harness.server }),
+  ensureNativeApi: () => ({
+    server: harness.server,
+    provider: {
+      listModels: async () => ({
+        source: "fixture",
+        models: [
+          {
+            slug: "openai-codex/gpt-6.1-sol",
+            name: "GPT-6.1 Sol",
+            supportedReasoningEfforts: [
+              { value: "low", label: "Low" },
+              { value: "medium", label: "Medium" },
+              { value: "high", label: "High" },
+            ],
+            defaultReasoningEffort: "medium",
+          },
+          { slug: "openai-codex/gpt-6-luna", name: "GPT-6 Luna" },
+        ],
+      }),
+      listAgents: async () => ({ agents: [] }),
+    },
+  }),
   readNativeApiServerCapabilityState: () => "supported",
 }));
+vi.mock("~/appSettings", async (importOriginal) => {
+  const actual = await importOriginal<typeof AppSettingsModule>();
+  return {
+    ...actual,
+    useAppSettings: () => ({
+      settings: actual.AppSettingsSchema.makeUnsafe({
+        disabledProviders: [],
+        hiddenProviders: [],
+      }),
+    }),
+  };
+});
 vi.mock("~/hooks/useNativeApiServerCapability", () => ({
   useNativeApiServerCapabilitySnapshot: () => ({
     generation: "experts-settings-browser",
@@ -287,6 +331,15 @@ async function mountCenter(
 beforeEach(() => {
   harness.data.experts = [harness.makeExpert()];
   for (const operation of Object.values(harness.server)) operation.mockReset();
+  harness.server.getConfig.mockResolvedValue({
+    cwd: "/workspace",
+    providers: ["codex", "claudeAgent", "pi", "omp"].map((provider) => ({
+      provider,
+      available: true,
+      status: "ready",
+      authStatus: "authenticated",
+    })),
+  });
   harness.server.skillLibrary.mockResolvedValue({ skills: [] });
   harness.server.listExperts.mockImplementation(async () => harness.data.experts);
   harness.server.listExpertConnections.mockImplementation(async () => harness.data.connections);
@@ -302,7 +355,7 @@ beforeEach(() => {
     const previous = harness.data.experts.find((expert) => expert.id === id);
     const { expectedRevision: _expectedRevision, ...fields } = input;
     const saved = {
-      ...(previous ?? harness.makeExpert({ id, name: "" })),
+      ...harness.makeExpert({ id, name: "" }),
       ...fields,
       id,
       revision: (previous?.revision ?? 0) + 1,
@@ -393,28 +446,38 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     },
   );
 
-  it("offers Claude and Oh My Pi as expert preferred providers", async () => {
-    const { close } = await mountPanel("/settings?expertId=planner", "capabilities");
-    await page.getByRole("tab", { name: "设置", exact: true }).click();
-    const provider = page.getByRole("combobox", { name: "专家首选 Provider", exact: true });
-
-    for (const [providerId, displayName] of [
-      ["claudeAgent", "Claude"],
-      ["omp", "Oh My Pi"],
-    ] as const) {
-      await provider.click();
-      await page.getByRole("option", { name: displayName, exact: true }).click();
-      await expect.element(provider).toHaveTextContent(displayName);
-      await page.getByRole("button", { name: "保存更改", exact: true }).click();
-      await expect
-        .poll(() => harness.server.saveExpert.mock.calls.length)
-        .toBe(providerId === "claudeAgent" ? 1 : 2);
-      expect(harness.server.saveExpert.mock.calls.at(-1)?.[0]).toMatchObject({
-        preferredProvider: providerId,
-      });
-    }
-
+  it("saves harness, model and effort from one picker without changing chat defaults", async () => {
+    const stickyBefore = useComposerDraftStore.getState().stickyModelSelectionByProvider;
+    const { close } = await mountPanel("/settings?expertId=planner");
+    const picker = page.getByRole("button", { name: "Change model and reasoning", exact: true });
+    await picker.click();
+    await page.getByRole("tab", { name: "Oh My Pi", exact: true }).click();
+    await page.getByRole("menuitem", { name: /GPT-6.1 Sol/ }).click();
+    const effort = page.getByRole("slider", { name: "Reasoning effort", exact: true });
+    await effort.element().focus();
+    await userEvent.keyboard("{ArrowRight}");
+    await expect.element(effort).toHaveAttribute("aria-valuetext", "High");
+    await picker.click();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "保存更改", exact: true }))
+      .toBeDisabled();
     await close();
+
+    const reopened = await mountPanel("/settings?expertId=planner");
+    const restored = page.getByRole("button", { name: "Change model and reasoning", exact: true });
+    await expect.element(restored).toHaveTextContent("GPT-6.1 Sol");
+    await expect.element(restored).toHaveTextContent("High");
+    await restored.click();
+    await page.getByRole("menuitem", { name: "不指定默认模型", exact: true }).click();
+    await expect.element(page.getByRole("button", { name: "保存更改", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "保存更改", exact: true }))
+      .toBeDisabled();
+    await expect.poll(() => harness.data.experts[0]?.defaultModelSelection).toBeUndefined();
+    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider).toBe(stickyBefore);
+    await reopened.close();
   });
 
   it("grows compact instructions with content and preserves independent fields across tabs and save", async () => {
@@ -438,13 +501,6 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     await expect.poll(() => textarea.getBoundingClientRect().height).toBe(shortHeight);
     await page.getByRole("tab", { name: "设置", exact: true }).click();
     await expect.element(page.getByRole("region", { name: "基本信息", exact: true })).toBeVisible();
-    await expect
-      .element(
-        page
-          .getByRole("region", { name: "运行配置", exact: true })
-          .getByRole("combobox", { name: "专家首选 Provider" }),
-      )
-      .toHaveTextContent("Codex");
     await page.getByRole("textbox", { name: "专家描述" }).fill("帮助团队形成决策");
     await page.getByRole("textbox", { name: "专家使用场景" }).fill("方案比较、需求分析");
     expect(harness.server.saveExpert).not.toHaveBeenCalled();
@@ -666,9 +722,6 @@ describe("ExpertsSettingsPanel browser interactions", () => {
       .element(page.getByRole("tab", { name: "设置" }))
       .toHaveAttribute("aria-selected", "true");
     await expect.element(page.getByText("请填写专家名称。", { exact: true })).toBeVisible();
-    await expect
-      .element(page.getByRole("combobox", { name: "专家首选 Provider" }))
-      .toHaveTextContent("不指定");
     await name.click();
     document.activeElement?.dispatchEvent(
       new KeyboardEvent("keydown", {

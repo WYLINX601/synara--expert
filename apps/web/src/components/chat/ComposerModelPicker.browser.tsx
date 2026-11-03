@@ -151,6 +151,7 @@ async function mountPicker(
   });
   const screen = await render(<Harness {...harnessProps} />);
   await page.getByRole("button", { name: "Change model and reasoning" }).click();
+  await expect.element(page.getByRole("searchbox", { name: "Search models" })).toHaveFocus();
   return screen;
 }
 

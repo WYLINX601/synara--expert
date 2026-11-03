@@ -149,6 +149,7 @@ export function resolveHubCreationSpec(input: {
 
     const requestedTarget =
       input.spec.target ??
+      definition.defaultModelSelection ??
       (definition.preferredProvider
         ? yield* preferredTarget({
             provider: definition.preferredProvider,
@@ -238,12 +239,16 @@ export function listHubExpertSummaries(input: {
             preferredProvider: null,
             available: false,
           } satisfies HubExpertSummary;
-        const provider = definition.preferredProvider ?? input.callerTarget.provider;
+        const provider =
+          definition.defaultModelSelection?.provider ??
+          definition.preferredProvider ??
+          input.callerTarget.provider;
         const providerAvailability = availabilities.get(provider);
         let available = !definition.archived && isExpertProvider(provider);
         if (available) {
           const target =
-            definition.preferredProvider === undefined
+            definition.defaultModelSelection ??
+            (definition.preferredProvider === undefined
               ? input.callerTarget
               : yield* preferredTarget({
                   provider,
@@ -252,7 +257,7 @@ export function listHubExpertSummaries(input: {
                     ? { availability: providerAvailability }
                     : {}),
                   cwd: workspaceRoot,
-                }).pipe(Effect.catch(() => Effect.succeed(null)));
+                }).pipe(Effect.catch(() => Effect.succeed(null))));
           if (target === null) {
             available = false;
           } else {

@@ -13,27 +13,39 @@ import { buildNextProviderOptions, type ProviderOptions } from "../../providerMo
 // sticky choice for the model. Every trait surface (radio menu, slider card,
 // keyboard shortcuts) funnels through here so persistence semantics stay identical.
 export function useComposerTraitCommit(input: {
-  threadId: ThreadId;
+  threadId?: ThreadId | undefined;
   provider: ProviderKind;
   providerInstanceId?: ProviderInstanceId | null | undefined;
   model: string | null | undefined;
   modelOptions: ProviderOptions | null | undefined;
+  onModelOptionsChange?: ((options: ProviderOptions | undefined) => void) | undefined;
 }): (patch: Record<string, unknown>) => void {
-  const { threadId, provider, providerInstanceId, model, modelOptions } = input;
+  const { threadId, provider, providerInstanceId, model, modelOptions, onModelOptionsChange } =
+    input;
   const setProviderModelOptions = useComposerDraftStore((store) => store.setProviderModelOptions);
   return useCallback(
     (patch: Record<string, unknown>) => {
-      setProviderModelOptions(
-        threadId,
-        provider,
-        buildNextProviderOptions(provider, modelOptions, patch),
-        {
-          ...(providerInstanceId ? { instanceId: providerInstanceId } : {}),
-          ...(model !== undefined ? { model } : {}),
-          persistSticky: true,
-        },
-      );
+      const next = buildNextProviderOptions(provider, modelOptions, patch);
+      if (onModelOptionsChange) {
+        onModelOptionsChange(next);
+        return;
+      }
+      if (!threadId)
+        throw new Error("A composer thread or controlled model-options callback is required.");
+      setProviderModelOptions(threadId, provider, next, {
+        ...(providerInstanceId ? { instanceId: providerInstanceId } : {}),
+        ...(model !== undefined ? { model } : {}),
+        persistSticky: true,
+      });
     },
-    [threadId, provider, providerInstanceId, modelOptions, model, setProviderModelOptions],
+    [
+      threadId,
+      provider,
+      providerInstanceId,
+      modelOptions,
+      model,
+      setProviderModelOptions,
+      onModelOptionsChange,
+    ],
   );
 }

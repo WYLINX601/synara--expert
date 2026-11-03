@@ -128,6 +128,43 @@ describe("ExpertStore", () => {
     expect(archived).toMatchObject({ archived: true, revision: 3 });
   });
 
+  it("persists and clears defaults without changing the model pinned in an admitted snapshot", async () => {
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const store = createExpertStore(stateDir);
+    const defaults = {
+      provider: "omp" as const,
+      instanceId: "omp",
+      model: "openai-codex/gpt-6.1-sol",
+      options: { thinkingLevel: "high" as const },
+    };
+    const input = definitionInput("Default model", {
+      preferredProvider: "omp",
+      defaultModelSelection: defaults,
+    });
+    const saved = await store.save(input);
+    const pinned = await store.prepareSnapshot(saved.id);
+    const reopened = createExpertStore(stateDir);
+    expect((await reopened.read(saved.id))?.defaultModelSelection).toEqual(defaults);
+    await reopened.save({
+      ...input,
+      expectedRevision: saved.revision,
+      defaultModelSelection: undefined,
+    });
+    expect((await reopened.read(saved.id))?.defaultModelSelection).toBeUndefined();
+    expect((await reopened.readSnapshot(pinned.snapshotId)).defaultModelSelection).toEqual(
+      defaults,
+    );
+    await expect(
+      reopened.save({
+        ...input,
+        expectedRevision: saved.revision + 1,
+        preferredProvider: "pi",
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect((await reopened.read(saved.id))?.revision).toBe(saved.revision + 1);
+  });
+
   it("deletes only the requested revision and preserves pinned resources after reopening", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");

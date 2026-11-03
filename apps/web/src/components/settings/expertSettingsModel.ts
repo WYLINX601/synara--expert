@@ -7,6 +7,7 @@ export type ExpertDraftField =
   | "persona"
   | "outputRequirements"
   | "preferredProvider"
+  | "defaultModelSelection"
   | "skillBindings"
   | "references"
   | "connections";
@@ -103,6 +104,9 @@ export function expertDraftFromDefinition(expert?: ExpertDefinition): ExpertSave
       expert?.connections.map((connection) => ({ ...connection, tools: [...connection.tools] })) ??
       [],
     ...(expert?.preferredProvider ? { preferredProvider: expert.preferredProvider } : {}),
+    ...(expert?.defaultModelSelection
+      ? { defaultModelSelection: structuredClone(expert.defaultModelSelection) }
+      : {}),
   };
 }
 
@@ -125,6 +129,9 @@ export function expertSaveInputForDraft(
       tools: connection.tools.map((tool) => tool.trim()).filter(Boolean),
     })),
     ...(draft.preferredProvider ? { preferredProvider: draft.preferredProvider } : {}),
+    ...(draft.defaultModelSelection
+      ? { defaultModelSelection: structuredClone(draft.defaultModelSelection) }
+      : {}),
     ...(baseline ? { id: baseline.id, expectedRevision: baseline.revision } : {}),
   };
 }
@@ -137,6 +144,7 @@ export function expertDraftsEqual(a: ExpertSaveInput, b: ExpertSaveInput): boole
     a.persona === b.persona &&
     a.outputRequirements === b.outputRequirements &&
     a.preferredProvider === b.preferredProvider &&
+    JSON.stringify(a.defaultModelSelection) === JSON.stringify(b.defaultModelSelection) &&
     JSON.stringify(a.skillBindings ?? []) === JSON.stringify(b.skillBindings ?? []) &&
     JSON.stringify(a.references) === JSON.stringify(b.references) &&
     JSON.stringify(a.connections) === JSON.stringify(b.connections)
@@ -163,6 +171,16 @@ export function validateExpertDraft(draft: ExpertSaveInput): ExpertDraftIssue[] 
   addLengthIssue("useCases", draft.useCases, REFERENCE_TEXT_LIMIT);
   addLengthIssue("persona", draft.persona, REFERENCE_TEXT_LIMIT);
   addLengthIssue("outputRequirements", draft.outputRequirements, REFERENCE_TEXT_LIMIT);
+  if (
+    draft.defaultModelSelection &&
+    draft.defaultModelSelection.provider !== draft.preferredProvider
+  ) {
+    issues.push({
+      field: "defaultModelSelection",
+      code: "invalid",
+      message: "默认模型须与首选 Provider 一致。",
+    });
+  }
 
   if (draft.skillBindings !== undefined) {
     if (

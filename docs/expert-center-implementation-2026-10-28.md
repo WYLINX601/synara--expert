@@ -83,3 +83,15 @@
 交付收尾：目前 Git 仅登记主目录 `/Users/wangyuelin/synara-expert` 与受管预览 `/Users/wangyuelin/.codex/worktrees/expert-center/synara-expert`。临时开发树在确认源码已合入、无未提交/独有成果及文件占用，并保留失败浏览器截图和测试日志后回收；两个可从已校验 ZIP 重建的解包目录也已回收，完整恢复集和原包保留。图标输入恢复引用已改指向恢复集中的 0.1.6 原应用，不再引用退役解包路径。
 
 最小隔离测试 home 保留在 `.synara/expert-center-runtime`；其中测试项目仍记录原临时源码路径，若需重演，应先从 `codex/expert-center` 固定提交重建该工作树并安装锁定依赖，再按隔离端口启动，不将该测试 home 用于日用应用。早期主目录方案草稿保存在 Git stash `ac5fe91d92ff6077a807c66ee25f7d1af7c82b03`，未覆盖或丢弃。
+
+## 2026-11-03 默认 harness／模型修复
+
+本次为独立修复分支交付，不替换上述历史安装记录；未合并 main、未构建或安装日用应用，未恢复 Graph。
+
+- Expert 设置改为复用原生对话框的一个模型按钮，支持 harness、账号、模型、effort 的保存、刷新回显和清除。Hub 显式 target 覆盖已保存默认值；原生任务草稿带入默认值并允许局部覆盖，不回写 Expert。
+- 隔离真实页面保存并刷新回显 `OMP / GPT-6.1 Sol / High`；产品经理任务草稿带入相同选择，改为 `GPT-6 Luna / Low` 后，读取 Expert 保存值仍为原来的 `Sol / High`。未发送消息或运行 Provider 回合，不能据此声称真实 Provider 派发成功。
+- 受影响服务端 5 文件 115 tests、Web unit 5 文件 91 tests、浏览器 3 文件 69 tests 通过；contracts 32 文件 287 tests、shared 104 文件 1,114 tests 通过（2 skipped）。保存／清除、模型可用性、显式覆盖、冻结与草稿隔离均有行为覆盖。
+- 格式、lint（0 errors）、7 包 typecheck 与 115 文件静态接入边界检查通过。边界检查证明清单和依赖规则，不证明完整运行时隔离。React Doctor 以本地 main 为基线扫描 17 文件，72/100；4 项小列表循环内查找警告，未为理论优化额外改写现有选择逻辑。
+- 全库 `bun run test` 未通过：desktop 的 `backendShutdown.posix.integration`、`cuaDriverHost`、`macAppIcon.native` 各有失败，Web `storeNormalization` 的后台 activity trimming 用例也报告失败；Turbo 随后中断。相关文件未改动，但未证明这些失败在本次变更前已存在，不将其标成既有通过或正式集成验收。
+- 验收期间集成浏览器坐标点击偏移，关闭通知的操作误触 Provider 更新；服务端记录 Codex 更新至 0.166.0、Pi 从 1.1.0 更新至 1.5.0，Pi 扩展未更新。已通知用户并报告工具问题；该主机侧变化不属于修复内容，未自行降级或重启。后续交互改用精确键盘定位。
+- 独立预览使用隔离 home 与端口；原始验收标签存在用户未保存编辑，因此保留该标签和隔离数据，不丢弃或覆盖。未更改日用数据库；隔离 home 并不能隔离系统级 CLI 安装。

@@ -211,6 +211,33 @@ describe("planComposerEffortChange", () => {
       planComposerEffortChange({ provider: "codex", selection: free, prompt: "", value: "" }),
     ).toBeNull();
   });
+
+  it("does not offer prompt-injected effort when editing a saved model configuration", () => {
+    const selection = getComposerTraitSelection(
+      "claudeAgent",
+      "claude-opus-4-8",
+      "",
+      undefined,
+      undefined,
+      false,
+    );
+    expect(
+      planComposerEffortChange({
+        provider: "claudeAgent",
+        selection,
+        prompt: "",
+        value: "ultrathink",
+      }),
+    ).toBeNull();
+    expect(
+      planComposerEffortChange({
+        provider: "claudeAgent",
+        selection,
+        prompt: "",
+        value: "high",
+      }),
+    ).toMatchObject({ kind: "options" });
+  });
 });
 
 describe("resolveComposerEffortLadderIndex", () => {

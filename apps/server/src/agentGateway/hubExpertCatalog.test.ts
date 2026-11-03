@@ -217,4 +217,31 @@ describe("Hub Expert catalogue read capability", () => {
     expect(unavailable[0]?.available).toBe(false);
     expect(h.prepareSnapshot).not.toHaveBeenCalled();
   });
+
+  it("checks a saved OMP model rather than demanding a static provider default", async () => {
+    const h = setup();
+    const model = "openai-codex/gpt-6.1-sol";
+    h.read.mockResolvedValue({
+      ...h.expert,
+      preferredProvider: "omp",
+      defaultModelSelection: { provider: "omp", model, instanceId: "omp" },
+    });
+    h.listModels.mockReturnValue(
+      Effect.succeed({
+        source: "test",
+        models: [{ slug: model, name: "GPT-6.1 Sol" }],
+      }),
+    );
+    const configured = await Effect.runPromise(readHubExpertCatalog(h.input));
+    expect(configured[0]?.available).toBe(true);
+    h.listModels.mockReturnValue(
+      Effect.succeed({
+        source: "test",
+        models: [{ slug: "different-model", name: "Different" }],
+      }),
+    );
+    const missing = await Effect.runPromise(readHubExpertCatalog(h.input));
+    expect(missing[0]?.available).toBe(false);
+    expect(h.prepareSnapshot).not.toHaveBeenCalled();
+  });
 });

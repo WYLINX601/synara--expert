@@ -503,8 +503,14 @@ export function ExpertsSettingsPanel(props: {
   };
 
   const focusDraftIssue = (issue: ExpertDraftIssue) => {
-    const settingsFields = new Set(["name", "description", "useCases", "preferredProvider"]);
-    const nextTab: ExpertEditorTab = settingsFields.has(issue.field) ? "settings" : "capabilities";
+    const settingsFields: Record<string, true> = {
+      name: true,
+      description: true,
+      useCases: true,
+      preferredProvider: true,
+      defaultModelSelection: true,
+    };
+    const nextTab: ExpertEditorTab = settingsFields[issue.field] ? "settings" : "capabilities";
     const targetLabel = (() => {
       switch (issue.field) {
         case "name":
@@ -515,6 +521,8 @@ export function ExpertsSettingsPanel(props: {
           return "专家使用场景";
         case "preferredProvider":
           return "专家首选 Provider";
+        case "defaultModelSelection":
+          return "默认模型";
         case "persona":
           return "专家角色与工作方式";
         case "outputRequirements":

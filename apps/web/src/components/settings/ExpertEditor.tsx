@@ -1,21 +1,15 @@
-import {
-  EXPERT_PROVIDER_KINDS,
-  type ExpertConnectionConfig,
-  type ExpertSaveInput,
-} from "@synara/contracts";
-import { isExpertProvider } from "@synara/shared/expertProviders";
-import { PROVIDER_DESCRIPTOR_BY_KIND } from "@synara/shared/providerMetadata";
+import type { ExpertConnectionConfig, ExpertSaveInput } from "@synara/contracts";
 import { type KeyboardEvent, type ReactNode } from "react";
 import type { ExpertDraftIssue, ExpertDraftField } from "./expertSettingsModel";
 import { Button } from "../ui/button";
 import { DialogPanel } from "../ui/dialog";
 import { Input } from "../ui/input";
-import { Select, SelectItem, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { ExpertConnectionPermissions } from "./ExpertConnectionPermissions";
 import { ExpertReferencesEditor } from "./ExpertReferencesEditor";
 import { ExpertSkillBindingsEditor } from "./ExpertSkillBindingsEditor";
-import { SettingsCard, SettingsSectionShell, SettingsSelectPopup } from "./SettingsPanelPrimitives";
+import { SettingsCard, SettingsSectionShell } from "./SettingsPanelPrimitives";
+import { ExpertModelPicker } from "./ExpertModelPicker";
 
 export type ExpertEditorTab = "capabilities" | "settings" | "history" | "evolution";
 
@@ -236,40 +230,7 @@ export function ExpertEditor({
             </SettingsCard>
             <SettingsCard divided={false} className="px-4 pb-3">
               <SettingsSectionShell title="运行配置" layout="compact">
-                <div className="flex flex-wrap items-center justify-between gap-2 text-ui-sm">
-                  <span className="font-medium">首选 Provider</span>
-                  <Select
-                    value={draft.preferredProvider ?? "unspecified"}
-                    onValueChange={(value) =>
-                      onChange({
-                        preferredProvider: isExpertProvider(value) ? value : undefined,
-                      })
-                    }
-                    disabled={readonly}
-                  >
-                    <SelectTrigger
-                      size="sm"
-                      aria-label="专家首选 Provider"
-                      className="w-full sm:w-48"
-                    >
-                      <SelectValue>
-                        {draft.preferredProvider
-                          ? PROVIDER_DESCRIPTOR_BY_KIND[draft.preferredProvider].displayName
-                          : "不指定"}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SettingsSelectPopup>
-                      <SelectItem value="unspecified" hideIndicator>
-                        不指定
-                      </SelectItem>
-                      {EXPERT_PROVIDER_KINDS.map((provider) => (
-                        <SelectItem key={provider} value={provider} hideIndicator>
-                          {PROVIDER_DESCRIPTOR_BY_KIND[provider].displayName}
-                        </SelectItem>
-                      ))}
-                    </SettingsSelectPopup>
-                  </Select>
-                </div>
+                <ExpertModelPicker draft={draft} disabled={readonly} onChange={onChange} />
                 {learning ? <div className="mt-4">{learning}</div> : null}
               </SettingsSectionShell>
             </SettingsCard>

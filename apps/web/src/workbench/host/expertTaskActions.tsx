@@ -76,7 +76,16 @@ export function useExpertTaskActions(projectContext?: string, sourceThreadId?: s
               : {};
       const threadId = await native.handleNewThread(
         projectId,
-        { ...inherited, standalone: true, expertId },
+        {
+          ...inherited,
+          standalone: true,
+          expertId,
+          ...(expert.defaultModelSelection
+            ? { modelSelection: expert.defaultModelSelection }
+            : expert.preferredProvider
+              ? { provider: expert.preferredProvider }
+              : {}),
+        },
         {
           isCurrent: () =>
             mountedRef.current &&

@@ -1,5 +1,6 @@
 # Expert 中心实现与验收
 
+2026-10-29 存储收口补充：本文所述旧私有交付目录及恢复集已按用户要求退役；必要记录归入最新交付的 `history/`，现行恢复入口见[清理记录](./storage-management-2026-10-24.md#delivery-cleanup-20261029)。下文保留当时的交付事实。
 日期：2026-10-28。用户已批准产品方案并要求实施。初次实现位于 `codex/expert-center` 隔离开发分支，基线 `2577e5819353e6089cc3f6e118e848f38df04913`；下文初始实施验收保留其时点范围；本轮已提交合入本地 main 并更新日用应用至 0.1.7，见文末交付结果。代码摘要见[源码清单](./expert-center-evidence-2026-10-28/source-manifest.json)。
 
 后续用户要求将专家团与技能库一并移入专家页；该补充已更新至 0.1.9，见[整合验收](./expert-center-organization-2026-10-28.md)。以下保留 0.1.7 的原始实施与交付记录。
@@ -82,3 +83,114 @@
 交付收尾：目前 Git 仅登记主目录 `/Users/wangyuelin/synara-expert` 与受管预览 `/Users/wangyuelin/.codex/worktrees/expert-center/synara-expert`。临时开发树在确认源码已合入、无未提交/独有成果及文件占用，并保留失败浏览器截图和测试日志后回收；两个可从已校验 ZIP 重建的解包目录也已回收，完整恢复集和原包保留。图标输入恢复引用已改指向恢复集中的 0.1.6 原应用，不再引用退役解包路径。
 
 最小隔离测试 home 保留在 `.synara/expert-center-runtime`；其中测试项目仍记录原临时源码路径，若需重演，应先从 `codex/expert-center` 固定提交重建该工作树并安装锁定依赖，再按隔离端口启动，不将该测试 home 用于日用应用。早期主目录方案草稿保存在 Git stash `ac5fe91d92ff6077a807c66ee25f7d1af7c82b03`，未覆盖或丢弃。
+
+## 2026-11-03 默认 harness／模型修复
+
+本次为独立修复分支交付，不替换上述历史安装记录；未合并 main、未构建或安装日用应用，未恢复 Graph。
+
+- Expert 设置改为复用原生对话框的一个模型按钮，支持 harness、账号、模型、effort 的保存、刷新回显和清除。Hub 显式 target 覆盖已保存默认值；原生任务草稿带入默认值并允许局部覆盖，不回写 Expert。
+- 隔离真实页面保存并刷新回显 `OMP / GPT-6.1 Sol / High`；产品经理任务草稿带入相同选择，改为 `GPT-6 Luna / Low` 后，读取 Expert 保存值仍为原来的 `Sol / High`。未发送消息或运行 Provider 回合，不能据此声称真实 Provider 派发成功。
+- 受影响服务端 5 文件 115 tests、Web unit 5 文件 91 tests、浏览器 3 文件 69 tests 通过；contracts 32 文件 287 tests、shared 104 文件 1,114 tests 通过（2 skipped）。保存／清除、模型可用性、显式覆盖、冻结与草稿隔离均有行为覆盖。
+- 格式、lint（0 errors）、7 包 typecheck 与 115 文件静态接入边界检查通过。边界检查证明清单和依赖规则，不证明完整运行时隔离。React Doctor 以本地 main 为基线扫描 17 文件，72/100；4 项小列表循环内查找警告，未为理论优化额外改写现有选择逻辑。
+- 全库 `bun run test` 未通过。完整原始日志复盘纠正此前只列 4 项的漏报：至少 **23 项失败、8 个文件**，包括 desktop `backendShutdown.posix.integration` 1、`cuaDriverHost` 1、`macAppIcon.native` 1；Web `storeNormalization` 1、`ChatMarkdown` 5、`wsNativeApi` 2；scripts `workbench-build` 5、`workbench-sync` 7。contracts、shared 和 desktop 有包级终态，其余被 Turbo 中断，缺少最终断言详情；`storeNormalization` 仅有 7,390ms 的失败标记，不能据耗时直接归因超时。相关文件未改动不证明失败在变更前已存在，也不构成正式集成验收。
+- 验收期间集成浏览器坐标点击偏移，关闭通知的操作误触 Provider 更新；服务端记录 Codex 更新至 0.166.0、Pi 从 1.1.0 更新至 1.5.0，Pi 扩展未更新。已通知用户并报告工具问题；该主机侧变化不属于修复内容，未自行降级或重启。后续交互改用精确键盘定位。
+- 独立预览使用隔离 home 与端口；原始验收标签存在用户未保存编辑，因此保留该标签和隔离数据，不丢弃或覆盖。未更改日用数据库；隔离 home 并不能隔离系统级 CLI 安装。
+
+## 2026-11-03 测试失败复盘与修复
+
+范围：接续 `ae1425f3c` 的 `codex/fix-expert-default-model`，修复测试执行问题并取得全包终态。最初仅授权独立分支；用户随后明确授权更新、推送并合并到 GitHub main，需通过适用门禁后执行。不恢复 Graph，不安装应用，不处理上一节的 Provider 更新事故，也不覆盖用户预览编辑。
+
+### 完整失败清单与隔离对照
+
+首轮原始日志至少 23 项失败；此前仅报告 4 项是漏报，已在上节纠正。该轮只有 contracts、shared、desktop 有包级终态，不能把其他包的中间通过标记相加当作完整验收。
+
+| 文件组                                      | 首轮失败数 | 隔离检查结果 | 判定与处理                                                                                                                      |
+| ------------------------------------------- | ---------: | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| desktop `backendShutdown.posix.integration` |          1 | 2/2 通过     | 原断言为 SIGTERM 日志为空、最终 SIGKILL；保留 TERM→KILL 和退出边界，不修改生产时限或断言                                        |
+| desktop `cuaDriverHost`                     |          1 | 157/157 通过 | 原失败为请求 1,000ms 超时、effect 为 dispatched-unknown；保留输入释放失败后永久关闭 admission、不重放和不替换 generation 的断言 |
+| desktop `macAppIcon.native`                 |          1 | 1/1 通过     | 原失败为 5,000ms 超时；实际操作仅临时测试 bundle，未扩大预算                                                                    |
+| Web `storeNormalization`                    |          1 | 29/29 通过   | 原日志只有 7,390ms 失败标记，未取得具体断言；保留后台所有权、任务列表和终态裁剪断言，不直接归为超时                             |
+| Web `ChatMarkdown`                          |          5 | 60/60 通过   | 原冷导入／渲染失败在隔离执行及后续按包串行运行中未再出现；保留双向文字、HTML、alert 和 streaming 行为                           |
+| Web `wsNativeApi`                           |          2 | 53/53 通过   | Context 身份和 user-input 答案过滤原断言保留，无实现改写                                                                        |
+| scripts `workbench-build`                   |          5 | 21/21 通过   | 临时本地 Git／产物夹具验证，无真实发布；不放宽祖先、标签或来源校验                                                              |
+| scripts `workbench-sync`                    |          7 | 15/15 通过   | 临时本地 Git 远端验证；不改变候选、冲突或脏工作区保护                                                                           |
+
+隔离命令（路径分别相对包目录）：
+
+```bash
+bun run --cwd apps/desktop test src/backendShutdown.posix.integration.test.ts src/cuaDriverHost.test.ts src/macAppIcon.native.test.ts --maxWorkers=1 --no-file-parallelism
+bun run --cwd apps/web test src/storeNormalization.test.ts src/components/ChatMarkdown.test.tsx src/wsNativeApi.test.ts --maxWorkers=1 --no-file-parallelism
+bun run --cwd scripts test workbench-build.test.ts workbench-sync.test.ts --maxWorkers=1 --no-file-parallelism
+```
+
+三个命令分别为 160、142、36 项通过，耗时 77.58s、5.50s、9.75s；这只是失败组隔离证据，不代替最终完整运行。
+
+### 根因与最小修改
+
+1. 根入口曾同时启动多个包，每包 Vitest 又按整机可用核数建立 worker 池，造成嵌套并发资源竞争；默认失败即取消又截断其他包的终态。本轮只将根 `test` 改为 `turbo run test --concurrency=1 --continue=always`，保留包内 worker 设置、测试时限、所有断言及跳过状态。隔离及按包串行结果与资源竞争解释一致，但未将缺少断言详情的历史失败逐项武断标成超时，也未据此声称发现产品逻辑缺陷。
+2. 新增 `scripts/workspace-test-runner.test.ts`，实际运行三个临时包，以排他资源探测并发重叠；覆盖全部成功，以及一个包失败后依赖包和独立包仍完成且总退出非零的两条路径。聚焦 2/2 通过；另做真实失败注入 smoke，临时夹具均回收。没有只断言命令文本或弱化业务／安全测试。
+3. 首次按包串行全库随后暴露 `workbench-sync-workflow` 的 9 项明确断言失败。原因不是时序：默认 PATH 的 Node 22.23.1／Bun 1.4.0 被 prepare 记录，fixture／verify 则按仓库锁定的 24.13.1／1.4.2 检查，正确拒绝不匹配候选，导致后续状态与证据断言失败。所需版本已安装，仅用 `mise exec` 选择，不安装、升级或修改全局 PATH，不绕过 toolchain／候选安全门。
+4. `mise exec -- bun run --cwd scripts test workbench-sync-workflow.test.ts --maxWorkers=1 --no-file-parallelism` 已确认 Node 24.13.1、Bun 1.4.2，22/22 通过。CONTRIBUTING 与开发 SOP 补齐工具链、串行调度、失败汇总和避免重检查叠加的约定。
+
+首次按包串行、但工具链未纠正且最终被中断的一轮：desktop 1,444 passed／6 skipped，shared 1,114／2，Web 5,580／3，contracts 287／0；scripts 431 passed／9 failed；server 无终态。该记录保留失败，不冒充最终全过。
+
+### 2026-11-04 最终完整覆盖与交付边界
+
+基线为 `ae1425f3c` 加本轮根测试入口、真实 runner 回归及文档变更；产品源码、锁文件与已有测试断言在续验期间未变。统一使用已安装的 Node 24.13.1／Bun 1.4.2。以下是每个完整包或原生分片的最终汇总，不是累加中断前的单项通过：
+
+| 包／分片   |     passed | failed | skipped |
+| ---------- | ---------: | -----: | ------: |
+| Web        |      5,580 |      0 |       3 |
+| shared     |      1,114 |      0 |       2 |
+| desktop    |      1,444 |      0 |       6 |
+| contracts  |        287 |      0 |       0 |
+| scripts    |        440 |      0 |       0 |
+| server 1/3 |      3,421 |      0 |      11 |
+| server 2/3 |      2,296 |      0 |       4 |
+| server 3/3 |      3,984 |      0 |      16 |
+| **合计**   | **18,566** |  **0** |  **42** |
+
+server 三片覆盖完整包，共 9,701 passed、31 skipped；使用当前 `ci.yml` 和 `release.yml` 的三分片机制，保持单 worker／不并行文件。当前 CI 已是三片，历史 CI 性能文档中的两片不代表现行配置。本轮没有新增 skip，也不把历史版本的 40 skipped 移用为本轮数量。
+
+```bash
+mise exec -- bun run test
+# 上一命令中 Web/shared/desktop 已取得终态；外部中断后，仅续跑未完成包：
+mise exec -- bun run test --filter=@synara/scripts --filter=@synara/contracts
+mise exec -- bun run test --filter=@synara/cli -- --shard=1/3
+mise exec -- bun run test --filter=@synara/cli -- --shard=2/3
+mise exec -- bun run test --filter=@synara/cli -- --shard=3/3
+```
+
+完整覆盖来自同一代码与锁定环境下的分包／原生分片续验，并非一次未中断的根命令成功。外层 runner 曾在 SIGTERM 中断后显示 exit 0，但 Tasks 为 0 successful／3 total，缺少包级终态；该次明确不计为通过。持久服务标记没有阻止那次子任务中断，后改为逐片保留完整终态。
+
+- 最终 Expert 浏览器专项 3 文件 **69/69** 通过，覆盖单按钮保存／回显／清除、effort、不改聊天默认值、原生草稿默认值与覆盖。
+- `fmt:check` 5,201 文件通过；lint **1,163 warnings、0 errors**，server sync-fs 通过；typecheck **7/7 包**通过，保留建议性诊断。
+- 接入边界 115 文件通过；Windows 静态边界检查覆盖 324 应用源文件、119 边界文件、4 依赖补丁和 9 workspace manifests，通过；migration 归属与 92 个 release tags 的 lineage 检查通过。静态 Windows 检查不代表 Windows 实机运行。
+- Turbo 仍报告现有 `bun.lock` 解析警告；各包实际执行、缓存关闭，并已读取完整终态，不依赖该警告推断成功。Browserslist 数据过期提示未通过安装或更新依赖来消除。
+- 本轮未改生产取消、输入释放、admission、重放或进程退出逻辑；未调用真实 Provider 回合，未安装、升级、降级或重启日用应用／Provider。原预览进程已随先前中断退出，保留隔离数据及原始未保存页，不擅自重启或丢弃编辑。
+- 本记录固定本地验收与用户授权范围；GitHub 合并结果以关联 PR 的实际状态为准，不把本地检查当作远端 CI、签名发行或安装成功。
+
+### PR #7 远端浏览器门禁追加修复
+
+[PR #7](https://github.com/WYLINX601/synara--expert/pull/7) 首轮 CI `41762109470` 并非全过：类型、迁移、core／Web unit、server 三片、Windows Process Regression、Desktop Build 及其他浏览器分组通过，但 `chat-follow` 一项失败、`components 2/3` 一项 suite 导入失败，聚合门禁失败，未据此合并。
+
+- `ExpertSkillEvolution.browser.tsx` 原先整体 mock `appSettings`，新选择器导入的 `getAppModelOptions` 等真实导出不存在。改用已有的 `importOriginal` 部分 mock 模式和 `AppSettingsSchema` 完整夹具；同步保留被实际 settings 模块引用的 `serverReactQuery`、`providerDiscovery` 真实导出，只覆盖原有测试 seam。没有隐藏新选择器、删减进化场景或伪造模型实现。
+- `ChatView` 长响应用例的锚定断言要求偏移严格 `<4px`，但阶段分类用 `offset < topGap - 4` 才开始交接，把恰好 `4px` 的首个贴尾步骤仍算作锚定。CI 轨迹为 `16→12→-146…`，恰好落在该边界。交接分类改为包含边界 `<=`，原有 `<4px` 锚定、回弹／运动量、交接时机及最终距底 `<8px` 断言均不变，未改生产滚动行为。用原始轨迹重放，旧分类 held 最大偏移为 4，修正分类为 0，交接时机与最终贴尾断言均满足。
+- 本地使用相同 CI 配置，完整进化 suite **48/48** 通过；完整 `chat-follow` 分组 **31 passed／209 skipped**，后者为现有 CI 分组过滤，不新增 skip。命令如下，耗时分别为 30.29s、224.10s：
+
+```bash
+mise exec -- bun run --cwd apps/web test:browser:ci --project=components src/components/settings/ExpertSkillEvolution.browser.tsx
+mise exec -- bun run --cwd apps/web test:browser:ci --project=chat-follow
+```
+
+`chat-follow` 输出一次 Router preload `_nonReactive` 控制台异常，但完整分组终态为通过；未抑制该输出，也未在本轮证明该异常的根因或首次出现版本。该轮只修改浏览器测试夹具与阶段分类，上一节全库 unit 结果仍对应同一生产源码；远端重验与最终合并必须以新 head 的实际门禁状态为准。
+
+追加修复后 `fmt:check` 5,201 文件通过；lint 1,163 warnings／0 errors、server sync-fs 通过；typecheck 7/7 包通过。React Doctor 以 `a50308124` 为基线扫描本次两个测试文件，89/100、无诊断；该分数不替代最初 17 个功能变更文件的独立扫描记录。
+
+第二轮 CI `41764744867`（head `ca8e2f583`）中，上述两个失败点通过；core／Web unit、server 三片、Windows 回归、类型、迁移、桌面构建、其余浏览器组也通过。但 `chat-workflows` 为 **145 passed／1 failed／94 分组过滤 skipped**，失败项是 Expert 没有自定义提示时，清空编辑器后未找到通用提示；聚合门禁仍失败，未合并。
+
+该用例原来用 `aria-placeholder` 变回通用文本来等待取消 Expert；fallback 场景的文本前后相同，不能证明选择或焦点交接已完成。实际 `ExpertComposerPicker` 提交选择后调用 `scheduleComposerFocus`，由下一帧的 `focusAtEnd` 交接焦点，合成 clear 动作可与其竞争。CI 未记录逐事件焦点序列，因此不把具体交错顺序当作已复现事实。本轮只改测试：选择及取消选择均等待真实按钮状态和编辑器获得焦点，再执行输入／清空；保留描述优先、useCases 回退、通用回退三种场景，以及草稿保留、不发送断言。通用提示从选择前的可访问提示读取，不再固定当前产品文案。没有改生产焦点行为、添加固定 sleep、放大 timeout 或删除场景。
+
+`mise exec -- bun run --cwd apps/web test:browser:ci --project=chat-workflows` 完整分组本地 **146 passed／94 原有分组过滤 skipped**，200.06s，通过；没有缩小 testNamePattern 或只运行失败参数分支。
+
+焦点同步修复后再次完成 `fmt:check`（5,201 文件）、lint（1,163 warnings／0 errors）、server sync-fs 和 7/7 包 typecheck；React Doctor 以 `ca8e2f583` 为基线扫描本次单个测试文件，89/100、无诊断。后续远端结果仍以 PR 新 head 的实际门禁为准。

@@ -40,7 +40,7 @@ import { cn, isMacNavigatorPlatform } from "~/lib/utils";
 import { ProviderAccountAvatar } from "../ProviderAccountMark";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { Menu, MenuGroup, MenuGroupLabel } from "../ui/menu";
+import { Menu, MenuGroup, MenuGroupLabel, MenuItem } from "../ui/menu";
 import { Skeleton } from "../ui/skeleton";
 import { ComposerModelMenuTrigger } from "./ComposerModelMenuTrigger";
 import { ModelCatalogRefresh } from "./ModelCatalogRefresh";
@@ -115,6 +115,7 @@ type ComposerModelPickerProps = {
   discoveryErrorsByProvider?: Partial<Record<ProviderKind, string | undefined>>;
   hiddenProviders?: ReadonlyArray<ProviderKind>;
   providerOrder?: ReadonlyArray<ProviderKind>;
+  allowedProviders?: ReadonlyArray<ProviderKind>;
   providerInstances?: ReadonlyArray<ProviderModelPickerInstance>;
   selectedProviderInstanceId?: ProviderInstanceId;
   modelOptionsByProviderInstance?: ProviderModelOptionsByProviderInstance;
@@ -136,7 +137,7 @@ type ComposerModelPickerProps = {
   ) => void;
   onSelectionCommitted?: () => void;
 
-  threadId: ThreadId;
+  threadId?: ThreadId | undefined;
   runtimeModel?: ProviderModelDescriptor | undefined;
   runtimeModelsByProvider?: Partial<
     Record<ProviderKind, ReadonlyArray<ProviderModelDescriptor> | null | undefined>
@@ -144,7 +145,10 @@ type ComposerModelPickerProps = {
   runtimeAgents?: ReadonlyArray<ProviderAgentDescriptor> | null | undefined;
   modelOptions: ProviderModelOptions[ProviderKind] | undefined;
   prompt: string;
-  onPromptChange: (prompt: string) => void;
+  onPromptChange?: ((prompt: string) => void) | undefined;
+  onModelOptionsChange?: ((options: ProviderOptions | undefined) => void) | undefined;
+  placeholder?: string;
+  resetSelection?: { label: string; onReset: () => void };
 
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -206,34 +210,6 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
   };
   const activeInstanceId = selectedInstanceIdFor(activeProvider);
 
-  // A locked thread can only ever run its own account's presets, and a preset of a
-  // removed or disabled account cannot run at all.
-  const knownInstances = props.providerInstances;
-  const usableStarredModels = starredModels.filter((entry) => {
-    if (lockedProvider !== null && entry.provider !== lockedProvider) return false;
-    const instanceId = starredModelInstanceId(entry);
-    const status = findProviderStatusForInstance({
-      providers: props.providers,
-      provider: entry.provider,
-      instanceId,
-    });
-    if (status?.enabled === false) return false;
-    if (knownInstances?.some((instance) => instance.instanceId === instanceId && !instance.enabled))
-      return false;
-    if (lockedProvider !== null && instanceId !== activeInstanceId) return false;
-    const bound = props.boundProviderInstance;
-    if (bound && entry.provider === bound.provider && instanceId !== bound.instanceId) {
-      return false;
-    }
-    return (
-      instanceId === entry.provider ||
-      knownInstances === undefined ||
-      knownInstances.some(
-        (instance) => instance.instanceId === instanceId && instance.enabled !== false,
-      )
-    );
-  });
-
   const [tab, setTab] = useState<ComposerModelPickerTab>(activeInstanceId);
   const [query, setQuery] = useState("");
   const normalizedQuery = useDeferredValue(query).trim().toLowerCase();
@@ -261,17 +237,17 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
 
   // Options a provider's models would run with: the composer's own for the selected
   // provider, otherwise that provider's draft / sticky selection.
-  const draftSelectionByProvider = useComposerDraftStore(
-    (store) => store.draftsByThreadId[threadId]?.modelSelectionByProvider,
+  const draftSelectionByProvider = useComposerDraftStore((store) =>
+    threadId ? store.draftsByThreadId[threadId]?.modelSelectionByProvider : undefined,
   );
-  const stickySelectionByProvider = useComposerDraftStore(
-    (store) => store.stickyModelSelectionByProvider,
+  const stickySelectionByProvider = useComposerDraftStore((store) =>
+    props.onModelOptionsChange ? undefined : store.stickyModelSelectionByProvider,
   );
   const providerOptionsFor = (provider: ProviderKind): ProviderOptions | undefined =>
     provider === props.provider
       ? props.modelOptions
       : (draftSelectionByProvider?.[provider]?.options ??
-        stickySelectionByProvider[provider]?.options);
+        stickySelectionByProvider?.[provider]?.options);
   const promptFor = (provider: ProviderKind) => (provider === props.provider ? props.prompt : "");
   const traitSelectionFor = (provider: ProviderKind, model: string) =>
     getComposerTraitSelection(
@@ -284,7 +260,43 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
         model,
         runtimeModels: props.runtimeModelsByProvider?.[provider],
       }),
+      props.onPromptChange !== undefined,
     );
+  // A locked thread can only ever run its own account's presets, and a preset of a
+  // removed or disabled account cannot run at all.
+  const knownInstances = props.providerInstances;
+  const usableStarredModels = starredModels.filter((entry) => {
+    if (props.allowedProviders && !props.allowedProviders.includes(entry.provider)) return false;
+    if (
+      props.onModelOptionsChange &&
+      traitSelectionFor(entry.provider, entry.model).promptInjectedValues.includes(
+        entry.effort ?? "",
+      )
+    )
+      return false;
+    if (lockedProvider !== null && entry.provider !== lockedProvider) return false;
+    const instanceId = starredModelInstanceId(entry);
+    const status = findProviderStatusForInstance({
+      providers: props.providers,
+      provider: entry.provider,
+      instanceId,
+    });
+    if (status?.enabled === false) return false;
+    if (knownInstances?.some((instance) => instance.instanceId === instanceId && !instance.enabled))
+      return false;
+    if (lockedProvider !== null && instanceId !== activeInstanceId) return false;
+    const bound = props.boundProviderInstance;
+    if (bound && entry.provider === bound.provider && instanceId !== bound.instanceId) {
+      return false;
+    }
+    return (
+      instanceId === entry.provider ||
+      knownInstances === undefined ||
+      knownInstances.some(
+        (instance) => instance.instanceId === instanceId && instance.enabled !== false,
+      )
+    );
+  });
 
   const modelLabel = resolveProviderModelLabel({
     provider: props.provider,
@@ -308,6 +320,7 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
     props.prompt,
     props.modelOptions,
     props.runtimeModel,
+    props.onPromptChange !== undefined,
   );
 
   const visibleProviderOptions = resolveVisibleProviderOptions({
@@ -316,7 +329,11 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
     providers: props.providers,
     hiddenProviders: props.hiddenProviders,
     providerOrder: props.providerOrder,
-  }).filter((option) => lockedProvider === null || option.value === lockedProvider);
+  }).filter(
+    (option) =>
+      (lockedProvider === null || option.value === lockedProvider) &&
+      (!props.allowedProviders || props.allowedProviders.includes(option.value)),
+  );
   // An enabled provider awaiting setup keeps its tab; a disabled provider is
   // managed through the recovery list in Settings instead.
   const activeProviderStatus = findProviderStatusForInstance({
@@ -487,7 +504,7 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
     }
     // Prompt-injected levels (Ultrathink) only make sense for the composer's own prompt.
     if (row.provider !== props.provider) return;
-    props.onPromptChange(plan.prompt);
+    props.onPromptChange?.(plan.prompt);
     commitRow(row, model, {});
   };
 
@@ -538,7 +555,11 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
         // The default account is implied; only another one is worth the room.
         accountName={activeProviderTab?.dotted ? activeProviderTab.name : null}
         accountAccentColor={activeProviderTab?.accentColor}
-        modelLabel={composerModelDisplayName(activeProvider, modelLabel)}
+        modelLabel={
+          !props.model && props.placeholder
+            ? props.placeholder
+            : composerModelDisplayName(activeProvider, modelLabel)
+        }
         statusLabel={resolveComposerTraitStatusLabel(currentTraitSelection)}
         contextWindowLabel={activeProvider === "claudeAgent" ? props.contextWindowLabel : null}
         showsFastBadge={showsComposerFastModeBadge(currentTraitSelection)}
@@ -677,6 +698,16 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
               </div>
             )}
           </div>
+          {props.resetSelection ? (
+            <MenuItem
+              onClick={() => {
+                props.resetSelection?.onReset();
+                setMenuOpen(false);
+              }}
+            >
+              {props.resetSelection.label}
+            </MenuItem>
+          ) : null}
           {isMenuOpen && tabAccount && !setupMessage && props.onRefreshModels ? (
             <ModelCatalogRefresh
               key={tabAccount.instanceId}
@@ -685,19 +716,22 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
               onRefresh={props.onRefreshModels}
             />
           ) : null}
-          <ComposerModelPickerTraitRows
-            provider={props.provider}
-            providerInstanceId={props.selectedProviderInstanceId}
-            threadId={threadId}
-            model={props.model}
-            runtimeModel={props.runtimeModel}
-            runtimeAgents={props.runtimeAgents}
-            modelOptions={props.modelOptions}
-            prompt={props.prompt}
-            onPromptChange={props.onPromptChange}
-            effortControl={effortControl}
-            fastModeNotice={props.provider === "claudeAgent" ? props.fastModeNotice : null}
-          />
+          {props.model ? (
+            <ComposerModelPickerTraitRows
+              provider={props.provider}
+              providerInstanceId={props.selectedProviderInstanceId}
+              threadId={threadId}
+              model={props.model}
+              runtimeModel={props.runtimeModel}
+              runtimeAgents={props.runtimeAgents}
+              modelOptions={props.modelOptions}
+              prompt={props.prompt}
+              onPromptChange={props.onPromptChange}
+              onModelOptionsChange={props.onModelOptionsChange}
+              effortControl={effortControl}
+              fastModeNotice={props.provider === "claudeAgent" ? props.fastModeNotice : null}
+            />
+          ) : null}
         </div>
       </ComposerPickerMenuPopup>
     </Menu>

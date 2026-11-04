@@ -76,13 +76,14 @@ function TraitRow(props: {
 export function ComposerModelPickerTraitRows(props: {
   provider: ProviderKind;
   providerInstanceId?: ProviderInstanceId | null | undefined;
-  threadId: ThreadId;
+  threadId?: ThreadId | undefined;
   model: string;
   runtimeModel: ProviderModelDescriptor | undefined;
   runtimeAgents: ReadonlyArray<ProviderAgentDescriptor> | null | undefined;
   modelOptions: ProviderOptions | undefined;
   prompt: string;
-  onPromptChange: (prompt: string) => void;
+  onPromptChange?: ((prompt: string) => void) | undefined;
+  onModelOptionsChange?: ((options: ProviderOptions | undefined) => void) | undefined;
   // "slider" swaps the Effort and Speed rows for the stepped slider card, which owns
   // both. Models without an effort ladder always keep the rows.
   effortControl: ComposerEffortControl;
@@ -95,6 +96,7 @@ export function ComposerModelPickerTraitRows(props: {
     prompt,
     modelOptions,
     props.runtimeModel,
+    props.onPromptChange !== undefined,
   );
   const commitTrait = useComposerTraitCommit({
     threadId,
@@ -102,6 +104,7 @@ export function ComposerModelPickerTraitRows(props: {
     providerInstanceId: props.providerInstanceId,
     model,
     modelOptions,
+    onModelOptionsChange: props.onModelOptionsChange,
   });
   const agentOptions = getAgentOptions(provider, props.runtimeAgents);
   const defaultAgent = defaultAgentForProvider(provider);
@@ -166,7 +169,7 @@ export function ComposerModelPickerTraitRows(props: {
           const plan = planComposerEffortChange({ provider, selection, prompt, value });
           if (!plan) return;
           if (plan.kind === "prompt") {
-            props.onPromptChange(plan.prompt);
+            props.onPromptChange?.(plan.prompt);
             return;
           }
           commitTrait(plan.patch);
@@ -224,6 +227,7 @@ export function ComposerModelPickerTraitRows(props: {
           modelOptions={modelOptions}
           prompt={prompt}
           onPromptChange={props.onPromptChange}
+          onModelOptionsChange={props.onModelOptionsChange}
           fastModeNotice={fastModeNotice}
         />
       ) : null}

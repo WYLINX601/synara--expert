@@ -39,10 +39,6 @@ import type { ExpertDraftIssue } from "./expertSettingsModel";
 import { SKILL_LIBRARY_QUERY_KEY } from "./ExpertSkillBindingsEditor";
 import { EXPERT_CONNECTIONS_QUERY_KEY, EXPERTS_QUERY_KEY } from "./expertSettingsQueries";
 import { useExpertDraftGuard } from "./useExpertDraftGuard";
-import {
-  HubTeamsSettingsPanel,
-  type HubTeamsSettingsPanelHandle,
-} from "~/features/hubCollaboration/HubTeamsSettingsPanel";
 
 const SkillLibrarySettingsPanel = lazy(() =>
   import("./SkillLibrarySettingsPanel").then((module) => ({
@@ -91,9 +87,7 @@ export function ExpertsSettingsPanel(props: {
   });
   const experts = expertsQuery.data ?? EMPTY_EXPERTS;
   const [view, setView] = useState<"list" | "editor">("list");
-  const [localSettingsKind, setSettingsKind] = useState<"experts" | "teams">("experts");
-  const settingsKind = props.centerRoute?.kind ?? localSettingsKind;
-  const hubTeamsPanelRef = useRef<HubTeamsSettingsPanelHandle>(null);
+  const settingsKind = props.centerRoute?.kind === "skills" ? "skills" : "experts";
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [baseline, setBaseline] = useState<ExpertDefinition | null>(null);
   const [draft, setDraft] = useState<ExpertSaveInput | null>(null);
@@ -238,16 +232,9 @@ export function ExpertsSettingsPanel(props: {
 
   const changeSettingsKind = async (next: ExpertCenterKind) => {
     if (next === settingsKind) return;
-    if (settingsKind === "teams") {
-      const teamPanel = hubTeamsPanelRef.current;
-      if (teamPanel && !(await teamPanel.confirmLeave())) return;
-    } else if (!(await confirmLeave())) {
-      return;
-    }
+    if (!(await confirmLeave())) return;
     if (props.centerRoute?.navigateKind) {
       await props.centerRoute.navigateKind(next);
-    } else if (next !== "skills") {
-      setSettingsKind(next);
     }
   };
 
@@ -287,17 +274,12 @@ export function ExpertsSettingsPanel(props: {
       lastRouteRequestRef.current = requestedExpertId;
       return;
     }
-    if (
-      settingsKind === "experts" &&
-      view === "editor" &&
-      baselineRef.current?.id === requested.id
-    ) {
+    if (view === "editor" && baselineRef.current?.id === requested.id) {
       lastRouteRequestRef.current = requestedExpertId;
       return;
     }
 
     void (async () => {
-      if (settingsKind === "teams" && !(await hubTeamsPanelRef.current?.confirmLeave())) return;
       if (!(await confirmLeave())) return;
       lastRouteRequestRef.current = requestedExpertId;
       const latest =
@@ -312,18 +294,9 @@ export function ExpertsSettingsPanel(props: {
       setSelectedId(latest.id);
       setTab("settings");
       setActionError(null);
-      setSettingsKind("experts");
       setView("editor");
     })();
-  }, [
-    confirmLeave,
-    experts,
-    expertsQuery.data,
-    queryClient,
-    requestedExpertId,
-    settingsKind,
-    view,
-  ]);
+  }, [confirmLeave, experts, expertsQuery.data, queryClient, requestedExpertId, view]);
 
   useEffect(() => {
     if (!baseline || !draft || !expertsQuery.data) return;
@@ -522,8 +495,7 @@ export function ExpertsSettingsPanel(props: {
 
   const handleSaveKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!(event.metaKey || event.ctrlKey) || event.key.toLocaleLowerCase() !== "s") return;
-    if (settingsKind !== "experts") return;
-    if (view !== "editor" || !active) return;
+    if (settingsKind !== "experts" || view !== "editor" || !active) return;
     event.preventDefault();
     event.stopPropagation();
     if (readonly || pending || !isDirty) return;
@@ -531,8 +503,14 @@ export function ExpertsSettingsPanel(props: {
   };
 
   const focusDraftIssue = (issue: ExpertDraftIssue) => {
-    const settingsFields = new Set(["name", "description", "useCases", "preferredProvider"]);
-    const nextTab: ExpertEditorTab = settingsFields.has(issue.field) ? "settings" : "capabilities";
+    const settingsFields: Record<string, true> = {
+      name: true,
+      description: true,
+      useCases: true,
+      preferredProvider: true,
+      defaultModelSelection: true,
+    };
+    const nextTab: ExpertEditorTab = settingsFields[issue.field] ? "settings" : "capabilities";
     const targetLabel = (() => {
       switch (issue.field) {
         case "name":
@@ -543,6 +521,8 @@ export function ExpertsSettingsPanel(props: {
           return "专家使用场景";
         case "preferredProvider":
           return "专家首选 Provider";
+        case "defaultModelSelection":
+          return "默认模型";
         case "persona":
           return "专家角色与工作方式";
         case "outputRequirements":
@@ -589,7 +569,6 @@ export function ExpertsSettingsPanel(props: {
           ariaLabel="专家设置分类"
           options={[
             { value: "experts", label: props.centerRoute ? "专家" : "单个专家" },
-            { value: "teams", label: "专家团" },
             ...(props.centerRoute ? [{ value: "skills" as const, label: "技能" }] : []),
           ]}
         />
@@ -603,27 +582,6 @@ export function ExpertsSettingsPanel(props: {
             返回专家列表
           </Button>
         </SettingsEmptyState>
-      ) : settingsKind === "teams" ? (
-        <HubTeamsSettingsPanel
-          ref={hubTeamsPanelRef}
-          active={active}
-          {...(props.centerRoute
-            ? {
-                shouldGuardNavigation: ({
-                  currentPathname,
-                  nextPathname,
-                  nextSearch,
-                }: {
-                  currentPathname: string;
-                  nextPathname: string;
-                  nextSearch: Readonly<Record<string, unknown>>;
-                }) => currentPathname !== nextPathname || nextSearch.kind !== "teams",
-              }
-            : {})}
-          experts={expertsQuery.data}
-          expertsLoading={expertsQuery.isPending || expertsQuery.isFetching}
-          expertsError={expertsQuery.error ? errorText(expertsQuery.error) : null}
-        />
       ) : settingsKind === "skills" ? (
         <Suspense
           fallback={<SettingsEmptyState layout="status">正在读取技能库…</SettingsEmptyState>}

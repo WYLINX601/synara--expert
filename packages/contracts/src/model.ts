@@ -1,6 +1,7 @@
 import { Schema } from "effect";
 import { TrimmedNonEmptyString } from "./baseSchemas";
 import type { ProviderKind } from "./orchestration";
+import { ProviderInstanceId } from "./providerInstance";
 
 export const CODEX_REASONING_EFFORT_OPTIONS = ["low", "medium", "high", "xhigh"] as const;
 // Codex app-server can add model-specific efforts through runtime discovery.
@@ -1412,3 +1413,36 @@ export const PROVIDER_DISPLAY_NAMES: Record<ProviderKind, string> = {
   pi: "Pi",
   omp: "Oh My Pi",
 };
+
+export const CodexModelSelection = Schema.Struct({
+  provider: Schema.Literal("codex"),
+  instanceId: Schema.optional(ProviderInstanceId),
+  model: TrimmedNonEmptyString,
+  options: Schema.optional(CodexModelOptions),
+});
+export type CodexModelSelection = typeof CodexModelSelection.Type;
+
+export const ClaudeModelSelection = Schema.Struct({
+  provider: Schema.Literal("claudeAgent"),
+  instanceId: Schema.optional(ProviderInstanceId),
+  model: TrimmedNonEmptyString,
+  options: Schema.optional(ClaudeModelOptions),
+  supportsAutoMode: Schema.optional(Schema.Boolean),
+});
+export type ClaudeModelSelection = typeof ClaudeModelSelection.Type;
+
+export const PiModelSelection = Schema.Struct({
+  provider: Schema.Literal("pi"),
+  instanceId: Schema.optional(ProviderInstanceId),
+  model: TrimmedNonEmptyString,
+  options: Schema.optional(PiModelOptions),
+});
+export type PiModelSelection = typeof PiModelSelection.Type;
+
+export const OmpModelSelection = Schema.Struct({
+  provider: Schema.Literal("omp"),
+  instanceId: Schema.optional(ProviderInstanceId),
+  model: TrimmedNonEmptyString,
+  options: Schema.optional(OmpModelOptions),
+});
+export type OmpModelSelection = typeof OmpModelSelection.Type;

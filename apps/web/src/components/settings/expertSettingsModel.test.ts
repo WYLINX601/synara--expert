@@ -60,6 +60,32 @@ describe("expertSettingsModel", () => {
     expect(expertDraftsEqual(draft, { ...draft, name: "另一个名称" })).toBe(false);
   });
 
+  it("tracks default-model edits independently and removes a cleared default on save", () => {
+    const expert: ExpertDefinition = {
+      ...definition,
+      preferredProvider: "omp",
+      defaultModelSelection: {
+        provider: "omp",
+        model: "openai-codex/gpt-6.1-sol",
+        instanceId: "omp",
+        options: { thinkingLevel: "high" },
+      },
+    };
+    const draft = expertDraftFromDefinition(expert);
+    const changed = {
+      ...draft,
+      defaultModelSelection: { ...expert.defaultModelSelection!, model: "openai-codex/gpt-6-luna" },
+    };
+    expect(expertDraftsEqual(draft, changed)).toBe(false);
+    expect(expertSaveInputForDraft(changed, expert).defaultModelSelection?.model).toBe(
+      "openai-codex/gpt-6-luna",
+    );
+    expect(expert.defaultModelSelection?.model).toBe("openai-codex/gpt-6.1-sol");
+    const cleared = { ...draft, defaultModelSelection: undefined };
+    expect(expertDraftsEqual(draft, cleared)).toBe(false);
+    expect(expertSaveInputForDraft(cleared, expert)).not.toHaveProperty("defaultModelSelection");
+  });
+
   it("requires at least one nonblank tool for enabled MCP authorizations", () => {
     const draft = expertDraftFromDefinition(definition);
 

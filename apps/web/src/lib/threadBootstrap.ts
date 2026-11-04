@@ -32,6 +32,7 @@ export interface NewThreadOptions {
   entryPoint?: ThreadPrimarySurface;
   temporary?: boolean;
   provider?: ProviderKind;
+  modelSelection?: ModelSelection;
   fresh?: boolean;
   /** Create an independent draft without claiming the project composer slot. */
   standalone?: boolean;

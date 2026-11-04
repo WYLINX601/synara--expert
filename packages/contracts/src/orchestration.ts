@@ -10,15 +10,15 @@ import {
 } from "./projectImport";
 import {
   AntigravityModelOptions,
-  ClaudeModelOptions,
-  CodexModelOptions,
+  ClaudeModelSelection,
+  CodexModelSelection,
+  OmpModelSelection,
+  PiModelSelection,
   CursorModelOptions,
   DevinModelOptions,
   DroidModelOptions,
   GrokModelOptions,
   OpenCodeModelOptions,
-  OmpModelOptions,
-  PiModelOptions,
   DEFAULT_MODEL_BY_PROVIDER,
 } from "./model";
 import { ProviderInstanceId } from "./providerInstance";
@@ -254,23 +254,6 @@ function defaultModelForProvider(provider: ProviderKind): string {
   return provider === "pi" ? "openai/gpt-5.5" : DEFAULT_MODEL_BY_PROVIDER[provider];
 }
 
-export const CodexModelSelection = Schema.Struct({
-  provider: Schema.Literal("codex"),
-  instanceId: ProviderInstanceIdForDriver("codex"),
-  model: TrimmedNonEmptyString,
-  options: Schema.optional(CodexModelOptions),
-});
-export type CodexModelSelection = typeof CodexModelSelection.Type;
-
-export const ClaudeModelSelection = Schema.Struct({
-  provider: Schema.Literal("claudeAgent"),
-  instanceId: ProviderInstanceIdForDriver("claudeAgent"),
-  model: TrimmedNonEmptyString,
-  options: Schema.optional(ClaudeModelOptions),
-  supportsAutoMode: Schema.optional(Schema.Boolean),
-});
-export type ClaudeModelSelection = typeof ClaudeModelSelection.Type;
-
 export const CursorModelSelection = Schema.Struct({
   provider: Schema.Literal("cursor"),
   instanceId: ProviderInstanceIdForDriver("cursor"),
@@ -310,21 +293,6 @@ export const OpenCodeModelSelection = Schema.Struct({
   options: Schema.optional(OpenCodeModelOptions),
 });
 export type OpenCodeModelSelection = typeof OpenCodeModelSelection.Type;
-
-export const PiModelSelection = Schema.Struct({
-  provider: Schema.Literal("pi"),
-  instanceId: ProviderInstanceIdForDriver("pi"),
-  model: TrimmedNonEmptyString,
-  options: Schema.optional(PiModelOptions),
-});
-export type PiModelSelection = typeof PiModelSelection.Type;
-export const OmpModelSelection = Schema.Struct({
-  provider: Schema.Literal("omp"),
-  instanceId: ProviderInstanceIdForDriver("omp"),
-  model: TrimmedNonEmptyString,
-  options: Schema.optional(OmpModelOptions),
-});
-export type OmpModelSelection = typeof OmpModelSelection.Type;
 
 export const DevinModelSelection = Schema.Struct({
   provider: Schema.Literal("devin"),

@@ -23,6 +23,24 @@ function definition(connections: unknown[]) {
   };
 }
 
+describe("Expert default model selection", () => {
+  it("rejects unsupported harnesses, blank models and malformed account ids", () => {
+    for (const selection of [
+      { provider: "cursor", model: "auto" },
+      { provider: "omp", model: "" },
+      { provider: "omp", model: "openai-codex/gpt-6.1-sol", instanceId: "invalid account!" },
+    ]) {
+      expect(() =>
+        Schema.decodeUnknownSync(ExpertSaveInput)({
+          ...definition([]),
+          preferredProvider: "omp",
+          defaultModelSelection: selection,
+        }),
+      ).toThrow();
+    }
+  });
+});
+
 describe("Expert connection tool modes", () => {
   it("accepts all mode with an empty legacy tools list", () => {
     const decoded = Schema.decodeUnknownSync(ExpertSaveInput)(

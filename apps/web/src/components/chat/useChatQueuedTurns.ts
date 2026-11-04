@@ -105,7 +105,6 @@ interface ChatQueuedTurnsInput {
   pendingUserInputs: ReturnType<typeof useChatPendingInteractions>["pendingUserInputs"];
   sendInFlightRef: RefObject<boolean>;
   sendPreflightInFlightRef: RefObject<boolean>;
-  suspendAutoDispatch: boolean;
 }
 
 export function useChatQueuedTurns({
@@ -148,7 +147,6 @@ export function useChatQueuedTurns({
   pendingUserInputs,
   sendInFlightRef,
   sendPreflightInFlightRef,
-  suspendAutoDispatch,
 }: ChatQueuedTurnsInput) {
   const hasPendingCacheReview =
     hasPendingCacheReviewInput === true || activeThread?.claudeCacheReview != null;
@@ -323,9 +321,6 @@ export function useChatQueuedTurns({
 
   const dispatchQueuedComposerTurn = useCallback(
     async (queuedTurn: QueuedComposerTurn, dispatchMode: "queue" | "steer"): Promise<boolean> => {
-      if (suspendAutoDispatch) {
-        return false;
-      }
       if (
         hasPendingCacheReview ||
         getThreadFromState(useStore.getState(), threadId)?.claudeCacheReview != null
@@ -346,14 +341,11 @@ export function useChatQueuedTurns({
         queuedTurn,
       });
     },
-    [hasPendingCacheReview, lateComposerSendHandlersRef, suspendAutoDispatch, threadId],
+    [hasPendingCacheReview, lateComposerSendHandlersRef, threadId],
   );
 
   const onSteerQueuedComposerTurn = useCallback(
     async (queuedTurn: QueuedComposerTurn) => {
-      if (suspendAutoDispatch) {
-        return;
-      }
       if (
         hasPendingCacheReview ||
         getThreadFromState(useStore.getState(), threadId)?.claudeCacheReview != null
@@ -387,7 +379,6 @@ export function useChatQueuedTurns({
       dispatchQueuedComposerTurn,
       hasPendingCacheReview,
       removeQueuedComposerTurnFromDraft,
-      suspendAutoDispatch,
       threadId,
     ],
   );
@@ -476,9 +467,6 @@ export function useChatQueuedTurns({
   const isQueuePaused = queuePause !== null;
 
   useEffect(() => {
-    if (suspendAutoDispatch) {
-      return;
-    }
     if (hasPendingCacheReview) {
       clearQueuedComposerAutoDispatchRetry(threadId);
       return;
@@ -580,7 +568,6 @@ export function useChatQueuedTurns({
     queuedComposerTurns,
     queuedSteerGate,
     removeQueuedComposerTurnFromDraft,
-    suspendAutoDispatch,
     threadId,
   ]);
   return {

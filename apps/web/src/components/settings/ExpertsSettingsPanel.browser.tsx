@@ -17,11 +17,12 @@ import { useState } from "react";
 import type {
   ExpertDefinition,
   ExpertSaveInput,
-  HubTeamPreset,
   SkillDefinition,
   SkillLibraryRequest,
   SkillLibraryResponse,
 } from "@synara/contracts";
+import type * as AppSettingsModule from "~/appSettings";
+import { useComposerDraftStore } from "~/composerDraftStore";
 
 const harness = vi.hoisted(() => {
   const makeExpert = (overrides: Record<string, unknown> = {}): ExpertDefinition => ({
@@ -42,7 +43,6 @@ const harness = vi.hoisted(() => {
   });
   const data = {
     experts: [makeExpert()],
-    teams: [] as Array<Record<string, unknown>>,
     connections: [
       {
         id: "linear",
@@ -60,6 +60,15 @@ const harness = vi.hoisted(() => {
     connectionState: "active" as "active" | "disabled" | "retired",
   };
   const server = {
+    getConfig: vi.fn(async () => ({
+      cwd: "/workspace",
+      providers: ["codex", "claudeAgent", "pi", "omp"].map((provider) => ({
+        provider,
+        available: true,
+        status: "ready",
+        authStatus: "authenticated",
+      })),
+    })),
     skillLibrary: vi.fn(
       async (_request: SkillLibraryRequest): Promise<SkillLibraryResponse> => ({ skills: [] }),
     ),
@@ -76,7 +85,7 @@ const harness = vi.hoisted(() => {
       const previous = data.experts.find((expert) => expert.id === id);
       const { expectedRevision: _expectedRevision, ...fields } = input;
       const saved = {
-        ...(previous ?? makeExpert({ id, name: "" })),
+        ...makeExpert({ id, name: "" }),
         ...fields,
         id,
         revision: (previous?.revision ?? 0) + 1,
@@ -109,41 +118,46 @@ const harness = vi.hoisted(() => {
     readExpertAppliedRuntime: vi.fn(async () => null),
     testExpertConnection: vi.fn(async () => ({ tools: [] as string[] })),
   };
-  const hubTeams = {
-    list: vi.fn(async () => data.teams),
-    read: vi.fn(async () => null),
-    save: vi.fn(async (input: Record<string, unknown>) => {
-      const existing = data.teams.find((team) => team.id === input.id);
-      const saved = {
-        ...input,
-        revision: (typeof existing?.revision === "number" ? existing.revision : 0) + 1,
-        createdAt:
-          typeof existing?.createdAt === "string" ? existing.createdAt : "2026-10-22T00:00:00.000Z",
-        updatedAt: "2026-10-22T00:01:00.000Z",
-        archivedAt: null as string | null,
-      };
-      data.teams = [saved, ...data.teams.filter((team) => team.id !== input.id)];
-      return saved;
-    }),
-    setArchived: vi.fn(async (input: { id: string; archived: boolean }) => {
-      const existing = data.teams.find((team) => team.id === input.id) ?? {};
-      const saved = {
-        ...existing,
-        revision: (typeof existing.revision === "number" ? existing.revision : 0) + 1,
-        updatedAt: "2026-10-22T00:01:00.000Z",
-        archivedAt: input.archived ? "2026-10-22T00:01:00.000Z" : null,
-      };
-      data.teams = data.teams.map((team) => (team.id === input.id ? saved : team));
-      return saved;
-    }),
-  };
-  return { data, makeExpert, server, hubTeams };
+  return { data, makeExpert, server };
 });
 
 vi.mock("~/nativeApi", () => ({
-  ensureNativeApi: () => ({ server: harness.server, hubTeams: harness.hubTeams }),
+  ensureNativeApi: () => ({
+    server: harness.server,
+    provider: {
+      listModels: async () => ({
+        source: "fixture",
+        models: [
+          {
+            slug: "openai-codex/gpt-6.1-sol",
+            name: "GPT-6.1 Sol",
+            supportedReasoningEfforts: [
+              { value: "low", label: "Low" },
+              { value: "medium", label: "Medium" },
+              { value: "high", label: "High" },
+            ],
+            defaultReasoningEffort: "medium",
+          },
+          { slug: "openai-codex/gpt-6-luna", name: "GPT-6 Luna" },
+        ],
+      }),
+      listAgents: async () => ({ agents: [] }),
+    },
+  }),
   readNativeApiServerCapabilityState: () => "supported",
 }));
+vi.mock("~/appSettings", async (importOriginal) => {
+  const actual = await importOriginal<typeof AppSettingsModule>();
+  return {
+    ...actual,
+    useAppSettings: () => ({
+      settings: actual.AppSettingsSchema.makeUnsafe({
+        disabledProviders: [],
+        hiddenProviders: [],
+      }),
+    }),
+  };
+});
 vi.mock("~/hooks/useNativeApiServerCapability", () => ({
   useNativeApiServerCapabilitySnapshot: () => ({
     generation: "experts-settings-browser",
@@ -314,73 +328,18 @@ async function mountCenter(
   };
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((complete) => {
-    resolve = complete;
-  });
-  return { promise, resolve };
-}
-
-async function selectRoutedExpert(router: ReturnType<typeof createRouter>, expertId: string) {
-  await router.navigate({
-    to: "/settings" as never,
-    search: { expertId } as never,
-  } as never);
-}
-
-function makeHubTeam(overrides: Partial<HubTeamPreset> = {}): HubTeamPreset {
-  return {
-    id: "team-research",
-    name: "研究协作团",
-    purpose: "研究与写作",
-    expertIds: ["planner"],
-    coordinatorInstructions: "先澄清问题",
-    collaborationPreferences: "需要时交叉评审",
-    revision: 4,
-    createdAt: "2026-10-20T00:00:00.000Z",
-    updatedAt: "2026-10-21T00:00:00.000Z",
-    archivedAt: null,
-    ...overrides,
-  };
-}
-
-function resetHubTeamsHarness() {
-  harness.data.teams = [];
-  for (const operation of Object.values(harness.hubTeams)) operation.mockReset();
-  harness.hubTeams.list.mockImplementation(async () => harness.data.teams);
-  harness.hubTeams.save.mockImplementation(async (input: Record<string, unknown>) => {
-    const existing = harness.data.teams.find((team) => team.id === input.id);
-    const saved = {
-      ...input,
-      revision: (typeof existing?.revision === "number" ? existing.revision : 0) + 1,
-      createdAt:
-        typeof existing?.createdAt === "string" ? existing.createdAt : "2026-10-22T00:00:00.000Z",
-      updatedAt: "2026-10-22T00:01:00.000Z",
-      archivedAt: null as string | null,
-    };
-    harness.data.teams = [saved, ...harness.data.teams.filter((team) => team.id !== input.id)];
-    return saved;
-  });
-  harness.hubTeams.setArchived.mockImplementation(
-    async (input: { id: string; archived: boolean }) => {
-      const existing = harness.data.teams.find((team) => team.id === input.id) ?? {};
-      const saved = {
-        ...existing,
-        revision: (typeof existing.revision === "number" ? existing.revision : 0) + 1,
-        updatedAt: "2026-10-22T00:01:00.000Z",
-        archivedAt: input.archived ? "2026-10-22T00:01:00.000Z" : null,
-      };
-      harness.data.teams = harness.data.teams.map((team) => (team.id === input.id ? saved : team));
-      return saved;
-    },
-  );
-}
-
 beforeEach(() => {
   harness.data.experts = [harness.makeExpert()];
   for (const operation of Object.values(harness.server)) operation.mockReset();
-  resetHubTeamsHarness();
+  harness.server.getConfig.mockResolvedValue({
+    cwd: "/workspace",
+    providers: ["codex", "claudeAgent", "pi", "omp"].map((provider) => ({
+      provider,
+      available: true,
+      status: "ready",
+      authStatus: "authenticated",
+    })),
+  });
   harness.server.skillLibrary.mockResolvedValue({ skills: [] });
   harness.server.listExperts.mockImplementation(async () => harness.data.experts);
   harness.server.listExpertConnections.mockImplementation(async () => harness.data.connections);
@@ -396,7 +355,7 @@ beforeEach(() => {
     const previous = harness.data.experts.find((expert) => expert.id === id);
     const { expectedRevision: _expectedRevision, ...fields } = input;
     const saved = {
-      ...(previous ?? harness.makeExpert({ id, name: "" })),
+      ...harness.makeExpert({ id, name: "" }),
       ...fields,
       id,
       revision: (previous?.revision ?? 0) + 1,
@@ -436,31 +395,20 @@ beforeEach(() => {
 });
 
 describe("ExpertsSettingsPanel browser interactions", () => {
-  it.each([
-    ["expert", 1280],
-    ["expert", 390],
-    ["team", 1280],
-    ["team", 390],
-  ] as const)(
-    "keeps the %s dialog footer visible at %s px and guards Escape",
-    async (kind, width) => {
+  it.each([1280, 390])(
+    "keeps the Expert dialog footer visible at %s px and guards Escape",
+    async (width) => {
       await page.viewport(width, 844);
-      harness.data.teams = [makeHubTeam()];
-      const { close } = await mountCenter(
-        kind === "expert"
-          ? "/experts/planner?tab=capabilities"
-          : "/experts?kind=teams&tab=capabilities",
-      );
+      const { close } = await mountCenter("/experts/planner?tab=capabilities");
       try {
-        if (kind === "team") await page.getByRole("button", { name: "编辑", exact: true }).click();
-        const title = kind === "expert" ? "规划专家" : "研究协作团";
-        const closeLabel = kind === "expert" ? "关闭专家编辑" : "关闭专家团编辑";
+        const title = "规划专家";
+        const closeLabel = "关闭专家编辑";
         const dialog = page.getByRole("dialog", { name: title, exact: true });
         await expect.element(dialog).toBeVisible();
         await expect
           .element(page.getByRole("button", { name: closeLabel, exact: true }))
           .toHaveFocus();
-        const field = page.getByLabelText(kind === "expert" ? "专家角色与工作方式" : "专家团用途");
+        const field = page.getByLabelText("专家角色与工作方式");
         const text = Array.from({ length: 45 }, (_, index) => `检查步骤 ${index + 1}`).join("\n");
         await field.fill(text);
         const popup = dialog.element();
@@ -485,13 +433,12 @@ describe("ExpertsSettingsPanel browser interactions", () => {
         await expect
           .element(
             page.getByRole("button", {
-              name: kind === "expert" ? "编辑专家 规划专家" : "编辑",
+              name: "编辑专家 规划专家",
               exact: true,
             }),
           )
           .toBeVisible();
         expect(harness.server.saveExpert).not.toHaveBeenCalled();
-        expect(harness.hubTeams.save).not.toHaveBeenCalled();
       } finally {
         await close();
         await page.viewport(1280, 800);
@@ -499,121 +446,38 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     },
   );
 
-  it("retains a team draft after a CAS save error and retries with its baseline revision", async () => {
-    harness.data.teams = [makeHubTeam()];
-    const { close } = await mountPanel("/settings");
-    try {
-      await page.getByRole("radio", { name: "专家团" }).click();
-      await page.getByRole("button", { name: "编辑" }).click();
-      const purpose = page.getByLabelText("专家团用途");
-      await purpose.fill("updated purpose");
-      harness.hubTeams.save.mockRejectedValueOnce(new Error("revision conflict"));
-
-      await page.getByRole("button", { name: "保存专家团" }).click();
-      await expect.element(page.getByRole("alert")).toHaveTextContent("revision conflict");
-      await expect.element(purpose).toHaveValue("updated purpose");
-      expect(harness.hubTeams.save.mock.calls[0]?.[0]).toMatchObject({
-        id: "team-research",
-        expectedRevision: 4,
-      });
-
-      await page.getByRole("button", { name: "保存专家团" }).click();
-      await expect.poll(() => harness.hubTeams.save.mock.calls.length).toBe(2);
-      expect(harness.hubTeams.save.mock.calls[1]?.[0]).toMatchObject({
-        id: "team-research",
-        expectedRevision: 4,
-        purpose: "updated purpose",
-      });
-    } finally {
-      await close();
-    }
-  });
-
-  it("guards route departure while a team save is pending", async () => {
-    const { close, router } = await mountPanel("/settings");
-    try {
-      await page.getByRole("radio", { name: "专家团" }).click();
-      await page.getByRole("button", { name: "新建专家团" }).click();
-      await page.getByLabelText("专家团名称").fill("新团队");
-      await page.getByRole("checkbox", { name: "规划专家" }).click();
-
-      const pending = deferred<HubTeamPreset>();
-      harness.hubTeams.save.mockImplementationOnce(() => pending.promise);
-      const navigation = router.navigate({ to: "/connections" as never } as never);
-      await expect.element(page.getByRole("heading", { name: "未保存的更改" })).toBeVisible();
-      await page.getByRole("button", { name: "保存并继续" }).click();
-      await expect.poll(() => harness.hubTeams.save.mock.calls.length).toBe(1);
-      expect(router.state.location.pathname).toBe("/settings");
-
-      const input = harness.hubTeams.save.mock.calls[0]?.[0] as Record<string, unknown>;
-      pending.resolve(
-        makeHubTeam({
-          id: input.id as string,
-          name: input.name as string,
-          purpose: input.purpose as string,
-          expertIds: input.expertIds as string[],
-          revision: 1,
-        }),
-      );
-      await navigation;
-      expect(router.state.location.pathname).toBe("/connections");
-    } finally {
-      await close();
-    }
-  });
-
-  it("archives and restores team presets from the Expert center with revisioned actions", async () => {
-    harness.data.teams = [makeHubTeam()];
-    const { close } = await mountCenter("/experts?kind=teams&tab=capabilities");
-    try {
-      await expect.element(page.getByRole("radio", { name: "专家团" })).toBeChecked();
-      await page.getByRole("button", { name: "归档", exact: true }).click();
-      await page.getByRole("button", { name: "确认归档" }).click();
-      await expect.poll(() => harness.hubTeams.setArchived.mock.calls.length).toBe(1);
-      expect(harness.hubTeams.setArchived.mock.calls[0]?.[0]).toMatchObject({
-        id: "team-research",
-        expectedRevision: 4,
-        archived: true,
-      });
-
-      await page.getByRole("button", { name: "查看已归档" }).click();
-      await page.getByRole("button", { name: "恢复" }).click();
-      await page.getByRole("button", { name: "确认恢复" }).click();
-      await expect.poll(() => harness.hubTeams.setArchived.mock.calls.length).toBe(2);
-      expect(harness.hubTeams.setArchived.mock.calls[1]?.[0]).toMatchObject({
-        id: "team-research",
-        expectedRevision: 5,
-        archived: false,
-      });
-      await page.getByRole("button", { name: "返回专家团" }).click();
-      await expect.element(page.getByText("研究协作团")).toBeInTheDocument();
-    } finally {
-      await close();
-    }
-  });
-
-  it("offers Claude and Oh My Pi as expert preferred providers", async () => {
-    const { close } = await mountPanel("/settings?expertId=planner", "capabilities");
-    await page.getByRole("tab", { name: "设置", exact: true }).click();
-    const provider = page.getByRole("combobox", { name: "专家首选 Provider", exact: true });
-
-    for (const [providerId, displayName] of [
-      ["claudeAgent", "Claude"],
-      ["omp", "Oh My Pi"],
-    ] as const) {
-      await provider.click();
-      await page.getByRole("option", { name: displayName, exact: true }).click();
-      await expect.element(provider).toHaveTextContent(displayName);
-      await page.getByRole("button", { name: "保存更改", exact: true }).click();
-      await expect
-        .poll(() => harness.server.saveExpert.mock.calls.length)
-        .toBe(providerId === "claudeAgent" ? 1 : 2);
-      expect(harness.server.saveExpert.mock.calls.at(-1)?.[0]).toMatchObject({
-        preferredProvider: providerId,
-      });
-    }
-
+  it("saves harness, model and effort from one picker without changing chat defaults", async () => {
+    const stickyBefore = useComposerDraftStore.getState().stickyModelSelectionByProvider;
+    const { close } = await mountPanel("/settings?expertId=planner");
+    const picker = page.getByRole("button", { name: "Change model and reasoning", exact: true });
+    await picker.click();
+    await page.getByRole("tab", { name: "Oh My Pi", exact: true }).click();
+    await page.getByRole("menuitem", { name: /GPT-6.1 Sol/ }).click();
+    const effort = page.getByRole("slider", { name: "Reasoning effort", exact: true });
+    await effort.element().focus();
+    await userEvent.keyboard("{ArrowRight}");
+    await expect.element(effort).toHaveAttribute("aria-valuetext", "High");
+    await picker.click();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "保存更改", exact: true }))
+      .toBeDisabled();
     await close();
+
+    const reopened = await mountPanel("/settings?expertId=planner");
+    const restored = page.getByRole("button", { name: "Change model and reasoning", exact: true });
+    await expect.element(restored).toHaveTextContent("GPT-6.1 Sol");
+    await expect.element(restored).toHaveTextContent("High");
+    await restored.click();
+    await page.getByRole("menuitem", { name: "不指定默认模型", exact: true }).click();
+    await expect.element(page.getByRole("button", { name: "保存更改", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "保存更改", exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: "保存更改", exact: true }))
+      .toBeDisabled();
+    await expect.poll(() => harness.data.experts[0]?.defaultModelSelection).toBeUndefined();
+    expect(useComposerDraftStore.getState().stickyModelSelectionByProvider).toBe(stickyBefore);
+    await reopened.close();
   });
 
   it("grows compact instructions with content and preserves independent fields across tabs and save", async () => {
@@ -637,13 +501,6 @@ describe("ExpertsSettingsPanel browser interactions", () => {
     await expect.poll(() => textarea.getBoundingClientRect().height).toBe(shortHeight);
     await page.getByRole("tab", { name: "设置", exact: true }).click();
     await expect.element(page.getByRole("region", { name: "基本信息", exact: true })).toBeVisible();
-    await expect
-      .element(
-        page
-          .getByRole("region", { name: "运行配置", exact: true })
-          .getByRole("combobox", { name: "专家首选 Provider" }),
-      )
-      .toHaveTextContent("Codex");
     await page.getByRole("textbox", { name: "专家描述" }).fill("帮助团队形成决策");
     await page.getByRole("textbox", { name: "专家使用场景" }).fill("方案比较、需求分析");
     expect(harness.server.saveExpert).not.toHaveBeenCalled();
@@ -865,9 +722,6 @@ describe("ExpertsSettingsPanel browser interactions", () => {
       .element(page.getByRole("tab", { name: "设置" }))
       .toHaveAttribute("aria-selected", "true");
     await expect.element(page.getByText("请填写专家名称。", { exact: true })).toBeVisible();
-    await expect
-      .element(page.getByRole("combobox", { name: "专家首选 Provider" }))
-      .toHaveTextContent("不指定");
     await name.click();
     document.activeElement?.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -1560,12 +1414,9 @@ describe("Expert center routes", () => {
     }
   });
 
-  it.each([
-    ["专家团", "放弃更改"],
-    ["技能", "保存并继续"],
-  ] as const)(
-    "returns to the personal list after resolving a new draft through %s with %s",
-    async (category, decision) => {
+  it.each(["放弃更改", "保存并继续"] as const)(
+    "returns to the personal list after resolving a new draft through skills with %s",
+    async (decision) => {
       const { close, router } = await mountCenter("/experts?tab=capabilities");
       try {
         await page.getByRole("button", { name: "新建专家", exact: true }).click();
@@ -1574,13 +1425,11 @@ describe("Expert center routes", () => {
           to: "/experts" as never,
           search: {
             tab: "capabilities",
-            kind: category === "专家团" ? "teams" : "skills",
+            kind: "skills",
           } as never,
         });
         await page.getByRole("button", { name: decision, exact: true }).click();
-        await expect
-          .element(page.getByRole("radio", { name: category, exact: true }))
-          .toBeChecked();
+        await expect.element(page.getByRole("radio", { name: "技能", exact: true })).toBeChecked();
         await page.getByRole("radio", { name: "专家", exact: true }).click();
         await expect
           .element(page.getByRole("button", { name: "新建专家", exact: true }))
@@ -1612,121 +1461,6 @@ describe("Expert center routes", () => {
       await expect
         .element(page.getByRole("button", { name: "新建专家", exact: true }))
         .toBeVisible();
-    } finally {
-      await close();
-    }
-  });
-
-  it("opens team deep links and preserves the existing full team editor", async () => {
-    harness.data.teams = [makeHubTeam()];
-    const { close, router } = await mountCenter("/experts?kind=teams&tab=capabilities");
-    try {
-      await expect.element(page.getByRole("radio", { name: "专家团" })).toBeChecked();
-      await expect.element(page.getByRole("button", { name: /^研究协作团/u })).toBeVisible();
-      await page.getByLabelText("搜索专家团").fill("missing");
-      await expect.element(page.getByText("没有符合搜索条件的专家团。")).toBeVisible();
-      await page.getByLabelText("搜索专家团").fill("");
-      await page.getByRole("button", { name: "新建专家团", exact: true }).click();
-      await page.getByLabelText("专家团名称").fill("产品方案小队");
-      await page.getByLabelText("专家团用途").fill("梳理方案与评审");
-      await page.getByRole("checkbox", { name: "规划专家", exact: true }).click();
-      await page.getByRole("button", { name: /角色与协调方式/u }).click();
-      await page.getByLabelText("协调者角色与协调方式").fill("先澄清目标再安排成员");
-      await page.getByLabelText("协作偏好").fill("输出前交叉评审");
-      await page.getByRole("button", { name: "保存专家团", exact: true }).click();
-      await expect.poll(() => harness.hubTeams.save.mock.calls.length).toBe(1);
-      expect(harness.hubTeams.save.mock.calls[0]?.[0]).toMatchObject({
-        name: "产品方案小队",
-        purpose: "梳理方案与评审",
-        expertIds: ["planner"],
-        coordinatorInstructions: "先澄清目标再安排成员",
-        collaborationPreferences: "输出前交叉评审",
-      });
-      expect(router.state.location.searchStr).toContain("kind=teams");
-    } finally {
-      await close();
-    }
-  });
-
-  it("resolves a personal draft once before switching to teams", async () => {
-    const { router, close } = await mountCenter();
-    try {
-      await page.getByLabelText("专家角色与工作方式").fill("保留专家修改");
-      void router.navigate({
-        to: "/experts" as never,
-        search: { tab: "capabilities", kind: "teams" } as never,
-      });
-      await expect.element(page.getByRole("heading", { name: "未保存的更改" })).toBeVisible();
-      await page.getByRole("button", { name: "取消", exact: true }).click();
-      await expect.element(page.getByLabelText("专家角色与工作方式")).toHaveValue("保留专家修改");
-      void router.navigate({
-        to: "/experts" as never,
-        search: { tab: "capabilities", kind: "teams" } as never,
-      });
-      await page.getByRole("button", { name: "保存并继续", exact: true }).click();
-      await expect
-        .element(page.getByRole("button", { name: "新建专家团", exact: true }))
-        .toBeVisible();
-      await expect
-        .element(page.getByRole("heading", { name: "未保存的更改" }))
-        .not.toBeInTheDocument();
-      expect(harness.server.saveExpert).toHaveBeenCalledTimes(1);
-      expect(router.state.location.pathname).toBe("/experts");
-      expect(router.state.location.searchStr).toContain("kind=teams");
-    } finally {
-      await close();
-    }
-  });
-
-  it.each(["放弃更改", "保存并继续"] as const)(
-    "guards a same-path team switch and continues after %s",
-    async (decision) => {
-      harness.data.teams = [makeHubTeam()];
-      const { router, close } = await mountCenter("/experts?kind=teams&tab=capabilities");
-      try {
-        await page.getByRole("button", { name: "编辑", exact: true }).click();
-        await page.getByLabelText("专家团用途").fill("尚未保存的用途");
-        void router.navigate({ to: "/experts" as never, search: { tab: "capabilities" } as never });
-        await expect.element(page.getByRole("heading", { name: "未保存的更改" })).toBeVisible();
-        await page.getByRole("button", { name: "取消", exact: true }).click();
-        await expect.element(page.getByLabelText("专家团用途")).toHaveValue("尚未保存的用途");
-        void router.navigate({ to: "/experts" as never, search: { tab: "capabilities" } as never });
-        await page.getByRole("button", { name: decision, exact: true }).click();
-        await expect
-          .element(page.getByRole("button", { name: "新建专家", exact: true }))
-          .toBeVisible();
-        await expect
-          .element(page.getByRole("heading", { name: "未保存的更改" }))
-          .not.toBeInTheDocument();
-        expect(router.state.location.pathname).toBe("/experts");
-        expect(router.state.location.searchStr).not.toContain("kind=teams");
-        expect(harness.hubTeams.save).toHaveBeenCalledTimes(decision === "保存并继续" ? 1 : 0);
-      } finally {
-        await close();
-      }
-    },
-  );
-
-  it("guards query-only route changes and restores the teams view on back", async () => {
-    harness.data.teams = [makeHubTeam()];
-    const { router, close } = await mountCenter("/experts?tab=capabilities");
-    try {
-      await page.getByRole("radio", { name: "专家团", exact: true }).click();
-      await page.getByRole("button", { name: "编辑", exact: true }).click();
-      await page.getByLabelText("专家团用途").fill("浏览器返回前保留");
-      void router.navigate({ to: "/experts" as never, search: { tab: "capabilities" } as never });
-      await expect.element(page.getByRole("heading", { name: "未保存的更改" })).toBeVisible();
-      await page.getByRole("button", { name: "取消", exact: true }).click();
-      await expect.element(page.getByLabelText("专家团用途")).toHaveValue("浏览器返回前保留");
-      expect(router.state.location.searchStr).toContain("kind=teams");
-      void router.navigate({ to: "/experts" as never, search: { tab: "capabilities" } as never });
-      await page.getByRole("button", { name: "放弃更改", exact: true }).click();
-      await expect
-        .element(page.getByRole("button", { name: "新建专家", exact: true }))
-        .toBeVisible();
-      router.history.back();
-      await expect.element(page.getByRole("button", { name: /^研究协作团/u })).toBeVisible();
-      await expect.element(page.getByRole("radio", { name: "专家团", exact: true })).toBeChecked();
     } finally {
       await close();
     }

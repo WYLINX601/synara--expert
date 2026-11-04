@@ -104,6 +104,7 @@ export function getComposerTraitSelection(
   prompt: string,
   modelOptions: ProviderOptions | null | undefined,
   runtimeModel?: ProviderModelDescriptor,
+  allowPromptTraits = true,
 ) {
   const caps = getRuntimeAwareModelCapabilities({ provider, model, runtimeModel });
   const descriptors = getProviderOptionDescriptors({
@@ -173,7 +174,9 @@ export function getComposerTraitSelection(
     promptInjectedValues,
     defaultEffort,
     effort,
-    effortLevels,
+    effortLevels: allowPromptTraits
+      ? effortLevels
+      : effortLevels.filter((option) => !promptInjectedValues.includes(option.value)),
     thinkingEnabled,
     fastModeEnabled,
     contextWindowOptions,

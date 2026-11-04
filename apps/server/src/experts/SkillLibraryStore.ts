@@ -136,6 +136,7 @@ const expertSaveInput = (
   ...(expert.preferredProvider !== undefined
     ? { preferredProvider: expert.preferredProvider }
     : {}),
+  ...(expert.defaultModelSelection ? { defaultModelSelection: expert.defaultModelSelection } : {}),
 });
 function skillLibrarySourceFilter(skill: SkillDefinition): SkillLibrarySourceFilter | undefined {
   if (

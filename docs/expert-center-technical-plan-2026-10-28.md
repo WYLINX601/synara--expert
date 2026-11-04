@@ -265,3 +265,12 @@
 - 复用 `SettingsSegmentedControl`、`SettingsSectionShell.count/layout` 与 `SettingsListRow.layout`；团队紧凑列表不另建控件。技能库查询、编辑、上传、绑定和更新流程均未改动。
 
 本次仅改变 Web 入口、分类与编辑离开判定，不改任务草稿生命周期、进程或数据库。检查取 C + 受影响浏览器 + 接入边界；沿用初版未改路径的历史验收边界，不把 0.1.7 全库与真实 Provider 结果改记成本次验证。实际记录见[整合验收](./expert-center-organization-2026-10-28.md)。
+
+## 14. Expert 默认 harness／模型（2026-11-03）
+
+- Expert 定义、保存输入与冻结快照增加可选 `defaultModelSelection`，复用现有四种受支持 harness 的模型、账号和 options 契约；不引入新 RPC 或数据库迁移。保存时要求模型的 provider 与 `preferredProvider` 一致。
+- 设置只保留一个入口，直接复用对话框的 `ComposerModelPicker`：harness 标签、账号、搜索、收藏和 effort slider 在同一弹层中完成。受控 options 回调写入 Expert 草稿，不写对话 sticky；依赖提示词注入的 effort 不作为 Expert 默认配置。清除默认值也在该弹层内完成。
+- Hub 派发优先级为显式 `target` > Expert 保存的 `defaultModelSelection` > 既有 preferred-provider／调用者规则。没有配置模型时不猜测模型列表第一项；配置了模型仍需通过正常可用性和兼容性校验。
+- Expert 原生启动和空白任务切换 Expert 时携带完整默认选择；任务草稿继续使用原生单按钮选择器覆盖。覆盖只影响该草稿，不回写 Expert；同一 Expert 的重新选择不会重置手工覆盖。
+- 已排队任务的 target 与 Expert 快照保持冻结。旧 Expert 未设置该字段时维持原快照 hash 输入，技能绑定保存也保留已配置的默认模型。
+- 不恢复 Graph，不新增执行器、Provider 回合或进程边界。实际验证与限制记录在[实现与验收](./expert-center-implementation-2026-10-28.md)。

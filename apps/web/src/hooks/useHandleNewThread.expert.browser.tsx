@@ -225,6 +225,43 @@ describe("useHandleNewThread Expert standalone bootstrap", () => {
     }
   });
 
+  it("seeds the Expert default without changing sticky choices and retains a later dispatch override", async () => {
+    const projectId = ProjectId.makeUnsafe("expert-default-project");
+    resetHookHarness(makeProject(projectId));
+    const store = useComposerDraftStore.getState();
+    const previousThread = ThreadId.makeUnsafe("previous-model-choice");
+    store.setModelSelectionAndSticky(previousThread, { provider: "codex", model: "gpt-5.4" });
+    const sticky = useComposerDraftStore.getState().stickyActiveProvider;
+    const hook = await renderHook(() => useHandleNewThread());
+    try {
+      const selection = {
+        provider: "omp" as const,
+        model: "openai-codex/gpt-6.1-sol",
+        instanceId: "omp",
+        options: { thinkingLevel: "high" as const },
+      };
+      const created = await hook.result.current.handleNewThread(projectId, {
+        standalone: true,
+        expertId: "expert-default",
+        modelSelection: selection,
+      });
+      const after = useComposerDraftStore.getState();
+      expect(after.draftsByThreadId[created!]?.modelSelectionByProvider.omp).toEqual(selection);
+      expect(after.stickyActiveProvider).toBe(sticky);
+      after.setModelSelection(created!, {
+        ...selection,
+        model: "openai-codex/gpt-6-luna",
+      });
+      expect(
+        useComposerDraftStore.getState().draftsByThreadId[created!]?.modelSelectionByProvider.omp
+          ?.model,
+      ).toBe("openai-codex/gpt-6-luna");
+      expect(hookMocks.dispatchCommand).not.toHaveBeenCalled();
+    } finally {
+      await hook.unmount();
+    }
+  });
+
   it("keeps a standalone draft when only its Expert metadata changes before navigation is superseded", async () => {
     const projectId = ProjectId.makeUnsafe("expert-edited-draft-project");
     resetHookHarness(makeProject(projectId));

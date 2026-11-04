@@ -192,6 +192,15 @@ function validateDefinitionInput(input: typeof ExpertSaveInput.Type): void {
   ) {
     throw new ExpertStoreError("Expert definition is too large.", "invalid_input");
   }
+  if (
+    input.defaultModelSelection &&
+    input.defaultModelSelection.provider !== input.preferredProvider
+  ) {
+    throw new ExpertStoreError(
+      "The default model must belong to the Expert's preferred provider.",
+      "invalid_input",
+    );
+  }
   if (input.skillSelections === undefined) {
     for (const skill of input.skills) sourcePath(skill.path, `Skill ${skill.name}`);
   } else if (input.skills.length > 0) {
@@ -492,6 +501,9 @@ function hashSnapshot(snapshot: ExpertSnapshot, resources: ReadonlyArray<Resourc
     preferredProvider: snapshot.preferredProvider ?? null,
     resources: [...resources].sort((left, right) => left.path.localeCompare(right.path)),
   };
+  if (snapshot.defaultModelSelection) {
+    payload.defaultModelSelection = snapshot.defaultModelSelection;
+  }
   if (snapshot.schemaVersion === 2 || snapshot.schemaVersion === 3) {
     payload.schemaVersion = snapshot.schemaVersion;
     if (snapshot.skillPolicy) payload.skillPolicy = snapshot.skillPolicy;
@@ -1084,6 +1096,9 @@ export function createExpertStore(stateDir: string): ExpertStore {
           references: input.references,
           connections: input.connections,
           preferredProvider: input.preferredProvider,
+          ...(input.defaultModelSelection
+            ? { defaultModelSelection: input.defaultModelSelection }
+            : {}),
           revision: (previous?.revision ?? 0) + 1,
           archived: previous?.archived ?? false,
           updatedAt: new Date().toISOString(),
@@ -1308,6 +1323,9 @@ export function createExpertStore(stateDir: string): ExpertStore {
           servers: mcpBindingServers,
         },
         preferredProvider: definition.preferredProvider,
+        ...(definition.defaultModelSelection
+          ? { defaultModelSelection: definition.defaultModelSelection }
+          : {}),
         createdAt: "1970-01-01T00:00:00.000Z",
       };
       const snapshotId = hashSnapshot(relativeSnapshot, resources);

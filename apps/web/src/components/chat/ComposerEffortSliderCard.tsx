@@ -31,12 +31,13 @@ import { useComposerTraitCommit } from "./useComposerTraitCommit";
 type ComposerEffortSliderCardProps = {
   provider: ProviderKind;
   providerInstanceId?: ProviderInstanceId | null | undefined;
-  threadId: ThreadId;
+  threadId?: ThreadId | undefined;
   model: string | null | undefined;
   runtimeModel?: ProviderModelDescriptor | undefined;
   modelOptions: ProviderOptions | null | undefined;
   prompt: string;
-  onPromptChange: (prompt: string) => void;
+  onPromptChange?: ((prompt: string) => void) | undefined;
+  onModelOptionsChange?: ((options: ProviderOptions | undefined) => void) | undefined;
   fastModeNotice?: FastModeNotice | null | undefined;
 };
 
@@ -55,6 +56,7 @@ export function ComposerEffortSliderCard(props: ComposerEffortSliderCardProps) {
     prompt,
     modelOptions,
     props.runtimeModel,
+    onPromptChange !== undefined,
   );
   const { effortLevels, defaultEffort, effort, fastModeEnabled, ultrathinkPromptControlled } =
     selection;
@@ -65,6 +67,7 @@ export function ComposerEffortSliderCard(props: ComposerEffortSliderCardProps) {
     providerInstanceId: props.providerInstanceId,
     model,
     modelOptions,
+    onModelOptionsChange: props.onModelOptionsChange,
   });
 
   const ladderIndex = resolveComposerEffortLadderIndex(selection);
@@ -82,7 +85,7 @@ export function ComposerEffortSliderCard(props: ComposerEffortSliderCardProps) {
     const plan = planComposerEffortChange({ provider, selection, prompt, value: nextLevel.value });
     if (!plan) return;
     if (plan.kind === "prompt") {
-      onPromptChange(plan.prompt);
+      onPromptChange?.(plan.prompt);
       return;
     }
     commitTrait(plan.patch);

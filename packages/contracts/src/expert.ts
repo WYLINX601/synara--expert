@@ -4,6 +4,12 @@ import { IsoDateTime, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./bas
 import { ExpertMcpBindingSchema, McpConfigSourceReferenceSchema, McpConnectionId } from "./mcp";
 import { ProviderSkillReference } from "./providerDiscovery";
 import { ProviderInstanceId } from "./providerInstance";
+import {
+  ClaudeModelSelection,
+  CodexModelSelection,
+  OmpModelSelection,
+  PiModelSelection,
+} from "./model";
 import { ExpertSkillBinding, ExpertSkillPolicy } from "./skillLibrary";
 import {
   ExpertSkillApplication,
@@ -15,6 +21,13 @@ import {
 export const EXPERT_PROVIDER_KINDS = ["codex", "pi", "claudeAgent", "omp"] as const;
 export const ExpertProviderKind = Schema.Literals(EXPERT_PROVIDER_KINDS);
 export type ExpertProviderKind = typeof ExpertProviderKind.Type;
+
+const ExpertDefaultModelSelection = Schema.Union([
+  CodexModelSelection,
+  ClaudeModelSelection,
+  PiModelSelection,
+  OmpModelSelection,
+]);
 
 const ExpertConnection = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -158,6 +171,7 @@ export const ExpertDefinition = Schema.Struct({
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
   preferredProvider: Schema.optional(ExpertProviderKind),
+  defaultModelSelection: Schema.optional(ExpertDefaultModelSelection),
   revision: PositiveInt,
   archived: Schema.Boolean,
   updatedAt: IsoDateTime,
@@ -180,6 +194,7 @@ export const ExpertSaveInput = Schema.Struct({
   references: Schema.Array(TrimmedNonEmptyString),
   connections: Schema.Array(ExpertConnection),
   preferredProvider: Schema.optional(ExpertProviderKind),
+  defaultModelSelection: Schema.optional(ExpertDefaultModelSelection),
 });
 export type ExpertSaveInput = typeof ExpertSaveInput.Type;
 
@@ -241,6 +256,7 @@ export const ExpertSnapshot = Schema.Struct({
   connections: Schema.Array(ExpertConnection),
   mcpBinding: Schema.optional(ExpertMcpBindingSchema),
   preferredProvider: Schema.optional(ExpertProviderKind),
+  defaultModelSelection: Schema.optional(ExpertDefaultModelSelection),
   createdAt: IsoDateTime,
 });
 export type ExpertSnapshot = typeof ExpertSnapshot.Type;

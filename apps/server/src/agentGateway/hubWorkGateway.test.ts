@@ -115,6 +115,7 @@ function harness(name: string) {
     let expertArchived = false;
     let expertName = "Pinned Expert";
     let preferredProvider: ExpertDefinition["preferredProvider"] = "claudeAgent";
+    let defaultModelSelection: ExpertDefinition["defaultModelSelection"];
     let expertPreviewBlocked = false;
     const expertSnapshots = new Map<string, ExpertSnapshot>();
     const expertDefinition = (): ExpertDefinition => ({
@@ -128,6 +129,7 @@ function harness(name: string) {
       references: [],
       connections: [],
       ...(preferredProvider !== undefined ? { preferredProvider } : {}),
+      ...(defaultModelSelection ? { defaultModelSelection } : {}),
       revision: expertRevision,
       archived: expertArchived,
       updatedAt: now,
@@ -323,6 +325,9 @@ function harness(name: string) {
       },
       setPreferredProvider: (provider: ExpertDefinition["preferredProvider"]) => {
         preferredProvider = provider;
+      },
+      setDefaultModel: (selection: ExpertDefinition["defaultModelSelection"]) => {
+        defaultModelSelection = selection;
       },
       blockExpertPreview: () => {
         expertPreviewBlocked = true;
@@ -636,6 +641,55 @@ tests("Hub work gateway integration", (it) => {
         assert.include(JSON.stringify(result), "has no configured default model");
         assert.equal((yield* h.repository.list(h.projectId)).length, 0);
       }),
+  );
+
+  it.effect("pins the Expert default model and allows an explicit dispatch override", () =>
+    Effect.gen(function* () {
+      const h = yield* harness("expert-saved-default");
+      h.setPreferredProvider("omp");
+      h.setDefaultModel({
+        provider: "omp",
+        model: "fixture-model",
+        instanceId: "omp",
+        options: { thinkingLevel: "high" },
+      });
+      const accepted = yield* h.gateway.submit(
+        {
+          requestId: "expert-default",
+          threads: [{ prompt: "Use the saved model", expertId: "expert-v1" }],
+        },
+        h.context,
+      );
+      assert.equal(accepted?.isError, undefined);
+      h.setDefaultModel({ provider: "omp", model: "unavailable-model" });
+      yield* h.gateway.tick;
+      assert.deepEqual(h.calls[0]?.threads[0]?.target, {
+        provider: "omp",
+        model: "fixture-model",
+        instanceId: "omp",
+        options: { thinkingLevel: "high" },
+      });
+      const override = { provider: "codex" as const, model: "fixture-model" };
+      const overrideHarness = yield* harness("expert-explicit-override");
+      overrideHarness.setPreferredProvider("omp");
+      overrideHarness.setDefaultModel({ provider: "omp", model: "unavailable-model" });
+      const overridden = yield* overrideHarness.gateway.submit(
+        {
+          requestId: "expert-override",
+          threads: [
+            { prompt: "Override the saved model", expertId: "expert-v1", target: override },
+          ],
+        },
+        overrideHarness.context,
+      );
+      assert.equal(overridden?.isError, undefined);
+      const records = yield* overrideHarness.repository.list(overrideHarness.projectId);
+      const target = records.find(
+        (record) => record.creationSpec.prompt === "Override the saved model",
+      )?.creationSpec.target;
+      assert.equal(target?.provider, override.provider);
+      assert.equal(target?.model, override.model);
+    }),
   );
 
   it.effect("requires a target for ordinary Hub workers", () =>

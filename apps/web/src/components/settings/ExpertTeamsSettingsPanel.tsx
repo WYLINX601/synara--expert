@@ -19,18 +19,6 @@ export function ExpertTeamsSettingsPanel(props: {
           </div>
         </SettingsCard>
       </SettingsSectionShell>
-      <SettingsSectionShell title="专家团">
-        <SettingsCard>
-          <div className="flex flex-wrap items-center justify-between gap-3 p-4">
-            <p className="min-w-0 flex-1 text-ui leading-relaxed text-muted-foreground">
-              专家团的创建和管理已移至 Experts 页面。
-            </p>
-            <Button size="sm" variant="outline" onClick={() => props.onOpenExperts("teams")}>
-              打开专家团
-            </Button>
-          </div>
-        </SettingsCard>
-      </SettingsSectionShell>
       <SettingsSectionShell title="技能">
         <SettingsCard>
           <div className="flex flex-wrap items-center justify-between gap-3 p-4">

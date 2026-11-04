@@ -64,6 +64,19 @@ Run the full workspace test suite from the repository root with:
 bun run test
 ```
 
+Activate the Node and Bun versions pinned in `.mise.toml` first. With those
+versions already installed, `mise exec -- bun run test` selects them without
+changing the machine's default PATH. The sync-workflow tests bind candidate
+evidence to the actual toolchain; mixing system versions with pinned fixture
+versions correctly rejects verification instead of producing a ready candidate.
+
+The root command runs package suites one at a time. Each Vitest process already
+owns a worker pool; running several package pools together oversubscribes the
+host and can starve native-process and cold-import deadlines. Package-local
+worker settings and all test deadlines remain unchanged. A failed package does
+not cancel the remaining packages: Turbo collects every package outcome and
+still returns a nonzero exit status if any package fails.
+
 For focused web tests, pass paths relative to `apps/web` through the dedicated root command:
 
 ```bash

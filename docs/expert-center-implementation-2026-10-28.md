@@ -92,6 +92,80 @@
 - 隔离真实页面保存并刷新回显 `OMP / GPT-6.1 Sol / High`；产品经理任务草稿带入相同选择，改为 `GPT-6 Luna / Low` 后，读取 Expert 保存值仍为原来的 `Sol / High`。未发送消息或运行 Provider 回合，不能据此声称真实 Provider 派发成功。
 - 受影响服务端 5 文件 115 tests、Web unit 5 文件 91 tests、浏览器 3 文件 69 tests 通过；contracts 32 文件 287 tests、shared 104 文件 1,114 tests 通过（2 skipped）。保存／清除、模型可用性、显式覆盖、冻结与草稿隔离均有行为覆盖。
 - 格式、lint（0 errors）、7 包 typecheck 与 115 文件静态接入边界检查通过。边界检查证明清单和依赖规则，不证明完整运行时隔离。React Doctor 以本地 main 为基线扫描 17 文件，72/100；4 项小列表循环内查找警告，未为理论优化额外改写现有选择逻辑。
-- 全库 `bun run test` 未通过：desktop 的 `backendShutdown.posix.integration`、`cuaDriverHost`、`macAppIcon.native` 各有失败，Web `storeNormalization` 的后台 activity trimming 用例也报告失败；Turbo 随后中断。相关文件未改动，但未证明这些失败在本次变更前已存在，不将其标成既有通过或正式集成验收。
+- 全库 `bun run test` 未通过。完整原始日志复盘纠正此前只列 4 项的漏报：至少 **23 项失败、8 个文件**，包括 desktop `backendShutdown.posix.integration` 1、`cuaDriverHost` 1、`macAppIcon.native` 1；Web `storeNormalization` 1、`ChatMarkdown` 5、`wsNativeApi` 2；scripts `workbench-build` 5、`workbench-sync` 7。contracts、shared 和 desktop 有包级终态，其余被 Turbo 中断，缺少最终断言详情；`storeNormalization` 仅有 7,390ms 的失败标记，不能据耗时直接归因超时。相关文件未改动不证明失败在变更前已存在，也不构成正式集成验收。
 - 验收期间集成浏览器坐标点击偏移，关闭通知的操作误触 Provider 更新；服务端记录 Codex 更新至 0.166.0、Pi 从 1.1.0 更新至 1.5.0，Pi 扩展未更新。已通知用户并报告工具问题；该主机侧变化不属于修复内容，未自行降级或重启。后续交互改用精确键盘定位。
 - 独立预览使用隔离 home 与端口；原始验收标签存在用户未保存编辑，因此保留该标签和隔离数据，不丢弃或覆盖。未更改日用数据库；隔离 home 并不能隔离系统级 CLI 安装。
+
+## 2026-11-03 测试失败复盘与修复
+
+范围：接续 `ae1425f3c` 的 `codex/fix-expert-default-model`，修复测试执行问题并取得全包终态。最初仅授权独立分支；用户随后明确授权更新、推送并合并到 GitHub main，需通过适用门禁后执行。不恢复 Graph，不安装应用，不处理上一节的 Provider 更新事故，也不覆盖用户预览编辑。
+
+### 完整失败清单与隔离对照
+
+首轮原始日志至少 23 项失败；此前仅报告 4 项是漏报，已在上节纠正。该轮只有 contracts、shared、desktop 有包级终态，不能把其他包的中间通过标记相加当作完整验收。
+
+| 文件组                                      | 首轮失败数 | 隔离检查结果 | 判定与处理                                                                                                                      |
+| ------------------------------------------- | ---------: | ------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| desktop `backendShutdown.posix.integration` |          1 | 2/2 通过     | 原断言为 SIGTERM 日志为空、最终 SIGKILL；保留 TERM→KILL 和退出边界，不修改生产时限或断言                                        |
+| desktop `cuaDriverHost`                     |          1 | 157/157 通过 | 原失败为请求 1,000ms 超时、effect 为 dispatched-unknown；保留输入释放失败后永久关闭 admission、不重放和不替换 generation 的断言 |
+| desktop `macAppIcon.native`                 |          1 | 1/1 通过     | 原失败为 5,000ms 超时；实际操作仅临时测试 bundle，未扩大预算                                                                    |
+| Web `storeNormalization`                    |          1 | 29/29 通过   | 原日志只有 7,390ms 失败标记，未取得具体断言；保留后台所有权、任务列表和终态裁剪断言，不直接归为超时                             |
+| Web `ChatMarkdown`                          |          5 | 60/60 通过   | 原冷导入／渲染失败在隔离执行及后续按包串行运行中未再出现；保留双向文字、HTML、alert 和 streaming 行为                           |
+| Web `wsNativeApi`                           |          2 | 53/53 通过   | Context 身份和 user-input 答案过滤原断言保留，无实现改写                                                                        |
+| scripts `workbench-build`                   |          5 | 21/21 通过   | 临时本地 Git／产物夹具验证，无真实发布；不放宽祖先、标签或来源校验                                                              |
+| scripts `workbench-sync`                    |          7 | 15/15 通过   | 临时本地 Git 远端验证；不改变候选、冲突或脏工作区保护                                                                           |
+
+隔离命令（路径分别相对包目录）：
+
+```bash
+bun run --cwd apps/desktop test src/backendShutdown.posix.integration.test.ts src/cuaDriverHost.test.ts src/macAppIcon.native.test.ts --maxWorkers=1 --no-file-parallelism
+bun run --cwd apps/web test src/storeNormalization.test.ts src/components/ChatMarkdown.test.tsx src/wsNativeApi.test.ts --maxWorkers=1 --no-file-parallelism
+bun run --cwd scripts test workbench-build.test.ts workbench-sync.test.ts --maxWorkers=1 --no-file-parallelism
+```
+
+三个命令分别为 160、142、36 项通过，耗时 77.58s、5.50s、9.75s；这只是失败组隔离证据，不代替最终完整运行。
+
+### 根因与最小修改
+
+1. 根入口曾同时启动多个包，每包 Vitest 又按整机可用核数建立 worker 池，造成嵌套并发资源竞争；默认失败即取消又截断其他包的终态。本轮只将根 `test` 改为 `turbo run test --concurrency=1 --continue=always`，保留包内 worker 设置、测试时限、所有断言及跳过状态。隔离及按包串行结果与资源竞争解释一致，但未将缺少断言详情的历史失败逐项武断标成超时，也未据此声称发现产品逻辑缺陷。
+2. 新增 `scripts/workspace-test-runner.test.ts`，实际运行三个临时包，以排他资源探测并发重叠；覆盖全部成功，以及一个包失败后依赖包和独立包仍完成且总退出非零的两条路径。聚焦 2/2 通过；另做真实失败注入 smoke，临时夹具均回收。没有只断言命令文本或弱化业务／安全测试。
+3. 首次按包串行全库随后暴露 `workbench-sync-workflow` 的 9 项明确断言失败。原因不是时序：默认 PATH 的 Node 22.23.1／Bun 1.4.0 被 prepare 记录，fixture／verify 则按仓库锁定的 24.13.1／1.4.2 检查，正确拒绝不匹配候选，导致后续状态与证据断言失败。所需版本已安装，仅用 `mise exec` 选择，不安装、升级或修改全局 PATH，不绕过 toolchain／候选安全门。
+4. `mise exec -- bun run --cwd scripts test workbench-sync-workflow.test.ts --maxWorkers=1 --no-file-parallelism` 已确认 Node 24.13.1、Bun 1.4.2，22/22 通过。CONTRIBUTING 与开发 SOP 补齐工具链、串行调度、失败汇总和避免重检查叠加的约定。
+
+首次按包串行、但工具链未纠正且最终被中断的一轮：desktop 1,444 passed／6 skipped，shared 1,114／2，Web 5,580／3，contracts 287／0；scripts 431 passed／9 failed；server 无终态。该记录保留失败，不冒充最终全过。
+
+### 2026-11-04 最终完整覆盖与交付边界
+
+基线为 `ae1425f3c` 加本轮根测试入口、真实 runner 回归及文档变更；产品源码、锁文件与已有测试断言在续验期间未变。统一使用已安装的 Node 24.13.1／Bun 1.4.2。以下是每个完整包或原生分片的最终汇总，不是累加中断前的单项通过：
+
+| 包／分片   |     passed | failed | skipped |
+| ---------- | ---------: | -----: | ------: |
+| Web        |      5,580 |      0 |       3 |
+| shared     |      1,114 |      0 |       2 |
+| desktop    |      1,444 |      0 |       6 |
+| contracts  |        287 |      0 |       0 |
+| scripts    |        440 |      0 |       0 |
+| server 1/3 |      3,421 |      0 |      11 |
+| server 2/3 |      2,296 |      0 |       4 |
+| server 3/3 |      3,984 |      0 |      16 |
+| **合计**   | **18,566** |  **0** |  **42** |
+
+server 三片覆盖完整包，共 9,701 passed、31 skipped；使用当前 `ci.yml` 和 `release.yml` 的三分片机制，保持单 worker／不并行文件。当前 CI 已是三片，历史 CI 性能文档中的两片不代表现行配置。本轮没有新增 skip，也不把历史版本的 40 skipped 移用为本轮数量。
+
+```bash
+mise exec -- bun run test
+# 上一命令中 Web/shared/desktop 已取得终态；外部中断后，仅续跑未完成包：
+mise exec -- bun run test --filter=@synara/scripts --filter=@synara/contracts
+mise exec -- bun run test --filter=@synara/cli -- --shard=1/3
+mise exec -- bun run test --filter=@synara/cli -- --shard=2/3
+mise exec -- bun run test --filter=@synara/cli -- --shard=3/3
+```
+
+完整覆盖来自同一代码与锁定环境下的分包／原生分片续验，并非一次未中断的根命令成功。外层 runner 曾在 SIGTERM 中断后显示 exit 0，但 Tasks 为 0 successful／3 total，缺少包级终态；该次明确不计为通过。持久服务标记没有阻止那次子任务中断，后改为逐片保留完整终态。
+
+- 最终 Expert 浏览器专项 3 文件 **69/69** 通过，覆盖单按钮保存／回显／清除、effort、不改聊天默认值、原生草稿默认值与覆盖。
+- `fmt:check` 5,201 文件通过；lint **1,163 warnings、0 errors**，server sync-fs 通过；typecheck **7/7 包**通过，保留建议性诊断。
+- 接入边界 115 文件通过；Windows 静态边界检查覆盖 324 应用源文件、119 边界文件、4 依赖补丁和 9 workspace manifests，通过；migration 归属与 92 个 release tags 的 lineage 检查通过。静态 Windows 检查不代表 Windows 实机运行。
+- Turbo 仍报告现有 `bun.lock` 解析警告；各包实际执行、缓存关闭，并已读取完整终态，不依赖该警告推断成功。Browserslist 数据过期提示未通过安装或更新依赖来消除。
+- 本轮未改生产取消、输入释放、admission、重放或进程退出逻辑；未调用真实 Provider 回合，未安装、升级、降级或重启日用应用／Provider。原预览进程已随先前中断退出，保留隔离数据及原始未保存页，不擅自重启或丢弃编辑。
+- 本记录固定本地验收与用户授权范围；GitHub 合并结果以关联 PR 的实际状态为准，不把本地检查当作远端 CI、签名发行或安装成功。

@@ -6774,7 +6774,9 @@ describe("ChatView transcript geometry (full app)", () => {
       // tail. Validate the rigid hold before that hand-off separately from the
       // upward motion afterward. A separate small-viewport browser test always
       // forces overflow and requires the hand-off.
-      const handoffIndex = settled.findIndex((entry) => entry.offset < topGapPx - 4);
+      // The hold assertion below is strictly within 4px. Its exact boundary
+      // belongs to the hand-off, which still must end at the live tail below.
+      const handoffIndex = settled.findIndex((entry) => entry.offset <= topGapPx - 4);
       const held = handoffIndex < 0 ? settled : settled.slice(0, handoffIndex);
       let reversals = 0;
       let travelAfterArrivalPx = 0;

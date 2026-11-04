@@ -169,3 +169,20 @@ mise exec -- bun run test --filter=@synara/cli -- --shard=3/3
 - Turbo 仍报告现有 `bun.lock` 解析警告；各包实际执行、缓存关闭，并已读取完整终态，不依赖该警告推断成功。Browserslist 数据过期提示未通过安装或更新依赖来消除。
 - 本轮未改生产取消、输入释放、admission、重放或进程退出逻辑；未调用真实 Provider 回合，未安装、升级、降级或重启日用应用／Provider。原预览进程已随先前中断退出，保留隔离数据及原始未保存页，不擅自重启或丢弃编辑。
 - 本记录固定本地验收与用户授权范围；GitHub 合并结果以关联 PR 的实际状态为准，不把本地检查当作远端 CI、签名发行或安装成功。
+
+### PR #7 远端浏览器门禁追加修复
+
+[PR #7](https://github.com/WYLINX601/synara--expert/pull/7) 首轮 CI `41762109470` 并非全过：类型、迁移、core／Web unit、server 三片、Windows Process Regression、Desktop Build 及其他浏览器分组通过，但 `chat-follow` 一项失败、`components 2/3` 一项 suite 导入失败，聚合门禁失败，未据此合并。
+
+- `ExpertSkillEvolution.browser.tsx` 原先整体 mock `appSettings`，新选择器导入的 `getAppModelOptions` 等真实导出不存在。改用已有的 `importOriginal` 部分 mock 模式和 `AppSettingsSchema` 完整夹具；同步保留被实际 settings 模块引用的 `serverReactQuery`、`providerDiscovery` 真实导出，只覆盖原有测试 seam。没有隐藏新选择器、删减进化场景或伪造模型实现。
+- `ChatView` 长响应用例的锚定断言要求偏移严格 `<4px`，但阶段分类用 `offset < topGap - 4` 才开始交接，把恰好 `4px` 的首个贴尾步骤仍算作锚定。CI 轨迹为 `16→12→-146…`，恰好落在该边界。交接分类改为包含边界 `<=`，原有 `<4px` 锚定、回弹／运动量、交接时机及最终距底 `<8px` 断言均不变，未改生产滚动行为。用原始轨迹重放，旧分类 held 最大偏移为 4，修正分类为 0，交接时机与最终贴尾断言均满足。
+- 本地使用相同 CI 配置，完整进化 suite **48/48** 通过；完整 `chat-follow` 分组 **31 passed／209 skipped**，后者为现有 CI 分组过滤，不新增 skip。命令如下，耗时分别为 30.29s、224.10s：
+
+```bash
+mise exec -- bun run --cwd apps/web test:browser:ci --project=components src/components/settings/ExpertSkillEvolution.browser.tsx
+mise exec -- bun run --cwd apps/web test:browser:ci --project=chat-follow
+```
+
+`chat-follow` 输出一次 Router preload `_nonReactive` 控制台异常，但完整分组终态为通过；未抑制该输出，也未在本轮证明该异常的根因或首次出现版本。该轮只修改浏览器测试夹具与阶段分类，上一节全库 unit 结果仍对应同一生产源码；远端重验与最终合并必须以新 head 的实际门禁状态为准。
+
+追加修复后 `fmt:check` 5,201 文件通过；lint 1,163 warnings／0 errors、server sync-fs 通过；typecheck 7/7 包通过。React Doctor 以 `a50308124` 为基线扫描本次两个测试文件，89/100、无诊断；该分数不替代最初 17 个功能变更文件的独立扫描记录。

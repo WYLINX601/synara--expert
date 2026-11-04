@@ -32,6 +32,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-react";
 import { useState } from "react";
+import type * as AppSettingsModule from "~/appSettings";
+import type * as ServerReactQueryModule from "~/lib/serverReactQuery";
+import type * as ProviderDiscoveryModule from "~/lib/providerDiscovery";
 
 const harness = vi.hoisted(() => ({
   calls: [] as SkillEvolutionRequest[],
@@ -70,9 +73,15 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("~/nativeApi", () => ({ ensureNativeApi: () => ({ server: harness.server }) }));
-vi.mock("~/appSettings", () => ({
-  useAppSettings: () => ({ settings: { defaultProvider: "pi" } }),
-}));
+vi.mock("~/appSettings", async (importOriginal) => {
+  const actual = await importOriginal<typeof AppSettingsModule>();
+  return {
+    ...actual,
+    useAppSettings: () => ({
+      settings: actual.AppSettingsSchema.makeUnsafe({ defaultProvider: "pi" }),
+    }),
+  };
+});
 vi.mock("~/hooks/useProviderStatusesForLocalConfig", () => ({
   useProviderStatusesForLocalConfig: () => [],
 }));
@@ -85,13 +94,20 @@ vi.mock("~/hooks/useScratchComposerDraft", () => ({
 vi.mock("~/hooks/useScratchModelCatalog", () => ({ useScratchModelCatalog: () => ({}) }));
 vi.mock("~/components/chat/ScratchAgentControls", () => ({ ScratchModelPickers: () => null }));
 vi.mock("~/components/settings/SkillLibraryDetail", () => ({ SkillLibraryDetail: () => null }));
-vi.mock("~/lib/serverReactQuery", () => ({
-  serverConfigQueryOptions: () => ({
-    queryKey: ["test", "config"],
-    queryFn: harness.server.getConfig,
-  }),
-}));
-vi.mock("~/lib/providerDiscovery", () => ({ resolveProviderDiscoveryCwd: () => null }));
+vi.mock("~/lib/serverReactQuery", async (importOriginal) => {
+  const actual = await importOriginal<typeof ServerReactQueryModule>();
+  return {
+    ...actual,
+    serverConfigQueryOptions: () => ({
+      queryKey: ["test", "config"],
+      queryFn: harness.server.getConfig,
+    }),
+  };
+});
+vi.mock("~/lib/providerDiscovery", async (importOriginal) => {
+  const actual = await importOriginal<typeof ProviderDiscoveryModule>();
+  return { ...actual, resolveProviderDiscoveryCwd: () => null };
+});
 
 import { ExpertLearningControl, expertLearningQueryKey } from "./ExpertLearningControl";
 import { ExpertSkillEvolution } from "./ExpertSkillEvolution";

@@ -7962,12 +7962,22 @@ describe("ChatView transcript geometry (full app)", () => {
   });
 
   it.each([
-    { description: "  梳理需求并撰写 PRD。  ", useCases: "适用场景", hint: "梳理需求并撰写 PRD。" },
-    { description: "  ", useCases: "  审核方案与任务计划。  ", hint: "审核方案与任务计划。" },
-    { description: "", useCases: " ", hint: "Do anything in Synara" },
+    {
+      source: "description",
+      description: "  梳理需求并撰写 PRD。  ",
+      useCases: "适用场景",
+      hint: "梳理需求并撰写 PRD。",
+    },
+    {
+      source: "use cases",
+      description: "  ",
+      useCases: "  审核方案与任务计划。  ",
+      hint: "审核方案与任务计划。",
+    },
+    { source: "general", description: "", useCases: " ", hint: undefined },
   ])(
-    "uses the selected expert's empty-input hint: $hint",
-    async ({ description, useCases, hint }) => {
+    "uses the selected expert's empty-input hint from $source",
+    async ({ description, useCases, hint: configuredHint }) => {
       useComposerDraftStore.setState({
         draftThreadsByThreadId: {
           [THREAD_ID]: {
@@ -8007,9 +8017,14 @@ describe("ChatView transcript geometry (full app)", () => {
       });
       try {
         const editor = await waitForComposerEditor();
-        expect(editor.getAttribute("aria-placeholder")).toBe("Do anything in Synara");
+        const defaultHint = editor.getAttribute("aria-placeholder")!;
+        const hint = configuredHint ?? defaultHint;
         await page.getByRole("button", { name: "选择专家", exact: true }).click();
         await page.getByRole("menuitem", { name: "规划专家", exact: true }).click();
+        await expect
+          .element(page.getByRole("button", { name: "专家：规划专家", exact: true }))
+          .toBeVisible();
+        await expect.element(editor).toHaveFocus();
         await vi.waitFor(() => expect(editor.getAttribute("aria-placeholder")).toBe(hint));
         await expect.element(page.getByText(hint, { exact: true })).toBeVisible();
         if (description.trim()) {
@@ -8028,14 +8043,14 @@ describe("ChatView transcript geometry (full app)", () => {
         );
         await page.getByRole("button", { name: "专家：规划专家", exact: true }).click();
         await page.getByRole("menuitem", { name: "通用", exact: true }).click();
-        await vi.waitFor(() =>
-          expect(editor.getAttribute("aria-placeholder")).toBe("Do anything in Synara"),
-        );
+        await expect
+          .element(page.getByRole("button", { name: "选择专家", exact: true }))
+          .toBeVisible();
+        await expect.element(editor).toHaveFocus();
+        await vi.waitFor(() => expect(editor.getAttribute("aria-placeholder")).toBe(defaultHint));
         expect(editor.textContent).toBe("Keep my draft");
         await userEvent.clear(editor);
-        await expect
-          .element(page.getByText("Do anything in Synara", { exact: true }))
-          .toBeVisible();
+        await expect.element(page.getByText(defaultHint, { exact: true })).toBeVisible();
         expect(
           wsRequests.some((request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand),
         ).toBe(false);

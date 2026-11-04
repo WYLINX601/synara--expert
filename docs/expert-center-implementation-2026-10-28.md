@@ -186,3 +186,11 @@ mise exec -- bun run --cwd apps/web test:browser:ci --project=chat-follow
 `chat-follow` 输出一次 Router preload `_nonReactive` 控制台异常，但完整分组终态为通过；未抑制该输出，也未在本轮证明该异常的根因或首次出现版本。该轮只修改浏览器测试夹具与阶段分类，上一节全库 unit 结果仍对应同一生产源码；远端重验与最终合并必须以新 head 的实际门禁状态为准。
 
 追加修复后 `fmt:check` 5,201 文件通过；lint 1,163 warnings／0 errors、server sync-fs 通过；typecheck 7/7 包通过。React Doctor 以 `a50308124` 为基线扫描本次两个测试文件，89/100、无诊断；该分数不替代最初 17 个功能变更文件的独立扫描记录。
+
+第二轮 CI `41764744867`（head `ca8e2f583`）中，上述两个失败点通过；core／Web unit、server 三片、Windows 回归、类型、迁移、桌面构建、其余浏览器组也通过。但 `chat-workflows` 为 **145 passed／1 failed／94 分组过滤 skipped**，失败项是 Expert 没有自定义提示时，清空编辑器后未找到通用提示；聚合门禁仍失败，未合并。
+
+该用例原来用 `aria-placeholder` 变回通用文本来等待取消 Expert；fallback 场景的文本前后相同，不能证明选择或焦点交接已完成。实际 `ExpertComposerPicker` 提交选择后调用 `scheduleComposerFocus`，由下一帧的 `focusAtEnd` 交接焦点，合成 clear 动作可与其竞争。CI 未记录逐事件焦点序列，因此不把具体交错顺序当作已复现事实。本轮只改测试：选择及取消选择均等待真实按钮状态和编辑器获得焦点，再执行输入／清空；保留描述优先、useCases 回退、通用回退三种场景，以及草稿保留、不发送断言。通用提示从选择前的可访问提示读取，不再固定当前产品文案。没有改生产焦点行为、添加固定 sleep、放大 timeout 或删除场景。
+
+`mise exec -- bun run --cwd apps/web test:browser:ci --project=chat-workflows` 完整分组本地 **146 passed／94 原有分组过滤 skipped**，200.06s，通过；没有缩小 testNamePattern 或只运行失败参数分支。
+
+焦点同步修复后再次完成 `fmt:check`（5,201 文件）、lint（1,163 warnings／0 errors）、server sync-fs 和 7/7 包 typecheck；React Doctor 以 `ca8e2f583` 为基线扫描本次单个测试文件，89/100、无诊断。后续远端结果仍以 PR 新 head 的实际门禁为准。

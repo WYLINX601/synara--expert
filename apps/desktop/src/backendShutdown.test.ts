@@ -3,6 +3,7 @@ import * as Http from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { shutdownBrowserServices } from "./browserAutomation/browserShutdown";
 
 import {
   DESKTOP_BACKEND_SHUTDOWN_PATH,
@@ -690,6 +691,28 @@ describe("requireWindowsBackendExit", () => {
 });
 
 describe("runAfterDesktopShutdown", () => {
+  it("clears browser resources after an ambient shutdown failure without reporting success", async () => {
+    const failure = new Error("context listener did not close");
+    const services = {
+      revokeHost: vi.fn(async () => undefined),
+      closePages: vi.fn(),
+      stopCapture: vi.fn(async () => undefined),
+      clearKeys: vi.fn(),
+    };
+    const completed = vi.fn();
+    const shutdown = runAfterDesktopShutdown(Promise.resolve(), async () => {
+      await runAfterDesktopShutdown(
+        Promise.reject(failure),
+        () => shutdownBrowserServices(services),
+        { runAfterShutdownFailure: true },
+      );
+      completed();
+    });
+    await expect(shutdown).rejects.toBe(failure);
+    for (const cleanup of Object.values(services)) expect(cleanup).toHaveBeenCalledOnce();
+    expect(completed).not.toHaveBeenCalled();
+  });
+
   it("runs shutdown-only actions only after shutdown completes successfully", async () => {
     const afterShutdown = vi.fn();
 

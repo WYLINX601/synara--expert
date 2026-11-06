@@ -81,6 +81,7 @@ import {
   Stream,
 } from "effect";
 import { nonEmptyTrimmed } from "@synara/shared/text";
+import { formatAmbientContext } from "@synara/shared/ambientContext";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { computerApprovalGate } from "../../computer/ComputerApprovalGate.ts";
 import { ContextRepository, type ContextRepositoryError } from "../../context/ContextRepository.ts";
@@ -318,6 +319,32 @@ function toValidationError(
     issue,
     ...(cause !== undefined ? { cause } : {}),
   });
+}
+
+function hasSendableAmbientContext(
+  ambientContext: ProviderSendTurnInput["ambientContext"],
+): boolean {
+  return (ambientContext?.items.length ?? 0) > 0;
+}
+
+function withFormattedAmbientContext(
+  inputText: string | undefined,
+  ambientContext: ProviderSendTurnInput["ambientContext"],
+  operation: string,
+): Effect.Effect<string | undefined, ProviderValidationError> {
+  const ambientContextText = ambientContext ? formatAmbientContext(ambientContext) : "";
+  if (!ambientContextText) return Effect.succeed(inputText);
+
+  const formattedInput = [inputText, ambientContextText].filter(Boolean).join("\n\n");
+  if (formattedInput.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
+    return Effect.fail(
+      toValidationError(
+        operation,
+        "The attached ambient context would exceed the provider turn input limit. Reduce the selected context or shorten the message.",
+      ),
+    );
+  }
+  return Effect.succeed(formattedInput);
 }
 
 const decodeInputOrValidationError = <S extends Schema.Top>(input: {
@@ -3848,7 +3875,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       readonly operation: string;
       readonly turnInput?: Pick<
         ProviderSendTurnInput,
-        "modelSelection" | "skills" | "mentions" | "attachments"
+        "modelSelection" | "skills" | "mentions" | "attachments" | "ambientContext"
       >;
       readonly routed: {
         readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
@@ -3879,7 +3906,8 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               !sameEvolutionModel(evolution.modelSelection, input.turnInput.modelSelection)) ||
             input.turnInput?.attachments?.length ||
             input.turnInput?.skills?.length ||
-            input.turnInput?.mentions?.length
+            input.turnInput?.mentions?.length ||
+            input.turnInput?.ambientContext !== undefined
           )
             return yield* toValidationError(
               input.operation,
@@ -5430,10 +5458,14 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           ...parsed,
           attachments: carryProviderAttachmentPaths(rawInput, parsed.attachments ?? []),
         };
-        if (!input.input && input.attachments.length === 0) {
+        if (
+          !input.input &&
+          input.attachments.length === 0 &&
+          !hasSendableAmbientContext(input.ambientContext)
+        ) {
           return yield* toValidationError(
             "ProviderService.sendTurn",
-            "Either input text or at least one attachment is required",
+            "Input text, non-empty ambient context, or at least one attachment is required",
           );
         }
         return yield* runTurnDispatch(input.threadId, (generation) =>
@@ -5473,9 +5505,16 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               text: input.input,
               operation: "ProviderService.sendTurn",
             });
+            const { ambientContext, ...providerInput } = input;
+            const formattedInput = yield* withFormattedAmbientContext(
+              skillInvocation.input ?? input.input,
+              ambientContext,
+              "ProviderService.sendTurn",
+            );
             const routedInput = {
-              ...input,
+              ...providerInput,
               ...skillInvocation,
+              ...(formattedInput !== undefined ? { input: formattedInput } : {}),
               ...(routedModelSelection !== undefined
                 ? { modelSelection: routedModelSelection }
                 : {}),
@@ -5534,10 +5573,14 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           ...parsed,
           attachments: carryProviderAttachmentPaths(rawInput, parsed.attachments ?? []),
         };
-        if (!input.input && input.attachments.length === 0) {
+        if (
+          !input.input &&
+          input.attachments.length === 0 &&
+          !hasSendableAmbientContext(input.ambientContext)
+        ) {
           return yield* toValidationError(
             "ProviderService.steerTurn",
-            "Either input text or at least one attachment is required",
+            "Input text, non-empty ambient context, or at least one attachment is required",
           );
         }
         return yield* runTurnDispatch(input.threadId, (generation) =>
@@ -5586,9 +5629,16 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               text: input.input,
               operation: "ProviderService.steerTurn",
             });
+            const { ambientContext, ...providerInput } = input;
+            const formattedInput = yield* withFormattedAmbientContext(
+              skillInvocation.input ?? input.input,
+              ambientContext,
+              "ProviderService.steerTurn",
+            );
             const routedInput = {
-              ...input,
+              ...providerInput,
               ...skillInvocation,
+              ...(formattedInput !== undefined ? { input: formattedInput } : {}),
               ...(routedModelSelection !== undefined
                 ? { modelSelection: routedModelSelection }
                 : {}),
@@ -5919,6 +5969,16 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         Effect.flatMap((input) =>
           lifecycle.runCurrent(input.threadId, () =>
             Effect.gen(function* () {
+              if (
+                !input.input &&
+                (input.attachments?.length ?? 0) === 0 &&
+                !hasSendableAmbientContext(input.ambientContext)
+              ) {
+                return yield* toValidationError(
+                  "ProviderService.steerSubagent",
+                  "Input text, non-empty ambient context, or at least one attachment is required",
+                );
+              }
               const routed = yield* resolveRoutableSession({
                 threadId: input.threadId,
                 operation: "ProviderService.steerSubagent",
@@ -5939,6 +5999,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               const verifiedExpertSession = yield* validateContextDispatch({
                 threadId: input.threadId,
                 operation: "ProviderService.steerSubagent",
+                turnInput: input,
                 routed,
               });
               const skillInvocation = yield* prepareExpertSkillInvocations({
@@ -5949,8 +6010,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 operation: "ProviderService.steerSubagent",
               });
               const attachments = carryProviderAttachmentPaths(rawInput, input.attachments ?? []);
+              const routedInput = yield* withFormattedAmbientContext(
+                skillInvocation.input ?? input.input,
+                input.ambientContext,
+                "ProviderService.steerSubagent",
+              );
               yield* routed.adapter.steerSubagent(input.threadId, input.providerThreadId, {
-                input: skillInvocation.input ?? "",
+                input: routedInput ?? "",
                 ...(attachments.length > 0 ? { attachments } : {}),
                 ...(skillInvocation.skills !== undefined ? { skills: skillInvocation.skills } : {}),
                 ...(input.mentions !== undefined ? { mentions: input.mentions } : {}),

@@ -22,6 +22,8 @@ import {
   resolveOmpCliBinaryPath,
 } from "./OmpAcpSupport.ts";
 
+import { prepareOmpNativeCompat } from "./OmpNativeCompat.ts";
+
 function initializeWithAuthMethods(ids: ReadonlyArray<string>): Acp.InitializeResponse {
   return {
     protocolVersion: 1,
@@ -61,6 +63,20 @@ describe("resolveOmpCliBinaryPath", () => {
 });
 
 describe("buildOmpAcpSpawnInput", () => {
+  it("launches the executable selected by the account PATH used for capability probes", () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "omp-account-path-"));
+    try {
+      const executable = path.join(cwd, "omp");
+      writeFileSync(executable, "#!/bin/sh\nexit 0\n");
+      chmodSync(executable, 0o700);
+      const spawn = buildOmpAcpSpawnInput({ environment: { PATH: cwd } }, cwd);
+      expect(spawn.command).toBe(executable);
+      expect(spawn.env?.PATH).toBe(cwd);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("builds the default OMP ACP command", () => {
     const spawn = buildOmpAcpSpawnInput(undefined, "/tmp/project");
     expect(spawn.args).toEqual(["acp"]);
@@ -108,6 +124,45 @@ describe("buildOmpAcpSpawnInput", () => {
       "/owned/APPEND_SYSTEM.md",
     ]);
     expect(buildOmpAcpSpawnInput(undefined, "/tmp/project").args).toEqual(["acp"]);
+  });
+
+  it("uses the selected standalone CLI with a trusted extension and restricted learning flags", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "omp-public-spawn-"));
+    try {
+      const launch = await prepareOmpNativeCompat({
+        privateTempDirectory: root,
+        kind: "evolution",
+        sessionDir: path.join(root, "sessions"),
+      });
+      const spawn = buildOmpAcpSpawnInput(
+        { binaryPath: "/selected/omp", agentDir: "/selected/account" },
+        root,
+        { nativeCompat: launch },
+      );
+      expect(spawn.command).toBe("/selected/omp");
+      expect(spawn.args).toEqual([
+        "acp",
+        "--trusted-extension",
+        launch.extensionPath,
+        "--no-tools",
+        "--no-skills",
+        "--no-rules",
+        "--no-context-files",
+        "--no-lsp",
+        "--session-dir",
+        launch.sessionDir,
+        "--system-prompt",
+        launch.systemPromptPath,
+        "--append-system-prompt",
+        launch.appendSystemPromptPath,
+        "--config",
+        launch.configOverlayPath,
+      ]);
+      expect(spawn.env?.PI_CODING_AGENT_DIR).toBe("/selected/account");
+      expect(buildOmpAcpSpawnInput(undefined, root).args).toEqual(["acp"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("uses only the verified private Bun launcher when idle-task compatibility is supplied", () => {

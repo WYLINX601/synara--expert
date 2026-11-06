@@ -25,6 +25,7 @@ import {
   EXPERT_LEARNING_EVIDENCE_DELIVERY_EFFECT,
 } from "./ExpertLearningEvidenceDeliveryMigration.ts";
 import { SPACE_MEMORY_EFFECT, SPACE_MEMORY_SQL } from "./SpaceMemoryMigration.ts";
+import { AMBIENT_CONTEXT_SNAPSHOT_SQL } from "./AmbientContextSnapshotMigration.ts";
 import {
   CONTEXT_SCHEMA_OBJECTS_QUERY,
   validateFrozenContextSchema,
@@ -178,6 +179,7 @@ export interface WorkbenchSchemaState {
   readonly contextSchemaObjects: readonly SqliteSchemaObject[];
   readonly projectionThreadsExists: boolean;
   readonly bindingColumn: SqliteColumnInfo | null;
+  readonly ambientContextColumn: SqliteColumnInfo | null;
   readonly runtimeRecordColumns: readonly SqliteColumnInfo[] | null;
   readonly contextTableColumns: Readonly<Record<string, readonly SqliteColumnInfo[] | null>>;
   readonly contextDeliveryColumns: readonly SqliteColumnInfo[] | null;
@@ -425,6 +427,13 @@ export const workbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] 
     statement: SPACE_MEMORY_SQL,
     effect: SPACE_MEMORY_EFFECT,
   },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 14,
+    name: "AmbientContextMessageSnapshots",
+    checksum: "sha256:5053eaa98f33df07dc5dff48b49ac6161829de6711151b528f7ad060aece5a3e",
+    statement: AMBIENT_CONTEXT_SNAPSHOT_SQL,
+  },
 ];
 
 /** The Context migration reuses the exact frozen native script from legacy 111. */
@@ -457,12 +466,15 @@ export interface InvalidWorkbenchHistoryPlan {
 export const planWorkbenchHistory = (
   rows: readonly WorkbenchMigrationRecord[],
 ): WorkbenchHistoryPlan | InvalidWorkbenchHistoryPlan => {
-  for (const migration of workbenchMigrationEntries) {
+  for (const migration of allWorkbenchMigrationEntries) {
     if (migration.statement === undefined) {
-      return {
-        ok: false,
-        reason: `Expert workbench migration ${migration.migrationId} has no canonical SQL statement.`,
-      };
+      if (migration.moduleId === EXPERT_WORKBENCH_MODULE_ID) {
+        return {
+          ok: false,
+          reason: `Expert workbench migration ${migration.migrationId} has no canonical SQL statement.`,
+        };
+      }
+      continue;
     }
     const expectedChecksum = `sha256:${createHash("sha256")
       .update(migration.statement)
@@ -470,7 +482,7 @@ export const planWorkbenchHistory = (
     if (migration.checksum !== expectedChecksum) {
       return {
         ok: false,
-        reason: `Expert workbench migration ${migration.migrationId} has a stale source checksum.`,
+        reason: `${migration.moduleId} workbench migration ${migration.migrationId} has a stale source checksum.`,
       };
     }
   }
@@ -533,6 +545,7 @@ export const validateWorkbenchSchemaState = (
       ? { expert: appliedMigrationCount, context: 0 }
       : appliedMigrationCount;
   const contextApplied = appliedByModule.context >= 1;
+  const ambientContextApplied = appliedByModule.expert >= 14;
   const contextDefinitionIssue = validateFrozenContextSchema(
     contextApplied,
     state.contextSchemaObjects,
@@ -570,11 +583,29 @@ export const validateWorkbenchSchemaState = (
       appliedByModule.expert === 0 &&
       !contextApplied &&
       state.bindingColumn === null &&
+      state.ambientContextColumn === null &&
       state.runtimeRecordColumns === null
     ) {
       return null;
     }
     return "The official projection_threads table is missing; run official migrations through 108 first.";
+  }
+
+  if (ambientContextApplied) {
+    if (
+      state.ambientContextColumn === null ||
+      !sameColumn(state.ambientContextColumn, {
+        name: "ambient_context_json",
+        type: "TEXT",
+        notnull: 0,
+        dflt_value: null,
+        pk: 0,
+      })
+    ) {
+      return "projection_thread_messages.ambient_context_json does not match the Ambient Context migration schema.";
+    }
+  } else if (state.ambientContextColumn !== null) {
+    return "projection_thread_messages.ambient_context_json exists without a matching Workbench migration record.";
   }
 
   const bindingApplied = appliedByModule.expert >= 1;
@@ -797,6 +828,17 @@ export const readWorkbenchSchemaState = Effect.gen(function* () {
   const bindingColumn =
     projectionColumns.find((column) => column.name === "expert_binding_json") ?? null;
 
+  const projectionMessages = yield* inspectSqliteObject(sql, "projection_thread_messages");
+  if (projectionMessages !== null && projectionMessages.type !== "table") {
+    return yield* fail("projection_thread_messages exists but is not a table.");
+  }
+  const projectionMessageColumns =
+    projectionMessages === null
+      ? []
+      : yield* inspectTableColumns(sql, "projection_thread_messages");
+  const ambientContextColumn =
+    projectionMessageColumns.find((column) => column.name === "ambient_context_json") ?? null;
+
   const runtimeTable = yield* inspectSqliteObject(sql, "expert_applied_runtime_records");
   if (runtimeTable !== null && runtimeTable.type !== "table") {
     return yield* fail("expert_applied_runtime_records exists but is not a table.");
@@ -834,6 +876,7 @@ export const readWorkbenchSchemaState = Effect.gen(function* () {
     contextSchemaObjects,
     projectionThreadsExists,
     bindingColumn,
+    ambientContextColumn,
     runtimeRecordColumns,
     contextTableColumns,
     contextDeliveryColumns: contextDeliveryColumns?.length === 0 ? null : contextDeliveryColumns,

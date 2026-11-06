@@ -256,6 +256,9 @@ export function useChatQueuedTurns({
         addComposerPullRequestContextsToDraft(queuedTurn.pullRequestContexts);
         updateSelectedComposerSkills(queuedTurn.skills);
         updateSelectedComposerMentions(queuedTurn.mentions);
+        useComposerDraftStore
+          .getState()
+          .setAmbientContext(activeThread.id, queuedTurn.ambientContext);
       } else {
         updateSelectedComposerSkills([]);
         updateSelectedComposerMentions([]);

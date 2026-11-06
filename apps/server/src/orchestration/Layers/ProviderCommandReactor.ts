@@ -50,6 +50,7 @@ import {
   type ProviderRuntimeEvent,
   ProviderKind,
   type ProviderReviewTarget,
+  type ProviderSendTurnInput,
   type ProviderStartOptions,
   type ProviderSkillReference,
   type ProviderTurnStartResult,
@@ -3325,6 +3326,7 @@ const make = Effect.gen(function* () {
     readonly messageId: string;
     readonly messageText: string;
     readonly dispatchOrigin?: "user" | "automation" | "agent";
+    readonly ambientContext?: ProviderSendTurnInput["ambientContext"];
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly skills?: ReadonlyArray<ProviderSkillReference>;
     readonly mentions?: ReadonlyArray<ProviderMentionReference>;
@@ -3661,6 +3663,7 @@ const make = Effect.gen(function* () {
         threadId: providerThread.id,
         providerThreadId: subagentProviderThreadId,
         ...(normalizedSteerInput ? { input: normalizedSteerInput } : {}),
+        ...(input.ambientContext !== undefined ? { ambientContext: input.ambientContext } : {}),
         ...(normalizedSteerAttachments.length > 0
           ? { attachments: normalizedSteerAttachments }
           : {}),
@@ -4216,6 +4219,7 @@ const make = Effect.gen(function* () {
         : requestedModelSelection;
     const providerTurnInput = {
       threadId: input.threadId,
+      ...(input.ambientContext !== undefined ? { ambientContext: input.ambientContext } : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(input.skills !== undefined ? { skills: input.skills } : {}),
       ...(providerMentions !== undefined ? { mentions: providerMentions } : {}),
@@ -5427,6 +5431,7 @@ const make = Effect.gen(function* () {
         messageId: message.id,
         messageText: message.text,
         dispatchOrigin: event.payload.dispatchOrigin ?? "user",
+        ...(message.ambientContext !== undefined ? { ambientContext: message.ambientContext } : {}),
         ...(message.attachments !== undefined ? { attachments: resolvedAttachments } : {}),
         ...(message.skills !== undefined ? { skills: message.skills } : {}),
         ...(message.mentions !== undefined ? { mentions: message.mentions } : {}),
@@ -7220,6 +7225,9 @@ const make = Effect.gen(function* () {
         messageId: payload.messageId,
         role: "user",
         text: payload.text,
+        ...(originalMessage.ambientContext !== undefined
+          ? { ambientContext: originalMessage.ambientContext }
+          : {}),
         attachments: originalMessage.attachments ?? [],
         ...(originalMessage.skills !== undefined ? { skills: originalMessage.skills } : {}),
         ...(originalMessage.mentions !== undefined ? { mentions: originalMessage.mentions } : {}),

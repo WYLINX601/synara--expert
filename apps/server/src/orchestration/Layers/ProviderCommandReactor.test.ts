@@ -14,6 +14,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type {
+  AmbientContextSnapshot,
   ClaudeCacheObservation,
   ModelSelection,
   OrchestrationCommand,
@@ -188,6 +189,35 @@ const asApprovalRequestId = (value: string): ApprovalRequestId =>
   ApprovalRequestId.makeUnsafe(value);
 const asEventId = (value: string): EventId => EventId.makeUnsafe(value);
 const asMessageId = (value: string): MessageId => MessageId.makeUnsafe(value);
+const ambientContextFixture = (): AmbientContextSnapshot => ({
+  schemaVersion: 1,
+  id: "snapshot-reactor-1",
+  capturedAt: "2026-10-09T00:00:00.000Z",
+  items: [
+    {
+      observation: {
+        schemaVersion: 1,
+        id: "observation-reactor-1",
+        targetKey: "target-reactor-1",
+        capturedAt: "2026-10-09T00:00:00.000Z",
+        method: "selection event",
+        confidence: "exact",
+        type: "selection.text",
+        value: { text: "Keep this exact selection context" },
+      },
+      provenance: [
+        {
+          sourceId: "source-reactor-1",
+          observationId: "observation-reactor-1",
+          capturedAt: "2026-10-09T00:00:00.000Z",
+          method: "selection event",
+          confidence: "exact",
+        },
+      ],
+      ambiguous: false,
+    },
+  ],
+});
 const asTurnId = (value: string): TurnId => TurnId.makeUnsafe(value);
 
 describe("legacy provider blocker recovery", () => {
@@ -1827,6 +1857,7 @@ describe("ProviderCommandReactor", () => {
       readonly createdAt: string;
       readonly threadId?: ThreadId;
       readonly attachments?: ReadonlyArray<ChatAttachment>;
+      readonly ambientContext?: AmbientContextSnapshot;
       readonly dispatchOrigin?: "user" | "automation" | "agent";
     },
   ) {
@@ -1839,6 +1870,7 @@ describe("ProviderCommandReactor", () => {
           messageId: asMessageId(input.messageId),
           role: "user",
           text: input.text,
+          ...(input.ambientContext !== undefined ? { ambientContext: input.ambientContext } : {}),
           attachments: input.attachments ?? [],
         },
         ...(input.dispatchOrigin !== undefined ? { dispatchOrigin: input.dispatchOrigin } : {}),
@@ -14976,12 +15008,14 @@ describe("ProviderCommandReactor", () => {
   it("routes subagent-thread turn starts to the parent session as steers", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();
+    const ambientContext = ambientContextFixture();
+    const subagentThreadId = ThreadId.makeUnsafe("subagent:thread-1:tool-steer-1");
 
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.create",
         commandId: CommandId.makeUnsafe("cmd-subagent-thread-create"),
-        threadId: ThreadId.makeUnsafe("subagent:thread-1:tool-steer-1"),
+        threadId: subagentThreadId,
         projectId: asProjectId("project-1"),
         title: "Subagent",
         modelSelection: { provider: "claudeAgent", model: "claude-sonnet-4-5" },
@@ -14998,11 +15032,12 @@ describe("ProviderCommandReactor", () => {
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.makeUnsafe("cmd-subagent-steer-1"),
-        threadId: ThreadId.makeUnsafe("subagent:thread-1:tool-steer-1"),
+        threadId: subagentThreadId,
         message: {
           messageId: asMessageId("subagent-steer-message-1"),
           role: "user",
           text: "focus on the tests",
+          ambientContext,
           attachments: [],
         },
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -15016,6 +15051,14 @@ describe("ProviderCommandReactor", () => {
       threadId: ThreadId.makeUnsafe("thread-1"),
       providerThreadId: "tool-steer-1",
       input: "focus on the tests",
+      ambientContext,
+    });
+    const persistedMessage = (await readHarnessThread(harness, subagentThreadId))?.messages.find(
+      (message) => message.id === asMessageId("subagent-steer-message-1"),
+    );
+    expect(persistedMessage).toMatchObject({
+      text: "focus on the tests",
+      ambientContext,
     });
     // The subagent thread must never boot a provider session of its own.
     expect(harness.startSession).not.toHaveBeenCalled();
@@ -17636,6 +17679,7 @@ describe("ProviderCommandReactor", () => {
       readonly messageId: MessageId;
       readonly text: string;
       readonly attachments?: ReadonlyArray<ChatAttachment>;
+      readonly ambientContext?: AmbientContextSnapshot;
     },
   ) {
     const now = new Date().toISOString();
@@ -17671,6 +17715,7 @@ describe("ProviderCommandReactor", () => {
           messageId: input.messageId,
           role: "user",
           text: input.text,
+          ...(input.ambientContext !== undefined ? { ambientContext: input.ambientContext } : {}),
           attachments: [...(input.attachments ?? [])],
         },
         runtimeMode: "approval-required",
@@ -17714,10 +17759,12 @@ describe("ProviderCommandReactor", () => {
 
   it("drains a thread again after a promotion dispatch failed", async () => {
     const harness = await createHarness();
+    const ambientContext = ambientContextFixture();
     const queuedSequence = await seedQueuedTurnBehindLiveTurn(harness, {
       liveTurnId: asTurnId("turn-running-blocked"),
       messageId: asMessageId("msg-queue-blocked"),
       text: "promote me on the next settle",
+      ambientContext,
     });
 
     // A checkpoint revert in flight blocks promotion and is deliberately not
@@ -17755,11 +17802,33 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
       threadId: ThreadId.makeUnsafe("thread-1"),
       input: "promote me on the next settle",
+      ambientContext,
     });
     const promotion = await Effect.runPromise(
       harness.queuedTurnPromotionRepository.getBySequence(queuedSequence),
     );
     expect(promotion.pipe(Option.getOrThrow)).toMatchObject({ state: "promoted" });
+  });
+
+  it("replays a persisted turn start with its original ambient context snapshot", async () => {
+    const harness = await createHarness({ startReactor: false });
+    const ambientContext = ambientContextFixture();
+    await dispatchHarnessUserTurn(harness, {
+      messageId: "ambient-context-recovery",
+      text: "Continue with the selected evidence",
+      ambientContext,
+      createdAt: new Date().toISOString(),
+    });
+
+    expect(
+      (await readHarnessThread(harness))?.messages.find(
+        (message) => message.id === "ambient-context-recovery",
+      )?.ambientContext,
+    ).toEqual(ambientContext);
+
+    await harness.startReactor();
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.sendTurn.mock.calls[0]?.[0].ambientContext).toEqual(ambientContext);
   });
 
   it("drains a session again after a promoted turn start failed before dispatch", async () => {

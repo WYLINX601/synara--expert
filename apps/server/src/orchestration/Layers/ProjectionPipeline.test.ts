@@ -3214,6 +3214,101 @@ it.layer(
 });
 
 it.layer(
+  Layer.fresh(makeProjectionPipelinePrefixedTestLayer("synara-projection-ambient-context-")),
+)("OrchestrationProjectionPipeline", (it) => {
+  it.effect(
+    "round-trips an immutable ambient context snapshot from the event into the projection",
+    () =>
+      Effect.gen(function* () {
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const eventStore = yield* OrchestrationEventStore;
+        const repository = yield* ProjectionThreadMessageRepository;
+        const threadId = ThreadId.makeUnsafe("thread-ambient-context");
+        const messageId = MessageId.makeUnsafe("message-ambient-context");
+        const createdAt = "2026-10-09T00:00:00.000Z";
+        const ambientContext = {
+          schemaVersion: 1 as const,
+          id: "snapshot-ambient-1",
+          capturedAt: createdAt,
+          items: [
+            {
+              observation: {
+                schemaVersion: 1 as const,
+                id: "observation-ambient-1",
+                targetKey: "target-ambient-1",
+                capturedAt: createdAt,
+                method: "selection event",
+                confidence: "exact" as const,
+                type: "selection.text" as const,
+                value: { text: "selected evidence" },
+              },
+              provenance: [
+                {
+                  sourceId: "source-ambient-1",
+                  observationId: "observation-ambient-1",
+                  capturedAt: createdAt,
+                  method: "selection event",
+                  confidence: "exact" as const,
+                },
+              ],
+              ambiguous: false,
+            },
+          ],
+        };
+        const appendMessageEvent = (input: {
+          readonly eventId: string;
+          readonly commandId: string;
+          readonly text: string;
+          readonly ambientContext?: typeof ambientContext;
+        }) =>
+          eventStore.append({
+            type: "thread.message-sent",
+            eventId: EventId.makeUnsafe(input.eventId),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: createdAt,
+            commandId: CommandId.makeUnsafe(input.commandId),
+            causationEventId: null,
+            correlationId: CommandId.makeUnsafe(input.commandId),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId,
+              role: "user",
+              text: input.text,
+              ...(input.ambientContext !== undefined
+                ? { ambientContext: input.ambientContext }
+                : {}),
+              turnId: null,
+              streaming: false,
+              createdAt,
+              updatedAt: createdAt,
+            },
+          });
+
+        yield* appendMessageEvent({
+          eventId: "evt-ambient-context-1",
+          commandId: "cmd-ambient-context-1",
+          text: "Inspect this selection",
+          ambientContext,
+        });
+        yield* appendMessageEvent({
+          eventId: "evt-ambient-context-2",
+          commandId: "cmd-ambient-context-2",
+          text: "Inspect the saved selection again",
+        });
+        yield* projectionPipeline.bootstrap;
+
+        const projected = Option.getOrThrow(
+          yield* repository.getByThreadAndMessageId({ threadId, messageId }),
+        );
+        assert.equal(projected.text, "Inspect the saved selection again");
+        assert.deepEqual(projected.ambientContext, ambientContext);
+      }),
+  );
+});
+
+it.layer(
   Layer.fresh(makeProjectionPipelinePrefixedTestLayer("synara-projection-attachments-safe-")),
 )("OrchestrationProjectionPipeline", (it) => {
   it.effect("preserves mixed image attachment metadata as-is", () =>

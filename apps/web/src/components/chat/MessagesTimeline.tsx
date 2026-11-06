@@ -101,6 +101,7 @@ import { InlineAgentChip } from "./InlineAgentChip";
 import { EditedFileRow } from "./EditedFileRow";
 import { MessageActionButton, MESSAGE_ACTION_ICON_CLASS_NAME } from "./MessageActionButton";
 import { MessageCopyButton } from "./MessageCopyButton";
+import { AmbientContextSummaryChip } from "./AmbientContextSummaryChip";
 import { AssistantSelectionsSummaryChip } from "./AssistantSelectionsSummaryChip";
 import { FileAttachmentChip } from "./FileAttachmentChip";
 import { FileCommentsSummaryChip } from "./FileCommentsSummaryChip";
@@ -2142,6 +2143,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
                       hasLeadingMedia={hasLeadingMedia}
                     />
                   )}
+                  {row.message.ambientContext && row.message.ambientContext.items.length > 0 ? (
+                    <div className="mb-1 flex max-w-full justify-end self-end">
+                      <AmbientContextSummaryChip snapshot={row.message.ambientContext} />
+                    </div>
+                  ) : null}
                   {renderedAssistantSelections.length > 0 && (
                     <div className="mb-1 flex max-w-[240px] flex-wrap justify-end gap-1.5 self-end">
                       <AssistantSelectionsSummaryChip selections={renderedAssistantSelections} />

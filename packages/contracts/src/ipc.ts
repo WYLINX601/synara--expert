@@ -1,4 +1,5 @@
 import { SkillLibraryRequest, SkillLibraryResponse } from "./skillLibrary";
+import type { AmbientContextDesktopMethods } from "./ambientContext";
 import { SkillEvolutionRequest, SkillEvolutionResponse } from "./skillEvolution";
 import type {
   SkillManagementAccess,
@@ -1020,6 +1021,7 @@ export const DESKTOP_DIAGNOSTIC_ISSUE_PREFIX = "SYNARA_DIAGNOSTIC_ISSUE ";
 export type DesktopDiagnosticReportStatus = "queued" | "sent" | "unavailable";
 
 export interface DesktopBridge {
+  ambientContext?: AmbientContextDesktopMethods;
   /** Present only when the desktop main process enables baked-in Beta diagnostics. */
   betaDiagnostics?: {
     rendererReady: () => void;

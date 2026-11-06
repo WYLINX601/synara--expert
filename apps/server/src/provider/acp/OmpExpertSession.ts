@@ -34,7 +34,8 @@ import {
 import { invalidateNativeSkillAssemblyVerification } from "../expertSkillCatalog";
 
 export const OMP_EXPERT_PROJECTION_VERSION = "omp-acp-native-v1" as const;
-export const OMP_EXPERT_SUPPORTED_CLI_VERSION = "18.12.1" as const;
+/** Legacy source-patch route; newer CLIs must prove their capabilities at runtime. */
+export const OMP_EXPERT_LEGACY_CLI_VERSION = "18.12.1" as const;
 const OMP_EXPERT_TEMP_PREFIX = "synara-omp-expert-";
 
 interface FixedProjectionCleanupFileSystem {
@@ -260,7 +261,7 @@ function isNativeSkillRecord(value: unknown): value is Record<string, unknown> {
   );
 }
 
-function parseCliVersion(stdout: string): string | undefined {
+export function parseOmpExpertCliVersion(stdout: string): string | undefined {
   return stdout.trim().match(/^omp\/(\d+\.\d+\.\d+)$/)?.[1];
 }
 
@@ -613,21 +614,15 @@ export function prepareOmpExpertSession(
     const versionFailure = requireExitZero(versionResult.success, "the CLI version");
     const detectedVersion = versionFailure
       ? undefined
-      : parseCliVersion(versionResult.success.stdout);
+      : parseOmpExpertCliVersion(versionResult.success.stdout);
     if (!detectedVersion) {
       return noResources(
         ["OMP returned an unrecognized CLI version; Expert projection is disabled."],
         instructionsHash,
       );
     }
-    if (detectedVersion !== OMP_EXPERT_SUPPORTED_CLI_VERSION) {
-      return noResources(
-        [
-          `OMP ${detectedVersion} has no verified Expert projection contract; verified version is ${OMP_EXPERT_SUPPORTED_CLI_VERSION}.`,
-        ],
-        instructionsHash,
-      );
-    }
+    // Version identifies the runtime; config and exact native Skill probes below
+    // establish compatibility instead of an exact-version allowlist.
     verifiedCliVersion = detectedVersion;
 
     const configResult = yield* input
@@ -926,9 +921,9 @@ function prepareFixedOmpExpertSession(
     if (!lifecycleGeneration)
       throw new Error("Fixed native verification requires a lifecycle generation.");
     const version = yield* input.runCli(["--version"], input.cwd, input.env);
-    const cliVersion = parseCliVersion(version.stdout);
-    if (version.exitCode !== 0 || cliVersion !== OMP_EXPERT_SUPPORTED_CLI_VERSION)
-      throw new Error("OMP has no verified fixed Skill assembly contract for this CLI version.");
+    const cliVersion = parseOmpExpertCliVersion(version.stdout);
+    if (version.exitCode !== 0 || !cliVersion)
+      throw new Error("OMP could not identify its CLI version for fixed Skill assembly checks.");
     const originalConfigResult = yield* input.runCli(
       ["config", "list", "--json"],
       input.cwd,

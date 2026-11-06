@@ -24,6 +24,7 @@ import {
 
 const absentContextSchema = {
   contextSchemaObjects: [],
+  ambientContextColumn: null,
   contextTableColumns: {
     context_meta: null,
     context_spaces: null,

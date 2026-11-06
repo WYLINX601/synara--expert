@@ -597,6 +597,7 @@ export function normalizeChatMessage(
       : (previous?.mentions ?? []);
   const previousSkills = previous?.skills ?? [];
   const previousMentions = previous?.mentions ?? [];
+  const ambientContext = incoming.ambientContext ?? previous?.ambientContext;
   const completedAt = incoming.streaming ? undefined : incoming.updatedAt;
   const asyncUserInput = mergeAsyncUserInput(previous?.asyncUserInput, incoming.asyncUserInput);
   if (
@@ -604,6 +605,7 @@ export function normalizeChatMessage(
     previous.role === incoming.role &&
     previous.text === incoming.text &&
     previous.asyncUserInput === asyncUserInput &&
+    previous.ambientContext === ambientContext &&
     previous.dispatchMode === incoming.dispatchMode &&
     previous.dispatchOrigin === incoming.dispatchOrigin &&
     previous.startsNewTurn === incoming.startsNewTurn &&
@@ -641,6 +643,7 @@ export function normalizeChatMessage(
     ...(attachments ? { attachments } : {}),
     ...(skills.length > 0 ? { skills: [...skills] } : {}),
     ...(mentions.length > 0 ? { mentions: [...mentions] } : {}),
+    ...(ambientContext ? { ambientContext } : {}),
   };
 }
 function normalizeChatMessages(
@@ -704,6 +707,7 @@ function readModelMessageFromChatMessage(
     attachments: readModelAttachmentsFromChatMessage(message.attachments),
     ...(message.skills && message.skills.length > 0 ? { skills: message.skills } : {}),
     ...(message.mentions && message.mentions.length > 0 ? { mentions: message.mentions } : {}),
+    ...(message.ambientContext ? { ambientContext: message.ambientContext } : {}),
   };
 }
 

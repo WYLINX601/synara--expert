@@ -1,0 +1,9 @@
+{
+  "id": "synara-context",
+  "name": "Synara Context",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Share explicitly enabled current-note context with a paired local Synara session.",
+  "author": "Synara",
+  "isDesktopOnly": true
+}

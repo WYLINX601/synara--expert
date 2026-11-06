@@ -12,6 +12,7 @@ import {
   WorkbenchMigrationError,
   currentOfficialMigrationCount,
   currentOfficialMigrationEntryCount,
+  contextWorkbenchMigrationEntries,
   officialMigrationCatalogHighWaterMark,
   WORKBENCH_SCHEMA_FORMAT_VERSION,
   planWorkbenchHistory,
@@ -31,6 +32,7 @@ import {
 
 const absentContextSchema = {
   contextSchemaObjects: [],
+  ambientContextColumn: null,
   contextTableColumns: {
     context_meta: null,
     context_spaces: null,
@@ -130,20 +132,34 @@ it.effect("uses stable expert checksums and rejects malformed or future extensio
     const gap = [workbenchRows(2)[1]!];
     const future = [{ ...workbenchRows(1)[0]!, migration_id: 6, name: "FutureExpertMigration" }];
     const unsupportedModule = [{ ...workbenchRows(1)[0]!, module_id: "future-module" }];
+    const contextRows = contextWorkbenchMigrationEntries.map((migration) => ({
+      module_id: migration.moduleId,
+      migration_id: migration.migrationId,
+      name: migration.name,
+      checksum: migration.checksum,
+      applied_at: "2026-09-29T12:00:00.000Z",
+    }));
 
     assert.isFalse(planWorkbenchHistory(wrongChecksum).ok);
     assert.isFalse(planWorkbenchHistory(wrongName).ok);
     assert.isFalse(planWorkbenchHistory(gap).ok);
     assert.isFalse(planWorkbenchHistory(future).ok);
     assert.isFalse(planWorkbenchHistory(unsupportedModule).ok);
+    assert.isTrue(planWorkbenchHistory(contextRows).ok);
+    assert.isFalse(
+      planWorkbenchHistory([
+        ...contextRows.slice(0, -1),
+        { ...contextRows.at(-1)!, checksum: "sha256:wrong-context-snapshot-checksum" },
+      ]).ok,
+    );
 
     const complete = planWorkbenchHistory(workbenchRows(workbenchMigrationEntries.length));
     assert.isTrue(complete.ok);
     if (complete.ok) {
-      assert.strictEqual(complete.applied.at(-2)?.migrationId, 12);
-      assert.strictEqual(complete.applied.at(-2)?.name, "ExpertLearningEvidenceDelivery");
-      assert.strictEqual(complete.applied.at(-1)?.migrationId, 13);
-      assert.strictEqual(complete.applied.at(-1)?.name, "SpaceMemory");
+      assert.strictEqual(complete.applied.at(-2)?.migrationId, 13);
+      assert.strictEqual(complete.applied.at(-2)?.name, "SpaceMemory");
+      assert.strictEqual(complete.applied.at(-1)?.migrationId, 14);
+      assert.strictEqual(complete.applied.at(-1)?.name, "AmbientContextMessageSnapshots");
     }
   }),
 );
@@ -432,7 +448,7 @@ fullAdoptionLayer("legacy expert migration handoff", (test) => {
         contextUpgrade.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
         [
           ...workbenchMigrationEntries.slice(2).map(({ migrationId }) => ["expert", migrationId]),
-          ["context", 1],
+          ...contextWorkbenchMigrationEntries.map(({ migrationId }) => ["context", migrationId]),
         ],
       );
       const rerun = yield* runWorkbenchMigrations();
@@ -456,7 +472,7 @@ partialAdoptionLayer("legacy 109 intermediate handoff", (test) => {
         result.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
         [
           ...workbenchMigrationEntries.slice(1).map(({ migrationId }) => ["expert", migrationId]),
-          ["context", 1],
+          ...contextWorkbenchMigrationEntries.map(({ migrationId }) => ["context", migrationId]),
         ],
       );
       const rows = yield* sql<{ readonly count: number }>`
@@ -479,7 +495,7 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
         first.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
         [
           ...workbenchMigrationEntries.map(({ migrationId }) => ["expert", migrationId]),
-          ["context", 1],
+          ...contextWorkbenchMigrationEntries.map(({ migrationId }) => ["context", migrationId]),
         ],
       );
       assert.deepStrictEqual(second.executed, []);
@@ -487,6 +503,11 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
         SELECT format_version FROM workbench_schema_metadata
       `;
       assert.deepStrictEqual(format, [{ format_version: WORKBENCH_SCHEMA_FORMAT_VERSION }]);
+      const ambientContextColumns = yield* sql<{ readonly name: string }>`
+        SELECT name FROM pragma_table_info('projection_thread_messages')
+        WHERE name = 'ambient_context_json'
+      `;
+      assert.deepStrictEqual(ambientContextColumns, [{ name: "ambient_context_json" }]);
       const columns = yield* sql<{ readonly name: string; readonly pk: number }>`
         SELECT name, pk FROM pragma_table_info('hub_expert_participants') ORDER BY pk
       `;
@@ -604,7 +625,7 @@ freshUpgradeLayer("fresh workbench extension migration", (test) => {
 
 const spaceMemoryUpgradeLayer = it.layer(NodeSqliteClient.layerMemory());
 spaceMemoryUpgradeLayer("Space Memory migration", (test) => {
-  test.effect("applies migration 13 to a 12-entry ledger and preserves learning data", () =>
+  test.effect("applies migrations 13–14 to a 12-entry ledger and preserves learning data", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations();
@@ -663,7 +684,8 @@ spaceMemoryUpgradeLayer("Space Memory migration", (test) => {
         upgrade.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
         [
           ["expert", 13],
-          ["context", 1],
+          ["expert", 14],
+          ...contextWorkbenchMigrationEntries.map(({ migrationId }) => ["context", migrationId]),
         ],
       );
       assert.deepStrictEqual(
@@ -716,11 +738,18 @@ spaceMemoryUpgradeLayer("Space Memory migration", (test) => {
       `;
       const currentExpertLedger = currentLedger.filter(({ module_id }) => module_id === "expert");
       assert.deepStrictEqual(currentExpertLedger.slice(0, 12), ledgerBefore);
-      assert.deepStrictEqual(currentExpertLedger.at(-1), {
+      assert.deepStrictEqual(currentExpertLedger.at(-2), {
         module_id: "expert",
         migration_id: 13,
         name: "SpaceMemory",
         checksum: "sha256:0b828a9503f2cde719ceaaaf6411f21c593999585262a0d8b20afc7a73bc1767",
+        applied_at: currentExpertLedger.at(-2)?.applied_at,
+      });
+      assert.deepStrictEqual(currentExpertLedger.at(-1), {
+        module_id: "expert",
+        migration_id: 14,
+        name: "AmbientContextMessageSnapshots",
+        checksum: "sha256:5053eaa98f33df07dc5dff48b49ac6161829de6711151b528f7ad060aece5a3e",
         applied_at: currentExpertLedger.at(-1)?.applied_at,
       });
     }),

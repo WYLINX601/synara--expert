@@ -1,3 +1,6 @@
+import { makeQueuedChatTurn } from "../composerDraftStoreTestFixtures";
+import * as ambientContextClient from "../workbench/host/ambientContextClient";
+import { ambientResourceSnapshot } from "~/lib/ambientContext";
 import { FEATURE_TOUR_STORAGE_KEY } from "../featureTour/store";
 import {
   buildStalePendingRequestFailureDetail,
@@ -59,6 +62,8 @@ import {
   vi,
 } from "vitest";
 import { render } from "vitest-browser-react";
+
+vi.mock("../workbench/host/ambientContextClient", { spy: true });
 
 import { type ComposerImageAttachment, useComposerDraftStore } from "../composerDraftStore";
 import {
@@ -2400,6 +2405,12 @@ describe("ChatView transcript geometry (full app)", () => {
   });
 
   beforeEach(async () => {
+    vi.mocked(ambientContextClient.readAmbientContextSendAuthorization).mockImplementation(
+      (snapshot) => ({
+        allowed: true,
+        generation: snapshot?.items.length ? "test-connection:1" : null,
+      }),
+    );
     // Reset the shared fixture snapshot to a neutral, low-sequence shell before
     // disposing the old transport. Any in-flight getShellSnapshot that resolves
     // after this point will then return sequence 0, which the next test's real
@@ -9571,6 +9582,210 @@ describe("ChatView transcript geometry (full app)", () => {
     }
   });
 
+  it.each(["unsupported", "unknown"] as const)(
+    "keeps ambient context draft when server support is %s",
+    async (capability) => {
+      const restoreNativeApi = installDeterministicSendNativeApi();
+      const context = ambientResourceSnapshot({
+        sourceId: "obsidian",
+        targetKey: "blocked",
+        uri: "obsidian://open?file=Note.md",
+        title: "Note.md",
+      });
+      const message =
+        capability === "unsupported"
+          ? "Update the Synara server and reconnect before sending."
+          : "Reconnect to confirm context support before sending.";
+      vi.mocked(ambientContextClient.readAmbientContextSendAuthorization).mockImplementation(
+        (snapshot) =>
+          snapshot?.items.length
+            ? { allowed: false, message }
+            : { allowed: true, generation: null },
+      );
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, "Keep my draft");
+      useComposerDraftStore.getState().setAmbientContext(THREAD_ID, context);
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-ambient-blocked" as MessageId,
+          targetText: "blocked send target",
+        }),
+      });
+      try {
+        (await waitForSendButton()).click();
+        await vi.waitFor(() => expect(document.body.textContent).toContain(message));
+        expect(wsRequests.some((request) => turnStartText(request) !== null)).toBe(false);
+        expect(
+          useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext,
+        ).toEqual(context);
+        expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
+          "Keep my draft",
+        );
+      } finally {
+        await mounted.cleanup();
+        restoreNativeApi();
+      }
+    },
+  );
+
+  it.each(["unsupported", "unknown"] as const)(
+    "keeps queued ambient context when server support is %s",
+    async (capability) => {
+      const restoreNativeApi = installDeterministicSendNativeApi();
+      const context = ambientResourceSnapshot({
+        sourceId: "obsidian",
+        targetKey: "queued-blocked",
+        uri: "obsidian://open?file=Queued.md",
+        title: "Queued.md",
+      });
+      const message = `Context support ${capability}: reconnect before sending.`;
+      vi.mocked(ambientContextClient.readAmbientContextSendAuthorization).mockImplementation(
+        (snapshot) =>
+          snapshot?.items.length
+            ? { allowed: false, message }
+            : { allowed: true, generation: null },
+      );
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-ambient-queue-blocked" as MessageId,
+          targetText: "blocked queue target",
+          sessionStatus: "ready",
+        }),
+      });
+      try {
+        const queued = makeQueuedChatTurn("ambient-persisted-queue");
+        if (queued.kind !== "chat") throw new Error("Expected chat fixture");
+        queued.ambientContext = context;
+        useComposerDraftStore.getState().setPrompt(THREAD_ID, "Separate live draft");
+        useComposerDraftStore.getState().enqueueQueuedTurn(THREAD_ID, queued);
+        await vi.waitFor(() => expect(document.body.textContent).toContain(message));
+        expect(wsRequests.some((request) => turnStartText(request) !== null)).toBe(false);
+        expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.queuedTurns).toEqual([
+          queued,
+        ]);
+        expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
+          "Separate live draft",
+        );
+      } finally {
+        await mounted.cleanup();
+        restoreNativeApi();
+      }
+    },
+  );
+
+  it("keeps ordinary chat sendable without ambient server support", async () => {
+    const restoreNativeApi = installDeterministicSendNativeApi();
+    vi.mocked(ambientContextClient.readAmbientContextSendAuthorization).mockImplementation(
+      (snapshot) =>
+        snapshot?.items.length
+          ? { allowed: false, message: "Unsupported context" }
+          : { allowed: true, generation: null },
+    );
+    useComposerDraftStore.getState().setPrompt(THREAD_ID, "Ordinary chat still works");
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-ambient-ordinary" as MessageId,
+        targetText: "ordinary send target",
+      }),
+    });
+    try {
+      (await waitForSendButton()).click();
+      await vi.waitFor(() =>
+        expect(
+          wsRequests.some((request) => turnStartText(request) === "Ordinary chat still works"),
+        ).toBe(true),
+      );
+    } finally {
+      await mounted.cleanup();
+      restoreNativeApi();
+    }
+  });
+
+  it("restores ambient context if connection changes immediately before dispatch", async () => {
+    const restoreNativeApi = installDeterministicSendNativeApi();
+    const context = ambientResourceSnapshot({
+      sourceId: "obsidian",
+      targetKey: "changed",
+      uri: "obsidian://open?file=Note.md",
+      title: "Note.md",
+    });
+    let checks = 0;
+    vi.mocked(ambientContextClient.readAmbientContextSendAuthorization).mockImplementation(
+      (snapshot) => {
+        if (!snapshot?.items.length) return { allowed: true, generation: null };
+        checks += 1;
+        return checks < 3
+          ? { allowed: true, generation: "test-connection:1" }
+          : { allowed: false, message: "Reconnect: the server generation changed." };
+      },
+    );
+    useComposerDraftStore.getState().setPrompt(THREAD_ID, "Retry after reconnect");
+    useComposerDraftStore.getState().setAmbientContext(THREAD_ID, context);
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-ambient-generation" as MessageId,
+        targetText: "generation send target",
+      }),
+    });
+    try {
+      (await waitForSendButton()).click();
+      await vi.waitFor(() =>
+        expect(document.body.textContent).toContain("Reconnect: the server generation changed."),
+      );
+      expect(wsRequests.some((request) => turnStartText(request) !== null)).toBe(false);
+      expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext).toEqual(
+        context,
+      );
+      expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
+        "Retry after reconnect",
+      );
+    } finally {
+      await mounted.cleanup();
+      restoreNativeApi();
+    }
+  });
+
+  it.each(["Explain this note.", ""])(
+    "sends frozen ambient context as structured metadata without changing user text (%s)",
+    async (prompt) => {
+      const restoreNativeApi = installDeterministicSendNativeApi();
+      const snapshot = ambientResourceSnapshot({
+        sourceId: "obsidian",
+        targetKey: "note",
+        uri: "obsidian://open?vault=Research&file=Note.md",
+        title: "Note.md",
+      });
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, prompt);
+      useComposerDraftStore.getState().setAmbientContext(THREAD_ID, snapshot);
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-ambient-send" as MessageId,
+          targetText: "ambient send target",
+        }),
+      });
+      try {
+        (await waitForSendButton()).click();
+        await vi.waitFor(() => {
+          const request = wsRequests.find((candidate) => turnStartText(candidate) === prompt);
+          expect(request).toBeTruthy();
+          expect(
+            (request!.command as { message: { ambientContext: unknown } }).message.ambientContext,
+          ).toEqual(snapshot);
+          expect(
+            useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext,
+          ).toBeUndefined();
+        });
+      } finally {
+        await mounted.cleanup();
+        restoreNativeApi();
+      }
+    },
+  );
+
   it("sends every browser annotation as prompt context without upload attachments", async () => {
     const restoreNativeApi = installDeterministicSendNativeApi();
     const prompt = "Delete everything I annotated.";
@@ -9857,6 +10072,12 @@ describe("ChatView transcript geometry (full app)", () => {
       previewUrl: "blob:queued-image-1",
       name: "queued-image.png",
     });
+    const ambientContext = ambientResourceSnapshot({
+      sourceId: "obsidian",
+      targetKey: "queued",
+      uri: "obsidian://open?file=Queued.md",
+      title: "Queued.md",
+    });
     const firstQueuedPrompt = "first queued prompt with image";
     const secondQueuedPrompt = "second queued prompt stays queued";
 
@@ -9886,6 +10107,7 @@ describe("ChatView transcript geometry (full app)", () => {
         pullRequestContexts: [],
         skills: [],
         mentions: [],
+        ambientContext,
         selectedProvider: "codex",
         selectedModel: "gpt-5",
         selectedPromptEffort: null,
@@ -9977,6 +10199,9 @@ describe("ChatView transcript geometry (full app)", () => {
         },
         { timeout: 8_000, interval: 16 },
       );
+      expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext).toEqual(
+        ambientContext,
+      );
     } finally {
       await mounted.cleanup();
     }
@@ -9984,6 +10209,18 @@ describe("ChatView transcript geometry (full app)", () => {
 
   it("auto-dispatches a queued turn without wiping the live composer draft", async () => {
     const restoreNativeApi = installDeterministicSendNativeApi();
+    const ambientContext = ambientResourceSnapshot({
+      sourceId: "obsidian",
+      targetKey: "queued",
+      uri: "obsidian://open?file=Queued.md",
+      title: "Queued.md",
+    });
+    const liveContext = ambientResourceSnapshot({
+      sourceId: "obsidian",
+      targetKey: "live",
+      uri: "obsidian://open?file=Live.md",
+      title: "Live.md",
+    });
     const queuedPrompt = "queued prompt that should auto-send";
     const draftBeingTyped = "draft the user is still typing";
 
@@ -10001,6 +10238,7 @@ describe("ChatView transcript geometry (full app)", () => {
     try {
       // The user is mid-draft in the composer while a turn-completion drain fires.
       useComposerDraftStore.getState().setPrompt(THREAD_ID, draftBeingTyped);
+      useComposerDraftStore.getState().setAmbientContext(THREAD_ID, liveContext);
       useComposerDraftStore.getState().enqueueQueuedTurn(THREAD_ID, {
         id: "queued-turn-auto",
         kind: "chat",
@@ -10017,6 +10255,7 @@ describe("ChatView transcript geometry (full app)", () => {
         pullRequestContexts: [],
         skills: [],
         mentions: [],
+        ambientContext,
         selectedProvider: "codex",
         selectedModel: "gpt-5",
         selectedPromptEffort: null,
@@ -10048,6 +10287,13 @@ describe("ChatView transcript geometry (full app)", () => {
               request.command.message.text.includes(queuedPrompt),
           );
           expect(turnStartRequest).toBeTruthy();
+          expect(
+            (turnStartRequest!.command as { message: { ambientContext: unknown } }).message
+              .ambientContext,
+          ).toEqual(ambientContext);
+          expect(
+            useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext,
+          ).toEqual(liveContext);
           // Queue drained...
           expect(document.querySelectorAll('[data-testid="queued-follow-up-row"]')).toHaveLength(0);
           // ...but the in-progress composer draft is left untouched.

@@ -1,3 +1,5 @@
+import { readAmbientContextSendAuthorization } from "~/workbench/host/ambientContextClient";
+import { cloneAmbientContext } from "~/lib/ambientContext";
 import type { ThreadId } from "@synara/contracts";
 import { flushWorkspaceEditors } from "~/lib/workspaceEditorSession";
 import { resolveComputerInvocationMode } from "@synara/shared/computerInvocation";
@@ -309,7 +311,9 @@ export function useChatTurnSubmission({
             (composerEditorRef.current?.readSnapshot().value ?? promptRef.current).trim().length >
               0 ||
             composerImages.length > 0 ||
-            composerFiles.length > 0,
+            composerFiles.length > 0 ||
+            (useComposerDraftStore.getState().draftsByThreadId[activeThread.id]?.ambientContext
+              ?.items.length ?? 0) > 0,
         });
         if (blockedReason !== null && !queuedTurn) {
           notifyBlockedComposerSend(activeThread.id, blockedReason);
@@ -389,6 +393,19 @@ export function useChatTurnSubmission({
         return lateSendHandlers.advanceActivePendingUserInput(answerOverrides);
       }
       const queuedChatTurn = queuedTurn ?? null;
+      // Snapshot once before asynchronous preflight. Queued turns never fall back to live pins.
+      const ambientContextForSend = cloneAmbientContext(
+        queuedChatTurn
+          ? queuedChatTurn.ambientContext
+          : useComposerDraftStore.getState().draftsByThreadId[activeThread.id]?.ambientContext,
+      );
+      const ambientAuthorization = readAmbientContextSendAuthorization(ambientContextForSend);
+      if (!ambientAuthorization.allowed) {
+        setThreadError(activeThread.id, ambientAuthorization.message);
+        return false;
+      }
+      const ambientContextGenerationForSend = ambientAuthorization.generation;
+
       let dispatchSettings = resolveQueuedTurnDispatchSettings(
         turnDispatchSettings,
         queuedChatTurn,
@@ -487,6 +504,7 @@ export function useChatTurnSubmission({
       } = deriveComposerSendState({
         prompt: promptForSend,
         imageCount: composerImagesForSend.length,
+        ambientContextItemCount: ambientContextForSend?.items.length ?? 0,
         fileCount: composerFilesForSend.length,
         assistantSelectionCount: composerAssistantSelectionsForSend.length,
         browserAnnotationCount: composerBrowserAnnotationsForSend.length,
@@ -511,6 +529,7 @@ export function useChatTurnSubmission({
         showPlanFollowUpPrompt &&
         activeProposedPlan !== null;
       const hasStructuredPlanFollowUpContent =
+        Boolean(ambientContextForSend) ||
         composerImagesForSend.length > 0 ||
         composerFilesForSend.length > 0 ||
         composerAssistantSelectionsForSend.length > 0 ||
@@ -558,6 +577,7 @@ export function useChatTurnSubmission({
         }
       }
       const hasNoStructuredComposerContext =
+        !ambientContextForSend &&
         composerImagesForSend.length === 0 &&
         composerFilesForSend.length === 0 &&
         composerAssistantSelectionsForSend.length === 0 &&
@@ -713,8 +733,10 @@ export function useChatTurnSubmission({
       if (hasPendingCacheReview()) return false;
 
       if (hasQueueableLiveTurn && dispatchMode === "queue" && queuedChatTurn === null) {
-        clearComposerInput(activeThread.id);
-        scheduleComposerFocus();
+        if (!ambientContextForSend?.items.length) {
+          clearComposerInput(activeThread.id);
+          scheduleComposerFocus();
+        }
         const queuedImagesForPersistence = await Promise.all(
           composerImagesForSend.map(async (image) => {
             try {
@@ -727,6 +749,18 @@ export function useChatTurnSubmission({
             }
           }),
         );
+        const queueAuthorization = readAmbientContextSendAuthorization(
+          ambientContextForSend,
+          ambientContextGenerationForSend,
+        );
+        if (!queueAuthorization.allowed) {
+          setThreadError(activeThread.id, queueAuthorization.message);
+          return false;
+        }
+        if (ambientContextForSend?.items.length) {
+          clearComposerInput(activeThread.id);
+          scheduleComposerFocus();
+        }
         enqueueQueuedComposerTurn(activeThread.id, {
           id: randomUUID(),
           kind: "chat",
@@ -753,6 +787,7 @@ export function useChatTurnSubmission({
           pullRequestContexts: sendableComposerPullRequestContexts,
           skills: selectedComposerSkillsForSend,
           mentions: selectedComposerMentionsForSend,
+          ambientContext: ambientContextForSend,
           selectedProvider: selectedProviderForSend,
           selectedModel: selectedModelForSend,
           selectedPromptEffort: selectedPromptEffortForSend,
@@ -818,6 +853,14 @@ export function useChatTurnSubmission({
         worktreeSetupScriptName,
         worktreeCopiesLocalChanges,
       } = workspace;
+      const preparedAuthorization = readAmbientContextSendAuthorization(
+        ambientContextForSend,
+        ambientContextGenerationForSend,
+      );
+      if (!preparedAuthorization.allowed) {
+        setThreadError(activeThread.id, preparedAuthorization.message);
+        return false;
+      }
       const messageIdForSend = newMessageId();
       const worktreeSetupResolution = baseBranchForWorktree
         ? createWorktreeSetupResolution()
@@ -936,6 +979,7 @@ export function useChatTurnSubmission({
           id: messageIdForSend,
           role: "user",
           text: outgoingMessageText,
+          ...(ambientContextForSend ? { ambientContext: ambientContextForSend } : {}),
           dispatchMode,
           ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
           ...(mentionedSkillsForSend.length > 0 ? { skills: mentionedSkillsForSend } : {}),
@@ -1023,6 +1067,8 @@ export function useChatTurnSubmission({
         outgoingMessageText,
         mentionedSkillsForSend,
         mentionedPluginMentionsForSend,
+        ambientContextForSend,
+        ambientContextGenerationForSend,
         dispatchMode,
         sourceProposedPlanForSend,
         shouldResumeSettledLocalThread,

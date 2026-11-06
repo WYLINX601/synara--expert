@@ -7,6 +7,7 @@
  * @module ProjectionThreadMessageRepository
  */
 import {
+  AmbientContextSnapshot,
   AsyncUserInput,
   ChatAttachment,
   MessageDispatchOrigin,
@@ -42,6 +43,7 @@ export const ProjectionThreadMessage = Schema.Struct({
   role: OrchestrationMessageRole,
   text: Schema.String,
   textSegments: Schema.optional(Schema.Array(ProjectionThreadMessageTextSegment)),
+  ambientContext: Schema.optional(AmbientContextSnapshot),
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   skills: Schema.optional(Schema.Array(ProviderSkillReference)),
   mentions: Schema.optional(Schema.Array(ProviderMentionReference)),

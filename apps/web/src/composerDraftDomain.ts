@@ -5,6 +5,7 @@ import type { ComposerComputerControlMode } from "./computerControlMode";
 // Exports: Internal domain primitives plus public facade types.
 
 import {
+  type AmbientContextSnapshot,
   type ModelSelection,
   type OrchestrationLatestTurn,
   type OrchestrationThreadPullRequest,
@@ -120,6 +121,7 @@ export interface ComposerPromptHistorySavedDraft {
   pullRequestContexts: PullRequestContextDraft[];
   skills: ProviderSkillReference[];
   mentions: ProviderMentionReference[];
+  ambientContext?: AmbientContextSnapshot | undefined;
 }
 
 export type ComposerAssistantSelectionAttachment = ChatAssistantSelectionAttachment;
@@ -142,6 +144,7 @@ export interface QueuedComposerChatTurn {
   pullRequestContexts: PullRequestContextDraft[];
   skills: ProviderSkillReference[];
   mentions: ProviderMentionReference[];
+  ambientContext?: AmbientContextSnapshot | undefined;
   selectedProvider: ProviderKind;
   selectedModel: string | null;
   selectedPromptEffort: string | null;
@@ -202,6 +205,7 @@ export interface ComposerThreadDraftState {
   pullRequestContexts: PullRequestContextDraft[];
   skills: ProviderSkillReference[];
   mentions: ProviderMentionReference[];
+  ambientContext?: AmbientContextSnapshot | undefined;
   queuedTurns: QueuedComposerTurn[];
   // Turn the user stopped while this queue was waiting, and the turn whose stop or
   // failure the user acknowledged with Resume (see lib/queuedComposerPause.ts).
@@ -341,6 +345,7 @@ export interface ComposerDraftStoreState {
   ) => Promise<ComposerAttachmentPersistenceResult>;
   setTerminalContexts: (threadId: ThreadId, contexts: TerminalContextDraft[]) => void;
   setSkills: (threadId: ThreadId, skills: ProviderSkillReference[]) => void;
+  setAmbientContext: (threadId: ThreadId, snapshot: AmbientContextSnapshot | undefined) => void;
   setMentions: (threadId: ThreadId, mentions: ProviderMentionReference[]) => void;
   setModelSelection: (
     threadId: ThreadId,
@@ -823,6 +828,7 @@ export function captureComposerPromptHistorySavedDraft(input: {
     pullRequestContexts: normalizePullRequestContexts(draft.pullRequestContexts),
     skills: [...draft.skills],
     mentions: [...draft.mentions],
+    ambientContext: draft.ambientContext,
   };
 }
 
@@ -855,6 +861,7 @@ export function buildTransferredComposerDraft(input: {
     pullRequestContexts: normalizePullRequestContexts(sourceDraft.pullRequestContexts),
     skills: [...sourceDraft.skills],
     mentions: [...sourceDraft.mentions],
+    ambientContext: sourceDraft.ambientContext,
     enableComputerControl: sourceDraft.enableComputerControl,
     computerControlMode: sourceDraft.computerControlMode,
     // Revocation generations belong to the target thread, never the copied prompt.
@@ -903,6 +910,7 @@ function clonePromptHistorySavedDraft(
     pullRequestContexts: normalizePullRequestContexts(savedDraft.pullRequestContexts),
     skills: [...savedDraft.skills],
     mentions: [...savedDraft.mentions],
+    ambientContext: savedDraft.ambientContext,
   };
 }
 
@@ -922,6 +930,7 @@ export function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.pullRequestContexts.length === 0 &&
     draft.skills.length === 0 &&
     draft.mentions.length === 0 &&
+    !draft.ambientContext &&
     draft.queuedTurns.length === 0 &&
     draft.restoredSourceProposedPlan == null &&
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
@@ -976,9 +985,10 @@ export function composerDraftHasAttachments(
     | "assistantSelections"
     | "fileComments"
   > &
-    Partial<Pick<ComposerThreadDraftState, "browserAnnotations">>,
+    Partial<Pick<ComposerThreadDraftState, "browserAnnotations" | "ambientContext">>,
 ): boolean {
   return (
+    Boolean(draft.ambientContext) ||
     draft.images.length > 0 ||
     draft.files.length > 0 ||
     draft.persistedAttachments.length > 0 ||

@@ -92,6 +92,7 @@ export interface ChatMessage {
   attachments?: ChatAttachment[];
   skills?: ProviderSkillReference[];
   mentions?: ProviderMentionReference[];
+  ambientContext?: import("@synara/contracts").AmbientContextSnapshot;
   dispatchMode?: TurnDispatchMode;
   dispatchOrigin?: MessageDispatchOrigin;
   startsNewTurn?: boolean;

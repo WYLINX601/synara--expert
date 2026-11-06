@@ -43,6 +43,7 @@ import {
   makeOmpSkillEvolutionCompatArgs,
   type OmpSkillEvolutionCompatLaunch,
 } from "./OmpSkillEvolutionCompat.ts";
+import type { OmpNativeCompatLaunch } from "./OmpNativeCompat.ts";
 
 export interface OmpAcpRuntimeSettings extends OmpAccountBoundary {
   readonly binaryPath?: string;
@@ -145,6 +146,7 @@ export interface OmpAcpExpertSessionSpawnOptions {
   readonly appendSystemPromptPath?: string;
   readonly idleTaskCompat?: OmpAcpIdleTaskCompatLaunch;
   readonly skillEvolutionCompat?: OmpSkillEvolutionCompatLaunch;
+  readonly nativeCompat?: OmpNativeCompatLaunch;
 }
 
 export interface OmpAcpCliCommandResult {
@@ -287,8 +289,33 @@ export function buildOmpAcpSpawnInput(
   cwd: string,
   expertSessionSpawn?: OmpAcpExpertSessionSpawnOptions,
 ): AcpSpawnInput {
+  const env = buildOmpProcessEnv(ompSettings ?? {});
   const cliArgs = ["acp"];
   const skillEvolutionCompat = expertSessionSpawn?.skillEvolutionCompat;
+  const nativeCompat = expertSessionSpawn?.nativeCompat;
+  if (nativeCompat) {
+    cliArgs.push("--trusted-extension", nativeCompat.extensionPath);
+    if (nativeCompat.kind === "fixed" && nativeCompat.sessionDir) {
+      cliArgs.push("--session-dir", nativeCompat.sessionDir);
+    }
+    if (nativeCompat.kind === "evolution") {
+      cliArgs.push(
+        "--no-tools",
+        "--no-skills",
+        "--no-rules",
+        "--no-context-files",
+        "--no-lsp",
+        "--session-dir",
+        nativeCompat.sessionDir!,
+        "--system-prompt",
+        nativeCompat.systemPromptPath!,
+        "--append-system-prompt",
+        nativeCompat.appendSystemPromptPath!,
+        "--config",
+        nativeCompat.configOverlayPath!,
+      );
+    }
+  }
   if (skillEvolutionCompat) {
     cliArgs.push(
       "--no-tools",
@@ -298,7 +325,7 @@ export function buildOmpAcpSpawnInput(
       "--session-dir",
       skillEvolutionCompat.sessionDir,
     );
-  } else if (expertSessionSpawn?.disableExtensions) {
+  } else if (expertSessionSpawn?.disableExtensions && !nativeCompat) {
     cliArgs.push("--no-extensions");
   }
   if (expertSessionSpawn?.configOverlayPath) {
@@ -308,7 +335,12 @@ export function buildOmpAcpSpawnInput(
     cliArgs.push("--append-system-prompt", expertSessionSpawn.appendSystemPromptPath);
   }
   const idleTaskCompat = expertSessionSpawn?.idleTaskCompat;
-  if (idleTaskCompat && skillEvolutionCompat) {
+  if (
+    Number(Boolean(idleTaskCompat)) +
+      Number(Boolean(skillEvolutionCompat)) +
+      Number(Boolean(nativeCompat)) >
+    1
+  ) {
     throw new Error(
       "OMP idle-task and Skill extraction compatibility cannot share one ACP process.",
     );
@@ -317,14 +349,14 @@ export function buildOmpAcpSpawnInput(
     command:
       idleTaskCompat?.bunExecutable ??
       skillEvolutionCompat?.bunExecutable ??
-      resolveOmpCliBinaryPath(ompSettings?.binaryPath),
+      resolveOmpCliBinaryPath(ompSettings?.binaryPath, { cwd, env }),
     args: idleTaskCompat
       ? [...makeOmpAcpIdleTaskCompatArgs(idleTaskCompat, cliArgs)]
       : skillEvolutionCompat
         ? [...makeOmpSkillEvolutionCompatArgs(skillEvolutionCompat, cliArgs)]
         : cliArgs,
     cwd,
-    env: buildOmpProcessEnv(ompSettings ?? {}),
+    env,
   };
 }
 

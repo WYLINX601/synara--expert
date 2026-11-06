@@ -467,6 +467,10 @@
     "./hubReferences": {
       "types": "./src/hubReferences.ts",
       "import": "./src/hubReferences.ts"
+    },
+    "./ambientContext": {
+      "types": "./src/ambientContext.ts",
+      "import": "./src/ambientContext.ts"
     }
   },
   "scripts": {

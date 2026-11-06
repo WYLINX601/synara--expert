@@ -90,7 +90,7 @@ layer("Space Memory domain and SQL persistence", (test) => {
         const tracker = yield* sql<{ readonly max_id: number }>`
         SELECT MAX(migration_id) AS max_id FROM workbench_sql_migrations WHERE module_id = 'expert'
       `;
-        assert.strictEqual(tracker[0]?.max_id, 13);
+        assert.strictEqual(tracker[0]?.max_id, 14);
         const memoryTables = yield* sql<{ readonly name: string }>`
         SELECT name FROM sqlite_master WHERE type = 'table'
       `;

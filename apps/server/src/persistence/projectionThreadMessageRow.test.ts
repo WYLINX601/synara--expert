@@ -7,6 +7,36 @@ import {
   projectionThreadMessageFromRow,
 } from "./projectionThreadMessageRow.ts";
 
+const ambientContext = {
+  schemaVersion: 1 as const,
+  id: "snapshot-1",
+  capturedAt: "2026-07-20T10:00:00.000Z",
+  items: [
+    {
+      observation: {
+        schemaVersion: 1 as const,
+        id: "observation-1",
+        targetKey: "target-1",
+        capturedAt: "2026-07-20T10:00:00.000Z",
+        method: "selection event",
+        confidence: "exact" as const,
+        type: "selection.text" as const,
+        value: { text: "selected evidence" },
+      },
+      provenance: [
+        {
+          sourceId: "source-1",
+          observationId: "observation-1",
+          capturedAt: "2026-07-20T10:00:00.000Z",
+          method: "selection event",
+          confidence: "exact" as const,
+        },
+      ],
+      ambiguous: false,
+    },
+  ],
+};
+
 const decodeRow = Schema.decodeUnknownSync(ProjectionThreadMessageDbRowSchema);
 
 const baseRow = {
@@ -15,6 +45,7 @@ const baseRow = {
   turnId: "turn-row-1",
   role: "user",
   text: "Use @github with $check-code",
+  ambientContext: JSON.stringify(ambientContext),
   attachments: JSON.stringify([
     {
       type: "file",
@@ -57,6 +88,7 @@ describe("projection thread message row codec", () => {
       turnId: "turn-row-1",
       role: "user",
       text: "Use @github with $check-code",
+      ambientContext,
       attachments: [{ type: "file", id: "attachment-1", name: "notes.txt" }],
       skills: [{ name: "check-code", path: "/skills/check-code/SKILL.md" }],
       mentions: [{ name: "github", path: "plugin://github" }],
@@ -78,6 +110,7 @@ describe("projection thread message row codec", () => {
       turnId: "turn-row-1",
       streaming: true,
       attachments: [{ id: "attachment-1" }],
+      ambientContext,
       skills: [{ name: "check-code" }],
       mentions: [{ name: "github" }],
       dispatchMode: "steer",
@@ -90,6 +123,7 @@ describe("projection thread message row codec", () => {
       ...baseRow,
       turnId: null,
       attachments: null,
+      ambientContext: null,
       skills: null,
       mentions: null,
       dispatchMode: null,
@@ -111,6 +145,7 @@ describe("projection thread message row codec", () => {
     });
     for (const optionalField of [
       "attachments",
+      "ambientContext",
       "skills",
       "mentions",
       "dispatchMode",
@@ -124,7 +159,7 @@ describe("projection thread message row codec", () => {
   });
 
   it("rejects invalid persisted JSON before either converter runs", () => {
-    for (const field of ["attachments", "skills", "mentions"] as const) {
+    for (const field of ["ambientContext", "attachments", "skills", "mentions"] as const) {
       expect(() =>
         decodeRow({
           ...baseRow,

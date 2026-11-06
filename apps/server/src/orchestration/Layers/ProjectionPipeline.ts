@@ -1126,6 +1126,9 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
               : Option.isSome(existingMessage)
                 ? existingMessage.value.attachments
                 : undefined;
+          const retainedAmbientContext = Option.isSome(existingMessage)
+            ? (existingMessage.value.ambientContext ?? event.payload.ambientContext)
+            : event.payload.ambientContext;
           yield* projectionThreadMessageRepository.upsert({
             messageId: event.payload.messageId,
             threadId: event.payload.threadId,
@@ -1135,6 +1138,9 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             }),
             role: event.payload.role,
             text: resolvedText,
+            ...(retainedAmbientContext !== undefined
+              ? { ambientContext: retainedAmbientContext }
+              : {}),
             ...(nextAttachments !== undefined ? { attachments: [...nextAttachments] } : {}),
             ...(event.payload.skills !== undefined ? { skills: event.payload.skills } : {}),
             ...(event.payload.mentions !== undefined ? { mentions: event.payload.mentions } : {}),

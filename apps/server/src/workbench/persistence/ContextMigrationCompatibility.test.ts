@@ -35,7 +35,9 @@ const insertModuleHistory = (moduleId: "expert" | "context") =>
           ({ workbenchId }) => workbenchId === row.migrationId,
         );
       }
-      return true;
+      // This fixture represents an older database which has Context V1 but
+      // has not yet received the additive Ambient Context message migration.
+      return row.migrationId === 1;
     });
     for (const migration of history) {
       yield* sql`
@@ -123,7 +125,7 @@ const finishUpgrade = Effect.gen(function* () {
   return { adoption, migration };
 });
 
-it("keeps legacy Context 111 byte-for-byte frozen and uses its checksum for context1", () => {
+it("keeps legacy Context 111 byte-for-byte frozen and records it as context1", () => {
   const bytes = readFileSync(
     new URL("../../persistence/Migrations/111_ContextV1.ts", import.meta.url),
   );
@@ -133,6 +135,9 @@ it("keeps legacy Context 111 byte-for-byte frozen and uses its checksum for cont
     "sha256:b7dbd84911484156f3f38093973338ca005dce9e8ba4b38b8972d9dfe79a4911",
   );
   assert.strictEqual(contextWorkbenchMigrationEntries[0]?.checksum, checksum);
+  assert.strictEqual(contextWorkbenchMigrationEntries.length, 1);
+  assert.strictEqual(workbenchMigrationEntries[13]?.migrationId, 14);
+  assert.strictEqual(workbenchMigrationEntries[13]?.name, "AmbientContextMessageSnapshots");
   assert.deepStrictEqual(
     workbenchMigrationEntries.map(({ migrationId, name }) => [migrationId, name]),
     [
@@ -149,6 +154,7 @@ it("keeps legacy Context 111 byte-for-byte frozen and uses its checksum for cont
       [11, "ExpertAutomaticLearning"],
       [12, "ExpertLearningEvidenceDelivery"],
       [13, "SpaceMemory"],
+      [14, "AmbientContextMessageSnapshots"],
     ],
   );
 });
@@ -203,6 +209,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
             ["expert", 11],
             ["expert", 12],
             ["expert", 13],
+            ["expert", 14],
           ],
         );
         assert.deepStrictEqual(yield* readPreservedData, before);
@@ -230,6 +237,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
             ["expert", 11],
             ["expert", 12],
             ["expert", 13],
+            ["expert", 14],
           ],
         );
         const repeated = yield* finishUpgrade;
@@ -248,7 +256,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
         assert.strictEqual(settled.kind, "ready");
         if (settled.kind === "ready") {
           assert.deepStrictEqual(settled.workbench.modules, {
-            expert: { sourceVersion: 13, targetVersion: 13 },
+            expert: { sourceVersion: 14, targetVersion: 14 },
             context: { sourceVersion: 1, targetVersion: 1 },
           });
           assert.isFalse(settled.requiresBackup);
@@ -281,6 +289,7 @@ it.effect(
           ["expert", 11],
           ["expert", 12],
           ["expert", 13],
+          ["expert", 14],
           ["context", 1],
         ],
       );
@@ -323,6 +332,7 @@ for (const through of [109, 110] as const) {
               ["expert", 11],
               ["expert", 12],
               ["expert", 13],
+              ["expert", 14],
               ["context", 1],
             ]
           : [
@@ -337,6 +347,7 @@ for (const through of [109, 110] as const) {
               ["expert", 11],
               ["expert", 12],
               ["expert", 13],
+              ["expert", 14],
               ["context", 1],
             ],
       );

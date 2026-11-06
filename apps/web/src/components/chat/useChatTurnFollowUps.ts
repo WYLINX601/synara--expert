@@ -1,3 +1,4 @@
+import { readAmbientContextSendAuthorization } from "~/workbench/host/ambientContextClient";
 import { MessageId, ThreadId, type ProviderKind, type TurnId } from "@synara/contracts";
 import { resolveTailUserMessageEditTarget } from "@synara/shared/conversationEdit";
 import { providerSupportsNativeTurnSteering } from "@synara/shared/providerMetadata";
@@ -341,6 +342,13 @@ export function useChatTurnFollowUps({
         setThreadError(activeThread.id, "Wait for the current send to start before editing.");
         return false;
       }
+      const ambientAuthorization = readAmbientContextSendAuthorization(
+        originalMessage.ambientContext,
+      );
+      if (!ambientAuthorization.allowed) {
+        setThreadError(activeThread.id, ambientAuthorization.message);
+        return false;
+      }
 
       setIsRevertingCheckpoint(true);
       setThreadError(activeThread.id, null);
@@ -363,6 +371,11 @@ export function useChatTurnFollowUps({
           threadId: activeThread.id,
           createdAt: messageCreatedAt,
         });
+        const replayAuthorization = readAmbientContextSendAuthorization(
+          originalMessage.ambientContext,
+          ambientAuthorization.generation,
+        );
+        if (!replayAuthorization.allowed) throw new Error(replayAuthorization.message);
         await api.orchestration.dispatchCommand({
           type: "thread.message.edit-and-resend",
           commandId: newCommandId(),

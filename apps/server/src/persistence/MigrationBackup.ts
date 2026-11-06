@@ -1310,17 +1310,27 @@ function inspectMigrationBackupDatabase(
   const projectionObject = reader.all<{ readonly type: string }>(
     "SELECT type FROM sqlite_master WHERE name = 'projection_threads'",
   )[0];
+  const projectionMessagesObject = reader.all<{ readonly type: string }>(
+    "SELECT type FROM sqlite_master WHERE name = 'projection_thread_messages'",
+  )[0];
   const runtimeObject = reader.all<{ readonly type: string }>(
     "SELECT type FROM sqlite_master WHERE name = 'expert_applied_runtime_records'",
   )[0];
   if (projectionObject !== undefined && projectionObject.type !== "table") {
     readError ??= "projection_threads exists but is not a table.";
   }
+  if (projectionMessagesObject !== undefined && projectionMessagesObject.type !== "table") {
+    readError ??= "projection_thread_messages exists but is not a table.";
+  }
   if (runtimeObject !== undefined && runtimeObject.type !== "table") {
     readError ??= "expert_applied_runtime_records exists but is not a table.";
   }
   const projectionColumns =
     projectionObject?.type === "table" ? readSqliteColumns(reader, "projection_threads") : [];
+  const projectionThreadMessageColumns =
+    projectionMessagesObject?.type === "table"
+      ? readSqliteColumns(reader, "projection_thread_messages")
+      : [];
   const contextTableColumns: Record<string, readonly SqliteColumnInfo[] | null> = {};
   for (const tableName of Object.keys(CONTEXT_TABLE_COLUMNS)) {
     const object = reader.all<{ readonly type: string }>(
@@ -1350,6 +1360,8 @@ function inspectMigrationBackupDatabase(
     contextDeliveryColumns: contextDeliveryColumns.length > 0 ? contextDeliveryColumns : null,
     projectionThreadsExists: projectionObject?.type === "table",
     bindingColumn: projectionColumns.find(({ name }) => name === "expert_binding_json") ?? null,
+    ambientContextColumn:
+      projectionThreadMessageColumns.find(({ name }) => name === "ambient_context_json") ?? null,
     runtimeRecordColumns:
       runtimeObject?.type === "table"
         ? readSqliteColumns(reader, "expert_applied_runtime_records")
@@ -1392,6 +1404,7 @@ function readSqliteColumns(
     "workbench_sql_migrations",
     "workbench_schema_metadata",
     "projection_threads",
+    "projection_thread_messages",
     "expert_applied_runtime_records",
     "orchestration_event_deliveries",
     ...Object.keys(CONTEXT_TABLE_COLUMNS),

@@ -1,3 +1,4 @@
+import { cloneAmbientContext } from "./lib/ambientContext";
 import { normalizePendingUserInputDrafts } from "./pendingUserInputRecovery";
 import { resolveComputerControlMode } from "./computerControlMode";
 // FILE: composerDraftPersistence.ts
@@ -5,6 +6,7 @@ import { resolveComputerControlMode } from "./computerControlMode";
 // Exports: Persist middleware transitions and persisted state type.
 
 import {
+  AmbientContextSnapshot,
   ModelSelection,
   OrchestrationProposedPlanId,
   OrchestrationThreadPullRequest,
@@ -227,6 +229,7 @@ const PersistedQueuedComposerChatTurn = Schema.Struct({
   pullRequestContexts: Schema.optionalKey(Schema.Array(PersistedPullRequestContextDraft)),
   skills: Schema.Array(ProviderSkillReference),
   mentions: Schema.Array(ProviderMentionReference),
+  ambientContext: Schema.optionalKey(AmbientContextSnapshot),
   selectedProvider: ProviderKind,
   selectedModel: Schema.NullOr(Schema.String),
   selectedPromptEffort: Schema.NullOr(Schema.String),
@@ -283,6 +286,7 @@ const PersistedComposerPromptHistorySavedDraft = Schema.Union([
     pullRequestContexts: Schema.optionalKey(Schema.Array(PersistedPullRequestContextDraft)),
     skills: Schema.optionalKey(Schema.Array(ProviderSkillReference)),
     mentions: Schema.optionalKey(Schema.Array(ProviderMentionReference)),
+    ambientContext: Schema.optionalKey(AmbientContextSnapshot),
   }),
 ]);
 
@@ -312,6 +316,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   pullRequestContexts: Schema.optionalKey(Schema.Array(PersistedPullRequestContextDraft)),
   skills: Schema.optionalKey(Schema.Array(ProviderSkillReference)),
   mentions: Schema.optionalKey(Schema.Array(ProviderMentionReference)),
+  ambientContext: Schema.optionalKey(AmbientContextSnapshot),
   queuedTurns: Schema.optionalKey(Schema.Array(PersistedQueuedComposerTurn)),
   queueStoppedTurnId: Schema.optionalKey(Schema.String),
   queueResumedTurnId: Schema.optionalKey(Schema.String),
@@ -460,6 +465,7 @@ function normalizePersistedPromptHistorySavedDraft(
   const skills = Array.isArray(candidate.skills)
     ? candidate.skills.filter(Schema.is(ProviderSkillReference))
     : [];
+  const ambientContext = cloneAmbientContext(candidate.ambientContext);
   const mentions = Array.isArray(candidate.mentions)
     ? candidate.mentions.filter(Schema.is(ProviderMentionReference))
     : [];
@@ -474,6 +480,7 @@ function normalizePersistedPromptHistorySavedDraft(
     ...(pullRequestContexts.length > 0 ? { pullRequestContexts } : {}),
     ...(skills.length > 0 ? { skills } : {}),
     ...(mentions.length > 0 ? { mentions } : {}),
+    ...(ambientContext ? { ambientContext } : {}),
   };
 }
 
@@ -765,6 +772,7 @@ function normalizePersistedQueuedTurns(
       const skills = Array.isArray(candidate.skills)
         ? candidate.skills.filter(Schema.is(ProviderSkillReference))
         : [];
+      const ambientContext = cloneAmbientContext(candidate.ambientContext);
       const mentions = Array.isArray(candidate.mentions)
         ? candidate.mentions.filter(Schema.is(ProviderMentionReference))
         : [];
@@ -793,6 +801,7 @@ function normalizePersistedQueuedTurns(
         ...(pullRequestContexts.length > 0 ? { pullRequestContexts } : {}),
         skills: [...skills],
         mentions: [...mentions],
+        ...(ambientContext ? { ambientContext } : {}),
         selectedProvider,
         selectedModel,
         selectedPromptEffort,
@@ -1046,6 +1055,7 @@ function normalizePersistedDraftsByThreadId(
     const skills = Array.isArray(draftCandidate.skills)
       ? draftCandidate.skills.filter(Schema.is(ProviderSkillReference))
       : [];
+    const ambientContext = cloneAmbientContext(draftCandidate.ambientContext);
     const mentions = Array.isArray(draftCandidate.mentions)
       ? draftCandidate.mentions.filter(Schema.is(ProviderMentionReference))
       : [];
@@ -1141,7 +1151,7 @@ function normalizePersistedDraftsByThreadId(
     const hasModelData =
       Object.keys(modelSelectionByProvider).length > 0 || activeProvider !== null;
     const hasQueuedTurns = normalizedQueuedTurns.length > 0;
-    const hasReferenceData = skills.length > 0 || mentions.length > 0;
+    const hasReferenceData = skills.length > 0 || mentions.length > 0 || Boolean(ambientContext);
     if (
       Object.keys(pendingUserInputDrafts).length === 0 &&
       promptCandidate.length === 0 &&
@@ -1178,6 +1188,7 @@ function normalizePersistedDraftsByThreadId(
       ...(pullRequestContexts.length > 0 ? { pullRequestContexts } : {}),
       ...(skills.length > 0 ? { skills } : {}),
       ...(mentions.length > 0 ? { mentions } : {}),
+      ...(ambientContext ? { ambientContext } : {}),
       ...(hasQueuedTurns ? { queuedTurns: normalizedQueuedTurns } : {}),
       ...(hasQueuedTurns && typeof draftCandidate.queueStoppedTurnId === "string"
         ? { queueStoppedTurnId: draftCandidate.queueStoppedTurnId }
@@ -1287,6 +1298,9 @@ export function partializeComposerDraftStoreState(
             : {}),
           skills: [...queuedTurn.skills],
           mentions: [...queuedTurn.mentions],
+          ...(queuedTurn.ambientContext
+            ? { ambientContext: cloneAmbientContext(queuedTurn.ambientContext) }
+            : {}),
           selectedProvider: queuedTurn.selectedProvider,
           selectedModel: queuedTurn.selectedModel,
           selectedPromptEffort: queuedTurn.selectedPromptEffort,
@@ -1347,7 +1361,8 @@ export function partializeComposerDraftStoreState(
     const hasModelData =
       Object.keys(draft.modelSelectionByProvider).length > 0 || draft.activeProvider !== null;
     const hasQueuedTurns = persistedQueuedTurns.length > 0;
-    const hasReferenceData = draft.skills.length > 0 || draft.mentions.length > 0;
+    const hasReferenceData =
+      draft.skills.length > 0 || draft.mentions.length > 0 || Boolean(draft.ambientContext);
     if (
       Object.keys(draft.pendingUserInputDrafts ?? {}).length === 0 &&
       draft.prompt.length === 0 &&
@@ -1445,6 +1460,13 @@ export function partializeComposerDraftStoreState(
               ...(draft.promptHistorySavedDraft.skills.length > 0
                 ? { skills: [...draft.promptHistorySavedDraft.skills] }
                 : {}),
+              ...(draft.promptHistorySavedDraft.ambientContext
+                ? {
+                    ambientContext: cloneAmbientContext(
+                      draft.promptHistorySavedDraft.ambientContext,
+                    ),
+                  }
+                : {}),
               ...(draft.promptHistorySavedDraft.mentions.length > 0
                 ? { mentions: [...draft.promptHistorySavedDraft.mentions] }
                 : {}),
@@ -1506,6 +1528,9 @@ export function partializeComposerDraftStoreState(
         : {}),
       ...(draft.skills.length > 0 ? { skills: [...draft.skills] } : {}),
       ...(draft.mentions.length > 0 ? { mentions: [...draft.mentions] } : {}),
+      ...(draft.ambientContext
+        ? { ambientContext: cloneAmbientContext(draft.ambientContext) }
+        : {}),
       ...(hasQueuedTurns ? { queuedTurns: persistedQueuedTurns } : {}),
       ...(hasQueuedTurns && draft.queueStoppedTurnId
         ? { queueStoppedTurnId: draft.queueStoppedTurnId }
@@ -1634,6 +1659,7 @@ function hydrateQueuedTurnsFromPersisted(
         pullRequestContexts: normalizePullRequestContexts(queuedTurn.pullRequestContexts ?? []),
         skills: [...queuedTurn.skills],
         mentions: [...queuedTurn.mentions],
+        ambientContext: cloneAmbientContext(queuedTurn.ambientContext),
       };
     }
     return { ...queuedTurn };
@@ -1682,6 +1708,7 @@ function hydratePromptHistorySavedDraft(
     pullRequestContexts: normalizePullRequestContexts(savedDraft.pullRequestContexts ?? []),
     skills: [...(savedDraft.skills ?? [])],
     mentions: [...(savedDraft.mentions ?? [])],
+    ambientContext: cloneAmbientContext(savedDraft.ambientContext),
   };
 }
 
@@ -1724,6 +1751,7 @@ export function toHydratedThreadDraft(
     pullRequestContexts: normalizePullRequestContexts(persistedDraft.pullRequestContexts ?? []),
     skills: [...(persistedDraft.skills ?? [])],
     mentions: [...(persistedDraft.mentions ?? [])],
+    ambientContext: cloneAmbientContext(persistedDraft.ambientContext),
     queuedTurns: hydrateQueuedTurnsFromPersisted(threadId, persistedDraft.queuedTurns),
     ...(persistedDraft.queueStoppedTurnId
       ? { queueStoppedTurnId: persistedDraft.queueStoppedTurnId }

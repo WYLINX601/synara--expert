@@ -54,6 +54,7 @@ export function useChatComposerDraft({ threadId }: ChatComposerDraftInput) {
       deriveComposerSendState({
         prompt,
         imageCount: composerImages.length,
+        ambientContextItemCount: composerDraft.ambientContext?.items.length ?? 0,
         fileCount: composerFiles.length,
         assistantSelectionCount: composerAssistantSelections.length,
         browserAnnotationCount: composerBrowserAnnotations.length,
@@ -63,6 +64,7 @@ export function useChatComposerDraft({ threadId }: ChatComposerDraftInput) {
         pullRequestContexts: composerPullRequestContexts,
       }),
     [
+      composerDraft.ambientContext,
       composerAssistantSelections.length,
       composerBrowserAnnotations.length,
       composerFileComments.length,

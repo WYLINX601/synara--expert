@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type {
+  AmbientContextSnapshot,
   ProviderExpertSession,
   ExpertAppliedRuntimeRecord,
   ContextAppliedRuntimeRecord,
@@ -39,6 +40,7 @@ import {
   ProjectId,
   ThreadId,
   TurnId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 } from "@synara/contracts";
 import { it, assert, vi } from "@effect/vitest";
 import { afterAll, beforeAll } from "vitest";
@@ -59,6 +61,7 @@ import {
 } from "effect";
 import { TestClock } from "effect/testing";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
+import { formatAmbientContext } from "@synara/shared/ambientContext";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   buildCodexProcessEnv,
@@ -162,6 +165,7 @@ afterAll(async () => {
   if (previousSynaraHome === undefined) delete process.env.SYNARA_HOME;
   else process.env.SYNARA_HOME = previousSynaraHome;
   if (defaultCodexFixtureRoot) fs.rmSync(defaultCodexFixtureRoot, { recursive: true, force: true });
+  await Promise.allSettled(expertSkillFixtureInitializationPromises);
   await removeExpertSkillFixtures();
 });
 
@@ -353,6 +357,12 @@ type ExpertSkillPackageFixture = {
 };
 
 const expertSkillFixtureRoots: string[] = [];
+const expertSkillFixtureInitializationPromises: Promise<unknown>[] = [];
+function trackExpertSkillFixtureInitialization<T>(promise: Promise<T>): Promise<T> {
+  expertSkillFixtureInitializationPromises.push(promise);
+  return promise;
+}
+
 async function makeExpertSkillPackageFixture(
   root = fs.mkdtempSync(path.join(os.tmpdir(), "synara-provider-expert-skills-")),
 ): Promise<ExpertSkillPackageFixture> {
@@ -659,6 +669,9 @@ function makeFakeCodexAdapter(
         turnId: TurnId.makeUnsafe(`steer-${String(input.threadId)}`),
       }),
   );
+  const steerSubagent = vi.fn<
+    NonNullable<ProviderAdapterShape<ProviderAdapterError>["steerSubagent"]>
+  >(() => Effect.void);
 
   const startReview = vi.fn(
     (
@@ -776,6 +789,7 @@ function makeFakeCodexAdapter(
       : {}),
     sendTurn,
     steerTurn,
+    steerSubagent,
     startReview,
     interruptTurn,
     respondToRequest,
@@ -824,6 +838,7 @@ function makeFakeCodexAdapter(
     startSession,
     sendTurn,
     steerTurn,
+    steerSubagent,
     startReview,
     interruptTurn,
     respondToRequest,
@@ -1151,6 +1166,35 @@ const contextDispatchRouting = makeProviderServiceLayer(undefined, {
   contextRepository: contextDispatchRepository.repository,
 });
 const contextDispatchThreadId = asThreadId("thread-context-dispatch-witness");
+const contextDispatchAmbientContext: AmbientContextSnapshot = {
+  schemaVersion: 1,
+  id: "snapshot-provider-service-1",
+  capturedAt: "2026-10-09T00:00:00.000Z",
+  items: [
+    {
+      observation: {
+        schemaVersion: 1,
+        id: "observation-provider-service-1",
+        targetKey: "target-provider-service-1",
+        capturedAt: "2026-10-09T00:00:00.000Z",
+        method: "selection event",
+        confidence: "exact",
+        type: "selection.text",
+        value: { text: "Provider prompt context" },
+      },
+      provenance: [
+        {
+          sourceId: "source-provider-service-1",
+          observationId: "observation-provider-service-1",
+          capturedAt: "2026-10-09T00:00:00.000Z",
+          method: "selection event",
+          confidence: "exact",
+        },
+      ],
+      ambiguous: false,
+    },
+  ],
+};
 const contextDispatchSession = makeTestContextSession(
   "context-dispatch",
   "## Project instructions\nPreserve source evidence boundaries.",
@@ -1214,7 +1258,12 @@ contextDispatchRouting.layer("ProviderService Context V1.1", (it) => {
           }),
         );
         yield* provider.sendTurn(
-          { threadId: contextDispatchThreadId, input: "send", attachments: [] },
+          {
+            threadId: contextDispatchThreadId,
+            input: "send",
+            attachments: [],
+            ambientContext: contextDispatchAmbientContext,
+          },
           {
             beforeDispatch: Effect.sync(() => contextDispatchOrder.push("witness.sendTurn")).pipe(
               Effect.asVoid,
@@ -1222,7 +1271,12 @@ contextDispatchRouting.layer("ProviderService Context V1.1", (it) => {
           },
         );
         yield* provider.steerTurn(
-          { threadId: contextDispatchThreadId, input: "steer", attachments: [] },
+          {
+            threadId: contextDispatchThreadId,
+            input: "steer",
+            attachments: [],
+            ambientContext: contextDispatchAmbientContext,
+          },
           {
             beforeDispatch: Effect.sync(() => contextDispatchOrder.push("witness.steerTurn")).pipe(
               Effect.asVoid,
@@ -1245,6 +1299,80 @@ contextDispatchRouting.layer("ProviderService Context V1.1", (it) => {
           "witness.startReview",
           "adapter.startReview",
         ]);
+        const expectedAmbientContextText = formatAmbientContext(contextDispatchAmbientContext);
+        const formattedSendInput = contextDispatchRouting.codex.sendTurn.mock.calls[0]?.[0];
+        const formattedSteerInput = contextDispatchRouting.codex.steerTurn.mock.calls[0]?.[0];
+        assert.equal(formattedSendInput?.input, `send\n\n${expectedAmbientContextText}`);
+        assert.isFalse("ambientContext" in (formattedSendInput ?? {}));
+        assert.equal(formattedSteerInput?.input, `steer\n\n${expectedAmbientContextText}`);
+        assert.isFalse("ambientContext" in (formattedSteerInput ?? {}));
+
+        const emptyAmbientContext = { ...contextDispatchAmbientContext, items: [] };
+        const emptyContextOnlySend = yield* Effect.exit(
+          provider.sendTurn({
+            threadId: contextDispatchThreadId,
+            attachments: [],
+            ambientContext: emptyAmbientContext,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(emptyContextOnlySend));
+        const emptyContextOnlySubagent = yield* Effect.exit(
+          provider.steerSubagent({
+            threadId: contextDispatchThreadId,
+            providerThreadId: "tool-empty-context",
+            attachments: [],
+            ambientContext: emptyAmbientContext,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(emptyContextOnlySubagent));
+        assert.equal(contextDispatchRouting.codex.steerSubagent.mock.calls.length, 0);
+
+        yield* provider.sendTurn({
+          threadId: contextDispatchThreadId,
+          attachments: [],
+          ambientContext: contextDispatchAmbientContext,
+        });
+        assert.equal(
+          contextDispatchRouting.codex.sendTurn.mock.calls.at(-1)?.[0].input,
+          expectedAmbientContextText,
+        );
+        yield* provider.steerSubagent({
+          threadId: contextDispatchThreadId,
+          providerThreadId: "tool-context",
+          input: "subagent steer",
+          ambientContext: contextDispatchAmbientContext,
+        });
+        const subagentAdapterInput =
+          contextDispatchRouting.codex.steerSubagent.mock.calls.at(-1)?.[2];
+        assert.equal(
+          subagentAdapterInput?.input,
+          `subagent steer\n\n${expectedAmbientContextText}`,
+        );
+        assert.isFalse("ambientContext" in (subagentAdapterInput ?? {}));
+
+        const sendCallsBeforeOverflow = contextDispatchRouting.codex.sendTurn.mock.calls.length;
+        const oversizedPrompt = yield* Effect.exit(
+          provider.sendTurn({
+            threadId: contextDispatchThreadId,
+            input: "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
+            attachments: [],
+            ambientContext: contextDispatchAmbientContext,
+          }),
+        );
+        assert.isTrue(Exit.isFailure(oversizedPrompt));
+        assert.equal(
+          contextDispatchRouting.codex.sendTurn.mock.calls.length,
+          sendCallsBeforeOverflow,
+        );
+
+        yield* provider.sendTurn({
+          threadId: contextDispatchThreadId,
+          input: "plain send",
+          attachments: [],
+        });
+        const plainAdapterInput = contextDispatchRouting.codex.sendTurn.mock.calls.at(-1)?.[0];
+        assert.equal(plainAdapterInput?.input, "plain send");
+        assert.isFalse("ambientContext" in (plainAdapterInput ?? {}));
         yield* provider.stopSession({ threadId: contextDispatchThreadId });
       }),
   );
@@ -1940,6 +2068,27 @@ skillEvolutionRouting.layer("ProviderService Skill Evolution execution boundary"
       assert.equal(skillEvolutionContextSessionRead.mock.calls.length, 0);
       assert.equal(skillEvolutionContextBindingRead.mock.calls.length, 0);
       assert.equal(skillEvolutionContextAppliedRead.mock.calls.length, 0);
+      const contextAttached = yield* Effect.exit(
+        provider.sendTurn({
+          threadId,
+          input: "This must not modify the registered extraction input.",
+          attachments: [],
+          modelSelection: skillEvolutionFixedModel,
+          ambientContext: contextDispatchAmbientContext,
+        }),
+      );
+      assert.isTrue(Exit.isFailure(contextAttached));
+      assert.equal(skillEvolutionRouting.pi.sendTurn.mock.calls.length, 1);
+      const subagentContextAttached = yield* Effect.exit(
+        provider.steerSubagent({
+          threadId,
+          providerThreadId: "tool-skill-evolution-context",
+          input: "This must not modify the registered extraction input.",
+          ambientContext: contextDispatchAmbientContext,
+        }),
+      );
+      assert.isTrue(Exit.isFailure(subagentContextAttached));
+      assert.equal(skillEvolutionRouting.pi.steerSubagent.mock.calls.length, 0);
       yield* provider.stopSession({ threadId });
     }),
   );
@@ -12095,7 +12244,9 @@ for (const providerKind of ["claudeAgent", "omp"] as const) {
 }
 
 const expertV2RuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "synara-provider-expert-v2-"));
-const expertV2FixturePromise = makeExpertSkillPackageFixture(expertV2RuntimeRoot);
+const expertV2FixturePromise = trackExpertSkillFixtureInitialization(
+  makeExpertSkillPackageFixture(expertV2RuntimeRoot),
+);
 const expertV2AppliedWrites: ExpertAppliedRuntimeRecord[] = [];
 const expertV2Runtime = makeProviderServiceLayer(
   {
@@ -13057,7 +13208,7 @@ expertV2ForkRuntime.layer("ProviderService Expert V2 runtime notices and fork Co
 
 for (const failureMode of ["missing", "corrupt", "missing-snapshot"] as const) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `synara-provider-expert-v2-${failureMode}-`));
-  const fixturePromise = makeExpertSkillPackageFixture(root);
+  const fixturePromise = trackExpertSkillFixtureInitialization(makeExpertSkillPackageFixture(root));
   const runtime = makeProviderServiceLayer({ stateDir: path.join(root, "state") });
   runtime.layer(`ProviderService Expert V2 ${failureMode} package`, (it) => {
     it.effect("blocks startup before the provider adapter sees an unverified package", () =>

@@ -287,6 +287,19 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     isSupported: () => ipcRenderer.invoke(IPC.notificationsIsSupported),
     show: (input) => ipcRenderer.invoke(IPC.notificationsShow, input),
   },
+  ambientContext: {
+    getState: () => ipcRenderer.invoke(IPC.ambientContext.getState),
+    configure: (sourceId, policy) =>
+      ipcRenderer.invoke(IPC.ambientContext.configure, sourceId, policy),
+    getPairing: (sourceId) => ipcRenderer.invoke(IPC.ambientContext.getPairing, sourceId),
+    capture: () => ipcRenderer.invoke(IPC.ambientContext.capture),
+    searchResources: (query) => ipcRenderer.invoke(IPC.ambientContext.searchResources, query),
+    onChanged: (listener) => {
+      const changed = () => listener();
+      ipcRenderer.on(IPC.ambientContext.changed, changed);
+      return () => ipcRenderer.removeListener(IPC.ambientContext.changed, changed);
+    },
+  },
   appSnap: {
     captureCurrentApp: (requestId) => ipcRenderer.invoke(IPC.appSnap.captureCurrentApp, requestId),
     cancelCapture: (requestId) => ipcRenderer.invoke(IPC.appSnap.cancelCapture, requestId),

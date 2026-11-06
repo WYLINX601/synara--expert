@@ -468,6 +468,36 @@ it.effect("decodes thread.turn.start defaults for provider, runtime mode, and di
   }),
 );
 
+it.effect("accepts an explicitly attached ambient snapshot on a client turn-start message", () =>
+  Effect.gen(function* () {
+    const ambientContext = {
+      schemaVersion: 1,
+      id: "snapshot-contract-1",
+      capturedAt: "2026-01-01T00:00:00.000Z",
+      items: [],
+    };
+    const parsed = yield* decodeClientOrchestrationCommand({
+      type: "thread.turn.start",
+      commandId: "cmd-turn-ambient-context",
+      threadId: "thread-1",
+      message: {
+        messageId: "msg-ambient-context",
+        role: "user",
+        text: "Use this selection",
+        ambientContext,
+        attachments: [],
+      },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.type, "thread.turn.start");
+    if (parsed.type !== "thread.turn.start") return;
+    assert.deepEqual(parsed.message.ambientContext, ambientContext);
+  }),
+);
+
 it.effect("preserves the per-thread computer-control opt-in", () =>
   Effect.gen(function* () {
     const parsed = yield* decodeThreadTurnStartCommand({

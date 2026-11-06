@@ -1536,6 +1536,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
       const sql = yield* SqlClient.SqlClient;
       const threadId = asThreadId("thread-causal-message-snapshot");
+      const ambientContext = {
+        schemaVersion: 1 as const,
+        id: "snapshot-causal-message",
+        capturedAt: "2026-07-14T12:10:00.000Z",
+        items: [],
+      };
 
       yield* sql`DELETE FROM projection_thread_messages`;
       yield* sql`DELETE FROM projection_pending_interactions`;
@@ -1566,16 +1572,17 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       yield* sql`
         INSERT INTO projection_thread_messages (
           message_id, thread_id, turn_id, role, text, is_streaming, source,
-          sequence, created_at, updated_at
+          ambient_context_json, sequence, created_at, updated_at
         ) VALUES
           (
             'message-causal-first', 'thread-causal-message-snapshot', NULL, 'user',
-            'accepted first', 0, 'native', 10,
+            'accepted first', 0, 'native',
+            ${JSON.stringify(ambientContext)}, 10,
             '2026-07-14T12:10:00.000Z', '2026-07-14T12:10:00.000Z'
           ),
           (
             'message-causal-second', 'thread-causal-message-snapshot', NULL, 'assistant',
-            'accepted second despite older clock', 0, 'native', 11,
+            'accepted second despite older clock', 0, 'native', NULL, 11,
             '2026-07-14T11:59:00.000Z', '2026-07-14T11:59:00.000Z'
           )
       `;
@@ -1615,6 +1622,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         },
       ];
       assert.isTrue(Option.isSome(detail));
+      assert.deepStrictEqual(snapshot.threads[0]?.messages[0]?.ambientContext, ambientContext);
+      assert.deepStrictEqual(
+        Option.isSome(detail) ? detail.value.messages[0]?.ambientContext : undefined,
+        ambientContext,
+      );
       assert.deepStrictEqual(
         snapshot.threads[0]?.messages.map((message) => message.id),
         [asMessageId("message-causal-first"), asMessageId("message-causal-second")],

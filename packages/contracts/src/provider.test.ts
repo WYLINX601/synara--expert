@@ -1,11 +1,47 @@
 import { describe, expect, it } from "vitest";
 import { Schema } from "effect";
 
-import { ProviderSendTurnInput, ProviderSession, ProviderSessionStartInput } from "./provider";
+import {
+  ProviderSendTurnInput,
+  ProviderSession,
+  ProviderSessionStartInput,
+  ProviderSteerSubagentInput,
+} from "./provider";
 
 const decodeProviderSessionStartInput = Schema.decodeUnknownSync(ProviderSessionStartInput);
 const decodeProviderSendTurnInput = Schema.decodeUnknownSync(ProviderSendTurnInput);
+const decodeProviderSteerSubagentInput = Schema.decodeUnknownSync(ProviderSteerSubagentInput);
 const decodeProviderSession = Schema.decodeUnknownSync(ProviderSession);
+
+const ambientContext = {
+  schemaVersion: 1,
+  id: "snapshot-provider-test",
+  capturedAt: "2026-10-09T00:00:00.000Z",
+  items: [
+    {
+      observation: {
+        schemaVersion: 1,
+        id: "observation-provider-test",
+        targetKey: "target-provider-test",
+        capturedAt: "2026-10-09T00:00:00.000Z",
+        method: "selection event",
+        confidence: "exact",
+        type: "selection.text",
+        value: { text: "Selected text" },
+      },
+      provenance: [
+        {
+          sourceId: "source-provider-test",
+          observationId: "observation-provider-test",
+          capturedAt: "2026-10-09T00:00:00.000Z",
+          method: "selection event",
+          confidence: "exact",
+        },
+      ],
+      ambiguous: false,
+    },
+  ],
+};
 
 describe("ProviderSession runtime metadata", () => {
   it("accepts trimmed component, version, and lifecycle generation values", () => {
@@ -87,6 +123,7 @@ describe("ProviderSendTurnInput", () => {
   it("accepts claude modelSelection including ultrathink", () => {
     const parsed = decodeProviderSendTurnInput({
       threadId: "thread-1",
+      input: "Review this",
       modelSelection: {
         provider: "claudeAgent",
         model: "claude-sonnet-4-6",
@@ -103,5 +140,45 @@ describe("ProviderSendTurnInput", () => {
     }
     expect(parsed.modelSelection.options?.effort).toBe("ultrathink");
     expect(parsed.modelSelection.options?.fastMode).toBe(true);
+  });
+
+  it("allows non-empty ambient context as sendable input but rejects an empty snapshot alone", () => {
+    const base = {
+      schemaVersion: 1 as const,
+      id: "snapshot-empty",
+      capturedAt: ambientContext.capturedAt,
+      items: [],
+    };
+    expect(() =>
+      decodeProviderSendTurnInput({
+        threadId: "thread-ambient-context-only",
+        attachments: [],
+        ambientContext: base,
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeProviderSteerSubagentInput({
+        threadId: "thread-ambient-subagent-empty",
+        providerThreadId: "tool-1",
+        attachments: [],
+        ambientContext: base,
+      }),
+    ).toThrow();
+
+    expect(
+      decodeProviderSendTurnInput({
+        threadId: "thread-ambient-context-only",
+        attachments: [],
+        ambientContext,
+      }).ambientContext,
+    ).toEqual(ambientContext);
+    expect(
+      decodeProviderSteerSubagentInput({
+        threadId: "thread-ambient-subagent-only",
+        providerThreadId: "tool-1",
+        attachments: [],
+        ambientContext,
+      }).ambientContext,
+    ).toEqual(ambientContext);
   });
 });

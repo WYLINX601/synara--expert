@@ -1415,6 +1415,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             messageId: message.messageId,
             role: message.role,
             text: message.text,
+            ...(message.ambientContext !== undefined
+              ? { ambientContext: message.ambientContext }
+              : {}),
             ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
             turnId: null,
             streaming: false,
@@ -1521,6 +1524,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             messageId: message.messageId,
             role: message.role,
             text: message.text,
+            ...(message.ambientContext !== undefined
+              ? { ambientContext: message.ambientContext }
+              : {}),
             ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
             turnId: null,
             streaming: false,
@@ -2162,6 +2168,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           messageId: command.message.messageId,
           role: "user",
           text: messageText,
+          ...(command.message.ambientContext !== undefined
+            ? { ambientContext: command.message.ambientContext }
+            : {}),
           attachments: command.message.attachments,
           ...(command.message.skills !== undefined ? { skills: command.message.skills } : {}),
           ...(command.message.mentions !== undefined ? { mentions: command.message.mentions } : {}),
@@ -2909,6 +2918,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           messageId: message.messageId,
           role: message.role,
           text: message.text,
+          ...(message.ambientContext !== undefined
+            ? { ambientContext: message.ambientContext }
+            : {}),
           ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
           ...(message.dispatchOrigin !== undefined
             ? { dispatchOrigin: message.dispatchOrigin }

@@ -2,6 +2,8 @@
 
 更新：2026-10-27，Asia/Shanghai。来源：用户确认以应用日用、在应用内浏览器批注预览，并明确允许最新版本打包及更新安装。流程规范见[开发规范](workbench-development-workflow.md#browser-daily-preview)。本记录取代此前三角色的运行分工；[旧浏览器环境记录](browser-environments-2026-10-24.md)保留为历史及回退依据。
 
+2026-11-05 校准：本页下方 0.1.6 及旧预览路径均为历史时点。当前已安装 0.1.13，恢复入口和活动预览以[交付与存储收口方案](delivery-storage-plan-2026-11-05.md)为准；旧环境管理根中的备份指针并非当前版本。
+
 ## 当前日用更新（2026-10-27）
 
 用户授权六项审核修复提交推送 main 并更新日用应用。`/Applications/Personal Workbench.app` 已安装启动 **0.1.6**，实际构建源为 `d189ce8af2c8eec6ab30515cdaaee3485867b9d4`；main 后续 `4337c7e6e` 仅修正浏览器测试的时序匹配，CI 已成功。日用 home/profile 保持原路径，32 线程、308 消息、3 Space 和 18 Project 的原始 ID 均保留，699 个用户配置/凭据/专家资源文件摘要不变。

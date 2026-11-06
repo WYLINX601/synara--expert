@@ -39,6 +39,8 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
   const upsertProjectionThreadMessageRow = SqlSchema.void({
     Request: ProjectionThreadMessage,
     execute: (row) => {
+      const nextAmbientContextJson =
+        row.ambientContext !== undefined ? JSON.stringify(row.ambientContext) : null;
       const nextAttachmentsJson =
         row.attachments !== undefined ? JSON.stringify(row.attachments) : null;
       const nextSkillsJson = row.skills !== undefined ? JSON.stringify(row.skills) : null;
@@ -51,6 +53,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           role,
           text,
           text_json,
+          ambient_context_json,
           attachments_json,
           skills_json,
           mentions_json,
@@ -71,6 +74,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           ${row.role},
           ${row.text},
           ${encodeMessageTextFallback(row.text)},
+          ${nextAmbientContextJson},
           ${nextAttachmentsJson},
           ${nextSkillsJson},
           ${nextMentionsJson},
@@ -90,6 +94,10 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           role = excluded.role,
           text = excluded.text,
           text_json = excluded.text_json,
+          ambient_context_json = COALESCE(
+            projection_thread_messages.ambient_context_json,
+            excluded.ambient_context_json
+          ),
           attachments_json = COALESCE(
             excluded.attachments_json,
             projection_thread_messages.attachments_json
@@ -137,6 +145,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           text,
           text_json AS "encodedText",
           ${selectMessageTextChunks(sql, "projection_thread_messages")},
+          ambient_context_json AS "ambientContext",
           attachments_json AS "attachments",
           skills_json AS "skills",
           mentions_json AS "mentions",
@@ -205,6 +214,7 @@ const makeProjectionThreadMessageRepository = Effect.gen(function* () {
           text,
           text_json AS "encodedText",
           ${selectMessageTextChunks(sql, "projection_thread_messages")},
+          ambient_context_json AS "ambientContext",
           attachments_json AS "attachments",
           skills_json AS "skills",
           mentions_json AS "mentions",

@@ -2,6 +2,25 @@ import { describe, expect, it } from "vitest";
 import { groupCommandItems, type ComposerCommandItem } from "./ComposerCommandMenu";
 
 describe("groupCommandItems", () => {
+  it("keeps Obsidian resources distinct from provider mentions and local paths", () => {
+    const resource: ComposerCommandItem = {
+      id: "ambient:obsidian:note",
+      type: "ambient-resource",
+      label: "Note.md",
+      description: "Attach file identity only",
+      resource: {
+        sourceId: "obsidian",
+        targetKey: "note",
+        uri: "obsidian://open?file=Note.md",
+        title: "Note.md",
+      },
+    };
+    expect(groupCommandItems([resource], "mention", false)).toEqual([
+      { id: "ambient", label: "Obsidian resources", items: [resource] },
+    ]);
+    expect(resource).not.toHaveProperty("mention");
+  });
+
   it("groups mention suggestions as plugins, chats, local, then subagents", () => {
     const items: ComposerCommandItem[] = [
       {

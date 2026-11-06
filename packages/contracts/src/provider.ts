@@ -32,6 +32,7 @@ import {
 } from "./skillPackage";
 import { ExpertSkillPolicy } from "./skillLibrary";
 import { ContextSession } from "./context";
+import { AmbientContextSnapshot } from "./ambientContext";
 import { LearningSessionContext } from "./learningTools";
 
 const ProviderSessionStatus = Schema.Literals([
@@ -143,6 +144,7 @@ export const ProviderSendTurnInput = Schema.Struct({
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),
+  ambientContext: Schema.optional(AmbientContextSnapshot),
   attachments: Schema.optional(
     Schema.Array(ChatAttachment).check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_ATTACHMENTS)),
   ),
@@ -150,7 +152,14 @@ export const ProviderSendTurnInput = Schema.Struct({
   mentions: Schema.optional(Schema.Array(ProviderMentionReference)),
   modelSelection: Schema.optional(ModelSelection),
   interactionMode: Schema.optional(ProviderInteractionMode),
-});
+}).check(
+  Schema.makeFilter(
+    ({ input, attachments, ambientContext }) =>
+      input !== undefined ||
+      (attachments?.length ?? 0) > 0 ||
+      (ambientContext?.items.length ?? 0) > 0,
+  ),
+);
 export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 export const ProviderSteerTurnInput = ProviderSendTurnInput;
 export type ProviderSteerTurnInput = typeof ProviderSteerTurnInput.Type;
@@ -247,7 +256,15 @@ export const ProviderSteerSubagentInput = Schema.Struct({
   ),
   skills: Schema.optional(Schema.Array(ProviderSkillReference)),
   mentions: Schema.optional(Schema.Array(ProviderMentionReference)),
-});
+  ambientContext: Schema.optional(AmbientContextSnapshot),
+}).check(
+  Schema.makeFilter(
+    ({ input, attachments, ambientContext }) =>
+      input !== undefined ||
+      (attachments?.length ?? 0) > 0 ||
+      (ambientContext?.items.length ?? 0) > 0,
+  ),
+);
 export type ProviderSteerSubagentInput = typeof ProviderSteerSubagentInput.Type;
 
 export const ProviderStopSessionInput = Schema.Struct({

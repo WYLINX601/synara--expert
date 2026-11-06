@@ -9,6 +9,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { formatShortTimestamp } from "../../timestampFormat";
 import { makeActivity } from "../../storeTestFixtures";
 import { deriveWorkLogEntries, type WorkLogEntry } from "../../workLog";
+import { ambientResourceSnapshot } from "~/lib/ambientContext";
 import { INLINE_COMMAND_CHIP_CLASS_NAME } from "./chatTypography";
 
 const TOOLTIP_TRIGGER_MARKER = 'data-base-ui-tooltip-trigger=""';
@@ -544,6 +545,40 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Sent by the Release Synara coordinator");
     expect(markup).toContain('aria-label="Open coordinator"');
     expect(markup).not.toContain("Sent by Synara from another thread");
+  });
+
+  it("renders the sent ambient snapshot as a read-only attachment summary", async () => {
+    const { MessagesTimeline } = await import("./MessagesTimeline");
+    const ambientContext = ambientResourceSnapshot({
+      sourceId: "obsidian",
+      targetKey: "note",
+      title: "Note.md",
+      uri: "obsidian://open?file=Note.md",
+    });
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...makeTimelineBaseProps()}
+        timelineEntries={[
+          {
+            id: "ambient-entry",
+            kind: "message",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            message: {
+              id: MessageId.makeUnsafe("ambient-message"),
+              role: "user",
+              text: "Explain",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              streaming: false,
+              ambientContext,
+            },
+          },
+        ]}
+        resolvedTheme="light"
+      />,
+    );
+    expect(markup).toContain("Context · 1 item");
+    expect(markup).not.toContain('aria-label="Remove context"');
+    expect(markup).not.toContain("Attach context");
   });
 
   it("renders edit beside copy for user messages", async () => {

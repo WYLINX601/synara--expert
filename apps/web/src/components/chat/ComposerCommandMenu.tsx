@@ -1,4 +1,5 @@
 import {
+  type AmbientResourceReference,
   type ProjectEntry,
   type ModelSlug,
   type ProviderNativeCommandDescriptor,
@@ -141,6 +142,7 @@ function commandMenuTrailingMeta(item: ComposerCommandItem): ReactNode | null {
 }
 
 function commandMenuSecondaryText(item: ComposerCommandItem): string | null {
+  if (item.type === "ambient-resource") return item.description;
   if (item.type === "hub-expert") return item.description;
   // The menu is driven from the composer, so focus never reaches the warning icon:
   // the row itself has to say why the command will not work.
@@ -169,6 +171,13 @@ function commandMenuSecondaryText(item: ComposerCommandItem): string | null {
 }
 
 export type ComposerCommandItem =
+  | {
+      id: string;
+      type: "ambient-resource";
+      resource: AmbientResourceReference;
+      label: string;
+      description: string;
+    }
   | {
       id: string;
       type: "hub-expert";
@@ -296,6 +305,7 @@ export function groupCommandItems(
   groupSlashCommandSections: boolean,
 ): ComposerCommandGroupModel[] {
   if (triggerKind === "mention") {
+    const ambientItems = items.filter((item) => item.type === "ambient-resource");
     const connectorItems = items.filter((item) => item.type === "connector");
     const pluginItems = items.filter((item) => item.type === "plugin");
     const threadItems = items.filter((item) => item.type === "thread");
@@ -303,6 +313,7 @@ export function groupCommandItems(
     const agentItems = items.filter((item) => item.type === "agent");
     const otherItems = items.filter(
       (item) =>
+        item.type !== "ambient-resource" &&
         item.type !== "connector" &&
         item.type !== "plugin" &&
         item.type !== "thread" &&
@@ -314,6 +325,8 @@ export function groupCommandItems(
     );
 
     const groups: ComposerCommandGroupModel[] = [];
+    if (ambientItems.length > 0)
+      groups.push({ id: "ambient", label: "Obsidian resources", items: ambientItems });
     const experts = items.filter((item) => item.type === "hub-expert");
     if (experts.length > 0) groups.push({ id: "experts", label: "Experts", items: experts });
     const deliverables = items.filter((item) => item.type === "hub-deliverable");
@@ -508,6 +521,8 @@ function commandMenuSlashGlyph(command: string, fallback: LucideIcon): ReactNode
 function commandMenuItemGlyph(item: ComposerCommandItem, theme: "light" | "dark"): ReactNode {
   const cls = COMPOSER_COMMAND_ITEM_GLYPH_CLASSNAME;
   switch (item.type) {
+    case "ambient-resource":
+      return <FileEntryIcon pathValue={item.resource.title} kind="file" />;
     case "hub-expert":
       return <BotIcon className={cls} />;
     case "hub-deliverable":

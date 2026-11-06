@@ -1,3 +1,4 @@
+import { cloneAmbientContext } from "./lib/ambientContext";
 // FILE: composerDraftActions.ts
 // Purpose: Constructs the ComposerDraftStoreState actions while preserving granular thread identity.
 // Exports: Zustand state creator consumed by the public facade.
@@ -665,6 +666,7 @@ export const createComposerDraftStoreState =
                 pullRequestContexts: [],
                 skills: [],
                 mentions: [],
+                ambientContext: undefined,
               }
             : {}),
         };
@@ -712,6 +714,7 @@ export const createComposerDraftStoreState =
           pullRequestContexts: normalizePullRequestContexts(savedDraft.pullRequestContexts),
           skills: [...savedDraft.skills],
           mentions: [...savedDraft.mentions],
+          ambientContext: cloneAmbientContext(savedDraft.ambientContext),
         };
         const nextDraftsByThreadId = { ...state.draftsByThreadId };
         if (shouldRemoveDraft(nextDraft)) {
@@ -812,6 +815,18 @@ export const createComposerDraftStoreState =
           nextDraftsByThreadId[threadId] = nextDraft;
         }
         return { draftsByThreadId: nextDraftsByThreadId };
+      });
+    },
+    setAmbientContext: (threadId, snapshot) => {
+      if (!threadId) return;
+      const ambientContext = snapshot?.items.length ? cloneAmbientContext(snapshot) : undefined;
+      set((state) => {
+        const existing = state.draftsByThreadId[threadId] ?? createEmptyThreadDraft();
+        const nextDraft = { ...existing, ambientContext };
+        const draftsByThreadId = { ...state.draftsByThreadId };
+        if (shouldRemoveDraft(nextDraft)) delete draftsByThreadId[threadId];
+        else draftsByThreadId[threadId] = nextDraft;
+        return { draftsByThreadId };
       });
     },
     setMentions: (threadId, mentions) => {
@@ -2259,6 +2274,7 @@ export const createComposerDraftStoreState =
           pullRequestContexts: [],
           skills: [],
           mentions: [],
+          ambientContext: undefined,
           restoredSourceProposedPlan: null,
         };
         const nextDraftsByThreadId = { ...state.draftsByThreadId };

@@ -52,6 +52,7 @@ import {
   WorktreesSettingsPanel,
 } from "~/components/settings/ConversationStorageSettingsPanels";
 import {
+  AmbientContextSettingsPanel,
   AppSnapSettingsPanel,
   BetaChannelSettingsPanel,
   NotificationsSettingsPanel,
@@ -1943,6 +1944,7 @@ function SettingsRouteView() {
                   resetEpoch={resetEpoch}
                 />
                 <McpConnectorsSettingsPanel active={activeSection === "connectors"} />
+                <AmbientContextSettingsPanel active={activeSection === "connectors"} />
                 <ExternalMcpSettingsPanel active={activeSection === "integrations"} />
                 <AdvancedSettingsPanel
                   active={activeSection === "advanced"}

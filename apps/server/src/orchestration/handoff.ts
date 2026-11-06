@@ -1,9 +1,12 @@
 import type { OrchestrationMessage, OrchestrationThread } from "@synara/contracts";
 import { unicodeSafeEndOffset } from "@synara/shared/text";
+import { formatAmbientContext } from "@synara/shared/ambientContext";
 
 const RECENT_MESSAGE_COUNT = 6;
 const EARLIER_MESSAGE_CHAR_LIMIT = 320;
 const RECENT_MESSAGE_CHAR_LIMIT = 2_400;
+const AMBIENT_CONTEXT_OMITTED_MARKER =
+  "[Ambient Context snapshot omitted to fit transcript budget.]";
 // Hard ceiling for any bootstrap transcript: it replays as one uncached user
 // message, so long threads must drop their oldest summaries rather than grow.
 const BOOTSTRAP_TRANSCRIPT_CHAR_BUDGET = 32_000;
@@ -101,7 +104,8 @@ export function listPriorTranscriptMessages(
     return (
       (message.role === "user" || message.role === "assistant") &&
       message.streaming === false &&
-      message.text.trim().length > 0
+      (message.text.trim().length > 0 ||
+        (message.role === "user" && (message.ambientContext?.items.length ?? 0) > 0))
     );
   });
 }
@@ -128,15 +132,59 @@ function buildImportedMessagesBootstrapText(input: {
     sections.push(`Worktree path: ${input.thread.worktreePath}`);
   }
 
+  const recentMessageText = new Map(
+    recentMessages.map((message) => [
+      message.id,
+      `${roleLabel(message)}:\n${truncateText(
+        normalizeMessageText(message.text),
+        RECENT_MESSAGE_CHAR_LIMIT,
+      )}`,
+    ]),
+  );
+  const baseRecentSection =
+    "Most recent imported messages:\n" +
+    recentMessages.map((message) => recentMessageText.get(message.id) ?? "").join("\n\n");
+  const contextBudget = Math.min(
+    BOOTSTRAP_TRANSCRIPT_CHAR_BUDGET,
+    Math.max(
+      0,
+      maxChars -
+        sections.reduce((total, section) => total + section.length + 2, 0) -
+        baseRecentSection.length -
+        2 -
+        (earlierMessages.length > 0 ? earlierSummaryHeader(earlierMessages.length).length + 1 : 0),
+    ),
+  );
+  let remainingContextBudget = contextBudget;
+  const ambientByMessageId = new Map<string, string>();
+  const omittedAmbientByMessageId = new Set<string>();
+  const ambientCandidates = [...recentMessages].reverse().flatMap((message) => {
+    if (message.role !== "user" || message.ambientContext === undefined) return [];
+    const formatted = formatAmbientContext(message.ambientContext);
+    return formatted.length > 0 ? [{ id: message.id, formatted }] : [];
+  });
+  const omissionMarkerCost = AMBIENT_CONTEXT_OMITTED_MARKER.length + 1;
+  for (const [index, candidate] of ambientCandidates.entries()) {
+    const laterMarkerReserve = (ambientCandidates.length - index - 1) * omissionMarkerCost;
+    const formattedCost = candidate.formatted.length + 2;
+    if (formattedCost + laterMarkerReserve <= remainingContextBudget) {
+      ambientByMessageId.set(candidate.id, candidate.formatted);
+      remainingContextBudget -= formattedCost;
+    } else if (omissionMarkerCost + laterMarkerReserve <= remainingContextBudget) {
+      omittedAmbientByMessageId.add(candidate.id);
+      remainingContextBudget -= omissionMarkerCost;
+    }
+  }
   const recentSection =
     "Most recent imported messages:\n" +
     recentMessages
       .map((message) => {
-        const normalized = truncateText(
-          normalizeMessageText(message.text),
-          RECENT_MESSAGE_CHAR_LIMIT,
-        );
-        return `${roleLabel(message)}:\n${normalized}`;
+        const text = recentMessageText.get(message.id) ?? "";
+        const ambientContext = ambientByMessageId.get(message.id);
+        if (ambientContext) return `${text}\n${ambientContext}`;
+        return omittedAmbientByMessageId.has(message.id)
+          ? `${text}\n${AMBIENT_CONTEXT_OMITTED_MARKER}`
+          : text;
       })
       .join("\n\n");
 

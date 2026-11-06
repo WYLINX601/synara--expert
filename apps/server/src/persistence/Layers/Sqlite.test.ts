@@ -68,6 +68,40 @@ describe("SQLite persistence", () => {
         expect(lockingMode?.locking_mode).toBe("exclusive");
         expect(journalMode?.journal_mode).toBe("wal");
 
+        const [nativeHead] = yield* sql<{
+          readonly migration_id: number;
+          readonly name: string;
+        }>`
+          SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id DESC LIMIT 1
+        `;
+        expect(nativeHead).toEqual({
+          migration_id: 135,
+          name: "ProjectionMessageTurnActivityIndex",
+        });
+        const contextLedger = yield* sql<{
+          readonly migration_id: number;
+          readonly name: string;
+        }>`
+          SELECT migration_id, name FROM workbench_sql_migrations
+          WHERE module_id = 'context' ORDER BY migration_id
+        `;
+        expect(contextLedger).toEqual([{ migration_id: 1, name: "ContextV1" }]);
+        const expertAmbientLedger = yield* sql<{
+          readonly migration_id: number;
+          readonly name: string;
+        }>`
+          SELECT migration_id, name FROM workbench_sql_migrations
+          WHERE module_id = 'expert' AND migration_id = 14
+        `;
+        expect(expertAmbientLedger).toEqual([
+          { migration_id: 14, name: "AmbientContextMessageSnapshots" },
+        ]);
+        const ambientContextColumn = yield* sql<{ readonly name: string }>`
+          SELECT name FROM pragma_table_info('projection_thread_messages')
+          WHERE name = 'ambient_context_json'
+        `;
+        expect(ambientContextColumn).toEqual([{ name: "ambient_context_json" }]);
+
         // Large-database tuning must actually take effect, not silently
         // no-op: a reverted or ignored cache_size reintroduces multi-minute
         // startups on multi-GB event logs. mmap_size may be capped by the

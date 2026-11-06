@@ -35,6 +35,7 @@ import {
   Layer,
   Option,
   PubSub,
+  Queue,
   Random,
   Semaphore,
   Scope,
@@ -150,7 +151,19 @@ import {
   type OmpSkillEvolutionCompatLaunch,
 } from "../acp/OmpSkillEvolutionCompat.ts";
 import { SKILL_EVOLUTION_EXECUTION_PURPOSE } from "../skillEvolutionConstraints.ts";
-import { OMP_EXPERT_PROJECTION_VERSION, prepareOmpExpertSession } from "../acp/OmpExpertSession.ts";
+import {
+  OMP_EXPERT_PROJECTION_VERSION,
+  OMP_EXPERT_LEGACY_CLI_VERSION,
+  parseOmpExpertCliVersion,
+  prepareOmpExpertSession,
+} from "../acp/OmpExpertSession.ts";
+import {
+  prepareOmpNativeCompat,
+  parseOmpNativeCompatEvent,
+  writeOmpNativeEvolutionPrompt,
+  type OmpNativeCompatLaunch,
+  type OmpNativeCompatEvent,
+} from "../acp/OmpNativeCompat.ts";
 import { makeSessionTeardownGate } from "../acp/SessionTeardownGate.ts";
 import { cancelTurnAndWait } from "../acp/TurnCancellation.ts";
 import { isFormElicitationRequest } from "../acp/AcpElicitationSupport.ts";
@@ -238,6 +251,7 @@ interface OmpSessionContext {
   readonly verifyFixedSkills?: () => Effect.Effect<void, unknown>;
   readonly fixedSkillCommands?: ReadonlyArray<string>;
   readonly skillEvolution: boolean;
+  readonly nativeCompat?: OmpNativeCompatLaunch;
   harnessPolicyDelivered?: boolean;
   readonly gatewaySessionLease?: AgentGatewaySessionLease;
   readonly threadId: ThreadId;
@@ -1207,8 +1221,133 @@ export function makeOmpAdapter(
             input.expertSession?.skillPolicy?.version === 2 &&
             input.expertSession.skillPolicy.discovery === "fixed" &&
             input.expertSession.skillPolicy.nativeSubagents === "inherit";
+          let compatibilityCliVersion = expertPreparation?.cliVersion;
+          if (skillEvolution) {
+            const versionProbe = yield* runOmpAcpCliCommand({
+              childProcessSpawner,
+              binaryPath: resolveOmpCliBinaryPath(effectiveSettings.binaryPath, {
+                cwd,
+                env: buildOmpProcessEnv(effectiveSettings),
+              }),
+              args: ["--version"],
+              cwd,
+              env: buildOmpProcessEnv(effectiveSettings),
+            }).pipe(
+              Effect.mapError(
+                () =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/start",
+                    detail: "OMP restricted learning version probe failed.",
+                  }),
+              ),
+            );
+            compatibilityCliVersion =
+              versionProbe.exitCode === 0
+                ? parseOmpExpertCliVersion(versionProbe.stdout)
+                : undefined;
+            if (!compatibilityCliVersion)
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/start",
+                detail: "OMP could not identify its CLI for restricted learning capability checks.",
+              });
+          }
+          // Preserve the already-verified legacy source route. New releases prove
+          // the public extension contract inside the actual child session instead.
+          const useNativeCompat =
+            compatibilityCliVersion !== undefined &&
+            compatibilityCliVersion !== OMP_EXPERT_LEGACY_CLI_VERSION;
+          let nativeCompat: OmpNativeCompatLaunch | undefined;
+          if (
+            useNativeCompat &&
+            (inheritNativeTasks || learningPermissionContext || skillEvolution)
+          ) {
+            const privateTempDirectory = skillEvolution
+              ? skillEvolutionWorkspace?.preloadDir
+              : expertPreparation?.ownedTempDirectory;
+            if (!privateTempDirectory)
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/start",
+                detail: "OMP capability checks require a private session directory.",
+              });
+            nativeCompat = yield* Effect.tryPromise({
+              try: () =>
+                prepareOmpNativeCompat({
+                  privateTempDirectory,
+                  kind: skillEvolution ? "evolution" : "fixed",
+                  ...(skillEvolutionWorkspace
+                    ? { sessionDir: skillEvolutionWorkspace.sessionDir }
+                    : {}),
+                }),
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/start",
+                  detail:
+                    cause instanceof Error
+                      ? cause.message
+                      : "OMP public compatibility preparation failed.",
+                }),
+            });
+            if (nativeCompat.kind === "evolution") {
+              const compatEnv = buildOmpProcessEnv(effectiveSettings);
+              const configProbe = yield* runOmpAcpCliCommand({
+                childProcessSpawner,
+                binaryPath: resolveOmpCliBinaryPath(effectiveSettings.binaryPath, {
+                  cwd,
+                  env: compatEnv,
+                }),
+                args: ["config", "list", "--json"],
+                cwd,
+                env: {
+                  ...compatEnv,
+                  PI_CONFIG_FILES: [compatEnv.PI_CONFIG_FILES, nativeCompat.configOverlayPath]
+                    .filter(Boolean)
+                    .join(nodePath.delimiter),
+                },
+              }).pipe(
+                Effect.mapError(
+                  () =>
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "session/start",
+                      detail: "OMP restricted learning configuration probe failed.",
+                    }),
+                ),
+              );
+              const settings = yield* Effect.try({
+                try: () => {
+                  const parsed: unknown = JSON.parse(configProbe.stdout);
+                  if (!isRecord(parsed)) throw new Error("Invalid OMP configuration.");
+                  return parsed as Record<string, { value?: unknown }>;
+                },
+                catch: () =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session/start",
+                    detail: "OMP could not attest restricted learning settings.",
+                  }),
+              });
+              if (
+                configProbe.exitCode !== 0 ||
+                settings["autolearn.enabled"]?.value !== false ||
+                settings["autolearn.autoContinue"]?.value !== false ||
+                settings["advisor.enabled"]?.value !== false ||
+                settings["task.maxRecursionDepth"]?.value !== 0
+              ) {
+                return yield* new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/start",
+                  detail:
+                    "OMP did not disable native learning, advisors and task recursion for restricted extraction.",
+                });
+              }
+            }
+          }
           let idleTaskCompat: Awaited<ReturnType<typeof prepareOmpAcpIdleTaskCompat>> | undefined;
-          if (inheritNativeTasks || learningPermissionContext) {
+          if (!useNativeCompat && (inheritNativeTasks || learningPermissionContext)) {
             if (!expertPreparation?.ownedTempDirectory) {
               return yield* new ProviderAdapterRequestError({
                 provider: PROVIDER,
@@ -1272,7 +1411,7 @@ export function makeOmpAdapter(
           }
 
           let skillEvolutionCompat: OmpSkillEvolutionCompatLaunch | undefined;
-          if (skillEvolution) {
+          if (skillEvolution && !useNativeCompat) {
             if (!skillEvolutionWorkspace) {
               return yield* new ProviderAdapterRequestError({
                 provider: PROVIDER,
@@ -1347,7 +1486,9 @@ export function makeOmpAdapter(
 
           let idleTaskCompatMarkerResolve: (() => void) | undefined;
           const requiredCompatMarker =
-            skillEvolutionCompat?.expectedMarker ?? idleTaskCompat?.expectedMarker;
+            nativeCompat?.expectedMarker ??
+            skillEvolutionCompat?.expectedMarker ??
+            idleTaskCompat?.expectedMarker;
           const idleTaskCompatMarkerPromise = requiredCompatMarker
             ? new Promise<void>((resolve) => {
                 idleTaskCompatMarkerResolve = resolve;
@@ -1368,10 +1509,42 @@ export function makeOmpAdapter(
                     : {}),
                 }
               : {}),
+            ...(nativeCompat ? { nativeCompat } : {}),
             ...(idleTaskCompat ? { idleTaskCompat } : {}),
             ...(skillEvolutionCompat ? { disableExtensions: true, skillEvolutionCompat } : {}),
           };
 
+          const nativeEvents = yield* Queue.unbounded<OmpNativeCompatEvent, Cause.Done>();
+          yield* Scope.addFinalizer(sessionScope, Queue.end(nativeEvents).pipe(Effect.asVoid));
+          const nativeToolNames = new Map<string, string>();
+          const nativeToolWaiters = new Map<string, (name: string | undefined) => void>();
+          yield* Scope.addFinalizer(
+            sessionScope,
+            Effect.sync(() => {
+              for (const resolve of nativeToolWaiters.values()) resolve(undefined);
+              nativeToolWaiters.clear();
+            }),
+          );
+          const awaitNativeToolName = (toolCallId: string) =>
+            new Promise<string | undefined>((resolve) => {
+              const known = nativeToolNames.get(toolCallId);
+              if (known !== undefined) {
+                nativeToolNames.delete(toolCallId);
+                resolve(known);
+                return;
+              }
+              const timer = setTimeout(() => {
+                nativeToolWaiters.delete(toolCallId);
+                resolve(undefined);
+              }, 1_000);
+              nativeToolWaiters.set(toolCallId, (name) => {
+                clearTimeout(timer);
+                nativeToolWaiters.delete(toolCallId);
+                resolve(name);
+              });
+            });
+          let nativeQueued = 0;
+          let nativeBridgeFailed = false;
           const acp = yield* makeOmpAcpRuntime({
             ompSettings: effectiveSettings,
             ...(Object.keys(expertSessionSpawn).length > 0 ? { expertSessionSpawn } : {}),
@@ -1384,9 +1557,29 @@ export function makeOmpAdapter(
             ...(requiredCompatMarker
               ? {
                   onChildStderrLine: (line: string) => {
-                    if (line.trim() === requiredCompatMarker) {
-                      idleTaskCompatMarkerResolve?.();
+                    if (!nativeCompat) {
+                      if (line.trim() === requiredCompatMarker) idleTaskCompatMarkerResolve?.();
+                      return;
                     }
+                    const event = parseOmpNativeCompatEvent(line, nativeCompat);
+                    if (!event || nativeBridgeFailed) return;
+                    if (event.type === "ready") {
+                      idleTaskCompatMarkerResolve?.();
+                      return;
+                    }
+                    if (event.type === "approval") {
+                      const waiting = nativeToolWaiters.get(event.toolCallId);
+                      if (waiting) waiting(event.toolName);
+                      else {
+                        if (nativeToolNames.size >= 512)
+                          nativeToolNames.delete(nativeToolNames.keys().next().value!);
+                        nativeToolNames.set(event.toolCallId, event.toolName);
+                      }
+                      return;
+                    }
+                    nativeQueued += 1;
+                    if (nativeQueued > 256 || event.type === "failure") nativeBridgeFailed = true;
+                    Queue.offerUnsafe(nativeEvents, event);
                   },
                 }
               : {}),
@@ -1412,6 +1605,10 @@ export function makeOmpAdapter(
             yield* acp.handleRequestPermission((params) =>
               Effect.gen(function* () {
                 yield* logNative(input.threadId, "session/request_permission", params);
+                const nativeToolName =
+                  nativeCompat && learningPermissionContext
+                    ? yield* Effect.promise(() => awaitNativeToolName(params.toolCall.toolCallId))
+                    : undefined;
                 const policyOutcome = resolveAcpPermissionPolicy({
                   runtimeMode: input.runtimeMode,
                   interactionMode: ctx?.activeInteractionMode,
@@ -1423,7 +1620,11 @@ export function makeOmpAdapter(
                     kind: params.toolCall.kind,
                     title: params.toolCall.title,
                     rawInput: params.toolCall.rawInput,
-                    metadata: params.toolCall._meta,
+                    metadata: nativeCompat
+                      ? nativeToolName
+                        ? { synaraToolName: nativeToolName }
+                        : undefined
+                      : params.toolCall._meta,
                   },
                 });
                 if (policyOutcome !== undefined) {
@@ -1564,6 +1765,12 @@ export function makeOmpAdapter(
               onNone: () => Effect.fail(ompAcpTimeoutError("session/start")),
               onSome: Effect.succeed,
             });
+            if (nativeBridgeFailed)
+              return yield* new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/start",
+                detail: "OMP public compatibility constraints failed during startup.",
+              });
             if (requiredCompatMarker) {
               const markerOption = yield* Effect.promise(() => idleTaskCompatMarkerPromise).pipe(
                 Effect.timeoutOption(
@@ -1576,9 +1783,11 @@ export function makeOmpAdapter(
                 return yield* new ProviderAdapterRequestError({
                   provider: PROVIDER,
                   method: "session/start",
-                  detail: skillEvolutionCompat
-                    ? "OMP Skill extraction ACP child did not prove its constructed no-tool session."
-                    : "OMP fixed native task compatibility marker was missing from the ACP child.",
+                  detail: nativeCompat
+                    ? "OMP did not prove the required public extension capabilities in its session."
+                    : skillEvolutionCompat
+                      ? "OMP Skill extraction ACP child did not prove its constructed no-tool session."
+                      : "OMP fixed native task compatibility marker was missing from the ACP child.",
                 });
               }
             }
@@ -1657,6 +1866,7 @@ export function makeOmpAdapter(
               : {}),
             threadId: input.threadId,
             skillEvolution,
+            ...(nativeCompat ? { nativeCompat } : {}),
             ...(gatewaySessionLease ? { gatewaySessionLease } : {}),
             ...(input.lifecycleGeneration !== undefined
               ? { lifecycleGeneration: input.lifecycleGeneration }
@@ -1692,6 +1902,71 @@ export function makeOmpAdapter(
             stopped: false,
           };
 
+          if (nativeCompat)
+            yield* Stream.fromQueue(nativeEvents).pipe(
+              Stream.runForEach((event) =>
+                Effect.gen(function* () {
+                  nativeQueued -= 1;
+                  if (nativeBridgeFailed || event.type === "failure") {
+                    yield* stopSessionInternal(ctx, {
+                      exitKind: "error",
+                      reason: "OMP public compatibility bridge failed.",
+                    });
+                    return;
+                  }
+                  if (event.type !== "task" || ctx.stopped || ctx.resumeReplayReady !== undefined)
+                    return;
+                  // stdout ACP and the extension's stderr can be read in either
+                  // order. Let the native start event establish ownership first.
+                  const attributionDeadline = Date.now() + 3_000;
+                  while (
+                    !ctx.stopped &&
+                    (!ctx.turnToolCallIds.has(event.toolCallId) ||
+                      !ctx.nestedTaskLifecycleByToolCallId.has(event.toolCallId)) &&
+                    Date.now() < attributionDeadline
+                  ) {
+                    yield* waitForOmpQueuedTurnEventsDrained(ctx);
+                    yield* Effect.sleep(10);
+                  }
+                  if (ctx.stopped) return;
+                  const originalTurn = ctx.turnToolCallIds.get(event.toolCallId);
+                  if (!originalTurn || !ctx.nestedTaskLifecycleByToolCallId.has(event.toolCallId)) {
+                    yield* stopSessionInternal(ctx, {
+                      exitKind: "error",
+                      reason: "OMP could not attribute a native task update to its original turn.",
+                    });
+                    return;
+                  }
+                  const output = event.partialResult as { details: { async: { state: string } } };
+                  const state = output.details.async.state;
+                  const toolCall: AcpToolCallState = {
+                    toolCallId: event.toolCallId,
+                    title: event.toolName,
+                    kind: "other",
+                    status:
+                      state === "failed"
+                        ? "failed"
+                        : state === "completed" || state === "cancelled"
+                          ? "completed"
+                          : "inProgress",
+                    data: { rawInput: event.args, rawOutput: event.partialResult },
+                  };
+                  yield* emitNestedTaskLifecycle(ctx, toolCall, originalTurn);
+                  yield* offerRuntimeEvent(
+                    ctx.lifecycleGeneration,
+                    makeAcpToolCallEvent({
+                      stamp: yield* makeEventStamp(),
+                      provider: PROVIDER,
+                      threadId: ctx.threadId,
+                      turnId: originalTurn,
+                      toolCall: scopeOmpToolCallStateForTurn(originalTurn, toolCall),
+                      rawPayload: event,
+                    }),
+                  );
+                }),
+              ),
+              Effect.forkIn(ctx.scope),
+            );
           const notificationFiber = yield* Stream.runDrain(
             Stream.mapEffect(acp.getEvents(), (event) =>
               Effect.gen(function* () {
@@ -2260,6 +2535,16 @@ export function makeOmpAdapter(
             issue: "Turn requires non-empty text or attachments.",
           });
         }
+        if (ctx.nativeCompat?.kind === "evolution")
+          yield* Effect.tryPromise({
+            try: () => writeOmpNativeEvolutionPrompt(ctx.nativeCompat!, promptText ?? ""),
+            catch: () =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session/prompt",
+                detail: "OMP could not stage the explicitly submitted learning prompt.",
+              }),
+          });
         const harnessPolicy = ctx.skillEvolution
           ? null
           : takeOmpSynaraHarnessPolicyTextPart(ctx, agentGatewayCredentials !== undefined);

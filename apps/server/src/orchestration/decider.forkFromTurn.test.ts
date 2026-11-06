@@ -6,6 +6,7 @@ import {
   ProjectId,
   ThreadId,
   TurnId,
+  type AmbientContextSnapshot,
   type OrchestrationEvent,
 } from "@synara/contracts";
 import { Effect } from "effect";
@@ -19,6 +20,35 @@ const SOURCE_THREAD_ID = ThreadId.makeUnsafe("thread-fork-turn-source");
 const FORK_THREAD_ID = ThreadId.makeUnsafe("thread-fork-turn-target");
 const APPLE_MESSAGE_ID = MessageId.makeUnsafe("assistant:apple");
 const MODEL_SELECTION = { provider: "claudeAgent" as const, model: "claude-sonnet-4-6" };
+const ambientContext: AmbientContextSnapshot = {
+  schemaVersion: 1,
+  id: "snapshot-fork-import",
+  capturedAt: "2026-10-09T00:00:00.000Z",
+  items: [
+    {
+      observation: {
+        schemaVersion: 1,
+        id: "observation-fork-import",
+        targetKey: "target-fork-import",
+        capturedAt: "2026-10-09T00:00:00.000Z",
+        method: "selection event",
+        confidence: "exact",
+        type: "selection.text",
+        value: { text: "forked selection" },
+      },
+      provenance: [
+        {
+          sourceId: "source-fork-import",
+          observationId: "observation-fork-import",
+          capturedAt: "2026-10-09T00:00:00.000Z",
+          method: "selection event",
+          confidence: "exact",
+        },
+      ],
+      ambiguous: false,
+    },
+  ],
+};
 
 const eventBase = (sequence: number, aggregateKind: "project" | "thread", aggregateId: string) => ({
   sequence,
@@ -125,5 +155,33 @@ describe("thread.fork.create from a turn", () => {
     expect(
       projected.threads.find((thread) => thread.id === FORK_THREAD_ID)?.forkSourceMessageId,
     ).toBe(APPLE_MESSAGE_ID);
+  });
+
+  it("copies each saved user-message ambient snapshot into fork-import events", async () => {
+    const readModel = await createSourceReadModel();
+    const result = await Effect.runPromise(
+      decideOrchestrationCommand({
+        command: {
+          ...forkCommand(APPLE_MESSAGE_ID),
+          importedMessages: [
+            {
+              messageId: MessageId.makeUnsafe("user:ambient-fork"),
+              role: "user",
+              text: "Continue with this selection",
+              ambientContext,
+              createdAt: "2026-10-09T00:00:00.000Z",
+              updatedAt: "2026-10-09T00:00:00.000Z",
+            },
+          ],
+        },
+        readModel,
+      }),
+    );
+    const importedMessage = (Array.isArray(result) ? result : [result]).find(
+      (event) => event.type === "thread.message-sent",
+    );
+    expect(importedMessage?.type).toBe("thread.message-sent");
+    if (importedMessage?.type !== "thread.message-sent") return;
+    expect(importedMessage.payload.ambientContext).toEqual(ambientContext);
   });
 });

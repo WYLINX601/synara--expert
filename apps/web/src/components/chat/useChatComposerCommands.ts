@@ -1,3 +1,5 @@
+import { toastManager } from "../ui/toast";
+import { ambientResourceSnapshot, mergeAmbientContext } from "~/lib/ambientContext";
 import {
   ThreadId,
   type ModelSlug,
@@ -11,6 +13,7 @@ import type { AppSettings } from "../../appSettings";
 import { resolveFollowUpDispatchMode } from "../../appSettings";
 import { collapseExpandedComposerCursor, detectComposerTrigger } from "../../composer-logic";
 import {
+  useComposerDraftStore,
   captureComposerPromptHistorySavedDraft,
   type QueuedComposerChatTurn,
 } from "../../composerDraftStore";
@@ -199,6 +202,30 @@ export function useChatComposerCommands({
       }
       const { snapshot, trigger } = resolveActiveComposerTrigger();
       if (!trigger) return;
+      if (item.type === "ambient-resource") {
+        const store = useComposerDraftStore.getState();
+        // React Compiler cannot lower optional-chain value blocks inside try/catch.
+        const currentContext = store.draftsByThreadId[threadId]?.ambientContext;
+        try {
+          const captured = mergeAmbientContext(
+            currentContext,
+            ambientResourceSnapshot(item.resource),
+          );
+          applyComposerTriggerReplacement({
+            snapshot,
+            trigger,
+            base: "",
+            onApplied: () => store.setAmbientContext(threadId, captured),
+          });
+        } catch {
+          toastManager.add({
+            type: "error",
+            title: "Could not attach resource",
+            description: "Remove a pinned context item and try again.",
+          });
+        }
+        return;
+      }
       if (item.type === "hub-expert" || item.type === "hub-deliverable") {
         applyComposerTriggerReplacement({
           snapshot,
@@ -301,6 +328,7 @@ export function useChatComposerCommands({
       }
     },
     [
+      threadId,
       composerSelectLockRef,
       setComposerHighlightedItemId,
       applyComposerTriggerReplacement,

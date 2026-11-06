@@ -333,6 +333,8 @@ import {
 } from "./desktopStorageMigration";
 import { DESKTOP_IPC_CHANNELS } from "./ipcChannels";
 import { DesktopAppSnapManager } from "./appSnapManager";
+import { DesktopAmbientContext } from "./ambientContext/DesktopAmbientContext";
+import { registerAmbientContextIpc } from "./ambientContextIpc";
 import { notifyBackendComputerEmergencyStop } from "./computerEmergencyStopNotice";
 import { EscapeKillSwitchMonitor } from "./escapeKillSwitchMonitor";
 import {
@@ -644,6 +646,7 @@ const browserManager = new DesktopBrowserManager({
 });
 let browserHostPipeServer: BrowserHostPipeServer | null = null;
 let appSnapManager: DesktopAppSnapManager | null = null;
+let ambientContext: DesktopAmbientContext | null = null;
 let configuredUpdaterCacheDirName: string | null = null;
 
 browserManager.subscribe((state) => {
@@ -4844,18 +4847,25 @@ async function shutdownDesktopRuntime(reason: string): Promise<void> {
       cancelBackendReadinessWait();
       appSnapManager?.dispose();
       appSnapManager = null;
-      await shutdownBrowserServices({
-        revokeHost: () => disposeBrowserHostPipeServerForShutdown(reason),
-        closePages: () => browserManager.dispose(),
-        stopCapture: () => browserVaultCapture.dispose(),
-        clearKeys: () => browserVault.dispose(),
-      });
-      await browserSessionRestore?.shutdown();
-      restoreStdIoCapture?.();
-      if (betaDiagnostics) {
-        trackBetaDiagnostics("app.exit", { kind: "lifecycle" });
-        await betaDiagnostics.dispose().catch(() => undefined);
-      }
+      await runAfterDesktopShutdown(
+        ambientContext?.stop() ?? Promise.resolve(),
+        async () => {
+          await shutdownBrowserServices({
+            revokeHost: () => disposeBrowserHostPipeServerForShutdown(reason),
+            closePages: () => browserManager.dispose(),
+            stopCapture: () => browserVaultCapture.dispose(),
+            clearKeys: () => browserVault.dispose(),
+          });
+          await browserSessionRestore?.shutdown();
+          restoreStdIoCapture?.();
+          if (betaDiagnostics) {
+            trackBetaDiagnostics("app.exit", { kind: "lifecycle" });
+            await betaDiagnostics.dispose().catch(() => undefined);
+          }
+        },
+        { runAfterShutdownFailure: true },
+      );
+      ambientContext = null;
       desktopShutdownComplete = true;
       writeDesktopLogHeader(`${reason} shutdown complete`);
     },
@@ -4989,6 +4999,19 @@ function requestGracefulAppQuit(reason: string): void {
 }
 
 function registerIpcHandlers(): void {
+  ambientContext ??= new DesktopAmbientContext(
+    Path.join(app.getPath("userData"), "ambient-context-settings.json"),
+    () => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send(IPC.ambientContext.changed);
+      }
+    },
+  );
+  registerAmbientContextIpc(
+    ipcMain,
+    ambientContext,
+    (event) => event.sender === mainWindow?.webContents,
+  );
   const storageSnapshotPath = resolveSynaraStorageSnapshotPath(app.getPath("userData"));
 
   ipcMain.removeAllListeners(IPC.betaDiagnostics.enabled);

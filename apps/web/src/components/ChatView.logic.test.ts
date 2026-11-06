@@ -1539,6 +1539,26 @@ describe("shouldConsumePendingCustomBinaryConfirmation", () => {
 });
 
 describe("deriveComposerSendState", () => {
+  it.each([0, 1])(
+    "enables context-only sends only for a nonempty snapshot (%s items)",
+    (ambientContextItemCount) => {
+      const state = deriveComposerSendState({
+        prompt: "",
+        imageCount: 0,
+        fileCount: 0,
+        assistantSelectionCount: 0,
+        browserAnnotationCount: 0,
+        fileCommentCount: 0,
+        terminalContexts: [],
+        pastedTexts: [],
+        pullRequestContexts: [],
+        ambientContextItemCount,
+      });
+      expect(state.hasSendableContent).toBe(ambientContextItemCount > 0);
+      expect(state.trimmedPrompt).toBe("");
+    },
+  );
+
   it("treats expired terminal pills as non-sendable content", () => {
     const state = deriveComposerSendState({
       prompt: "\uFFFC",

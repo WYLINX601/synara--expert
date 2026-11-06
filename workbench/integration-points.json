@@ -46,7 +46,8 @@
         "apps/web/src/components/settings/ExpertEditor.tsx",
         "apps/web/src/components/settings/ExpertsSettingsPanel.tsx",
         "apps/web/src/workbench/ExpertCenterPage.tsx",
-        "apps/web/src/storeSelectors.ts"
+        "apps/web/src/storeSelectors.ts",
+        "apps/server/src/provider/acp/OmpNativeCompat.ts"
       ],
       "featureRoots": [
         "apps/server/src/experts/evolution",
@@ -89,7 +90,9 @@
         "apps/server/src/provider/acp/OmpExpertSession.test.ts",
         "apps/web/src/storeSelectors.test.ts",
         "apps/web/src/components/settings/ExpertsSettingsPanel.browser.tsx",
-        "apps/web/src/workbench/features/expert-evolution/LearningChangeDetails.browser.tsx"
+        "apps/web/src/workbench/features/expert-evolution/LearningChangeDetails.browser.tsx",
+        "apps/server/src/provider/acp/OmpNativeCompat.test.ts",
+        "apps/server/src/provider/acp/OmpNativeCompat.live.test.ts"
       ]
     },
     {
@@ -128,7 +131,8 @@
         "apps/server/src/provider/Layers/OmpAdapter.ts",
         "apps/server/src/provider/acp/AcpAdapterSupport.ts",
         "apps/server/src/provider/acp/OmpAcpIdleTaskCompat.ts",
-        "apps/server/src/agentGateway/computerToolPermission.ts"
+        "apps/server/src/agentGateway/computerToolPermission.ts",
+        "apps/server/src/provider/acp/OmpNativeCompat.ts"
       ],
       "featureRoots": ["apps/server/src/spaceMemory"],
       "featureFiles": [
@@ -159,7 +163,9 @@
         "apps/server/src/provider/Layers/OmpAdapter.fixedSkills.test.ts",
         "apps/server/src/provider/acp/AcpAdapterSupport.test.ts",
         "apps/server/src/provider/acp/OmpAcpIdleTaskCompat.test.ts",
-        "apps/server/src/agentGateway/computerToolPermission.test.ts"
+        "apps/server/src/agentGateway/computerToolPermission.test.ts",
+        "apps/server/src/provider/acp/OmpNativeCompat.test.ts",
+        "apps/server/src/provider/acp/OmpNativeCompat.live.test.ts"
       ]
     },
     {
@@ -363,7 +369,8 @@
         "apps/server/src/provider/acp/OmpAcpIdleTaskCompat.ts",
         "apps/server/src/experts/pinnedSkillReferences.ts",
         "apps/server/src/experts/skillRunResources.ts",
-        "apps/server/src/provider/claudeSkillProjection.ts"
+        "apps/server/src/provider/claudeSkillProjection.ts",
+        "apps/server/src/provider/acp/OmpNativeCompat.ts"
       ],
       "responsibility": "The managed Skill library owns stable IDs, full immutable content heads, provenance, filters and per-Expert CAS binding operations. The lifecycle lock serializes publication and durable idempotency journals; multi-Expert commands report partial results. RunSkillAssemblyStore freezes latest saved bindings and content only at actual root execution; approvals/recovery/goal and same Hub work retain that root. Task Persona/MCP identity remains pinned. Run records retain package references. Owner RPC and authenticated binary HTTP share the same store. Composer discovery reads the running assembly or an unfrozen latest preview; stable managed IDs resolve again at actual start. Adapters own native exclusion, original-content views, hashes, invocation and subagent inheritance. Native receipts require proof and remain separate from model execution evidence. Ordinary harness behavior remains provider-native; historical records are preserved. Static boundary checks cover declared direct imports, not transitive runtime isolation or an OS filesystem sandbox. OMP async Task state remains active after dispatch until native terminal metadata, retaining task identity and deduplication across parent turns. Fixed OMP v2 inherited tasks use a private exact-bundle Bun preload to forward idle native Task updates; selected CLI bytes, preflight and actual ACP marker are verified before model execution. Unknown bundles fail closed. Fixed Codex home selection is separate from ordinary source adoption and image-root validation. Content integrity is independent of the rebuildable entry index. Pinned references retain historical Run metadata and policy. Native adapters receive complete package trees and enforce the selected discovery set without deleting sibling SKILL.md files. Claude plugin and Agent interpretation is Claude-owned. Persistent Run-private copies have independent files and inherited owner references across Worker continuations; generated outputs never rewrite source packages. Current Expert editing and adoption use stable Skill bindings directly; legacy conversion endpoints and adapters are removed. Normal binding edits retain durable receipts, revision checks and management authorization.",
       "tests": [
@@ -410,7 +417,9 @@
         "apps/server/src/provider/acp/OmpAcpIdleTaskCompat.test.ts",
         "apps/server/src/experts/pinnedSkillReferences.test.ts",
         "apps/server/src/experts/skillRunResources.test.ts",
-        "apps/server/src/provider/claudeSkillProjection.test.ts"
+        "apps/server/src/provider/claudeSkillProjection.test.ts",
+        "apps/server/src/provider/acp/OmpNativeCompat.test.ts",
+        "apps/server/src/provider/acp/OmpNativeCompat.live.test.ts"
       ],
       "featureFiles": [
         "apps/server/src/experts/skillPackageLifecycle.ts",
@@ -949,6 +958,63 @@
         "apps/web/src/components/settings/ExpertTaskHistory.browser.tsx",
         "apps/web/src/storeState.test.ts",
         "apps/web/src/components/settings/SkillLibrarySettingsPanel.browser.tsx"
+      ]
+    },
+    {
+      "id": "ambient.context",
+      "surface": "desktop-composer",
+      "entryFiles": [
+        "packages/contracts/src/ambientContext.ts",
+        "packages/contracts/src/ipc.ts",
+        "packages/contracts/src/orchestration.ts",
+        "packages/contracts/src/provider.ts",
+        "apps/desktop/src/main.ts",
+        "apps/desktop/src/preload.ts",
+        "apps/desktop/src/ipcChannels.ts",
+        "apps/desktop/src/ambientContextIpc.ts",
+        "apps/server/src/orchestration/decider.ts",
+        "apps/server/src/orchestration/projector.ts",
+        "apps/server/src/orchestration/handoff.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.ts",
+        "apps/server/src/orchestration/Layers/ProjectionPipeline.ts",
+        "apps/server/src/orchestration/Layers/ProjectionSnapshotQuery.ts",
+        "apps/server/src/persistence/Layers/ProjectionThreadMessages.ts",
+        "apps/server/src/provider/Layers/ProviderService.ts",
+        "apps/web/src/components/ChatView.tsx",
+        "apps/web/src/routes/_chat.settings.tsx",
+        "apps/web/src/composerDraftDomain.ts",
+        "apps/web/src/composerDraftPersistence.ts",
+        "packages/contracts/src/wsCompatibility.ts",
+        "apps/web/src/workbench/host/ambientContextClient.ts",
+        "apps/server/src/workbench/persistence/AmbientContextSnapshotMigration.ts",
+        "apps/server/src/workbench/persistence/WorkbenchMigrations.ts",
+        "apps/server/src/workbench/persistence/WorkbenchUpgradePlan.ts",
+        "apps/server/src/persistence/MigrationBackup.ts"
+      ],
+      "featureRoots": ["apps/desktop/src/ambientContext", "apps/obsidian-plugin"],
+      "featureFiles": [
+        "apps/web/src/components/chat/AmbientContextComposer.tsx",
+        "apps/web/src/components/settings/AmbientContextSettingsPanel.tsx",
+        "apps/web/src/hooks/useAmbientContext.ts",
+        "apps/web/src/lib/ambientContext.ts",
+        "apps/web/src/components/chat/AmbientContextSummaryChip.tsx"
+      ],
+      "responsibility": "Independent desktop-owned optional ambient sources and type policies; source manifest, observation, and immutable user-message snapshot contracts stay separate from Space/Project context and Provider adapters. Obsidian companion pairs with a session-local authenticated loopback WebSocket; only enabled types are collected and current batches expire, replace, or clear. No task or filesystem operation API. Explicit composer pins live in existing per-thread drafts and snapshots flow through native message events, projections, queues, recovery and common provider prompt formatting as untrusted data. Settings and composer reuse existing _chat layout, query cache and draft state; no separate task runtime. Static imports and tests do not establish live Obsidian or provider acceptance.",
+      "tests": [
+        "packages/contracts/src/ambientContext.test.ts",
+        "packages/shared/src/ambientContext.test.ts",
+        "apps/desktop/src/ambientContext/AmbientContextManager.test.ts",
+        "apps/desktop/src/ambientContext/ObsidianSource.test.ts",
+        "apps/desktop/src/ambientContext/ObsidianPlugin.test.ts",
+        "apps/web/src/composerDraftStore.ambientContext.test.ts",
+        "apps/web/src/components/chat/AmbientContextComposer.browser.tsx",
+        "apps/web/src/components/ChatView.browser.tsx",
+        "apps/server/src/orchestration/Layers/ProjectionPipeline.test.ts",
+        "apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts",
+        "apps/server/src/provider/Layers/ProviderService.test.ts",
+        "apps/desktop/src/ambientContextIpc.test.ts",
+        "apps/desktop/src/ambientContext/DesktopAmbientContext.test.ts",
+        "apps/server/src/workbench/persistence/WorkbenchMigrations.test.ts"
       ]
     }
   ]

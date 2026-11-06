@@ -26,6 +26,7 @@ import { ProviderMentionReference, ProviderSkillReference } from "./providerDisc
 import { AsyncUserInput, AsyncUserInputQuestions, AsyncUserInputResponse } from "./asyncUserInput";
 import { ProjectKind } from "./project";
 import { ClaudeCacheObservation } from "./claudeCache";
+import { AmbientContextSnapshot } from "./ambientContext";
 import {
   ContextMode,
   ContextSnapshot,
@@ -774,6 +775,7 @@ export const OrchestrationMessage = Schema.Struct({
   role: OrchestrationMessageRole,
   text: Schema.String,
   textSegments: Schema.optional(Schema.Array(OrchestrationMessageTextSegment)),
+  ambientContext: Schema.optional(AmbientContextSnapshot),
   asyncUserInput: Schema.optional(AsyncUserInput),
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   skills: Schema.optional(Schema.Array(ProviderSkillReference)),
@@ -786,7 +788,9 @@ export const OrchestrationMessage = Schema.Struct({
   source: OrchestrationMessageSource.pipe(Schema.withDecodingDefault(() => "native")),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
-});
+}).check(
+  Schema.makeFilter(({ role, ambientContext }) => role === "user" || ambientContext === undefined),
+);
 export type OrchestrationMessage = typeof OrchestrationMessage.Type;
 
 export const ThreadHandoff = Schema.Struct({
@@ -1468,13 +1472,16 @@ export const ThreadHandoffImportedMessage = Schema.Struct({
   messageId: MessageId,
   role: Schema.Literals(["user", "assistant"]),
   text: Schema.String,
+  ambientContext: Schema.optional(AmbientContextSnapshot),
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   // Who wrote an imported user message. "agent" marks a subagent's brief from
   // the agent that launched it, so it never counts as a human message.
   dispatchOrigin: Schema.optional(MessageDispatchOrigin),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
-});
+}).check(
+  Schema.makeFilter(({ role, ambientContext }) => role === "user" || ambientContext === undefined),
+);
 export type ThreadHandoffImportedMessage = typeof ThreadHandoffImportedMessage.Type;
 
 const ThreadHandoffCreateCommand = Schema.Struct({
@@ -1654,6 +1661,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
     messageId: MessageId,
     role: Schema.Literal("user"),
     text: Schema.String.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
+    ambientContext: Schema.optional(AmbientContextSnapshot),
     attachments: ChatAttachmentList,
     skills: Schema.optional(Schema.Array(ProviderSkillReference)),
     mentions: Schema.optional(Schema.Array(ProviderMentionReference)),
@@ -1699,6 +1707,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     messageId: MessageId,
     role: Schema.Literal("user"),
     text: Schema.String.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
+    ambientContext: Schema.optional(AmbientContextSnapshot),
     attachments: UploadChatAttachmentList,
     skills: Schema.optional(Schema.Array(ProviderSkillReference)),
     mentions: Schema.optional(Schema.Array(ProviderMentionReference)),
@@ -2475,6 +2484,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
   messageId: MessageId,
   role: OrchestrationMessageRole,
   text: Schema.String,
+  ambientContext: Schema.optional(AmbientContextSnapshot),
   // Mirrors ThreadMessageAssistantDeltaCommand.segmentStartedAt: set on the
   // first delta of a new text segment (after a row-making event). The message
   // projection persists segment boundaries into the message's textSegments.
@@ -2491,7 +2501,9 @@ export const ThreadMessageSentPayload = Schema.Struct({
   source: OrchestrationMessageSource.pipe(Schema.withDecodingDefault(() => "native")),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
-});
+}).check(
+  Schema.makeFilter(({ role, ambientContext }) => role === "user" || ambientContext === undefined),
+);
 
 export const ThreadAsyncUserInputAnsweredPayload = Schema.Struct({
   threadId: ThreadId,

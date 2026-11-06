@@ -1044,6 +1044,9 @@ export function projectEvent(
             id: payload.messageId,
             role: payload.role,
             text: payload.text,
+            ...(payload.ambientContext !== undefined
+              ? { ambientContext: payload.ambientContext }
+              : {}),
             ...(payload.asyncUserInput ? { asyncUserInput: payload.asyncUserInput } : {}),
             ...(payload.attachments !== undefined ? { attachments: payload.attachments } : {}),
             ...(payload.skills !== undefined ? { skills: payload.skills } : {}),
@@ -1072,6 +1075,7 @@ export function projectEvent(
         let cappedMessages: ReadonlyArray<OrchestrationMessage>;
         if (existingIndex >= 0) {
           const entry = thread.messages[existingIndex]!;
+          const retainedAmbientContext = entry.ambientContext ?? message.ambientContext;
           const resolvedText = message.streaming
             ? `${entry.text}${message.text}`
             : message.text.length > 0
@@ -1097,6 +1101,9 @@ export function projectEvent(
             ...entryWithoutTextSegments,
             ...(message.asyncUserInput ? { asyncUserInput: message.asyncUserInput } : {}),
             text: resolvedText,
+            ...(retainedAmbientContext !== undefined
+              ? { ambientContext: retainedAmbientContext }
+              : {}),
             ...(nextSegments !== undefined ? { textSegments: nextSegments } : {}),
             streaming: message.streaming,
             source: message.source,

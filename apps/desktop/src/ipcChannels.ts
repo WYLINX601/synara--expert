@@ -3,6 +3,14 @@
 // Layer: Desktop IPC contract
 
 export const DESKTOP_IPC_CHANNELS = {
+  ambientContext: {
+    getState: "desktop:ambient-context-state",
+    configure: "desktop:ambient-context-configure",
+    getPairing: "desktop:ambient-context-pairing",
+    capture: "desktop:ambient-context-capture",
+    searchResources: "desktop:ambient-context-search",
+    changed: "desktop:ambient-context-changed",
+  },
   pickFolder: "desktop:pick-folder",
   saveFile: "desktop:save-file",
   confirm: "desktop:confirm",

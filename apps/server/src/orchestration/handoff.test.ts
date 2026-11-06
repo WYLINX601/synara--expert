@@ -3,7 +3,13 @@
 // Layer: Orchestration mapping tests
 // Depends on: handoff.
 
-import { MessageId, type OrchestrationMessage, ThreadId } from "@synara/contracts";
+import {
+  MessageId,
+  type AmbientContextSnapshot,
+  type OrchestrationMessage,
+  ThreadId,
+} from "@synara/contracts";
+import { formatAmbientContext } from "@synara/shared/ambientContext";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -32,6 +38,36 @@ const thread = (messages: ReadonlyArray<OrchestrationMessage>) => ({
   branch: null,
   worktreePath: null,
   messages,
+});
+
+const ambientContextFixture = (id: string): AmbientContextSnapshot => ({
+  schemaVersion: 1,
+  id,
+  capturedAt: "2026-07-08T00:00:00.000Z",
+  items: [
+    {
+      observation: {
+        schemaVersion: 1,
+        id: `${id}-observation`,
+        targetKey: `${id}-target`,
+        capturedAt: "2026-07-08T00:00:00.000Z",
+        method: "selection event",
+        confidence: "exact",
+        type: "selection.text",
+        value: { text: "historical selected evidence" },
+      },
+      provenance: [
+        {
+          sourceId: `${id}-source`,
+          observationId: `${id}-observation`,
+          capturedAt: "2026-07-08T00:00:00.000Z",
+          method: "selection event",
+          confidence: "exact",
+        },
+      ],
+      ambiguous: false,
+    },
+  ],
 });
 
 function hasUnpairedSurrogate(text: string): boolean {
@@ -67,6 +103,21 @@ describe("listPriorTranscriptMessages", () => {
     expect(result[1]).toBe(second);
     expect(listPriorTranscriptMessages(thread(messages), first.id)).toEqual([]);
   });
+
+  it("replays a context-only user turn from its persisted snapshot", () => {
+    const priorContext = ambientContextFixture("snapshot-context-only");
+    const priorMessage = {
+      ...message(0, "user", ""),
+      ambientContext: priorContext,
+    };
+    const currentMessage = message(1, "user", "current user message");
+    const messages = thread([priorMessage, currentMessage]);
+
+    expect(listPriorTranscriptMessages(messages, currentMessage.id)).toEqual([priorMessage]);
+    const text = buildPriorTranscriptBootstrapText(messages, currentMessage.id);
+    expect(text).toContain(formatAmbientContext(priorContext));
+    expect(text).not.toContain("User:\n\nUser: current");
+  });
 });
 
 describe("buildHandoffBootstrapText", () => {
@@ -97,6 +148,44 @@ describe("buildHandoffBootstrapText", () => {
 });
 
 describe("buildPriorTranscriptBootstrapText", () => {
+  it("includes saved prior snapshots once and excludes the current turn snapshot", () => {
+    const priorContext = ambientContextFixture("snapshot-prior");
+    const currentContext = ambientContextFixture("snapshot-current");
+    const priorMessage = {
+      ...message(0, "user", "prior user message"),
+      ambientContext: priorContext,
+    };
+    const currentMessage = {
+      ...message(1, "user", "current user message"),
+      ambientContext: currentContext,
+    };
+
+    const text = buildPriorTranscriptBootstrapText(
+      thread([priorMessage, currentMessage]),
+      currentMessage.id,
+    );
+
+    expect(text).toContain(formatAmbientContext(priorContext));
+    expect(text!.match(/<ambient_context_data>/g)).toHaveLength(1);
+    expect(text).not.toContain(currentContext.id);
+  });
+
+  it("never emits a partial ambient context block when the transcript budget is too small", () => {
+    const priorMessage = {
+      ...message(0, "user", "prior user message"),
+      ambientContext: ambientContextFixture("snapshot-over-budget"),
+    };
+    const currentMessage = message(1, "user", "current user message");
+    const text = buildPriorTranscriptBootstrapText(
+      thread([priorMessage, currentMessage]),
+      currentMessage.id,
+      320,
+    );
+
+    expect(text).not.toContain("<ambient_context_data>");
+    expect(text).toContain("[Ambient Context snapshot omitted to fit transcript budget.]");
+  });
+
   it("keeps every message with a plain summary header when under budget", () => {
     const messages = Array.from({ length: 10 }, (_, index) =>
       message(index, index % 2 === 0 ? "user" : "assistant", `marker-${index} short message`),

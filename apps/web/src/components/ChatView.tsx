@@ -1,3 +1,5 @@
+import { useAmbientResources } from "~/hooks/useAmbientContext";
+import { AmbientContextComposer } from "./chat/AmbientContextComposer";
 import { type LegendListRef } from "@legendapp/list/react";
 import {
   parseComputerInvocation,
@@ -2665,6 +2667,10 @@ export default function ChatView({
     activeHubId !== null &&
     effectiveComposerTriggerKind === "mention" &&
     composerCommandPicker === null;
+  const ambientResources = useAmbientResources(
+    mentionTriggerQuery,
+    effectiveComposerTriggerKind === "mention" && composerCommandPicker === null,
+  );
   const composerMenuItems = useMemo(() => {
     if (composerCommandPicker === "fork-target") {
       return [
@@ -2706,7 +2712,16 @@ export default function ChatView({
       ];
     }
 
-    return showHubMentions ? hubMentions.items : normalComposerMenuItems;
+    return [
+      ...(ambientResources.data ?? []).map((resource) => ({
+        id: `ambient:${resource.sourceId}:${resource.targetKey}`,
+        type: "ambient-resource" as const,
+        resource,
+        label: resource.title,
+        description: "Attach file identity only",
+      })),
+      ...(showHubMentions ? hubMentions.items : normalComposerMenuItems),
+    ];
   }, [
     activeThread?.envMode,
     activeThread?.worktreePath,
@@ -2714,6 +2729,7 @@ export default function ChatView({
     normalComposerMenuItems,
     showHubMentions,
     hubMentions.items,
+    ambientResources.data,
   ]);
   const composerMenuOpen = Boolean(composerTrigger || composerCommandPicker);
   // The `+` panel yields the floating slot to the slash/mention menu as soon as a
@@ -6455,6 +6471,7 @@ export default function ChatView({
         data-chat-pane-scope={paneScopeId}
       >
         <ComposerColumnFrame>
+          <AmbientContextComposer key={threadId} threadId={threadId} />
           {/* A bare wrapper keeps the normal-flow panels' -mb-px seam onto the input shell
                 via margin collapse. */}
           <div>

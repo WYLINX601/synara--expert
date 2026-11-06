@@ -562,7 +562,7 @@ describe("prepareOmpExpertSession", () => {
     expect(calls.some((args) => args[0] === "skill")).toBe(false);
   });
 
-  it("fails closed for unverified CLI versions and cleans up failed probes", async () => {
+  it("fails closed for an unidentified CLI and cleans up failed probes", async () => {
     const root = await makeRoot();
     const cwd = path.join(root, "project");
     const skill = await createSkill(root);
@@ -570,12 +570,14 @@ describe("prepareOmpExpertSession", () => {
     await mkdir(tempDirectory);
     const preparation = await Effect.runPromise(
       prepareOmpExpertSession({
-        ...baseInput(cwd, makeRunner({ cwd, skills: [skill], version: "omp/18.12.2" }), [skill]),
+        ...baseInput(cwd, makeRunner({ cwd, skills: [skill], version: "omp/not-a-version" }), [
+          skill,
+        ]),
         tempDirectory,
       }),
     );
 
-    expect(preparation.issues.join(" ")).toContain("no verified Expert projection contract");
+    expect(preparation.issues.join(" ")).toContain("unrecognized CLI version");
     expect(preparation.configOverlayPath).toBeUndefined();
     expect(await readdir(tempDirectory)).toEqual([]);
     await Effect.runPromise(preparation.cleanup());
@@ -719,6 +721,7 @@ describe("OMP fixed native Skill preparation", () => {
     await removeFixedProjectionStaging(staging);
   });
   function fixedRunner(control: {
+    version?: string;
     foreign?: boolean;
     duplicateName?: boolean;
     warnings?: ReadonlyArray<unknown>;
@@ -730,7 +733,7 @@ describe("OMP fixed native Skill preparation", () => {
     return (args, _cwd, env) =>
       Effect.tryPromise({
         try: async () => {
-          if (args[0] === "--version") return result("omp/18.12.1");
+          if (args[0] === "--version") return result(`omp/${control.version ?? "18.12.1"}`);
           if (args[0] === "config" && !env.PI_CONFIG_FILES)
             return result(JSON.stringify(nativeConfig()));
           const file = env.PI_CONFIG_FILES!.split(path.delimiter).at(-1)!,
@@ -797,6 +800,32 @@ describe("OMP fixed native Skill preparation", () => {
         catch: (error) => error,
       });
   }
+  it.each(["18.12.2", "18.16.0", "19.0.0"])(
+    "uses effective native capabilities rather than version equality for %s",
+    async (version) => {
+      const { root, session } = await fixedFixture();
+      const control = { version, foreign: false };
+      const preparation = await Effect.runPromise(
+        prepareOmpExpertSession({
+          cwd: root,
+          env: { HOME: root },
+          expertSession: session,
+          lifecycleGeneration: "version-capability-test",
+          tempDirectory: root,
+          runCli: fixedRunner(control),
+        }),
+      );
+      expect(preparation.issues).toEqual([]);
+      expect(preparation.cliVersion).toBe(version);
+      expect(preparation.loadedSkills).toEqual(session.skills);
+      control.foreign = true;
+      await expect(Effect.runPromise(preparation.verify!())).rejects.toThrow(
+        /unselected|catalog/iu,
+      );
+      await Effect.runPromise(preparation.cleanup());
+    },
+  );
+
   it.each([false, true])(
     "fixes every source/filter and native subagent gate (empty=%s), then checks reloads",
     async (empty) => {

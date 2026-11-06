@@ -756,6 +756,7 @@ function mergeStreamingMessage(
     existingMessage.text === nextText &&
     existingMessage.textSegments === nextTextSegments &&
     existingMessage.asyncUserInput === nextAsyncUserInput &&
+    existingMessage.ambientContext === incomingMessage.ambientContext &&
     existingMessage.streaming === incomingMessage.streaming &&
     existingMessage.attachments === nextAttachments &&
     providerReferenceArraysEqual(existingMessage.skills, nextSkills) &&
@@ -776,6 +777,7 @@ function mergeStreamingMessage(
   return {
     ...existingMessageWithoutSegments,
     text: nextText,
+    ...(incomingMessage.ambientContext ? { ambientContext: incomingMessage.ambientContext } : {}),
     ...(nextTextSegments !== undefined ? { textSegments: nextTextSegments } : {}),
     updatedAt: nextUpdatedAt,
     ...(nextAsyncUserInput ? { asyncUserInput: nextAsyncUserInput } : {}),
@@ -818,6 +820,7 @@ function applyThreadMessageSentEvent(thread: Thread, event: ThreadMessageSentEve
       attachments: payload.attachments ?? [],
       ...(payload.skills !== undefined ? { skills: payload.skills } : {}),
       ...(payload.mentions !== undefined ? { mentions: payload.mentions } : {}),
+      ...(payload.ambientContext ? { ambientContext: payload.ambientContext } : {}),
       streaming: payload.streaming,
       source: payload.source,
       createdAt: payload.createdAt,

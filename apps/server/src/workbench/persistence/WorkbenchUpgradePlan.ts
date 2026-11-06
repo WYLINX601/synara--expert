@@ -379,6 +379,7 @@ const emptySchemaState: WorkbenchSchemaState = {
   contextSchemaObjects: [],
   projectionThreadsExists: false,
   bindingColumn: null,
+  ambientContextColumn: null,
   runtimeRecordColumns: null,
   contextTableColumns: {
     context_meta: null,

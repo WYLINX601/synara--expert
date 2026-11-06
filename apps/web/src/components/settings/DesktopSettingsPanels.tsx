@@ -874,3 +874,5 @@ export function BetaChannelSettingsPanel({ active }: { readonly active: boolean 
     </SettingsCard>
   );
 }
+
+export { AmbientContextSettingsPanel } from "./AmbientContextSettingsPanel";

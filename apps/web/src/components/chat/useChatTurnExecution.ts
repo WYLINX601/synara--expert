@@ -1,4 +1,6 @@
+import { readAmbientContextSendAuthorization } from "~/workbench/host/ambientContextClient";
 import type {
+  AmbientContextSnapshot,
   ProjectId,
   ProjectKind,
   ProjectScript,
@@ -94,6 +96,8 @@ interface PreparedChatTurn {
   outgoingMessageText: string;
   mentionedSkillsForSend: ProviderSkillReference[];
   mentionedPluginMentionsForSend: ProviderMentionReference[];
+  ambientContextForSend: AmbientContextSnapshot | undefined;
+  ambientContextGenerationForSend: string | null;
   dispatchMode: "queue" | "steer";
   sourceProposedPlanForSend: QueuedComposerChatTurn["sourceProposedPlan"];
   shouldResumeSettledLocalThread: boolean;
@@ -238,6 +242,8 @@ export function useChatTurnExecution({
         outgoingMessageText,
         mentionedSkillsForSend,
         mentionedPluginMentionsForSend,
+        ambientContextForSend,
+        ambientContextGenerationForSend,
         dispatchMode,
         sourceProposedPlanForSend,
         shouldResumeSettledLocalThread,
@@ -671,6 +677,11 @@ export function useChatTurnExecution({
               "Choose how to resume the held message before sending another message.",
             );
           }
+          const ambientAuthorization = readAmbientContextSendAuthorization(
+            ambientContextForSend,
+            ambientContextGenerationForSend,
+          );
+          if (!ambientAuthorization.allowed) throw new Error(ambientAuthorization.message);
           await api.orchestration
             .dispatchCommand({
               type: "thread.turn.start",
@@ -680,6 +691,7 @@ export function useChatTurnExecution({
                 messageId: messageIdForSend,
                 role: "user",
                 text: outgoingMessageText,
+                ...(ambientContextForSend ? { ambientContext: ambientContextForSend } : {}),
                 attachments: turnAttachments,
                 ...(fixedSkills.length > 0 ? { skills: fixedSkills } : {}),
                 ...(mentionedPluginMentionsForSend.length > 0
@@ -868,7 +880,8 @@ export function useChatTurnExecution({
           queuedChatTurn === null &&
           !turnStartSucceeded &&
           (!retryDraft ||
-            (retryDraft.prompt.length === 0 &&
+            ((retryDraft.ambientContext?.items.length ?? 0) === 0 &&
+              retryDraft.prompt.length === 0 &&
               retryDraft.images.length === 0 &&
               retryDraft.files.length === 0 &&
               retryDraft.assistantSelections.length === 0 &&
@@ -945,6 +958,9 @@ export function useChatTurnExecution({
                 value.forEach((context) =>
                   useComposerDraftStore.getState().addPullRequestContext(threadIdForSend, context),
                 ))(composerPullRequestContextsSnapshot);
+          useComposerDraftStore
+            .getState()
+            .setAmbientContext(threadIdForSend, ambientContextForSend);
           if (isFocusedSend) {
             updateSelectedComposerSkills(composerSkillsSnapshot);
             updateSelectedComposerMentions(composerMentionsSnapshot);

@@ -46,6 +46,14 @@ Context 页面、自动保存与旧指令迁移通过 `workbench/host/contextCli
 
 连接状态与共享连接代次由现有宿主 transport 提供。重连开始即暂停依赖 Context 的写入，当前代次的实际读取成功后再恢复；多个观察者复用同一查询结果，旧代次的晚返回不能授权新连接。自动保存队列仍按原 API、数据实例和项目区分。相同项目或 Space 切换数据所有者时，未保存、已发送待回执及结果不确定的操作都属于受保护状态；保留旧草稿及离开保护，明确丢弃后才采纳新所有者。首次发送与迁移交互在异步步骤返回后再次核对当前连接及数据归属，不以开始时的闭包快照放行。
 
+### Ambient Context 接入（2026-11-06）
+
+`ambient.context` 独立拥有来源能力、类型策略、最新实时批次与捕获规则。跨进程契约归 contracts，过滤/关联/去重/不可信数据格式化归 shared 显式子路径；Electron 主进程负责来源启停、当前应用身份下的偏好、配对凭证及 IPC。Obsidian、Browser 和 System 是并列可选来源，不注册成 Provider，不复用持久 Space/Project Context 或 External MCP 事件通道。
+
+来源关闭与类型收紧立即撤销采集代次并清空 Active；适配器停止后才重新启动。配对通道只有受限数据发布和资源身份检索，不授予任务或文件操作权限。Active 不持久化，用户显式固定内容进入原 ComposerDraft，发送后随原用户消息事件/投影保存不可变快照。排队、派生、重放与 Provider 入口使用既定消息快照，不重新读取当前应用；统一格式化仅作为不可信任务输入。
+
+设置和输入区继续位于现有 `_chat.settings` / `_chat → ChatView` 父布局，继承宿主查询、草稿、消息与快捷键；不宣称存在隔离的聊天运行时。新增可空投影列通过工作台扩展迁移登记，上游迁移目录保持原样。接入清单登记 desktop、web 与宿主消息接缝；静态边界检查不证明配对、权限或真实应用运行。当前范围、操作步骤与实际验收分别见[实施入口](../context/ambient-context-implementation-plan-2026-11-06.md)及[专项验收](./ambient-context-obsidian-acceptance-2026-11-06.md)。
+
 ### Hub 协作模块接入（2026-10-22）
 
 `hub.collaboration` 负责专家团预设、Hub 配置副本、计划修订、固定候选、审核与人工出口；宿主继续拥有 Goal、Task、Attempt、HubWork、Provider 会话、线程和成果版本。首期一个 Hub 同时一份活跃计划，确认后绑定一个原生 Goal；不新增执行器或绕过原生队列。
@@ -115,6 +123,8 @@ Context 页面、自动保存与旧指令迁移通过 `workbench/host/contextCli
 内容校验和固定引用是 Expert 领域的只读能力，派生索引不参与源文件完整性。`fixedSkillProjection` 只定位完整资源树；`claudeSkillProjection` 独占 Claude 插件、Agent 和命名规则。Run 私有工作树由 Run 资源能力持久化，原生适配器使用其实际路径；continuation 继承资源所有者引用，不能用新的 Worker Run ID 重建或覆盖旧输出。
 
 OMP 提炼继续经过已持久登记的 purpose、ProviderService 和现有 ACP 生命周期。仅该用途启用固定 bundle 哈希／锚点校验的私有原生兼容变换，强制空工具和固定请求，且跳过普通 Gateway、MCP 与 harness 消息注入。账户及模型来源沿用已选配置；版本或断言不匹配只阻断该提炼能力，不改写全局 CLI。受控 transport、真实模型及操作系统隔离是不同证据。接入清单和实际检查见[优化验收](./skill-management-optimization-acceptance-2026-10-29.md)。
+
+2026-11-06 兼容策略更新：18.12.1 保留上述已验证的旧 bundle 接缝；其他可识别的正式版本改用 OMP 官方 `--trusted-extension` 接口，不再以版本相等作为 Expert 准入条件。启动仍核验有效配置、固定 Skill 清单与路径、内容完整性，以及当前子进程的扩展就绪信号。扩展在会话作用域内转交原生后台任务事件与权限工具名；提炼额外验证空工具及固定系统提示，并将模型上下文替换为本次明确提交的请求。检查与启动使用同一账户环境解析可执行文件；必要能力缺失时拒绝对应会话，不修改全局 CLI 或账户设置。版本识别通过不等于运行时兼容已验证，实际证据见 [OMP 兼容验收](./omp-runtime-compatibility-2026-11-06.md)。
 
 ### 路由与布局契约
 

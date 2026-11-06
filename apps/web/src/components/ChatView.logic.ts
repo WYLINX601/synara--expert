@@ -1688,6 +1688,7 @@ export function buildSuggestedWorktreeName(input: {
 export function deriveComposerSendState(options: {
   prompt: string;
   imageCount: number;
+  ambientContextItemCount?: number;
   fileCount: number;
   assistantSelectionCount: number;
   browserAnnotationCount: number;
@@ -1718,6 +1719,7 @@ export function deriveComposerSendState(options: {
     hasSendableContent:
       trimmedPrompt.length > 0 ||
       options.imageCount > 0 ||
+      (options.ambientContextItemCount ?? 0) > 0 ||
       options.fileCount > 0 ||
       options.assistantSelectionCount > 0 ||
       options.browserAnnotationCount > 0 ||

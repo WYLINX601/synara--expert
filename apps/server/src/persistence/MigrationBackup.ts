@@ -673,6 +673,17 @@ async function transformMigrationBackup(
 const isCompressedMigrationBackup = (backupPath: string) =>
   backupPath.toLowerCase().endsWith(".sqlite.gz");
 
+function migrationBackupInspectionTemporaryPath(backupPath: string): string {
+  const databaseBasename = canonicalDatabaseBasenameFromMigrationBackupName(
+    path.basename(backupPath),
+  );
+  const temporaryBasename =
+    databaseBasename === undefined
+      ? `.migration-backup-inspection-${randomUUID()}.partial`
+      : `.${databaseBasename}.pre-migration-inspect-${randomUUID()}.partial`;
+  return path.join(path.dirname(backupPath), temporaryBasename);
+}
+
 /**
  * Removes matching regular files from a directory.
  *
@@ -705,17 +716,21 @@ async function removeRegularFiles(
 const removeStaleRegularFiles = (directory: string, matches: (name: string) => boolean) =>
   removeRegularFiles(directory, matches, { olderThanMs: STALE_RECOVERY_ARTIFACT_AGE_MS });
 
+/** Matches the bounded generic name used when inspecting noncanonical legacy backups. */
+const GENERIC_MIGRATION_BACKUP_INSPECTION_PARTIAL =
+  /^\.migration-backup-inspection-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.partial$/iu;
+
 /**
- * Matches the temporary snapshot `createMigrationBackup` writes before renaming
- * a finished backup into place.
- *
- * The leading dot is load-bearing: it is precisely why these orphans never
- * matched the finished-backup prefix that retention pruning filters on, so a
- * stranded partial could never be reclaimed by any existing cleanup path.
+ * Matches temporary snapshots and decompressed backup inspections before
+ * their owner promotes or removes them. The leading dot keeps them out of
+ * finished-backup retention; the exact known prefixes let startup reclaim
+ * stranded files without sweeping unrelated artifacts.
  */
 function isMigrationBackupPartial(dbBasename: string): (name: string) => boolean {
   const partialPrefix = `.${dbBasename}.pre-migration-`;
-  return (name) => name.startsWith(partialPrefix) && name.endsWith(".partial");
+  return (name) =>
+    (name.startsWith(partialPrefix) && name.endsWith(".partial")) ||
+    GENERIC_MIGRATION_BACKUP_INSPECTION_PARTIAL.test(name);
 }
 
 /** Removes only the known snapshot file from an unchanged, real scratch directory. */
@@ -1374,10 +1389,7 @@ async function inspectMigrationBackupFile(
 ): Promise<SqliteMigrationBackupInspection> {
   if (!isCompressedMigrationBackup(backupPath)) return inspectSqliteMigrationBackup(backupPath);
   // Match the existing startup partial sweep if inspection is killed mid-stream.
-  const temporaryPath = path.join(
-    path.dirname(backupPath),
-    `.${path.basename(backupPath)}.${randomUUID()}.partial`,
-  );
+  const temporaryPath = migrationBackupInspectionTemporaryPath(backupPath);
   const ownedStat = await transformMigrationBackup(backupPath, temporaryPath, "decompress");
   try {
     return await inspectSqliteMigrationBackup(temporaryPath);
@@ -1783,12 +1795,25 @@ export type MigrationRecoveryMarker = {
   readonly payload: Record<string, unknown>;
 };
 
+const GENERATED_MIGRATION_BACKUP_SUFFIX = String.raw`\.pre-migration-[A-Za-z0-9_-]+-to-v\d+-\d{8}T\d{9}Z-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.sqlite(?:\.gz)?`;
+
 function generatedBackupNamePattern(dbPath: string): RegExp {
   const escapedBasename = path.basename(dbPath).replaceAll(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  return new RegExp(
-    `^${escapedBasename}\\.pre-migration-[A-Za-z0-9_-]+-to-v\\d+-\\d{8}T\\d{9}Z-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.sqlite(?:\\.gz)?$`,
-    "iu",
+  return new RegExp(`^${escapedBasename}${GENERATED_MIGRATION_BACKUP_SUFFIX}$`, "iu");
+}
+
+function canonicalDatabaseBasenameFromMigrationBackupName(backupName: string): string | undefined {
+  const match = new RegExp(String.raw`^([\s\S]+)${GENERATED_MIGRATION_BACKUP_SUFFIX}$`, "iu").exec(
+    backupName,
   );
+  const databaseBasename = match?.[1];
+  if (
+    databaseBasename === undefined ||
+    !generatedBackupNamePattern(databaseBasename).test(backupName)
+  ) {
+    return undefined;
+  }
+  return databaseBasename;
 }
 
 async function readRegularFileNoFollow(filePath: string): Promise<string> {

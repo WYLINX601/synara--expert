@@ -313,6 +313,7 @@ describe("migration lineage guard", () => {
         resolveReleaseTags(
           () => ["v1.0.6-remote.14", "v1.0.6-remote.8", "v1.0.6-beta.1", "v1.0.5", "v0.0.18.1"],
           family,
+          () => false,
         ),
       ).toEqual(expected);
     },

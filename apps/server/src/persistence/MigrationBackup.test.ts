@@ -71,6 +71,29 @@ async function makeDbPath(): Promise<string> {
   return path.join(directory, "state.sqlite");
 }
 
+async function makeDbPathWithLongBackupInspectionPath(): Promise<string> {
+  const databaseBasename = "state.sqlite";
+  const prefix = "synara-migration-backup-";
+  const temporaryRoot = process.platform === "win32" ? os.tmpdir() : "/tmp";
+  const legacyBackupBasename =
+    `${databaseBasename}.pre-migration-v108-wb0-fmt0-legacy109-to-v${currentOfficialMigrationCount()}` +
+    `-${"0".repeat(19)}-${"0".repeat(36)}.sqlite.gz`;
+  const legacyInspectionBasename = `.${legacyBackupBasename}.${"0".repeat(36)}.partial`;
+  let padding = "";
+  const projectedLegacyInspectionPath = () =>
+    path.join(
+      migrationBackupDirectory(
+        path.join(temporaryRoot, `${prefix}${padding}${"0".repeat(6)}`, databaseBasename),
+      ),
+      legacyInspectionBasename,
+    );
+  while (projectedLegacyInspectionPath().length <= 260) padding += "x";
+
+  const rootDirectory = await fs.mkdtemp(path.join(temporaryRoot, `${prefix}${padding}`));
+  tempDirectories.push(rootDirectory);
+  return path.join(rootDirectory, databaseBasename);
+}
+
 const runWithDatabase = <A, E>(dbPath: string, effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
   Effect.runPromise(effect.pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath }))));
 
@@ -452,6 +475,10 @@ describe("migration backups", () => {
     const dbPath = await makeDbPath();
     const backupDirectory = migrationBackupDirectory(dbPath);
     await fs.mkdir(backupDirectory, { recursive: true });
+    const genericInspectionPartial = path.join(
+      backupDirectory,
+      `.migration-backup-inspection-${randomUUID()}.partial`,
+    );
     const stalePartial = path.join(
       backupDirectory,
       `.${path.basename(dbPath)}.pre-migration-abandoned.sqlite.partial`,
@@ -460,6 +487,7 @@ describe("migration backups", () => {
       backupDirectory,
       `.${path.basename(dbPath)}.pre-migration-active.sqlite.partial`,
     );
+    await fs.writeFile(genericInspectionPartial, "stranded legacy inspection");
     await fs.writeFile(stalePartial, "stale");
     await fs.writeFile(recentPartial, "recent");
     const staleDate = new Date(Date.now() - 48 * 60 * 60 * 1_000);
@@ -487,6 +515,7 @@ describe("migration backups", () => {
     // gigabytes of unreclaimable snapshots.
     await expect(fs.stat(stalePartial)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.stat(recentPartial)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(genericInspectionPartial)).rejects.toMatchObject({ code: "ENOENT" });
 
     const staleRestore = `${dbPath}.00000000-0000-0000-0000-000000000000.restore`;
     const recentRestore = `${dbPath}.11111111-1111-1111-1111-111111111111.restore`;
@@ -1250,7 +1279,8 @@ describe("migration backups", () => {
   it.each([109, 110] as const)(
     "backs up, adopts, and restores exact file-backed legacy migration %i history",
     async (legacyThrough) => {
-      const dbPath = await makeDbPath();
+      const dbPath =
+        legacyThrough === 109 ? await makeDbPathWithLongBackupInspectionPath() : await makeDbPath();
       await runWithDatabase(
         dbPath,
         Effect.gen(function* () {
@@ -1292,6 +1322,32 @@ describe("migration backups", () => {
       const provenance = JSON.parse(
         await fs.readFile(migrationBackupProvenancePath(dbPath), "utf8"),
       ) as Record<string, unknown>;
+      if (legacyThrough === 109) {
+        const backupPath = String(provenance.backupPath);
+        const previousInspectionPath = path.join(
+          path.dirname(backupPath),
+          `.${path.basename(backupPath)}.${"0".repeat(36)}.partial`,
+        );
+        expect(previousInspectionPath.length).toBe(261);
+        const vacuumSnapshotPath = path.join(
+          migrationBackupDirectory(dbPath),
+          `.${path.basename(backupPath).slice(0, -".gz".length)}.partial`,
+          "snapshot.sqlite",
+        );
+        expect(dbPath.length).toBeLessThan(260);
+        expect(backupPath.length).toBeLessThan(260);
+        expect(vacuumSnapshotPath.length).toBeLessThan(260);
+
+        const compressedBackup = await fs.readFile(backupPath);
+        await fs.writeFile(backupPath, "invalid compressed backup");
+        await expect(Effect.runPromise(restoreMarkedMigrationBackup(dbPath))).rejects.toThrow();
+        expect(
+          (await fs.readdir(migrationBackupDirectory(dbPath))).filter((name) =>
+            name.endsWith(".partial"),
+          ),
+        ).toEqual([]);
+        await fs.writeFile(backupPath, compressedBackup);
+      }
       expect(provenance).toMatchObject({
         version: 3,
         phase: "migration-completed",

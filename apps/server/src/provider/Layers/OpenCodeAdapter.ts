@@ -338,6 +338,15 @@ const installOpenCodeGatewayMcp = Effect.fn("installOpenCodeGatewayMcp")(functio
           ),
         ).pipe(
           Effect.timeout("10 seconds"),
+          Effect.flatMap((added) => {
+            const connectorStatus = added.data?.[connector.name]?.status;
+            return connectorStatus === "connected"
+              ? Effect.void
+              : Effect.logWarning("OpenCode connector MCP install failed", {
+                  connector: connector.name,
+                  detail: `status: ${connectorStatus ?? "missing"}`,
+                });
+          }),
           // Log the summarized detail only: the raw cause can echo request headers.
           Effect.catch((error) =>
             Effect.logWarning("OpenCode connector MCP install failed", {
@@ -1394,9 +1403,12 @@ const stopOpenCodeContext = Effect.fn("stopOpenCodeContext")(function* (
 
   yield* runOpenCodeSdk("session.abort", () =>
     context.client.session.abort({ sessionID: context.openCodeSessionId }),
-  ).pipe(Effect.ignore({ log: true }));
-
-  yield* releaseOpenCodeSessionResources(context, beforeRelease);
+  ).pipe(
+    Effect.ignore({ log: true }),
+    // A cancelled abort still retires the stopped context before recovery can
+    // replace it. Otherwise its managed server and gateway lease are abandoned.
+    Effect.ensuring(releaseOpenCodeSessionResources(context, beforeRelease)),
+  );
 });
 
 export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
@@ -4039,6 +4051,9 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
                   cwd: directory,
                   ...(input.modelSelection ? { model: input.modelSelection.model } : {}),
                   threadId: input.threadId,
+                  ...(input.lifecycleGeneration !== undefined
+                    ? { lifecycleGeneration: input.lifecycleGeneration }
+                    : {}),
                   resumeCursor: buildOpenCodeResumeCursor({
                     openCodeSessionId: started.openCodeSessionId,
                     cwd: directory,
@@ -4567,7 +4582,10 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
         Effect.sync(() => [...sessions.values()].map((context) => context.session));
 
       const hasSession: OpenCodeAdapterShape["hasSession"] = (threadId) =>
-        Effect.sync(() => sessions.has(threadId));
+        Effect.sync(() => {
+          const context = sessions.get(threadId);
+          return context !== undefined && !Ref.getUnsafe(context.stopped);
+        });
 
       const readThread: OpenCodeAdapterShape["readThread"] = Effect.fn("readThread")(
         function* (threadId) {
@@ -4962,6 +4980,7 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
       const listModels: NonNullable<OpenCodeAdapterShape["listModels"]> = (input) => {
         const binaryPath = input.binaryPath?.trim() || adapterConfig.defaultBinaryPath;
         return Effect.gen(function* () {
+          let cliDiscoveryFailed = false;
           const cliModelsEffect = openCodeRuntime
             .listOpenCodeCliModels({
               binaryPath,
@@ -4973,12 +4992,13 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
               ...(input.environment !== undefined ? { environment: input.environment } : {}),
             })
             .pipe(
-              Effect.catch((error) =>
-                Effect.logDebug(`${adapterConfig.displayName} CLI model discovery failed`, {
+              Effect.catch((error) => {
+                cliDiscoveryFailed = true;
+                return Effect.logDebug(`${adapterConfig.displayName} CLI model discovery failed`, {
                   binaryPath,
                   detail: openCodeRuntimeErrorDetail(error),
-                }).pipe(Effect.as([] as ReadonlyArray<OpenCodeCliModelDescriptor>)),
-              ),
+                }).pipe(Effect.as([] as ReadonlyArray<OpenCodeCliModelDescriptor>));
+              }),
             );
           const inventoryEffect = withDiscoveryInventory(
             {
@@ -5028,6 +5048,7 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
                   ? adapterConfig.cliModelSource
                   : adapterConfig.fallbackModelSource,
               cached: false,
+              degraded: cliDiscoveryFailed,
             };
           }
 
@@ -5052,6 +5073,7 @@ export function makeOpenCodeAdapterLive(options?: OpenCodeAdapterLiveOptions) {
               models,
               source: adapterConfig.cliModelSource,
               cached: false,
+              degraded: true,
             };
           }
 

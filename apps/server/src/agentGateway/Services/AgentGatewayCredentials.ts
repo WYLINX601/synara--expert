@@ -12,6 +12,7 @@ import type { LearningSessionContext, ProviderKind, ThreadId } from "@synara/con
 import { ServiceMap } from "effect";
 import type {
   AgentGatewaySessionIdentity,
+  AgentGatewayRetiredWriteAuthority,
   AgentGatewayWriteAuthority,
   AgentGatewayCapability,
 } from "./AgentGatewaySessionRegistry.ts";
@@ -27,7 +28,7 @@ export interface AgentGatewayMcpConnection {
   /** Bearer token bound to the calling thread. */
   readonly bearerToken: string;
   /**
-   * Connector proxies (Beta) served by this gateway and authenticated with the
+   * Connector proxies served by this gateway and authenticated with the
    * same bearer. Absent when no connector is connected.
    */
   readonly connectors?: ReadonlyArray<AgentGatewayConnectorServer>;
@@ -97,6 +98,14 @@ export interface AgentGatewayCredentialsShape {
    * happen synchronously; the promise represents only in-flight drainage.
    */
   readonly retireSessionTurn: (token: string, turnId: string) => Promise<void>;
+  /**
+   * Live credentials for one thread whose write authority was already retired
+   * by a terminal turn. Diagnostics reads this to surface bearers that can no
+   * longer bind write authority while a newer turn is running.
+   */
+  readonly listRetiredWriteAuthorities?: (
+    threadId: string,
+  ) => ReadonlyArray<AgentGatewayRetiredWriteAuthority>;
   /** Revoke exactly one provider session credential. */
   readonly revokeSessionToken: (token: string) => void;
   /** Clean up resources owned by a provider session after its requests drain. */

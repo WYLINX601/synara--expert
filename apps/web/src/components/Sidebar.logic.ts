@@ -10,7 +10,8 @@ import {
   type ThreadId,
 } from "@synara/contracts";
 import { isGroupThreadRoute } from "./SidebarGroupsSurface.logic";
-import { pluralize } from "@synara/shared/text";
+import { isSidechatThread } from "@synara/shared/sidechatThread";
+import { t } from "~/i18n";
 import { collectSubagentDescendants } from "@synara/shared/threadHierarchy";
 import { resolveThreadEnvironmentMode } from "@synara/shared/threadEnvironment";
 import { isWorkspaceRootWithin, workspaceRootsEqual } from "@synara/shared/threadWorkspace";
@@ -76,39 +77,35 @@ export function isProjectsSidebarSurface(input: {
 /** Keep partial review counts visible without presenting them as exact. */
 export function resolvePullRequestReviewBadge(
   result: GitHubReviewRequestBadgeCount | undefined,
+  translate: typeof t = t,
 ): SidebarActionBadge | null {
   if (!result) return null;
   if (result.incomplete) {
     return result.count > 0
       ? {
           text: `${result.count}+`,
-          accessibleLabel: `At least ${result.count} ${pluralize(
-            result.count,
-            "pull request is",
-            "pull requests are",
-          )} waiting for your review`,
+          accessibleLabel: translate("workspace:reviewBadgeAtLeast", { count: result.count }),
         }
       : null;
   }
   return result.count > 0
     ? {
         text: String(result.count),
-        accessibleLabel: `${result.count} ${pluralize(
-          result.count,
-          "pull request is",
-          "pull requests are",
-        )} waiting for your review`,
+        accessibleLabel: translate("workspace:reviewBadge", { count: result.count }),
       }
     : null;
 }
 
 /** Sidebar badge = number of configured automations, matching the Automations "All" tab. */
-export function resolveAutomationCountBadge(count: number | undefined): SidebarActionBadge | null {
+export function resolveAutomationCountBadge(
+  count: number | undefined,
+  translate: typeof t = t,
+): SidebarActionBadge | null {
   if (count === undefined) return null;
   return count > 0
     ? {
         text: String(count),
-        accessibleLabel: `${count} ${pluralize(count, "automation")}`,
+        accessibleLabel: translate("workspace:automationBadge", { count }),
       }
     : null;
 }
@@ -423,6 +420,18 @@ export function resolveThreadStatusTrailingIndicator(input: {
   }
   return status;
 }
+
+export const THREAD_STATUS_LABEL_KEYS: Record<ThreadStatusPill["label"], string> = {
+  "Pending Approval": "workspace:pendingApproval",
+  "Awaiting Input": "workspace:awaitingInput",
+  "Plan Ready": "chat:planReady",
+  "In Background": "workspace:inBackground",
+  Reminder: "workspace:reminder",
+  Working: "workspace:status_working",
+  Connecting: "chat:composer_connecting",
+  "Preparing worktree": "workspace:composer_preparingWorktree",
+  Completed: "workspace:triageOutcome_completed",
+};
 
 const THREAD_STATUS_PRIORITY: Record<ThreadStatusPill["label"], number> = {
   "Pending Approval": 5,
@@ -1461,6 +1470,83 @@ export function partitionSidebarThreadsByProjectIds<
     }
   }
   return { groupThreads, nonGroupThreads };
+}
+
+/**
+ * Whether a thread is, or may still turn out to be, a Hub member. Workers carry their
+ * linked repo's projectId, so only a hub's member list or a coordinator's provenance tells
+ * them from ordinary chats, and those lists arrive with the summaries list, not with the
+ * stream rows that precede it. Until then every chat in a workspace with Hubs is a candidate.
+ */
+export function mayBelongToGroup(input: {
+  readonly threadId: ThreadId;
+  readonly projectId: ProjectId;
+  readonly creationSource: SidebarThreadSummary["creationSource"];
+  readonly sourceThreadId: SidebarThreadSummary["sourceThreadId"];
+  readonly groupProjectIds: ReadonlySet<ProjectId>;
+  readonly summariesByProjectId: ReadonlyMap<
+    ProjectId,
+    Pick<ProjectAgentSummary, "memberThreadIds">
+  >;
+  readonly coordinatorThreadIds: ReadonlySet<string>;
+  readonly membersLoaded: boolean;
+}): boolean {
+  return (
+    (input.groupProjectIds.size > 0 && !input.membersLoaded) ||
+    // A coordinator's worker shows up before its index row, and a closed Hub never sends
+    // that row here. Its provenance already names the Hub, the rule the server uses too.
+    (input.creationSource === "synara_mcp" &&
+      !!input.sourceThreadId &&
+      input.coordinatorThreadIds.has(input.sourceThreadId)) ||
+    isGroupThreadRoute({
+      threadId: input.threadId,
+      projectId: input.projectId,
+      groupProjectIds: input.groupProjectIds,
+      summariesByProjectId: input.summariesByProjectId,
+    })
+  );
+}
+
+/**
+ * Snoozed chats are listed in the Chats surface's Snoozed section, and Hubs has none, so a
+ * Hub thread cannot be snoozed. That includes its workers, and any chat that may still be
+ * one: a snoozed worker would leave every list.
+ */
+export function canSnoozeSidebarThread(input: {
+  readonly thread: Pick<
+    SidebarThreadSummary,
+    | "id"
+    | "projectId"
+    | "creationSource"
+    | "sourceThreadId"
+    | "parentThreadId"
+    | "sidechatSourceThreadId"
+    | "sidechatContext"
+  >;
+  readonly groupProjectIds: ReadonlySet<ProjectId>;
+  readonly summariesByProjectId: ReadonlyMap<
+    ProjectId,
+    Pick<ProjectAgentSummary, "memberThreadIds">
+  >;
+  readonly coordinatorThreadIds: ReadonlySet<string>;
+  readonly membersLoaded: boolean;
+}): boolean {
+  const { thread } = input;
+  return (
+    !thread.parentThreadId &&
+    !mayBelongToGroup({
+      threadId: thread.id,
+      projectId: thread.projectId,
+      creationSource: thread.creationSource,
+      sourceThreadId: thread.sourceThreadId,
+      groupProjectIds: input.groupProjectIds,
+      summariesByProjectId: input.summariesByProjectId,
+      coordinatorThreadIds: input.coordinatorThreadIds,
+      membersLoaded: input.membersLoaded,
+    }) &&
+    !input.coordinatorThreadIds.has(thread.id) &&
+    !isSidechatThread(thread)
+  );
 }
 
 /** Classic thread sections share the active Space; container chats remain global. */

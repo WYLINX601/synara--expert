@@ -266,7 +266,7 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
 }
 
 it.effect(
-  "initializes a fresh database with native 109–135 and independent expert/context ledgers once",
+  "initializes a fresh database with native migrations through 141 and independent expert/context ledgers once",
   () =>
     Effect.gen(function* () {
       const initial = yield* inspectWorkbenchUpgradePlan;

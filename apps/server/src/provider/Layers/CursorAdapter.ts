@@ -1078,6 +1078,9 @@ export function makeCursorAdapter(
             cwd,
             model: cursorModelSelection?.model,
             threadId: input.threadId,
+            ...(input.lifecycleGeneration !== undefined
+              ? { lifecycleGeneration: input.lifecycleGeneration }
+              : {}),
             resumeCursor: {
               schemaVersion: CURSOR_RESUME_VERSION,
               sessionId: started.sessionId,
@@ -1887,6 +1890,7 @@ export function makeCursorAdapter(
                   models: cliModels,
                   source: "cursor.cli",
                   cached: false,
+                  degraded: true,
                 }) satisfies ProviderListModelsResult,
             ),
           ),

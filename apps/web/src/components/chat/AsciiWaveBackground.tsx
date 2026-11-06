@@ -29,7 +29,7 @@ const RIPPLE_WOBBLE_PX = 34;
 // Ink only shows inside drifting noise blotches; the rest of the field stays empty.
 const PATCH_THRESHOLD_LOW = 0.4;
 const PATCH_THRESHOLD_HIGH = 0.78;
-const INK_ALPHA_MAX = 0.24;
+const INK_ALPHA_MAX = 0.18;
 // The field cycles through these looks, cross-fading from one to the next.
 const PATTERN_DURATION_MS = 20_000;
 const PATTERN_CROSSFADE_MS = 4_000;

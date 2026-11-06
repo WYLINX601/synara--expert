@@ -10,10 +10,20 @@ export class HubWorkRepositoryError extends Schema.TaggedErrorClass<HubWorkRepos
   },
 ) {}
 
+export interface HubWorkSubmission {
+  readonly projectId: ProjectId;
+  readonly requestId: string;
+  readonly scopeKey: string;
+  readonly fingerprint: string;
+  readonly legacyFingerprint?: string;
+  readonly records: readonly HubWorkRecord[];
+  /** Trusted admission guard, checked only when this call adds unfrozen tasks. */
+  readonly admission?: { readonly expectedConfigRevision: number };
+}
+
 export interface HubWorkRepositoryShape {
   readonly submit: (
-    records: readonly HubWorkRecord[],
-    /** Trusted admission guard, applied only to new work after replay lookup. */
+    input: HubWorkSubmission | readonly HubWorkRecord[],
     admission?: { readonly expectedConfigRevision: number },
   ) => Effect.Effect<
     { readonly items: readonly HubWorkRecord[]; readonly replayed: boolean },
@@ -24,6 +34,10 @@ export interface HubWorkRepositoryShape {
   ) => Effect.Effect<readonly HubWorkRecord[], HubWorkRepositoryError>;
   /** Complete durable inventory for owner-only migration/reference checks. */
   readonly listAll: () => Effect.Effect<readonly HubWorkRecord[], HubWorkRepositoryError>;
+  readonly listByScope: (
+    projectId: ProjectId,
+    scopeKey: string,
+  ) => Effect.Effect<readonly HubWorkRecord[], HubWorkRepositoryError>;
   readonly get: (id: string) => Effect.Effect<HubWorkRecord | null, HubWorkRepositoryError>;
   readonly findByWorker: (
     threadId: ThreadId,

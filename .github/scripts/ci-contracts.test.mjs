@@ -64,6 +64,7 @@ test("required check, independent static lane and full-history lineage stay inta
   assert.ok(!staticJob.includes("needs:"));
   assert.ok(staticJob.includes("node scripts/release-smoke.ts"));
   assert.ok(staticJob.includes("run: bun run workbench:check-boundaries"));
+  assert.ok(staticJob.includes("bun run i18n:check && bun run workbench:i18n:check"));
   assert.ok(
     read("../../package.json").includes(
       '"workbench:check-boundaries": "node scripts/check-workbench-boundary.ts"',

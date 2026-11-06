@@ -1,6 +1,12 @@
-import { TurnId } from "@synara/contracts";
-import { describe, expect, it } from "vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ThreadId, TurnId } from "@synara/contracts";
+import { Effect, Layer } from "effect";
+import { describe, expect, it, vi } from "vitest";
 
+import { ServerConfig } from "../../config.ts";
+import { DroidAdapter } from "../Services/DroidAdapter.ts";
+import { makeFakeAcpSessionRuntime } from "../acp/testing/fakeAcpSessionRuntime.ts";
+import { makeDroidAdapterLive } from "./DroidAdapter.ts";
 import {
   classifyDroidPromptTurnCompletion,
   extractDroidApproveSpecPlanMarkdown,
@@ -12,6 +18,16 @@ import {
   scopeDroidToolCallStateForTurn,
   shouldIgnoreDroidInterrupt,
 } from "./DroidAdapter.ts";
+
+const droidRuntimeMock = vi.hoisted(() => ({ makeRuntime: vi.fn() }));
+
+vi.mock("../acp/DroidAcpSupport.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../acp/DroidAcpSupport.ts")>();
+  return {
+    ...actual,
+    makeDroidAcpRuntime: droidRuntimeMock.makeRuntime,
+  };
+});
 
 const serverConfig = {
   cwd: "/server/cwd",
@@ -29,6 +45,37 @@ describe("resolveDroidSessionCwd", () => {
 });
 
 describe("DroidAdapter runtime event scoping", () => {
+  it("returns the owned lifecycle generation from start and list", async () => {
+    droidRuntimeMock.makeRuntime.mockReturnValue(
+      Effect.succeed(makeFakeAcpSessionRuntime({ sessionId: "droid-generation-session" })),
+    );
+    const layer = makeDroidAdapterLive().pipe(
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "droid-generation-test-" }),
+      ),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    const sessions = await Effect.runPromise(
+      Effect.gen(function* () {
+        const adapter = yield* DroidAdapter;
+        const threadId = ThreadId.makeUnsafe("droid-generation-thread");
+        const started = yield* adapter.startSession({
+          provider: "droid",
+          threadId,
+          runtimeMode: "full-access",
+          cwd: process.cwd(),
+          lifecycleGeneration: "droid-owned-generation",
+        });
+        const [listed] = yield* adapter.listSessions();
+        yield* adapter.stopAll();
+        return { started, listed };
+      }).pipe(Effect.provide(layer), Effect.scoped),
+    );
+
+    expect(sessions.started.lifecycleGeneration).toBe("droid-owned-generation");
+    expect(sessions.listed?.lifecycleGeneration).toBe("droid-owned-generation");
+  });
+
   it("makes reused ACP assistant segment ids unique per turn", () => {
     const providerItemId = "assistant:droid-session:segment:5";
 

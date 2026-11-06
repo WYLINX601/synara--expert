@@ -5,7 +5,10 @@
 
 import type { AssistantDeliveryMode, MessageId, ThreadId } from "@synara/contracts";
 
-import { persistModelSelectionBeforeRuntimeMode } from "../components/ChatView.logic";
+import {
+  persistModelSelectionBeforeRuntimeMode,
+  retargetQueuedTurnToThreadProvider,
+} from "../components/ChatView.logic";
 import { useComposerDraftStore, type QueuedComposerTurn } from "../composerDraftStore";
 import { readNativeApi } from "../nativeApi";
 import { clearPendingTurnDispatch, markPendingTurnDispatch } from "../pendingTurnDispatch";
@@ -35,6 +38,8 @@ import { runComposerSendOnce } from "./composerSendOwnership";
 import { waitForDraftThreadDispatchToSettle } from "./draftThreadDispatch";
 import { bindDraftExpertSkillInvocations } from "./expertSkillInvocation";
 import { newCommandId, newMessageId } from "./utils";
+import { cloneAmbientContext } from "./ambientContext";
+import { readAmbientContextSendAuthorization } from "~/workbench/host/ambientContextClient";
 
 export async function dispatchQueuedComposerTurnHeadless(input: {
   threadId: ThreadId;
@@ -58,13 +63,13 @@ async function dispatchQueuedComposerTurnOnce(
   }
 
   const thread = getThreadFromState(useStore.getState(), input.threadId);
-  if (!thread || thread.claudeCacheReview != null) {
+  if (!thread || thread.claudeCacheReview != null || thread.usageLimitRecovery != null) {
     return false;
   }
 
   const createdAt = new Date().toISOString();
   const messageId = input.messageId ?? newMessageId();
-  const queuedTurn = input.queuedTurn;
+  const queuedTurn = retargetQueuedTurnToThreadProvider(input.queuedTurn, thread);
 
   if (queuedTurn.kind === "plan-follow-up") {
     const trimmed = queuedTurn.text.trim();
@@ -134,6 +139,11 @@ async function dispatchQueuedComposerTurnOnce(
     }
   }
 
+  // A queued turn owns its frozen pins even when ChatView is not mounted.
+  const ambientContext = cloneAmbientContext(queuedTurn.ambientContext);
+  const ambientAuthorization = readAmbientContextSendAuthorization(ambientContext);
+  if (!ambientAuthorization.allowed) return false;
+
   const sendableTerminalContexts = filterTerminalContextsWithText(queuedTurn.terminalContexts);
   const sendablePastedTexts = filterPastedTextsWithText(queuedTurn.pastedTexts);
   const messageText = appendBrowserAnnotationsToPrompt(
@@ -155,7 +165,7 @@ async function dispatchQueuedComposerTurnOnce(
   );
   const outgoingTextSeed =
     messageText || (queuedTurn.images.length > 0 ? IMAGE_ONLY_BOOTSTRAP_PROMPT : "");
-  if (!outgoingTextSeed.trim() && queuedTurn.images.length === 0) {
+  if (!outgoingTextSeed.trim() && queuedTurn.images.length === 0 && !ambientContext?.items.length) {
     return false;
   }
   const outgoingMessageText = formatOutgoingComposerPrompt({
@@ -179,6 +189,8 @@ async function dispatchQueuedComposerTurnOnce(
     files: queuedTurn.files,
     assistantSelections: queuedTurn.assistantSelections,
   });
+  // Preparation may outlast a failed upload; the original promise still drives rollback.
+  void turnAttachmentsPromise.catch(() => undefined);
 
   markPendingTurnDispatch(input.threadId);
   try {
@@ -190,8 +202,18 @@ async function dispatchQueuedComposerTurnOnce(
     });
     const boundSkills = await bindDraftExpertSkillInvocations(api, input.threadId, mentionedSkills);
     const stagedTurnAttachments = await turnAttachmentsPromise;
-    await stagedTurnAttachments.runWithDispatch((turnAttachments) =>
-      api.orchestration
+    if (getThreadFromState(useStore.getState(), input.threadId)?.usageLimitRecovery) {
+      await stagedTurnAttachments.cleanup();
+      clearPendingTurnDispatch(input.threadId);
+      return false;
+    }
+    await stagedTurnAttachments.runWithDispatch((turnAttachments) => {
+      const authorization = readAmbientContextSendAuthorization(
+        ambientContext,
+        ambientAuthorization.generation,
+      );
+      if (!authorization.allowed) throw new Error(authorization.message);
+      return api.orchestration
         .dispatchCommand({
           type: "thread.turn.start",
           commandId: newCommandId(),
@@ -201,6 +223,7 @@ async function dispatchQueuedComposerTurnOnce(
             role: "user",
             text: outgoingMessageText,
             attachments: turnAttachments,
+            ...(ambientContext ? { ambientContext } : {}),
             ...(boundSkills.length > 0 ? { skills: boundSkills } : {}),
             ...(mentionedMentions.length > 0 ? { mentions: mentionedMentions } : {}),
           },
@@ -224,8 +247,8 @@ async function dispatchQueuedComposerTurnOnce(
           ) {
             throw error;
           }
-        }),
-    );
+        });
+    });
     return true;
   } catch {
     await turnAttachmentsPromise.then(

@@ -65,6 +65,7 @@ import {
   SIDEBAR_ROW_LABEL_TEXT_CLASS_NAME,
   SIDEBAR_SECTION_LABEL_CLASS_NAME,
 } from "../sidebarRowStyles";
+import { useTranslation } from "~/i18n";
 
 // The hub row's hover toolbar holds two actions (pin, settings); only the truncating
 // name yields to it, so the trailing status fades in place instead of sliding.
@@ -117,6 +118,8 @@ export function SidebarGroupsSurface({
   ) => void;
   readonly onProjectContextMenu: (projectId: ProjectId, position: { x: number; y: number }) => void;
 }) {
+  const { t } = useTranslation();
+
   const homeDir = useWorkspacePathsStore((store) => store.homeDir);
   const chatWorkspaceRoot = useWorkspacePathsStore((store) => store.chatWorkspaceRoot);
   const studioWorkspaceRoot = useWorkspacePathsStore((store) => store.studioWorkspaceRoot);
@@ -218,7 +221,7 @@ export function SidebarGroupsSurface({
         type: "project.meta.update",
         commandId: newCommandId(),
         projectId: legacy.id,
-        title: "Hubs",
+        title: t("common:hubs"),
       })
       .then(() => {
         studioAdoptionDispatchedIds.add(legacy.id);
@@ -249,8 +252,8 @@ export function SidebarGroupsSurface({
     } catch (error) {
       toastManager.add({
         type: "error",
-        title: "Unable to create hub",
-        description: error instanceof Error ? error.message : "An error occurred.",
+        title: t("workspace:unableToCreateHub"),
+        description: error instanceof Error ? error.message : t("common:proposedPlan_unknownError"),
       });
       // Re-throw so the dialog stays open for a retry instead of closing silently.
       throw error;
@@ -258,8 +261,8 @@ export function SidebarGroupsSurface({
     if (!projectId) {
       toastManager.add({
         type: "error",
-        title: "Unable to create hub",
-        description: "The Hubs workspace is not ready yet — try again in a moment.",
+        title: t("workspace:unableToCreateHub"),
+        description: t("workspace:theHubsWorkspaceIsNotReadyYetTryAgain"),
       });
       throw new Error("Hub creation is not ready yet.");
     }
@@ -309,9 +312,9 @@ export function SidebarGroupsSurface({
             <ChatSortMenu {...threadSortMenuProps} />
             <SidebarIconButton
               icon={AddPlusIcon}
-              label="New hub"
+              label={t("workspace:newHub")}
               disabled={!groupsWorkspaceRoot}
-              tooltip="New hub"
+              tooltip={t("workspace:newHub")}
               tooltipSide="bottom"
               onClick={() => setNewGroupDialogOpen(true)}
             />
@@ -354,7 +357,9 @@ export function SidebarGroupsSurface({
                 const groupThreadEntries = projectSidebarData?.visibleEntries ?? [];
                 const hasGroupThreads = (projectSidebarData?.allProjectThreadCount ?? 0) > 0;
                 const groupLabel = resolveSidebarProjectRowLabel(project);
-                const toggleLabel = project.expanded ? "Hide threads" : "Show threads";
+                const toggleLabel = project.expanded
+                  ? t("workspace:hideThreads")
+                  : t("workspace:showThreads");
                 return (
                   <SidebarMenuItem key={project.id} className="rounded-md">
                     <div className="group/collapsible">
@@ -590,11 +595,11 @@ export function SidebarGroupsSurface({
       </SidebarGroup>
       <RenameDialog
         open={newGroupDialogOpen}
-        title="New hub"
-        description="Create a hub container for coordinated work."
+        title={t("workspace:newHub")}
+        description={t("workspace:createAHubContainerForCoordinatedWork")}
         initialValue=""
-        placeholder="Hub name"
-        saveLabel="Create hub"
+        placeholder={t("workspace:hubName")}
+        saveLabel={t("workspace:createHub")}
         onOpenChange={setNewGroupDialogOpen}
         onSave={createGroup}
       />

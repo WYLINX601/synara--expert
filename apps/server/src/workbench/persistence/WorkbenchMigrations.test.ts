@@ -339,18 +339,18 @@ it.effect("uses official migration IDs as versions even when the catalog reserve
       migration_id,
       name,
     }));
-    const catalog = [...currentEntries, [137, "OfficialChangeAfterSplit", Effect.void] as const];
+    const catalog = [...currentEntries, [142, "OfficialChangeAfterSplit", Effect.void] as const];
     const rows: OfficialMigrationRecord[] = [
       ...currentRows,
-      { migration_id: 137, name: "OfficialChangeAfterSplit" },
+      { migration_id: 142, name: "OfficialChangeAfterSplit" },
     ];
     assert.isNull(validateOfficialMigrationPrefixAgainstCatalog(rows, catalog));
     assert.isNull(validateCurrentOfficialMigrationPrefix(frozenOfficialPrefix));
     assert.isNull(validateCurrentOfficialMigrationPrefix(currentRows));
-    assert.strictEqual(currentOfficialMigrationCount(), 135);
-    assert.strictEqual(currentOfficialMigrationEntryCount(), 135);
-    assert.strictEqual(catalog.length, 136);
-    assert.strictEqual(officialMigrationCatalogHighWaterMark(catalog), 137);
+    assert.strictEqual(currentOfficialMigrationCount(), 141);
+    assert.strictEqual(currentOfficialMigrationEntryCount(), 136);
+    assert.strictEqual(catalog.length, 137);
+    assert.strictEqual(officialMigrationCatalogHighWaterMark(catalog), 142);
   }),
 );
 
@@ -409,8 +409,8 @@ fullAdoptionLayer("legacy expert migration handoff", (test) => {
       assert.strictEqual(officialRows.length, currentOfficialMigrationEntryCount());
       assert.strictEqual(officialRows[107]?.name, "GatewayCompletions");
       assert.deepStrictEqual(officialRows.at(-1), {
-        migration_id: 135,
-        name: "ProjectionMessageTurnActivityIndex",
+        migration_id: 141,
+        name: "ProjectionThreadsUsageLimitRecovery",
       });
 
       const binding = yield* sql<{ readonly expert_binding_json: string }>`

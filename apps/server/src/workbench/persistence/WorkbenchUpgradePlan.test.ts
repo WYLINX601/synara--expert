@@ -241,59 +241,46 @@ it.effect("recognizes frozen legacy rows before checking the post-split official
       }
     }
 
-    const futureCatalog = [
-      ...postSplitCatalog,
-      [137, "OfficialMigrationAfterContextV1", Effect.void] as const,
-    ];
-    const futureRows = [
-      ...currentOfficialRows(),
-      { migration_id: 137, name: "OfficialMigrationAfterContextV1" },
-    ];
+    const futureId = currentOfficialMigrationCount() + 1;
+    const futureName = "OfficialMigrationAfterContextV1";
+    const futureCatalog = [...postSplitCatalog, [futureId, futureName, Effect.void] as const];
+    const futureRows = [...currentOfficialRows(), { migration_id: futureId, name: futureName }];
     const sparseOfficial = planWorkbenchUpgrade(
       observe({ officialRows: futureRows, schemaState: baselineSchema }),
       futureCatalog,
     );
     assert.strictEqual(sparseOfficial.kind, "ready");
     if (sparseOfficial.kind === "ready") {
-      assert.strictEqual(sparseOfficial.official.sourceVersion, 137);
-      assert.strictEqual(sparseOfficial.official.targetVersion, 137);
+      assert.strictEqual(sparseOfficial.official.sourceVersion, futureId);
+      assert.strictEqual(sparseOfficial.official.targetVersion, futureId);
     }
 
-    const known136Catalog = [
-      ...postSplitCatalog,
-      [136, "CurrentOfficialMigration136", Effect.void] as const,
-    ];
-    const known136 = planWorkbenchUpgrade(
+    const knownFutureCatalog = [...postSplitCatalog, [futureId, futureName, Effect.void] as const];
+    const knownFuture = planWorkbenchUpgrade(
       observe({
-        officialRows: [
-          ...currentOfficialRows(),
-          { migration_id: 136, name: "CurrentOfficialMigration136" },
-        ],
+        officialRows: futureRows,
         schemaState: baselineSchema,
       }),
-      known136Catalog,
+      knownFutureCatalog,
     );
-    assert.strictEqual(known136.kind, "ready");
-    if (known136.kind === "ready") {
-      assert.strictEqual(known136.official.sourceVersion, 136);
-      assert.strictEqual(known136.official.targetVersion, 136);
-      assert.deepStrictEqual(known136.legacyOfficialMigrations, []);
+    assert.strictEqual(knownFuture.kind, "ready");
+    if (knownFuture.kind === "ready") {
+      assert.strictEqual(knownFuture.official.sourceVersion, futureId);
+      assert.strictEqual(knownFuture.official.targetVersion, futureId);
+      assert.deepStrictEqual(knownFuture.legacyOfficialMigrations, []);
     }
 
-    const unknownKnown136 = planWorkbenchUpgrade(
+    const unknownKnownFuture = planWorkbenchUpgrade(
       observe({
-        officialRows: [
-          ...currentOfficialRows(),
-          { migration_id: 136, name: "UnrecognizedMigration136" },
-        ],
+        officialRows: [...currentOfficialRows(), { migration_id: futureId, name: "Unrecognized" }],
         schemaState: baselineSchema,
       }),
-      known136Catalog,
+      knownFutureCatalog,
     );
-    assert.strictEqual(unknownKnown136.kind, "ready");
-    if (unknownKnown136.kind === "ready") {
-      assert.isFalse(unknownKnown136.official.hasLineageRepair);
-      assert.isTrue(unknownKnown136.requiresBackup);
+    assert.strictEqual(unknownKnownFuture.kind, "ready");
+    if (unknownKnownFuture.kind === "ready") {
+      assert.isFalse(unknownKnownFuture.official.hasLineageRepair);
+      assert.isTrue(unknownKnownFuture.requiresBackup);
     }
   }),
 );
@@ -304,7 +291,10 @@ it.effect("rejects unknown, too-new, and structurally inconsistent histories", (
       observe({
         officialRows: [
           ...currentOfficialRows(),
-          { migration_id: 136, name: "UnrecognizedFutureOfficialMigration" },
+          {
+            migration_id: currentOfficialMigrationCount() + 1,
+            name: "UnrecognizedFutureOfficialMigration",
+          },
         ],
         schemaState: baselineSchema,
       }),
@@ -312,7 +302,7 @@ it.effect("rejects unknown, too-new, and structurally inconsistent histories", (
     assert.strictEqual(tooNewOfficial.kind, "rejected");
     if (tooNewOfficial.kind === "rejected") {
       assert.strictEqual(tooNewOfficial.rejectionKind, "official-too-new");
-      assert.strictEqual(tooNewOfficial.databaseVersion, 136);
+      assert.strictEqual(tooNewOfficial.databaseVersion, currentOfficialMigrationCount() + 1);
     }
 
     const tooNewWorkbench = planWorkbenchUpgrade(

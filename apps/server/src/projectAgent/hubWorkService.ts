@@ -18,6 +18,14 @@ import { Effect, Option, Schema } from "effect";
 
 import { stableGatewayDigest } from "../agentGateway/creationUtils";
 import { parseHubReferenceUri } from "@synara/shared/hubReferences";
+import {
+  hubWorkLogicalTaskKey,
+  hubWorkPositionalTaskKey,
+  hubWorkRequestFingerprint,
+  hubWorkTaskFingerprint,
+  hubWorkWorkItemId,
+  normalizeHubTaskKey,
+} from "../agentGateway/hubWorkRouting";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery";
 import type { OrchestrationCommandReceiptRepositoryShape } from "../persistence/Services/OrchestrationCommandReceipts";
 import type { ProjectionThreadMessageRepositoryShape } from "../persistence/Services/ProjectionThreadMessages";
@@ -227,18 +235,8 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
         const config = yield* requireConfig(principal.projectId);
         if (!config.enabled || config.pausedAt !== null || config.archivedAt !== null)
           return yield* Effect.fail(fail("Resume this hub before starting work.", "conflict"));
-        if (
-          input.tasks.length === 0 ||
-          input.tasks.length >
-            Math.min(
-              config.limits.maxNewWorkersPerTurn,
-              DEFAULT_PROJECT_AGENT_LIMITS.maxNewWorkersPerTurn,
-            )
-        ) {
-          return yield* Effect.fail(
-            fail("The hub work plan exceeds the per-turn task limit.", "limit"),
-          );
-        }
+        if (input.tasks.length === 0)
+          return yield* Effect.fail(fail("The hub work plan has no tasks.", "invalid"));
         if (
           input.sourceMessages.length === 0 ||
           input.sourceMessages.some((message) => message.threadId !== config.coordinatorThreadId)
@@ -250,63 +248,35 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
         const orderedSources = input.sourceMessages.toSorted((left, right) =>
           left.messageId < right.messageId ? -1 : left.messageId > right.messageId ? 1 : 0,
         );
-        const sourceDigest = stableGatewayDigest(orderedSources, 64);
-        const scopeKey = `source:${sourceDigest}`;
-        const fingerprint = stableGatewayDigest(
-          { sourceMessages: input.sourceMessages, tasks: input.tasks },
-          64,
-        );
-        // Replay lookup precedes Expert reads and model discovery. Once accepted,
-        // template edits and archiving must not change or invalidate the frozen
-        // target/binding returned for the same source request.
-        const existingRecords = yield* repository
-          .list(principal.projectId)
-          .pipe(Effect.mapError(serviceError));
-        const sameRequest = existingRecords.filter(
-          (record) => record.requestId === input.requestId,
-        );
-        const sameScope = existingRecords.filter((record) => record.scopeKey === scopeKey);
-        const replay = sameRequest.length > 0 ? sameRequest : sameScope;
-        if (replay.length > 0) {
-          if (
-            replay.length !== input.tasks.length ||
-            replay.some(
-              (record) => record.scopeKey !== scopeKey || record.fingerprint !== fingerprint,
-            )
-          ) {
-            return yield* Effect.fail(
-              fail("This request already has a different hub work plan.", "conflict"),
-            );
-          }
-          // Keep the repository's request-ID conflict ledger in sync when a
-          // semantically identical source request arrives with a new wake ID.
-          const result = yield* repository
-            .submit(
-              replay.map((record) => ({
-                ...record,
-                requestId: input.requestId,
-              })),
-            )
-            .pipe(Effect.mapError(serviceError));
-          yield* Effect.forEach(result.items, notify, { discard: true });
-          return result;
-        }
-        for (const task of input.tasks) {
-          if (
-            task.spec.expertId !== undefined &&
-            !(config.expertIds ?? []).includes(task.spec.expertId)
-          ) {
-            return yield* Effect.fail(
-              fail("This Expert does not participate in the current Hub.", "forbidden"),
-            );
-          }
-        }
-        const now = new Date().toISOString();
-        const records: HubWorkRecord[] = [];
+        const scopeKey = `source:${stableGatewayDigest(orderedSources, 64)}`;
         const sourceById = new Map<string, HubWorkSourceMessage>(
           input.sourceMessages.map((source) => [source.messageId, source]),
         );
-        for (const [taskIndex, task] of input.tasks.entries()) {
+        // The scope is the frozen set of original human messages this request was
+        // decided from. Task keys address individual tasks inside it, so a retry
+        // replays the same workers instead of forking new ones.
+        const frozen = yield* repository
+          .listByScope(principal.projectId, scopeKey)
+          .pipe(Effect.mapError(serviceError));
+        const frozenByKey = new Map(
+          frozen.map((record) => [hubWorkLogicalTaskKey(record), record]),
+        );
+        // Records persisted before keyed routing carry the whole-plan digest of the
+        // time. Replays of those still compare against that frozen plan.
+        const legacyPlanFingerprint = frozen.some((record) => record.taskFingerprint === undefined)
+          ? stableGatewayDigest({ sourceMessages: input.sourceMessages, tasks: input.tasks }, 64)
+          : null;
+        const decisions: Array<{
+          readonly taskKey: string;
+          readonly fingerprint: string;
+          readonly spec: SynaraCreateThreadSpec;
+          readonly task: (typeof input.tasks)[number];
+          readonly taskSources: readonly HubWorkSourceMessage[];
+          readonly targetProjectId: ProjectId;
+          readonly routingReason: string | undefined;
+        }> = [];
+        const claimedKeys = new Set<string>();
+        for (const [position, task] of input.tasks.entries()) {
           const sourceIds = task.spec.contextMessageIds;
           const taskSources = sourceIds
             ? sourceIds.flatMap((id) => {
@@ -332,42 +302,135 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
             callerThreadId: input.callerThreadId,
             targetProjectId,
           });
+          const taskKey =
+            task.spec.taskKey === undefined
+              ? hubWorkPositionalTaskKey(position)
+              : normalizeHubTaskKey(task.spec.taskKey);
+          if (taskKey === null)
+            return yield* Effect.fail(
+              fail(
+                'taskKey must be 1-128 characters of lowercase letters, digits, ".", "_", ":" or "-".',
+                "invalid",
+              ),
+            );
+          if (claimedKeys.has(taskKey))
+            return yield* Effect.fail(
+              fail(`Task key '${taskKey}' appears twice in one hub work plan.`, "invalid"),
+            );
+          claimedKeys.add(taskKey);
+          // The frozen key belongs to the plan, so a retry that proposes the same key
+          // differently still addresses the same decision. The routing reason
+          // annotates that decision and is not part of its identity.
+          const frozenSpec = { ...task.spec, taskKey };
+          const { routingReason, ...decisionSpec } = frozenSpec;
+          const fingerprint = hubWorkTaskFingerprint({
+            sourceMessages: taskSources,
+            spec: decisionSpec,
+            title: task.title,
+          });
+          const existing = frozenByKey.get(taskKey);
+          if (
+            existing &&
+            (existing.taskFingerprint === undefined
+              ? existing.fingerprint !== legacyPlanFingerprint
+              : existing.taskFingerprint !== fingerprint)
+          ) {
+            return yield* Effect.fail(
+              fail(
+                `Task key '${taskKey}' already names a different task in this hub request. Keep the frozen plan, or use a new taskKey for new work.`,
+                "conflict",
+              ),
+            );
+          }
+          decisions.push({
+            taskKey,
+            fingerprint,
+            spec: frozenSpec,
+            task,
+            taskSources,
+            targetProjectId,
+            routingReason: routingReason?.trim().slice(0, 500) || undefined,
+          });
+        }
+        const fresh = decisions.filter((decision) => !frozenByKey.has(decision.taskKey));
+        // Replay is settled above, so a per-turn cap only ever refuses work that is
+        // genuinely new instead of failing an already persisted request.
+        if (
+          fresh.length >
+          Math.min(
+            config.limits.maxNewWorkersPerTurn,
+            DEFAULT_PROJECT_AGENT_LIMITS.maxNewWorkersPerTurn,
+          )
+        ) {
+          return yield* Effect.fail(
+            fail("The hub work plan exceeds the per-turn task limit.", "limit"),
+          );
+        }
+        const fingerprint = hubWorkRequestFingerprint({
+          sourceMessages: orderedSources,
+          taskKeys: decisions.map((decision) => decision.taskKey),
+        });
+        const now = new Date().toISOString();
+        let taskIndex = frozen.reduce((highest, record) => Math.max(highest, record.taskIndex), -1);
+        const records: HubWorkRecord[] = [];
+        for (const decision of fresh) {
+          taskIndex += 1;
+          const spec = decision.spec;
+          if (spec.expertId !== undefined && !(config.expertIds ?? []).includes(spec.expertId)) {
+            return yield* Effect.fail(
+              fail("This Expert does not participate in the current Hub.", "forbidden"),
+            );
+          }
           const creationSpec = dependencies.resolveCreationSpec
             ? yield* dependencies
                 .resolveCreationSpec({
                   callerThreadId: input.callerThreadId,
-                  targetProjectId,
-                  spec: task.spec,
+                  targetProjectId: decision.targetProjectId,
+                  spec: spec,
                 })
                 .pipe(Effect.mapError(serviceError))
-            : task.spec.expertId !== undefined || task.spec.target === undefined
+            : spec.expertId !== undefined || spec.target === undefined
               ? yield* Effect.fail(
                   fail(
-                    task.spec.expertId
+                    spec.expertId
                       ? "Hub Expert dispatch is unavailable."
                       : "A target is required for a plain worker.",
                     "invalid",
                   ),
                 )
               : yield* Schema.decodeUnknownEffect(SynaraResolvedCreateThreadSpec)({
-                  ...task.spec,
-                  target: task.spec.target,
+                  ...spec,
+                  target: spec.target,
                 }).pipe(Effect.mapError(serviceError));
           const record = yield* Schema.decodeUnknownEffect(HubWorkRecord)({
-            id: `hub-work:${stableGatewayDigest({ projectId: principal.projectId, scopeKey, taskIndex }, 40)}`,
+            id: hubWorkWorkItemId({
+              projectId: principal.projectId,
+              scopeKey,
+              taskKey: decision.taskKey,
+            }),
             projectId: principal.projectId,
             ...(input.callerTurnId ? { delegationTurnId: input.callerTurnId } : {}),
-            targetProjectId,
+            targetProjectId: decision.targetProjectId,
             requestId: input.requestId,
             scopeKey,
             fingerprint,
             taskIndex,
+            taskKey: decision.taskKey,
+            taskFingerprint: decision.fingerprint,
+            ...(decision.routingReason === undefined
+              ? {}
+              : { routingReason: decision.routingReason }),
             sourceThreadId: config.coordinatorThreadId,
-            sourceMessageId: taskSources[0]!.messageId,
-            sourceMessages: taskSources,
+            sourceMessageId: decision.taskSources[0]!.messageId,
+            sourceMessages: decision.taskSources,
             creationSpec,
             title:
-              (task.title ?? task.spec.title ?? task.spec.prompt.split("\n")[0] ?? "Task")
+              (
+                decision.task.title ??
+                decision.task.spec.title ??
+                decision.task.spec.prompt.split("\n")[0] ??
+                "Task"
+              )
                 .trim()
                 .slice(0, 240) || "Task",
             workerThreadId: null,
@@ -388,10 +451,21 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
           records.push(record);
         }
         const result = yield* repository
-          .submit(records, { expectedConfigRevision: config.revision })
+          .submit({
+            projectId: principal.projectId,
+            requestId: input.requestId,
+            scopeKey,
+            fingerprint,
+            ...(legacyPlanFingerprint === null ? {} : { legacyFingerprint: legacyPlanFingerprint }),
+            records,
+            admission: { expectedConfigRevision: config.revision },
+          })
           .pipe(Effect.mapError(serviceError));
-        yield* Effect.forEach(result.items, notify, { discard: true });
-        return result;
+        const items = result.items.filter((record) =>
+          claimedKeys.has(hubWorkLogicalTaskKey(record)),
+        );
+        yield* Effect.forEach(items, notify, { discard: true });
+        return { ...result, items };
       }),
 
     claimNext: (projectId) =>

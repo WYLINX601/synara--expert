@@ -1,4 +1,5 @@
 import { Option, Schema } from "effect";
+import { ProviderInteractionMode } from "./orchestration";
 import { AsyncUserInputQuestions } from "./asyncUserInput";
 import {
   EventId,
@@ -14,6 +15,7 @@ import {
   TurnId,
 } from "./baseSchemas";
 import { ClaudeCacheObservation } from "./claudeCache";
+import { ProviderUsageLimit } from "./usageLimit";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
@@ -391,6 +393,7 @@ const TurnStartedPayload = Schema.Struct({
 export type TurnStartedPayload = typeof TurnStartedPayload.Type;
 
 const TurnCompletedPayload = Schema.Struct({
+  usageLimit: Schema.optional(ProviderUsageLimit),
   state: RuntimeTurnState,
   // Present only for an explicitly requested native compaction operation.
   contextCompacted: Schema.optional(Schema.Boolean),
@@ -574,6 +577,7 @@ const WorkflowAgentPlan = Schema.Struct({
 export type WorkflowAgentPlan = typeof WorkflowAgentPlan.Type;
 
 const TaskStartedPayload = Schema.Struct({
+  interactionMode: Schema.optional(ProviderInteractionMode),
   taskId: RuntimeTaskId,
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -611,6 +615,8 @@ const TaskProgressPayload = Schema.Struct({
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
 
 const TaskUpdatedPayload = Schema.Struct({
+  reconcilesStop: Schema.optional(Schema.Boolean),
+  interactionMode: Schema.optional(ProviderInteractionMode),
   taskId: RuntimeTaskId,
   status: Schema.optional(
     Schema.Literals(["pending", "running", "completed", "failed", "killed", "paused"]),
@@ -628,6 +634,7 @@ const TaskUpdatedPayload = Schema.Struct({
 export type TaskUpdatedPayload = typeof TaskUpdatedPayload.Type;
 
 const TaskCompletedPayload = Schema.Struct({
+  interactionMode: Schema.optional(ProviderInteractionMode),
   taskId: RuntimeTaskId,
   status: Schema.Literals(["completed", "failed", "stopped"]),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -636,6 +643,12 @@ const TaskCompletedPayload = Schema.Struct({
   workflowAgents: Schema.optional(Schema.Array(WorkflowAgentSnapshot)),
   // Spawning tool call id when the task is a provider-native subagent.
   toolUseId: Schema.optional(TrimmedNonEmptyStringSchema),
+  // A provider terminal update can correct an adapter's earlier local stop
+  // result when the task's completion notification arrived later.
+  reconcilesStop: Schema.optional(Schema.Boolean),
+  // A local stop persisted without a provider terminal update. Resume replay
+  // may reconcile this task after a process restart.
+  awaitingProviderConfirmation: Schema.optional(Schema.Boolean),
 });
 export type TaskCompletedPayload = typeof TaskCompletedPayload.Type;
 

@@ -1,3 +1,6 @@
+import { EditorDebugService } from "./editor/debugService";
+import { EditorLanguageService } from "./editor/languageService";
+import { requireNativeEditor } from "./editor/nativeEditorGate";
 import { readEventLoopStatus } from "./eventLoopMonitor";
 import { makeGitActionRunner } from "./git/gitActionRunner";
 import { AgentGatewaySessionRegistry } from "./agentGateway/Services/AgentGatewaySessionRegistry";
@@ -163,6 +166,7 @@ import { Open, resolveAvailableEditors } from "./open";
 import {
   OrchestrationCommandInvariantError,
   OrchestrationCommandPreviouslyRejectedError,
+  ProviderDeliveryRecoveryError,
 } from "./orchestration/Errors";
 import { makeDispatchCommandNormalizer } from "./orchestration/dispatchCommandNormalization";
 import { sanitizeOrchestrationEventProviderOptions } from "./orchestration/providerOptionsSecurity";
@@ -220,6 +224,7 @@ import { isLoopbackHost } from "./startupAccess";
 import { TerminalManager } from "./terminal/Services/Manager";
 import { TerminalThreadTitleTracker } from "./terminal/terminalThreadTitleTracker";
 import { resolveOutOfRootFileReference } from "./workspace/outOfRootFileReference";
+import { listLocalPreviewWorktreeRoots } from "./workspace/localPreviewWorktrees";
 import { watchWorkspaceFile } from "./workspaceFileChanges";
 import { WorkspaceEntries } from "./workspace/Services/WorkspaceEntries";
 import {
@@ -405,6 +410,17 @@ export function toWsRpcError(cause: unknown, fallbackMessage: string) {
   if (Schema.is(WsRpcError)(cause)) {
     return cause;
   }
+  if (cause instanceof ProviderDeliveryRecoveryError) {
+    return new WsRpcError({
+      message: cause.message,
+      code:
+        cause.reason === "stop-required"
+          ? "PROVIDER_DELIVERY_STOP_REQUIRED"
+          : "PROVIDER_DELIVERY_STOP_UNCONFIRMED",
+      retryable: false,
+      cause,
+    });
+  }
   if (
     cause instanceof OrchestrationCommandInvariantError ||
     cause instanceof OrchestrationCommandPreviouslyRejectedError
@@ -556,6 +572,10 @@ const makeWsRpcHandlersLayer = () =>
         projectAgentService,
       });
       const config = yield* ServerConfig;
+      const editorLanguages = new EditorLanguageService();
+      const editorDebug = new EditorDebugService(config.stateDir);
+      yield* Effect.addFinalizer(() => Effect.promise(() => editorDebug.dispose()));
+      yield* Effect.addFinalizer(() => Effect.sync(() => editorLanguages.dispose()));
       const devServerManager = yield* DevServerManager;
       const fileSystem = yield* FileSystem.FileSystem;
       const externalMcp = yield* ExternalMcpService;
@@ -1376,7 +1396,7 @@ const makeWsRpcHandlersLayer = () =>
       const requireOwner = requireLoopbackOwner(
         "External MCP management is available only on a loopback-only instance.",
       );
-      // Connectors (Beta): refused on Stable. Sign-in redirects to this
+      // Connectors: available in Stable and Beta. Sign-in redirects to this
       // machine's loopback port, so only a loopback-only instance can finish it.
       const requireConnectorsOwner = Effect.gen(function* () {
         if (!mcpConnectors.enabled) {
@@ -2018,8 +2038,106 @@ const makeWsRpcHandlersLayer = () =>
           ),
         [WS_METHODS.projectsCreateLocalFilePreviewGrant]: (input) =>
           rpcEffect(
-            Effect.promise(() => createLocalPreviewGrant({ requestedPath: input.path })),
+            Effect.gen(function* () {
+              // Absolute requests retain their existing explicit-file semantics.
+              if (path.isAbsolute(input.path)) {
+                return yield* Effect.tryPromise(() =>
+                  createLocalPreviewGrant({ requestedPath: input.path }),
+                );
+              }
+              let workspaceCwd = input.cwd;
+              if (input.threadId !== undefined) {
+                const thread = yield* projectionReadModelQuery.getThreadShellById(input.threadId);
+                if (Option.isNone(thread)) {
+                  return yield* new WsRpcError({ message: "Preview thread was not found." });
+                }
+                const project = yield* projectionReadModelQuery.getProjectShellById(
+                  thread.value.projectId,
+                );
+                workspaceCwd = resolveThreadWorkspaceCwd({
+                  thread: thread.value,
+                  projects: Option.isSome(project) ? [project.value] : [],
+                });
+              }
+              if (!workspaceCwd) {
+                return yield* new WsRpcError({
+                  message: "Relative local files need a workspace or thread.",
+                });
+              }
+              const cwd = yield* canonicalizeProjectWorkspaceRoot(workspaceCwd);
+              const worktreeRoots = yield* listLocalPreviewWorktreeRoots({
+                cwd,
+                requestedPaths: [input.path],
+              }).pipe(Effect.provideService(GitCore, git));
+              return yield* Effect.tryPromise(() =>
+                createLocalPreviewGrant({
+                  requestedPath: input.path,
+                  cwd,
+                  homeDir: config.homeDir,
+                  worktreeRoots,
+                }),
+              );
+            }),
             "Failed to create local file preview grant",
+          ),
+        [WS_METHODS.editorDebugStart]: (input, { clientId }) =>
+          requireNativeEditor.pipe(
+            Effect.andThen(() => requireWsOwnerSession),
+            Effect.andThen(() => canonicalizeProjectWorkspaceRoot(input.cwd)),
+            Effect.andThen((cwd) =>
+              rpcEffect(
+                Effect.tryPromise({
+                  try: (signal) => editorDebug.start(String(clientId), { ...input, cwd }, signal),
+                  catch: (cause) =>
+                    cause instanceof Error ? cause : new Error("Debug launch failed."),
+                }),
+                "Debug launch failed",
+              ),
+            ),
+          ),
+        [WS_METHODS.editorDebugAction]: (input, { clientId }) =>
+          requireNativeEditor.pipe(
+            Effect.andThen(() => requireWsOwnerSession),
+            Effect.andThen(() =>
+              rpcEffect(
+                Effect.tryPromise({
+                  try: () => editorDebug.action(String(clientId), input),
+                  catch: (cause) =>
+                    cause instanceof Error ? cause : new Error("Debug command failed."),
+                }),
+                "Debug command failed",
+              ),
+            ),
+          ),
+        [WS_METHODS.editorDebugPoll]: (input, { clientId }) =>
+          requireNativeEditor.pipe(
+            Effect.andThen(() => requireWsOwnerSession),
+            Effect.andThen(() =>
+              rpcEffect(
+                Effect.try({
+                  try: () => editorDebug.poll(String(clientId), input.sessionId, input.after),
+                  catch: (cause) =>
+                    cause instanceof Error ? cause : new Error("Debug session is unavailable."),
+                }),
+                "Debug session is unavailable",
+              ),
+            ),
+          ),
+        [WS_METHODS.editorIntelligence]: (input, { clientId }) =>
+          requireNativeEditor.pipe(
+            Effect.andThen(() => requireWsOwnerSession),
+            Effect.andThen(() => canonicalizeProjectWorkspaceRoot(input.cwd)),
+            Effect.andThen((cwd) =>
+              rpcEffect(
+                Effect.tryPromise({
+                  try: (signal) =>
+                    editorLanguages.request(String(clientId), { ...input, cwd }, signal),
+                  catch: (cause) =>
+                    cause instanceof Error ? cause : new Error("Language service failed."),
+                }),
+                "Language service failed",
+              ),
+            ),
           ),
         [WS_METHODS.projectsWriteFile]: (input) =>
           workspaceFileSystem.writeFile(input).pipe(

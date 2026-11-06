@@ -86,6 +86,7 @@ import {
 } from "./libraryPanel.logic";
 import { buildHubDeliverableGroups } from "./hubDeliverablePresentation";
 import { useGroupLibrary } from "./useGroupLibrary";
+import { useTranslation } from "~/i18n";
 
 export interface LibraryPanelProps {
   open: boolean;
@@ -97,18 +98,18 @@ export interface LibraryPanelProps {
 
 const TYPE_FILTER_OPTIONS: ReadonlyArray<{
   readonly value: LibraryTypeFilter;
-  readonly label: string;
+  readonly labelKey: string;
 }> = [
-  { value: "all", label: "All" },
-  { value: "documents", label: "Documents" },
-  { value: "images", label: "Images" },
-  { value: "code", label: "Code" },
-  { value: "other", label: "Other" },
+  { value: "all", labelKey: "workspace:all" },
+  { value: "documents", labelKey: "workspace:documents" },
+  { value: "images", labelKey: "workspace:images" },
+  { value: "code", labelKey: "common:code" },
+  { value: "other", labelKey: "chat:other" },
 ];
 
 const VIEW_MODE_OPTIONS = [
-  { value: "list" as const, label: "List" },
-  { value: "grid" as const, label: "Grid" },
+  { value: "list" as const, labelKey: "workspace:list" },
+  { value: "grid" as const, labelKey: "workspace:grid" },
 ];
 
 type PinnedPreviewState =
@@ -151,6 +152,7 @@ export function LibraryPanel({
   onClose,
   onReferenceDeliverable,
 }: LibraryPanelProps) {
+  const { t, formatLocale } = useTranslation();
   const library = useGroupLibrary({ projectId, enabled: open && projectId !== null });
   const [query, setQuery] = useState("");
   const [libraryTab, setLibraryTab] = useState<"key" | "all">("key");
@@ -382,12 +384,12 @@ export function LibraryPanel({
       if (!api) return;
       const clicked = await api.contextMenu.show(
         [
-          { id: "rename" as const, label: "Rename" },
+          { id: "rename" as const, label: t("workspace:rename") },
           ...(entry.kind === "directory"
-            ? [{ id: "upload-here" as const, label: "Upload here" }]
+            ? [{ id: "upload-here" as const, label: t("workspace:uploadHere") }]
             : []),
-          { id: "delete" as const, label: "Delete" },
-          { id: "history" as const, label: "History" },
+          { id: "delete" as const, label: t("computer:detail_delete") },
+          { id: "history" as const, label: t("workspace:history") },
         ],
         { x: event.clientX, y: event.clientY },
       );
@@ -408,7 +410,7 @@ export function LibraryPanel({
         void showHistory(entry);
       }
     },
-    [pickUploadDirectory, showHistory],
+    [pickUploadDirectory, showHistory, t],
   );
 
   const confirmDelete = useCallback(async () => {
@@ -498,12 +500,12 @@ export function LibraryPanel({
   const content = (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center gap-1 px-2 pb-1 pt-0.5">
-        <EnvironmentPanelTitle>Library</EnvironmentPanelTitle>
+        <EnvironmentPanelTitle>{t("chat:library")}</EnvironmentPanelTitle>
         <div className="ml-auto flex items-center gap-0.5">
           <IconButton
             type="button"
-            label="Add files"
-            tooltip="Add files"
+            label={t("workspace:addFiles")}
+            tooltip={t("workspace:addFiles")}
             disabled={library.busy}
             onClick={() => pickUploadDirectory(undefined)}
           >
@@ -511,16 +513,16 @@ export function LibraryPanel({
           </IconButton>
           <IconButton
             type="button"
-            label="Library history"
-            tooltip="History"
+            label={t("workspace:libraryHistory")}
+            tooltip={t("workspace:history")}
             onClick={() => void showLibraryHistory()}
           >
             <HistoryIcon className="size-3.5" />
           </IconButton>
           <IconButton
             type="button"
-            label={fullHeight ? "Collapse library" : "Expand library"}
-            tooltip={fullHeight ? "Collapse" : "Expand"}
+            label={fullHeight ? t("workspace:collapseLibrary") : t("workspace:expandLibrary")}
+            tooltip={fullHeight ? t("workspace:collapse") : t("chat:generatedImage_expand")}
             onClick={() => setFullHeight((current) => !current)}
           >
             {fullHeight ? (
@@ -529,7 +531,12 @@ export function LibraryPanel({
               <PanelExpandIcon className="size-3.5" />
             )}
           </IconButton>
-          <IconButton type="button" label="Close library" tooltip="Close" onClick={onClose}>
+          <IconButton
+            type="button"
+            label={t("workspace:closeLibrary")}
+            tooltip={t("common:app_close")}
+            onClick={onClose}
+          >
             <XIcon className="size-3.5" />
           </IconButton>
         </div>
@@ -539,8 +546,10 @@ export function LibraryPanel({
         <SearchInput
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder={libraryTab === "key" ? "Search key deliverables..." : "Search library..."}
-          aria-label="Search library"
+          placeholder={
+            libraryTab === "key" ? "Search key deliverables..." : t("workspace:searchLibrary2")
+          }
+          aria-label={t("workspace:searchLibrary")}
         />
       </div>
 
@@ -568,13 +577,13 @@ export function LibraryPanel({
           >
             <SelectTrigger variant="ghost" size="xs" className="w-auto min-w-0" aria-label="Type">
               <SelectValue>
-                {TYPE_FILTER_OPTIONS.find((option) => option.value === typeFilter)?.label}
+                {t(TYPE_FILTER_OPTIONS.find((option) => option.value === typeFilter)!.labelKey)}
               </SelectValue>
             </SelectTrigger>
             <SelectPopup surface="composer">
               {TYPE_FILTER_OPTIONS.map((option) => (
                 <SelectItem key={option.value} value={option.value}>
-                  {option.label}
+                  {t(option.labelKey)}
                 </SelectItem>
               ))}
             </SelectPopup>
@@ -592,7 +601,10 @@ export function LibraryPanel({
             <SettingsSegmentedControl
               value={viewMode}
               onValueChange={setViewMode}
-              options={VIEW_MODE_OPTIONS}
+              options={VIEW_MODE_OPTIONS.map((option) => ({
+                value: option.value,
+                label: t(option.labelKey),
+              }))}
               ariaLabel="View mode"
             />
           </div>
@@ -616,14 +628,16 @@ export function LibraryPanel({
                 ? "border-destructive/40 text-destructive"
                 : "border-[color:var(--color-border)] text-muted-foreground",
             )}
-            title={remoteStatus.lastPushError ?? remoteStatus.lastPushAt ?? "Not pushed yet"}
+            title={
+              remoteStatus.lastPushError ?? remoteStatus.lastPushAt ?? t("workspace:notPushedYet")
+            }
           >
             <CloudSyncIcon className="size-3" />
             {remoteStatus.lastPushError
-              ? "Push failed"
+              ? t("git:pushFailed")
               : remoteStatus.lastPushAt
-                ? "Pushed"
-                : "Not pushed yet"}
+                ? t("workspace:pushed")
+                : t("workspace:notPushedYet")}
           </span>
         </div>
       ) : null}
@@ -715,8 +729,8 @@ export function LibraryPanel({
           <div className="flex items-center px-2 pb-1">
             <button
               type="button"
-              aria-label={`Back to library from ${previewPath}`}
-              title="Back to library"
+              aria-label={t("workspace:backToLibraryFrom", { value0: previewPath })}
+              title={t("workspace:backToLibrary")}
               className="flex min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 py-0.5 text-left text-ui-sm text-muted-foreground transition-colors hover:bg-[var(--color-background-button-secondary-hover)] hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
               onClick={() => setPreviewPath(null)}
             >
@@ -740,8 +754,8 @@ export function LibraryPanel({
           <div className="flex items-center px-2 pb-1">
             <button
               type="button"
-              aria-label="Back to library from history"
-              title="Back to library"
+              aria-label={t("workspace:backToLibraryFromHistory")}
+              title={t("workspace:backToLibrary")}
               className="flex min-w-0 flex-1 items-center gap-1 rounded-md px-1.5 py-0.5 text-left text-ui-sm text-muted-foreground transition-colors hover:bg-[var(--color-background-button-secondary-hover)] hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
               onClick={() => {
                 setHistoryPath(null);
@@ -751,20 +765,22 @@ export function LibraryPanel({
               <ArrowLeftIcon className="size-3.5 shrink-0" />
               <span
                 className="min-w-0 truncate"
-                title={historyScope === "library" ? "Library" : historyPath}
+                title={historyScope === "library" ? t("chat:library") : historyPath}
               >
-                {historyScope === "library" ? "History" : `History — ${historyPath}`}
+                {historyScope === "library"
+                  ? t("workspace:history")
+                  : t("workspace:history2", { value0: historyPath })}
               </span>
             </button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto px-1">
             {historyCommits === null ? (
               <PanelStateMessage density="compact" fill="flex">
-                <p>Loading history…</p>
+                <p>{t("workspace:loadingHistory")}</p>
               </PanelStateMessage>
             ) : historyCommits.length === 0 ? (
               <PanelStateMessage density="compact" fill="flex">
-                <p>No versions yet.</p>
+                <p>{t("workspace:noVersionsYet")}</p>
               </PanelStateMessage>
             ) : (
               <ul className="flex flex-col gap-0.5">
@@ -784,7 +800,8 @@ export function LibraryPanel({
                           {commit.message}
                         </p>
                         <p className="text-ui-xs text-muted-foreground">
-                          {commit.sha.slice(0, 7)} · {formatRelativeTime(commit.at)}
+                          {commit.sha.slice(0, 7)} ·{" "}
+                          {formatRelativeTime(commit.at, undefined, formatLocale)}
                         </p>
                       </div>
                       {restorePath !== null && restoreSha !== undefined ? (
@@ -798,15 +815,18 @@ export function LibraryPanel({
                               if (restored) {
                                 toastManager.add({
                                   type: "success",
-                                  title: "Restored",
-                                  description: `${restorePath} was restored from ${restoreSha.slice(0, 7)}.`,
+                                  title: t("workspace:restored"),
+                                  description: t("workspace:wasRestoredFrom", {
+                                    value0: restorePath,
+                                    value1: restoreSha.slice(0, 7),
+                                  }),
                                 });
                                 void refreshHistory();
                               }
                             });
                           }}
                         >
-                          Restore
+                          {t("common:app_restore")}
                         </Button>
                       ) : null}
                     </li>
@@ -890,18 +910,18 @@ export function LibraryPanel({
             <div className="grid grid-cols-[1fr_auto] items-center gap-1 px-3 pb-0.5 text-ui-xs text-muted-foreground">
               {(
                 [
-                  ["name", "Name"],
-                  ["modifiedAt", "Date modified"],
+                  ["name", "common:scripts_name"],
+                  ["modifiedAt", "workspace:dateModified"],
                 ] as ReadonlyArray<readonly [LibrarySortKey, string]>
-              ).map(([key, label]) => (
+              ).map(([key, labelKey]) => (
                 <button
                   key={key}
                   type="button"
                   className="flex items-center gap-0.5 text-left transition-colors hover:text-foreground"
-                  aria-label={`Sort by ${label}`}
+                  aria-label={t("workspace:sortBy", { value0: t(labelKey) })}
                   onClick={() => setSort((current) => nextLibrarySort(current, key))}
                 >
-                  {label}
+                  {t(labelKey)}
                   {sort.key === key ? (
                     sort.direction === "asc" ? (
                       <ArrowUpIcon className="size-2.5" />
@@ -919,9 +939,9 @@ export function LibraryPanel({
                 {onlyKeyDeliverables ? (
                   <p>No key deliverables are available in this library.</p>
                 ) : query || typeFilter !== "all" ? (
-                  <p>No files match.</p>
+                  <p>{t("workspace:noFilesMatch")}</p>
                 ) : (
-                  <p>No files yet. Add documents or artifacts for this hub.</p>
+                  <p>{t("workspace:noFilesYetAddDocumentsOrArtifactsForThis")}</p>
                 )}
               </PanelStateMessage>
             ) : viewMode === "grid" ? (
@@ -993,16 +1013,18 @@ export function LibraryPanel({
         <AlertDialogPopup>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              Delete {deleteTarget?.kind === "directory" ? "folder" : "file"} "{deleteTarget?.name}
+              {t("computer:detail_delete")}{" "}
+              {deleteTarget?.kind === "directory" ? t("workspace:folder2") : t("common:file")} "
+              {deleteTarget?.name}
               "?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              This removes it from the library. It can be restored from History.
+              {t("workspace:thisRemovesItFromTheLibraryItCanBe")}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogClose render={<Button variant="outline" size="sm" />}>
-              Cancel
+              {t("common:form_cancel")}
             </AlertDialogClose>
             <Button
               size="sm"
@@ -1010,7 +1032,7 @@ export function LibraryPanel({
               disabled={library.busy}
               onClick={() => void confirmDelete()}
             >
-              Delete
+              {t("computer:detail_delete")}
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -1031,6 +1053,8 @@ function LibraryListRow(props: {
   onOpen: (entry: LibraryEntry) => void;
   onContextMenu: (entry: LibraryEntry, event: ReactMouseEvent<HTMLElement>) => void;
 }) {
+  const { t, formatLocale } = useTranslation();
+
   const { entry, depth } = props.row;
   return (
     <div
@@ -1042,7 +1066,7 @@ function LibraryListRow(props: {
           <Input
             autoFocus
             value={props.renameDraft}
-            aria-label={`Rename ${entry.name}`}
+            aria-label={t("workspace:rename2", { value0: entry.name })}
             className="h-6 flex-1 text-ui"
             onChange={(event) => props.onRenameDraftChange(event.target.value)}
             onKeyDown={(event) => {
@@ -1079,7 +1103,10 @@ function LibraryListRow(props: {
       )}
       <span className="pr-1 text-ui-xs text-muted-foreground/80">
         {entry.kind === "file"
-          ? `${formatBytes(entry.sizeBytes)} · ${formatRelativeTime(entry.modifiedAt)}`
+          ? t("common:symbol9", {
+              value0: formatBytes(entry.sizeBytes),
+              value1: formatRelativeTime(entry.modifiedAt, undefined, formatLocale),
+            })
           : ""}
       </span>
     </div>
@@ -1097,6 +1124,8 @@ function LibraryGridTile(props: {
   onOpen: (entry: LibraryEntry) => void;
   onContextMenu: (entry: LibraryEntry, event: ReactMouseEvent<HTMLElement>) => void;
 }) {
+  const { t } = useTranslation();
+
   const { entry, depth } = props.row;
   if (props.renaming) {
     return (
@@ -1104,7 +1133,7 @@ function LibraryGridTile(props: {
         <Input
           autoFocus
           value={props.renameDraft}
-          aria-label={`Rename ${entry.name}`}
+          aria-label={t("workspace:rename2", { value0: entry.name })}
           className="h-6 flex-1 text-ui"
           onChange={(event) => props.onRenameDraftChange(event.target.value)}
           onKeyDown={(event) => {

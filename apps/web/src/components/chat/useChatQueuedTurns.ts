@@ -7,6 +7,7 @@ import { type QueuedComposerTurn, useComposerDraftStore } from "../../composerDr
 import { cloneComposerImageAttachment } from "../../lib/composerSend";
 import {
   armQueuedComposerSteerGate,
+  canResumeClosedQueuedComposerSession,
   claimQueuedComposerAutoDispatch,
   clearQueuedComposerAutoDispatchRetry,
   clearQueuedComposerSteerGate,
@@ -23,9 +24,11 @@ import { derivePhase } from "../../session-logic";
 import { useStore } from "../../store";
 import { getThreadFromState } from "../../threadDerivation";
 import { type ChatMessage, type Thread } from "../../types";
+import { addWsTransportStateListener, readLatestWsTransportState } from "../../wsTransportEvents";
 import {
   resolveQueuedComposerAutoDispatchHold,
   resolveQueuedSteerGateTransition,
+  retargetQueuedTurnToThreadProvider,
   type QueuedSteerGate,
 } from "../ChatView.logic";
 import { useChatComposerDraft } from "./useChatComposerDraft";
@@ -161,6 +164,7 @@ export function useChatQueuedTurns({
     () =>
       deriveQueuedComposerPause({
         latestTurn: activeLatestTurn,
+        usageLimitRecovery: activeThread?.usageLimitRecovery,
         activities: activeThread?.activities ?? [],
         threadError: activeThread?.error,
         queuedTurnCount: queuedComposerTurns.length,
@@ -170,6 +174,7 @@ export function useChatQueuedTurns({
     [
       activeLatestTurn,
       activeThread?.activities,
+      activeThread?.usageLimitRecovery,
       activeThread?.error,
       queueResumedTurnId,
       queueStoppedTurnId,
@@ -191,6 +196,9 @@ export function useChatQueuedTurns({
   // Bumped to re-evaluate auto-dispatch when only non-reactive guards (refs)
   // blocked it; nothing else re-triggers the effect once they reset.
   const [queuedAutoDispatchTick, setQueuedAutoDispatchTick] = useState(0);
+  const [transportState, setTransportState] = useState(readLatestWsTransportState);
+
+  useEffect(() => addWsTransportStateListener(setTransportState, { replayCurrent: true }), []);
 
   useEffect(() => {
     queuedComposerTurnsRef.current = queuedComposerTurns;
@@ -209,10 +217,11 @@ export function useChatQueuedTurns({
   }, [setQueuedSteerGate, threadId]);
 
   const restoreQueuedTurnToComposer = useCallback(
-    (queuedTurn: QueuedComposerTurn) => {
+    (queued: QueuedComposerTurn) => {
       if (!activeThread) {
         return;
       }
+      const queuedTurn = retargetQueuedTurnToThreadProvider(queued, activeThread);
       const nextPrompt = queuedTurn.kind === "chat" ? queuedTurn.prompt : queuedTurn.text;
       const restoredImages =
         queuedTurn.kind === "chat" ? queuedTurn.images.map(cloneComposerImageAttachment) : [];
@@ -323,10 +332,12 @@ export function useChatQueuedTurns({
   );
 
   const dispatchQueuedComposerTurn = useCallback(
-    async (queuedTurn: QueuedComposerTurn, dispatchMode: "queue" | "steer"): Promise<boolean> => {
+    async (queued: QueuedComposerTurn, dispatchMode: "queue" | "steer"): Promise<boolean> => {
+      const thread = getThreadFromState(useStore.getState(), threadId);
       if (
         hasPendingCacheReview ||
-        getThreadFromState(useStore.getState(), threadId)?.claudeCacheReview != null
+        thread?.claudeCacheReview != null ||
+        thread?.usageLimitRecovery != null
       ) {
         return false;
       }
@@ -334,6 +345,7 @@ export function useChatQueuedTurns({
       if (!lateSendHandlers) {
         return false;
       }
+      const queuedTurn = thread ? retargetQueuedTurnToThreadProvider(queued, thread) : queued;
       if (queuedTurn.kind === "chat") {
         return lateSendHandlers.send(undefined, dispatchMode, queuedTurn);
       }
@@ -370,7 +382,10 @@ export function useChatQueuedTurns({
             removeQueuedComposerTurnFromDraft(threadId, queuedTurnForSend.id);
             return;
           }
-          if (getThreadFromState(useStore.getState(), threadId)?.claudeCacheReview == null) {
+          if (
+            getThreadFromState(useStore.getState(), threadId)?.claudeCacheReview == null &&
+            getThreadFromState(useStore.getState(), threadId)?.usageLimitRecovery == null
+          ) {
             recordQueuedComposerAutoDispatchFailure(threadId, queuedTurnForSend.id);
           }
           setQueuedAutoDispatchTick((tick) => tick + 1);
@@ -395,11 +410,11 @@ export function useChatQueuedTurns({
   );
 
   const onResumeQueuedComposerTurns = useCallback(() => {
-    if (!queuePause) {
+    if (!queuePause || activeThread?.usageLimitRecovery) {
       return;
     }
     useComposerDraftStore.getState().resumeQueuedTurns(threadId, queuePause.turnId);
-  }, [queuePause, threadId]);
+  }, [activeThread?.usageLimitRecovery, queuePause, threadId]);
 
   // Edit on the paused notice takes the next queued message back into the composer;
   // the rest stays paused until that message is sent and its turn ends normally.
@@ -468,19 +483,24 @@ export function useChatQueuedTurns({
     activeLatestTurn == null;
 
   const isQueuePaused = queuePause !== null;
+  const canResumeClosedSession = canResumeClosedQueuedComposerSession(
+    activeThread,
+    queueResumedTurnId,
+  );
 
   useEffect(() => {
-    if (hasPendingCacheReview) {
+    if (hasPendingCacheReview || activeThread?.usageLimitRecovery) {
       clearQueuedComposerAutoDispatchRetry(threadId);
       return;
     }
     if (
       isQueuePaused ||
+      (transportState !== null && transportState !== "open") ||
       isQueuedComposerAwaitingTurnStart(threadId) ||
       resolveQueuedComposerAutoDispatchHold({
         localDispatch,
         // A mini-composer submission queues the first turn before the draft has a session.
-        phase: isLocalDraftThread || isUnstartedThread ? "ready" : phase,
+        phase: isLocalDraftThread || isUnstartedThread || canResumeClosedSession ? "ready" : phase,
         latestTurn: activeLatestTurn,
         session: activeThread?.session ?? null,
         messages: activeThread?.messages ?? EMPTY_MESSAGES,
@@ -538,7 +558,10 @@ export function useChatQueuedTurns({
           removeQueuedComposerTurnFromDraft(threadId, nextQueuedTurn.id);
           return;
         }
-        if (getThreadFromState(useStore.getState(), threadId)?.claudeCacheReview == null) {
+        if (
+          getThreadFromState(useStore.getState(), threadId)?.claudeCacheReview == null &&
+          getThreadFromState(useStore.getState(), threadId)?.usageLimitRecovery == null
+        ) {
           recordQueuedComposerAutoDispatchFailure(threadId, nextQueuedTurn.id);
         }
         setQueuedAutoDispatchTick((tick) => tick + 1);
@@ -558,11 +581,13 @@ export function useChatQueuedTurns({
     activeThread?.error,
     activeThread?.messages,
     activeThread?.session,
+    activeThread?.usageLimitRecovery,
     dispatchQueuedComposerTurn,
     hasPendingCacheReview,
     isConnecting,
     isLocalDraftThread,
     isQueuePaused,
+    canResumeClosedSession,
     isUnstartedThread,
     localDispatch,
     pendingUserInputs.length,
@@ -572,6 +597,7 @@ export function useChatQueuedTurns({
     queuedSteerGate,
     removeQueuedComposerTurnFromDraft,
     threadId,
+    transportState,
   ]);
   return {
     setQueuedSteerGate,

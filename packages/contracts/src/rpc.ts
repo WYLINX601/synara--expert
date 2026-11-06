@@ -15,6 +15,15 @@ import {
   HubDeliverableReadResult,
   HubDeliverableMutationResult,
 } from "./hubDeliverables";
+import {
+  EditorDebugStartInput,
+  EditorDebugStartResult,
+  EditorDebugActionInput,
+  EditorDebugActionResult,
+  EditorDebugPollInput,
+  EditorDebugSnapshot,
+} from "./editorDebug";
+import { EditorIntelligenceInput, EditorIntelligenceResult } from "./editorIntelligence";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
 
@@ -694,6 +703,28 @@ export const WsProjectsSearchContentRpc = Rpc.make(WS_METHODS.projectsSearchCont
 export const WsProjectsPrewarmSearchIndexRpc = Rpc.make(WS_METHODS.projectsPrewarmSearchIndex, {
   payload: ProjectPrewarmSearchIndexInput,
   success: ProjectPrewarmSearchIndexResult,
+  error: WsRpcError,
+});
+
+export const WsEditorDebugStartRpc = Rpc.make(WS_METHODS.editorDebugStart, {
+  payload: EditorDebugStartInput,
+  success: EditorDebugStartResult,
+  error: WsRpcError,
+});
+export const WsEditorDebugActionRpc = Rpc.make(WS_METHODS.editorDebugAction, {
+  payload: EditorDebugActionInput,
+  success: EditorDebugActionResult,
+  error: WsRpcError,
+});
+export const WsEditorDebugPollRpc = Rpc.make(WS_METHODS.editorDebugPoll, {
+  payload: EditorDebugPollInput,
+  success: EditorDebugSnapshot,
+  error: WsRpcError,
+});
+
+export const WsEditorIntelligenceRpc = Rpc.make(WS_METHODS.editorIntelligence, {
+  payload: EditorIntelligenceInput,
+  success: EditorIntelligenceResult,
   error: WsRpcError,
 });
 
@@ -2312,7 +2343,8 @@ export const WsSubscribeProjectAgentEventsRpc = Rpc.make(WS_METHODS.subscribePro
 
 export const WsBootstrapRpcGroup = RpcGroup.make(WsBootstrapNegotiateRpc);
 
-const WS_FEATURE_RPC_GROUP_1 = RpcGroup.make(
+// Keep declaration inference bounded without widening any RPC payload or result.
+const wsOrchestrationRpcGroup = RpcGroup.make(
   WsOrchestrationDispatchCommandRpc,
   WsOrchestrationSettleTurnDispatchRpc,
   WsOrchestrationImportThreadRpc,
@@ -2337,12 +2369,19 @@ const WS_FEATURE_RPC_GROUP_1 = RpcGroup.make(
   WsOrchestrationSubscribeThreadRpc,
   WsOrchestrationUnsubscribeThreadRpc,
   WsOrchestrationSubscribeDomainEventsRpc,
+);
+
+const wsApplicationRpcGroup = RpcGroup.make(
   WsProjectsDiscoverScriptsRpc,
   WsProjectsListDirectoriesRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsSearchLocalEntriesRpc,
   WsProjectsSearchContentRpc,
   WsProjectsPrewarmSearchIndexRpc,
+  WsEditorIntelligenceRpc,
+  WsEditorDebugStartRpc,
+  WsEditorDebugActionRpc,
+  WsEditorDebugPollRpc,
   WsProjectsReadFileRpc,
   WsProjectsSubscribeFileChangeRpc,
   WsProjectsResolveWorkspaceFileReferencesRpc,
@@ -2517,12 +2556,14 @@ const WS_FEATURE_RPC_GROUP_4 = RpcGroup.make(
 );
 
 type WsFeatureRpc =
-  | RpcGroup.Rpcs<typeof WS_FEATURE_RPC_GROUP_1>
+  | RpcGroup.Rpcs<typeof wsOrchestrationRpcGroup>
+  | RpcGroup.Rpcs<typeof wsApplicationRpcGroup>
   | RpcGroup.Rpcs<typeof WS_FEATURE_RPC_GROUP_2>
   | RpcGroup.Rpcs<typeof WS_FEATURE_RPC_GROUP_3>
   | RpcGroup.Rpcs<typeof WS_FEATURE_RPC_GROUP_4>;
 
-export const WsFeatureRpcGroup: RpcGroup.RpcGroup<WsFeatureRpc> = WS_FEATURE_RPC_GROUP_1.merge(
+export const WsFeatureRpcGroup: RpcGroup.RpcGroup<WsFeatureRpc> = wsOrchestrationRpcGroup.merge(
+  wsApplicationRpcGroup,
   WS_FEATURE_RPC_GROUP_2,
   WS_FEATURE_RPC_GROUP_3,
   WS_FEATURE_RPC_GROUP_4,

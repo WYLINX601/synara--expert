@@ -531,7 +531,7 @@ describe("OMP adapter fixed Skill admission", () => {
         Effect.gen(function* () {
           const adapter = yield* OmpAdapter;
           const threadId = ThreadId.makeUnsafe("omp-learning-compat");
-          yield* adapter.startSession({
+          const started = yield* adapter.startSession({
             threadId,
             provider: "omp",
             cwd: root,
@@ -540,6 +540,10 @@ describe("OMP adapter fixed Skill admission", () => {
             expertSession: session,
             providerOptions: { omp: { environment: { PATH: "/selected/omp-account-bin" } } },
           });
+          expect(started.lifecycleGeneration).toBe("learning-compat-generation");
+          expect(
+            (yield* adapter.listSessions()).find((candidate) => candidate.threadId === threadId),
+          ).toMatchObject({ lifecycleGeneration: "learning-compat-generation" });
 
           expect(preparation.compatPreparations).toBe(1);
           expect(preparation.spawnInputs.at(-1)).toMatchObject({

@@ -16,6 +16,71 @@ import { isHomeChatContainerProject } from "~/lib/chatProjects";
 import { isGroupContainerProject } from "~/lib/groupProjects";
 import type { ServerWorkspacePaths } from "~/lib/serverWorkspacePaths";
 import { newCommandId, newSpaceId } from "~/lib/utils";
+import { readProjectSpaceMembership } from "~/workbench/host/spaceMembership";
+import { requestShellSnapshotRefresh } from "~/routeRestoreRefreshCoordinator";
+
+type PendingProjectSpaceMove = {
+  readonly spaceId: SpaceId | null;
+  readonly receipt: Promise<{ readonly sequence: number }>;
+};
+const pendingProjectSpaceMoves = new Map<ProjectId, PendingProjectSpaceMove>();
+
+// Receipts precede shell pushes; keep only unconfirmed membership, not a second project store.
+async function trackProjectSpaceMove(
+  projectIds: readonly ProjectId[],
+  spaceId: SpaceId | null,
+  receipt: Promise<{ readonly sequence: number }>,
+): Promise<void> {
+  const move = { spaceId, receipt };
+  const previousMoves = projectIds.map((projectId) => pendingProjectSpaceMoves.get(projectId));
+  for (const projectId of projectIds) pendingProjectSpaceMoves.set(projectId, move);
+  try {
+    await receipt;
+  } catch (error) {
+    for (const [index, projectId] of projectIds.entries()) {
+      if (pendingProjectSpaceMoves.get(projectId) === move) {
+        const previous = previousMoves[index];
+        if (previous) pendingProjectSpaceMoves.set(projectId, previous);
+        else pendingProjectSpaceMoves.delete(projectId);
+      }
+    }
+    throw error;
+  }
+}
+
+/** Refresh only when a local Space move could make a close-action fallback read stale membership. */
+export async function reconcilePendingProjectSpaceMoves(): Promise<boolean> {
+  const moves = [...pendingProjectSpaceMoves];
+  if (moves.length === 0) return true;
+  const receipts = await Promise.allSettled(moves.map(([, move]) => move.receipt));
+  const membership = readProjectSpaceMembership();
+  const needsRefresh = moves.some(
+    ([projectId, move], index) =>
+      receipts[index]?.status === "fulfilled" &&
+      pendingProjectSpaceMoves.get(projectId) === move &&
+      (!membership.has(projectId) || membership.get(projectId) !== move.spaceId),
+  );
+  if (needsRefresh) {
+    try {
+      const minSequence = Math.max(
+        ...receipts.flatMap((receipt) =>
+          receipt.status === "fulfilled" ? [receipt.value.sequence] : [],
+        ),
+      );
+      if (!(await requestShellSnapshotRefresh(minSequence))) return false;
+    } catch {
+      // The close succeeded; keep its route rather than select a chat using stale membership.
+      return false;
+    }
+  }
+  for (const [projectId, move] of moves) {
+    if (pendingProjectSpaceMoves.get(projectId) === move) {
+      pendingProjectSpaceMoves.delete(projectId);
+    }
+  }
+  // A newer move started during the refresh; leave navigation for its confirmed membership.
+  return pendingProjectSpaceMoves.size === 0;
+}
 
 type SpaceCommandApi = Pick<NativeApi["orchestration"], "dispatchCommand">;
 type SpaceCommandRecoveryApi = Pick<
@@ -106,12 +171,16 @@ export async function moveProjectToSpace(input: {
   projectId: ProjectId;
   spaceId: SpaceId | null;
 }): Promise<void> {
-  await input.api.dispatchCommand({
-    type: "project.meta.update",
-    commandId: newCommandId(),
-    projectId: input.projectId,
-    spaceId: input.spaceId,
-  });
+  await trackProjectSpaceMove(
+    [input.projectId],
+    input.spaceId,
+    input.api.dispatchCommand({
+      type: "project.meta.update",
+      commandId: newCommandId(),
+      projectId: input.projectId,
+      spaceId: input.spaceId,
+    }),
+  );
 }
 
 /**
@@ -134,12 +203,16 @@ export async function moveProjectsToSpace(input: {
   ) {
     const chunk = input.projectIds.slice(offset, offset + SPACE_PROJECTS_ASSIGN_MAX_COUNT);
     try {
-      await input.api.dispatchCommand({
-        type: "space.projects.assign",
-        commandId: newCommandId(),
-        spaceId: input.spaceId,
-        projectIds: chunk,
-      });
+      await trackProjectSpaceMove(
+        chunk,
+        input.spaceId,
+        input.api.dispatchCommand({
+          type: "space.projects.assign",
+          commandId: newCommandId(),
+          spaceId: input.spaceId,
+          projectIds: chunk,
+        }),
+      );
     } catch {
       const remainingProjectIds = input.projectIds.slice(offset);
       // A transport error can race a committed command. Re-read the authoritative shell

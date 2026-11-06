@@ -17,7 +17,20 @@ export interface ContextExecutionWorkspace {
 /** Hash only execution inputs, excluding mutable session/turn status and current config. */
 export function contextExecutionInputDigest(
   event: ContextExecutionEvent,
-  thread: OrchestrationThread,
+  thread: Pick<
+    OrchestrationThread,
+    | "messages"
+    | "notes"
+    | "modelSelection"
+    | "runtimeMode"
+    | "interactionMode"
+    | "goal"
+    | "projectId"
+    | "envMode"
+    | "worktreePath"
+    | "workingDirectory"
+    | "branch"
+  >,
   workspace: ContextExecutionWorkspace,
 ): string {
   const messageId = event.type === "thread.turn-start-requested" ? event.payload.messageId : null;

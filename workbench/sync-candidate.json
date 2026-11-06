@@ -1,9 +1,9 @@
 {
   "formatVersion": 1,
-  "baseSha": "21052b8338e4c71514df31fee9a422778ac626c9",
+  "baseSha": "e147a7c4e93eed3a8734b72213781f547a8d5f16",
   "target": {
-    "tag": "v1.0.5",
-    "commit": "1eb2beb6b5019fc311f23a3deb5362f68d07d537"
+    "tag": "v1.1.0",
+    "commit": "b6aa37bc82eec649dd527c5956fdccc2c63d3b24"
   },
-  "branch": "codex/sync-v1-0-5-1eb2beb6"
+  "branch": "codex/sync-v1-1-0-b6aa37bc"
 }

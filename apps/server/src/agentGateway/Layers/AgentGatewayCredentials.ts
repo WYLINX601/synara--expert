@@ -220,6 +220,7 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
     cancelInFlightRequests: inFlightRequests.cancel,
     cancelSessionTurnRequests,
     retireSessionTurn,
+    listRetiredWriteAuthorities: sessionRegistry.listRetiredWriteAuthorities,
     revokeSessionToken,
     onSessionRevoked: (listener) => {
       revokedListeners.add(listener);

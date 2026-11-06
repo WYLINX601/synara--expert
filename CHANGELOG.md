@@ -1,5 +1,207 @@
 # Changelog
 
+## 1.1.0 — 2026-11-02
+
+**More reliable recovery, opt-in continuation after usage limits, Spanish interface and safer attachments.**
+
+This Stable release covers the complete range after `v1.0.9` through `d80787e3e4d8829a35a64b111e6fcbe5f51cf037`. Simplified Chinese remains Beta-only. Stable and Beta retain separate identities, data homes and update feeds.
+
+### Added
+
+- English, Spanish and System interface preferences, including native menus and app-authored permission explanations. Existing editor engine labels may require the offered guarded reload; user content and provider output are not translated.
+- Default-off **Resume after usage limits** for supported Codex and Claude terminal refusals with verified account identity and future reset evidence. The execution host must be running. Stop, manual sends and account/model changes cancel pending waits; ambiguous limits stay manual.
+- Explicit offline `synara-compact-database` maintenance for legacy SQLite files. A private copy must pass integrity, row-count and identity checks before replacement. All clients must be stopped and sufficient scratch space available; retained data and migration backups are preserved.
+
+### Changed
+
+- Ordinary chats interrupted by an unexpected server shutdown receive guarded continuations from saved context. Approvals, unanswered questions, starting chats, native subagents and managed work retain their separate recovery rules.
+- Agent narration appears as prose with compact tool rows; subagent rows report model and effort. Right-dock width is remembered per thread, and editor folders can be dropped into the composer.
+- Runtime ingestion and command delivery retain less redundant state; computer frame handling reduces repeated copies. No whole-app memory, CPU or battery improvement is claimed from these scoped changes.
+- Pi updates its OpenAI login support while preserving legacy Azure profiles, Kimi endpoint compatibility and account isolation. Windows release qualification now requires active Defender cloud checks; an antivirus detection still blocks publication.
+
+### Fixed
+
+- Claude Stop and ambiguous sends retain runtime ownership fences, SDK error results fail correctly, and steers are admitted against the original turn. Recovery does not claim unverified process retirement.
+- Crash recovery, queued-message resumption and subagent lifecycle/messaging preserve accepted work and avoid duplicate continuation. Completed background work and resumed clocks display correctly.
+- Photo preparation errors preserve drafts; unsupported native-review attachments do not discard accepted work. Private inline image recovery respects ownership and replay safety, and desktop uploads use the server route.
+- New-chat creation remains reachable without tabs. Composer highlighting avoids redundant updates. Cursor usage supports safe-storage access tokens, and credential-lock publication handles owner-release collisions.
+
+### Verification
+
+The complete candidate requires brand, formatting, lint, typecheck, release smoke, relevant migration/platform checks, focused tests and marketing checks. The single exact-tag publication workflow must pass the full quality/server suites, portable build, all four native packages, macOS signing/notarization, provenance, Defender and packaged startup. Pending gates are not passed gates; actual results remain in the release checkpoint and publication notes.
+
+See [source audit](docs/releases/1.1.0-source-audit.md). Preparation changes versions and release text in existing surfaces only. Manual installation/upgrades, live provider authentication, macOS 13 runtime and Windows browser-download reputation remain separately unverified.
+
+## 1.0.9 — 2026-10-25
+
+**Native editing and MCP Connectors in Stable, safer Stop retries and compressed recovery backups.**
+
+This Stable release covers all 15 commits after `v1.0.8` through `8e21e29c2a3d47205a0a9e834c8c44745efd0cf1`. Native editor and connector promotion was merged before release preparation. Diagnostics remain Beta-only; app identities, credentials, data homes and update feeds stay separate.
+
+### Added
+
+- Stable gains the Code OSS engine for file editors, editable diffs and previews, TypeScript/JavaScript language intelligence, editor commands and JavaScript debugging. Existing buffer ownership, save/conflict rules and large-preview fallbacks remain.
+- Stable gains Settings → Connectors and supported remote MCP connections. Provider coverage and normal tool approvals still apply; running sessions keep their starting connector set.
+- A new `/goal` in an idle persisted chat outside Plan mode commits a visible message with its first turn. Native clients can discover this optional host capability without re-pairing.
+
+### Changed
+
+- New pre-migration SQLite backups use `.sqlite.gz`; inspection and recovery accept compressed and existing plain snapshots. Scratch-space checks account for both the snapshot and compressed output. Retention and recovery safety remain enforced.
+- Local project favicons supply project glyphs across sidebar, search, pickers and previews; explicit custom glyphs take precedence and unsafe paths are rejected.
+- The build toolchain requires Bun 1.4.4 security fixes. Mac bundles declare macOS 13.0, and updater manifests use Darwin 22.0.0 to enforce that minimum.
+
+### Fixed
+
+- Conditional Stop persists its original runtime/turn target before physical control. Retries cannot adopt a replacement runtime or later turn; failed observations remain retryable or uncertain. Interrupt-only controls preserve queued messages and transcript context.
+- Command-progress activity uses durable identity across ingestion and replay. User-facing provider errors retain readable messages without inline stack details.
+- OpenCode sign-in and model-list fallback use isolated servers when `--standalone` is supported; cold V2 discovery loads models before provider metadata. Authentication terminals retain usable capabilities despite inherited `TERM=dumb` or `NO_COLOR`.
+- Hub workers omit Snooze and Hub actions. The landing ASCII field remains continuous beneath the composer's own surface.
+
+### Verification
+
+Local formatting, lint, typecheck, release smoke, brand, Windows runtime and migration checks, affected tests and marketing build are required for the finished candidate. The exact-tag publication workflow supplies full quality/server suites, portable inputs, all four native packages, macOS signing/notarization and Intel startup, provenance, Windows Defender and packaged startup. Pending gates are not passed gates; actual outcomes are recorded in the release checkpoint and public notes.
+
+See [source audit](docs/releases/1.0.9-source-audit.md). Release preparation changes versions and visible release text on existing surfaces only. Manual installation/upgrades, runtime behavior on macOS 13, live providers and connector sign-in, and browser-download reputation remain separately unverified.
+
+## 1.0.8 — 2026-10-23
+
+**Reliable handoffs and recovery, clearer parallel work, captured live diffs and workspace refinements.**
+
+This Stable release covers all 32 commits after `v1.0.7` through `f9ba953a6a26769bf73c78c2bae673e5a09ba62f`. The native editor, connectors and diagnostics remain Beta-only. Stable and Beta keep separate identities, data homes and update feeds.
+
+### Added
+
+- A new-thread + follows the chat tabs and creates a chat in the current workspace. Environment offers shared project-action creation and editing; header actions are grouped with independent visibility preferences.
+- Running subagents appear above the composer. Devin ACP background work and child agents retain task, permission and turn ownership across replay and recovery; Claude child chats report their resolved model.
+- Turn diffs expose captured live snapshots and complete Codex cumulative patches against their exact baseline, including Ignore whitespace. Incomplete evidence remains unavailable until a complete update or final checkpoint.
+- Hyprland supports compositor-backed translucency when blur is confirmed enabled; Linux artwork is isolated by app flavor.
+
+### Changed
+
+- Hub context distinguishes coordinator and worker roles and labels provenance. Original human requests and attachment references accompany delegated work; stable task keys make replay idempotent. Ordinary follow-ups queue; steering can interrupt.
+- SQLite free pages are reclaimed incrementally. Existing databases convert only after clean shutdown with sufficient reclaimable pages and scratch space, under a bounded subprocess deadline. This is not guaranteed emergency disk recovery.
+- Idle agent-booted simulators are released after owned work settles, preserving overlapping and renewed leases.
+
+### Fixed
+
+- Send, Continue task and Implement use Hand off consistently. Auto-mode saves preserve pending provider switches; queued work follows the current provider/model. Stored-selection recovery preserves protected history and refuses switches that would silently end background tasks.
+- Codex fresh-resume fallback restores prior transcript context, handles threads without rollouts and discloses omitted or shortened messages. Runtime warnings surface in chat. Plugin discovery is isolated from live sessions, and retired gateway write authority is renewed without reviving old credentials.
+- Hubs settle non-Git workers and preserve settings saves after pause/resume. Orphaned agent tasks settle. Stopped Pi and Antigravity sessions report inactivity for normal next-turn recovery.
+- Done and Archive stay within the active Space; Activity grouping persists. New-thread creation validates current hydration, and window activation, composer updates and terminal activation preserve chosen keyboard focus.
+- Cmd/Ctrl+W closes the focused chat tab or dock terminal. Idle terminal reuse works with large process tables and retains input while commands start.
+- Safari setup detects an existing Full Disk Access grant. Unanswered foreground Computer Use prompts report cancellation. Nested untracked repositories no longer break ordinary working-tree diffs.
+
+### Verification
+
+The complete candidate receives brand, formatting, lint, typecheck, release smoke, focused tests and the relevant Windows runtime boundary check. One publication workflow on the exact tag SHA supplies the complete quality/server suites, portable build, native packages, signing/notarization, provenance, Windows Defender and packaged startup gates. Results are recorded in the publication notes after verification; pending gates are not passed gates.
+
+See [source audit](docs/releases/1.0.8-source-audit.md) for every commit and the durable documentation audit. Release preparation changes visible release text only through the existing surfaces. Manual installed-app upgrades, live provider/microphone behavior and browser-download reputation remain separately unqualified.
+
+## 1.0.7 — 2026-10-17
+
+**Lighter long-running turns, model switches that take effect and safer workspace recovery.**
+
+This Stable patch covers all eight commits from `v1.0.6` through feature head `4cd66c35d897a98aa61ffd075607e08a6c46e4cf`, including the previous release's download snapshot refresh. Connectors and diagnostics remain Beta-only; channel identities, data homes and update feeds stay separate.
+
+### Added
+
+- Message edits that restore an earlier Git workspace retain a hidden recovery checkpoint before provider rollback. The snapshot survives successful replay and later failures; capture failure refuses the edit before rollback. Ignored and external files are not promised recovery coverage.
+
+### Changed
+
+- Long turns bound repeated Git, event-history and checkpoint work. Claude retains turn identifiers rather than every SDK message body; usage reads cache unchanged files and parse appended records. Streaming Markdown reuses settled blocks and updates avoid repainting every transcript row.
+- Live file-change captures share a three-second per-thread throttle with a trailing capture. Read-only tools avoid unnecessary Git refreshes; PR status refreshes at turn end, branch changes, focus and regular polls.
+- Desktop frame capture runs only with a renderer subscriber. Cookie restoration uses a temporary view. Browser console/log domains quiesce after 60 seconds without automation and reactivate on acquisition; captured history, network tracking and request metadata remain available.
+- Scoped measurements reported in #1963: 200 untracked-file numstats, 1.44 s → 9 ms; a repeated usage scan, 214 ms → 4 ms; parsing updates to a 29 KB answer, 18.6 ms → 0.7 ms. These are workload-specific operation timings, not independent whole-app CPU, RAM or battery benchmarks.
+
+### Fixed
+
+- Devin model/Fast switches and Grok model/effort switches reject incompatible resume cursors and start a fresh native session with conversation context. Droid avoids duplicate transcript bootstrapping after a successful native reload.
+- Stopped-but-retained OpenCode sessions no longer trap later turns in a closed runtime. Normal recovery preserves native identity where available and retains unavailable-session failure handling.
+- Windows prepares a bounded process observer before owned OpenCode startup and retains it through pool reuse, then requests fresh teardown evidence. Creation identity, deadlines, cancellation, observer disposal and process exit proof remain required.
+- Missing or moved working directories are reported before executable resolution instead of being misreported as a missing Claude installation. WSL UNC behavior remains unchanged.
+- Beta connector retries reuse an already rotated, unexpired access token; failed OpenCode MCP installation statuses are logged. One connector sign-in covers supported accounts/providers on that computer. Stable keeps Connectors disabled.
+
+### Verification
+
+The finished candidate requires local formatting, lint, typecheck, release smoke, Windows runtime boundary, marketing build and affected unit/browser tests. The single exact-tag workflow supplies the full quality/server test suite, portable build, four native packages, Intel startup, provenance, macOS signing/notarization and Windows Defender/startup. Results are pending until recorded in the local checkpoint and public release notes; no earlier SHA is treated as qualification for this candidate.
+
+The documentation audit covers the complete range and updates recovery, provider troubleshooting, live-change cadence, desktop browser diagnostics and Beta connector scope. See [source audit](docs/releases/1.0.7-source-audit.md). This release changes curated release text on existing surfaces only. Manual installation, installed-app upgrades, real Windows 11 downloads and live-provider behavior remain unverified.
+
+## 1.0.6 — 2026-10-16
+
+**Faster long conversations, smoother parallel work and safer provider recovery.**
+
+This Stable patch covers all 16 commits after `v1.0.5` through `612aff6d8fdcdb9e849d8c8750a8683e7e2dca81`, including the intervening Beta notes. Connectors and diagnostics remain Beta-only; application identities, data homes and update feeds remain separate.
+
+### Added
+
+- Claude model controls can use effort, adaptive-thinking and fast-mode metadata from the installed CLI, including models newer than the fallback catalog. Unset effort leaves Claude Code's default in charge; older CLIs retain fallbacks for omitted fields.
+
+### Changed
+
+- Long conversations avoid repeated activity-history scans and full-detail reads on streaming and checkpoint paths. Full history, outstanding requests and the latest task snapshots remain available.
+- Parallel streams avoid redundant replay polls while live events arrive. Repository and workspace-file refreshes are throttled with a final trailing read. RPCs wait in bounded FIFO queues by request class before consuming server capacity; cancellation, deadlines and uncertain-delivery safeguards remain enforced.
+- The misleading server-busy popup and client heartbeat are removed. Reconnect notices, local event-loop monitoring, health probes and operator status remain.
+
+### Fixed
+
+- Runtime reconciliation keeps the actual live turn owner, serializes reconciliation passes and pages through stale candidates rather than repeatedly inspecting only the first batch.
+- Provider handoffs settle known durable outcomes beyond the native-call deadline without replaying stop/start side effects. Post-native persistence failures remain uncertain.
+- Partial or fallback model catalogs no longer overwrite or persist over complete discovery. They retry on demand after a thirty-second cooldown. The cache format upgrade discards the old catalog snapshot once; accounts, selected models and sessions remain intact.
+- Antigravity quota lookup uses the matching OAuth client and quota-summary endpoint, with legacy fallback.
+- The ASCII pattern fades around the composer and stays out of the input during ripples; command menus remain opaque.
+- Git diff and worktree-transfer commands pin `a/` and `b/` path prefixes despite user Git configuration.
+- Codex internal moderation metadata no longer creates chat activity rows. Native logs retain it when enabled; real provider errors and historical rows remain.
+- Release migration-lineage checks isolate unrelated Remote prerelease history.
+
+### Verification
+
+The complete candidate is qualified by the local release preparation checks and one publication workflow on the exact tag SHA. Public release notes record their actual results after publication; pending native signing, notarization, startup, Defender and provenance gates are not presented as passed.
+
+The documentation audit updates provider controls, model-cache recovery, parallel request behavior and public troubleshooting. See [source audit](docs/releases/1.0.6-source-audit.md). Source tests and packaged startup do not establish manual installed-app upgrades, live-provider behavior, microphone behavior or browser-download reputation.
+
+## 1.0.6-beta.1 — 2026-10-15
+
+**Connectors, a compact composer, clearer Activity and the full reliability work since the previous Beta.**
+
+This Beta covers all **59 feature commits** from `v1.0.2-beta.1` through `4b2441d1040080324f458602e30fbb7f946cb1f5`, including the 1.0.2–1.0.5 Stable changes. Its version commit stays off `main`. Connectors and diagnostics remain Beta-only; Stable and Beta retain separate application identities, data homes and update feeds. Hubs were already available in the previous Beta; their promotion to Stable is not presented as a new Beta feature. Inline visuals were added after that Beta and are included here.
+
+### Added
+
+- **Connect your tools to Synara Beta.** Sign in to remote MCP services from Settings → Connectors and use their tools in supported agent sessions. Claude, Codex and OpenCode support remote HTTP connectors; ACP providers require advertised HTTP MCP support. Pi, Devin and Antigravity do not. New sessions receive connected tools. Custom URLs require public HTTPS; sign-in requires loopback. Slack needs your own OAuth app and an updated redirect URL when the desktop port changes. Stable keeps Connectors disabled.
+- **Interactive visuals inside your conversations.** Agents can now show charts, tables, comparisons, checklists and calculators directly in Beta chats. Native components follow your theme and font size. Desktop apps also support isolated, self-contained HTML views; browser-hosted clients show native components only. Visuals stay with their chat in the current app’s data home.
+- **A compact composer with room for your work.** Short drafts fit into a single row that expands for longer messages. Goals, tasks and changes sit in floating capsules above it. Open a capsule for details or use the + menu for extras. Plans remain accessible, queued drafts survive layout changes, and narrow editor panes keep branch and model controls readable. Notices and task controls use the same compact layout.
+- **Find the chats that need you next.** Activity’s Priority section puts approvals, questions and ready plans ahead of unseen results and running work. Rows hold their place while you work through them; Clear read refreshes the list. Use mod+alt+a to cycle through chats waiting on you and unseen work. Native subagent chats stay in their parent’s cards and roster instead of filling the sidebar.
+- **More capable iOS simulator tools.** Agents can launch and inspect apps, wait for screens, read bounded logs and configure test conditions, with repaired input on Xcode 27. Actions return screen evidence and report when a screen has not settled. Tools support app restarts, launch arguments and environment, appearance, text size, location and privacy settings. Input and configuration retain approval checks; app builds still use your project’s build tools.
+
+### Changed
+
+- **Full conversation reloads and safer recovery.** Since the previous Beta, native chats restore their full saved conversation and apply rollbacks made while disconnected. The 1.0.2 recent-history pager and private detail cache were removed; imported provider history retains its own loader. Reconnects restore subscriptions without replaying uncertain requests. Missing owners cannot trigger abandoned child commands, and eligible ordinary chats can continue after an unexpected shutdown while approvals, goals, Hubs and scheduled work retain their own recovery rules.
+- **Clearer Hub navigation and consistent permissions.** Hubs appears in the main rail, with coordinator rows, worker navigation and settings beside your projects. Hiding Hubs again is respected. Check-ins use the coordinator’s current access mode; new workers inherit a supported mode or fall back to Ask for approval. Verified Claude Auto capability remains tied to the model and account. Gateway and External MCP callers can select a configured provider account for new work and automations.
+- **More control over chat headers and sidebar order.** Turn Thread tabs off for a simpler header, and disable Working and unread on top for chronological Recently active ordering. Rows stay anchored during pointer interaction; the Automations badge counts configured automations. Working for and Worked for use compact disclosures, and background completions keep an active response together. First-message naming survives replay without overwriting manual titles.
+- **Clearer Claude token totals.** Resumed Claude sessions avoid counting restored usage again, and Inbox separates observed cache reads from other tokens. Accounting keeps native-session and process identity, preserves child usage until a real parent result covers it, and excludes output from cache-read estimates. Historical records without enough evidence remain partial; these figures are not an independent billing statement.
+- **A new empty-chat background and smaller refinements.** Empty chats have an animated ASCII field, with an Appearance switch and a still version for reduced motion. The field stops when hidden or disabled and stays out of terminal views. Updated tool, app and connector icons, compact archive controls, clearer permission text, and corrected plan, voice-layout and transcript clearance make everyday controls easier to use.
+
+### Fixed
+
+- **Claude keeps the permissions and session you chose.** Ask for approval explicitly selects Claude’s default permission mode. Changing behavior settings such as Artifacts no longer discards a resumable session. Permission descriptions distinguish Claude’s modes from Codex’s sandbox policies. Finished or interrupted foreground Claude tasks settle with their turn, without stopping background work that still owns its lifecycle. Slash-command catalog updates no longer appear as unknown transcript events.
+- **Less waiting on task-heavy conversations.** Opening a conversation with many task updates avoids repeated quadratic database scans. The query retains the same reconstructed task state and history. Stale transcript row measurements are also ignored. These fixes address specific slow-query and layout cases; they do not establish that every server or provider stall is resolved.
+- **Keep typing while an agent uses the browser.** Agent clicks, typing and browser inspection no longer take native focus from the composer. Native browser hover also preserves the keyboard target. Input uses the tab’s protocol connection, and restored screenshot visibility keeps its focus behavior. This does not promise every website accepts automated input.
+- **Resolve a blocked provider switch.** If background tasks prevent a handoff, the composer offers Stop tasks and switch. The source keeps running until you choose that action. A failed handoff retains the source selection and its actual error instead of reporting success.
+- **Paste files and recover Computer Use actions.** On macOS, agents can paste workspace images and files, preserve supported clipboard formats and recover expired foreground requests. A newer human clipboard copy is retained. Native targeting excludes unrelated or parked document trees and cursor overlays. Input listeners recover with readiness checks, state and scroll progress avoid false repetition blocks, and uncertain text delivery is not replayed automatically. App outcomes still need verification.
+- **Browser tabs keep their place through ordinary switches.** Inactive browser tabs stay warm longer, preserving forms, scroll and page state until runtime limits require suspension. Hidden tabs can suspend earlier under pressure. Suspended pages and tabs whose desktop window was replaced reload their saved URL when reopened; unsaved state is not guaranteed indefinitely. Desktop HTTP requests also avoid the macOS Electron socket failure.
+- **Protect live sessions and resume Claude deliberately.** Active provider work is protected from stale cleanup decisions, delayed completion events and event-loop stalls. Claude’s long-idle resume review is off by default; enable it in Providers when you want the choice. Agent and automation sends are not held for that personal review. Nested Codex sessions preserve user configuration and source-account identity, startup reconciliation respects live ownership, and behavior-only Claude settings retain resume ownership.
+- **Provider and workspace refinements since the last Beta.** Pi reports missing installations accurately, Grok 4.7 Build Fast offers Extra High, and access-mode changes keep idle work settled. Provider effort and availability still depend on installed runtimes and accounts. Windows executable resolution prefers spawn-safe candidates; process scans no longer block POSIX maintenance, named pipes cannot strand ordinary file workers, and the context ring, file-read icon, Hubs empty state and Skip setup keyboard focus are corrected. Shared TypeScript preparation is serialized.
+
+### Verification
+
+The shared application source passed the complete Stable preparation battery: **16,995 local tests passed, 39 skipped**, full build, formatting, lint (918 warnings, zero errors), seven workspace typechecks, release smoke, Windows runtime, migration lineage and brand checks. The original external-volume metadata/cache/output failures and successful qualified reruns remain recorded under 1.0.5. Beta changes only release versions, curated notes and documentation; final Beta-specific checks are recorded with its publication evidence.
+
+Exact-tag CI must pass all quality/server shards, four native packages, provenance, macOS signing/notarization and Intel startup, and Windows Defender/startup under the exact `1.0.6-beta.1` unsigned exception before publication. The release remains a prerelease and must not replace GitHub Latest. Beta update manifests are separate from Stable; the historical compatibility feed stays unchanged.
+
+The durable documentation audit covers both release ranges, including the removed recent-history cache, recovery, browser continuity, Computer Use, Hubs and permissions. New Connectors and inline-visual guides are linked from navigation and overview pages. See [release source audit](docs/releases/1.0.5-source-audit.md). Manual installed-app upgrades and live microphone behavior remain unverified; the inherited Claude Sonnet 4.6 smoke establishes one real isolated provider response only.
+
 ## 1.0.5 — 2026-10-15
 
 **Interactive visuals, a compact composer, clearer Activity and stronger simulator and session behavior.**

@@ -1826,6 +1826,9 @@ export function makeOmpAdapter(
             cwd,
             model: ompModelSelection?.model,
             threadId: input.threadId,
+            ...(input.lifecycleGeneration !== undefined
+              ? { lifecycleGeneration: input.lifecycleGeneration }
+              : {}),
             ...(providerInstanceId !== undefined ? { providerInstanceId } : {}),
             resumeCursor: {
               schemaVersion: OMP_RESUME_VERSION,

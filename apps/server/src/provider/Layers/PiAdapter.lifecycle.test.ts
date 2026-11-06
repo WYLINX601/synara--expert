@@ -1047,7 +1047,7 @@ it("rejects steering into an untracked SDK run instead of orphaning a queued tur
   await withAdapter(async (adapter, events) => {
     const session = captured.sessions[0]!;
     const streamingSpy = vi.spyOn(session, "isStreaming", "get").mockReturnValue(true);
-    const steerSpy = vi.spyOn(session, "steer").mockResolvedValue(undefined);
+    const steerSpy = vi.spyOn(session, "steer").mockResolvedValue("queued");
     const promptSpy = vi.spyOn(session, "prompt");
     const outcome = await Effect.runPromise(
       adapter.steerTurn!({ threadId, input: "Fresh turn during untracked run" }).pipe(
@@ -1127,6 +1127,35 @@ it("does not let an old prompt rejection settle a replacement session's turn", a
     expect(completions(events)[0]?.turnId).toBe(next.turnId);
     expect(events.filter((event) => event.type === "runtime.error")).toHaveLength(0);
     expect(oldTurn.turnId).not.toBe(next.turnId);
+  });
+});
+
+it("retains a failed-stop context without reporting a live session", async () => {
+  responses("success");
+  await withAdapter(async (adapter) => {
+    const dispose = vi.spyOn(captured.sessions[0]!, "dispose").mockImplementationOnce(() => {
+      throw new Error("runtime disposal failed");
+    });
+    expect(await Effect.runPromise(adapter.hasSession(threadId))).toBe(true);
+    expect(await Effect.runPromise(adapter.hasSession(ThreadId.makeUnsafe("missing")))).toBe(false);
+    expect(await Effect.runPromise(adapter.hasRetainedSession!(threadId))).toBe(true);
+    expect(
+      await Effect.runPromise(adapter.hasRetainedSession!(ThreadId.makeUnsafe("missing"))),
+    ).toBe(false);
+
+    const stopped = await Effect.runPromise(Effect.result(adapter.stopSession(threadId)));
+    expect(stopped._tag).toBe("Failure");
+    expect(await Effect.runPromise(adapter.listSessions())).toMatchObject([
+      { threadId, status: "closed" },
+    ]);
+    expect(await Effect.runPromise(adapter.hasSession(threadId))).toBe(false);
+    expect(await Effect.runPromise(adapter.hasRetainedSession!(threadId))).toBe(true);
+
+    await Effect.runPromise(adapter.stopSession(threadId));
+    expect(dispose).toHaveBeenCalledTimes(2);
+    expect(await Effect.runPromise(adapter.listSessions())).toEqual([]);
+    expect(await Effect.runPromise(adapter.hasSession(threadId))).toBe(false);
+    expect(await Effect.runPromise(adapter.hasRetainedSession!(threadId))).toBe(false);
   });
 });
 

@@ -1,3 +1,4 @@
+export * from "./editorDebug";
 export * from "./auth";
 export * from "./ambientContext";
 export * from "./automation";
@@ -51,6 +52,7 @@ export * from "./githubInbox";
 export * from "./orchestration";
 export * from "./asyncUserInput";
 export * from "./editor";
+export * from "./editorIntelligence";
 export * from "./environment";
 export * from "./project";
 export * from "./projectAgent";
@@ -69,3 +71,7 @@ export * from "./computerBrowser";
 export * from "./rpc";
 export * from "./claudeCache";
 export * from "./todo";
+
+export * from "./uiLocale";
+
+export * from "./usageLimit";

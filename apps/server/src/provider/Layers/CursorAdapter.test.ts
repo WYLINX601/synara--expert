@@ -2,20 +2,70 @@
 // Purpose: Characterizes Cursor terminal-event account identity.
 // Layer: Provider adapter tests
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EventId,
   type ProviderInstanceId,
   type ProviderRuntimeEvent,
   ThreadId,
 } from "@synara/contracts";
-import { describe, expect, it } from "vitest";
+import { Effect, Layer } from "effect";
+import { describe, expect, it, vi } from "vitest";
 
 import type * as Acp from "@agentclientprotocol/sdk";
 
-import { cursorPromptUsageSnapshot, stampCursorTerminalEventInstance } from "./CursorAdapter.ts";
+import { ServerConfig } from "../../config.ts";
+import { CursorAdapter } from "../Services/CursorAdapter.ts";
+import { makeFakeAcpSessionRuntime } from "../acp/testing/fakeAcpSessionRuntime.ts";
+import {
+  cursorPromptUsageSnapshot,
+  makeCursorAdapterLive,
+  stampCursorTerminalEventInstance,
+} from "./CursorAdapter.ts";
 import { makeAcpTokenUsageEvent } from "../acp/AcpCoreRuntimeEvents.ts";
 
+const cursorRuntimeMock = vi.hoisted(() => ({ makeRuntime: vi.fn() }));
+
+vi.mock("../acp/CursorAcpSupport.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../acp/CursorAcpSupport.ts")>();
+  return {
+    ...actual,
+    makeCursorAcpRuntime: cursorRuntimeMock.makeRuntime,
+  };
+});
+
 describe("CursorAdapter terminal event identity", () => {
+  it("returns the owned lifecycle generation from start and list", async () => {
+    cursorRuntimeMock.makeRuntime.mockReturnValue(
+      Effect.succeed(makeFakeAcpSessionRuntime({ sessionId: "cursor-generation-session" })),
+    );
+    const layer = makeCursorAdapterLive().pipe(
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "cursor-generation-test-" }),
+      ),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    const sessions = await Effect.runPromise(
+      Effect.gen(function* () {
+        const adapter = yield* CursorAdapter;
+        const threadId = ThreadId.makeUnsafe("cursor-generation-thread");
+        const started = yield* adapter.startSession({
+          provider: "cursor",
+          threadId,
+          runtimeMode: "full-access",
+          cwd: process.cwd(),
+          lifecycleGeneration: "cursor-owned-generation",
+        });
+        const [listed] = yield* adapter.listSessions();
+        yield* adapter.stopAll();
+        return { started, listed };
+      }).pipe(Effect.provide(layer), Effect.scoped),
+    );
+
+    expect(sessions.started.lifecycleGeneration).toBe("cursor-owned-generation");
+    expect(sessions.listed?.lifecycleGeneration).toBe("cursor-owned-generation");
+  });
+
   it("keeps the stopped account identity after the thread is rebound to another account", () => {
     const accountA = "cursor_account_a" as ProviderInstanceId;
     const accountB = "cursor_account_b" as ProviderInstanceId;

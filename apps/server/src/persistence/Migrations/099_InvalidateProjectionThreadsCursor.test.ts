@@ -42,6 +42,7 @@ import projectSourceFoldersSchema from "./131_ProjectSourceFolders.ts";
 import projectionTurnsWorkspaceInitializationSchema from "./133_ProjectionTurnsWorkspaceInitialization.ts";
 import forkSourceMessageSchema from "./134_ProjectionThreadsForkSourceMessage.ts";
 import { AMBIENT_CONTEXT_SNAPSHOT_SQL } from "../../workbench/persistence/AmbientContextSnapshotMigration.ts";
+import usageLimitRecoverySchema from "./141_ProjectionThreadsUsageLimitRecovery.ts";
 
 const testLayer = OrchestrationProjectionPipelineLive.pipe(
   Layer.provideMerge(OrchestrationEventStoreLive),
@@ -95,6 +96,7 @@ it.layer(Layer.fresh(testLayer))("099_InvalidateProjectionThreadsCursor", (it) =
         // schemas, so add the canonical projection column required by current
         // readers without changing migration 99's native tracker state.
         yield* sql.unsafe(AMBIENT_CONTEXT_SNAPSHOT_SQL);
+        yield* usageLimitRecoverySchema;
 
         const threadId = ThreadId.makeUnsafe("thread-099");
         const projectId = ProjectId.makeUnsafe("project-099");

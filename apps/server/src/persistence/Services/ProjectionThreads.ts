@@ -26,6 +26,8 @@ import {
   ThreadCreationSource,
   ThreadEnvironmentMode,
   ThreadId,
+  UsageLimitRecovery,
+  UsageLimitRecoverySource,
   TurnId,
 } from "@synara/contracts";
 import { Option, Schema, ServiceMap } from "effect";
@@ -113,6 +115,12 @@ export const ProjectionThread = Schema.Struct({
   settledAt: Schema.optional(Schema.NullOr(IsoDateTime)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
+  // A host-owned wait and cancellation fence survive restarts independently of UI clients.
+  usageLimitRecovery: Schema.optional(Schema.NullOr(UsageLimitRecovery)),
+  usageLimitRecoverySource: Schema.optional(Schema.NullOr(UsageLimitRecoverySource)),
+  usageLimitRecoveryCancelledAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  usageLimitRecoveryCancelledTurnId: Schema.optional(Schema.NullOr(TurnId)),
+  usageLimitRecoveryLastResetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)).pipe(
     Schema.withDecodingDefault(() => null),
   ),

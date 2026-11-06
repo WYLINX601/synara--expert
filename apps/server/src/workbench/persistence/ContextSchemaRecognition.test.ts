@@ -1,7 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
+import * as SyncFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 
 import { Effect } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -161,48 +163,67 @@ const damageCases = [
   },
 ] as const;
 
-function damage(dbPath: string, fixture: (typeof damageCases)[number]) {
-  // Match the application's Bun SQLite DQS compatibility when constructing
-  // adversarial metadata. Production inspection still uses its normal reader.
-  const db = new DatabaseSync(dbPath, { enableDoubleQuotedStringLiterals: true });
+function withSqliteFixture<T>(dbPath: string, inspect: (sqlitePath: string) => T): T {
+  if (!dbPath.endsWith(".gz")) return inspect(dbPath);
+
+  const directory = SyncFs.mkdtempSync(path.join(os.tmpdir(), "synara-context-schema-inspect-"));
+  const sqlitePath = path.join(directory, "backup.sqlite");
   try {
-    if ("statement" in fixture) {
-      db.exec(fixture.statement);
-      return;
-    }
-    const original = FROZEN_CONTEXT_TABLE_SQL[fixture.table]!;
-    const changed = original.replace(fixture.from, fixture.to);
-    expect(changed).not.toBe(original);
-    // Rebuild only this test fixture and preserve its existing rows.
-    const columns = db
-      .prepare(`PRAGMA table_info(${fixture.table})`)
-      .all()
-      .map((row) => String(row.name));
-    db.exec(`CREATE TEMP TABLE saved_rows AS SELECT * FROM ${fixture.table}`);
-    db.exec(`DROP TABLE ${fixture.table}`);
-    db.exec(changed);
-    db.exec(`INSERT INTO ${fixture.table} (${columns.join(",")}) SELECT * FROM saved_rows`);
+    SyncFs.writeFileSync(sqlitePath, gunzipSync(SyncFs.readFileSync(dbPath)));
+    return inspect(sqlitePath);
   } finally {
-    db.close();
+    SyncFs.rmSync(directory, { recursive: true, force: true });
   }
 }
 
+function damage(dbPath: string, fixture: (typeof damageCases)[number]) {
+  // Match the application's Bun SQLite DQS compatibility when constructing
+  // adversarial metadata. Production inspection still uses its normal reader.
+  const compressed = dbPath.endsWith(".gz");
+  withSqliteFixture(dbPath, (sqlitePath) => {
+    const db = new DatabaseSync(sqlitePath, { enableDoubleQuotedStringLiterals: true });
+    try {
+      if ("statement" in fixture) {
+        db.exec(fixture.statement);
+      } else {
+        const original = FROZEN_CONTEXT_TABLE_SQL[fixture.table]!;
+        const changed = original.replace(fixture.from, fixture.to);
+        expect(changed).not.toBe(original);
+        // Rebuild only this test fixture and preserve its existing rows.
+        const columns = db
+          .prepare(`PRAGMA table_info(${fixture.table})`)
+          .all()
+          .map((row) => String(row.name));
+        db.exec(`CREATE TEMP TABLE saved_rows AS SELECT * FROM ${fixture.table}`);
+        db.exec(`DROP TABLE ${fixture.table}`);
+        db.exec(changed);
+        db.exec(`INSERT INTO ${fixture.table} (${columns.join(",")}) SELECT * FROM saved_rows`);
+      }
+    } finally {
+      db.close();
+    }
+    if (compressed) SyncFs.writeFileSync(dbPath, gzipSync(SyncFs.readFileSync(sqlitePath)));
+  });
+}
+
 function inspect(dbPath: string) {
-  const db = new DatabaseSync(dbPath, { readOnly: true });
-  try {
-    return {
-      schema: db.prepare(CONTEXT_SCHEMA_OBJECTS_QUERY).all(),
-      history: db.prepare("SELECT * FROM effect_sql_migrations ORDER BY migration_id").all(),
-      spaces: db.prepare("SELECT * FROM context_spaces").all(),
-      certification: db
-        .prepare(
-          "SELECT name FROM sqlite_master WHERE name IN ('workbench_sql_migrations', 'workbench_legacy_migration_adoptions')",
-        )
-        .all(),
-    };
-  } finally {
-    db.close();
-  }
+  return withSqliteFixture(dbPath, (sqlitePath) => {
+    const db = new DatabaseSync(sqlitePath, { readOnly: true });
+    try {
+      return {
+        schema: db.prepare(CONTEXT_SCHEMA_OBJECTS_QUERY).all(),
+        history: db.prepare("SELECT * FROM effect_sql_migrations ORDER BY migration_id").all(),
+        spaces: db.prepare("SELECT * FROM context_spaces").all(),
+        certification: db
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE name IN ('workbench_sql_migrations', 'workbench_legacy_migration_adoptions')",
+          )
+          .all(),
+      };
+    } finally {
+      db.close();
+    }
+  });
 }
 
 for (const fixture of damageCases) {

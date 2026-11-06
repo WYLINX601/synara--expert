@@ -44,6 +44,8 @@ export interface ProviderRuntimeEventRepositoryShape {
     readonly threadId: string;
     readonly throughSequenceInclusive: number;
     readonly beforeSequenceExclusive?: number;
+    /** Incremental readers check only the journal tail after their last successful bound. */
+    readonly afterSequenceExclusive?: number;
     readonly limit: number;
     readonly turnId?: string;
     readonly eventTypes?: ReadonlyArray<string>;
@@ -51,6 +53,8 @@ export interface ProviderRuntimeEventRepositoryShape {
     readonly eventIds?: ReadonlyArray<string>;
     /** Optional aggregate UTF-8 JSON budget, enforced in SQL before decoding. */
     readonly maxBytes?: number;
+    /** Exact immutable revision lookup, using the journal's unique event identity. */
+    readonly eventId?: string;
   }) => Effect.Effect<
     ReadonlyArray<PersistedProviderRuntimeEvent>,
     ProviderRuntimeEventRepositoryError

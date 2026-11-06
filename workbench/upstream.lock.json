@@ -5,14 +5,22 @@
   "updateChannel": "latest-stable-release",
   "integrationStrategy": "merge",
   "integratedBase": {
-    "tag": "v1.0.5",
-    "commit": "1eb2beb6b5019fc311f23a3deb5362f68d07d537"
+    "tag": "v1.1.0",
+    "commit": "b6aa37bc82eec649dd527c5956fdccc2c63d3b24"
   },
   "candidate": {
-    "tag": "v1.0.5",
-    "commit": "1eb2beb6b5019fc311f23a3deb5362f68d07d537",
+    "tag": "v1.1.0",
+    "commit": "b6aa37bc82eec649dd527c5956fdccc2c63d3b24",
     "status": "source-integrated"
   },
-  "verifiedAt": "2026-10-18",
-  "integrationEvidence": "docs/workbench-v105-upgrade-acceptance.md"
+  "integrationEvidence": "docs/workbench-v110-upgrade-acceptance.md",
+  "previousIntegration": {
+    "integratedBase": {
+      "tag": "v1.0.5",
+      "commit": "1eb2beb6b5019fc311f23a3deb5362f68d07d537"
+    },
+    "verifiedAt": "2026-10-18",
+    "integrationEvidence": "docs/workbench-v105-upgrade-acceptance.md"
+  },
+  "sourceIntegratedAt": "2026-11-06"
 }

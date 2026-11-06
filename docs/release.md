@@ -283,6 +283,23 @@ backoff follows [Apple's guidance for CloudKit network failures](https://develop
 
 ### macOS release toolchains
 
+Mac application bundles declare `LSMinimumSystemVersion` 13.0 through electron-builder's
+`mac.minimumSystemVersion`. The bundled Claude and Cua executables require macOS 13;
+the application manifest must not advertise Electron's lower deployment target as the
+requirement for the complete bundle. This applies to signed, unsigned and local ad-hoc
+packages, including DMG and update ZIP payloads.
+The generated and retained macOS update feeds use Darwin `22.0.0` for this minimum,
+because electron-updater compares `os.release()` rather than the macOS product version.
+
+The [read-only v1.0.1 inspection](https://github.com/Emanuele-web04/synara/actions/runs/38163962883)
+found app/Electron metadata at 12.0 and bundled Claude/Cua at 13.0 on both architectures.
+The [actual Homebrew audit](https://github.com/Emanuele-web04/synara/actions/runs/38166229495)
+rejected a cask requiring 13 because the old app plist still declares 12. This source fix
+does not modify signed historical releases. Recheck a newly built and published DMG's
+plist and native payload before refreshing the cask; the old audit failure remains
+unresolved until a matching release is available. Metadata inspection and macOS 15
+startup checks do not establish runtime behavior on macOS 13.
+
 Both native macOS release runners use macOS 15. Native helpers and the pinned
 Cua apple-metal bridge build with Xcode 16.4's macOS 15 SDK. A separate macOS 26
 job compiles the architecture-independent Icon Composer catalog with Xcode 26.3
@@ -381,16 +398,41 @@ Before startup smoke and artifact upload, the Windows job scans each final
 installer with Microsoft Defender. The guard enables protection and removes
 the hosted image's exclusions inside that disposable runner, updates security
 intelligence, verifies the actual file is not excluded, and requires an explicit
-clean scan plus unchanged installer bytes. If the configured update source returns
-definitions older than 24 hours, it retries Microsoft's direct MMPC source.
+clean scan plus unchanged installer bytes. If the configured update source fails
+all three attempts or returns definitions older than 24 hours, the guard falls
+back to Microsoft's direct MMPC source.
+After exhausted default-source attempts, it reaches MMPC without an intervening
+Defender state snapshot, which can fail during the same service transition.
+Each source allows at most three update attempts, five seconds apart, to recover
+from transient service errors during platform updates. Every failed attempt is
+preserved as `update-SOURCE-attempt-N-error.txt`; a successful update call is still
+required. Exhausting the direct-source attempts blocks qualification before
+scanning, even if the reported signatures already appear fresh.
 An older local timestamp then requires the installed version to match the latest
 version fetched from Microsoft's security intelligence page; unavailable or
 ambiguous vendor data fails closed. Missing signatures or Defender's own
 out-of-date status also block the scan. Detection, remediation, stale
 intelligence, a missing file, or a scan error blocks publication. Scan evidence
-is retained as `windows-defender-x64`, including on failure. Cloud participation
-and sample-submission settings are not changed. This server scan does not replace
-Windows 11 browser-download qualification.
+is retained as `windows-defender-x64`, including on failure.
+
+For this disposable GitHub-hosted public-release qualification only, the guard
+also enables cloud protection (`MAPSReporting=2`), automatic safe sample submission
+(`SubmitSamplesConsent=1`), and block at first sight. Safe samples may be sent to
+Microsoft; this does not authorize changing a user's machine or submitting private
+artifacts. The guard verifies these preferences before and after scanning, and
+requires `MpCmdRun -ValidateMapsConnection` to succeed before scanning, preserving
+its output and exit code. Configured cloud protection alone does not prove MAPS
+connectivity. These settings and the connectivity check follow Microsoft's
+[block-at-first-sight guidance](https://learn.microsoft.com/en-us/defender-endpoint/configure-block-at-first-sight-microsoft-defender-antivirus)
+and [network validation guidance](https://learn.microsoft.com/en-us/defender-endpoint/configure-network-connections-microsoft-defender-antivirus).
+This server scan does not replace Windows 11 browser-download qualification or
+prove that the cloud classified a particular installer.
+
+Run `pwsh -NoProfile -File scripts/verify-windows-defender.test.ps1` for the guard's
+19 mocked behavior tests, including disabled cloud protection, failed MAPS
+connectivity, direct-source fallback, stale or out-of-date signatures after
+fallback, changed bytes, and detections. These tests do not qualify real Windows
+behavior.
 
 Signing, provenance, and startup smoke alone do not establish Microsoft Defender
 acceptance. For a reported antivirus block, collect the exact artifact hash,
@@ -442,6 +484,10 @@ full subject distinguished name.
    `bun run lint`, `bun run typecheck`, `bun run release:smoke`, and affected
    Vitest tests. Include `bun run windows-runtime:check`, `bun run migrations:check`
    and relevant browser/native checks when their boundaries change.
+   Migration history is checked for the family selected by matching server and
+   desktop package versions: Stable and Beta share history; Remote checks its own
+   releases because its data home and updater are isolated. Legacy shared tags
+   remain protected. An unknown or mismatched package version fails the check.
    The single tag workflow supplies the final full workspace test suite through
    `quality` plus all three `server_tests` shards, and the desktop build through
    `build_portable` and the native platform jobs. Do not require an additional

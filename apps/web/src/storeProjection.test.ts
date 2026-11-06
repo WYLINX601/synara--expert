@@ -973,7 +973,7 @@ describe("store projection", () => {
     expect(threadsOf(evicted).find((thread) => thread.id === threadId)?.messages).toEqual([]);
   });
 
-  it("adds the desktop bridge token to server attachment preview URLs", () => {
+  it("preserves assistant image aliases and authenticated attachment preview URLs", () => {
     const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
     const testWindow = {
       location: { origin: "synara://app" },
@@ -991,11 +991,12 @@ describe("store projection", () => {
         messages: [
           {
             id: MessageId.makeUnsafe("message-with-image"),
-            role: "user",
+            role: "assistant",
             text: "see image",
             attachments: [
               {
                 type: "image",
+                sourcePath: "./literal%20.png",
                 id: "thread-1-image",
                 name: "image.png",
                 mimeType: "image/png",
@@ -1017,6 +1018,7 @@ describe("store projection", () => {
       const next = syncServerReadModel(initialState, readModel);
 
       expect(threadsOf(next)[0]?.messages[0]?.attachments?.[0]).toMatchObject({
+        sourcePath: "./literal%20.png",
         previewUrl: "http://127.0.0.1:53036/attachments/thread-1-image?token=desktop-secret",
       });
     } finally {

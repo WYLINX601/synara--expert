@@ -574,6 +574,16 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
   const applyThreadsProjection: ProjectorDefinition["apply"] = (event, attachmentSideEffects) =>
     Effect.gen(function* () {
       switch (event.type) {
+        case "thread.session-stop-requested":
+        case "thread.turn-interrupt-requested": {
+          if (event.payload.usageLimitRecoveryCancelledAt === undefined) return;
+          return yield* updateThreadProjection(event.payload.threadId, (thread) => ({
+            ...thread,
+            usageLimitRecoveryCancelledAt: event.payload.usageLimitRecoveryCancelledAt,
+            usageLimitRecoveryCancelledTurnId:
+              event.payload.usageLimitRecoveryCancelledTurnId ?? null,
+          }));
+        }
         case "thread.created": {
           const project = yield* projectionProjectRepository.getById({
             projectId: event.payload.projectId,
@@ -714,6 +724,24 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
               ...(event.payload.isPinned !== undefined ? { isPinned: event.payload.isPinned } : {}),
               ...(event.payload.settledAt !== undefined
                 ? { settledAt: event.payload.settledAt }
+                : {}),
+              ...(event.payload.usageLimitRecoverySource !== undefined
+                ? { usageLimitRecoverySource: event.payload.usageLimitRecoverySource }
+                : {}),
+              ...(event.payload.usageLimitRecovery !== undefined
+                ? { usageLimitRecovery: event.payload.usageLimitRecovery }
+                : {}),
+              ...(event.payload.usageLimitRecoveryCancelledAt !== undefined
+                ? { usageLimitRecoveryCancelledAt: event.payload.usageLimitRecoveryCancelledAt }
+                : {}),
+              ...(event.payload.usageLimitRecoveryCancelledTurnId !== undefined
+                ? {
+                    usageLimitRecoveryCancelledTurnId:
+                      event.payload.usageLimitRecoveryCancelledTurnId,
+                  }
+                : {}),
+              ...(event.payload.usageLimitRecoveryLastResetAt !== undefined
+                ? { usageLimitRecoveryLastResetAt: event.payload.usageLimitRecoveryLastResetAt }
                 : {}),
               ...(event.payload.snoozedUntil !== undefined
                 ? { snoozedUntil: event.payload.snoozedUntil }
@@ -920,6 +948,8 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
           return yield* updateThreadProjection(event.payload.threadId, (thread) => ({
             ...thread,
             deletedAt: event.payload.deletedAt,
+            usageLimitRecovery: null,
+            usageLimitRecoverySource: null,
             snoozedUntil: null,
             snoozeReminderAt: null,
             updatedAt: event.payload.deletedAt,
@@ -932,6 +962,8 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
           return yield* updateThreadProjection(event.payload.threadId, (thread) => ({
             ...thread,
             archivedAt,
+            usageLimitRecovery: null,
+            usageLimitRecoverySource: null,
             snoozedUntil: null,
             snoozeReminderAt: null,
             updatedAt: event.payload.updatedAt ?? archivedAt,
@@ -1540,6 +1572,9 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
               state: nextState,
+              // Live reconciliation can restore an incorrectly interrupted
+              // turn. Its completion timestamp must be reopened with it.
+              completedAt: nextState === "running" ? null : existingTurn.value.completedAt,
               pendingMessageId:
                 existingTurn.value.pendingMessageId ??
                 (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.messageId : null),

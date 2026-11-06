@@ -388,10 +388,23 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
         ...(callerTurnId ? { callerTurnId } : {}),
         requestId: input.requestId,
       })}`;
-      const fingerprint = stableGatewayDigest(
+      // Routing annotations do not change creation identity; the frozen Expert does.
+      const normalizedInput = {
+        ...input,
+        threads: input.threads.map(
+          ({ taskKey: _taskKey, routingReason: _routingReason, ...spec }) => spec,
+        ),
+      };
+      const legacyFingerprint = stableGatewayDigest(
         context.kind === "hub-work"
           ? { input, expertBinding: context.expertBinding ?? null }
           : input,
+        64,
+      );
+      const fingerprint = stableGatewayDigest(
+        context.kind === "hub-work"
+          ? { input: normalizedInput, expertBinding: context.expertBinding ?? null }
+          : normalizedInput,
         64,
       );
       const externalOperationRepository =
@@ -484,7 +497,10 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
             ),
           );
         }
-        if (existingOperation.fingerprint !== fingerprint) {
+        if (
+          existingOperation.fingerprint !== fingerprint &&
+          existingOperation.fingerprint !== legacyFingerprint
+        ) {
           return yield* Effect.fail(
             new GatewayToolError(
               "idempotency_conflict",

@@ -28,6 +28,7 @@ import type { ProviderDiscoveryServiceShape } from "../provider/Services/Provide
 import { makeCreateThreadsHandler, type GatewayCreationContext } from "./creationCoordinator.ts";
 import { AgentGatewayOperationRepositoryLive } from "./Layers/AgentGatewayOperationRepository.ts";
 import { AgentGatewayOperationRepository } from "./Services/AgentGatewayOperationRepository.ts";
+import { stableGatewayDigest } from "./creationUtils.ts";
 import { GatewayToolError } from "./toolRuntime.ts";
 
 const NOW = "2026-10-02T10:00:00.000Z";
@@ -109,7 +110,13 @@ const makeFixture = Effect.fn(function* (
   const workId = `${WORK_ID}:${scenario}`;
   const operationRepository = yield* AgentGatewayOperationRepository;
   const hubWork = yield* HubWorkRepository;
-  yield* hubWork.submit([work(workId)]);
+  yield* hubWork.submit({
+    projectId: work(workId).projectId,
+    requestId: work(workId).requestId,
+    scopeKey: work(workId).scopeKey,
+    fingerprint: work(workId).fingerprint,
+    records: [work(workId)],
+  });
   const commands: OrchestrationCommand[] = [];
   const dispatchContexts: Array<OrchestrationDispatchContext | undefined> = [];
   const prepareCalls: Array<{ threadId: string; messageId: string }> = [];
@@ -241,6 +248,74 @@ const layer = it.layer(
 );
 
 layer("Hub work creation saga", (it) => {
+  it.effect("ignores routing annotations but refuses a changed frozen Expert on replay", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture("routing-fingerprint");
+      const first = {
+        ...INPUT,
+        threads: [{ ...INPUT.threads[0]!, taskKey: "first", routingReason: "initial route" }],
+      };
+      const result = yield* fixture.handler(first, fixture.context);
+      assert.notEqual(result.isError, true);
+      const replay = yield* fixture.handler(
+        {
+          ...first,
+          threads: [
+            { ...first.threads[0]!, taskKey: "renamed", routingReason: "updated annotation" },
+          ],
+        },
+        fixture.context,
+      );
+      assert.deepEqual(replay, result);
+      const changed = yield* fixture.handler(first, {
+        ...fixture.context,
+        expertBinding: {
+          expertId: "expert",
+          snapshotId: "changed",
+          displayName: "Changed",
+          revision: 2,
+        },
+      });
+      assert.equal(changed.isError, true);
+      assert.equal(fixture.commands.length, 2);
+    }),
+  );
+
+  it.effect("replays legacy raw fingerprints only for the unchanged original request", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture("legacy-fingerprint");
+      const input = {
+        ...INPUT,
+        threads: [{ ...INPUT.threads[0]!, taskKey: "original", routingReason: "original route" }],
+      };
+      yield* fixture.operationRepository.reserve({
+        operationId: "legacy-creation",
+        callerThreadId: CALLER_ID,
+        callerTurnId: `hub-work:${fixture.workId}`,
+        operationKind: "create_threads",
+        requestId: input.requestId,
+        fingerprint: stableGatewayDigest({ input, expertBinding: null }, 64),
+        requestedCount: 1,
+        planJson: "[]",
+        now: NOW,
+      });
+      yield* fixture.operationRepository.complete({
+        operationId: "legacy-creation",
+        resultJson: JSON.stringify({ threadIds: ["legacy-worker"] }),
+        now: NOW,
+      });
+      const replay = yield* fixture.handler(input, fixture.context);
+      assert.notEqual(replay.isError, true);
+      assert.include(JSON.stringify(replay), "legacy-worker");
+      const changed = yield* fixture.handler(
+        { ...input, threads: [{ ...input.threads[0]!, routingReason: "different" }] },
+        fixture.context,
+      );
+      assert.equal(changed.isError, true);
+      assert.equal(fixture.commands.length, 0);
+    }),
+  );
+
   for (const { target, explicit, expected } of [
     { target: TARGET, explicit: undefined, expected: "auto" },
     {

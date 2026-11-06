@@ -10,6 +10,7 @@ import type {
   TurnDispatchMode,
   OrchestrationLatestTurn,
   OrchestrationThreadPullRequest,
+  OrchestrationThread,
   OrchestrationProposedPlanId,
   PinnedMessage,
   PendingClaudeCacheReview,
@@ -52,6 +53,8 @@ export type ProjectScript = ContractProjectScript;
 
 export interface ChatImageAttachment {
   type: "image";
+  /** Decoded source alias supplied by the host for inline assistant images. */
+  sourcePath?: string;
   id: string;
   name: string;
   mimeType: string;
@@ -259,6 +262,9 @@ export interface Thread extends ThreadWorkspaceState {
   sidechatLastActivityAt?: string | null;
   sidechatExpiredAt?: string | null;
   handoff?: ThreadHandoff | null;
+  usageLimitRecovery?: OrchestrationThread["usageLimitRecovery"];
+  /** Latest authoritative event/snapshot carrying the recovery, including cancellation. */
+  usageLimitRecoverySequence?: number;
   claudeCacheReview?: PendingClaudeCacheReview | null;
   /** Client projection cursor shared by shell and detail cache-review updates. */
   claudeCacheReviewSequence?: number;
@@ -315,6 +321,9 @@ export interface ThreadShell extends ThreadWorkspaceState {
   sidechatLastActivityAt?: string | null;
   sidechatExpiredAt?: string | null;
   handoff?: ThreadHandoff | null;
+  usageLimitRecovery?: OrchestrationThread["usageLimitRecovery"];
+  /** Latest authoritative event/snapshot carrying the recovery, including cancellation. */
+  usageLimitRecoverySequence?: number;
   claudeCacheReview?: PendingClaudeCacheReview | null;
   claudeCacheReviewSequence?: number;
   /** Last snapshot/event sequence carrying snooze metadata. */

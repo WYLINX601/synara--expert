@@ -6,7 +6,7 @@ import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { useTheme } from "~/hooks/useTheme";
 import { InfoIcon, PlusIcon, Trash2 } from "~/lib/icons";
 import { CodeEditorPane } from "../codeEditor/CodeEditorPane";
-import type { CodeEditHistoryControls } from "../codeEditor/pierreEdit";
+import type { CodeEditHistoryControls } from "../codeEditor/codeEditHistory";
 import { Button } from "../ui/button";
 import { DetailTabs } from "../ui/DetailTabs";
 import { Input } from "../ui/input";
@@ -718,7 +718,7 @@ export function SkillLibraryDetail({
               <div className="min-h-0 flex-1 overflow-auto" aria-label="文件内容">
                 {loadedPath && text !== null ? (
                   mode === "edit" ? (
-                    <div className="h-full min-h-64">
+                    <div className="flex h-full min-h-64 flex-col">
                       <CodeEditorPane
                         key={`${loadedPath}:${version}`}
                         cacheKeyPrefix={`skill:${base.skillId}:${detailId}`}

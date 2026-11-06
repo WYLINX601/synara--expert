@@ -413,3 +413,23 @@ the release source. No new external links were added.
 No real OAuth sign-in, installed-app upgrade, live microphone capture or
 universal provider/website compatibility is established by the docs audit.
 Unrelated dirty files in the older local website checkout remain untouched.
+
+## Synara 1.0.6 release audit — 2026-10-16
+
+Source: Stable range `v1.0.5..612aff6d8fdcdb9e849d8c8750a8683e7e2dca81` (16 commits). Provider discovery and troubleshooting updates cite their owning source files inline. Changelog highlights mirror the app entry; no Beta-only feature is promoted. Download snapshots are refreshed only after publication.
+
+## Stable 1.0.8 and Beta 1.0.9-beta.1 source audit
+
+Audited application source: `f9ba953a6a26769bf73c78c2bae673e5a09ba62f`, all 32 commits after Stable 1.0.7, plus the prior Stable changes since Beta 1.0.6-beta.1. Evidence: `docs/releases/1.0.8-source-audit.md`, `docs/editor/intelligence.md`, `docs/hubs.md`, `docs/providers.md`, `docs/core-concepts.md`, `docs/sqlite-space-reclamation.md`, shared Beta feature policy, server editor gate, provider/runtime adapters, checkpoint queries, keyboard bindings and desktop window/Safari handlers.
+
+Updated existing guides and their navigation dependencies for editor/debugger limits, live diffs, handoffs, Hubs, subagents, navigation/focus, actions, terminal reuse, Safari access, simulator ownership and conservative storage maintenance. Native editor and connectors remain Beta-only; Stable retains its editor. Publication and deployed-site verification are recorded separately after the exact release candidates pass.
+
+Publication verified: [Stable v1.0.8](https://github.com/Emanuele-web04/synara/releases/tag/v1.0.8), source `d7542782fd52a1dedf9634e1765ab62fa60e259f`, passed [workflow 39971610367](https://github.com/Emanuele-web04/synara/actions/runs/39971610367). [Beta v1.0.9-beta.1](https://github.com/Emanuele-web04/synara/releases/tag/v1.0.9-beta.1), source `143913ce19b343167072437c3871ec2ed1cd1160`, passed [workflow 39974728669](https://github.com/Emanuele-web04/synara/actions/runs/39974728669). Both exact-tag runs passed complete quality/server tests, four native packages, provenance, macOS signing/notarization and Intel startup, plus Windows Defender/startup under their exact version-scoped unsigned exceptions. Each public release has 18 assets; source and lockfile identities, public URLs and byte-identical channel aliases were verified. Stable remains Latest, Beta remains a prerelease, and the historical compatibility feed is unchanged. Download snapshots follow Stable 1.0.8. Manual installed-app upgrades, live provider/microphone behavior and browser-download reputation remain separately unqualified.
+
+## Synara Stable 1.0.9
+
+Authority: release candidate `ebd0d22b39ce3a0f7c6051dddc6090e9b85dc7c3` (tag `v1.0.9`), complete range `v1.0.8..ebd0d22b39ce3a0f7c6051dddc6090e9b85dc7c3` and `docs/releases/1.0.9-source-audit.md`. Audited Stable editor/connector promotion, conditional Stop and durable progress, visible goals, local project glyphs and worker actions, isolated OpenCode login/discovery, compressed SQLite recovery and macOS 13 updater gating. Existing guides and navigation are reused; no disconnected guide is added. Packaged startup is distinct from manual upgrades, macOS 13 runtime and live provider/connector sign-in.
+
+## Stable 1.1.0 and Beta 1.1.1-beta.1
+
+Source: `d80787e3e4d8829a35a64b111e6fcbe5f51cf037`; complete Stable range after `v1.0.9` and Beta range after `v1.0.9-beta.1`. Existing customization, runtime recovery, desktop maintenance and Pi guides cover languages, verified quota recovery, crash/queue/subagent ownership, attachment handling and offline compaction. Chinese remains Beta-only; native editing and Connectors were already in Beta. Source evidence: `docs/releases/1.1.0-source-audit.md` and the owning guides cited on each page. Exact-tag CI, native qualification, publication and final download snapshots remain pending until separately verified.

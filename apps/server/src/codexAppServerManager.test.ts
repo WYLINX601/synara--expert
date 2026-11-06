@@ -103,6 +103,7 @@ function createSyntheticCodexAppServer(options?: {
     readonly impostor?: boolean;
     readonly catalog?: (cwd: string, skills: unknown[]) => unknown;
   };
+  readonly pluginListFrameBytes?: number;
   readonly gatewayRenewal?:
     | "supported"
     | "unsupported"
@@ -332,6 +333,21 @@ function createSyntheticCodexAppServer(options?: {
           respond({ thread: { id: "fresh-provider-thread" } });
         } else if (request.method === "turn/start") {
           respond({ turn: { id: `synthetic-turn-${nextTurn++}` } });
+        } else if (request.method === "plugin/list" && options?.pluginListFrameBytes) {
+          const prefix = Buffer.from(
+            `{"id":${JSON.stringify(request.id)},"result":{"marketplaces":[{"name":"Synthetic catalog","path":"/synthetic/catalog","plugins":[]}],"padding":"`,
+          );
+          const suffix = Buffer.from('"}}\n');
+          const frame = Buffer.concat([
+            prefix,
+            Buffer.alloc(options.pluginListFrameBytes + 1 - prefix.length - suffix.length, 0x78),
+            suffix,
+          ]);
+          queueMicrotask(() => {
+            for (let offset = 0; offset < frame.length; offset += 64 * 1024) {
+              stdout.write(frame.subarray(offset, offset + 64 * 1024));
+            }
+          });
         } else {
           respond({});
         }
@@ -2181,6 +2197,14 @@ describe("isRecoverableThreadResumeError", () => {
   it("matches not-found resume errors", () => {
     expect(
       isRecoverableThreadResumeError(new Error("thread/resume failed: thread not found")),
+    ).toBe(true);
+  });
+
+  it("matches resume errors for threads that never wrote a rollout", () => {
+    expect(
+      isRecoverableThreadResumeError(
+        new Error("thread/resume failed: no rollout found for thread id 01a147ed"),
+      ),
     ).toBe(true);
   });
 
@@ -4610,69 +4634,74 @@ describe("CodexAppServerManager discovery", () => {
       },
     ]);
   });
-
-  it("wires plugin discovery through plugin/list", async () => {
-    const manager = new CodexAppServerManager();
-    const context = {
-      session: {
-        provider: "codex",
-        status: "ready",
-        threadId: "thread_1",
-        runtimeMode: "full-access",
-        model: "gpt-5.5",
-      },
-      account: {
-        type: "unknown",
-        planType: null,
-        sparkEnabled: true,
-      },
-      collabReceiverTurns: new Map(),
-      collabReceiverParents: new Map(),
-    };
-
-    const resolveContextForDiscovery = vi
-      .spyOn(
-        manager as unknown as {
-          resolveContextForDiscovery: (
-            threadId?: string,
-            cwd?: string,
-            codexOptions?: unknown,
-          ) => unknown;
-        },
-        "resolveContextForDiscovery",
-      )
-      .mockReturnValue(context);
-    const sendRequest = vi
-      .spyOn(
-        manager as unknown as {
-          sendRequest: (...args: unknown[]) => Promise<unknown>;
-        },
-        "sendRequest",
-      )
-      .mockResolvedValue({ result: {} });
-
-    await expect(
-      manager.listPlugins({
-        cwd: "/repo",
-        threadId: "thread_1",
-        forceRemoteSync: true,
-      }),
-    ).resolves.toMatchObject({
-      marketplaces: [],
-      source: "codex-app-server",
-      cached: false,
-    });
-    expect(resolveContextForDiscovery).toHaveBeenCalledWith(
-      "thread_1",
-      "/repo",
-      undefined,
-      expect.any(String),
-    );
-    expect(sendRequest).toHaveBeenCalledWith(context, "plugin/list", {
-      cwds: ["/repo"],
-      forceRemoteSync: true,
-    });
-  });
+  it.each([
+    { frameBytes: 16_842_752, succeeds: true },
+    { frameBytes: 32 * 1024 * 1024 + 1, succeeds: false },
+  ])(
+    "isolates a $frameBytes-byte plugin catalog from a running turn",
+    async ({ frameBytes, succeeds }) => {
+      const fake = createSyntheticCodexAppServer({ pluginListFrameBytes: frameBytes });
+      const spawnAppServer = vi.spyOn(fake, "spawnAppServer");
+      const { manager, teardownProcessTree } = createSyntheticCodexManager(fake);
+      const cwd = mkdtempSync(path.join(os.tmpdir(), "synara-codex-plugin-catalog-"));
+      const codexOptions = { homePath: cwd, binaryPath: "/synthetic/codex" };
+      const authTracking = prepareCodexAuthTracking({ env: { ...process.env }, homePath: cwd });
+      vi.spyOn(
+        manager as unknown as { buildSessionProcessEnv: () => Promise<unknown> },
+        "buildSessionProcessEnv",
+      ).mockResolvedValue({
+        env: {},
+        authTracking,
+        authFingerprint: readCodexPreparedAuthTrackingFingerprint(authTracking),
+      });
+      const threadId = asThreadId("plugin-catalog-active-turn");
+      try {
+        await manager.startSession({
+          threadId,
+          provider: "codex",
+          cwd,
+          runtimeMode: "full-access",
+          providerOptions: { codex: codexOptions },
+          agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+        });
+        await manager.sendTurn({ threadId, input: "Keep working during discovery" });
+        const discovery = manager.listPlugins({
+          cwd,
+          threadId,
+          codexOptions,
+          forceRemoteSync: true,
+        });
+        if (succeeds) {
+          await expect(discovery).resolves.toMatchObject({
+            marketplaces: [{ name: "Synthetic catalog", path: "/synthetic/catalog", plugins: [] }],
+            cached: false,
+          });
+        } else {
+          await expect(discovery).rejects.toThrow();
+        }
+        expect(manager.listSessions()).toMatchObject([
+          { threadId, status: "running", activeTurnId: "synthetic-turn-1" },
+        ]);
+        expect(fake.children).toHaveLength(2);
+        expect(spawnAppServer).toHaveBeenLastCalledWith(
+          expect.objectContaining({ cwd, binaryPath: codexOptions.binaryPath }),
+        );
+        expect(fake.requests.find((request) => request.method === "plugin/list")?.params).toEqual({
+          cwds: [cwd],
+          forceRemoteSync: true,
+        });
+        expect(teardownProcessTree).toHaveBeenCalledTimes(succeeds ? 0 : 1);
+        if (!succeeds) {
+          expect(teardownProcessTree).toHaveBeenCalledWith(
+            expect.objectContaining({ rootPid: fake.children[1]!.pid }),
+          );
+        }
+      } finally {
+        await manager.stopAll();
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("thread checkpoint control", () => {
@@ -6534,7 +6563,7 @@ describe("collab child conversation routing", () => {
     );
   });
 
-  it("suppresses child lifecycle notifications without mutating the parent session state", () => {
+  it("forwards child lifecycle notifications without mutating the parent session state", () => {
     const { manager, context, emitEvent, updateSession } = createCollabNotificationHarness();
 
     (
@@ -6580,11 +6609,45 @@ describe("collab child conversation routing", () => {
       },
     });
 
-    expect(emitEvent).not.toHaveBeenCalled();
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "turn/started",
+        providerThreadId: "child_provider_1",
+        providerParentThreadId: "provider_parent",
+      }),
+    );
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "turn/completed",
+        turnId: "turn_child_1",
+        providerThreadId: "child_provider_1",
+        providerParentThreadId: "provider_parent",
+      }),
+    );
     expect(updateSession).not.toHaveBeenCalled();
   });
 
-  it("suppresses child lifecycle notifications that arrive before receiver mapping", () => {
+  it("forwards a child abort without aborting the parent turn", () => {
+    const { manager, context, emitEvent, updateSession } = createCollabNotificationHarness();
+    context.collabReceiverParents.set("child_provider_1", "provider_parent");
+    context.collabReceiverTurns.set("child_provider_1", "turn_parent");
+    handleServerNotificationForTest(manager, context, {
+      method: "turn/aborted",
+      params: { threadId: "child_provider_1", turnId: "turn_child_1" },
+    });
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "turn/aborted",
+        turnId: "turn_child_1",
+        providerThreadId: "child_provider_1",
+        providerParentThreadId: "provider_parent",
+      }),
+    );
+    expect(updateSession).not.toHaveBeenCalled();
+    expect(context.session.activeTurnId).toBe("turn_parent");
+  });
+
+  it("forwards child lifecycle notifications that arrive before receiver mapping", () => {
     const { manager, context, emitEvent, updateSession } = createCollabNotificationHarness();
     context.session.status = "running";
     context.session.activeTurnId = "turn_parent";
@@ -6601,7 +6664,14 @@ describe("collab child conversation routing", () => {
       },
     });
 
-    expect(emitEvent).not.toHaveBeenCalled();
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "turn/started",
+        turnId: "turn_child_unmapped",
+        providerThreadId: "child_provider_unmapped",
+        providerParentThreadId: "provider_parent",
+      }),
+    );
     expect(updateSession).not.toHaveBeenCalled();
     expect(context.session.activeTurnId).toBe("turn_parent");
   });
@@ -6633,7 +6703,7 @@ describe("collab child conversation routing", () => {
     );
   });
 
-  it("suppresses child lifecycle notifications when only the provider parent is known", () => {
+  it("forwards child lifecycle notifications when only the provider parent is known", () => {
     const { manager, context, emitEvent, updateSession } = createCollabNotificationHarness();
     context.collabReceiverParents.set("child_provider_1", "provider_parent");
 
@@ -6649,7 +6719,13 @@ describe("collab child conversation routing", () => {
       },
     });
 
-    expect(emitEvent).not.toHaveBeenCalled();
+    expect(emitEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "turn/started",
+        providerThreadId: "child_provider_1",
+        providerParentThreadId: "provider_parent",
+      }),
+    );
     expect(updateSession).not.toHaveBeenCalled();
   });
 
@@ -7662,17 +7738,27 @@ describe("collab child routing after the parent turn ends", () => {
     });
   }
 
-  function expectOnlyChildDelta(harness: LateChildHarness, childProviderThreadId: string): void {
-    expect(harness.emitEvent).toHaveBeenCalledTimes(1);
-    expect(harness.emitEvent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        method: "item/agentMessage/delta",
-        turnId: "turn_child_late",
-        parentTurnId: "turn_parent",
-        providerThreadId: childProviderThreadId,
-        providerParentThreadId: "provider_parent",
-      }),
-    );
+  function expectChildLifecycleAndDelta(
+    harness: LateChildHarness,
+    childProviderThreadId: string,
+  ): void {
+    expect(harness.emitEvent).toHaveBeenCalledTimes(3);
+    for (const [index, method] of [
+      "turn/started",
+      "item/agentMessage/delta",
+      "turn/completed",
+    ].entries()) {
+      expect(harness.emitEvent).toHaveBeenNthCalledWith(
+        index + 1,
+        expect.objectContaining({
+          method,
+          turnId: "turn_child_late",
+          parentTurnId: "turn_parent",
+          providerThreadId: childProviderThreadId,
+          providerParentThreadId: "provider_parent",
+        }),
+      );
+    }
   }
 
   it("routes a collab-mapped child as a child after the parent turn completes", () => {
@@ -7693,7 +7779,7 @@ describe("collab child routing after the parent turn ends", () => {
 
     sendLateChildNotifications(harness, "child_provider_mapped");
 
-    expectOnlyChildDelta(harness, "child_provider_mapped");
+    expectChildLifecycleAndDelta(harness, "child_provider_mapped");
     expect(harness.context.session.status).toBe("ready");
     expect(harness.context.session.activeTurnId).toBeUndefined();
   });
@@ -7718,7 +7804,7 @@ describe("collab child routing after the parent turn ends", () => {
 
     sendLateChildNotifications(harness, "child_provider_v2");
 
-    expectOnlyChildDelta(harness, "child_provider_v2");
+    expectChildLifecycleAndDelta(harness, "child_provider_v2");
     expect(harness.context.session.status).toBe("ready");
   });
 
@@ -7729,7 +7815,7 @@ describe("collab child routing after the parent turn ends", () => {
 
     sendLateChildNotifications(harness, "child_provider_inferred");
 
-    expectOnlyChildDelta(harness, "child_provider_inferred");
+    expectChildLifecycleAndDelta(harness, "child_provider_inferred");
     expect(harness.context.session.status).toBe("ready");
     expect(harness.context.session.activeTurnId).toBeUndefined();
   });
@@ -7752,7 +7838,7 @@ describe("collab child routing after the parent turn ends", () => {
 
     sendLateChildNotifications(harness, "child_provider_inferred");
 
-    expectOnlyChildDelta(harness, "child_provider_inferred");
+    expectChildLifecycleAndDelta(harness, "child_provider_inferred");
     expect(harness.context.session.status).toBe("running");
     expect(harness.context.session.activeTurnId).toBe("turn_parent_next");
   });

@@ -2,10 +2,11 @@ import { DatabaseSync } from "node:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { gzipSync } from "node:zlib";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Effect, Layer } from "effect";
-import { afterEach, describe, expect, it } from "vitest";
+import { Effect, Fiber, Layer } from "effect";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   MIGRATION_RECOVERY_MAX_RESUME_ATTEMPTS,
@@ -17,15 +18,28 @@ import {
 
 import {
   inspectCompletedMigrationBackupForSchemaTooNew,
+  reclaimOrphanedMigrationArtifacts,
   restoreMarkedMigrationBackup,
 } from "./MigrationBackup.ts";
+import {
+  DatabaseLifecycleLockedError,
+  withDatabaseLifecycleLock,
+} from "./DatabaseLifecycleLock.ts";
 import { MigrationSchemaTooNewError } from "./Errors.ts";
 import { makeSqlitePersistenceLive } from "./Layers/Sqlite.ts";
+import * as NodeSqliteClient from "./NodeSqliteClient.ts";
 import {
   MigrationSchemaTooNewStartupBlockError,
   createMigrationSchemaTooNewStartupBlockError,
 } from "./MigrationSchemaTooNewStartupBlock.ts";
-import { migrationEntries } from "./Migrations.ts";
+import { LATEST_MIGRATION_ID, migrationEntries, runMigrations } from "./Migrations.ts";
+import { runWorkbenchMigrations } from "../workbench/persistence/WorkbenchMigrations.ts";
+import { inspectWorkbenchUpgradePlan } from "../workbench/persistence/WorkbenchUpgradePlan.ts";
+
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  return { ...actual, open: vi.fn(actual.open) };
+});
 
 const tempDirectories: Array<string> = [];
 
@@ -111,11 +125,111 @@ function writeFutureCanonicalDatabase(databasePath: string): number {
   return latestMigrationId;
 }
 
+function previousSupportedMigrationId(latestMigrationId: number): number {
+  const previous = migrationEntries
+    .map(([migrationId]) => migrationId)
+    .filter((migrationId) => migrationId < latestMigrationId)
+    .at(-1);
+  if (previous === undefined) throw new Error("Expected a previous supported migration");
+  return previous;
+}
+
+async function seedDatabaseThrough(
+  databasePath: string,
+  targetVersion: number,
+  withWorkbench = false,
+) {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      yield* runMigrations({ toMigrationInclusive: targetVersion });
+      if (withWorkbench) yield* runWorkbenchMigrations();
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: databasePath }))),
+  );
+}
+
+const inspectUpgradePlan = (databasePath: string) =>
+  Effect.runPromise(
+    inspectWorkbenchUpgradePlan.pipe(
+      Effect.provide(NodeSqliteClient.layer({ filename: databasePath })),
+    ),
+  );
+
+async function writeCurrentCompletedProvenance(input: {
+  readonly databasePath: string;
+  readonly backupPath: string;
+  readonly sourcePlan: Awaited<ReturnType<typeof inspectUpgradePlan>>;
+}): Promise<void> {
+  const source = input.sourcePlan;
+  const target = await inspectUpgradePlan(input.databasePath);
+  if (source.kind !== "ready" || target.kind !== "ready") {
+    throw new Error("Expected migration provenance fixtures to have recognized upgrade plans");
+  }
+  const legacySuffix = source.legacyMigrations
+    .map(({ officialId }) => `-legacy${officialId}`)
+    .join("");
+  const sourceVersion = source.lineageDivergence
+    ? source.official.sourceLabel
+    : `${source.official.sourceLabel}-wb${source.workbench.sourceVersion}` +
+      `-fmt${source.format.sourceVersion}${legacySuffix}`;
+  const payload = {
+    version: 3,
+    databasePath: input.databasePath,
+    backupPath: input.backupPath,
+    sourceVersion,
+    targetVersion: target.official.targetVersion,
+    lineageDivergence: source.lineageDivergence ?? null,
+    phase: "migration-completed",
+    createdAt: "2026-08-30T12:00:00.000Z",
+    completedAt: "2026-08-30T12:01:00.000Z",
+    resumeAttempts: 0,
+    migrationVersions: {
+      source: {
+        official: source.official.sourceVersion,
+        workbench: source.workbench.sourceVersion,
+        format: source.format.sourceVersion,
+      },
+      target: {
+        official: target.official.targetVersion,
+        workbench: target.workbench.targetVersion,
+        format: target.format.targetVersion,
+      },
+    },
+    moduleVersions: {
+      source: {
+        expert: source.workbench.modules.expert.sourceVersion,
+        context: source.workbench.modules.context.sourceVersion,
+      },
+      target: {
+        expert: target.workbench.modules.expert.targetVersion,
+        context: target.workbench.modules.context.targetVersion,
+      },
+    },
+    legacyMigrations: source.legacyMigrations,
+    legacyProgressMigrations: source.legacyMigrations,
+    legacyExpertMigrations: source.legacyOfficialMigrations,
+  };
+  await fs.writeFile(
+    migrationBackupProvenancePath(input.databasePath),
+    `${JSON.stringify(payload)}\n`,
+    { mode: 0o600 },
+  );
+}
+
 function generatedBackupPath(databasePath: string, suffix: string, targetVersion: number): string {
   return path.join(
     migrationBackupDirectory(databasePath),
     `${path.basename(databasePath)}.pre-migration-v1-to-v${targetVersion}-20260830T120000000Z-${suffix}.sqlite`,
   );
+}
+
+async function compressBackupFixture(backupPath: string): Promise<string> {
+  const compressedPath = `${backupPath}.gz`;
+  await fs.writeFile(compressedPath, gzipSync(await fs.readFile(backupPath), { level: 1 }), {
+    flag: "wx",
+    mode: 0o600,
+  });
+  await fs.unlink(backupPath);
+  return compressedPath;
 }
 
 async function writeCompletedProvenance(input: {
@@ -164,6 +278,190 @@ const firstUuid = "00000000-0000-4000-8000-000000000001";
 const secondUuid = "00000000-0000-4000-8000-000000000002";
 
 describe("completed migration backup recovery", () => {
+  it("inspects and restores the exact compressed backup, reclaiming inspection partials", async () => {
+    const databasePath = await makeDatabasePath();
+    const latestMigrationId = LATEST_MIGRATION_ID;
+    const previouslySupportedMigrationId = previousSupportedMigrationId(latestMigrationId);
+    await seedDatabaseThrough(databasePath, latestMigrationId, true);
+    const targetVersion = latestMigrationId;
+    const directory = migrationBackupDirectory(databasePath);
+    await fs.mkdir(directory);
+    const plainPath = generatedBackupPath(databasePath, firstUuid, targetVersion);
+    await seedDatabaseThrough(plainPath, previouslySupportedMigrationId);
+    const sourcePlan = await inspectUpgradePlan(plainPath);
+    const backupPath = await compressBackupFixture(plainPath);
+    const unrelatedPath = generatedBackupPath(databasePath, secondUuid, targetVersion + 1);
+    writeTrackedDatabase(unrelatedPath, targetVersion + 1);
+    await writeCurrentCompletedProvenance({ databasePath, backupPath, sourcePlan });
+    await fs.writeFile(
+      path.join(directory, `.${path.basename(backupPath)}.crashed.partial`),
+      "partial",
+    );
+
+    await Effect.runPromise(reclaimOrphanedMigrationArtifacts(databasePath));
+    await expect(
+      inspectCompletedMigrationBackupForSchemaTooNew(databasePath, {
+        databaseMigrationId: latestMigrationId,
+        latestSupportedMigrationId: previouslySupportedMigrationId,
+      }),
+    ).resolves.toMatchObject({
+      kind: "restore-available",
+      backupPath,
+      backupMigrationId: previouslySupportedMigrationId,
+    });
+    expect((await fs.readdir(directory)).sort()).toEqual(
+      [path.basename(backupPath), path.basename(unrelatedPath)].sort(),
+    );
+
+    await Effect.runPromise(
+      restoreMarkedMigrationBackup(databasePath, {
+        expectedBackupPath: backupPath,
+        expectedProvenancePath: migrationBackupProvenancePath(databasePath),
+      }),
+    );
+    const restored = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(
+        restored.prepare("SELECT MAX(migration_id) AS id FROM effect_sql_migrations").get(),
+      ).toMatchObject({ id: previouslySupportedMigrationId });
+    } finally {
+      restored.close();
+    }
+  });
+
+  it.each(["truncated", "checksum", "invalid-sqlite"])(
+    "rejects %s gzip backups without changing the live database or recovery records",
+    async (damage) => {
+      const databasePath = await makeDatabasePath();
+      const latestMigrationId = LATEST_MIGRATION_ID;
+      const previouslySupportedMigrationId = previousSupportedMigrationId(latestMigrationId);
+      await seedDatabaseThrough(databasePath, latestMigrationId, true);
+      const targetVersion = latestMigrationId;
+      const directory = migrationBackupDirectory(databasePath);
+      await fs.mkdir(directory);
+      const plainPath = generatedBackupPath(databasePath, firstUuid, targetVersion);
+      await seedDatabaseThrough(plainPath, previouslySupportedMigrationId);
+      const sourcePlan = await inspectUpgradePlan(plainPath);
+      const backupPath = await compressBackupFixture(plainPath);
+      const encoded = await fs.readFile(backupPath);
+      if (damage === "checksum") encoded[encoded.length - 8]! ^= 1;
+      await fs.writeFile(
+        backupPath,
+        damage === "truncated"
+          ? encoded.subarray(0, -3)
+          : damage === "invalid-sqlite"
+            ? gzipSync("not sqlite")
+            : encoded,
+      );
+      await writeCurrentCompletedProvenance({ databasePath, backupPath, sourcePlan });
+      await writeActiveRecoveryMarker({ databasePath, backupPath, targetVersion });
+      const protectedPaths = [
+        databasePath,
+        migrationBackupProvenancePath(databasePath),
+        migrationRecoveryMarkerPath(databasePath),
+      ];
+      const before = await Promise.all(protectedPaths.map((filePath) => fs.readFile(filePath)));
+
+      await expect(
+        inspectCompletedMigrationBackupForSchemaTooNew(databasePath, {
+          databaseMigrationId: latestMigrationId,
+          latestSupportedMigrationId: previouslySupportedMigrationId,
+        }),
+      ).resolves.toEqual({ kind: "restore-unavailable", reason: "invalid-backup" });
+      await expect(Effect.runPromise(restoreMarkedMigrationBackup(databasePath))).rejects.toThrow();
+
+      expect(await Promise.all(protectedPaths.map((filePath) => fs.readFile(filePath)))).toEqual(
+        before,
+      );
+      expect(await fs.readdir(directory)).toEqual([path.basename(backupPath)]);
+      expect(
+        (await fs.readdir(path.dirname(databasePath))).filter((name) => name.endsWith(".restore")),
+      ).toEqual([]);
+    },
+  );
+
+  it("fails closed when completed provenance claims an unknown future official target", async () => {
+    const databasePath = await makeDatabasePath();
+    const latestMigrationId = writeFutureCanonicalDatabase(databasePath);
+    const futureMigrationId = latestMigrationId + 1;
+    const directory = migrationBackupDirectory(databasePath);
+    await fs.mkdir(directory);
+    const plainPath = generatedBackupPath(databasePath, firstUuid, futureMigrationId);
+    writeTrackedDatabase(plainPath, latestMigrationId);
+    const backupPath = await compressBackupFixture(plainPath);
+    await writeCompletedProvenance({ databasePath, backupPath, targetVersion: futureMigrationId });
+
+    await expect(
+      inspectCompletedMigrationBackupForSchemaTooNew(databasePath, {
+        databaseMigrationId: futureMigrationId,
+        latestSupportedMigrationId: latestMigrationId,
+      }),
+    ).resolves.toEqual({ kind: "restore-unavailable", reason: "invalid-provenance" });
+  });
+
+  it("holds the lifecycle lock through interrupted compressed too-new startup inspection and cleanup", async () => {
+    const databasePath = await makeDatabasePath();
+    const latestMigrationId = LATEST_MIGRATION_ID;
+    const previouslySupportedMigrationId = previousSupportedMigrationId(latestMigrationId);
+    await seedDatabaseThrough(databasePath, latestMigrationId, true);
+    const targetVersion = latestMigrationId;
+    const directory = migrationBackupDirectory(databasePath);
+    await fs.mkdir(directory);
+    const plainPath = generatedBackupPath(databasePath, firstUuid, targetVersion);
+    await seedDatabaseThrough(plainPath, previouslySupportedMigrationId);
+    const sourcePlan = await inspectUpgradePlan(plainPath);
+    const backupPath = await compressBackupFixture(plainPath);
+    await writeCurrentCompletedProvenance({ databasePath, backupPath, sourcePlan });
+    const database = new DatabaseSync(databasePath);
+    try {
+      database
+        .prepare("INSERT INTO effect_sql_migrations (migration_id, name) VALUES (?, ?)")
+        .run(latestMigrationId + 1, `FutureMigration${latestMigrationId + 1}`);
+    } finally {
+      database.close();
+    }
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    const open = vi.mocked(fs.open);
+    open.mockImplementation(async (...args) => {
+      const handle = await actual.open(...args);
+      if (String(args[0]).endsWith(".partial") && String(args[0]).includes(".sqlite.gz.")) {
+        entered.resolve();
+        await release.promise;
+      }
+      return handle;
+    });
+    const startup = Effect.runFork(
+      Layer.build(
+        makeSqlitePersistenceLive(databasePath).pipe(Layer.provide(NodeServices.layer)),
+      ).pipe(Effect.scoped),
+    );
+    try {
+      await entered.promise;
+      let interrupted = false;
+      const interruption = Effect.runPromise(Fiber.interrupt(startup)).then(() => {
+        interrupted = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(interrupted).toBe(false);
+      await expect(
+        Effect.runPromise(withDatabaseLifecycleLock(databasePath, Effect.void)),
+      ).rejects.toBeInstanceOf(DatabaseLifecycleLockedError);
+      release.resolve();
+      await interruption;
+      expect((await Effect.runPromise(Fiber.await(startup)))._tag).toBe("Failure");
+    } finally {
+      release.resolve();
+      await Effect.runPromise(Fiber.interrupt(startup));
+      open.mockImplementation(actual.open);
+    }
+    expect(await fs.readdir(directory)).toEqual([path.basename(backupPath)]);
+    await expect(fs.stat(`${databasePath}.lifecycle-lock`)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("emits a structured block from the real persistence startup path", async () => {
     const databasePath = await makeDatabasePath();
     const latestMigrationId = writeFutureCanonicalDatabase(databasePath);

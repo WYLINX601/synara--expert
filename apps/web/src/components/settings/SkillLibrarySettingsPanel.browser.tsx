@@ -336,10 +336,21 @@ function managedFiles() {
   vi.stubGlobal("fetch", fetch);
   return { files, fetch, current: () => current };
 }
+async function readySkillEditor(fileName = "alpha/SKILL.md") {
+  const { monaco } = await import("../codeEditor/editorRuntime");
+  const find = () =>
+    monaco.editor.getEditors().find((editor) => {
+      const uri = editor.getModel()?.uri;
+      return uri?.scheme === "synara-standalone" && uri.path.endsWith(`/${fileName}`);
+    });
+  await expect.poll(find, { timeout: 10_000 }).toBeDefined();
+  const editor = find()!;
+  expect(editor.getDomNode()!.getBoundingClientRect().height).toBeGreaterThan(100);
+  return editor;
+}
 async function replaceEditor(text: string, fileName = "alpha/SKILL.md") {
-  await page
-    .getByRole("textbox", { name: fileName, exact: true })
-    .click({ position: { x: 15, y: 5 } });
+  const editor = await readySkillEditor(fileName);
+  editor.focus();
   const modifier = /Mac/.test(navigator.platform) ? "Meta" : "Control";
   await userEvent.keyboard(`{${modifier}>}a{/${modifier}}`);
   await userEvent.keyboard(text);
@@ -648,8 +659,9 @@ describe("Skill library management browser flows", () => {
     await expect.poll(() => resources.current().revision).toBe(3);
     await expect.element(save).toBeEnabled();
 
-    const editor = page.getByRole("textbox", { name: "alpha/SKILL.md", exact: true });
-    await expect.element(editor).toHaveTextContent("Typed while saving.");
+    await expect
+      .poll(async () => (await readySkillEditor()).getValue())
+      .toContain("Typed while saving.");
     await expect.element(page.getByText("有未保存的更改", { exact: true })).toBeVisible();
     expect(resources.files.get("alpha/SKILL.md")).toContain("Submitted body.");
     expect(resources.current().revision).toBe(3);
@@ -751,8 +763,8 @@ describe("Skill library management browser flows", () => {
       .toBeVisible();
     await page.getByRole("button", { name: "编辑", exact: true }).click();
     await expect
-      .element(page.getByRole("textbox", { name: "alpha/SKILL.md", exact: true }))
-      .toHaveTextContent("Draft reading guide");
+      .poll(async () => (await readySkillEditor("alpha/SKILL.md")).getValue())
+      .toContain("Draft reading guide");
     await replaceEditor("# Reopened draft");
     await page.getByRole("button", { name: "预览", exact: true }).click();
     await expect
@@ -778,9 +790,7 @@ describe("Skill library management browser flows", () => {
       .getByRole("textbox", { name: "资源相对路径", exact: true })
       .fill("references/new.md");
     await page.getByRole("button", { name: "新建文本", exact: true }).click();
-    await expect
-      .element(page.getByRole("textbox", { name: "references/new.md", exact: true }))
-      .toBeVisible();
+    await readySkillEditor("references/new.md");
     await replaceEditor("# New support file{Enter}{Enter}Support body.", "references/new.md");
     await page.getByRole("button", { name: "保存更改", exact: true }).click();
     await expect
@@ -1329,15 +1339,15 @@ describe("Skill library management browser flows", () => {
     await showFiles(true);
     await page.getByRole("button", { name: /alpha\/SKILL.md/u }).click();
     await expect
-      .element(page.getByRole("textbox", { name: "alpha/SKILL.md", exact: true }))
-      .toHaveTextContent("name: Alpha");
+      .poll(async () => (await readySkillEditor("alpha/SKILL.md")).getValue())
+      .toContain("name: Alpha");
     await page.getByRole("tab", { name: "概览", exact: true }).click();
     await page.getByRole("textbox", { name: "技能名称" }).fill("Renamed Alpha");
     await page.getByRole("button", { name: "保存更改", exact: true }).click();
     await showFiles(true);
     await expect
-      .element(page.getByRole("textbox", { name: "alpha/SKILL.md", exact: true }))
-      .toHaveTextContent("name: Renamed Alpha");
+      .poll(async () => (await readySkillEditor("alpha/SKILL.md")).getValue())
+      .toContain("name: Renamed Alpha");
     await replaceEditor(
       "---{Enter}name: Renamed Alpha{Enter}description: Review Alpha{Enter}---{Enter}Edited body.",
     );
@@ -1358,8 +1368,8 @@ describe("Skill library management browser flows", () => {
     await showFiles(true);
     await page.getByRole("button", { name: /alpha\/SKILL.md/u }).click();
     await expect
-      .element(page.getByRole("textbox", { name: "alpha/SKILL.md", exact: true }))
-      .toHaveTextContent("Original body.");
+      .poll(async () => (await readySkillEditor("alpha/SKILL.md")).getValue())
+      .toContain("Original body.");
     await replaceEditor(
       "---{Enter}name: Alpha{Enter}description: Review Alpha{Enter}---{Enter}Saved before switching.",
     );
@@ -1367,8 +1377,8 @@ describe("Skill library management browser flows", () => {
     await expect.element(page.getByText("未保存的更改", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "保存并继续", exact: true }).click();
     await expect
-      .element(page.getByRole("textbox", { name: "notes.txt", exact: true }))
-      .toHaveTextContent("Accepted notes.");
+      .poll(async () => (await readySkillEditor("notes.txt")).getValue())
+      .toContain("Accepted notes.");
     expect(resources.files.get("alpha/SKILL.md")).toContain("Saved before switching.");
     const lastRead = resources.fetch.mock.calls
       .filter(

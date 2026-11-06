@@ -2392,6 +2392,9 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
           cwd: trim(input.cwd) ?? serverConfig.cwd,
           model,
           threadId: input.threadId,
+          ...(input.lifecycleGeneration !== undefined
+            ? { lifecycleGeneration: input.lifecycleGeneration }
+            : {}),
           ...(conversationId ? { resumeCursor: conversationId } : {}),
           createdAt: now,
           updatedAt: now,
@@ -3019,7 +3022,12 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
       stopSession,
       listSessions: () =>
         Effect.sync(() => [...sessions.values()].map((context) => context.session)),
-      hasSession: (threadId) => Effect.sync(() => sessions.has(threadId)),
+      hasSession: (threadId) =>
+        Effect.sync(() => {
+          const context = sessions.get(threadId);
+          return context !== undefined && !context.stopped;
+        }),
+      hasRetainedSession: (threadId) => Effect.sync(() => sessions.has(threadId)),
       readThread: (threadId) => requireSession(threadId).pipe(Effect.map(snapshot)),
       rollbackThread,
       stopAll,

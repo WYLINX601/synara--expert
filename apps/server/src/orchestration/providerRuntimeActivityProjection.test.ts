@@ -1,9 +1,11 @@
-import type { OrchestrationThreadActivity, ProviderRuntimeEvent } from "@synara/contracts";
+import { createHash } from "node:crypto";
+import type { OrchestrationThreadActivity } from "@synara/contracts";
 import {
   ApprovalRequestId,
   CommandId,
   EventId,
   OrchestrationCommand,
+  ProviderRuntimeEvent,
   RuntimeItemId,
   ThreadId,
   TurnId,
@@ -20,6 +22,72 @@ import {
 const CREATED_AT = "2026-07-20T10:00:00.000Z";
 const THREAD_ID = ThreadId.makeUnsafe("thread-activity-projection");
 const TURN_ID = TurnId.makeUnsafe("turn-activity-projection");
+
+it.each([1_023, 1_024, 1_025])(
+  "bounds activity fingerprints at %i serialized code units",
+  (length) => {
+    const activity: OrchestrationThreadActivity = {
+      id: EventId.makeUnsafe("fingerprint"),
+      createdAt: CREATED_AT,
+      tone: "tool",
+      kind: "task.progress",
+      summary: "Reasoning trace",
+      payload: { detail: "" },
+      turnId: TURN_ID,
+    };
+    const serializedFields = {
+      kind: activity.kind,
+      summary: activity.summary,
+      payload: activity.payload,
+      turnId: activity.turnId,
+    };
+    const sizedActivity = {
+      ...activity,
+      payload: { detail: "é".repeat(length - JSON.stringify(serializedFields).length) },
+    };
+    const serialized = JSON.stringify({ ...serializedFields, payload: sizedActivity.payload });
+    expect(serialized.length).toBe(length);
+    expect(providerActivityUpdateFingerprint(sizedActivity)).toBe(
+      length <= 1_024 ? serialized : createHash("sha256").update(serialized).digest("hex"),
+    );
+  },
+);
+
+it("preserves fingerprint serialization, including aliases, escapes and changing payloads", () => {
+  const shared = { detail: `${"x".repeat(1_024)}\ud800\n"` };
+  const activity: OrchestrationThreadActivity = {
+    id: EventId.makeUnsafe("fingerprint"),
+    createdAt: CREATED_AT,
+    tone: "tool",
+    kind: "task.progress",
+    summary: "Reasoning trace",
+    turnId: TURN_ID,
+    payload: { first: shared, second: shared },
+  };
+  const serialized = JSON.stringify({
+    kind: activity.kind,
+    summary: activity.summary,
+    payload: { first: shared, second: "[Circular]" },
+    turnId: TURN_ID,
+  });
+  const fingerprint = providerActivityUpdateFingerprint(activity);
+  expect(fingerprint).toBe(createHash("sha256").update(serialized).digest("hex"));
+  expect(
+    providerActivityUpdateFingerprint({
+      ...activity,
+      id: EventId.makeUnsafe("another"),
+      createdAt: "2026-07-21T00:00:00.000Z",
+      sequence: 2,
+    }),
+  ).toBe(fingerprint);
+  for (const change of [
+    { kind: "tool.updated" },
+    { summary: "Changed" },
+    { turnId: null },
+    { payload: { first: shared, second: { detail: "Changed" } } },
+  ])
+    expect(providerActivityUpdateFingerprint({ ...activity, ...change })).not.toBe(fingerprint);
+});
 
 function runtimeEvent(input: Record<string, unknown> & { eventId: string }): ProviderRuntimeEvent {
   return {
@@ -62,7 +130,7 @@ it("persists terminal error identity and announced retry state in chat activitie
       eventId: "error",
       turnId: TURN_ID,
       payload: {
-        message: "Temporarily unavailable",
+        message: "Temporarily unavailable\n    at request (/app/provider.ts:12:1)",
         class: "provider_error",
         errorCode: "server_overloaded",
       },
@@ -79,12 +147,16 @@ it("persists terminal error identity and announced retry state in chat activitie
       turnId: TURN_ID,
       payload: {
         state: "failed",
-        errorMessage: "Temporarily unavailable",
+        errorMessage: "Temporarily unavailable\n    at request (/app/provider.ts:12:1)",
         errorCode: "server_overloaded",
       },
     }),
   )[0]!;
-  expect(completion.payload).toMatchObject({ errorCode: "server_overloaded", state: "failed" });
+  expect(completion.payload).toMatchObject({
+    errorCode: "server_overloaded",
+    state: "failed",
+    errorMessage: "Temporarily unavailable",
+  });
   const warning = projectProviderRuntimeActivities(
     runtimeEvent({
       type: "runtime.warning",
@@ -410,6 +482,54 @@ it("keeps the full task failure summary so the work-log reveal can show it", () 
   const cappedPayload = capped?.payload as { detail: string };
   expect(cappedPayload.detail).toHaveLength(2_000);
   expect(cappedPayload.detail.endsWith("...")).toBe(true);
+});
+
+it("persists provider confirmation when a late completion reconciles a local stop", () => {
+  const [activity] = projectProviderRuntimeActivities(
+    runtimeEvent({
+      type: "task.completed",
+      eventId: "task-completed-after-stop",
+      provider: "devin",
+      turnId: TURN_ID,
+      payload: {
+        taskId: "task-after-stop",
+        status: "completed",
+        reconcilesStop: true,
+      },
+    }),
+  );
+
+  expect(activity).toMatchObject({
+    kind: "task.completed",
+    payload: { taskId: "task-after-stop", status: "completed", reconcilesStop: true },
+  });
+  expect(() => decodeActivityAppendCommand(activity!)).not.toThrow();
+});
+
+it("persists pending provider confirmation for a stopped Devin task", () => {
+  const [activity] = projectProviderRuntimeActivities(
+    runtimeEvent({
+      type: "task.completed",
+      eventId: "task-awaiting-provider-confirmation",
+      provider: "devin",
+      turnId: TURN_ID,
+      payload: {
+        taskId: "task-awaiting-confirmation",
+        status: "stopped",
+        awaitingProviderConfirmation: true,
+      },
+    }),
+  );
+
+  expect(activity).toMatchObject({
+    kind: "task.completed",
+    payload: {
+      taskId: "task-awaiting-confirmation",
+      status: "stopped",
+      awaitingProviderConfirmation: true,
+    },
+  });
+  expect(() => decodeActivityAppendCommand(activity!)).not.toThrow();
 });
 
 it("keeps the full task update error so the work-log reveal can show it", () => {
@@ -1533,4 +1653,79 @@ describe("provider runtime activity projection", () => {
     });
     expect(() => decodeActivityAppendCommand(blocked!)).not.toThrow();
   });
+});
+
+it.each(["task.started", "task.updated", "task.completed"] as const)(
+  "persists the child launch mode from %s",
+  (type) => {
+    const event = Schema.decodeUnknownSync(ProviderRuntimeEvent)(
+      runtimeEvent({
+        type,
+        eventId: `policy-${type}`,
+        provider: "devin",
+        turnId: TURN_ID,
+        payload: {
+          taskId: "child-policy",
+          interactionMode: "plan",
+          ...(type === "task.started" ? {} : { status: "completed" }),
+        },
+      }),
+    );
+    const activities = projectProviderRuntimeActivities(event);
+    expect(activities[0]?.payload).toMatchObject({ interactionMode: "plan" });
+    decodeActivityAppendCommand(activities[0]!);
+  },
+);
+
+it("persists running-task stop reconciliation for resumed background work", () => {
+  const event = Schema.decodeUnknownSync(ProviderRuntimeEvent)(
+    runtimeEvent({
+      type: "task.updated",
+      eventId: "replayed-running",
+      provider: "devin",
+      turnId: TURN_ID,
+      payload: { taskId: "child", status: "running", reconcilesStop: true, isBackgrounded: true },
+    }),
+  );
+  const activity = projectProviderRuntimeActivities(event)[0]!;
+  expect(activity.payload).toMatchObject({
+    status: "running",
+    reconcilesStop: true,
+    isBackgrounded: true,
+  });
+  decodeActivityAppendCommand(activity);
+});
+
+it("projects the real nested Claude SDK rate-limit envelope", () => {
+  const event = runtimeEvent({
+    type: "account.rate-limits.updated",
+    eventId: "claude-nested-quota",
+    provider: "claudeAgent",
+    turnId: TURN_ID,
+    payload: {
+      rateLimits: {
+        type: "rate_limit_event",
+        uuid: "quota-event",
+        session_id: "sdk-session",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "five_hour",
+          resetsAt: 1_800_000_000,
+          utilization: 1,
+        },
+      },
+    },
+  });
+  const activities = projectProviderRuntimeActivities(event);
+  expect(activities.map((activity) => activity.kind)).toEqual([
+    "account.rate-limits.updated",
+    "account.rate-limited",
+  ]);
+  expect(activities[1]?.payload).toMatchObject({
+    status: "rejected",
+    rateLimitType: "five_hour",
+    resetsAt: "2027-01-15T08:00:00.000Z",
+    utilization: 1,
+  });
+  expectSchemaValidActivities(event);
 });

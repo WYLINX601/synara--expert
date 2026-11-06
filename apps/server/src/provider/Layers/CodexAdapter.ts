@@ -34,6 +34,7 @@ import {
   TurnId,
 } from "@synara/contracts";
 import { Cause, Effect, Layer, Option, Queue, Schema, ServiceMap, Stream } from "effect";
+import { sanitizeUserFacingErrorMessage } from "@synara/shared/errorMessages";
 
 import {
   ProviderAdapterProcessError,
@@ -49,6 +50,7 @@ import {
   CodexAppServerManager,
   CodexSessionAuthInvalidatedError,
   parseCodexUserInputQuestions,
+  readResumeCursorThreadId,
   type CodexAppServerSendTurnInput,
   type CodexAppServerStartSessionInput,
   type CodexSessionInspection,
@@ -81,6 +83,13 @@ import {
 import { ServerConfig } from "../../config.ts";
 import { resolveCodexServiceTier } from "../../codexServiceTier.ts";
 import { makeRuntimeTaskListItem } from "../runtimeTaskList.ts";
+import {
+  codexErrorCode,
+  codexUsageLimitWindows,
+  isCodexUsageLimitError,
+  usageLimitResetAt,
+  type UsageLimitWindows,
+} from "../usageLimit.ts";
 import { extractProposedPlanMarkdown } from "../planMode.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
 import { synaraSkillsDir } from "../skillsCatalog.ts";
@@ -103,6 +112,7 @@ import {
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const PROVIDER = "codex" as const;
+const CODEX_RUNTIME_WARNING_METHODS = new Set(["guardianWarning", "warning"]);
 
 // Backstop for an alive-but-silent codex app-server: if a turn produces no
 // activity at all for this long, abort it instead of showing "Working" forever.
@@ -178,17 +188,6 @@ function toMessage(cause: unknown, fallback: string): string {
     return sanitizeUserFacingErrorMessage(cause.message, fallback);
   }
   return fallback;
-}
-
-function sanitizeUserFacingErrorMessage(message: string, fallback: string): string {
-  const normalized = message.trim();
-  if (normalized.length === 0) {
-    return fallback;
-  }
-
-  const firstLine = normalized.split("\n")[0]?.trim() ?? "";
-  const withoutInlineStack = firstLine.replace(/\s+at file:\/\/.*$/s, "").trim();
-  return withoutInlineStack.length > 0 ? withoutInlineStack : fallback;
 }
 
 function composeCodexInputWithFileAttachments(input: {
@@ -274,12 +273,6 @@ function asString(value: unknown): string | undefined {
 function asTrimmedString(value: unknown): string | undefined {
   const stringValue = asString(value)?.trim();
   return stringValue ? stringValue : undefined;
-}
-
-function codexErrorCode(value: unknown): string | undefined {
-  const error = asObject(value);
-  const code = asTrimmedString(error?.codexErrorInfo) ?? asTrimmedString(error?.codex_error_info);
-  return code === "serverOverloaded" ? "server_overloaded" : code;
 }
 
 function asArray(value: unknown): unknown[] | undefined {
@@ -1167,8 +1160,9 @@ function mapCodexHookEvent(
   };
 }
 
-// Configuration/lifecycle bookkeeping belongs in native diagnostics, not the transcript.
+// Internal metadata and configuration/lifecycle bookkeeping stay in native diagnostics.
 const DIAGNOSTIC_ONLY_CODEX_METHODS = new Set([
+  "turn/moderationMetadata",
   "item/autoApprovalReview/started",
   "remoteControl/status/changed",
   "skills/changed",
@@ -1207,10 +1201,17 @@ function mapUnmappedCodexEvent(
   };
 }
 
+interface CodexUsageLimitContext {
+  activeTurnId?: string;
+  windows?: UsageLimitWindows;
+  terminalError?: { readonly turnId: string; readonly code: string; readonly usageLimit: boolean };
+}
+
 function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
   codexHome?: CodexGeneratedImageHomeContext,
+  usageLimitContext?: CodexUsageLimitContext,
 ): ReadonlyArray<ProviderRuntimeEvent> {
   const payload = asObject(event.payload);
   const turn = asObject(payload?.turn);
@@ -1461,6 +1462,13 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "turn/started") {
+    const observedTurnId = event.turnId ?? asString(turn?.id);
+    if (usageLimitContext && usageLimitContext.activeTurnId !== observedTurnId) {
+      if (observedTurnId === undefined) delete usageLimitContext.activeTurnId;
+      else usageLimitContext.activeTurnId = observedTurnId;
+      delete usageLimitContext.windows;
+      delete usageLimitContext.terminalError;
+    }
     const turnId = event.turnId;
     if (!turnId) {
       return [];
@@ -1480,7 +1488,28 @@ function mapToRuntimeEvents(
 
   if (event.method === "turn/completed") {
     const errorMessage = asString(asObject(turn?.error)?.message);
-    const errorCode = codexErrorCode(turn?.error);
+    const currentTurn =
+      event.turnId !== undefined && usageLimitContext?.activeTurnId === event.turnId;
+    const priorError = currentTurn ? usageLimitContext?.terminalError : undefined;
+    const errorCode = codexErrorCode(turn?.error) ?? priorError?.code;
+    const isUsageLimit =
+      codexErrorCode(turn?.error) !== undefined
+        ? isCodexUsageLimitError(errorCode, turn?.error)
+        : priorError?.usageLimit === true;
+    const usageLimit =
+      toTurnStatus(turn?.status) === "failed" && isUsageLimit
+        ? {
+            resetAt: usageLimitResetAt(
+              currentTurn ? usageLimitContext?.windows : undefined,
+              Date.parse(event.createdAt),
+            ),
+          }
+        : undefined;
+    if (usageLimitContext && currentTurn) {
+      delete usageLimitContext.activeTurnId;
+      delete usageLimitContext.windows;
+      delete usageLimitContext.terminalError;
+    }
     return [
       {
         ...runtimeEventBase(event, canonicalThreadId),
@@ -1495,6 +1524,7 @@ function mapToRuntimeEvents(
             : {}),
           ...(errorMessage ? { errorMessage } : {}),
           ...(errorCode ? { errorCode } : {}),
+          ...(usageLimit ? { usageLimit } : {}),
         },
       },
     ];
@@ -1539,16 +1569,20 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "turn/diff/updated") {
+    // Keep the cumulative body once. Metadata records its original UTF-8 size
+    // so a journal-compacted prefix cannot masquerade as a complete patch.
+    const unifiedDiff =
+      asString(payload?.unifiedDiff) ?? asString(payload?.diff) ?? asString(payload?.patch) ?? "";
+    const base = runtimeDeltaEventBase(event, canonicalThreadId);
     return [
       {
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...base,
         type: "turn.diff.updated",
-        payload: {
-          unifiedDiff:
-            asString(payload?.unifiedDiff) ??
-            asString(payload?.diff) ??
-            asString(payload?.patch) ??
-            "",
+        payload: { unifiedDiff },
+        raw: {
+          source: base.raw?.source ?? eventRawSource(event),
+          method: event.method,
+          payload: { unifiedDiffBytes: Buffer.byteLength(unifiedDiff, "utf8") },
         },
       },
     ];
@@ -1833,6 +1867,28 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (CODEX_RUNTIME_WARNING_METHODS.has(event.method)) {
+    const message = asTrimmedString(payload?.message);
+    if (
+      event.method === "guardianWarning" &&
+      message?.startsWith("Automatic approval review approved (")
+    ) {
+      return [];
+    }
+    return [
+      {
+        type: "runtime.warning",
+        ...withMinimalRawPayload(runtimeEventBase(event, canonicalThreadId), event),
+        payload: {
+          message: sanitizeUnmappedProviderDetail(message, 2_000) ?? "Codex runtime warning",
+          ...(event.payload !== undefined
+            ? { detail: sanitizeUnmappedProviderData(event.payload) }
+            : {}),
+        },
+      },
+    ];
+  }
+
   if (event.method === "configWarning") {
     const details = asTrimmedString(payload?.details);
     const path = asTrimmedString(payload?.path);
@@ -1863,6 +1919,17 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "account/rateLimits/updated") {
+    if (usageLimitContext?.activeTurnId) {
+      // Same-origin notifications are patches. Ignore other quota buckets and keep
+      // omitted canonical windows, including any still-exhausted weekly window.
+      const windows = codexUsageLimitWindows(
+        event.payload,
+        Date.parse(event.createdAt),
+        usageLimitContext.windows,
+      );
+      if (windows === undefined) delete usageLimitContext.windows;
+      else usageLimitContext.windows = windows;
+    }
     return [
       {
         type: "account.rate-limits.updated",
@@ -1955,7 +2022,26 @@ function mapToRuntimeEvents(
       asString(asObject(payload?.error)?.message) ?? event.message ?? "Provider runtime error";
     const willRetry = payload?.willRetry === true;
     const errorCode = codexErrorCode(payload?.error);
-    const treatAsWarning = willRetry || isNonFatalCodexErrorMessage(message);
+    const nonFatal = isNonFatalCodexErrorMessage(message);
+    const quotaFailure = isCodexUsageLimitError(errorCode, payload?.error);
+    // Only the terminal command settles quota failure and recovery together.
+    const treatAsWarning = willRetry || nonFatal || quotaFailure;
+    if (
+      usageLimitContext &&
+      !willRetry &&
+      !nonFatal &&
+      errorCode &&
+      event.turnId &&
+      (usageLimitContext.activeTurnId === undefined ||
+        usageLimitContext.activeTurnId === event.turnId)
+    ) {
+      usageLimitContext.activeTurnId = event.turnId;
+      usageLimitContext.terminalError = {
+        turnId: event.turnId,
+        code: errorCode,
+        usageLimit: quotaFailure,
+      };
+    }
     return [
       {
         type: treatAsWarning ? "runtime.warning" : "runtime.error",
@@ -2096,7 +2182,11 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         entry.lastActivityAt = Date.now();
       }
       for (const runtimeEvent of runtimeEvents) {
-        if (runtimeEvent.type === "turn.started" && runtimeEvent.turnId) {
+        if (
+          runtimeEvent.type === "turn.started" &&
+          runtimeEvent.turnId &&
+          runtimeEvent.providerRefs?.providerParentThreadId === undefined
+        ) {
           armTurnWatchdog(threadId, runtimeEvent.turnId);
         }
       }
@@ -2701,12 +2791,29 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
             sizeOf: (item) => item.bytes,
           },
         );
+        const usageLimitContexts = new WeakMap<object, CodexUsageLimitContext>();
         let nextDroppedWarning = 1;
         const listener = (event: ProviderEvent) => {
           const origin = manager.getSessionEventOrigin(event.threadId, event.lifecycleGeneration);
           const stampedEvent = stampEvent(event, origin.providerInstanceId);
+          // Native children share the parent transport, but cannot replace its
+          // active turn or clear the quota deadline needed for parent recovery.
+          const usageLimitOwner =
+            stampedEvent.providerParentThreadId === undefined ? origin.validationKey : undefined;
+          let usageLimitContext = usageLimitOwner
+            ? usageLimitContexts.get(usageLimitOwner)
+            : undefined;
+          if (usageLimitOwner && !usageLimitContext) {
+            usageLimitContext = {};
+            usageLimitContexts.set(usageLimitOwner, usageLimitContext);
+          }
           const mappedRuntimeEvents = assignDerivedProviderRuntimeEventIds(
-            mapToRuntimeEvents(stampedEvent, stampedEvent.threadId, origin.codexOptions),
+            mapToRuntimeEvents(
+              stampedEvent,
+              stampedEvent.threadId,
+              origin.codexOptions,
+              usageLimitContext,
+            ),
           );
           const hasUnmappedEvent = mappedRuntimeEvents.some(
             (runtimeEvent) => runtimeEvent.type === "event.unmapped",
@@ -2717,7 +2824,9 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
           const runtimeEvents = sizedRuntimeEvents.map((item) => item.event);
           trackTurnWatchdogActivity(stampedEvent.threadId, runtimeEvents);
           const nativeEvent = compactCodexNativeEventForIngress(
-            hasUnmappedEvent ? sanitizeUnmappedProviderEvent(stampedEvent) : stampedEvent,
+            hasUnmappedEvent || CODEX_RUNTIME_WARNING_METHODS.has(stampedEvent.method)
+              ? sanitizeUnmappedProviderEvent(stampedEvent)
+              : stampedEvent,
           );
           const result = ingress.offer({
             nativeEvent: nativeEvent.event,
@@ -2789,6 +2898,13 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         supportsLiveTurnDiffPatch: true,
       },
       startSession,
+      didResumeSession: (input, session) => {
+        const requestedThreadId = readResumeCursorThreadId(input.resumeCursor);
+        return (
+          requestedThreadId !== undefined &&
+          readResumeCursorThreadId(session.resumeCursor) === requestedThreadId
+        );
+      },
       sendTurn,
       steerTurn,
       startReview,
@@ -2807,6 +2923,8 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
           try: () => manager.renewAgentGatewayCredential(threadId),
           catch: (cause) => toRequestError(threadId, "thread/resume", cause),
         }),
+      agentGatewayCredentialRetired: (threadId) =>
+        Effect.sync(() => manager.isAgentGatewayCredentialRetired(threadId)),
       listSessions,
       listGeneratedImageHomePaths,
       hasSession,

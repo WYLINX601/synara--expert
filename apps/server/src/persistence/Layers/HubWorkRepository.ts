@@ -5,6 +5,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   HubWorkRepository,
   HubWorkRepositoryError,
+  type HubWorkSubmission,
   type HubWorkRepositoryShape,
 } from "../Services/HubWorkRepository";
 
@@ -26,6 +27,12 @@ export const makeHubWorkRepository = Effect.gen(function* () {
     Effect.forEach(rows, (row) => decodeRecord(row.recordJson));
   const readOne = (rows: readonly RecordRow[]) =>
     rows[0] ? decodeRecord(rows[0].recordJson) : Effect.succeed(null);
+  const readScope = (projectId: ProjectId, scopeKey: string) =>
+    sql<RecordRow>`
+      SELECT record_json AS "recordJson" FROM project_agent_work_items
+      WHERE project_id = ${projectId} AND scope_key = ${scopeKey}
+      ORDER BY task_index
+    `.pipe(Effect.flatMap(decodeRows), Effect.mapError(storageError));
 
   const availableCapacity = sql`(
               (SELECT COUNT(*) FROM project_agent_work_items held
@@ -43,75 +50,94 @@ export const makeHubWorkRepository = Effect.gen(function* () {
             ) < MIN(8, COALESCE(json_extract(config.limits_json, '$.maxConcurrentWorkers'), 8))`;
 
   const repository: HubWorkRepositoryShape = {
-    submit: (records, admission) =>
-      sql
+    submit: (inputOrRecords, legacyAdmission) => {
+      if (Array.isArray(inputOrRecords) && inputOrRecords.length === 0) {
+        return Effect.succeed({ items: [], replayed: false });
+      }
+      const input: HubWorkSubmission = Array.isArray(inputOrRecords)
+        ? (() => {
+            const records = inputOrRecords as readonly HubWorkRecord[];
+            const first = records[0]!;
+            return {
+              projectId: first.projectId,
+              requestId: first.requestId,
+              scopeKey: first.scopeKey,
+              fingerprint: first.fingerprint,
+              records,
+              ...(legacyAdmission === undefined ? {} : { admission: legacyAdmission }),
+            };
+          })()
+        : (inputOrRecords as HubWorkSubmission);
+      return sql
         .withTransaction(
           Effect.gen(function* () {
-            const first = records[0];
-            if (!first) return { items: [], replayed: false };
+            const records = input.records;
             if (
               records.some(
                 (record) =>
-                  record.projectId !== first.projectId ||
-                  record.requestId !== first.requestId ||
-                  record.scopeKey !== first.scopeKey ||
-                  record.fingerprint !== first.fingerprint,
+                  record.projectId !== input.projectId ||
+                  record.requestId !== input.requestId ||
+                  record.scopeKey !== input.scopeKey ||
+                  record.fingerprint !== input.fingerprint,
               )
             ) {
               return yield* Effect.fail(
                 conflict("All hub tasks must belong to the same frozen request."),
               );
             }
+            // A request id freezes its source scope and task set; extending the
+            // plan requires a new request id, including after a restart.
             const [request] = yield* sql<{
               readonly scopeKey: string;
               readonly fingerprint: string;
             }>`
               SELECT scope_key AS "scopeKey", fingerprint FROM project_agent_work_requests
-              WHERE project_id = ${first.projectId} AND request_id = ${first.requestId}
+              WHERE project_id = ${input.projectId} AND request_id = ${input.requestId}
             `;
             if (
               request &&
-              (request.scopeKey !== first.scopeKey || request.fingerprint !== first.fingerprint)
+              (request.scopeKey !== input.scopeKey ||
+                (request.fingerprint !== input.fingerprint &&
+                  request.fingerprint !== input.legacyFingerprint))
             ) {
               return yield* Effect.fail(
                 conflict("This request ID already belongs to a different hub work plan."),
               );
             }
-            const existing = yield* sql<RecordRow>`
-        SELECT record_json AS "recordJson" FROM project_agent_work_items
-        WHERE project_id = ${first.projectId} AND scope_key = ${first.scopeKey}
-        ORDER BY task_index
-      `.pipe(Effect.flatMap(decodeRows));
-            if (existing.length > 0) {
+            const existing = yield* readScope(input.projectId, input.scopeKey);
+            const frozen = new Map(existing.map((record) => [record.id, record]));
+            // Recheck each frozen task under the write transaction: the service's
+            // earlier scope read may have raced another coordinator submission.
+            for (const record of records) {
+              const previous = frozen.get(record.id);
               if (
-                existing.length !== records.length ||
-                existing.some((record) => record.fingerprint !== first.fingerprint)
+                (previous && previous.requestId !== input.requestId) ||
+                (previous &&
+                  (previous.taskFingerprint ?? previous.fingerprint) !==
+                    (record.taskFingerprint ?? record.fingerprint))
               ) {
                 return yield* Effect.fail(
-                  conflict("This request already has a different hub work plan."),
+                  conflict("This task already belongs to a different frozen hub work plan."),
                 );
               }
-              yield* sql`
-                INSERT OR IGNORE INTO project_agent_work_requests (project_id, request_id, scope_key, fingerprint)
-                VALUES (${first.projectId}, ${first.requestId}, ${first.scopeKey}, ${first.fingerprint})
-              `;
-              return { items: existing, replayed: true };
             }
-            if (admission) {
+
+            const newRecords = records.filter((record) => !frozen.has(record.id));
+            if (newRecords.length > 0 && input.admission) {
               const [config] = yield* sql<{ readonly revision: number }>`
-                SELECT revision FROM project_agent_configs WHERE project_id = ${first.projectId}
+                SELECT revision FROM project_agent_configs WHERE project_id = ${input.projectId}
               `;
-              if (!config || config.revision !== admission.expectedConfigRevision) {
+              if (!config || config.revision !== input.admission.expectedConfigRevision) {
                 return yield* Effect.fail(
                   conflict("Hub settings changed during work preflight. Reload and retry."),
                 );
               }
               const participants = yield* sql<{ readonly expertId: string }>`
-                SELECT expert_id AS "expertId" FROM hub_expert_participants WHERE hub_id = ${first.projectId}
+                SELECT expert_id AS "expertId" FROM hub_expert_participants WHERE hub_id = ${input.projectId}
               `;
               const selected = new Set(participants.map((row) => row.expertId));
               if (
-                records.some(
+                newRecords.some(
                   (record) =>
                     record.creationSpec.expertId !== undefined &&
                     !selected.has(record.creationSpec.expertId),
@@ -122,22 +148,31 @@ export const makeHubWorkRepository = Effect.gen(function* () {
                 );
               }
             }
-            for (const record of records) {
+
+            let taskIndex = existing.reduce(
+              (highest, record) => Math.max(highest, record.taskIndex),
+              -1,
+            );
+            for (const record of newRecords) {
+              // Only the transaction can allocate an append position safely.
+              const stored = { ...record, taskIndex: ++taskIndex };
               yield* sql`
-          INSERT INTO project_agent_work_items
-            (work_item_id, project_id, scope_key, task_index, state, worker_thread_id, slot_held, revision, record_json)
-          VALUES (${record.id}, ${record.projectId}, ${record.scopeKey}, ${record.taskIndex},
-            ${record.state}, ${record.workerThreadId}, ${record.slotHeld ? 1 : 0}, ${record.revision}, ${JSON.stringify(record)})
-        `;
+                INSERT INTO project_agent_work_items
+                  (work_item_id, project_id, scope_key, task_index, state, worker_thread_id, slot_held, revision, record_json)
+                VALUES (${stored.id}, ${stored.projectId}, ${stored.scopeKey}, ${stored.taskIndex},
+                  ${stored.state}, ${stored.workerThreadId}, ${stored.slotHeld ? 1 : 0}, ${stored.revision}, ${JSON.stringify(stored)})
+              `;
             }
+            const items = yield* readScope(input.projectId, input.scopeKey);
             yield* sql`
-              INSERT INTO project_agent_work_requests (project_id, request_id, scope_key, fingerprint)
-              VALUES (${first.projectId}, ${first.requestId}, ${first.scopeKey}, ${first.fingerprint})
+              INSERT OR IGNORE INTO project_agent_work_requests (project_id, request_id, scope_key, fingerprint)
+              VALUES (${input.projectId}, ${input.requestId}, ${input.scopeKey}, ${input.fingerprint})
             `;
-            return { items: records, replayed: false };
+            return { items, replayed: newRecords.length === 0 };
           }),
         )
-        .pipe(Effect.mapError(storageError)),
+        .pipe(Effect.mapError(storageError));
+    },
 
     list: (projectId) =>
       sql<RecordRow>`
@@ -149,6 +184,7 @@ export const makeHubWorkRepository = Effect.gen(function* () {
       sql<RecordRow>`
       SELECT record_json AS "recordJson" FROM project_agent_work_items ORDER BY sequence
     `.pipe(Effect.flatMap(decodeRows), Effect.mapError(storageError)),
+    listByScope: (projectId, scopeKey) => readScope(projectId, scopeKey),
 
     get: (id) =>
       sql<RecordRow>`

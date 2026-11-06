@@ -1,7 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
+import * as SyncFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { gunzipSync } from "node:zlib";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, Layer } from "effect";
@@ -22,7 +24,7 @@ import {
   resumeMarkedMigration,
   runWithPreMigrationBackup,
 } from "../../persistence/MigrationBackup.ts";
-import { runMigrations } from "../../persistence/Migrations.ts";
+import { LATEST_MIGRATION_ID, runMigrations } from "../../persistence/Migrations.ts";
 import ExpertBindingMigration from "../../persistence/Migrations/109_ProjectionThreadsExpertBinding.ts";
 import ExpertRuntimeMigration from "../../persistence/Migrations/110_ExpertAppliedRuntimeRecords.ts";
 import ContextV1Migration from "../../persistence/Migrations/111_ContextV1.ts";
@@ -102,44 +104,59 @@ const contextTables = [
   "context_command_results",
 ];
 
-function inspectFile(dbPath: string) {
-  const db = new DatabaseSync(dbPath, { readOnly: true });
+function inspectSqlite<T>(dbPath: string, inspect: (sqlitePath: string) => T): T {
+  if (!dbPath.endsWith(".gz")) return inspect(dbPath);
+
+  const directory = SyncFs.mkdtempSync(path.join(os.tmpdir(), "synara-context-recovery-inspect-"));
+  const sqlitePath = path.join(directory, "backup.sqlite");
   try {
-    const exists = (name: string) =>
-      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !==
-      undefined;
-    return {
-      context: Object.fromEntries(
-        contextTables.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()]),
-      ),
-      deliveries: db
-        .prepare(
-          "SELECT * FROM orchestration_event_deliveries WHERE consumer_name = 'context-consumer'",
-        )
-        .all(),
-      official: db.prepare("SELECT * FROM effect_sql_migrations ORDER BY migration_id").all(),
-      workbench: exists("workbench_sql_migrations")
-        ? db
-            .prepare("SELECT * FROM workbench_sql_migrations ORDER BY module_id, migration_id")
-            .all()
-        : null,
-      audit: exists("workbench_legacy_migration_adoptions")
-        ? db
-            .prepare(
-              "SELECT * FROM workbench_legacy_migration_adoptions ORDER BY module_id, migration_id",
-            )
-            .all()
-        : null,
-    };
+    SyncFs.writeFileSync(sqlitePath, gunzipSync(SyncFs.readFileSync(dbPath)));
+    return inspect(sqlitePath);
   } finally {
-    db.close();
+    SyncFs.rmSync(directory, { recursive: true, force: true });
   }
+}
+
+function inspectFile(dbPath: string) {
+  return inspectSqlite(dbPath, (sqlitePath) => {
+    const db = new DatabaseSync(sqlitePath, { readOnly: true });
+    try {
+      const exists = (name: string) =>
+        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !==
+        undefined;
+      return {
+        context: Object.fromEntries(
+          contextTables.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()]),
+        ),
+        deliveries: db
+          .prepare(
+            "SELECT * FROM orchestration_event_deliveries WHERE consumer_name = 'context-consumer'",
+          )
+          .all(),
+        official: db.prepare("SELECT * FROM effect_sql_migrations ORDER BY migration_id").all(),
+        workbench: exists("workbench_sql_migrations")
+          ? db
+              .prepare("SELECT * FROM workbench_sql_migrations ORDER BY module_id, migration_id")
+              .all()
+          : null,
+        audit: exists("workbench_legacy_migration_adoptions")
+          ? db
+              .prepare(
+                "SELECT * FROM workbench_legacy_migration_adoptions ORDER BY module_id, migration_id",
+              )
+              .all()
+          : null,
+      };
+    } finally {
+      db.close();
+    }
+  });
 }
 
 async function backupPaths(dbPath: string) {
   const names = await fs.readdir(migrationBackupDirectory(dbPath));
   return names
-    .filter((name) => name.endsWith(".sqlite"))
+    .filter((name) => name.endsWith(".sqlite") || name.endsWith(".sqlite.gz"))
     .map((name) => path.join(migrationBackupDirectory(dbPath), name));
 }
 
@@ -170,7 +187,7 @@ it.each(["legacy", "ledger"] as const)(
       resumeAttempts: 0,
       migrationVersions: {
         source: { official: 108, workbench: expert === "ledger" ? 2 : 0, format: 0 },
-        target: { official: 135, workbench: currentExpertTarget, format: 1 },
+        target: { official: LATEST_MIGRATION_ID, workbench: currentExpertTarget, format: 1 },
       },
       moduleVersions: {
         source: { expert: expert === "ledger" ? 2 : 0, context: 0 },
@@ -181,7 +198,7 @@ it.each(["legacy", "ledger"] as const)(
     const first = inspectFile(dbPath);
     expect(first.context).toEqual(original.context);
     expect(first.deliveries).toEqual(original.deliveries);
-    expect(first.official.at(-1)).toMatchObject({ migration_id: 135 });
+    expect(first.official.at(-1)).toMatchObject({ migration_id: LATEST_MIGRATION_ID });
     expect(first.audit).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -248,7 +265,9 @@ for (const point of [
       version: 3,
       resumeAttempts: 0,
       moduleVersions: { target: { expert: currentExpertTarget, context: 1 } },
-      migrationVersions: { target: { official: 135, workbench: currentExpertTarget, format: 1 } },
+      migrationVersions: {
+        target: { official: LATEST_MIGRATION_ID, workbench: currentExpertTarget, format: 1 },
+      },
     });
     expect(await backupPaths(dbPath)).toEqual([marker!.backupPath]);
     expect(inspectFile(marker!.backupPath)).toEqual(original);
@@ -338,19 +357,22 @@ it("stops after the v3 resume budget is exhausted and preserves the original Con
 });
 
 function inspectV2Fixture(dbPath: string) {
-  const db = new DatabaseSync(dbPath, { readOnly: true });
-  try {
-    return {
-      official: db.prepare("SELECT * FROM effect_sql_migrations ORDER BY migration_id").all(),
-      probe: db.prepare("SELECT * FROM old_marker_probe").all(),
-    };
-  } finally {
-    db.close();
-  }
+  return inspectSqlite(dbPath, (sqlitePath) => {
+    const db = new DatabaseSync(sqlitePath, { readOnly: true });
+    try {
+      return {
+        official: db.prepare("SELECT * FROM effect_sql_migrations ORDER BY migration_id").all(),
+        probe: db.prepare("SELECT * FROM old_marker_probe").all(),
+      };
+    } finally {
+      db.close();
+    }
+  });
 }
 
 for (const version of [1, 2] as const) {
-  for (const target of [111, 135]) {
+  const targets = version === 1 ? [111, 135, LATEST_MIGRATION_ID] : [111, 135];
+  for (const target of targets) {
     it(`handles pending v${version} target${target} without expanding its recorded authorization or replacing its backup`, async () => {
       const dbPath = await makeDbPath();
       const backup = await runWithDatabase(
@@ -411,9 +433,9 @@ for (const version of [1, 2] as const) {
           );
         }),
       );
-      // A historical v2 marker authorized only Expert 1/2. The new catalog
-      // must not enlarge that range during recovery, even at official 135.
-      if (target === 111 || version === 2) {
+      // Historical markers must not gain authority from the current catalog.
+      // v2 also cannot be converted when its target matches the current official schema.
+      if (target !== LATEST_MIGRATION_ID || version === 2) {
         await expect(tryConversion).rejects.toThrow(
           version === 1
             ? "targets an older official schema"
@@ -427,7 +449,7 @@ for (const version of [1, 2] as const) {
         const freshPlan = await runWithDatabase(dbPath, inspectWorkbenchUpgradePlan);
         expect(freshPlan).toMatchObject({
           kind: "ready",
-          official: { targetVersion: 135 },
+          official: { targetVersion: LATEST_MIGRATION_ID },
           workbench: { modules: { expert: { targetVersion: currentExpertTarget } } },
           requiresBackup: true,
         });
@@ -438,7 +460,7 @@ for (const version of [1, 2] as const) {
         expect(completed).toMatchObject({
           version: 3,
           phase: "migration-completed",
-          targetVersion: 135,
+          targetVersion: LATEST_MIGRATION_ID,
         });
         expect(completed.backupPath).not.toBe(backup.backupPath);
         expect(await backupPaths(dbPath)).toContain(backup.backupPath);
@@ -450,7 +472,7 @@ for (const version of [1, 2] as const) {
           resumeAttempts: 1,
           payload: {
             version: 3,
-            targetVersion: 135,
+            targetVersion: LATEST_MIGRATION_ID,
             moduleVersions: {
               source: { expert: 0, context: 0 },
               target: { expert: currentExpertTarget, context: 1 },
@@ -469,7 +491,7 @@ for (const version of [1, 2] as const) {
           phase: "migration-completed",
           backupPath: backup.backupPath,
           resumeAttempts: 2,
-          targetVersion: 135,
+          targetVersion: LATEST_MIGRATION_ID,
         });
         expect(await backupPaths(dbPath)).toEqual([backup.backupPath]);
         if (version === 1) {
@@ -516,7 +538,7 @@ for (const afterOfficial of [false, true]) {
       dbPath,
       Effect.gen(function* () {
         yield* adoptLegacyExpertMigrations();
-        if (afterOfficial) yield* runMigrations();
+        if (afterOfficial) yield* runMigrations({ toMigrationInclusive: 135 });
         const plan = yield* inspectWorkbenchUpgradePlan;
         expect(plan).toMatchObject({
           kind: "ready",
@@ -601,7 +623,10 @@ for (const afterOfficial of [false, true]) {
       dbPath,
       Effect.gen(function* () {
         yield* seedOld111("legacy");
-        return yield* createMigrationBackup(dbPath, { sourceVersion: "v111", targetVersion: 135 });
+        return yield* createMigrationBackup(dbPath, {
+          sourceVersion: "v111",
+          targetVersion: LATEST_MIGRATION_ID,
+        });
       }),
     );
     const original = inspectFile(dbPath);
@@ -609,7 +634,7 @@ for (const afterOfficial of [false, true]) {
       dbPath,
       Effect.gen(function* () {
         yield* adoptLegacyExpertMigrations();
-        if (afterOfficial) yield* runMigrations();
+        if (afterOfficial) yield* runMigrations({ toMigrationInclusive: LATEST_MIGRATION_ID });
         const plan = yield* inspectWorkbenchUpgradePlan;
         expect(plan).toMatchObject({
           kind: "ready",
@@ -626,7 +651,7 @@ for (const afterOfficial of [false, true]) {
         databasePath: dbPath,
         backupPath: backup.backupPath,
         sourceVersion: "v111",
-        targetVersion: 135,
+        targetVersion: LATEST_MIGRATION_ID,
         lineageDivergence: null,
         phase: "migration-in-progress",
         createdAt: backup.createdAt,
@@ -660,7 +685,11 @@ for (const afterOfficial of [false, true]) {
         version: 3,
         migrationVersions: {
           source: { official: 108, workbench: 0, format: 0 },
-          target: { official: 135, workbench: currentExpertTarget, format: 1 },
+          target: {
+            official: LATEST_MIGRATION_ID,
+            workbench: currentExpertTarget,
+            format: 1,
+          },
         },
         moduleVersions: {
           source: { expert: 0, context: 0 },

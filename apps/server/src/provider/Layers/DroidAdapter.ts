@@ -1047,6 +1047,9 @@ export function makeDroidAdapter(
             cwd,
             model: droidModelSelection?.model,
             threadId: input.threadId,
+            ...(input.lifecycleGeneration !== undefined
+              ? { lifecycleGeneration: input.lifecycleGeneration }
+              : {}),
             resumeCursor: {
               schemaVersion: DROID_RESUME_VERSION,
               sessionId: started.sessionId,

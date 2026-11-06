@@ -5,8 +5,9 @@
 //          SettingsListRow, SettingsRow, SettingsSelectPopup
 
 import { type ComponentProps, type ReactNode } from "react";
-import { cn } from "~/lib/utils";
+import { useTranslation } from "~/i18n";
 import { settingRowAnchorId } from "~/settingsNavigation";
+import { cn } from "~/lib/utils";
 import {
   SETTINGS_CARD_CLASS_NAME,
   SETTINGS_CARD_ROW_CLASS_NAME,
@@ -59,6 +60,7 @@ export function SettingsCard({
  */
 export function SettingsSectionShell({
   title,
+  translateTitle = true,
   action,
   id,
   count,
@@ -66,12 +68,14 @@ export function SettingsSectionShell({
   children,
 }: {
   title: string;
+  translateTitle?: boolean;
   action?: ReactNode;
   id?: string;
   count?: number;
   layout?: "default" | "compact";
   children: ReactNode;
 }) {
+  const { t } = useTranslation();
   const heading = (
     <h2
       className={
@@ -80,7 +84,7 @@ export function SettingsSectionShell({
           : SETTINGS_SECTION_LABEL_CLASS_NAME
       }
     >
-      {title}
+      {translateTitle ? t(title) : title}
       {count !== undefined ? (
         <span className="rounded-md bg-foreground/5 px-1.5 py-0.5 text-ui-xs tabular-nums text-muted-foreground">
           {count}
@@ -91,7 +95,7 @@ export function SettingsSectionShell({
   return (
     <section
       id={id}
-      aria-label={layout === "compact" ? title : undefined}
+      aria-label={layout === "compact" ? (translateTitle ? t(title) : title) : undefined}
       className={cn(
         layout === "compact" ? "flex flex-col" : SETTINGS_PANEL_SECTION_CLASS_NAME,
         id && "scroll-mt-24",
@@ -112,9 +116,17 @@ export function SettingsSectionShell({
   );
 }
 
-export function SettingsSection({ title, children }: { title: string; children: ReactNode }) {
+export function SettingsSection({
+  title,
+  children,
+  translateTitle,
+}: {
+  title: string;
+  children: ReactNode;
+  translateTitle?: boolean;
+}) {
   return (
-    <SettingsSectionShell title={title}>
+    <SettingsSectionShell title={title} translateTitle={translateTitle ?? true}>
       <SettingsCard>{children}</SettingsCard>
     </SettingsSectionShell>
   );
@@ -241,6 +253,7 @@ export function SettingsListRow({
 
 export function SettingsRow({
   title,
+  id,
   description,
   status,
   resetAction,
@@ -249,6 +262,8 @@ export function SettingsRow({
   onClick,
 }: {
   title: ReactNode;
+  /** Stable navigation target, independent of display copy and locale. */
+  id?: string;
   description: string;
   status?: ReactNode;
   resetAction?: ReactNode;
@@ -256,9 +271,8 @@ export function SettingsRow({
   children?: ReactNode;
   onClick?: () => void;
 }) {
-  // String-titled rows expose a stable anchor so the sidebar search can deep-link to them
-  // via `?target=…`; scroll-margin keeps the row clear of the sticky settings header.
-  const anchorId = typeof title === "string" ? settingRowAnchorId(title) : undefined;
+  const { t } = useTranslation();
+  const anchorId = id ?? (typeof title === "string" ? settingRowAnchorId(title) : undefined);
   return (
     <div
       id={anchorId}
@@ -274,12 +288,14 @@ export function SettingsRow({
       >
         <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex min-h-5 items-center gap-1.5">
-            <h3 className={SETTINGS_CARD_ROW_TITLE_CLASS_NAME}>{title}</h3>
+            <h3 className={SETTINGS_CARD_ROW_TITLE_CLASS_NAME}>
+              {typeof title === "string" ? t(title) : title}
+            </h3>
             <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center">
               {resetAction}
             </span>
           </div>
-          <p className={SETTINGS_CARD_ROW_DESCRIPTION_CLASS_NAME}>{description}</p>
+          <p className={SETTINGS_CARD_ROW_DESCRIPTION_CLASS_NAME}>{t(description)}</p>
           {status ? <div className="pt-1 text-ui-sm text-muted-foreground">{status}</div> : null}
         </div>
         {control ? (

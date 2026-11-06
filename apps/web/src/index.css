@@ -3740,3 +3740,50 @@ diffs-container {
 [data-dock-maximized="true"] .editor-markdown-preview__body {
   max-width: 1120px;
 }
+
+/* Zen changes the existing chat's presentation; the route and composer stay mounted. */
+[data-sidebar-layout="rail"][data-zen-mode="true"] {
+  --app-rail-inset-gap: 0px;
+  --app-rail-card-radii: 0;
+  --app-rail-block-radii: 0;
+}
+[data-zen-mode="true"] .chat-content-card::before,
+[data-zen-mode="true"] .chat-content-card::after {
+  display: none;
+}
+
+/* Only the surrounding layout changes; composer styling stays shared with the main window. */
+[data-zen-chat="true"] {
+  justify-content: flex-end;
+  --zen-chat-gutter: var(--app-density-chat-gutter-x, 0.75rem);
+}
+[data-zen-chat="true"] > [data-zen-main] {
+  flex: 0 1 auto;
+  overflow-y: auto;
+}
+[data-zen-chat="true"][data-zen-expanded="true"] > [data-zen-main] {
+  flex: 1 1 0%;
+}
+
+/* The drawer is an inset surface above the unchanged shared composer. */
+[data-zen-chat="true"] [data-testid="chat-transcript-drawer"] {
+  width: calc((100% - 2 * var(--zen-chat-gutter)) * 14 / 15);
+  max-width: calc(var(--app-chat-max-width, 46rem) * 14 / 15);
+  margin-inline: auto;
+  margin-bottom: 0.25rem;
+  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  border-top: 0;
+  border-radius: 0 0 var(--radius-xl) var(--radius-xl);
+  background: var(--background);
+  box-shadow: var(--shadow-sm);
+}
+@media (min-width: 640px) {
+  [data-zen-chat="true"] {
+    --zen-chat-gutter: var(--app-density-chat-gutter-x-lg, 1.25rem);
+  }
+}
+
+/* Inline @/+ panels are absolute; let them use the temporary compact window space. */
+[data-zen-chat="true"][data-zen-expanded="false"][data-zen-overlay-open="true"] > [data-zen-main] {
+  overflow: visible;
+}

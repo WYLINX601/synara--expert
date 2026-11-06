@@ -23,6 +23,7 @@ interface ChatComposerFooterProps {
   leadingControls: ReactNode;
   composerPickerControls: ReactNode;
   contextMeter: ReactNode;
+  metadataControls?: ReactNode;
   interactionMode: ProviderInteractionMode;
   resetInteractionMode: () => void;
   sidebarAction: { title: string; label: string; onClick: () => void } | null;
@@ -71,6 +72,7 @@ export function ChatComposerFooter({
   leadingControls,
   composerPickerControls,
   contextMeter,
+  metadataControls,
   interactionMode,
   resetInteractionMode,
   sidebarAction,
@@ -171,6 +173,7 @@ export function ChatComposerFooter({
               : "shrink-0",
         )}
       >
+        {metadataControls}
         {contextMeter}
         {!voice.recording && !voice.transcribing ? composerPickerControls : null}
         {voice.enabled && (voice.recording || voice.transcribing) ? (

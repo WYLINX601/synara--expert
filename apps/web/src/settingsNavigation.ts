@@ -28,6 +28,7 @@ export const SETTINGS_SECTION_IDS = [
   // Legacy Linx links normalize to the unified MCP page.
   "expert-connections",
   "connectors",
+  "app-context",
   "integrations",
   "advanced",
 ] as const;
@@ -162,6 +163,14 @@ const ALL_SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
     icon: "computer-use",
     eyebrow: "Desktop control",
     badge: "workspace:beta",
+  },
+  {
+    id: "app-context",
+    group: "integrations",
+    label: "应用上下文",
+    description: "连接应用，在会话中绑定知识库并跟随当前选区。",
+    icon: "connectors-1",
+    eyebrow: "Application context",
   },
   {
     id: "connectors",

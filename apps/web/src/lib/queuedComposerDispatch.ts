@@ -94,6 +94,9 @@ async function dispatchQueuedComposerTurnOnce(
           })
         : undefined;
 
+    const ambientContext = cloneAmbientContext(queuedTurn.ambientContext);
+    const ambientAuthorization = readAmbientContextSendAuthorization(ambientContext);
+    if (!ambientAuthorization.allowed) return false;
     markPendingTurnDispatch(input.threadId);
     try {
       await persistQueuedTurnThreadSettings({
@@ -105,6 +108,11 @@ async function dispatchQueuedComposerTurnOnce(
       useComposerDraftStore
         .getState()
         .setInteractionMode(input.threadId, queuedTurn.interactionMode);
+      const authorization = readAmbientContextSendAuthorization(
+        ambientContext,
+        ambientAuthorization.generation,
+      );
+      if (!authorization.allowed) throw new Error(authorization.message);
       await api.orchestration.dispatchCommand({
         type: "thread.turn.start",
         commandId: newCommandId(),
@@ -113,6 +121,7 @@ async function dispatchQueuedComposerTurnOnce(
           messageId,
           role: "user",
           text: outgoingMessageText,
+          ...(ambientContext ? { ambientContext } : {}),
           attachments: [],
         },
         modelSelection: queuedTurn.modelSelection,

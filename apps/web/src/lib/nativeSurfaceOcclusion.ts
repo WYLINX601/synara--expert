@@ -8,6 +8,9 @@
 export const NATIVE_SURFACE_OCCLUSION_SYNC_EVENT = "synara:native-surface-occlusion-sync";
 export const NATIVE_SURFACE_MENU_OVERLAY_SELECTOR = "[data-slot='menu-positioner']";
 
+export const NATIVE_SURFACE_COMPACT_POPOVER_SELECTOR =
+  "[data-slot='popover-positioner'][data-compact-space='true']";
+
 export function notifyNativeSurfaceOcclusionChange(): void {
   if (typeof window === "undefined") {
     return;

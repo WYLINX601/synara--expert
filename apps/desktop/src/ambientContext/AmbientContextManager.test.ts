@@ -114,6 +114,23 @@ describe("AmbientContextManager", () => {
     expect(() => manager.registerSource(createSource("source-32"))).toThrow("at most 32 sources");
   });
 
+  it("forgets a stopped dynamic source and retains it when cleanup fails", async () => {
+    const stop = vi
+      .fn<AmbientContextSource["stop"]>()
+      .mockRejectedValueOnce(new Error("listener still open"));
+    const manager = new AmbientContextManager({ now: () => now });
+    manager.registerSource(createSource("vault-a", { stop }));
+    await manager.setPolicy("vault-a", enabledPolicy);
+    await expect(manager.unregisterSource("vault-a")).rejects.toThrow("Could not stop");
+    expect(manager.getSourceStatus("vault-a").state).toBe("failed");
+
+    await manager.unregisterSource("vault-a");
+    expect(() => manager.getSourceStatus("vault-a")).toThrow("Unknown ambient context source");
+    expect(stop).toHaveBeenCalledTimes(2);
+    manager.registerSource(createSource("vault-a"));
+    expect(manager.getSourceStatus("vault-a").state).toBe("disabled");
+  });
+
   it("uses complete sequence-checked replacements, including empty publications", async () => {
     const manager = new AmbientContextManager({ now: () => now });
     let emit!: (publication: unknown) => void;
@@ -134,6 +151,56 @@ describe("AmbientContextManager", () => {
     emit(publication(1, [selection("stale", "stale")]));
     emit(publication(0, [selection("older", "older")]));
     expect(manager.resolve()).toEqual([]);
+  });
+
+  it("omits full text by default and enforces explicit body scope before snapshot validation", async () => {
+    const manager = new AmbientContextManager({ now: () => now });
+    const ids = Array.from({ length: 5 }, (_, index) => `vault-${index}`);
+    const emitters = new Map<string, (publication: unknown) => void>();
+    const privateBody = `PRIVATE:${"x".repeat(16_376)}`;
+    for (const id of ids) {
+      manager.registerSource(
+        createSource(id, {
+          manifest: manifest(id, [
+            {
+              type: "resource.content",
+              captureMode: "event",
+              requiredPermissions: [],
+              precision: "exact",
+            },
+          ]),
+          start: async (_policy, emit) => void emitters.set(id, emit),
+        }),
+      );
+      await manager.setPolicy(id, { enabled: true, allowedTypes: ["resource.content"] });
+      emitters.get(id)!(
+        publication(0, [
+          {
+            schemaVersion: 1,
+            id: `body-${id}`,
+            targetKey: `target-${id}`,
+            capturedAt,
+            method: "editor",
+            confidence: "exact",
+            type: "resource.content",
+            value: { text: privateBody, truncated: false },
+          },
+        ]),
+      );
+    }
+
+    expect(manager.capture({ sourceIds: ids }).items).toEqual([]);
+    expect(() => manager.capture({ sourceIds: ids, includeFullTextSourceIds: ids })).toThrow(
+      "Context exceeds the snapshot size limit.",
+    );
+    try {
+      manager.capture({ sourceIds: ids, includeFullTextSourceIds: ids });
+    } catch (error) {
+      expect(String(error)).not.toContain("PRIVATE:");
+    }
+    expect(() => manager.capture({ sourceIds: [ids[0]!], includeFullTextSourceIds: ids })).toThrow(
+      "Full-text sources must be selected context sources.",
+    );
   });
 
   it("clears malformed publications without echoing their data", async () => {

@@ -1,3 +1,5 @@
+import { ZenModeProvider } from "../components/chat/ZenModeProvider";
+import { useAmbientContextBindingStore } from "~/ambientContextBindingStore";
 import { EditorDirtyRouteGuard } from "../components/EditorDirtyRouteGuard";
 import {
   ORCHESTRATION_STREAM_OVERFLOW_CODE,
@@ -297,6 +299,14 @@ export const Route = createRootRouteWithContext<{
 });
 
 function RootRouteView() {
+  return (
+    <ZenModeProvider>
+      <RootRouteContent />
+    </ZenModeProvider>
+  );
+}
+
+function RootRouteContent() {
   const { t } = useTranslation();
 
   useAppTypography();
@@ -1956,6 +1966,10 @@ function EventRouter() {
     };
 
     const removeOrphanedTerminalsForCurrentState = () => {
+      for (const id of Object.keys(useStore.getState().deletedThreadIdsById ?? {})) {
+        if (useAmbientContextBindingStore.getState().byThreadId[id])
+          useAmbientContextBindingStore.getState().removeThread(id as ThreadId);
+      }
       const draftThreadIds = Object.keys(
         useComposerDraftStore.getState().draftThreadsByThreadId,
       ) as ThreadId[];

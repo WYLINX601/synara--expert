@@ -1,3 +1,4 @@
+import { useAmbientContextBindingStore } from "./ambientContextBindingStore";
 import { cloneAmbientContext } from "./lib/ambientContext";
 // FILE: composerDraftActions.ts
 // Purpose: Constructs the ComposerDraftStoreState actions while preserving granular thread identity.
@@ -474,6 +475,7 @@ export const createComposerDraftStoreState =
           return state;
         }
         const nextPromotedTo = promotedTo ?? threadId;
+        useAmbientContextBindingStore.getState().moveThread(threadId, nextPromotedTo);
         if (existing.promotedTo === nextPromotedTo) {
           return state;
         }
@@ -507,6 +509,9 @@ export const createComposerDraftStoreState =
       });
     },
     clearDraftThread: (threadId) => {
+      // Retiring an already promoted draft must preserve the real chat binding.
+      if (!get().draftThreadsByThreadId[threadId]?.promotedTo)
+        useAmbientContextBindingStore.getState().removeThread(threadId);
       if (threadId.length === 0) {
         return;
       }
@@ -667,6 +672,7 @@ export const createComposerDraftStoreState =
                 skills: [],
                 mentions: [],
                 ambientContext: undefined,
+                ambientContextFrozen: undefined,
               }
             : {}),
         };
@@ -715,6 +721,7 @@ export const createComposerDraftStoreState =
           skills: [...savedDraft.skills],
           mentions: [...savedDraft.mentions],
           ambientContext: cloneAmbientContext(savedDraft.ambientContext),
+          ambientContextFrozen: savedDraft.ambientContextFrozen,
         };
         const nextDraftsByThreadId = { ...state.draftsByThreadId };
         if (shouldRemoveDraft(nextDraft)) {
@@ -817,12 +824,16 @@ export const createComposerDraftStoreState =
         return { draftsByThreadId: nextDraftsByThreadId };
       });
     },
-    setAmbientContext: (threadId, snapshot) => {
+    setAmbientContext: (threadId, snapshot, options) => {
       if (!threadId) return;
       const ambientContext = snapshot?.items.length ? cloneAmbientContext(snapshot) : undefined;
       set((state) => {
         const existing = state.draftsByThreadId[threadId] ?? createEmptyThreadDraft();
-        const nextDraft = { ...existing, ambientContext };
+        const nextDraft = {
+          ...existing,
+          ambientContext,
+          ambientContextFrozen: options?.frozen ?? existing.ambientContextFrozen,
+        };
         const draftsByThreadId = { ...state.draftsByThreadId };
         if (shouldRemoveDraft(nextDraft)) delete draftsByThreadId[threadId];
         else draftsByThreadId[threadId] = nextDraft;
@@ -2275,6 +2286,7 @@ export const createComposerDraftStoreState =
           skills: [],
           mentions: [],
           ambientContext: undefined,
+          ambientContextFrozen: undefined,
           restoredSourceProposedPlan: null,
         };
         const nextDraftsByThreadId = { ...state.draftsByThreadId };

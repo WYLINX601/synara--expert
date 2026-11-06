@@ -1,3 +1,5 @@
+import { useZenMode } from "./ZenModeProvider";
+import { Minimize2 } from "~/lib/icons";
 // FILE: ChatHeader.tsx
 // Purpose: Renders the chat top bar with project actions and panel toggles.
 // Layer: Chat shell header
@@ -483,6 +485,7 @@ export function ChatHeader({
 }: ChatHeaderProps) {
   const { t } = useTranslation();
 
+  const zenMode = useZenMode();
   const hideSidebarControls = hideSidebarControlsProp ?? false;
   const hideHandoffControls = hideHandoffControlsProp ?? false;
   const showHandoffAction = showHandoffActionProp ?? true;
@@ -740,6 +743,22 @@ export function ChatHeader({
         )}
       </div>
       <div className="flex shrink-0 items-center gap-2 [-webkit-app-region:no-drag]">
+        {zenMode.available ? (
+          <ChatHeaderIconButton
+            type="button"
+            tone="surface"
+            label={t("chat:zenMode")}
+            title={
+              zenMode.state.shortcutAvailable
+                ? `${t("chat:zenMode")} · ${zenMode.state.shortcut}`
+                : t("chat:zenShortcutUnavailable")
+            }
+            disabled={zenMode.pending}
+            onClick={zenMode.toggle}
+          >
+            <Minimize2 className="size-4" />
+          </ChatHeaderIconButton>
+        ) : null}
         {!minimalChrome && hubLocationControl}
         {!minimalChrome && expertControl}
         {!minimalChrome && !hideHandoffControls && !environment ? (

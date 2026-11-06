@@ -692,6 +692,13 @@ export const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   },
   ...WORKBENCH_SETTINGS_SEARCH_ENTRIES,
   {
+    target: null,
+    id: "app-context:connections",
+    section: "app-context",
+    title: "settings:ambientContextTitle",
+    keywords: "settings:ambientSearchKeywords",
+  },
+  {
     id: "connectors:catalog",
     section: "connectors",
     title: "settings:connectors",

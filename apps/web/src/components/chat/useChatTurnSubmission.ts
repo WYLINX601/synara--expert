@@ -1,3 +1,6 @@
+import { t } from "~/i18n";
+import { useAmbientContextBindingStore } from "~/ambientContextBindingStore";
+import { prepareBoundAmbientContext } from "~/lib/ambientContextBinding";
 import { readAmbientContextSendAuthorization } from "~/workbench/host/ambientContextClient";
 import { cloneAmbientContext } from "~/lib/ambientContext";
 import type { ThreadId } from "@synara/contracts";
@@ -403,12 +406,40 @@ export function useChatTurnSubmission({
         return lateSendHandlers.advanceActivePendingUserInput(answerOverrides);
       }
       const queuedChatTurn = queuedTurn ?? null;
-      // Snapshot once before asynchronous preflight. Queued turns never fall back to live pins.
-      const ambientContextForSend = cloneAmbientContext(
+      // Queue/retry snapshots are immutable. Only a new submission captures live bindings.
+      const ambientContextDraftForRetry = cloneAmbientContext(
         queuedChatTurn
           ? queuedChatTurn.ambientContext
           : useComposerDraftStore.getState().draftsByThreadId[activeThread.id]?.ambientContext,
       );
+      const ambientContextFrozenForRetry = Boolean(
+        queuedChatTurn ||
+        useComposerDraftStore.getState().draftsByThreadId[activeThread.id]?.ambientContextFrozen,
+      );
+      let ambientContextForSend = ambientContextDraftForRetry;
+      if (!ambientContextFrozenForRetry) {
+        sendPreflightInFlightRef.current = true;
+        const prepared = await prepareBoundAmbientContext(
+          window.desktopBridge?.ambientContext,
+          useAmbientContextBindingStore.getState().byThreadId[activeThread.id] ?? [],
+          ambientContextDraftForRetry,
+        );
+        sendPreflightInFlightRef.current = false;
+        if (!prepared.result) {
+          setThreadError(activeThread.id, prepared.error);
+          return false;
+        }
+        const captured = prepared.result;
+        ambientContextForSend = cloneAmbientContext(captured.snapshot);
+        if (captured.unavailable.length)
+          toastManager.add({
+            type: "warning",
+            title: t("chat:ambientPartialOmission"),
+            description: t("chat:ambientUnavailableSources", {
+              sources: captured.unavailable.join(", "),
+            }),
+          });
+      }
       const ambientAuthorization = readAmbientContextSendAuthorization(ambientContextForSend);
       if (!ambientAuthorization.allowed) {
         setThreadError(activeThread.id, ambientAuthorization.message);
@@ -538,6 +569,9 @@ export function useChatTurnSubmission({
         restoredQueuedPlanDraftSource === null &&
         showPlanFollowUpPrompt &&
         activeProposedPlan !== null;
+      const planFollowUpRetryIntent = isLivePlanFollowUpSubmission
+        ? { prompt: promptForSend, interactionMode: dispatchSettings.interactionMode }
+        : undefined;
       const hasStructuredPlanFollowUpContent =
         Boolean(ambientContextForSend) ||
         composerImagesForSend.length > 0 ||
@@ -565,6 +599,7 @@ export function useChatTurnSubmission({
             enqueueQueuedComposerTurn(activeThread.id, {
               id: randomUUID(),
               kind: "plan-follow-up",
+              ambientContext: ambientContextForSend,
               createdAt: new Date().toISOString(),
               previewText: followUp.text.trim(),
               text: followUp.text,
@@ -579,6 +614,9 @@ export function useChatTurnSubmission({
           clearComposerInput(activeThread.id);
           scheduleComposerFocus();
           return lateSendHandlers.submitPlanFollowUp({
+            ambientContext: ambientContextForSend,
+            ambientContextCaptured: true,
+            ...(planFollowUpRetryIntent ? { retryIntent: planFollowUpRetryIntent } : {}),
             text: followUp.text,
             interactionMode: followUp.interactionMode,
             dispatchMode,
@@ -1080,6 +1118,10 @@ export function useChatTurnSubmission({
         mentionedSkillsForSend,
         mentionedPluginMentionsForSend,
         ambientContextForSend,
+        // A failed dispatch retries this authorized send-time snapshot, including
+        // an empty snapshot. New user drafts still win in the execution restore guard.
+        ambientContextDraftForRetry: ambientContextForSend,
+        ambientContextFrozenForRetry: true,
         ambientContextGenerationForSend,
         dispatchMode,
         sourceProposedPlanForSend,
@@ -1088,6 +1130,7 @@ export function useChatTurnSubmission({
         queuedChatTurn,
         expertIdForSend,
         promptForSend,
+        planFollowUpRetryIntent,
         composerImagesSnapshot,
         composerFilesSnapshot,
         composerAssistantSelectionsSnapshot,

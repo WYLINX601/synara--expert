@@ -1,5 +1,6 @@
 import { SkillLibraryRequest, SkillLibraryResponse } from "./skillLibrary";
 import type { AmbientContextDesktopMethods } from "./ambientContext";
+import type { ZenModeDesktopMethods } from "./zenMode";
 import { SkillEvolutionRequest, SkillEvolutionResponse } from "./skillEvolution";
 import type {
   SkillManagementAccess,
@@ -1052,6 +1053,7 @@ export type DesktopDiagnosticReportStatus = "queued" | "sent" | "unavailable";
 
 export interface DesktopBridge {
   ambientContext?: AmbientContextDesktopMethods;
+  zenMode?: ZenModeDesktopMethods;
   /** Mirrors the renderer language onto native menus and startup dialogs; absent on older builds. */
   setLanguagePreference?: (preference: DesktopLanguagePreference) => Promise<void>;
   /** Current OS preference order; synchronous so bootstrap copy and native menus agree. */

@@ -18,6 +18,11 @@ const editor = () => ({
   getCursor: vi.fn((kind: string) => ({ line: kind === "from" ? 2 : 3, ch: 4 })),
   getValue: vi.fn(() => "正文"),
 });
+class ObsidianWebSocket extends WebSocket {
+  constructor(endpoint: string) {
+    super(endpoint, { headers: { Origin: "app://obsidian.md" } });
+  }
+}
 describe("Obsidian companion capture", () => {
   it("pairs the actual companion transport and captures unsaved editor data through the desktop bridge", async () => {
     const manager = new AmbientContextManager();
@@ -49,7 +54,7 @@ describe("Obsidian companion capture", () => {
             : id === "./capture.cjs"
               ? plugin
               : require(id),
-        WebSocket,
+        WebSocket: ObsidianWebSocket,
         clearTimeout,
       },
     );

@@ -74,4 +74,6 @@ export * from "./todo";
 
 export * from "./uiLocale";
 
+export * from "./zenMode";
+
 export * from "./usageLimit";

@@ -40,6 +40,8 @@ export function ComposerModelMenuTrigger(props: {
   accountName?: string | null | undefined;
   accountAccentColor?: string | undefined;
   modelLabel: string;
+  modelTitle?: string | undefined;
+  compact?: boolean | undefined;
   statusLabel: string | null;
   contextWindowLabel?: string | null | undefined;
   showsFastBadge: boolean;
@@ -79,9 +81,13 @@ export function ComposerModelMenuTrigger(props: {
   const ProviderIcon = PROVIDER_ICON_COMPONENT_BY_PROVIDER[props.provider];
   const hiddenTriggerTitle = [
     props.accountLabel,
-    props.hideModelLabel ? props.modelLabel : null,
-    props.hideStatusLabel ? props.statusLabel : null,
-    props.hideStatusLabel ? props.contextWindowLabel : null,
+    props.compact
+      ? (props.modelTitle ?? props.modelLabel)
+      : props.hideModelLabel
+        ? props.modelLabel
+        : null,
+    props.compact || props.hideStatusLabel ? props.statusLabel : null,
+    props.compact || props.hideStatusLabel ? props.contextWindowLabel : null,
   ]
     .filter((part): part is string => typeof part === "string" && part.length > 0)
     .join(" · ");
@@ -94,6 +100,7 @@ export function ComposerModelMenuTrigger(props: {
       className={cn(
         "min-w-0 shrink-0 justify-start gap-1.5 whitespace-nowrap px-2 sm:px-2.5 [&_svg]:mx-0",
         COMPOSER_PICKER_TRIGGER_TEXT_CLASS_NAME,
+        props.compact && "max-w-28 gap-1 px-1.5 sm:px-1.5",
       )}
       aria-label={t("chat:modelEffort_changeModelAndReasoning")}
       {...(hiddenTriggerTitle.length > 0 ? { title: hiddenTriggerTitle } : {})}
@@ -122,7 +129,7 @@ export function ComposerModelMenuTrigger(props: {
             className="-ms-1 size-1.5 shrink-0 self-start ring-0"
           />
           {props.accountName ? (
-            props.hideModelLabel ? (
+            props.hideModelLabel || props.compact ? (
               <span className="sr-only">{props.accountLabel}</span>
             ) : (
               <span
@@ -135,7 +142,12 @@ export function ComposerModelMenuTrigger(props: {
           {props.hideModelLabel ? (
             <span className="sr-only">{label.modelLabel}</span>
           ) : (
-            <span className="min-w-0 truncate text-[var(--color-text-foreground)]">
+            <span
+              className={cn(
+                "min-w-0 truncate text-[var(--color-text-foreground)]",
+                props.compact && "max-w-16 max-sm:sr-only",
+              )}
+            >
               {label.modelLabel}
             </span>
           )}
@@ -146,7 +158,9 @@ export function ComposerModelMenuTrigger(props: {
             />
           ) : null}
           {label.statusLabel ? (
-            props.hideStatusLabel ? (
+            props.compact ? (
+              <span className="sr-only">{label.statusLabel}</span>
+            ) : props.hideStatusLabel ? (
               <>
                 <SettingsIcon
                   aria-hidden="true"
@@ -162,7 +176,11 @@ export function ComposerModelMenuTrigger(props: {
             )
           ) : null}
           {label.contextWindowLabel ? (
-            <span className={props.hideStatusLabel ? "sr-only" : TRIGGER_TRAIT_LABEL_CLASS_NAME}>
+            <span
+              className={
+                props.compact || props.hideStatusLabel ? "sr-only" : TRIGGER_TRAIT_LABEL_CLASS_NAME
+              }
+            >
               {label.contextWindowLabel}
             </span>
           ) : null}
@@ -178,7 +196,9 @@ export function ComposerModelMenuTrigger(props: {
           </span>
         ) : null}
       </span>
-      <ChevronDownIcon aria-hidden="true" className="ms-0.5 size-3 shrink-0 opacity-60" />
+      {!props.compact ? (
+        <ChevronDownIcon aria-hidden="true" className="ms-0.5 size-3 shrink-0 opacity-60" />
+      ) : null}
     </span>
   );
 

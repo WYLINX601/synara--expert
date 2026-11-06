@@ -9,22 +9,24 @@ import {
 import { Schema } from "effect";
 import { WebSocket, WebSocketServer } from "ws";
 
+const obsidianCapabilities: AmbientContextSourceManifest["capabilities"] = [
+  "application.identity",
+  "resource.identity",
+  "selection.text",
+  "selection.location",
+  "resource.content",
+].map((type) => ({
+  type: type as AmbientContextSourceManifest["capabilities"][number]["type"],
+  captureMode: "event",
+  precision: "exact",
+  requiredPermissions: [],
+}));
+
 export const OBSIDIAN_CONTEXT_MANIFEST: AmbientContextSourceManifest = {
   id: "obsidian",
   label: "Obsidian",
   kind: "application",
-  capabilities: [
-    "application.identity",
-    "resource.identity",
-    "selection.text",
-    "selection.location",
-    "resource.content",
-  ].map((type) => ({
-    type: type as AmbientContextSourceManifest["capabilities"][number]["type"],
-    captureMode: "event",
-    precision: "exact",
-    requiredPermissions: [],
-  })),
+  capabilities: obsidianCapabilities,
 };
 
 const SearchResults = Schema.Array(AmbientResourceReference).check(Schema.isMaxLength(30));
@@ -33,7 +35,7 @@ const SEARCH_TIMEOUT_MS = 3_000;
 
 /** A session-paired data-only bridge. It has no filesystem or task execution API. */
 export class ObsidianSource {
-  readonly manifest = OBSIDIAN_CONTEXT_MANIFEST;
+  readonly manifest: AmbientContextSourceManifest;
   private server: WebSocketServer | undefined;
   private peer: WebSocket | undefined;
   private token = "";
@@ -50,7 +52,15 @@ export class ObsidianSource {
     }
   >();
 
-  constructor(private readonly changed: () => void = () => {}) {}
+  constructor(
+    private readonly changed: () => void = () => {},
+    sourceId = "obsidian",
+    label = "Obsidian",
+    token = randomBytes(32).toString("hex"),
+  ) {
+    this.manifest = { ...OBSIDIAN_CONTEXT_MANIFEST, id: sourceId, label };
+    this.token = token;
+  }
 
   get connected(): boolean {
     return this.peer?.readyState === WebSocket.OPEN;
@@ -63,6 +73,16 @@ export class ObsidianSource {
     return { endpoint: this.endpoint, token: this.token };
   }
 
+  setCredentialToken(token: string): void {
+    if (this.server) throw new Error("Cannot rotate an active Obsidian grant.");
+    if (!/^[a-f0-9]{64}$/.test(token)) throw new Error("Invalid Obsidian grant.");
+    this.token = token;
+  }
+
+  clearCredential(): void {
+    this.token = "";
+  }
+
   async start(
     policy: AmbientContextSourcePolicy,
     emit: (publication: AmbientContextPublication) => void,
@@ -71,7 +91,9 @@ export class ObsidianSource {
     this.policy = policy;
     this.emit = emit;
     this.publicationSequence = 0;
-    this.token = randomBytes(32).toString("hex");
+    if (!/^[a-f0-9]{64}$/.test(this.token)) {
+      this.token = randomBytes(32).toString("hex");
+    }
     const server = new WebSocketServer({
       host: "127.0.0.1",
       port: 0,
@@ -81,7 +103,7 @@ export class ObsidianSource {
       verifyClient: ({ origin, req }: { origin: string; req: IncomingMessage }) =>
         (req.socket.remoteAddress === "127.0.0.1" ||
           req.socket.remoteAddress === "::ffff:127.0.0.1") &&
-        (!origin || origin === "app://obsidian.md"),
+        origin === "app://obsidian.md",
     });
     this.server = server;
     server.on("connection", (peer) => this.accept(peer));
@@ -136,7 +158,13 @@ export class ObsidianSource {
           authenticated = true;
           clearTimeout(authTimeout);
           this.peer = peer;
-          peer.send(JSON.stringify({ kind: "policy", policy: this.policy }));
+          peer.send(
+            JSON.stringify({
+              kind: "policy",
+              policy: this.policy,
+              sourceId: this.manifest.id,
+            }),
+          );
           this.changed();
           return;
         }
@@ -205,7 +233,6 @@ export class ObsidianSource {
 
   async stop(): Promise<void> {
     this.policy = { enabled: false, allowedTypes: [] };
-    this.token = "";
     this.endpoint = "";
     this.emit = undefined;
     this.peer = undefined;

@@ -2,6 +2,7 @@
 
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 
+import { observeNativeSurfaceOverlay } from "~/lib/nativeSurfaceOcclusion";
 import { cn } from "~/lib/utils";
 import { APP_TRANSLUCENT_POPUP_SURFACE_CLASS_NAME } from "../chat/composerPickerStyles";
 
@@ -25,6 +26,7 @@ function PopoverPopup({
   sideOffset: sideOffsetProp,
   alignOffset: alignOffsetProp,
   tooltipStyle: tooltipStyleProp,
+  reserveCompactSpace: reserveCompactSpaceProp,
   anchor,
   ...props
 }: PopoverPrimitive.Popup.Props & {
@@ -33,6 +35,8 @@ function PopoverPopup({
   sideOffset?: PopoverPrimitive.Positioner.Props["sideOffset"];
   alignOffset?: PopoverPrimitive.Positioner.Props["alignOffset"];
   tooltipStyle?: boolean;
+  /** Interactive detail panels can opt in even when using tooltip chrome. */
+  reserveCompactSpace?: boolean;
   anchor?: PopoverPrimitive.Positioner.Props["anchor"];
 }) {
   const side = sideProp ?? "bottom";
@@ -40,9 +44,12 @@ function PopoverPopup({
   const sideOffset = sideOffsetProp ?? 4;
   const alignOffset = alignOffsetProp ?? 0;
   const tooltipStyle = tooltipStyleProp ?? false;
+  const reserveCompactSpace = reserveCompactSpaceProp ?? !tooltipStyle;
   return (
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Positioner
+        ref={reserveCompactSpace ? observeNativeSurfaceOverlay : undefined}
+        data-compact-space={reserveCompactSpace ? "true" : undefined}
         align={align}
         alignOffset={alignOffset}
         anchor={anchor}

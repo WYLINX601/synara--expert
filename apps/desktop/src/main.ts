@@ -349,6 +349,8 @@ import { DESKTOP_IPC_CHANNELS } from "./ipcChannels";
 import { DesktopAppSnapManager } from "./appSnapManager";
 import { DesktopAmbientContext } from "./ambientContext/DesktopAmbientContext";
 import { registerAmbientContextIpc } from "./ambientContextIpc";
+import { registerZenModeIpc } from "./zenModeIpc";
+import { ZenModeManager, type ZenModeWindow } from "./zenModeManager";
 import { notifyBackendComputerEmergencyStop } from "./computerEmergencyStopNotice";
 import { EscapeKillSwitchMonitor } from "./escapeKillSwitchMonitor";
 import {
@@ -591,6 +593,7 @@ const browserPerfLoggingEnabled = process.env.SYNARA_BROWSER_PERF === "1";
 type DesktopUpdateErrorContext = DesktopUpdateState["errorContext"];
 
 let mainWindow: BrowserWindow | null = null;
+let zenModeWindowOpenInFlight: Promise<void> | null = null;
 /** Whether the live BrowserWindow was created with `frame: false` (win32/linux). */
 let customTitleBarActive = false;
 let backendProcess: ChildProcess.ChildProcess | null = null;
@@ -681,6 +684,29 @@ const browserManager = new DesktopBrowserManager({
       handleDesktopZoomShortcut(event, input, target)
     );
   },
+});
+const zenModeManager = new ZenModeManager({
+  getWindow: () =>
+    mainWindow && !mainWindow.isDestroyed() ? (mainWindow as unknown as ZenModeWindow) : null,
+  getDisplayWorkAreas: () => screen.getAllDisplays().map((display) => display.workArea),
+  onStateChanged: (state) => {
+    const window = mainWindow;
+    if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+      window.webContents.send(IPC.zenMode.stateChanged, state);
+    }
+  },
+  onToggleRequested: requestZenModeToggle,
+  setBrowserViewsZenMode: (window, active) => {
+    if (mainWindow !== window || window.isDestroyed()) return;
+    browserManager.setZenModeActive(active);
+  },
+  setTrafficLightsVisible: (window, visible) => {
+    if (process.platform !== "darwin" || mainWindow !== window || window.isDestroyed()) return;
+    (window as unknown as BrowserWindow).setWindowButtonVisibility(visible);
+  },
+  shortcutRegistry: globalShortcut,
+  setFullScreenAndWait: (window, fullScreen) =>
+    setWindowFullScreenAndWait(window as unknown as BrowserWindow, fullScreen),
 });
 let browserHostPipeServer: BrowserHostPipeServer | null = null;
 let appSnapManager: DesktopAppSnapManager | null = null;
@@ -2295,6 +2321,105 @@ function clearUnreadNotificationBadge(): void {
 
 // Reuse the existing desktop window when the app is launched again so users
 // don't end up with multiple packaged instances racing the same local state.
+function requestZenModeToggle(): void {
+  if (isQuitting || desktopStartupBlockedForDatabaseRestore) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    focusMainWindow({ stealAppFocus: true });
+    const targetWindow = mainWindow;
+    const dispatch = () => {
+      if (
+        mainWindow !== targetWindow ||
+        targetWindow.isDestroyed() ||
+        targetWindow.webContents.isDestroyed()
+      ) {
+        return;
+      }
+      targetWindow.webContents.send(IPC.zenMode.toggleRequested);
+    };
+    if (targetWindow.webContents.isLoadingMainFrame()) {
+      targetWindow.webContents.once("did-finish-load", dispatch);
+    } else {
+      dispatch();
+    }
+    return;
+  }
+
+  if (!backendHttpUrl || zenModeWindowOpenInFlight) return;
+  const openWindow = waitForBackendWindowReady(backendHttpUrl)
+    .catch((error) => {
+      if (!isBackendReadinessAborted(error)) {
+        console.warn("[desktop] Zen shortcut waited for backend readiness", error);
+      }
+    })
+    .then(() => {
+      if (isQuitting || desktopStartupBlockedForDatabaseRestore) return;
+      if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow();
+      focusMainWindow({ stealAppFocus: true });
+      const targetWindow = mainWindow;
+      if (!targetWindow || targetWindow.isDestroyed()) return;
+      const dispatch = () => {
+        if (
+          mainWindow !== targetWindow ||
+          targetWindow.isDestroyed() ||
+          targetWindow.webContents.isDestroyed()
+        ) {
+          return;
+        }
+        targetWindow.webContents.send(IPC.zenMode.toggleRequested);
+      };
+      if (targetWindow.webContents.isLoadingMainFrame()) {
+        targetWindow.webContents.once("did-finish-load", dispatch);
+      } else {
+        dispatch();
+      }
+    })
+    .catch((error) => {
+      console.warn("[desktop] Failed to show the window for the Zen shortcut", error);
+    })
+    .finally(() => {
+      if (zenModeWindowOpenInFlight === openWindow) zenModeWindowOpenInFlight = null;
+    });
+  zenModeWindowOpenInFlight = openWindow;
+}
+
+function setWindowFullScreenAndWait(window: BrowserWindow, fullScreen: boolean): Promise<void> {
+  if (window.isDestroyed()) return Promise.reject(new Error("The desktop window is closed."));
+  if (window.isFullScreen() === fullScreen) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (fullScreen) window.removeListener("enter-full-screen", onTransition);
+      else window.removeListener("leave-full-screen", onTransition);
+      window.removeListener("closed", onWindowClosed);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onWindowClosed = () =>
+      finish(new Error("The desktop window closed during fullscreen change."));
+    const onTransition = () => {
+      if (window.isDestroyed() || window.isFullScreen() !== fullScreen) {
+        finish(new Error("The desktop window fullscreen state did not settle."));
+      } else {
+        finish();
+      }
+    };
+    if (fullScreen) window.once("enter-full-screen", onTransition);
+    else window.once("leave-full-screen", onTransition);
+    window.once("closed", onWindowClosed);
+    timer = setTimeout(() => finish(new Error("Timed out changing fullscreen mode.")), 5_000);
+    timer.unref?.();
+    try {
+      window.setFullScreen(fullScreen);
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
 function focusMainWindow(options: { stealAppFocus?: boolean } = {}): void {
   if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = null;
@@ -5162,12 +5287,17 @@ function registerIpcHandlers(): void {
         mainWindow.webContents.send(IPC.ambientContext.changed);
       }
     },
+    {
+      sharedDataDirectory: Path.join(app.getPath("appData"), "SynaraContext"),
+      instanceLabel: desktopIdentity.displayName,
+    },
   );
   registerAmbientContextIpc(
     ipcMain,
     ambientContext,
     (event) => event.sender === mainWindow?.webContents,
   );
+  registerZenModeIpc(ipcMain, zenModeManager, (event) => event.sender === mainWindow?.webContents);
   const storageSnapshotPath = resolveSynaraStorageSnapshotPath(app.getPath("userData"));
 
   ipcMain.removeAllListeners(IPC.betaDiagnostics.enabled);
@@ -5971,6 +6101,12 @@ function createWindow(): BrowserWindow {
     window.setTitle(APP_DISPLAY_NAME);
     emitUpdateState();
   });
+  window.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (!isMainFrame || isInPlace) return;
+    void zenModeManager.resetForRendererReload().catch((error: unknown) => {
+      console.warn("[desktop] Failed to restore the main window after renderer navigation", error);
+    });
+  });
   window.once("ready-to-show", () => {
     // Preserve the original first-launch behavior, then respect the state saved
     // by subsequent closes. Normal bounds are restored before maximizing so the
@@ -6002,10 +6138,11 @@ function createWindow(): BrowserWindow {
   }
   window.on("close", (event) => {
     try {
+      const zenRestoreState = zenModeManager.getWindowStateForPersistence();
       writeDesktopWindowState(DESKTOP_WINDOW_STATE_PATH, {
         version: 1,
-        bounds: window.getNormalBounds(),
-        isMaximized: window.isMaximized(),
+        bounds: zenRestoreState?.bounds ?? window.getNormalBounds(),
+        isMaximized: zenRestoreState?.isMaximized ?? window.isMaximized(),
       });
     } catch (error) {
       console.warn(`[desktop] Failed to persist window state: ${formatErrorMessage(error)}`);
@@ -6053,6 +6190,7 @@ function createWindow(): BrowserWindow {
     if (mainWindow === window) {
       mainWindow = null;
     }
+    zenModeManager.windowClosed();
     browserManager.setWindow(null);
   });
 
@@ -6381,6 +6519,13 @@ async function bootstrap(): Promise<void> {
   ensureInitialBackendWindowOpen(backendHttpUrl);
 }
 
+app.on("will-quit", () => {
+  zenModeManager.unregisterShortcut();
+  void zenModeManager.dispose().catch((error: unknown) => {
+    console.warn("[desktop] Zen window restoration failed during final teardown", error);
+  });
+});
+
 app.on("before-quit", (event) => {
   writeDesktopLogHeader("before-quit received");
   if (desktopShutdownComplete) {
@@ -6475,6 +6620,7 @@ if (hasSingleInstanceLock) {
       refreshMacIconCacheOnVersionChange();
       configureMediaPermissions();
       initializeDesktopAppSnap();
+      zenModeManager.registerShortcut();
       configureApplicationMenu();
       try {
         registerDesktopProtocol();

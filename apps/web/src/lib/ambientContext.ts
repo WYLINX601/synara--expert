@@ -1,3 +1,4 @@
+import { t } from "~/i18n";
 import { AmbientContextSnapshot, type AmbientResourceReference } from "@synara/contracts";
 import * as Schema from "effect/Schema";
 import type { DeepMutable } from "effect/Types";
@@ -31,23 +32,13 @@ export function ambientContextItemKey(item: AmbientContextSnapshot["items"][numb
       : Object.entries(observation.value).toSorted(([left], [right]) => left.localeCompare(right));
   return JSON.stringify([
     observation.schemaVersion,
-    observation.id,
     observation.targetKey,
     observation.type,
-    observation.capturedAt,
     observation.method,
     observation.confidence,
     value,
     item.provenance
-      .map((entry) =>
-        JSON.stringify([
-          entry.sourceId,
-          entry.observationId,
-          entry.capturedAt,
-          entry.method,
-          entry.confidence,
-        ]),
-      )
+      .map((entry) => JSON.stringify([entry.sourceId, entry.method, entry.confidence]))
       .toSorted(),
     item.ambiguous,
   ]);
@@ -139,4 +130,43 @@ export function ambientContextItemLabel(item: AmbientContextSnapshot["items"][nu
     case "element.identity":
       return observation.value.name;
   }
+}
+
+/** Compact pins share a source/resource group while preserving distinct selections. */
+export function groupAmbientContextItems(items: AmbientContextSnapshot["items"]) {
+  const groups = new Map<
+    string,
+    { key: string; label: string; items: AmbientContextSnapshot["items"][number][] }
+  >();
+  for (const item of items) {
+    const sources = [...new Set(item.provenance.map((entry) => entry.sourceId))].sort();
+    const key = JSON.stringify([sources, item.observation.targetKey]);
+    const group = groups.get(key) ?? { key, label: sources.join(", "), items: [] };
+    group.items.push(item);
+    groups.set(key, group);
+  }
+  return [...groups.values()].map((group) => {
+    const resource = group.items.find((item) => item.observation.type === "resource.identity");
+    const ranges = [
+      ...new Set(
+        group.items
+          .filter((item) => item.observation.type === "selection.location")
+          .map(ambientContextItemLabel),
+      ),
+    ];
+    const hasText = group.items.some(
+      (item) =>
+        item.observation.type === "selection.text" || item.observation.type === "resource.content",
+    );
+    return {
+      ...group,
+      label: [
+        resource ? ambientContextItemLabel(resource).split(/[\\/]/).at(-1) : group.label,
+        ...ranges,
+        !hasText ? t("chat:ambientReferenceOnly") : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    };
+  });
 }

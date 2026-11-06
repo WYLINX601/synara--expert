@@ -1,3 +1,4 @@
+import { useAmbientContextBindingStore } from "../ambientContextBindingStore";
 // FILE: deletedThreadClientReconciliation.test.ts
 // Purpose: Verifies immediate thread-delete UI reconciliation without rendering callers.
 // Layer: Web orchestration helper tests
@@ -16,12 +17,16 @@ describe("reconcileDeletedThreadFromClient", () => {
     const threadId = ThreadId.makeUnsafe("thread-delete");
     const removeDeletedThreadFromClientState = vi.fn();
     useDiffRenderModeStore.getState().setModeForThread(threadId, "stacked");
+    useAmbientContextBindingStore
+      .getState()
+      .bind(threadId, { id: "paper", sourceId: "paper", label: "Paper" });
 
     await reconcileDeletedThreadFromClient({
       threadId,
       removeDeletedThreadFromClientState,
     });
 
+    expect(useAmbientContextBindingStore.getState().byThreadId[threadId]).toBeUndefined();
     expect(removeDeletedThreadFromClientState).toHaveBeenCalledOnce();
     expect(removeDeletedThreadFromClientState).toHaveBeenCalledWith(threadId);
     expect(useDiffRenderModeStore.getState().getModeForThread(threadId, "split")).toBe("split");

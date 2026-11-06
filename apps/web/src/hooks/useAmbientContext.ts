@@ -12,6 +12,8 @@ export function useAmbientContext(active = true) {
     queryFn: () => bridge!.getState(),
     enabled: Boolean(bridge) && active,
     staleTime: 0,
+    // Expiry can happen without another publication from an idle app.
+    refetchInterval: active && bridge ? 5_000 : false,
   });
   useEffect(() => {
     if (!active || !bridge) return;
@@ -26,7 +28,7 @@ export function useAmbientContext(active = true) {
 export function useAmbientResources(query: string, active: boolean) {
   const state = useAmbientContext(active);
   const queryClient = useQueryClient();
-  const allowedSourceIds =
+  const allowedFamilies =
     !state.bridge || state.isError
       ? []
       : (state.data?.sources ?? [])
@@ -37,8 +39,17 @@ export function useAmbientResources(query: string, active: boolean) {
               !source.error &&
               source.policy.allowedTypes.includes("resource.identity"),
           )
-          .map((source) => source.manifest.id)
-          .toSorted();
+          .map((source) => source.manifest.id);
+  const allowedSourceIds = (
+    state.data?.connections
+      ? state.data.connections
+          .filter(
+            (connection) =>
+              allowedFamilies.includes("obsidian") && connection.connected && !connection.error,
+          )
+          .map((connection) => connection.sourceId)
+      : allowedFamilies
+  ).toSorted();
   const scope = JSON.stringify(allowedSourceIds);
   const enabled = active && allowedSourceIds.length > 0;
   useEffect(() => {

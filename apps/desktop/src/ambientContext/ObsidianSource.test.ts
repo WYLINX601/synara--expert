@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 function connect(endpoint: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const peer = new WebSocket(endpoint);
+    const peer = new WebSocket(endpoint, { headers: { Origin: "app://obsidian.md" } });
     peer.once("open", () => resolve(peer));
     peer.once("error", reject);
   });
@@ -60,6 +60,22 @@ describe("Obsidian loopback bridge", () => {
     await closed;
     expect(emitted).toEqual([]);
     expect(source.connected).toBe(false);
+  });
+  it("rejects missing and untrusted origins before pairing", async () => {
+    const source = new ObsidianSource();
+    sources.push(source);
+    await source.start(policy, () => {});
+    for (const origin of [undefined, "https://example.test"]) {
+      const peer = new WebSocket(source.pairing().endpoint, {
+        ...(origin ? { headers: { Origin: origin } } : {}),
+      });
+      await expect(
+        new Promise<void>((resolve, reject) => {
+          peer.once("open", () => resolve());
+          peer.once("error", reject);
+        }),
+      ).rejects.toThrow();
+    }
   });
   it("clears on disconnect and accepts fresh sequence zero on authenticated reconnect", async () => {
     const manager = new AmbientContextManager();

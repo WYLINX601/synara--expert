@@ -1,5 +1,6 @@
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
 import { DESKTOP_IPC_CHANNELS } from "./ipcChannels";
+import type { AmbientContextCaptureRequestOptions } from "@synara/contracts";
 import type { DesktopAmbientContext } from "./ambientContext/DesktopAmbientContext";
 
 export function registerAmbientContextIpc(
@@ -12,7 +13,23 @@ export function registerAmbientContextIpc(
     [channels.getState, () => context.getState()],
     [channels.configure, (sourceId, policy) => context.configure(sourceId, policy)],
     [channels.getPairing, (sourceId) => context.pairing(sourceId)],
-    [channels.capture, () => context.capture()],
+    [channels.approveConnection, (id) => context.approveConnection(id)],
+    [channels.revokeConnection, (id) => context.revokeConnection(id)],
+    [
+      channels.capture,
+      (sourceIds, options) => {
+        if (
+          sourceIds !== undefined &&
+          (!Array.isArray(sourceIds) || sourceIds.some((sourceId) => typeof sourceId !== "string"))
+        ) {
+          throw new Error("Invalid Obsidian context selection.");
+        }
+        return context.capture(
+          sourceIds as readonly string[] | undefined,
+          options as AmbientContextCaptureRequestOptions | undefined,
+        );
+      },
+    ],
     [channels.searchResources, (query) => context.searchResources(query)],
   ];
   for (const [channel, handler] of handlers) {

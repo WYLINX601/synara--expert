@@ -460,6 +460,12 @@ export class DesktopBrowserManager {
   >();
   private readonly pendingStatePublicationsByKey = new Map<string, PendingStatePublication>();
   private readonly runtimes = new Map<string, LiveTabRuntime>();
+  private zenModeActive = false;
+  private zenModeRestore: {
+    readonly key: string;
+    readonly runtime: LiveTabRuntime;
+    readonly wasVisible: boolean;
+  } | null = null;
   private readonly runtimePageZoomFactors = new Map<string, number>();
   private readonly rendererOnlyRuntimeKeys = new Set<string>();
   private readonly automationRuntimeKeys = new Set<string>();
@@ -530,6 +536,8 @@ export class DesktopBrowserManager {
       this.detachAttachedRuntime();
       this.destroyAllRuntimes();
       this.closeAllPopupWindows();
+      this.zenModeActive = false;
+      this.zenModeRestore = null;
     }
     this.window = window;
     if (window) {
@@ -541,6 +549,101 @@ export class DesktopBrowserManager {
       }
       return;
     }
+  }
+
+  /**
+   * Parks the one attached native browser surface while Zen owns the main
+   * window, then restores it only if the same tab remains visibly selected.
+   */
+  setZenModeActive(active: boolean): void {
+    if (this.disposed) {
+      this.zenModeActive = false;
+      this.zenModeRestore = null;
+      return;
+    }
+    if (this.zenModeActive === active) return;
+
+    if (active) {
+      const key = this.attachedRuntimeKey;
+      const runtime = key ? this.runtimes.get(key) : undefined;
+      const state = runtime ? this.states.get(runtime.threadId) : undefined;
+      const bounds = runtime ? this.getVisibleBoundsForThread(runtime.threadId) : null;
+      const wasVisible = Boolean(
+        runtime?.view &&
+        runtime.ownsWebContents &&
+        state?.open &&
+        state.activeTabId === runtime.tabId &&
+        this.activeThreadId === runtime.threadId &&
+        bounds &&
+        !this.previewThreadIds.has(runtime.threadId) &&
+        !this.occludedThreadIds.has(runtime.threadId),
+      );
+      this.zenModeRestore = runtime && key ? { key, runtime, wasVisible } : null;
+      this.zenModeActive = true;
+      if (wasVisible && runtime) {
+        this.clearSuspendTimer(runtime.threadId);
+        this.clearTabSuspendTimer(runtime.threadId, runtime.tabId);
+      }
+      this.detachAttachedRuntime(bounds ?? undefined);
+      return;
+    }
+
+    const restore = this.zenModeRestore;
+    this.zenModeRestore = null;
+    this.zenModeActive = false;
+
+    // Resume hidden-thread cleanup independently of view restoration. The
+    // original view may have been closed, replaced, or deselected during Zen,
+    // while other live tabs in this still-open thread remain to be reclaimed.
+    const restoreThreadId = restore?.runtime.threadId;
+    const state = restoreThreadId ? this.states.get(restoreThreadId) : undefined;
+    const bounds = restoreThreadId ? this.getVisibleBoundsForThread(restoreThreadId) : null;
+    if (restoreThreadId && state?.open && !bounds) {
+      this.scheduleThreadSuspend(restoreThreadId);
+    }
+
+    if (!restore?.wasVisible || !this.window || this.window.isDestroyed()) return;
+
+    const runtime = this.runtimes.get(restore.key);
+    if (runtime !== restore.runtime || runtime.webContents.isDestroyed()) return;
+    if (
+      !state?.open ||
+      state.activeTabId !== runtime.tabId ||
+      this.activeThreadId !== runtime.threadId ||
+      !bounds ||
+      this.previewThreadIds.has(runtime.threadId) ||
+      this.occludedThreadIds.has(runtime.threadId) ||
+      !runtime.view ||
+      !runtime.ownsWebContents
+    ) {
+      return;
+    }
+    this.clearSuspendTimer(runtime.threadId);
+    this.attachRuntime(runtime, bounds, this.getVisiblePageZoomFactor(runtime.threadId));
+  }
+
+  private isZenPreservedRuntime(runtime: LiveTabRuntime): boolean {
+    const restore = this.zenModeRestore;
+    if (
+      !this.zenModeActive ||
+      !restore?.wasVisible ||
+      restore.key !== runtime.key ||
+      restore.runtime !== runtime ||
+      this.runtimes.get(runtime.key) !== runtime ||
+      !runtime.ownsWebContents ||
+      runtime.webContents.isDestroyed()
+    ) {
+      return false;
+    }
+    const state = this.states.get(runtime.threadId);
+    return Boolean(
+      state?.open &&
+      state.activeTabId === runtime.tabId &&
+      state.tabs.some((tab) => tab.id === runtime.tabId) &&
+      (this.activeThreadId === null || this.activeThreadId === runtime.threadId) &&
+      !this.previewThreadIds.has(runtime.threadId) &&
+      !this.occludedThreadIds.has(runtime.threadId),
+    );
   }
 
   isWebMcpCompatibilityAllowed(webContentsId: number): boolean {
@@ -1258,6 +1361,8 @@ export class DesktopBrowserManager {
   dispose(): void {
     nativeTheme.removeListener("updated", this.updateNativeViewBackgrounds);
     this.disposed = true;
+    this.zenModeActive = false;
+    this.zenModeRestore = null;
     this.annotations.dispose();
     this.sessionPolicy.dispose();
     this.clearAllPendingWindowOpenTasks();
@@ -1677,6 +1782,11 @@ export class DesktopBrowserManager {
 
   hide(input: BrowserThreadInput): void {
     const wasOccluded = this.occludedThreadIds.delete(input.threadId);
+    if (this.zenModeRestore?.runtime.threadId === input.threadId) {
+      // A real panel hide means the user left this browser surface. Zen's own
+      // layout path only publishes null bounds and does not call hide().
+      this.zenModeRestore = null;
+    }
     const state = this.states.get(input.threadId);
     const activeTab = state ? this.getActiveTab(state) : null;
     const keepsAgentRuntimeAlive = Boolean(
@@ -2267,12 +2377,19 @@ export class DesktopBrowserManager {
     pageZoomFactor = this.getVisiblePageZoomFactor(threadId),
   ): void {
     const previousThreadId = this.activeThreadId;
+    const zenRestore = this.zenModeRestore;
+    if (zenRestore && zenRestore.runtime.threadId !== threadId) {
+      this.zenModeRestore = null;
+    }
     if (this.activeThreadId && this.activeThreadId !== threadId) {
       this.resetRuntimePageZoomForThread(this.activeThreadId);
       this.scheduleThreadSuspend(this.activeThreadId);
     }
 
     this.activeThreadId = threadId;
+    if (zenRestore && zenRestore.runtime.threadId !== threadId) {
+      this.scheduleThreadSuspend(zenRestore.runtime.threadId);
+    }
     this.activeBounds = bounds;
     this.activeBoundsThreadId = threadId;
     this.setActivePageZoomFactor(threadId, pageZoomFactor);
@@ -2324,12 +2441,19 @@ export class DesktopBrowserManager {
     pageZoomFactor = this.getVisiblePageZoomFactor(threadId),
   ): void {
     const previousThreadId = this.activeThreadId;
+    const zenRestore = this.zenModeRestore;
+    if (zenRestore && zenRestore.runtime.threadId !== threadId) {
+      this.zenModeRestore = null;
+    }
     if (previousThreadId && previousThreadId !== threadId) {
       this.resetRuntimePageZoomForThread(previousThreadId);
       this.scheduleThreadSuspend(previousThreadId);
       this.updatePopupWindowsForThread(previousThreadId);
     }
     this.activeThreadId = threadId;
+    if (zenRestore && zenRestore.runtime.threadId !== threadId) {
+      this.scheduleThreadSuspend(zenRestore.runtime.threadId);
+    }
     this.activeBounds = bounds;
     this.activeBoundsThreadId = threadId;
     this.setActivePageZoomFactor(threadId, pageZoomFactor);
@@ -2489,6 +2613,7 @@ export class DesktopBrowserManager {
       .filter(
         (runtime) =>
           runtime.key !== this.attachedRuntimeKey &&
+          !this.isZenPreservedRuntime(runtime) &&
           !(
             runtime.threadId === this.activeThreadId &&
             this.states.get(runtime.threadId)?.activeTabId === runtime.tabId
@@ -2537,6 +2662,7 @@ export class DesktopBrowserManager {
       (runtime) =>
         runtime.ownsWebContents &&
         runtime.key !== this.attachedRuntimeKey &&
+        !this.isZenPreservedRuntime(runtime) &&
         !this.isEmbeddedPopupFamily(runtime.threadId, runtime.tabId) &&
         !popupOwnerRuntimeKeys.has(runtime.key) &&
         this.automationRuntimeKeys.has(runtime.key),
@@ -2642,7 +2768,13 @@ export class DesktopBrowserManager {
 
   private scheduleThreadSuspend(threadId: ThreadId): void {
     const state = this.states.get(threadId);
-    if (!state?.open || this.activeThreadId === threadId) {
+    const zenPreservedRuntime = this.zenModeRestore?.runtime;
+    if (
+      !state?.open ||
+      this.activeThreadId === threadId ||
+      (zenPreservedRuntime?.threadId === threadId &&
+        this.isZenPreservedRuntime(zenPreservedRuntime))
+    ) {
       return;
     }
 
@@ -2664,6 +2796,8 @@ export class DesktopBrowserManager {
     let didChange = false;
     for (const tab of state.tabs) {
       if (this.isEmbeddedPopupFamily(threadId, tab.id)) continue;
+      const runtime = this.runtimes.get(buildRuntimeKey(threadId, tab.id));
+      if (runtime && this.isZenPreservedRuntime(runtime)) continue;
       if (
         tab.id === state.activeTabId &&
         this.automationRuntimeKeys.has(buildRuntimeKey(threadId, tab.id))
@@ -2694,6 +2828,8 @@ export class DesktopBrowserManager {
   private scheduleInactiveTabSuspend(threadId: ThreadId, tabId: string): void {
     if (this.isEmbeddedPopupFamily(threadId, tabId)) return;
     const key = buildRuntimeKey(threadId, tabId);
+    const runtime = this.runtimes.get(key);
+    if (runtime && this.isZenPreservedRuntime(runtime)) return;
     if (this.tabSuspendTimers.has(key)) {
       return;
     }
@@ -2704,7 +2840,8 @@ export class DesktopBrowserManager {
       this.tabSuspendTimers.delete(key);
       const state = this.states.get(threadId);
       const tab = state ? this.getTab(state, tabId) : null;
-      if (!state || !tab) {
+      const currentRuntime = this.runtimes.get(key);
+      if (!state || !tab || (currentRuntime && this.isZenPreservedRuntime(currentRuntime))) {
         return;
       }
 
@@ -2793,6 +2930,14 @@ export class DesktopBrowserManager {
     const window = this.window;
     this.setRuntimePageZoomFactor(runtime, pageZoomFactor);
     if (!window) {
+      return;
+    }
+
+    if (this.zenModeActive) {
+      if (this.attachedRuntimeKey !== runtime.key) this.detachAttachedRuntime();
+      if (runtime.view) this.setRuntimeViewHidden(runtime, true, bounds);
+      this.attachedRuntimeKey = null;
+      this.attachedBoundsSignature = null;
       return;
     }
 

@@ -265,13 +265,13 @@ export function useChatQueuedTurns({
         addComposerPullRequestContextsToDraft(queuedTurn.pullRequestContexts);
         updateSelectedComposerSkills(queuedTurn.skills);
         updateSelectedComposerMentions(queuedTurn.mentions);
-        useComposerDraftStore
-          .getState()
-          .setAmbientContext(activeThread.id, queuedTurn.ambientContext);
       } else {
         updateSelectedComposerSkills([]);
         updateSelectedComposerMentions([]);
       }
+      useComposerDraftStore
+        .getState()
+        .setAmbientContext(activeThread.id, queuedTurn.ambientContext, { frozen: true });
       setRestoredQueuedSourceProposedPlan(
         activeThread.id,
         queuedTurn.kind === "chat" && queuedTurn.sourceProposedPlan

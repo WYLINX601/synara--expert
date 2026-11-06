@@ -205,6 +205,236 @@ describe("DesktopBrowserManager tab switching", () => {
     }
   });
 
+  it("parks and restores only the same still-visible native browser surface for Zen", () => {
+    const page = makeView(432);
+    webContentsViewConstructor.mockReturnValueOnce(page.view);
+    const { manager } = makeManager();
+    try {
+      manager.open({ threadId: THREAD_ID, initialUrl: "https://example.test/" });
+      manager.setPanelBounds({ threadId: THREAD_ID, surface: "native", bounds });
+      expect(page.view.setVisible).toHaveBeenLastCalledWith(true);
+
+      manager.setZenModeActive(true);
+      expect(page.view.setVisible).toHaveBeenLastCalledWith(false);
+
+      manager.setZenModeActive(false);
+      expect(page.view.setVisible).toHaveBeenLastCalledWith(true);
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it("keeps the selected runtime warm through Zen bounds removal, then resumes normal cleanup", async () => {
+    vi.useFakeTimers();
+    const page = makeView(434);
+    webContentsViewConstructor.mockReturnValueOnce(page.view);
+    const sentinel = { draft: "same live document" };
+    const contentsWithSentinel = page.contents as typeof page.contents & {
+      sentinel: typeof sentinel;
+    };
+    contentsWithSentinel.sentinel = sentinel;
+    const { manager } = makeManager();
+    try {
+      const opened = manager.open({ threadId: THREAD_ID, initialUrl: "https://example.test/" });
+      const tabId = opened.activeTabId!;
+      manager.setPanelBounds({ threadId: THREAD_ID, surface: "native", bounds });
+      manager.setZenModeActive(true);
+
+      // Zen's hidden RightDock reports a normal, non-occluded null-bounds update.
+      manager.setPanelBounds({
+        threadId: THREAD_ID,
+        surface: "native",
+        bounds: null,
+        occluded: false,
+      });
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+
+      expect(page.contents.close).not.toHaveBeenCalled();
+      expect(contentsWithSentinel.sentinel).toBe(sentinel);
+      expect(manager.getState({ threadId: THREAD_ID }).tabs[0]?.status).toBe("live");
+
+      // Leaving Zen while still hidden restores the ordinary idle timer. A
+      // returning panel before its deadline reuses the same page and document.
+      manager.setZenModeActive(false);
+      manager.setPanelBounds({ threadId: THREAD_ID, surface: "native", bounds });
+      expect(page.contents.close).not.toHaveBeenCalled();
+      expect(contentsWithSentinel.sentinel).toBe(sentinel);
+      expect(manager.getState({ threadId: THREAD_ID }).activeTabId).toBe(tabId);
+      expect(page.view.setVisible).toHaveBeenLastCalledWith(true);
+    } finally {
+      manager.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes hidden-thread cleanup when the selected tab changes during Zen", async () => {
+    vi.useFakeTimers();
+    const firstPage = makeView(437);
+    const secondPage = makeView(438);
+    webContentsViewConstructor
+      .mockReturnValueOnce(firstPage.view)
+      .mockReturnValueOnce(secondPage.view);
+    const { manager } = makeManager();
+    try {
+      const opened = manager.open({
+        threadId: THREAD_ID,
+        initialUrl: "https://example.test/first",
+      });
+      manager.setPanelBounds({ threadId: THREAD_ID, surface: "native", bounds });
+      const second = manager.newTab({ threadId: THREAD_ID, url: "https://example.test/second" });
+      manager.selectTab({ threadId: THREAD_ID, tabId: opened.activeTabId! });
+
+      manager.setZenModeActive(true);
+      manager.setPanelBounds({
+        threadId: THREAD_ID,
+        surface: "native",
+        bounds: null,
+        occluded: false,
+      });
+      manager.selectTab({ threadId: THREAD_ID, tabId: second.activeTabId! });
+
+      manager.setZenModeActive(false);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+
+      expect(manager.getState({ threadId: THREAD_ID }).activeTabId).toBe(second.activeTabId);
+      expect(firstPage.contents.close).toHaveBeenCalledOnce();
+      expect(
+        manager.getState({ threadId: THREAD_ID }).tabs.every((tab) => tab.status === "suspended"),
+      ).toBe(true);
+    } finally {
+      manager.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes hidden-thread cleanup for remaining tabs when the saved Zen tab closes", async () => {
+    vi.useFakeTimers();
+    const pageA = makeView(439);
+    const pageB = makeView(440);
+    webContentsViewConstructor.mockReturnValueOnce(pageA.view).mockReturnValueOnce(pageB.view);
+    const { manager } = makeManager();
+    try {
+      const tabA = manager.open({ threadId: THREAD_ID, initialUrl: "https://example.test/a" });
+      manager.setPanelBounds({ threadId: THREAD_ID, surface: "native", bounds });
+      const tabB = manager.newTab({ threadId: THREAD_ID, url: "https://example.test/b" });
+      manager.selectTab({ threadId: THREAD_ID, tabId: tabA.activeTabId! });
+
+      manager.setZenModeActive(true);
+      manager.setPanelBounds({
+        threadId: THREAD_ID,
+        surface: "native",
+        bounds: null,
+        occluded: false,
+      });
+      manager.closeTab({ threadId: THREAD_ID, tabId: tabA.activeTabId! });
+      await manager.getCookieImportRuntime({ threadId: THREAD_ID, tabId: tabB.activeTabId! });
+      expect(pageB.contents.close).not.toHaveBeenCalled();
+
+      manager.setZenModeActive(false);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+
+      expect(pageA.contents.close).toHaveBeenCalledOnce();
+      expect(pageB.contents.close).toHaveBeenCalledOnce();
+      expect(manager.getState({ threadId: THREAD_ID }).tabs[0]?.status).toBe("suspended");
+    } finally {
+      manager.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("still releases an explicitly closed tab during Zen", () => {
+    const page = makeView(435);
+    webContentsViewConstructor.mockReturnValueOnce(page.view);
+    const { manager } = makeManager();
+    try {
+      const opened = manager.open({ threadId: THREAD_ID, initialUrl: "https://example.test/" });
+      manager.setPanelBounds({ threadId: THREAD_ID, surface: "native", bounds });
+      manager.setZenModeActive(true);
+      manager.setPanelBounds({
+        threadId: THREAD_ID,
+        surface: "native",
+        bounds: null,
+        occluded: false,
+      });
+
+      manager.closeTab({ threadId: THREAD_ID, tabId: opened.activeTabId! });
+
+      expect(page.contents.close).toHaveBeenCalledOnce();
+      expect(manager.getState({ threadId: THREAD_ID }).tabs[0]?.status).toBe("suspended");
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it("excludes the selected Zen runtime from background budget eviction", async () => {
+    vi.useFakeTimers();
+    const pages = Array.from({ length: 13 }, (_, index) => makeView(436 + index));
+    for (const page of pages) webContentsViewConstructor.mockReturnValueOnce(page.view);
+    const { manager } = makeManager();
+    try {
+      const selected = manager.open({
+        threadId: THREAD_ID,
+        initialUrl: "https://example.test/zen",
+      });
+      manager.setPanelBounds({ threadId: THREAD_ID, surface: "native", bounds });
+      manager.setZenModeActive(true);
+      manager.setPanelBounds({
+        threadId: THREAD_ID,
+        surface: "native",
+        bounds: null,
+        occluded: false,
+      });
+
+      for (let index = 0; index < 12; index += 1) {
+        const threadId = ThreadId.makeUnsafe(`thread-zen-budget-${index}`);
+        const state = manager.open({
+          threadId,
+          initialUrl: `https://example.test/background-${index}`,
+        });
+        await manager.getAutomationRuntime({ threadId, tabId: state.activeTabId! });
+      }
+
+      await vi.advanceTimersByTimeAsync(31_001);
+
+      expect(pages[0]!.contents.close).not.toHaveBeenCalled();
+      expect(manager.getState({ threadId: THREAD_ID }).tabs[0]?.status).toBe("live");
+      expect(pages.slice(1).some((page) => page.contents.close.mock.calls.length > 0)).toBe(true);
+    } finally {
+      manager.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not reveal a preview or occluded native surface when Zen exits", () => {
+    const page = makeView(433);
+    webContentsViewConstructor.mockReturnValueOnce(page.view);
+    const { manager } = makeManager();
+    try {
+      manager.open({ threadId: THREAD_ID, initialUrl: "https://example.test/" });
+      manager.setPanelBounds({ threadId: THREAD_ID, surface: "native", bounds, preview: true });
+      page.view.setVisible.mockClear();
+
+      manager.setZenModeActive(true);
+      manager.setZenModeActive(false);
+      expect(page.view.setVisible).not.toHaveBeenCalledWith(true);
+
+      manager.setPanelBounds({ threadId: THREAD_ID, surface: "native", bounds, preview: false });
+      expect(page.view.setVisible).toHaveBeenLastCalledWith(true);
+      manager.setZenModeActive(true);
+      page.view.setVisible.mockClear();
+      manager.setPanelBounds({
+        threadId: THREAD_ID,
+        surface: "native",
+        bounds: null,
+        occluded: true,
+      });
+      manager.setZenModeActive(false);
+      expect(page.view.setVisible).not.toHaveBeenCalledWith(true);
+    } finally {
+      manager.dispose();
+    }
+  });
+
   it("bounds live pages across threads without evicting the shown page or an active tool", async () => {
     vi.useFakeTimers();
     const pages = Array.from({ length: 14 }, (_, index) => makeView(450 + index));

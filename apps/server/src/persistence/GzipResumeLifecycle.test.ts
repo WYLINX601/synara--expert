@@ -86,10 +86,21 @@ describe("gzip migration resume lifecycle", () => {
     const releaseInspection = Promise.withResolvers<void>();
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     const open = vi.mocked(fs.open);
+    const inspectionPartialPrefix = path.join(
+      migrationBackupDirectory(dbPath),
+      `.${path.basename(dbPath)}.pre-migration-inspect-`,
+    );
     open.mockImplementation(async (...args) => {
       const handle = await actual.open(...args);
       const filePath = String(args[0]);
-      if (filePath.endsWith(".partial") && filePath.includes(".sqlite.gz.")) {
+      const inspectionId = filePath.startsWith(inspectionPartialPrefix)
+        ? filePath.slice(inspectionPartialPrefix.length, -".partial".length)
+        : "";
+      if (
+        args[1] === "wx" &&
+        filePath.endsWith(".partial") &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(inspectionId)
+      ) {
         enteredInspection.resolve();
         await releaseInspection.promise;
       }
@@ -101,8 +112,13 @@ describe("gzip migration resume lifecycle", () => {
         Effect.scoped,
       ),
     );
+    const inspectionEntryTimeout = setTimeout(
+      () => enteredInspection.reject(new Error("Timed out waiting for backup inspection open")),
+      10_000,
+    );
     try {
       await enteredInspection.promise;
+      clearTimeout(inspectionEntryTimeout);
       let interruptionSettled = false;
       const interruption = Effect.runPromise(Fiber.interrupt(startup));
       void interruption.then(
@@ -125,6 +141,7 @@ describe("gzip migration resume lifecycle", () => {
       const startupExit = await Effect.runPromise(Fiber.await(startup));
       expect(startupExit._tag).toBe("Failure");
     } finally {
+      clearTimeout(inspectionEntryTimeout);
       releaseInspection.resolve();
       await Effect.runPromise(Fiber.interrupt(startup));
       open.mockImplementation(actual.open);

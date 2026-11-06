@@ -72,16 +72,26 @@ async function makeDbPath(): Promise<string> {
 }
 
 async function makeDbPathWithLongBackupInspectionPath(): Promise<string> {
-  const rootDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "synara-migration-backup-"));
+  const databaseBasename = "state.sqlite";
+  const prefix = "synara-migration-backup-";
+  const temporaryRoot = process.platform === "win32" ? os.tmpdir() : "/tmp";
+  const legacyBackupBasename =
+    `${databaseBasename}.pre-migration-v108-wb0-fmt0-legacy109-to-v${currentOfficialMigrationCount()}` +
+    `-${"0".repeat(19)}-${"0".repeat(36)}.sqlite.gz`;
+  const legacyInspectionBasename = `.${legacyBackupBasename}.${"0".repeat(36)}.partial`;
+  let padding = "";
+  const projectedLegacyInspectionPath = () =>
+    path.join(
+      migrationBackupDirectory(
+        path.join(temporaryRoot, `${prefix}${padding}${"0".repeat(6)}`, databaseBasename),
+      ),
+      legacyInspectionBasename,
+    );
+  while (projectedLegacyInspectionPath().length <= 260) padding += "x";
+
+  const rootDirectory = await fs.mkdtemp(path.join(temporaryRoot, `${prefix}${padding}`));
   tempDirectories.push(rootDirectory);
-  let directory = rootDirectory;
-  const legacyInspectionBasename = `.${"x".repeat(125)}.${"0".repeat(36)}.partial`;
-  const dbPath = () => path.join(directory, "state.sqlite");
-  while (path.join(migrationBackupDirectory(dbPath()), legacyInspectionBasename).length <= 260) {
-    directory = path.join(directory, "migration-inspection-depth");
-  }
-  await fs.mkdir(directory, { recursive: true });
-  return dbPath();
+  return path.join(rootDirectory, databaseBasename);
 }
 
 const runWithDatabase = <A, E>(dbPath: string, effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
@@ -1318,11 +1328,15 @@ describe("migration backups", () => {
           path.dirname(backupPath),
           `.${path.basename(backupPath)}.${"0".repeat(36)}.partial`,
         );
-        expect(previousInspectionPath.length).toBeGreaterThan(260);
-        if (process.platform === "win32") {
-          expect(dbPath.length).toBeLessThan(260);
-          expect(backupPath.length).toBeLessThan(260);
-        }
+        expect(previousInspectionPath.length).toBe(261);
+        const vacuumSnapshotPath = path.join(
+          migrationBackupDirectory(dbPath),
+          `.${path.basename(backupPath).slice(0, -".gz".length)}.partial`,
+          "snapshot.sqlite",
+        );
+        expect(dbPath.length).toBeLessThan(260);
+        expect(backupPath.length).toBeLessThan(260);
+        expect(vacuumSnapshotPath.length).toBeLessThan(260);
 
         const compressedBackup = await fs.readFile(backupPath);
         await fs.writeFile(backupPath, "invalid compressed backup");

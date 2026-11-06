@@ -424,9 +424,21 @@ describe("completed migration backup recovery", () => {
     const release = Promise.withResolvers<void>();
     const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
     const open = vi.mocked(fs.open);
+    const inspectionPartialPrefix = path.join(
+      migrationBackupDirectory(databasePath),
+      `.${path.basename(databasePath)}.pre-migration-inspect-`,
+    );
     open.mockImplementation(async (...args) => {
       const handle = await actual.open(...args);
-      if (String(args[0]).endsWith(".partial") && String(args[0]).includes(".sqlite.gz.")) {
+      const filePath = String(args[0]);
+      const inspectionId = filePath.startsWith(inspectionPartialPrefix)
+        ? filePath.slice(inspectionPartialPrefix.length, -".partial".length)
+        : "";
+      if (
+        args[1] === "wx" &&
+        filePath.endsWith(".partial") &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(inspectionId)
+      ) {
         entered.resolve();
         await release.promise;
       }
@@ -437,8 +449,13 @@ describe("completed migration backup recovery", () => {
         makeSqlitePersistenceLive(databasePath).pipe(Layer.provide(NodeServices.layer)),
       ).pipe(Effect.scoped),
     );
+    const inspectionEntryTimeout = setTimeout(
+      () => entered.reject(new Error("Timed out waiting for backup inspection open")),
+      10_000,
+    );
     try {
       await entered.promise;
+      clearTimeout(inspectionEntryTimeout);
       let interrupted = false;
       const interruption = Effect.runPromise(Fiber.interrupt(startup)).then(() => {
         interrupted = true;
@@ -452,6 +469,7 @@ describe("completed migration backup recovery", () => {
       await interruption;
       expect((await Effect.runPromise(Fiber.await(startup)))._tag).toBe("Failure");
     } finally {
+      clearTimeout(inspectionEntryTimeout);
       release.resolve();
       await Effect.runPromise(Fiber.interrupt(startup));
       open.mockImplementation(actual.open);

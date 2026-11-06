@@ -4117,7 +4117,7 @@ export default function Sidebar() {
       }
       setProjectAgentDialogState({ projectId: hubProjectId, mode: "onboarding" });
     },
-    [activateThreadFromSidebarIntent, summaryFor],
+    [activateThreadFromSidebarIntent, setProjectAgentDialogState, summaryFor],
   );
   const {
     activeSpace,
@@ -4240,7 +4240,7 @@ export default function Sidebar() {
         });
       }
     },
-    [handleSelectSpaceForIncomingProject],
+    [handleSelectSpaceForIncomingProject, setProjectAgentDialogState],
   );
   const handleCreateProjectSubmit = useCallback(
     async (value: CreateProjectSubmitValue, options: CreateProjectSubmitOptions) => {

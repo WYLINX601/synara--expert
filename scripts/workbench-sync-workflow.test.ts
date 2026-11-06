@@ -143,7 +143,7 @@ async function makeFixture(conflict = false): Promise<Fixture> {
     join(repo, "workbench/upstream.lock.json"),
     `${JSON.stringify(fixtureLock(baseSha, targetSha), null, 2)}\n`,
   );
-  await writeFile(join(repo, ".mise.toml"), '[tools]\nnode = "24.13.1"\nbun = "1.4.2"\n');
+  await writeFile(join(repo, ".mise.toml"), '[tools]\nnode = "24.13.1"\nbun = "1.4.4"\n');
   await writeFile(join(repo, "bun.lock"), '{"lockfileVersion":1}\n');
   git(repo, "add", "--", "workbench/upstream.lock.json", ".mise.toml", "bun.lock");
   if (conflict) git(repo, "add", "--", baseFile);
@@ -173,7 +173,7 @@ async function checkedAndPrepared(fixture: Fixture) {
   return { baseSha, prepare };
 }
 
-const toolchain = { node: "24.13.1", bun: "1.4.2" };
+const toolchain = { node: "24.13.1", bun: "1.4.4" };
 const allPassing = () => ({ exitCode: 0, stdout: "", stderr: "" });
 
 async function runtimeEvidenceFor(
@@ -652,7 +652,10 @@ describe("workbench sync persisted workflow", () => {
       ).toBe(0o700);
       expect((await stat(indexPath)).mode & 0o777).toBe(0o600);
     }
-    const status = await statusWorkbenchSync({ repoRoot: fixture.repo });
+    const status = await statusWorkbenchSync({
+      repoRoot: fixture.repo,
+      dependencies: { readToolchain: () => toolchain },
+    });
     expect(status.status).toBe("checks-failed");
     expect((status.candidate as { readonly verificationLogs: unknown }).verificationLogs).toEqual(
       verified.verificationLogs,
@@ -696,7 +699,14 @@ describe("workbench sync persisted workflow", () => {
       status: "failed",
       reason: "log-directory-unavailable",
     });
-    expect((await statusWorkbenchSync({ repoRoot: fixture.repo })).status).toBe("checks-failed");
+    expect(
+      (
+        await statusWorkbenchSync({
+          repoRoot: fixture.repo,
+          dependencies: { readToolchain: () => toolchain },
+        })
+      ).status,
+    ).toBe("checks-failed");
   });
 
   // The composed Git fixture needs a 30s test budget matching its per-command Git timeout.
@@ -812,7 +822,14 @@ describe("workbench sync persisted workflow", () => {
       "passed",
       "passed",
     ]);
-    expect((await statusWorkbenchSync({ repoRoot: fixture.repo })).status).toBe("checks-failed");
+    expect(
+      (
+        await statusWorkbenchSync({
+          repoRoot: fixture.repo,
+          dependencies: { readToolchain: () => toolchain },
+        })
+      ).status,
+    ).toBe("checks-failed");
   });
 
   it("reports an appended candidate commit as needing bind without resetting the branch", async () => {
@@ -862,7 +879,7 @@ describe("workbench sync persisted workflow", () => {
       repoRoot: toolchainFixture.repo,
       candidateSha: toolchainPrepared.prepare.candidateSha!,
       dependencies: {
-        readToolchain: () => ({ node: "24.13.0", bun: "1.4.2" }),
+        readToolchain: () => ({ node: "24.13.0", bun: "1.4.4" }),
         commandRunner: () => allPassing(),
       },
     });
@@ -872,7 +889,7 @@ describe("workbench sync persisted workflow", () => {
       (
         await statusWorkbenchSync({
           repoRoot: toolchainFixture.repo,
-          dependencies: { readToolchain: () => ({ node: "24.13.0", bun: "1.4.2" }) },
+          dependencies: { readToolchain: () => ({ node: "24.13.0", bun: "1.4.4" }) },
         })
       ).status,
     ).toBe("rebind-required");

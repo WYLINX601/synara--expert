@@ -14,7 +14,7 @@ import { expectedCandidateBranch } from "./lib/workbench-sync/sync.ts";
 
 const temporaryDirectories: string[] = [];
 const OFFICIAL_REPOSITORY = "https://github.com/Emanuele-web04/synara.git";
-const toolchain = { node: "24.13.1", bun: "1.4.2" };
+const toolchain = { node: "24.13.1", bun: "1.4.4" };
 const BUILD_CONFIG = {
   formatVersion: 1,
   versions: { workbench: "0.1.0", "workbench-preview": "0.1.0-preview.1" },
@@ -93,7 +93,7 @@ function makeFixture(): BuildFixture {
     join(repo, "workbench/build-config.json"),
     `${JSON.stringify(BUILD_CONFIG, null, 2)}\n`,
   );
-  writeFileSync(join(repo, ".mise.toml"), '[tools]\nnode = "24.13.1"\nbun = "1.4.2"\n');
+  writeFileSync(join(repo, ".mise.toml"), '[tools]\nnode = "24.13.1"\nbun = "1.4.4"\n');
   writeFileSync(join(repo, "bun.lock"), '{"lockfileVersion":1}\n');
   writeFileSync(
     join(repo, "apps/server/src/persistence/Migrations.ts"),
@@ -278,7 +278,7 @@ describe("workbench build manifest", () => {
     );
 
     expect(schemas).toEqual({
-      officialMigrationHighWater: 135,
+      officialMigrationHighWater: 141,
       workbenchMigrationHighWaterByModule: { context: 1, expert: 14 },
       workbenchSchemaFormatVersion: 1,
     });

@@ -4382,6 +4382,7 @@ describe("OrchestrationEngine", () => {
     const createdAt = now();
     const projectId = asProjectId("context-first-bind-project");
     const threadId = ThreadId.makeUnsafe("context-first-bind-thread");
+    const provenanceThreadId = ThreadId.makeUnsafe("context-provenance-thread");
     const historicalThreadId = ThreadId.makeUnsafe("context-historical-thread");
     const turnCommandId = CommandId.makeUnsafe("context-first-bind-turn-accepted");
 
@@ -4398,27 +4399,32 @@ describe("OrchestrationEngine", () => {
         }),
       );
 
-      await system.run(
-        engine.dispatch({
-          type: "thread.create",
-          commandId: CommandId.makeUnsafe("context-first-bind-thread-create"),
-          threadId,
-          projectId,
-          title: "New Synara thread",
-          modelSelection: { provider: "codex", model: "gpt-5-codex" },
-          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
-          branch: null,
-          worktreePath: null,
-          // This untrusted provenance field must not turn an ordinary creation into legacy mode.
-          creationSource: "provider_native",
-          createdAt,
-        }),
-      );
-      expect(await system.run(system.contextRepository.getThreadBinding(threadId))).toEqual({
-        mode: "unbound",
-      });
-
+      for (const createdThreadId of [threadId, provenanceThreadId]) {
+        await system.run(
+          engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.makeUnsafe(`${createdThreadId}-create`),
+            threadId: createdThreadId,
+            projectId,
+            title: "New Synara thread",
+            modelSelection: { provider: "codex", model: "gpt-5-codex" },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            // This untrusted provenance field must not turn an ordinary creation into legacy mode.
+            ...(createdThreadId === provenanceThreadId
+              ? { creationSource: "provider_native" as const }
+              : {}),
+            createdAt,
+          }),
+        );
+        expect(
+          await system.run(system.contextRepository.getThreadBinding(createdThreadId)),
+        ).toEqual({
+          mode: "unbound",
+        });
+      }
       await system.run(
         engine.dispatch(
           {
@@ -4470,11 +4476,12 @@ describe("OrchestrationEngine", () => {
       const startTurn = (
         suffix: string,
         modelProvider?: "codex" | "claudeAgent" | "omp" | "opencode",
+        targetThreadId = threadId,
       ) =>
         engine.dispatch({
           type: "thread.turn.start",
           commandId: CommandId.makeUnsafe(`context-first-bind-turn-${suffix}`),
-          threadId,
+          threadId: targetThreadId,
           message: {
             messageId: asMessageId(`context-first-bind-message-${suffix}`),
             role: "user",
@@ -4497,6 +4504,15 @@ describe("OrchestrationEngine", () => {
           runtimeMode: "approval-required",
           createdAt,
         });
+
+      // Native Codex children remain non-addressable; provenance must also
+      // never grant a legacy Context binding to a newly created thread.
+      await expect(
+        system.run(startTurn("native-provenance", undefined, provenanceThreadId)),
+      ).rejects.toThrow("Direct messages to Codex subagent");
+      expect(await system.run(context.getThreadBinding(provenanceThreadId))).toEqual({
+        mode: "unbound",
+      });
 
       await expect(system.run(startTurn("migration-pending"))).rejects.toThrow(
         "Resolve the claimed legacy Project instructions",

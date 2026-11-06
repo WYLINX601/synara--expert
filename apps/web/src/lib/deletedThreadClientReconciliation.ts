@@ -1,3 +1,4 @@
+import { useAmbientContextBindingStore } from "../ambientContextBindingStore";
 // FILE: deletedThreadClientReconciliation.ts
 // Purpose: Keeps thread-delete UI state responsive after the server accepts deletion.
 // Layer: Web orchestration helper
@@ -39,6 +40,7 @@ export async function reconcileDeletedThreadsFromClient(
 
   for (const threadId of threadIds) {
     useDiffRenderModeStore.getState().removeThread(threadId);
+    useAmbientContextBindingStore.getState().removeThread(threadId);
     input.removeDeletedThreadFromClientState(threadId);
   }
 }

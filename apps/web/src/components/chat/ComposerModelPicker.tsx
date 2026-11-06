@@ -122,6 +122,7 @@ type ComposerModelPickerProps = {
   modelOptionsByProviderInstance?: ProviderModelOptionsByProviderInstance;
   // Narrow-composer degradation: drop the model name (provider icon stays)
   // and/or the effort/status label; both remain available to assistive tech.
+  compact?: boolean;
   hideModelLabel?: boolean;
   hideStatusLabel?: boolean;
   contextWindowLabel?: string | null;
@@ -569,6 +570,8 @@ export function ComposerModelPicker(props: ComposerModelPickerProps) {
         contextWindowLabel={activeProvider === "claudeAgent" ? props.contextWindowLabel : null}
         showsFastBadge={showsComposerFastModeBadge(currentTraitSelection)}
         fastModeNotice={activeProvider === "claudeAgent" ? props.fastModeNotice : null}
+        compact={props.compact}
+        modelTitle={modelLabel}
         hideModelLabel={props.hideModelLabel}
         hideStatusLabel={props.hideStatusLabel}
         disabled={props.disabled}

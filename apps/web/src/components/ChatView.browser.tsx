@@ -1,3 +1,10 @@
+import { useAmbientContextBindingStore } from "~/ambientContextBindingStore";
+import type {
+  AmbientContextDesktopMethods,
+  AmbientContextDesktopState,
+  DesktopBridge,
+  ZenModeState,
+} from "@synara/contracts";
 import { makeQueuedChatTurn } from "../composerDraftStoreTestFixtures";
 import * as ambientContextClient from "../workbench/host/ambientContextClient";
 import { ambientResourceSnapshot } from "~/lib/ambientContext";
@@ -82,7 +89,7 @@ import { extractTrailingBrowserAnnotations } from "../lib/browserAnnotations";
 import { isMacNavigatorPlatform } from "../lib/utils";
 import { STARRED_MODELS_STORAGE_KEY } from "../lib/starredModels";
 import { readNativeApi } from "../nativeApi";
-import { setLanguagePreference } from "~/i18n";
+import { setLanguagePreference, t } from "~/i18n";
 import { DEFAULT_THEME_STATE, getCodeThemeSeed } from "~/theme/theme.logic";
 import { emitWsTransportState } from "../wsTransportEvents";
 import { dispatchKanbanDraftThread } from "../lib/kanbanDispatch";
@@ -2397,7 +2404,738 @@ async function mountChatView(options: {
   };
 }
 
+function installZenModeBridge(initial: Partial<ZenModeState> = {}) {
+  const previous = window.desktopBridge;
+  let state: ZenModeState = {
+    isActive: false,
+    expanded: false,
+    alwaysOnTop: true,
+    shortcut: "CommandOrControl+Shift+Z",
+    shortcutAvailable: true,
+    ...initial,
+  };
+  const listeners = new Set<(value: ZenModeState) => void>();
+  const toggles = new Set<() => void>();
+  const update = (patch: Partial<ZenModeState>) => {
+    state = { ...state, ...patch };
+    for (const listener of listeners) listener(state);
+  };
+  const zenMode = {
+    getState: vi.fn(async () => state),
+    enter: vi.fn(async () => update({ isActive: true, expanded: false })),
+    exit: vi.fn(async () => update({ isActive: false, expanded: false })),
+    setExpanded: vi.fn(async (expanded: boolean) => update({ expanded })),
+    setCompactHeight: vi.fn(async (_height: number) => {}),
+    onStateChanged: (listener: (value: ZenModeState) => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    onToggleRequested: (listener: () => void) => {
+      toggles.add(listener);
+      return () => {
+        toggles.delete(listener);
+      };
+    },
+  };
+  window.desktopBridge = {
+    getWsUrl: () => null,
+    setTheme: async () => {},
+    setAppIcon: async () => {},
+    browser: {},
+    ...previous,
+    zenMode,
+  } as DesktopBridge;
+  onTestFinished(() => {
+    if (previous) window.desktopBridge = previous;
+    else delete window.desktopBridge;
+  });
+  return {
+    ...zenMode,
+    updateNativeState: update,
+    toggleShortcut: () => {
+      for (const listener of toggles) listener();
+    },
+  };
+}
+
 describe("ChatView transcript geometry (full app)", () => {
+  it("Zen preview keeps the shared editor with compact inline permissions and model controls", async () => {
+    installZenModeBridge();
+    setLanguagePreference("zh-CN");
+    const paper = ambientResourceSnapshot({
+      sourceId: "paper",
+      targetKey: "paper-note",
+      uri: "obsidian://open?vault=Paper&file=景宁畲族传统民居.md",
+      title: "景宁畲族传统民居.md",
+    });
+    const work = ambientResourceSnapshot({
+      sourceId: "work",
+      targetKey: "work-note",
+      uri: "obsidian://open?vault=Work&file=调研计划.md",
+      title: "调研计划.md",
+    });
+    const reference = paper.items[0]!;
+    const state: AmbientContextDesktopState = {
+      sources: [
+        {
+          manifest: { id: "obsidian", label: "Obsidian", kind: "application", capabilities: [] },
+          policy: {
+            enabled: true,
+            allowedTypes: ["resource.identity", "selection.text", "resource.content"],
+          },
+          connected: true,
+          error: null,
+        },
+      ],
+      connections: [
+        { id: "paper", sourceId: "paper", label: "Paper", connected: true, error: null },
+        { id: "work", sourceId: "work", label: "Work", connected: true, error: null },
+      ],
+      items: [
+        ...paper.items,
+        {
+          ...reference,
+          observation: {
+            ...reference.observation,
+            id: "preview-selection",
+            type: "selection.text",
+            value: { text: "建筑空间与日常生活相互作用，形成可被识别的地方性特征。" },
+          },
+        },
+        ...work.items,
+      ],
+    };
+    window.desktopBridge = {
+      ...window.desktopBridge!,
+      ambientContext: {
+        getState: async () => ({
+          ...state,
+          items: state.items.map((item) => ({
+            ...item,
+            observation: { ...item.observation, capturedAt: new Date().toISOString() },
+          })),
+        }),
+        searchResources: async () => [],
+        capture: async () => ({ ...paper, items: state.items }),
+        configure: async () => state,
+        getPairing: async () => ({ endpoint: "", token: "" }),
+        onChanged: () => () => {},
+      },
+    };
+    const base = createSnapshotForTargetUser({
+      targetMessageId: MessageId.makeUnsafe("zen-preview-user"),
+      targetText: "帮我整理这段材料的分析维度。",
+    });
+    const snapshot = {
+      ...base,
+      threads: base.threads.map((thread) =>
+        thread.id !== THREAD_ID
+          ? thread
+          : {
+              ...thread,
+              title: "景宁畲族传统民居研究",
+              messages: thread.messages.slice(-2).map((message) => ({
+                ...message,
+                text:
+                  message.role === "user"
+                    ? "结合当前笔记，梳理传统民居的空间分析维度。"
+                    : "可以先从三个维度组织材料：\n\n1. **空间组织**：院落、堂屋与过渡空间的层级关系。\n2. **日常使用**：居住、生产与礼俗活动如何共享空间。\n3. **地方特征**：构造、材料与地形适应的具体表现。\n\n建议先保留原文与页码，再区分观察事实和解释性判断。",
+              })),
+            },
+      ),
+    };
+    useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+    for (const binding of state.connections!)
+      useAmbientContextBindingStore.getState().bind(THREAD_ID, binding);
+    useComposerDraftStore
+      .getState()
+      .setPrompt(THREAD_ID, "结合这段选区，帮我细化空间组织的分析提纲。");
+    const mounted = await mountChatView({
+      viewport: { name: "main-comparison", width: 720, height: 560 },
+      snapshot,
+    });
+    const appearance = () => {
+      const surface = document.querySelector<HTMLElement>("[data-chat-composer-surface]")!;
+      const style = getComputedStyle(surface);
+      return {
+        borderWidth: style.borderWidth,
+        boxShadow: style.boxShadow,
+        fontFamily: getComputedStyle(document.querySelector('[data-testid="composer-editor"]')!)
+          .fontFamily,
+        fontSize: getComputedStyle(document.querySelector('[data-testid="composer-editor"]')!)
+          .fontSize,
+      };
+    };
+    try {
+      const editor = await waitForComposerEditor();
+      await expect
+        .element(
+          page.getByRole("button", { name: t("chat:ambientViewContext", { label: "Paper" }) }),
+        )
+        .toBeVisible();
+      await waitForLayout();
+      const originalWidth = queryComposerShell().getBoundingClientRect().width;
+      const originalAppearance = appearance();
+
+      await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
+      await mounted.setViewport({ name: "zen-comparison", width: 720, height: 240 });
+      const zenWidth = queryComposerShell().getBoundingClientRect().width;
+      const matchedViewportWidth = Math.round(720 + originalWidth - zenWidth);
+      await mounted.setViewport({
+        name: "zen-comparison",
+        width: matchedViewportWidth,
+        height: 240,
+      });
+      await waitForLayout();
+      expect(await waitForComposerEditor()).toBe(editor);
+      expect(
+        Math.abs(queryComposerShell().getBoundingClientRect().width - originalWidth),
+      ).toBeLessThan(1);
+      expect(appearance()).toEqual(originalAppearance);
+      await expect
+        .element(
+          page.getByRole("button", { name: t("chat:ambientViewContext", { label: "Paper" }) }),
+        )
+        .toBeVisible();
+      const modelLabel = t("chat:modelEffort_changeModelAndReasoning");
+      const permissionLabel = t("settings:runtimeFullLabel");
+      const modelButton = page.getByRole("button", { name: modelLabel, exact: true });
+      const permissionButton = page.getByRole("button", { name: permissionLabel, exact: true });
+      const surface = document.querySelector("[data-chat-composer-surface]")!;
+      expect(document.querySelector("[data-chat-composer-status-row]")).toBeNull();
+      expect(document.querySelectorAll(`button[aria-label="${modelLabel}"]`)).toHaveLength(1);
+      const modelElement = document.querySelector<HTMLButtonElement>(
+        `button[aria-label="${modelLabel}"]`,
+      )!;
+      expect(surface.contains(modelElement)).toBe(true);
+      expect(modelElement.title).toContain("GPT");
+      const permissionElement = Array.from(
+        surface.querySelectorAll<HTMLButtonElement>("button[title]"),
+      ).find((button) => button.textContent?.trim() === permissionLabel)!;
+      expect(permissionElement.title).toContain(permissionLabel);
+      await permissionButton.click();
+      await expect
+        .element(
+          page.getByRole("menuitemradio", { name: new RegExp(t("settings:runtimeAskLabel")) }),
+        )
+        .toBeVisible();
+      await userEvent.keyboard("{Escape}");
+      await modelButton.click();
+      await expect
+        .element(page.getByRole("searchbox", { name: t("chat:searchModels"), exact: true }))
+        .toBeVisible();
+      await userEvent.keyboard("{Escape}");
+      editor.focus();
+      // Fit the preview window to the actual compact stack, not a cropped screenshot.
+      // Native sizing remains outside this fixture.
+      const stackHeight = () => {
+        const toolbar = document.querySelector('[data-testid="zen-mode-toolbar"]')!;
+        const footer = document.querySelector('[data-chat-composer-form="true"]')!;
+        return Math.ceil(
+          footer.getBoundingClientRect().bottom - toolbar.getBoundingClientRect().top + 16,
+        );
+      };
+      await mounted.setViewport({
+        name: "zen-compact",
+        width: matchedViewportWidth,
+        height: stackHeight(),
+      });
+      await waitForLayout();
+      const compactToolbar = document
+        .querySelector('[data-testid="zen-mode-toolbar"]')!
+        .getBoundingClientRect();
+      const compactForm = document
+        .querySelector('[data-chat-composer-form="true"]')!
+        .getBoundingClientRect();
+      expect(Math.abs(compactForm.top - compactToolbar.bottom)).toBeLessThanOrEqual(1);
+      await page.screenshot({
+        path: "../../../../output/playwright/zen-inline-controls-compact.png",
+      });
+      await mounted.setViewport({ name: "zen-narrow", width: 520, height: 240 });
+      await mounted.setViewport({ name: "zen-narrow", width: 520, height: stackHeight() });
+      await waitForLayout();
+      expect(await waitForComposerEditor()).toBe(editor);
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(520);
+      expect(editor.getBoundingClientRect().width).toBeGreaterThanOrEqual(160);
+      await page.screenshot({
+        path: "../../../../output/playwright/zen-inline-controls-narrow.png",
+      });
+      useComposerDraftStore
+        .getState()
+        .setPrompt(THREAD_ID, "第一段：保持原输入编辑器。\n第二段：多行时权限和模型仍在输入区域。");
+      await mounted.setViewport({ name: "zen-narrow-multiline", width: 520, height: 300 });
+      await waitForLayout();
+      expect(await waitForComposerEditor()).toBe(editor);
+      expect(queryComposerShell().getAttribute("data-composer-layout")).not.toBe("row");
+      const multilineSurface = document.querySelector<HTMLElement>("[data-chat-composer-surface]")!;
+      expect(
+        multilineSurface.contains(document.querySelector(`button[aria-label="${modelLabel}"]`)),
+      ).toBe(true);
+      expect(multilineSurface.textContent).toContain(permissionLabel);
+      expect(multilineSurface.scrollWidth).toBeLessThanOrEqual(multilineSurface.clientWidth + 1);
+      expect(editor.getBoundingClientRect().width).toBeGreaterThanOrEqual(160);
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, "");
+      useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+      await mounted.setViewport({ name: "zen-empty", width: matchedViewportWidth, height: 180 });
+      await waitForLayout();
+      await mounted.setViewport({
+        name: "zen-empty",
+        width: matchedViewportWidth,
+        height: stackHeight(),
+      });
+      await waitForLayout();
+      expect(await waitForComposerEditor()).toBe(editor);
+      await page.screenshot({
+        path: "../../../../output/playwright/zen-inline-controls-empty.png",
+      });
+      useComposerDraftStore
+        .getState()
+        .setPrompt(THREAD_ID, "结合这段选区，帮我细化空间组织的分析提纲。");
+      for (const binding of state.connections!)
+        useAmbientContextBindingStore.getState().bind(THREAD_ID, binding);
+      await page.getByRole("button", { name: t("chat:zenExpand"), exact: true }).click();
+      await mounted.setViewport({ name: "zen-expanded", width: matchedViewportWidth, height: 560 });
+      await waitForLayout();
+      expect(await waitForComposerEditor()).toBe(editor);
+      expect(appearance()).toEqual(originalAppearance);
+      const expandedToolbar = document
+        .querySelector('[data-testid="zen-mode-toolbar"]')!
+        .getBoundingClientRect();
+      const drawer = document
+        .querySelector('[data-testid="chat-transcript-drawer"]')!
+        .getBoundingClientRect();
+      expect(Math.abs(drawer.left - expandedToolbar.left)).toBeLessThan(1);
+      expect(Math.abs(drawer.width - expandedToolbar.width)).toBeLessThan(1);
+      expect(Math.abs(drawer.top - expandedToolbar.bottom)).toBeLessThanOrEqual(1);
+      await page.screenshot({
+        path: "../../../../output/playwright/zen-inline-controls-expanded.png",
+      });
+      await page.getByRole("button", { name: t("chat:zenReturn"), exact: true }).click();
+      await mounted.setViewport({ name: "main-return", width: 720, height: 560 });
+      await waitForLayout();
+      expect(await waitForComposerEditor()).toBe(editor);
+      const restoredRow = document.querySelector("[data-chat-composer-status-row]")!;
+      expect(restoredRow.querySelector(`button[aria-label="${modelLabel}"]`)).not.toBeNull();
+      expect(restoredRow.textContent).toContain(permissionLabel);
+      expect(document.querySelectorAll(`button[aria-label="${modelLabel}"]`)).toHaveLength(1);
+    } finally {
+      await mounted.cleanup();
+      useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+      setLanguagePreference("en");
+    }
+  });
+
+  it("Zen reports intrinsic compact growth without viewport or expanded feedback", async () => {
+    const bridge = installZenModeBridge();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithLongAssistantResponse(),
+    });
+    const height = () => bridge.setCompactHeight.mock.calls.at(-1)?.[0] ?? 0;
+    try {
+      const editor = await waitForComposerEditor();
+      expect(bridge.setCompactHeight).not.toHaveBeenCalled();
+      await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
+      await mounted.setViewport({ name: "zen-height", width: 720, height: 160 });
+      await vi.waitFor(() => expect(height()).toBeGreaterThanOrEqual(96));
+      await waitForLayout();
+      const emptyHeight = height();
+      const emptyCalls = bridge.setCompactHeight.mock.calls.length;
+      await mounted.setViewport({ name: "zen-height", width: 720, height: emptyHeight });
+      await waitForLayout();
+      expect(bridge.setCompactHeight).toHaveBeenCalledTimes(emptyCalls);
+      useComposerDraftStore
+        .getState()
+        .setPrompt(THREAD_ID, "First line\nSecond line\nThird line\nFourth line");
+      await vi.waitFor(() => expect(height()).toBeGreaterThan(emptyHeight));
+      expect(height()).toBeLessThanOrEqual(600);
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, "");
+      await vi.waitFor(() => expect(height()).toBe(emptyHeight));
+      await page.getByRole("button", { name: t("chat:zenExpand"), exact: true }).click();
+      await mounted.setViewport({ name: "zen-expanded", width: 720, height: 560 });
+      const expandedCalls = bridge.setCompactHeight.mock.calls.length;
+      useComposerDraftStore
+        .getState()
+        .setPrompt(THREAD_ID, "Expanded draft\nStill intrinsic\nThird line");
+      await mounted.setViewport({ name: "zen-expanded", width: 720, height: 700 });
+      await waitForLayout();
+      expect(bridge.setCompactHeight).toHaveBeenCalledTimes(expandedCalls);
+      await page.getByRole("button", { name: t("chat:zenCollapse"), exact: true }).click();
+      await vi.waitFor(() =>
+        expect(bridge.setCompactHeight.mock.calls.length).toBeGreaterThan(expandedCalls),
+      );
+      expect(height()).toBeGreaterThan(emptyHeight);
+      expect(height()).toBeLessThan(560);
+      expect(await waitForComposerEditor()).toBe(editor);
+      await page.getByRole("button", { name: t("chat:zenReturn"), exact: true }).click();
+      const exitedCalls = bridge.setCompactHeight.mock.calls.length;
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, "Normal draft");
+      await waitForLayout();
+      expect(bridge.setCompactHeight).toHaveBeenCalledTimes(exitedCalls);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("Zen exits after navigation during enter and warns when the shortcut is unavailable", async () => {
+    const bridge = installZenModeBridge({ shortcutAvailable: false });
+    let finishEnter!: () => void;
+    const entering = new Promise<void>((resolve) => {
+      finishEnter = resolve;
+    });
+    bridge.enter.mockImplementationOnce(async () => {
+      bridge.updateNativeState({ isActive: true, expanded: false });
+      await entering;
+    });
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithLongAssistantResponse(),
+    });
+    try {
+      const entry = page.getByRole("button", { name: t("chat:zenMode"), exact: true });
+      await entry.click();
+      await expect
+        .element(page.getByText(t("chat:zenShortcutUnavailable"), { exact: true }))
+        .toBeVisible();
+      await mounted.router.navigate({ to: "/settings" });
+      expect(bridge.exit).not.toHaveBeenCalled();
+      finishEnter();
+      await vi.waitFor(() => expect(bridge.exit).toHaveBeenCalledTimes(1));
+      expect((await bridge.getState()).isActive).toBe(false);
+    } finally {
+      finishEnter();
+      await mounted.cleanup();
+    }
+  });
+
+  it("Zen reserves bounded menu space from an actual compact viewport and restores it", async () => {
+    const bridge = installZenModeBridge();
+    const base = createSnapshotWithLongAssistantResponse();
+    const snapshot = {
+      ...base,
+      threads: base.threads.map((thread) => ({
+        ...thread,
+        activities: [
+          ...thread.activities,
+          {
+            id: EventId.makeUnsafe("zen-usage"),
+            kind: "context-window.updated",
+            tone: "info" as const,
+            summary: "Usage",
+            payload: { usedTokens: 500, maxTokens: 1000, usedPercent: 50 },
+            turnId: null,
+            createdAt: NOW_ISO,
+          },
+        ],
+      })),
+    };
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    bridge.setCompactHeight.mockImplementation(async (height) => {
+      await mounted.setViewport({ name: "native-compact", width: 720, height });
+    });
+    try {
+      const editor = await waitForComposerEditor();
+      await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
+      await vi.waitFor(() => expect(window.innerHeight).toBe(96));
+      const bottomGap = () =>
+        window.innerHeight -
+        document.querySelector('[data-chat-composer-form="true"]')!.getBoundingClientRect().bottom;
+      const originalGap = bottomGap();
+      const model = page.getByRole("button", {
+        name: t("chat:modelEffort_changeModelAndReasoning"),
+        exact: true,
+      });
+      await model.hover();
+      await waitForLayout();
+      expect(window.innerHeight).toBe(96);
+      await page.getByRole("button", { name: t("settings:runtimeFullLabel"), exact: true }).click();
+      await vi.waitFor(() => expect(window.innerHeight).toBe(600));
+      await expect
+        .element(
+          page.getByRole("menuitemradio", { name: new RegExp(t("settings:runtimeAskLabel")) }),
+        )
+        .toBeVisible();
+      expect((await bridge.getState()).expanded).toBe(false);
+      await userEvent.keyboard("{Escape}");
+      await vi.waitFor(() => expect(window.innerHeight).toBe(96));
+      await model.click();
+      await vi.waitFor(() => expect(window.innerHeight).toBe(600));
+      const search = page.getByRole("searchbox", { name: t("chat:searchModels"), exact: true });
+      await expect.element(search).toBeVisible();
+      await search.fill("GPT");
+      expect(search.element().getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
+      await userEvent.keyboard("{Escape}");
+      await vi.waitFor(() => expect(window.innerHeight).toBe(96));
+      await page.getByRole("button", { name: "Context window 50% used", exact: true }).click();
+      await vi.waitFor(() => expect(window.innerHeight).toBe(600));
+      await expect
+        .element(page.getByText(t("chat:sessionStatus_contextWindow"), { exact: true }))
+        .toBeVisible();
+      await userEvent.keyboard("{Escape}");
+      await userEvent.hover(document.body, { position: { x: 0, y: 0 } });
+      await vi.waitFor(() => expect(window.innerHeight).toBe(96));
+      await page
+        .getByRole("button", { name: t("chat:composerExtras_extras"), exact: true })
+        .click();
+      await vi.waitFor(() => expect(window.innerHeight).toBe(600));
+      expect(Math.abs(bottomGap() - originalGap)).toBeLessThan(1);
+      await page
+        .getByRole("button", { name: t("chat:composerExtras_extras"), exact: true })
+        .click();
+      await vi.waitFor(() => expect(window.innerHeight).toBe(96));
+      await page.getByTestId("composer-editor").fill("@");
+      await vi.waitFor(() => expect(window.innerHeight).toBe(600));
+      await expect
+        .element(page.getByRole("tab", { name: t("chat:ambientMentionFiles"), exact: true }))
+        .toBeVisible();
+      expect(getComputedStyle(document.querySelector("[data-zen-main]")!).overflowY).toBe(
+        "visible",
+      );
+      const options = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'));
+      expect(options.length).toBeGreaterThan(0);
+      options.at(-1)!.scrollIntoView({ block: "nearest" });
+      await waitForLayout();
+      const lastOption = options.at(-1)!.getBoundingClientRect();
+      expect(lastOption.top).toBeGreaterThanOrEqual(0);
+      expect(lastOption.bottom).toBeLessThanOrEqual(window.innerHeight);
+      expect(Math.abs(bottomGap() - originalGap)).toBeLessThan(1);
+      await userEvent.keyboard("{Escape}");
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, "");
+      await vi.waitFor(() => expect(window.innerHeight).toBe(96));
+      expect(await waitForComposerEditor()).toBe(editor);
+      await page.getByRole("button", { name: t("chat:zenExpand"), exact: true }).click();
+      await mounted.setViewport({ name: "native-expanded", width: 720, height: 560 });
+      const calls = bridge.setCompactHeight.mock.calls.length;
+      await model.click();
+      await expect
+        .element(page.getByRole("searchbox", { name: t("chat:searchModels"), exact: true }))
+        .toBeVisible();
+      await waitForLayout();
+      expect(bridge.setCompactHeight).toHaveBeenCalledTimes(calls);
+      expect(window.innerHeight).toBe(560);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("Zen keeps Stop reachable with an empty input and a collapsed conversation", async () => {
+    installZenModeBridge();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithInlineToolOverflow({ active: true }),
+    });
+    try {
+      const editor = await waitForComposerEditor();
+      await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
+      await mounted.setViewport({ name: "zen-running", width: 720, height: 160 });
+      await expect
+        .element(
+          page.getByRole("button", { name: t("chat:stopGeneration_ariaLabel"), exact: true }),
+        )
+        .toBeVisible();
+      expect(await waitForComposerEditor()).toBe(editor);
+      await page
+        .getByRole("button", { name: t("chat:stopGeneration_ariaLabel"), exact: true })
+        .click();
+      await vi.waitFor(() =>
+        expect(
+          wsRequests.some(
+            (request) => (request.command as { type?: string })?.type === "thread.turn.interrupt",
+          ),
+        ).toBe(true),
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("Zen preserves the same composer, attachment, binding and queue while toggling the drawer", async () => {
+    const bridge = installZenModeBridge();
+    const snapshot = createSnapshotWithInlineToolOverflow({ active: true });
+    const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
+    try {
+      const editor = await waitForComposerEditor();
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, "Keep this Zen draft");
+      const file = new File(["Zen attachment"], "zen.txt", { type: "text/plain" });
+      useComposerDraftStore.getState().addFiles(THREAD_ID, [
+        {
+          type: "file",
+          id: "zen-file",
+          name: file.name,
+          mimeType: file.type,
+          sizeBytes: file.size,
+          file,
+        },
+      ]);
+      const queued = makeQueuedChatTurn("zen-queue");
+      useComposerDraftStore.getState().enqueueQueuedTurn(THREAD_ID, queued);
+      useAmbientContextBindingStore
+        .getState()
+        .bind(THREAD_ID, { id: "zen-vault", sourceId: "obsidian", label: "Zen vault" });
+      await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
+      await mounted.setViewport({ name: "zen", width: 720, height: 360 });
+      await expect.element(page.getByTestId("zen-mode-toolbar")).toBeVisible();
+      expect(await waitForComposerEditor()).toBe(editor);
+      expect(
+        getComputedStyle(document.querySelector('[data-testid="chat-transcript-drawer"]')!).display,
+      ).toBe("none");
+      expect(document.querySelectorAll('[data-chat-composer-form="true"]')).toHaveLength(1);
+      expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.files[0]?.file).toBe(
+        file,
+      );
+      expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.queuedTurns[0]?.id).toBe(
+        "zen-queue",
+      );
+      await page.getByRole("button", { name: t("chat:zenExpand"), exact: true }).click();
+      await mounted.setViewport({ name: "zen-expanded", width: 720, height: 720 });
+      await expect.element(page.getByTestId("chat-transcript-drawer")).toBeVisible();
+      expect((await bridge.getState()).alwaysOnTop).toBe(true);
+      await page.getByRole("button", { name: t("chat:zenReturn"), exact: true }).click();
+      await mounted.setViewport(DEFAULT_VIEWPORT);
+      await expect.element(page.getByTestId("zen-mode-toolbar")).not.toBeInTheDocument();
+      expect(await waitForComposerEditor()).toBe(editor);
+      expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
+        "Keep this Zen draft",
+      );
+      expect(useAmbientContextBindingStore.getState().byThreadId[THREAD_ID]?.[0]?.id).toBe(
+        "zen-vault",
+      );
+      expect(bridge.enter).toHaveBeenCalledTimes(1);
+      expect(bridge.exit).toHaveBeenCalledTimes(1);
+    } finally {
+      await mounted.cleanup();
+      useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+    }
+  });
+
+  it.each([false, true])(
+    "Zen keeps pending approvals reachable and bounded (oversized %s)",
+    async (oversized) => {
+      const bridge = installZenModeBridge();
+      const snapshot = createSnapshotForTargetUser({
+        targetMessageId: MessageId.makeUnsafe("zen-approval-message"),
+        targetText: "Run the command",
+      });
+      const requestId = ApprovalRequestId.makeUnsafe("zen-approval");
+      const thread = snapshot.threads[0]!;
+      const pendingThread = {
+        ...thread,
+        activities: [
+          {
+            id: EventId.makeUnsafe("zen-approval-event"),
+            createdAt: NOW_ISO,
+            kind: "approval.requested",
+            summary: "Command approval requested",
+            tone: "approval" as const,
+            turnId: null,
+            sequence: 1,
+            payload: {
+              requestId,
+              requestKind: "command",
+              detail: "Command: git status",
+              ...(oversized
+                ? {
+                    toolName: "read_file",
+                    toolParamsDisplay: Array.from({ length: 40 }, (_, index) => ({
+                      name: `parameter-${index}`,
+                      value: "A detail requiring explicit approval",
+                    })),
+                  }
+                : {}),
+            },
+          },
+        ],
+        pendingInteractions: [
+          {
+            interactionKind: "approval" as const,
+            requestId,
+            threadId: thread.id,
+            turnId: null,
+            lifecycleGeneration: null,
+            status: "pending" as const,
+            decision: null,
+            responseCommandId: null,
+            responseRequestedAt: null,
+            createdAt: NOW_ISO,
+            resolvedAt: null,
+          },
+        ],
+      };
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: { ...snapshot, threads: [pendingThread] },
+      });
+      try {
+        await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
+        await mounted.setViewport({ name: "zen", width: 720, height: oversized ? 600 : 360 });
+        await expect.element(page.getByRole("button", { name: /Approve once/u })).toBeVisible();
+        expect(
+          document.querySelector('[data-zen-chat="true"]')?.getBoundingClientRect().bottom,
+        ).toBeLessThanOrEqual(oversized ? 600 : 360);
+        await vi.waitFor(() => {
+          const form = document
+            .querySelector('[data-chat-composer-form="true"]')!
+            .getBoundingClientRect();
+          const toolbar = document
+            .querySelector("[data-zen-toolbar-frame]")!
+            .getBoundingClientRect();
+          expect(bridge.setCompactHeight.mock.calls.at(-1)?.[0]).toBe(
+            Math.min(600, Math.max(96, Math.ceil(form.height + toolbar.height))),
+          );
+        });
+        if (oversized) {
+          expect(bridge.setCompactHeight.mock.calls.at(-1)?.[0]).toBe(600);
+          const scroll = document.querySelector<HTMLElement>("[data-zen-main]")!;
+          expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
+        } else {
+          await page.screenshot({ path: "../../../../output/playwright/zen-approval-360.png" });
+        }
+        await page.getByRole("button", { name: /Approve once/u }).click();
+        await vi.waitFor(() =>
+          expect(
+            wsRequests.some(
+              (request) =>
+                (request.command as { type?: string })?.type === "thread.approval.respond",
+            ),
+          ).toBe(true),
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    },
+  );
+
+  it("Zen returns to the same detached transcript after compact and expanded layouts", async () => {
+    const bridge = installZenModeBridge();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithLongAssistantResponse(),
+    });
+    try {
+      const scrollContainer = document.querySelector<HTMLElement>("[data-chat-scroll-container]")!;
+      expect(scrollContainer).not.toBeNull();
+      scrollContainer.dispatchEvent(new WheelEvent("wheel", { deltaY: -500, bubbles: true }));
+      scrollContainer.scrollTop = 100;
+      scrollContainer.dispatchEvent(new Event("scroll"));
+      await waitForLayout();
+      bridge.toggleShortcut();
+      await mounted.setViewport({ name: "zen", width: 720, height: 360 });
+      await page.getByRole("button", { name: t("chat:zenExpand"), exact: true }).click();
+      await mounted.setViewport({ name: "zen-expanded", width: 720, height: 720 });
+      bridge.toggleShortcut();
+      await mounted.setViewport(DEFAULT_VIEWPORT);
+      await waitForLayout();
+      expect(document.querySelector("[data-chat-scroll-container]")).toBe(scrollContainer);
+      expect(scrollContainer.scrollTop).toBeLessThan(
+        scrollContainer.scrollHeight - scrollContainer.clientHeight - 100,
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("keeps the active chat explicitly unread until the next visit", async () => {
     const snapshot = createSnapshotWithInlineToolOverflow({ active: false });
     const mounted = await mountChatView({ viewport: DEFAULT_VIEWPORT, snapshot });
@@ -4408,7 +5146,11 @@ describe("ChatView transcript geometry (full app)", () => {
           tone: "approval" as const,
           turnId: null,
           sequence: 1,
-          payload: { requestId, requestKind: "command", detail: "Command: git status" },
+          payload: {
+            requestId,
+            requestKind: "command",
+            detail: "Command: git status",
+          },
         },
       ],
       pendingInteractions: [
@@ -10276,6 +11018,532 @@ describe("ChatView transcript geometry (full app)", () => {
     }
   });
 
+  it("sends a dismissed mention as literal text without reopening the menu", async () => {
+    const restoreNativeApi = installDeterministicSendNativeApi();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-dismissed-mention" as MessageId,
+        targetText: "literal mention target",
+      }),
+    });
+    try {
+      await page.getByTestId("composer-editor").fill("Explain @nomatchingcontextvault");
+      await expect
+        .element(page.getByRole("tab", { name: t("chat:ambientMentionFiles"), exact: true }))
+        .toBeVisible();
+      await userEvent.keyboard("{Escape}");
+      await expect
+        .element(page.getByRole("tab", { name: t("chat:ambientMentionFiles"), exact: true }))
+        .not.toBeInTheDocument();
+      await userEvent.keyboard("{Enter}");
+      await vi.waitFor(() =>
+        expect(
+          wsRequests.some(
+            (candidate) => turnStartText(candidate) === "Explain @nomatchingcontextvault",
+          ),
+        ).toBe(true),
+      );
+    } finally {
+      await mounted.cleanup();
+      restoreNativeApi();
+    }
+  });
+
+  it("distinguishes same-name resource files from duplicate vault labels in @ files", async () => {
+    const previousBridge = window.desktopBridge;
+    const connections = [
+      { id: "vault-one-abcdefgh", sourceId: "one", label: "Paper", connected: true, error: null },
+      { id: "vault-two-abcdefgh", sourceId: "two", label: "Paper", connected: true, error: null },
+    ];
+    const resources = connections.map((connection) => ({
+      sourceId: connection.sourceId,
+      targetKey: "same-note",
+      title: "Folder/Note.md",
+      uri: `obsidian://open?vault=Paper&file=Folder%2FNote.md&connection=${connection.id}`,
+    }));
+    const bridge: AmbientContextDesktopMethods = {
+      getState: vi.fn(async () => ({
+        sources: [
+          {
+            manifest: {
+              id: "obsidian",
+              label: "Obsidian",
+              kind: "application" as const,
+              capabilities: [],
+            },
+            policy: { enabled: true, allowedTypes: ["resource.identity" as const] },
+            connected: true,
+            error: null,
+          },
+        ],
+        connections,
+        items: [],
+      })),
+      searchResources: vi.fn(async () => resources),
+      capture: vi.fn(),
+      configure: vi.fn(),
+      getPairing: vi.fn(),
+      onChanged: () => () => {},
+    };
+    window.desktopBridge = {
+      getWsUrl: () => null,
+      setTheme: async () => {},
+      setAppIcon: async () => {},
+      browser: {},
+      ...previousBridge,
+      ambientContext: bridge,
+    } as DesktopBridge;
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "duplicate-resource" as MessageId,
+        targetText: "resource labels",
+      }),
+    });
+    try {
+      await page.getByTestId("composer-editor").fill("@Note");
+      const first = page.getByRole("option", { name: /Paper · e-abcdefgh/u });
+      const second = page.getByRole("option", { name: /Paper · o-abcdefgh/u });
+      await expect.element(first).toBeVisible();
+      await expect.element(second).toBeVisible();
+      expect(first.element().textContent).toContain("Note.md");
+      expect(second.element().textContent).toContain("Note.md");
+      expect(
+        first.element().querySelector('[title="Paper · vault-one-abcdefgh · Folder/Note.md"]'),
+      ).not.toBeNull();
+      expect(
+        second.element().querySelector('[title="Paper · vault-two-abcdefgh · Folder/Note.md"]'),
+      ).not.toBeNull();
+    } finally {
+      await mounted.cleanup();
+      if (previousBridge) window.desktopBridge = previousBridge;
+      else delete window.desktopBridge;
+    }
+  });
+
+  it.each([
+    { name: "chat", livePlan: false, originalPrompt: "Retry frozen context", captureEmpty: false },
+    {
+      name: "chat newer draft",
+      livePlan: false,
+      originalPrompt: "Retry frozen context",
+      captureEmpty: false,
+      newDraftDuringFailure: true,
+    },
+    { name: "empty Implement", livePlan: true, originalPrompt: "", captureEmpty: true },
+    {
+      name: "empty Implement newer draft",
+      livePlan: true,
+      originalPrompt: "",
+      captureEmpty: true,
+      newDraftDuringFailure: true,
+    },
+    { name: "structured Implement", livePlan: true, originalPrompt: "", captureEmpty: false },
+    {
+      name: "structured whitespace Implement",
+      livePlan: true,
+      originalPrompt: "   ",
+      captureEmpty: false,
+    },
+    {
+      name: "structured Refine",
+      livePlan: true,
+      originalPrompt: "  refine this part  ",
+      captureEmpty: false,
+    },
+    {
+      name: "structured newer draft",
+      livePlan: true,
+      originalPrompt: "",
+      captureEmpty: false,
+      newDraftDuringFailure: true,
+    },
+    {
+      name: "attachment Implement",
+      livePlan: true,
+      originalPrompt: "",
+      captureEmpty: true,
+      attachFile: true,
+    },
+  ])(
+    "freezes failed fresh sends and restores the complete retry action ($name)",
+    async ({ livePlan, originalPrompt, captureEmpty, newDraftDuringFailure, attachFile }) => {
+      const snapshotA = ambientResourceSnapshot({
+        sourceId: "paper",
+        targetKey: "note-a",
+        uri: "obsidian://open?vault=Paper&file=A.md",
+        title: "A.md",
+      });
+      const snapshotB = ambientResourceSnapshot({
+        sourceId: "paper",
+        targetKey: "note-b",
+        uri: "obsidian://open?vault=Paper&file=B.md",
+        title: "B.md",
+      });
+      let live = snapshotA;
+      const previousBridge = window.desktopBridge;
+      const binding = { id: "paper", sourceId: "paper", label: "Paper" };
+      const bridge: AmbientContextDesktopMethods = {
+        getState: vi.fn(async () => ({
+          sources: [
+            {
+              manifest: {
+                id: "obsidian",
+                label: "Obsidian",
+                kind: "application" as const,
+                capabilities: [],
+              },
+              policy: { enabled: true, allowedTypes: ["resource.identity" as const] },
+              connected: true,
+              error: null,
+            },
+          ],
+          connections: [{ ...binding, connected: true, error: null }],
+          items: live.items.map((item) => ({
+            ...item,
+            observation: { ...item.observation, capturedAt: new Date().toISOString() },
+          })),
+        })),
+        capture: vi.fn(async () =>
+          captureEmpty && live === snapshotA ? { ...live, items: [] } : live,
+        ),
+        searchResources: vi.fn(async () => []),
+        configure: vi.fn(),
+        getPairing: vi.fn(),
+        onChanged: () => () => {},
+      };
+      window.desktopBridge = {
+        setTheme: async () => {},
+        setAppIcon: async () => {},
+        browser: {},
+        ...previousBridge,
+        getWsUrl: () => window.location.origin.replace(/^http/u, "ws"),
+        ambientContext: bridge,
+      } as DesktopBridge;
+      const restoreNativeApi = installDeterministicSendNativeApi({
+        rejectTurnStart: true,
+        beforeTurnStart: async () => {
+          if (newDraftDuringFailure) {
+            useComposerDraftStore.getState().setPrompt(THREAD_ID, "A newer draft");
+            useComposerDraftStore.getState().setInteractionMode(THREAD_ID, "default");
+            useComposerDraftStore.getState().setAmbientContext(THREAD_ID, snapshotB);
+          }
+        },
+      });
+      useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+      useAmbientContextBindingStore.getState().bind(THREAD_ID, binding);
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, originalPrompt);
+      const file = new File(["retry attachment"], "plan.txt", { type: "text/plain" });
+      if (attachFile)
+        useComposerDraftStore.getState().addFiles(THREAD_ID, [
+          {
+            type: "file",
+            id: "plan-retry-file",
+            name: file.name,
+            mimeType: file.type,
+            sizeBytes: file.size,
+            file,
+          },
+        ]);
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: livePlan
+          ? createSnapshotWithSettledPlanAwaitingFollowUp()
+          : createSnapshotForTargetUser({
+              targetMessageId: "msg-frozen-retry" as MessageId,
+              targetText: "retry context target",
+            }),
+      });
+      const submitButton = () =>
+        waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              'form[data-chat-composer-form="true"] button[type="submit"]',
+            ),
+          "Missing composer submit button",
+        );
+      const sends = () => wsRequests.filter((candidate) => turnStartText(candidate) !== null);
+      const expectRetryAction = async () => {
+        const draft = useComposerDraftStore.getState().draftsByThreadId[THREAD_ID];
+        expect(draft?.prompt).toBe(originalPrompt);
+        if (livePlan) {
+          expect(draft?.interactionMode).toBe("plan");
+          await expect
+            .element(
+              page.getByRole("button", {
+                name: t(originalPrompt.trim() ? "chat:composer_refine" : "chat:composer_implement"),
+                exact: true,
+              }),
+            )
+            .toBeEnabled();
+        }
+        await vi.waitFor(() =>
+          expect(
+            (document.querySelector('[data-testid="composer-editor"]') as HTMLElement).textContent,
+          ).toBe(originalPrompt),
+        );
+        if (attachFile) expect(draft?.files[0]?.file).toBe(file);
+      };
+      try {
+        const editor = await waitForComposerEditor();
+        (await submitButton()).click();
+        await vi.waitFor(() =>
+          expect(document.body.textContent).toContain("Turn start failed for test."),
+        );
+        expect(sends()).toHaveLength(1);
+        const sentSnapshotA = (
+          sends()[0]!.command as { message: { ambientContext?: typeof snapshotA } }
+        ).message.ambientContext;
+        if (captureEmpty) expect(sentSnapshotA).toBeUndefined();
+        else expect(sentSnapshotA?.items).toEqual(snapshotA.items);
+        const firstSentText = turnStartText(sends()[0]!);
+        if (newDraftDuringFailure) {
+          expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
+            "A newer draft",
+          );
+          expect(
+            useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext,
+          ).toEqual(snapshotB);
+          expect(
+            useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.interactionMode,
+          ).toBe("default");
+          await expect
+            .element(page.getByRole("button", { name: "Send message", exact: true }))
+            .toBeEnabled();
+          return;
+        }
+        await expectRetryAction();
+        expect(await waitForComposerEditor()).toBe(editor);
+        expect(
+          useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContextFrozen,
+        ).toBe(true);
+        expect(
+          useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext,
+        ).toEqual(sentSnapshotA);
+        live = snapshotB;
+        const retry = await submitButton();
+        await vi.waitFor(() => expect(retry.disabled).toBe(false));
+        retry.click();
+        await vi.waitFor(() => expect(sends()).toHaveLength(2));
+        await vi.waitFor(() =>
+          expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
+            originalPrompt,
+          ),
+        );
+        expect(
+          (sends()[1]!.command as { message: { ambientContext?: unknown } }).message.ambientContext,
+        ).toEqual(sentSnapshotA);
+        await expectRetryAction();
+        expect(turnStartText(sends()[1]!)).toBe(firstSentText);
+        if (attachFile)
+          expect(
+            (sends()[1]!.command as { message: { attachments: unknown[] } }).message.attachments,
+          ).toHaveLength(1);
+        expect(bridge.capture).toHaveBeenCalledTimes(1);
+        await page
+          .getByRole("button", { name: t("chat:ambientUseCurrentContext"), exact: true })
+          .click();
+        const refreshed = await submitButton();
+        await vi.waitFor(() => expect(refreshed.disabled).toBe(false));
+        refreshed.click();
+        await vi.waitFor(() => expect(sends()).toHaveLength(3));
+        expect(
+          (sends()[2]!.command as { message: { ambientContext: typeof snapshotB } }).message
+            .ambientContext.items,
+        ).toEqual(snapshotB.items);
+        await vi.waitFor(() =>
+          expect(
+            useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext?.items,
+          ).toEqual(snapshotB.items),
+        );
+        expect(bridge.capture).toHaveBeenCalledTimes(2);
+      } finally {
+        await mounted.cleanup();
+        useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+        if (previousBridge) window.desktopBridge = previousBridge;
+        else delete window.desktopBridge;
+        restoreNativeApi();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "does not recapture live context when resending an edited queue snapshot (with context %s)",
+    async (withContext) => {
+      const restoreNativeApi = installDeterministicSendNativeApi();
+      const previousBridge = window.desktopBridge;
+      onTestFinished(() => {
+        if (previousBridge) window.desktopBridge = previousBridge;
+        else delete window.desktopBridge;
+        restoreNativeApi();
+        useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+      });
+      const bridge = {
+        getState: vi.fn(async () => ({ sources: [], connections: [], items: [] })),
+        capture: vi.fn(),
+        onChanged: () => () => {},
+      } as unknown as AmbientContextDesktopMethods;
+      window.desktopBridge = {
+        getWsUrl: () => null,
+        setTheme: async () => {},
+        setAppIcon: async () => {},
+        browser: {},
+        ...previousBridge,
+        ambientContext: bridge,
+      } as DesktopBridge;
+      const frozen = withContext
+        ? ambientResourceSnapshot({
+            sourceId: "paper",
+            targetKey: "queued-note",
+            uri: "obsidian://open?file=Queued.md",
+            title: "Queued.md",
+          })
+        : undefined;
+      useAmbientContextBindingStore
+        .getState()
+        .bind(THREAD_ID, { id: "paper", sourceId: "paper", label: "Paper" });
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, "Edited queued prompt");
+      useComposerDraftStore.getState().setAmbientContext(THREAD_ID, frozen, { frozen: true });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-edited-queue" as MessageId,
+          targetText: "edited queued target",
+        }),
+      });
+      try {
+        (await waitForSendButton()).click();
+        await vi.waitFor(() => {
+          const request = wsRequests.find(
+            (candidate) => turnStartText(candidate) === "Edited queued prompt",
+          );
+          expect(request).toBeTruthy();
+          expect(
+            (request!.command as { message: { ambientContext?: unknown } }).message.ambientContext,
+          ).toEqual(frozen);
+        });
+        expect(bridge.capture).not.toHaveBeenCalled();
+        expect(useAmbientContextBindingStore.getState().byThreadId[THREAD_ID]).toHaveLength(1);
+      } finally {
+        await mounted.cleanup();
+        useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+        if (previousBridge) window.desktopBridge = previousBridge;
+        else delete window.desktopBridge;
+        restoreNativeApi();
+      }
+    },
+  );
+
+  it.each(["Explain this note.", ""])(
+    "binds vaults through the context tab and freezes live context on send without pinning it (%s)",
+    async (sendPrompt) => {
+      const restoreNativeApi = installDeterministicSendNativeApi();
+      const previousBridge = window.desktopBridge;
+      onTestFinished(() => {
+        if (previousBridge) window.desktopBridge = previousBridge;
+        else delete window.desktopBridge;
+        restoreNativeApi();
+        useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+      });
+      const binding = { id: "paper", sourceId: "paper", label: "Paper" };
+      const snapshot = ambientResourceSnapshot({
+        sourceId: "paper",
+        targetKey: "note",
+        uri: "obsidian://open?vault=Paper&file=Note.md",
+        title: "Note.md",
+      });
+      const state: AmbientContextDesktopState = {
+        sources: [
+          {
+            manifest: { id: "obsidian", label: "Obsidian", kind: "application", capabilities: [] },
+            policy: { enabled: true, allowedTypes: ["resource.identity"] },
+            connected: true,
+            error: null,
+          },
+        ],
+        connections: [
+          { ...binding, connected: true, error: null },
+          { id: "work", sourceId: "work", label: "Work", connected: true, error: null },
+        ],
+        items: snapshot.items,
+      };
+      const bridge: AmbientContextDesktopMethods = {
+        getState: vi.fn(async () => state),
+        capture: vi.fn(async () => snapshot),
+        searchResources: vi.fn(async () => []),
+        configure: vi.fn(async () => state),
+        getPairing: vi.fn(async () => ({ endpoint: "", token: "" })),
+        onChanged: () => () => {},
+      };
+      window.desktopBridge = {
+        getWsUrl: () => null,
+        setTheme: async () => {},
+        setAppIcon: async () => {},
+        browser: {},
+        ...previousBridge,
+        ambientContext: bridge,
+      } as DesktopBridge;
+      useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, "Explain ");
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: createSnapshotForTargetUser({
+          targetMessageId: "msg-bound-send" as MessageId,
+          targetText: "bound context target",
+        }),
+      });
+      try {
+        const editor = page.getByTestId("composer-editor");
+        await editor.fill("Explain @");
+        await expect
+          .element(page.getByRole("tab", { name: t("chat:ambientMentionFiles"), exact: true }))
+          .toBeVisible();
+        await userEvent.keyboard("{ArrowRight}");
+        await expect
+          .element(page.getByRole("tab", { name: t("chat:ambientMentionContext"), exact: true }))
+          .toHaveAttribute("aria-selected", "true");
+        await expect.element(page.getByRole("option", { name: /Paper/ })).toBeVisible();
+        await userEvent.keyboard("{Enter}");
+        await vi.waitFor(() =>
+          expect(useAmbientContextBindingStore.getState().byThreadId[THREAD_ID]).toEqual([
+            { ...binding, includeFullText: false },
+          ]),
+        );
+        await expect
+          .element(page.getByRole("tab", { name: t("chat:ambientMentionContext"), exact: true }))
+          .not.toBeInTheDocument();
+        expect(
+          useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext,
+        ).toBeUndefined();
+        expect(bridge.capture).not.toHaveBeenCalled();
+        await editor.fill(sendPrompt);
+        (await waitForSendButton()).click();
+        await vi.waitFor(() => {
+          const request = wsRequests.find((candidate) => turnStartText(candidate) === sendPrompt);
+          expect(request).toBeTruthy();
+          expect(
+            (request!.command as { message: { ambientContext: { items: unknown } } }).message
+              .ambientContext.items,
+          ).toEqual(snapshot.items);
+        });
+        expect(bridge.capture).toHaveBeenCalledExactlyOnceWith(["paper"], {
+          includeFullTextSourceIds: [],
+        });
+        expect(useAmbientContextBindingStore.getState().byThreadId[THREAD_ID]).toHaveLength(1);
+        expect(
+          useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext,
+        ).toBeUndefined();
+      } finally {
+        await mounted.cleanup();
+        useAmbientContextBindingStore.setState({ byThreadId: {}, maxBindings: 5 });
+        if (previousBridge) window.desktopBridge = previousBridge;
+        else delete window.desktopBridge;
+        restoreNativeApi();
+      }
+    },
+  );
+
   it.each(["Explain this note.", ""])(
     "sends frozen ambient context as structured metadata without changing user text (%s)",
     async (prompt) => {
@@ -10752,6 +12020,9 @@ describe("ChatView transcript geometry (full app)", () => {
         },
         { timeout: 8_000, interval: 16 },
       );
+      expect(
+        useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContextFrozen,
+      ).toBe(true);
       expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext).toEqual(
         ambientContext,
       );

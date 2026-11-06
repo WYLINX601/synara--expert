@@ -1,3 +1,5 @@
+import type { AmbientContextBinding } from "~/ambientContextBindingStore";
+import { ComposerMentionTabs } from "./ComposerMentionTabs";
 import {
   type AmbientResourceReference,
   type ProjectEntry,
@@ -143,7 +145,8 @@ function commandMenuTrailingMeta(item: ComposerCommandItem): ReactNode | null {
 }
 
 function commandMenuSecondaryText(item: ComposerCommandItem): string | null {
-  if (item.type === "ambient-resource") return item.description;
+  if (item.type === "ambient-resource" || item.type === "ambient-connection")
+    return item.description;
   if (item.type === "hub-expert") return item.description;
   // The menu is driven from the composer, so focus never reaches the warning icon:
   // the row itself has to say why the command will not work.
@@ -174,7 +177,17 @@ function commandMenuSecondaryText(item: ComposerCommandItem): string | null {
 export type ComposerCommandItem =
   | {
       id: string;
+      type: "ambient-connection";
+      title?: string;
+      connection: Omit<AmbientContextBinding, "includeFullText">;
+      label: string;
+      description: string;
+      disabled?: boolean;
+    }
+  | {
+      id: string;
       type: "ambient-resource";
+      title?: string;
       resource: AmbientResourceReference;
       label: string;
       description: string;
@@ -306,7 +319,9 @@ export function groupCommandItems(
   groupSlashCommandSections: boolean,
 ): ComposerCommandGroupModel[] {
   if (triggerKind === "mention") {
-    const ambientItems = items.filter((item) => item.type === "ambient-resource");
+    const ambientItems = items.filter(
+      (item) => item.type === "ambient-resource" || item.type === "ambient-connection",
+    );
     const connectorItems = items.filter((item) => item.type === "connector");
     const pluginItems = items.filter((item) => item.type === "plugin");
     const threadItems = items.filter((item) => item.type === "thread");
@@ -315,6 +330,7 @@ export function groupCommandItems(
     const otherItems = items.filter(
       (item) =>
         item.type !== "ambient-resource" &&
+        item.type !== "ambient-connection" &&
         item.type !== "connector" &&
         item.type !== "plugin" &&
         item.type !== "thread" &&
@@ -327,7 +343,7 @@ export function groupCommandItems(
 
     const groups: ComposerCommandGroupModel[] = [];
     if (ambientItems.length > 0)
-      groups.push({ id: "ambient", label: "Obsidian resources", items: ambientItems });
+      groups.push({ id: "ambient", label: "Obsidian", items: ambientItems });
     const experts = items.filter((item) => item.type === "hub-expert");
     if (experts.length > 0) groups.push({ id: "experts", label: "Experts", items: experts });
     const deliverables = items.filter((item) => item.type === "hub-deliverable");
@@ -409,6 +425,8 @@ function CommandNoticeBadge(props: { notice: string }) {
 }
 
 export function ComposerCommandMenu(props: {
+  mentionTab?: "files" | "context";
+  onMentionTabChange?: (tab: "files" | "context") => void;
   items: ComposerCommandItem[];
   resolvedTheme: "light" | "dark";
   isLoading: boolean;
@@ -438,6 +456,10 @@ export function ComposerCommandMenu(props: {
         item.type === "slash-command" || item.type === "provider-native-command"
           ? commandMenuTitle(item)
           : item.label,
+      titleTooltip:
+        item.type === "ambient-connection" || item.type === "ambient-resource"
+          ? item.title
+          : undefined,
       secondary: commandMenuSecondaryText(item),
       trailing:
         item.type === "provider-native-command" && item.notice ? (
@@ -454,6 +476,11 @@ export function ComposerCommandMenu(props: {
 
   return (
     <ComposerMenuPanel
+      header={
+        props.triggerKind === "mention" && props.mentionTab && props.onMentionTabChange ? (
+          <ComposerMentionTabs value={props.mentionTab} onChange={props.onMentionTabChange} />
+        ) : null
+      }
       groups={panelGroups}
       activeRowId={props.activeItemId}
       onHighlightRow={props.onHighlightedItemChange}
@@ -462,7 +489,7 @@ export function ComposerCommandMenu(props: {
         if (item && !("disabled" in item && item.disabled)) props.onSelect(item);
       }}
       footer={
-        props.triggerKind === "mention" ? (
+        props.triggerKind === "mention" && props.mentionTab !== "context" ? (
           /* This footer is informational copy, not a selectable result group. */
           <div className="pt-0.5 pb-2">
             <p
@@ -528,6 +555,8 @@ function commandMenuSlashGlyph(command: string, fallback: LucideIcon): ReactNode
 function commandMenuItemGlyph(item: ComposerCommandItem, theme: "light" | "dark"): ReactNode {
   const cls = COMPOSER_COMMAND_ITEM_GLYPH_CLASSNAME;
   switch (item.type) {
+    case "ambient-connection":
+      return <FileEntryIcon pathValue={item.label} kind="directory" />;
     case "ambient-resource":
       return <FileEntryIcon pathValue={item.resource.title} kind="file" />;
     case "hub-expert":

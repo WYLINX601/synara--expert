@@ -1,3 +1,4 @@
+import type { AmbientContextSnapshot, ProviderInteractionMode } from "@synara/contracts";
 import type { MessageId, ModelSelection, ProviderKind, ThreadId } from "@synara/contracts";
 import type { QueryClient, UseMutationResult } from "@tanstack/react-query";
 import type { Dispatch, RefObject, SetStateAction } from "react";
@@ -25,7 +26,17 @@ import type { useChatTranscriptScroll } from "./useChatTranscriptScroll";
 import type { useComposerReferences } from "./useComposerReferences";
 import type { useComposerVoiceController } from "./useComposerVoiceController";
 
+export interface PlanFollowUpRetryIntent {
+  /** Preserve the editor value, including empty text and surrounding whitespace. */
+  prompt: string;
+  interactionMode: ProviderInteractionMode;
+}
+
 export interface PlanFollowUpSubmission {
+  ambientContext?: AmbientContextSnapshot | undefined;
+  ambientContextCaptured?: boolean;
+  /** The complete live composer action to restore after a failed dispatch. */
+  retryIntent?: PlanFollowUpRetryIntent;
   text: string;
   interactionMode: "default" | "plan";
   dispatchMode: "queue" | "steer";

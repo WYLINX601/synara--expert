@@ -5,6 +5,8 @@ import { Schema } from "effect";
 export const AMBIENT_CONTEXT_MAX_OBSERVATIONS = 64;
 export const AMBIENT_CONTEXT_MAX_TEXT_LENGTH = 16_384;
 export const AMBIENT_CONTEXT_MAX_SNAPSHOT_LENGTH = 65_536;
+export const AMBIENT_CONTEXT_FRESHNESS_MS = 30_000;
+export const AMBIENT_CONTEXT_SNAPSHOT_LIMIT_ERROR = "Context exceeds the snapshot size limit.";
 
 const Id = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128));
 const Label = Schema.String.check(Schema.isMaxLength(512));
@@ -175,6 +177,18 @@ export interface AmbientContextDesktopState {
     readonly error: string | null;
   }[];
   readonly items: readonly ResolvedAmbientContextItem[];
+  /** Individual runtime connections behind a family source such as Obsidian. */
+  readonly connections?: readonly {
+    /** Stable within one Synara app profile. */
+    readonly id: string;
+    /** Opaque provenance identity; normally the same stable value as id. */
+    readonly sourceId: string;
+    readonly label: string;
+    readonly connected: boolean;
+    readonly error: string | null;
+  }[];
+  /** Discovered devices that have not yet received explicit approval in Synara. */
+  readonly pendingConnections?: readonly { readonly id: string; readonly label: string }[];
 }
 
 export interface AmbientContextDesktopMethods {
@@ -185,7 +199,18 @@ export interface AmbientContextDesktopMethods {
   ): Promise<AmbientContextDesktopState>;
   /** Explicit session pairing only. Credentials must never enter messages or diagnostics. */
   getPairing(sourceId: string): Promise<{ endpoint: string; token: string }>;
-  capture(): Promise<AmbientContextSnapshot>;
+  approveConnection?(id: string): Promise<AmbientContextDesktopState>;
+  revokeConnection?(id: string): Promise<AmbientContextDesktopState>;
+  /** An omitted or empty list captures no sources; binding is explicit per thread. */
+  capture(
+    sourceIds?: readonly string[],
+    options?: AmbientContextCaptureRequestOptions,
+  ): Promise<AmbientContextSnapshot>;
   searchResources(query: string): Promise<readonly AmbientResourceReference[]>;
   onChanged(listener: () => void): () => void;
+}
+
+export interface AmbientContextCaptureRequestOptions {
+  /** Resource body is attached only for sources the user explicitly opted into. */
+  readonly includeFullTextSourceIds?: readonly string[];
 }

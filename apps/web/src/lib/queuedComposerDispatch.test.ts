@@ -100,6 +100,36 @@ describe("dispatchQueuedComposerTurnHeadless", () => {
     useStore.setState(initialState);
   });
 
+  it.each([true, false])(
+    "sends frozen queued plan context only when server capability is supported (%s)",
+    async (supported) => {
+      const queuedTurn = makeQueuedPlanFollowUp();
+      const snapshot = ambientResourceSnapshot({
+        sourceId: "paper",
+        targetKey: "note",
+        uri: "obsidian://open?file=Plan.md",
+        title: "Plan.md",
+      });
+      queuedTurn.ambientContext = snapshot;
+      nativeApiMocks.serverCapability.mockReturnValue(supported ? "supported" : "unsupported");
+      const sent = await dispatchQueuedComposerTurnHeadless({
+        threadId: THREAD_ID,
+        queuedTurn,
+        dispatchMode: "queue",
+        assistantDeliveryMode: "streaming",
+      });
+      expect(sent).toBe(supported);
+      if (supported)
+        expect(nativeApiMocks.dispatchCommand).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: "thread.turn.start",
+            message: expect.objectContaining({ ambientContext: snapshot }),
+          }),
+        );
+      else expect(nativeApiMocks.dispatchCommand).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["chat"] as const)(
     "holds a %s before uploads or settings changes while a cache review is pending",
     async (kind) => {

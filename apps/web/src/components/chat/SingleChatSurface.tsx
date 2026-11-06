@@ -1,3 +1,4 @@
+import { useZenMode } from "./ZenModeProvider";
 import type { FileDiffMetadata } from "@pierre/diffs/react";
 import { isWorkspaceRelativePathSafe } from "@synara/shared/path";
 import type { ProjectId, ResolvedKeybindingsConfig, ThreadId, TurnId } from "@synara/contracts";
@@ -198,6 +199,7 @@ export function SingleChatSurface(props: {
 }) {
   const { t } = useTranslation();
 
+  const { state: zenState } = useZenMode();
   const navigate = useNavigate();
   const createSplitView = useSplitViewStore((store) => store.createFromThread);
   const createSplitViewFromDrop = useSplitViewStore((store) => store.createFromDrop);
@@ -1211,60 +1213,64 @@ export function SingleChatSurface(props: {
               }}
             />
             {floatingBrowserVisible ? (
-              <FloatingBrowserPanel
-                key={props.threadId}
-                threadId={props.threadId}
-                onClose={dismissFloatingBrowser}
-                onPopToSidebar={() => {
-                  dismissFloatingBrowser();
-                  requestImmediateDockHydration("browser");
-                  openPane(props.threadId, { kind: "browser" });
-                }}
-              />
+              <div className={zenState.isActive ? "hidden" : "contents"} inert={zenState.isActive}>
+                <FloatingBrowserPanel
+                  key={props.threadId}
+                  threadId={props.threadId}
+                  onClose={dismissFloatingBrowser}
+                  onPopToSidebar={() => {
+                    dismissFloatingBrowser();
+                    requestImmediateDockHydration("browser");
+                    openPane(props.threadId, { kind: "browser" });
+                  }}
+                />
+              </div>
             ) : null}
           </ChatPaneBody>
         </KeptChatPane>
-        <RightDock
-          state={dockState}
-          minWidth={SINGLE_PANEL_MIN_WIDTH}
-          defaultWidth={DIFF_INLINE_DEFAULT_WIDTH}
-          widthStorageKey={`chat_right_dock_width:${props.threadId}`}
-          shouldAcceptWidth={shouldAcceptDockWidth}
-          addMenuKinds={availableDockPaneKinds}
-          launcherItems={dockLauncherItems}
-          motionKey={props.threadId}
-          activePaneRuntimeMode={
-            floatingBrowserVisible && activePane?.kind === "browser"
-              ? "preview"
-              : activePaneRuntimeMode
-          }
-          browserRuntimeMode={floatingBrowserVisible ? "preview" : "live"}
-          {...(paneLabelOverrides ? { paneLabelOverrides } : {})}
-          {...(paneIconOverrides ? { paneIconOverrides } : {})}
-          onSelectPane={handleSelectDockPane}
-          onClosePane={(paneId) => {
-            if (dockState.panes.find((pane) => pane.id === paneId)?.kind === "terminal") {
-              void closeDockTerminalPane({
-                hostThreadId: props.threadId,
-                paneId,
-                confirmationEnabled: appSettings.confirmTerminalTabClose,
+        <div className={zenState.isActive ? "hidden" : "contents"} inert={zenState.isActive}>
+          <RightDock
+            state={dockState}
+            minWidth={SINGLE_PANEL_MIN_WIDTH}
+            defaultWidth={DIFF_INLINE_DEFAULT_WIDTH}
+            widthStorageKey={`chat_right_dock_width:${props.threadId}`}
+            shouldAcceptWidth={shouldAcceptDockWidth}
+            addMenuKinds={availableDockPaneKinds}
+            launcherItems={dockLauncherItems}
+            motionKey={props.threadId}
+            activePaneRuntimeMode={
+              floatingBrowserVisible && activePane?.kind === "browser"
+                ? "preview"
+                : activePaneRuntimeMode
+            }
+            browserRuntimeMode={floatingBrowserVisible ? "preview" : "live"}
+            {...(paneLabelOverrides ? { paneLabelOverrides } : {})}
+            {...(paneIconOverrides ? { paneIconOverrides } : {})}
+            onSelectPane={handleSelectDockPane}
+            onClosePane={(paneId) => {
+              if (dockState.panes.find((pane) => pane.id === paneId)?.kind === "terminal") {
+                void closeDockTerminalPane({
+                  hostThreadId: props.threadId,
+                  paneId,
+                  confirmationEnabled: appSettings.confirmTerminalTabClose,
+                });
+                return;
+              }
+              if (dockState.panes.find((pane) => pane.id === paneId)?.kind !== "explorer") {
+                closePane(props.threadId, paneId);
+                return;
+              }
+              void flushWorkspaceEditors(queryClient, workspaceRoot).then((saved) => {
+                if (saved) closePane(props.threadId, paneId);
               });
-              return;
-            }
-            if (dockState.panes.find((pane) => pane.id === paneId)?.kind !== "explorer") {
-              closePane(props.threadId, paneId);
-              return;
-            }
-            void flushWorkspaceEditors(queryClient, workspaceRoot).then((saved) => {
-              if (saved) closePane(props.threadId, paneId);
-            });
-          }}
-          onMovePane={(paneId, overPaneId) => movePane(props.threadId, paneId, overPaneId)}
-          onCollapse={() => setDockOpen(props.threadId, false)}
-          onOpenChange={(open) => setDockOpen(props.threadId, open)}
-          onAddPane={handleAddDockPane}
-          renderPane={renderDockPane}
-        />
+            }}
+            onMovePane={(paneId, overPaneId) => movePane(props.threadId, paneId, overPaneId)}
+            onCollapse={() => setDockOpen(props.threadId, false)}
+            onOpenChange={(open) => setDockOpen(props.threadId, open)}
+            onAddPane={handleAddDockPane}
+            renderPane={renderDockPane}
+          />
+        </div>
         <WorkspaceSearchPalette
           open={searchPaletteOpen}
           mode={searchPaletteMode}

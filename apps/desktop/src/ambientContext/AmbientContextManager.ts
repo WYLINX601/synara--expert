@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
+  AMBIENT_CONTEXT_FRESHNESS_MS,
+  AMBIENT_CONTEXT_SNAPSHOT_LIMIT_ERROR,
   AmbientContextPublication,
   AmbientContextSnapshot,
   AmbientContextSourceManifest,
@@ -35,6 +37,10 @@ export interface AmbientContextSourceStatus {
 export interface AmbientContextCaptureOptions {
   readonly id?: string;
   readonly capturedAt?: string;
+  /** Filter before resolver correlation. An explicit empty list captures nothing. */
+  readonly sourceIds?: readonly string[];
+  /** The body type is removed before resolution for every source not listed here. */
+  readonly includeFullTextSourceIds?: readonly string[];
 }
 
 interface RegisteredSource {
@@ -230,6 +236,24 @@ export class AmbientContextManager {
     return this.reconfigure(entry);
   }
 
+  /** Stop and forget a dynamic source. A failed stop keeps it registered for recovery. */
+  unregisterSource(sourceId: string): Promise<void> {
+    const entry = this.requireSource(sourceId);
+    entry.policy = cloneFrozen({ enabled: false, allowedTypes: [] });
+    const generation = this.invalidate(entry);
+    return this.enqueue(entry, async () => {
+      await this.reconcile(entry, generation);
+      if (entry.generation !== generation) {
+        throw new Error(`Ambient context source ${sourceId} changed during unregister.`);
+      }
+      if (entry.needsStop || entry.state === "failed") {
+        throw new Error(`Could not stop ambient context source ${sourceId}.`);
+      }
+      this.sources.delete(sourceId);
+      this.notifyChanged();
+    });
+  }
+
   /** Disable and clear every source immediately, then serialize resource cleanup. */
   stop(): Promise<void> {
     const pending = [...this.sources.values()].map((entry) => {
@@ -254,15 +278,40 @@ export class AmbientContextManager {
     });
   }
 
-  resolveActive(now = this.now()): readonly ResolvedAmbientContextItem[] {
+  resolveActive(
+    now = this.now(),
+    sourceIds?: readonly string[],
+    includeFullTextSourceIds?: readonly string[],
+  ): readonly ResolvedAmbientContextItem[] {
+    const selected = sourceIds === undefined ? undefined : new Set(sourceIds);
+    if (selected && selected.size !== sourceIds?.length) {
+      throw new Error("Ambient context source IDs must be unique.");
+    }
+    for (const sourceId of selected ?? []) this.requireSource(sourceId);
+    const fullTextSources =
+      includeFullTextSourceIds === undefined ? undefined : new Set(includeFullTextSourceIds);
+    if (fullTextSources && fullTextSources.size !== includeFullTextSourceIds?.length) {
+      throw new Error("Full-text context source IDs must be unique.");
+    }
+    for (const sourceId of fullTextSources ?? []) {
+      this.requireSource(sourceId);
+      if (selected && !selected.has(sourceId)) {
+        throw new Error("Full-text sources must be selected context sources.");
+      }
+    }
     const inputs = [...this.sources.values()]
-      .filter((entry) => entry.state === "running")
+      .filter(
+        (entry) => entry.state === "running" && (!selected || selected.has(entry.manifest.id)),
+      )
       .map((entry) => ({
         sourceId: entry.manifest.id,
         manifest: entry.manifest,
         policy: effectivePolicy(entry),
         permissions: entry.permissions,
-        observations: entry.observations,
+        observations:
+          fullTextSources === undefined || fullTextSources.has(entry.manifest.id)
+            ? entry.observations
+            : entry.observations.filter((observation) => observation.type !== "resource.content"),
       }));
     return cloneFrozen(resolveAmbientContext(inputs, now));
   }
@@ -271,16 +320,31 @@ export class AmbientContextManager {
     return this.resolveActive(now);
   }
 
+  /** True when this source has a prior non-empty batch, but every item has expired. */
+  hasExpiredObservations(sourceId: string, now = this.now()): boolean {
+    const entry = this.requireSource(sourceId);
+    if (entry.observations.length === 0) return false;
+    return !entry.observations.some((observation) => {
+      const age = now - Date.parse(observation.capturedAt);
+      return age <= AMBIENT_CONTEXT_FRESHNESS_MS && age >= -5_000;
+    });
+  }
+
   capture(options: AmbientContextCaptureOptions = {}): Snapshot {
     const now = this.now();
     const capturedAt = options.capturedAt ?? new Date(now).toISOString();
-    const snapshot = Schema.decodeUnknownSync(AmbientContextSnapshot)({
+    const candidate = {
       schemaVersion: 1,
       id: options.id ?? randomUUID(),
       capturedAt,
-      items: this.resolveActive(now),
-    });
-    return cloneFrozen(snapshot);
+      items: this.resolveActive(now, options.sourceIds, options.includeFullTextSourceIds ?? []),
+    };
+    const snapshot = Schema.decodeUnknownOption(AmbientContextSnapshot)(candidate);
+    if (snapshot._tag === "None") {
+      // Effect parse errors can include offending data; keep external text out of errors.
+      throw new Error(AMBIENT_CONTEXT_SNAPSHOT_LIMIT_ERROR);
+    }
+    return cloneFrozen(snapshot.value);
   }
 
   private requireSource(sourceId: string): RegisteredSource {

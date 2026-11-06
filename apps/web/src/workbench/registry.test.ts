@@ -37,6 +37,7 @@ describe("Workbench web registry", () => {
       "usage",
       "appsnap",
       "computer",
+      "app-context",
       "connectors",
       "integrations",
       "providers",

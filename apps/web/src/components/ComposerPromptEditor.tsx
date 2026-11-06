@@ -545,7 +545,15 @@ interface ComposerPromptEditorProps {
     terminalContextIds: string[],
   ) => void;
   onCommandKeyDown?: (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Slash",
+    key:
+      | "ArrowDown"
+      | "ArrowUp"
+      | "ArrowLeft"
+      | "ArrowRight"
+      | "Escape"
+      | "Enter"
+      | "Tab"
+      | "Slash",
     event: KeyboardEvent,
   ) => boolean;
   onPaste: ClipboardEventHandler<HTMLElement>;
@@ -557,7 +565,15 @@ interface ComposerPromptEditorInnerProps extends ComposerPromptEditorProps {
 
 function ComposerCommandKeyPlugin(props: {
   onCommandKeyDown?: (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Slash",
+    key:
+      | "ArrowDown"
+      | "ArrowUp"
+      | "ArrowLeft"
+      | "ArrowRight"
+      | "Escape"
+      | "Enter"
+      | "Tab"
+      | "Slash",
     event: KeyboardEvent,
   ) => boolean;
 }) {
@@ -565,10 +581,24 @@ function ComposerCommandKeyPlugin(props: {
 
   useEffect(() => {
     const handleCommand = (
-      key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Slash",
+      key:
+        | "ArrowDown"
+        | "ArrowUp"
+        | "ArrowLeft"
+        | "ArrowRight"
+        | "Escape"
+        | "Enter"
+        | "Tab"
+        | "Slash",
       event: KeyboardEvent | null,
     ): boolean => {
-      if (!props.onCommandKeyDown || !event) {
+      if (
+        !props.onCommandKeyDown ||
+        !event ||
+        event.isComposing ||
+        event.keyCode === 229 ||
+        editor.isComposing()
+      ) {
         return false;
       }
       const handled = props.onCommandKeyDown(key, event);
@@ -579,6 +609,15 @@ function ComposerCommandKeyPlugin(props: {
       return handled;
     };
 
+    const unregisterMentionKeys = editor.registerCommand(
+      KEY_DOWN_COMMAND,
+      (event) => {
+        if (event.key === "Escape" || event.key === "ArrowLeft" || event.key === "ArrowRight")
+          return handleCommand(event.key, event);
+        return false;
+      },
+      COMMAND_PRIORITY_HIGH,
+    );
     const unregisterArrowDown = editor.registerCommand(
       KEY_ARROW_DOWN_COMMAND,
       (event) => handleCommand("ArrowDown", event),
@@ -607,6 +646,7 @@ function ComposerCommandKeyPlugin(props: {
     );
 
     return () => {
+      unregisterMentionKeys();
       unregisterArrowDown();
       unregisterArrowUp();
       unregisterEnter();

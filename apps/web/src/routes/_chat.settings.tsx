@@ -2101,7 +2101,7 @@ function SettingsRouteView() {
                   resetEpoch={resetEpoch}
                 />
                 <McpConnectorsSettingsPanel active={activeSection === "connectors"} />
-                <AmbientContextSettingsPanel active={activeSection === "connectors"} />
+                <AmbientContextSettingsPanel active={activeSection === "app-context"} />
                 <ExternalMcpSettingsPanel active={activeSection === "integrations"} />
                 <AdvancedSettingsPanel
                   active={activeSection === "advanced"}

@@ -349,9 +349,18 @@ export function useKanbanTaskComposerEditor(input: UseKanbanTaskComposerEditorIn
   };
 
   const onComposerCommandKey = (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Slash",
+    key:
+      | "ArrowDown"
+      | "ArrowUp"
+      | "ArrowLeft"
+      | "ArrowRight"
+      | "Escape"
+      | "Enter"
+      | "Tab"
+      | "Slash",
     event: KeyboardEvent,
   ) => {
+    if (key === "ArrowLeft" || key === "ArrowRight" || key === "Escape") return false;
     if (key === "Tab" && event.shiftKey) {
       setInteractionMode((current) => (current === "plan" ? "default" : "plan"));
       return true;

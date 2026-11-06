@@ -1,3 +1,4 @@
+import { ComposerMentionTabs, type ComposerMentionTab } from "./ComposerMentionTabs";
 // FILE: ComposerLocalDirectoryMenu.tsx
 // Purpose: Render the inline composer popup used for browsing local files and folders after `@local`.
 // Layer: Chat composer UI
@@ -149,6 +150,8 @@ export function ComposerLocalDirectoryMenu(props: {
   onSelectEntry: (absolutePath: string, entry: ProjectFileSystemEntry) => Promise<void> | void;
   onNavigateFolder: (absolutePath: string) => void;
   handleRef?: Ref<ComposerLocalDirectoryMenuHandle>;
+  mentionTab?: ComposerMentionTab;
+  onMentionTabChange?: (tab: ComposerMentionTab) => void;
 }) {
   const { t } = useTranslation();
 
@@ -397,6 +400,9 @@ export function ComposerLocalDirectoryMenu(props: {
   return (
     <Command autoHighlight={false} mode="none">
       <div className={COMPOSER_COMMAND_MENU_SURFACE_CLASS_NAME}>
+        {props.mentionTab && props.onMentionTabChange ? (
+          <ComposerMentionTabs value={props.mentionTab} onChange={props.onMentionTabChange} />
+        ) : null}
         <div className="flex items-center gap-2 border-b border-border px-2 py-1.5">
           {parent ? (
             <button

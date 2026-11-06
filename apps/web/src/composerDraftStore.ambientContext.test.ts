@@ -101,6 +101,24 @@ describe("ambient context composer ownership", () => {
     );
   });
 
+  it("retains the explicitly frozen empty queued context across persistence and clears it with composer content", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadA, "edited queued prompt");
+    store.setAmbientContext(threadA, undefined, { frozen: true });
+    const draft = useComposerDraftStore.getState().draftsByThreadId[threadA]!;
+    expect(draft.ambientContextFrozen).toBe(true);
+    const persisted = partializeComposerDraftStoreState(useComposerDraftStore.getState());
+    const normalized = normalizeCurrentPersistedComposerDraftStoreState(persisted);
+    expect(normalized.draftsByThreadId[threadA]?.ambientContextFrozen).toBe(true);
+    const restored = toHydratedThreadDraft(threadA, normalized.draftsByThreadId[threadA]!);
+    expect(restored.ambientContextFrozen).toBe(true);
+    expect(restored.ambientContext).toBeUndefined();
+    store.clearComposerContent(threadA);
+    expect(
+      useComposerDraftStore.getState().draftsByThreadId[threadA]?.ambientContextFrozen,
+    ).toBeUndefined();
+  });
+
   it("keeps changed file/selection captures despite reused source-local observation IDs", () => {
     const first = ambientResourceSnapshot(resource);
     const original = first.items[0]!;
@@ -185,7 +203,11 @@ describe("ambient context composer ownership", () => {
         ...next,
         items: Array.from({ length: 64 }, (_, index) => ({
           ...next.items[0]!,
-          observation: { ...next.items[0]!.observation, id: `item-${index}` },
+          observation: {
+            ...next.items[0]!.observation,
+            id: `item-${index}`,
+            targetKey: `target-${index}`,
+          },
         })),
       }),
     ).toThrow("Context is too large");

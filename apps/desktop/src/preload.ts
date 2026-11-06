@@ -7,6 +7,7 @@ import type {
   DesktopComputerPreviewFrame,
   DesktopDiagnosticActivity,
   DesktopWindowTranslucency,
+  ZenModeState,
 } from "@synara/contracts";
 import { normalizeDesktopWsUrl, resolveDesktopWsUrlFromEnv } from "./desktopWsBridge";
 import { DESKTOP_IPC_CHANNELS } from "./ipcChannels";
@@ -18,6 +19,18 @@ import {
 const IPC = DESKTOP_IPC_CHANNELS;
 // Live computerPreview.onFrame listeners in this renderer.
 let computerPreviewListenerCount = 0;
+const zenModeToggleListeners = new Set<() => void>();
+let pendingZenModeToggle = false;
+
+// Install before the React provider mounts so a first global-shortcut toggle
+// sent during window activation is buffered until the view subscribes.
+ipcRenderer.on(IPC.zenMode.toggleRequested, () => {
+  if (zenModeToggleListeners.size === 0) {
+    pendingZenModeToggle = true;
+    return;
+  }
+  for (const listener of [...zenModeToggleListeners]) listener();
+});
 
 function getDesktopWsUrl(): string | null {
   try {
@@ -124,6 +137,27 @@ function parseBrowserAnnotationEvent(payload: unknown): BrowserAnnotationEvent |
     return null;
   }
   return payload as BrowserAnnotationEvent;
+}
+
+function parseZenModeState(payload: unknown): ZenModeState | null {
+  if (!payload || typeof payload !== "object") return null;
+  const state = payload as Record<string, unknown>;
+  if (
+    typeof state.isActive !== "boolean" ||
+    typeof state.expanded !== "boolean" ||
+    typeof state.alwaysOnTop !== "boolean" ||
+    typeof state.shortcut !== "string" ||
+    typeof state.shortcutAvailable !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    isActive: state.isActive,
+    expanded: state.expanded,
+    alwaysOnTop: state.alwaysOnTop,
+    shortcut: state.shortcut,
+    shortcutAvailable: state.shortcutAvailable,
+  };
 }
 
 const betaDiagnosticsBridge = getBetaDiagnosticsBridge();
@@ -318,12 +352,39 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     configure: (sourceId, policy) =>
       ipcRenderer.invoke(IPC.ambientContext.configure, sourceId, policy),
     getPairing: (sourceId) => ipcRenderer.invoke(IPC.ambientContext.getPairing, sourceId),
-    capture: () => ipcRenderer.invoke(IPC.ambientContext.capture),
+    approveConnection: (id) => ipcRenderer.invoke(IPC.ambientContext.approveConnection, id),
+    revokeConnection: (id) => ipcRenderer.invoke(IPC.ambientContext.revokeConnection, id),
+    capture: (sourceIds, options) =>
+      ipcRenderer.invoke(IPC.ambientContext.capture, sourceIds, options),
     searchResources: (query) => ipcRenderer.invoke(IPC.ambientContext.searchResources, query),
     onChanged: (listener) => {
       const changed = () => listener();
       ipcRenderer.on(IPC.ambientContext.changed, changed);
       return () => ipcRenderer.removeListener(IPC.ambientContext.changed, changed);
+    },
+  },
+  zenMode: {
+    getState: () => ipcRenderer.invoke(IPC.zenMode.getState),
+    enter: () => ipcRenderer.invoke(IPC.zenMode.enter),
+    exit: () => ipcRenderer.invoke(IPC.zenMode.exit),
+    setExpanded: (expanded) => ipcRenderer.invoke(IPC.zenMode.setExpanded, expanded),
+    setCompactHeight: (contentHeight) =>
+      ipcRenderer.invoke(IPC.zenMode.setCompactHeight, contentHeight),
+    onStateChanged: (listener) => {
+      const changed = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        const state = parseZenModeState(payload);
+        if (state) listener(state);
+      };
+      ipcRenderer.on(IPC.zenMode.stateChanged, changed);
+      return () => ipcRenderer.removeListener(IPC.zenMode.stateChanged, changed);
+    },
+    onToggleRequested: (listener) => {
+      zenModeToggleListeners.add(listener);
+      if (pendingZenModeToggle) {
+        pendingZenModeToggle = false;
+        listener();
+      }
+      return () => zenModeToggleListeners.delete(listener);
     },
   },
   appSnap: {

@@ -63,7 +63,7 @@ import {
   turnStartDispatchFields,
   type TurnDispatchSettings,
 } from "../ChatView.logic";
-import type { ChatTurnSubmissionInput } from "./chatSendTypes";
+import type { ChatTurnSubmissionInput, PlanFollowUpRetryIntent } from "./chatSendTypes";
 import { waitForSetupScriptTerminalActivity } from "./projectScriptRuntime";
 interface PreparedChatTurn {
   nextThreadEnvMode: DraftThreadEnvMode;
@@ -98,6 +98,8 @@ interface PreparedChatTurn {
   mentionedSkillsForSend: ProviderSkillReference[];
   mentionedPluginMentionsForSend: ProviderMentionReference[];
   ambientContextForSend: AmbientContextSnapshot | undefined;
+  ambientContextDraftForRetry: AmbientContextSnapshot | undefined;
+  ambientContextFrozenForRetry: boolean;
   ambientContextGenerationForSend: string | null;
   dispatchMode: "queue" | "steer";
   sourceProposedPlanForSend: QueuedComposerChatTurn["sourceProposedPlan"];
@@ -108,6 +110,7 @@ interface PreparedChatTurn {
   turnDispatchSettings: TurnDispatchSettings;
   computerControlSequenceForSend: number;
   promptForSend: string;
+  planFollowUpRetryIntent: PlanFollowUpRetryIntent | undefined;
   composerImagesSnapshot: ChatTurnSubmissionInput["composerImages"];
   composerFilesSnapshot: ChatTurnSubmissionInput["composerFiles"];
   composerAssistantSelectionsSnapshot: ChatTurnSubmissionInput["composerAssistantSelections"];
@@ -244,6 +247,8 @@ export function useChatTurnExecution({
         mentionedSkillsForSend,
         mentionedPluginMentionsForSend,
         ambientContextForSend,
+        ambientContextDraftForRetry,
+        ambientContextFrozenForRetry,
         ambientContextGenerationForSend,
         dispatchMode,
         sourceProposedPlanForSend,
@@ -253,6 +258,7 @@ export function useChatTurnExecution({
         turnDispatchSettings: preparedTurnDispatchSettings,
         computerControlSequenceForSend,
         promptForSend,
+        planFollowUpRetryIntent,
         composerImagesSnapshot,
         composerFilesSnapshot,
         composerAssistantSelectionsSnapshot,
@@ -899,19 +905,27 @@ export function useChatTurnExecution({
               const next = existing.filter((message) => message.id !== messageIdForSend);
               return next.length === existing.length ? existing : next;
             });
-          if (isFocusedSend) promptRef.current = promptForSend;
-          setPrompt(promptForSend);
-          if (sourceProposedPlanForSend) {
+          const retryPrompt = planFollowUpRetryIntent?.prompt ?? promptForSend;
+          if (isFocusedSend) promptRef.current = retryPrompt;
+          setPrompt(retryPrompt);
+          if (planFollowUpRetryIntent) {
+            useComposerDraftStore
+              .getState()
+              .setInteractionMode(threadIdForSend, planFollowUpRetryIntent.interactionMode);
+          }
+          // A live plan retry must run the plan action again. The queued-plan
+          // marker instead means the stored prompt is already the final wire text.
+          if (sourceProposedPlanForSend && !planFollowUpRetryIntent) {
             (isFocusedSend
               ? setRestoredQueuedSourceProposedPlan
               : useComposerDraftStore.getState().setRestoredSourceProposedPlan)(threadIdForSend, {
               threadId: threadIdForSend,
-              restoredPrompt: promptForSend,
+              restoredPrompt: retryPrompt,
               sourceProposedPlan: sourceProposedPlanForSend,
             });
           }
           if (isFocusedSend)
-            setComposerCursor(collapseExpandedComposerCursor(promptForSend, promptForSend.length));
+            setComposerCursor(collapseExpandedComposerCursor(retryPrompt, retryPrompt.length));
           (isFocusedSend
             ? addComposerImagesToDraft
             : (value: Parameters<typeof addComposerImagesToDraft>[0]) =>
@@ -959,7 +973,9 @@ export function useChatTurnExecution({
                 ))(composerPullRequestContextsSnapshot);
           useComposerDraftStore
             .getState()
-            .setAmbientContext(threadIdForSend, ambientContextForSend);
+            .setAmbientContext(threadIdForSend, ambientContextDraftForRetry, {
+              frozen: ambientContextFrozenForRetry,
+            });
           if (isFocusedSend) {
             updateSelectedComposerSkills(composerSkillsSnapshot);
             updateSelectedComposerMentions(composerMentionsSnapshot);
@@ -968,7 +984,7 @@ export function useChatTurnExecution({
             useComposerDraftStore.getState().setMentions(threadIdForSend, composerMentionsSnapshot);
           }
           if (isFocusedSend)
-            setComposerTrigger(detectComposerTrigger(promptForSend, promptForSend.length));
+            setComposerTrigger(detectComposerTrigger(retryPrompt, retryPrompt.length));
         }
         // A handoff refused by the source's background tasks is explained by
         // the composer notice, which also offers to stop them.

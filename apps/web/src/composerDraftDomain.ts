@@ -122,6 +122,7 @@ export interface ComposerPromptHistorySavedDraft {
   skills: ProviderSkillReference[];
   mentions: ProviderMentionReference[];
   ambientContext?: AmbientContextSnapshot | undefined;
+  ambientContextFrozen?: boolean | undefined;
 }
 
 export type ComposerAssistantSelectionAttachment = ChatAssistantSelectionAttachment;
@@ -168,6 +169,7 @@ export interface RestoredComposerSourceProposedPlan {
 export interface QueuedComposerPlanFollowUp {
   id: string;
   kind: "plan-follow-up";
+  ambientContext?: AmbientContextSnapshot | undefined;
   createdAt: string;
   previewText: string;
   text: string;
@@ -206,6 +208,7 @@ export interface ComposerThreadDraftState {
   skills: ProviderSkillReference[];
   mentions: ProviderMentionReference[];
   ambientContext?: AmbientContextSnapshot | undefined;
+  ambientContextFrozen?: boolean | undefined;
   queuedTurns: QueuedComposerTurn[];
   // Turn the user stopped while this queue was waiting, and the turn whose stop or
   // failure the user acknowledged with Resume (see lib/queuedComposerPause.ts).
@@ -345,7 +348,11 @@ export interface ComposerDraftStoreState {
   ) => Promise<ComposerAttachmentPersistenceResult>;
   setTerminalContexts: (threadId: ThreadId, contexts: TerminalContextDraft[]) => void;
   setSkills: (threadId: ThreadId, skills: ProviderSkillReference[]) => void;
-  setAmbientContext: (threadId: ThreadId, snapshot: AmbientContextSnapshot | undefined) => void;
+  setAmbientContext: (
+    threadId: ThreadId,
+    snapshot: AmbientContextSnapshot | undefined,
+    options?: { frozen: boolean },
+  ) => void;
   setMentions: (threadId: ThreadId, mentions: ProviderMentionReference[]) => void;
   setModelSelection: (
     threadId: ThreadId,
@@ -829,6 +836,7 @@ export function captureComposerPromptHistorySavedDraft(input: {
     skills: [...draft.skills],
     mentions: [...draft.mentions],
     ambientContext: draft.ambientContext,
+    ambientContextFrozen: draft.ambientContextFrozen,
   };
 }
 
@@ -862,6 +870,7 @@ export function buildTransferredComposerDraft(input: {
     skills: [...sourceDraft.skills],
     mentions: [...sourceDraft.mentions],
     ambientContext: sourceDraft.ambientContext,
+    ambientContextFrozen: sourceDraft.ambientContextFrozen,
     enableComputerControl: sourceDraft.enableComputerControl,
     computerControlMode: sourceDraft.computerControlMode,
     // Revocation generations belong to the target thread, never the copied prompt.
@@ -911,6 +920,7 @@ function clonePromptHistorySavedDraft(
     skills: [...savedDraft.skills],
     mentions: [...savedDraft.mentions],
     ambientContext: savedDraft.ambientContext,
+    ambientContextFrozen: savedDraft.ambientContextFrozen,
   };
 }
 
@@ -931,6 +941,7 @@ export function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.skills.length === 0 &&
     draft.mentions.length === 0 &&
     !draft.ambientContext &&
+    !draft.ambientContextFrozen &&
     draft.queuedTurns.length === 0 &&
     draft.restoredSourceProposedPlan == null &&
     Object.keys(draft.modelSelectionByProvider).length === 0 &&

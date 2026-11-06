@@ -37,6 +37,7 @@ export type ComposerMenuPanelRow = {
   id: string;
   icon?: ReactNode;
   title: string;
+  titleTooltip?: string | undefined;
   /** Dimmed text trailing the title on the same line. */
   secondary?: string | null;
   /** Right-aligned metadata (path, scope, shortcut, chevron, check). */
@@ -51,6 +52,7 @@ export type ComposerMenuPanelGroup = {
 };
 
 export function ComposerMenuPanel(props: {
+  header?: ReactNode;
   groups: ComposerMenuPanelGroup[];
   activeRowId: string | null;
   onHighlightRow: (rowId: string | null) => void;
@@ -87,6 +89,7 @@ export function ComposerMenuPanel(props: {
       }}
     >
       <div className={cn(COMPOSER_COMMAND_MENU_SURFACE_CLASS_NAME, props.surfaceClassName)}>
+        {props.header}
         {hasRows || props.footer ? (
           <CommandList className={cn("max-h-72 scroll-py-1 p-1", props.listClassName)}>
             {props.groups.map((group, groupIndex) => (
@@ -176,7 +179,12 @@ const ComposerMenuPanelItem = memo(function ComposerMenuPanelItem({
       )}
       <div className="min-w-0 flex flex-1 items-center gap-3">
         <div className="min-w-0 flex flex-1 items-center gap-1.5 overflow-hidden">
-          <span className="shrink-0 text-ui-sm font-medium text-foreground/80">{row.title}</span>
+          <span
+            className="shrink-0 text-ui-sm font-medium text-foreground/80"
+            title={row.titleTooltip}
+          >
+            {row.title}
+          </span>
           {row.secondary ? (
             <span className="truncate text-ui-sm text-muted-foreground/55">{row.secondary}</span>
           ) : null}

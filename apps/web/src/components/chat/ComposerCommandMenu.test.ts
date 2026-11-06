@@ -16,7 +16,7 @@ describe("groupCommandItems", () => {
       },
     };
     expect(groupCommandItems([resource], "mention", false)).toEqual([
-      { id: "ambient", label: "Obsidian resources", items: [resource] },
+      { id: "ambient", label: "Obsidian", items: [resource] },
     ]);
     expect(resource).not.toHaveProperty("mention");
   });

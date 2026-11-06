@@ -1,3 +1,8 @@
+import { t } from "~/i18n";
+import { composerDraftHasUnsentContent } from "~/composerDraftDomain";
+import { useAmbientContextBindingStore } from "~/ambientContextBindingStore";
+import { captureBoundAmbientContext } from "~/lib/ambientContextBinding";
+import { cloneAmbientContext } from "~/lib/ambientContext";
 import { readAmbientContextSendAuthorization } from "~/workbench/host/ambientContextClient";
 import { MessageId, ThreadId, type ProviderKind, type TurnId } from "@synara/contracts";
 import { resolveTailUserMessageEditTarget } from "@synara/shared/conversationEdit";
@@ -54,6 +59,41 @@ import { useChatWorkLog } from "./useChatWorkLog";
 import { toastManager } from "../ui/toast";
 
 import type { LateComposerSendHandlers, PlanFollowUpSubmission } from "./chatSendTypes";
+async function captureFollowUpAmbientContext(threadId: ThreadId) {
+  const result = await captureBoundAmbientContext(
+    window.desktopBridge?.ambientContext,
+    useAmbientContextBindingStore.getState().byThreadId[threadId] ?? [],
+    undefined,
+  );
+  if (result.unavailable.length)
+    toastManager.add({
+      type: "warning",
+      title: t("chat:ambientPartialOmission"),
+      description: t("chat:ambientFollowUpOmission", { sources: result.unavailable.join(", ") }),
+    });
+  return result.snapshot;
+}
+async function prepareFollowUpAmbientContext(
+  threadId: ThreadId,
+  submission?: Pick<
+    PlanFollowUpSubmission,
+    "queuedTurn" | "ambientContext" | "ambientContextCaptured"
+  >,
+) {
+  try {
+    const snapshot = submission?.queuedTurn
+      ? cloneAmbientContext(submission.queuedTurn.ambientContext)
+      : submission?.ambientContextCaptured
+        ? cloneAmbientContext(submission.ambientContext)
+        : await captureFollowUpAmbientContext(threadId);
+    return { snapshot, error: null };
+  } catch (cause) {
+    return {
+      snapshot: undefined,
+      error: cause instanceof Error ? cause.message : t("chat:ambientPrepareFailed"),
+    };
+  }
+}
 interface ChatTurnFollowUpsInput {
   threadId: ThreadId;
   activeThread: Thread | undefined;
@@ -156,6 +196,9 @@ export function useChatTurnFollowUps({
   navigate,
 }: ChatTurnFollowUpsInput) {
   async function onSubmitPlanFollowUp({
+    ambientContext: preparedAmbientContext,
+    ambientContextCaptured,
+    retryIntent,
     text,
     interactionMode: nextInteractionMode,
     dispatchMode,
@@ -211,6 +254,23 @@ export function useChatTurnFollowUps({
     });
 
     sendInFlightRef.current = true;
+    const prepared = await prepareFollowUpAmbientContext(threadIdForSend, {
+      ...(queuedTurn ? { queuedTurn } : {}),
+      ambientContext: preparedAmbientContext,
+      ...(ambientContextCaptured !== undefined ? { ambientContextCaptured } : {}),
+    });
+    if (prepared.error) {
+      sendInFlightRef.current = false;
+      setThreadError(threadIdForSend, prepared.error);
+      return false;
+    }
+    const ambientContext = prepared.snapshot;
+    const ambientAuthorization = readAmbientContextSendAuthorization(ambientContext);
+    if (!ambientAuthorization.allowed) {
+      sendInFlightRef.current = false;
+      setThreadError(threadIdForSend, ambientAuthorization.message);
+      return false;
+    }
     beginLocalDispatch({ expectedUserMessageId: messageIdForSend });
     setThreadError(threadIdForSend, null);
     setOptimisticUserMessages((existing) => [
@@ -219,6 +279,7 @@ export function useChatTurnFollowUps({
         id: messageIdForSend,
         role: "user",
         text: outgoingMessageText,
+        ...(ambientContext ? { ambientContext } : {}),
         dispatchMode,
         createdAt: messageCreatedAt,
         streaming: false,
@@ -279,6 +340,11 @@ export function useChatTurnFollowUps({
           planDispatchSettings.modelSelection.provider,
         providerOptions: planDispatchSettings.providerOptions,
       });
+      const authorization = readAmbientContextSendAuthorization(
+        ambientContext,
+        ambientAuthorization.generation,
+      );
+      if (!authorization.allowed) throw new Error(authorization.message);
       await api.orchestration.dispatchCommand({
         type: "thread.turn.start",
         commandId: newCommandId(),
@@ -287,6 +353,7 @@ export function useChatTurnFollowUps({
           messageId: messageIdForSend,
           role: "user",
           text: outgoingMessageText,
+          ...(ambientContext ? { ambientContext } : {}),
           attachments: [],
         },
         ...turnStartDispatchFields(planDispatchSettings, dispatchMode),
@@ -336,6 +403,25 @@ export function useChatTurnFollowUps({
       if (resumeQueueAfterSend) resumeQueueAfterSend();
       return true;
     } catch (err) {
+      // Queue entries remain owned by their queue. A live submission cleared its
+      // input before dispatch, so restore only if the user has not started a new draft.
+      const draftStore = useComposerDraftStore.getState();
+      const retryDraft = draftStore.draftsByThreadId[threadIdForSend];
+      if (
+        !queuedTurn &&
+        (!retryDraft ||
+          (retryDraft.prompt.length === 0 &&
+            !composerDraftHasUnsentContent(retryDraft) &&
+            retryDraft.terminalContexts.length === 0 &&
+            !retryDraft.ambientContextFrozen))
+      ) {
+        draftStore.setPrompt(threadIdForSend, retryIntent?.prompt ?? text);
+        draftStore.setAmbientContext(threadIdForSend, ambientContext, { frozen: true });
+        draftStore.setInteractionMode(
+          threadIdForSend,
+          retryIntent?.interactionMode ?? turnDispatchSettings.interactionMode,
+        );
+      }
       setOptimisticUserMessages((existing) =>
         existing.filter((message) => message.id !== messageIdForSend),
       );
@@ -483,7 +569,14 @@ export function useChatTurnFollowUps({
         return false;
       const prompt =
         "Continue the interrupted task from the existing conversation and working state. First verify which operations have already completed; avoid repeating them and resume the remaining work.";
+      const prepared = await prepareFollowUpAmbientContext(threadId);
+      if (prepared.error) {
+        setThreadError(threadId, prepared.error);
+        return false;
+      }
+      const ambientContext = prepared.snapshot;
       return handlers.send(undefined, "queue", {
+        ambientContext,
         id: randomUUID(),
         kind: "chat",
         createdAt: new Date().toISOString(),
@@ -507,6 +600,7 @@ export function useChatTurnFollowUps({
     },
     [
       threadId,
+      setThreadError,
       isServerThread,
       lateComposerSendHandlersRef,
       selectedProvider,
@@ -522,7 +616,14 @@ export function useChatTurnFollowUps({
     if (!lateSendHandlers) return;
     const { workflowTaskId } = workflowRunState;
     const prompt = buildWorkflowResumePrompt(workflowRunState.scriptPath, workflowRunState.runId);
+    const prepared = await prepareFollowUpAmbientContext(threadId);
+    if (prepared.error) {
+      setThreadError(threadId, prepared.error);
+      return;
+    }
+    const ambientContext = prepared.snapshot;
     const sent = await lateSendHandlers.send(undefined, "queue", {
+      ambientContext,
       id: randomUUID(),
       kind: "chat",
       createdAt: new Date().toISOString(),
@@ -547,6 +648,8 @@ export function useChatTurnFollowUps({
       markWorkflowRunDismissed(activeThreadId, workflowTaskId);
     }
   }, [
+    threadId,
+    setThreadError,
     lateComposerSendHandlersRef,
     activeThreadId,
     markWorkflowRunDismissed,

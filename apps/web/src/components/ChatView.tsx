@@ -1,4 +1,18 @@
-import { useAmbientResources } from "~/hooks/useAmbientContext";
+import { useZenCompactHeight } from "./chat/useZenCompactHeight";
+import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
+import { useZenMode } from "./chat/ZenModeProvider";
+import { ZenModeToolbar } from "./chat/ZenModeToolbar";
+import { disclosureFadeClassName } from "~/lib/disclosureMotion";
+import {
+  ambientConnectionPresentation,
+  ambientBindingAvailable,
+  selectBoundAmbientItems,
+} from "~/lib/ambientContextBinding";
+import {
+  EMPTY_AMBIENT_BINDINGS,
+  useAmbientContextBindingStore,
+} from "~/ambientContextBindingStore";
+import { useAmbientContext, useAmbientResources } from "~/hooks/useAmbientContext";
 import { AmbientContextComposer } from "./chat/AmbientContextComposer";
 import { type LegendListRef } from "@legendapp/list/react";
 import {
@@ -675,6 +689,10 @@ export default function ChatView({
   // AssignmentPattern in the parameter list makes React Compiler bail out (silently —
   // `panicThreshold` is unset) on this entire component, the hottest one in the app.
   // See chatHotPath.compiler.test.ts.
+  const zenMode = useZenMode();
+  const isZenMode =
+    zenMode.state.isActive &&
+    (paneScopeIdProp ?? SINGLE_CHAT_PANE_SCOPE_ID) === SINGLE_CHAT_PANE_SCOPE_ID;
   const paneScopeId = paneScopeIdProp ?? SINGLE_CHAT_PANE_SCOPE_ID;
   const hideHeader = hideHeaderProp ?? false;
   const surfaceMode = surfaceModeProp ?? "single";
@@ -953,6 +971,7 @@ export default function ChatView({
   ]);
 
   const composerFormRef = useRef<HTMLFormElement>(null);
+  const zenToolbarRef = useRef<HTMLDivElement>(null);
   const composerStatusRowRef = useRef<HTMLDivElement>(null);
   // Set by whichever mounted GitActionsControl instance (header quick-action or the
   // Environment panel row) last registered — either performs the identical commit &
@@ -2743,9 +2762,25 @@ export default function ChatView({
     activeHubId !== null &&
     effectiveComposerTriggerKind === "mention" &&
     composerCommandPicker === null;
+  const [mentionTab, setMentionTab] = useState<"files" | "context">("files");
+  const ambientState = useAmbientContext();
+  const ambientBindingLimit = useAmbientContextBindingStore((state) => state.maxBindings);
+  const ambientBindings = useAmbientContextBindingStore(
+    (state) => state.byThreadId[threadId] ?? EMPTY_AMBIENT_BINDINGS,
+  );
+  const changeMentionTab = useCallback(
+    (tab: "files" | "context") => {
+      setMentionTab(tab);
+      setComposerHighlightedItemId(null);
+      requestAnimationFrame(() => composerEditorRef.current?.focus());
+    },
+    [composerEditorRef, setComposerHighlightedItemId],
+  );
   const ambientResources = useAmbientResources(
     mentionTriggerQuery,
-    effectiveComposerTriggerKind === "mention" && composerCommandPicker === null,
+    effectiveComposerTriggerKind === "mention" &&
+      composerCommandPicker === null &&
+      mentionTab === "files",
   );
   const composerMenuItems = useMemo(() => {
     if (composerCommandPicker === "fork-target") {
@@ -2788,14 +2823,62 @@ export default function ChatView({
       ];
     }
 
+    if (effectiveComposerTriggerKind === "mention" && mentionTab === "context") {
+      return (ambientState.data?.connections ?? [])
+        .filter(
+          (connection) =>
+            connection.connected &&
+            !connection.error &&
+            ambientState.data?.sources.some(
+              (source) => source.manifest.id === "obsidian" && source.policy.enabled,
+            ) &&
+            connection.label.toLowerCase().includes(mentionTriggerQuery.toLowerCase()),
+        )
+        .map((connection) => ({
+          id: `ambient-connection:${connection.id}`,
+          type: "ambient-connection" as const,
+          connection,
+          ...ambientConnectionPresentation(connection, [
+            ...(ambientState.data?.connections ?? []),
+            ...(ambientState.data?.pendingConnections ?? []),
+            ...ambientBindings,
+          ]),
+          description: ambientBindings.some((binding) => binding.id === connection.id)
+            ? t("chat:ambientAlreadyBound")
+            : ambientBindings.length >= ambientBindingLimit
+              ? t("chat:ambientLimitReached", { limit: ambientBindingLimit })
+              : t("chat:ambientBindSelection"),
+          disabled:
+            ambientBindings.some((binding) => binding.id === connection.id) ||
+            ambientBindings.length >= ambientBindingLimit,
+        }));
+    }
     return [
-      ...(ambientResources.data ?? []).map((resource) => ({
-        id: `ambient:${resource.sourceId}:${resource.targetKey}`,
-        type: "ambient-resource" as const,
-        resource,
-        label: resource.title,
-        description: "Attach file identity only",
-      })),
+      ...(effectiveComposerTriggerKind === "mention" ? (ambientResources.data ?? []) : []).map(
+        (resource) => {
+          const connection = ambientState.data?.connections?.find(
+            (entry) => entry.sourceId === resource.sourceId,
+          );
+          const presentation = connection
+            ? ambientConnectionPresentation(connection, [
+                ...(ambientState.data?.connections ?? []),
+                ...(ambientState.data?.pendingConnections ?? []),
+                ...ambientBindings,
+              ])
+            : { label: "Obsidian", title: resource.sourceId };
+          return {
+            id: `ambient:${resource.sourceId}:${resource.targetKey}`,
+            type: "ambient-resource" as const,
+            resource,
+            label: resource.title.split(/[\\/]/).at(-1) ?? resource.title,
+            description: t("chat:ambientResourceReference", {
+              connection: presentation.label,
+              resource: resource.title,
+            }),
+            title: `${presentation.title} · ${resource.title}`,
+          };
+        },
+      ),
       ...(showHubMentions ? hubMentions.items : normalComposerMenuItems),
     ];
   }, [
@@ -2805,7 +2888,13 @@ export default function ChatView({
     normalComposerMenuItems,
     showHubMentions,
     hubMentions.items,
+    ambientState.data,
     ambientResources.data,
+    ambientBindings,
+    ambientBindingLimit,
+    mentionTab,
+    mentionTriggerQuery,
+    effectiveComposerTriggerKind,
     t,
   ]);
   const composerMenuOpen = Boolean(composerTrigger || composerCommandPicker);
@@ -2813,6 +2902,13 @@ export default function ChatView({
   // trigger is typed, so the two can never render over each other.
   const composerExtrasPanelOpen = isComposerExtrasPanelOpen && !composerMenuOpen;
   const composerOverlayOpen = composerMenuOpen || composerExtrasPanelOpen;
+  useZenCompactHeight({
+    active: isZenMode && !zenMode.state.expanded,
+    inlineOverlayOpen: composerOverlayOpen,
+    composerRef: composerFormRef,
+    toolbarRef: zenToolbarRef,
+    onHeightChange: zenMode.setCompactHeight,
+  });
   const activeComposerMenuItem = useMemo(
     () =>
       composerMenuItems.find(
@@ -3831,6 +3927,7 @@ export default function ChatView({
     prompt,
     eligible:
       !isCenteredEmptyLanding &&
+      !(isZenMode && !activeThreadIsSidechat && isGitRepo && !environmentEnabled) &&
       !isComposerApprovalState &&
       pendingUserInputs.length === 0 &&
       !showPlanFollowUpPrompt &&
@@ -3941,7 +4038,7 @@ export default function ChatView({
     }
 
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape") {
+      if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) {
         return;
       }
 
@@ -5254,8 +5351,9 @@ export default function ChatView({
     )
   ) : (
     <ComposerModelPicker
+      compact={isZenMode}
       hideModelLabel={!composerFooterControlsPlan.showModelLabel}
-      hideStatusLabel={!composerFooterControlsPlan.showTraitsLabel}
+      hideStatusLabel={isZenMode || !composerFooterControlsPlan.showTraitsLabel}
       contextWindowLabel={composerContextWindowLabel}
       fastModeNotice={composerFastModeNotice}
       effortControl={settings.composerEffortSlider ? "slider" : "menu"}
@@ -5318,8 +5416,8 @@ export default function ChatView({
               lockedProvider !== null ||
               (boundProvider !== null && selectedProvider === boundProvider)
             }
-            compact={isComposerFooterCompact}
-            hideLabel={!composerFooterControlsPlan.showModelLabel}
+            compact={isZenMode || isComposerFooterCompact}
+            hideLabel={isZenMode || !composerFooterControlsPlan.showModelLabel}
             onProviderInstanceChange={onProviderInstanceSelect}
             onManageAccounts={openProviderAccountSettings}
           />
@@ -5578,6 +5676,8 @@ export default function ChatView({
     onPromptChange,
     onComposerCommandKey,
   } = useChatComposerCommands({
+    mentionTab,
+    onMentionTabChange: changeMentionTab,
     threadId,
     composerSelectLockRef,
     setComposerCommandPicker,
@@ -6100,7 +6200,7 @@ export default function ChatView({
   const composerContextMeter =
     (composerStatusBelow || (!isVoiceRecording && !isVoiceTranscribing)) &&
     runtimeUsageContextWindow &&
-    composerFooterControlsPlan.showContextMeter ? (
+    (isZenMode || composerFooterControlsPlan.showContextMeter) ? (
       <ContextWindowMeter
         usage={runtimeUsageContextWindow}
         showClaudeCache={activeThread?.session?.provider === "claudeAgent"}
@@ -6141,6 +6241,13 @@ export default function ChatView({
       ) : null}
     </>
   );
+  const zenMetadataControls = isZenMode ? (
+    <>
+      <RuntimeUsageControls {...runtimeUsageControlsProps} className="shrink-0" hideLabel />
+      {composerPickerControls}
+      {composerContextMeter}
+    </>
+  ) : null;
   const branchToolbarProps = {
     threadId: activeThread.id,
     onEnvModeChange: handleEnvModeChange,
@@ -6587,7 +6694,9 @@ export default function ChatView({
     ? Math.min(previewLayout?.width ?? previewBudgetPx, previewBudgetPx) + 24
     : 0;
   const contentInsetRightPx =
-    environmentInsetPx + previewInsetPx > 0 ? environmentInsetPx + previewInsetPx : undefined;
+    !isZenMode && environmentInsetPx + previewInsetPx > 0
+      ? environmentInsetPx + previewInsetPx
+      : undefined;
   const environmentHeaderState = environmentEnabled
     ? {
         open: environmentPanelVisibleEffective,
@@ -6674,6 +6783,14 @@ export default function ChatView({
       >
         <ComposerColumnFrame>
           <AmbientContextComposer key={threadId} threadId={threadId} />
+          {isZenMode && !zenMode.state.expanded && activeThread.error ? (
+            <ThreadErrorBanner
+              error={activeThread.error}
+              onDismiss={dismissActiveThreadError}
+              onUnblock={unblockThread}
+              unblocking={unblockingActiveThread}
+            />
+          ) : null}
           {/* A bare wrapper keeps the normal-flow panels' -mb-px seam onto the input shell
                 via margin collapse. */}
           <div>
@@ -6948,8 +7065,10 @@ export default function ChatView({
                           scheduleComposerFocus();
                         }}
                       />
-                    ) : isLocalFolderBrowserOpen ? (
+                    ) : isLocalFolderBrowserOpen && mentionTab === "files" ? (
                       <ComposerLocalDirectoryMenu
+                        mentionTab={mentionTab}
+                        onMentionTabChange={changeMentionTab}
                         mentionQuery={mentionTriggerQuery}
                         rootLabel={localFolderBrowseRootPath ?? "Local folders unavailable"}
                         homeDir={serverConfigQuery.data?.homeDir ?? null}
@@ -6961,18 +7080,31 @@ export default function ChatView({
                       />
                     ) : (
                       <ComposerCommandMenu
+                        mentionTab={mentionTab}
+                        onMentionTabChange={changeMentionTab}
                         items={composerMenuItems}
                         resolvedTheme={resolvedTheme}
                         isLoading={
-                          isComposerMenuLoading || (showHubMentions && hubMentions.loading)
+                          mentionTab === "context" && effectiveComposerTriggerKind === "mention"
+                            ? ambientState.isLoading
+                            : isComposerMenuLoading || (showHubMentions && hubMentions.loading)
                         }
-                        {...(showHubMentions
+                        {...(mentionTab === "context" && effectiveComposerTriggerKind === "mention"
                           ? {
-                              emptyStateText: "No matching references.",
+                              emptyStateText: t("chat:ambientNoBindableVaults"),
                             }
-                          : {})}
+                          : showHubMentions
+                            ? {
+                                emptyStateText: "No matching references.",
+                              }
+                            : {})}
                         statusText={
-                          (showHubMentions ? hubMentions.error : null) ?? composerDiscoveryError
+                          mentionTab === "context" && effectiveComposerTriggerKind === "mention"
+                            ? ambientState.isError
+                              ? t("chat:ambientConnectionsReadFailed")
+                              : null
+                            : ((showHubMentions ? hubMentions.error : null) ??
+                              composerDiscoveryError)
                         }
                         triggerKind={
                           composerCommandPicker !== null
@@ -7078,19 +7210,31 @@ export default function ChatView({
               {/* Bottom toolbar — hidden while an approval takes over the composer,
                     since the approve/decline actions live in the detached approval card
                     floating above (see ComposerPendingApprovalPanel). */}
-              {activePendingApproval ? null : (
+              {isZenMode && showTrailingBranchToolbar ? (
+                <BranchToolbar {...branchToolbarProps} className="min-w-0 px-2 py-0" />
+              ) : null}
+              {activePendingApproval ? (
+                isZenMode ? (
+                  <div className="flex items-center justify-end gap-2 px-2 pb-2">
+                    {zenMetadataControls}
+                  </div>
+                ) : null
+              ) : (
                 <ChatComposerFooter
                   layout={composerSingleRow ? "row" : "block"}
                   isComposerFooterCompact={isComposerFooterCompact}
                   leadingControls={
-                    composerStatusBelow
+                    isZenMode || composerStatusBelow
                       ? composerExtrasTrigger
                       : relocateComposerLeadingControls
                         ? null
                         : renderComposerLeadingControls({ iconOnly: false })
                   }
-                  composerPickerControls={composerStatusBelow ? null : composerPickerControls}
-                  contextMeter={composerStatusBelow ? null : composerContextMeter}
+                  metadataControls={zenMetadataControls}
+                  composerPickerControls={
+                    isZenMode || composerStatusBelow ? null : composerPickerControls
+                  }
+                  contextMeter={isZenMode || composerStatusBelow ? null : composerContextMeter}
                   interactionMode={interactionMode}
                   resetInteractionMode={handleResetInteractionMode}
                   sidebarAction={
@@ -7135,7 +7279,17 @@ export default function ChatView({
                     hasPendingCacheReview: activeThread?.claudeCacheReview != null,
                     preparingImages: isPreparingComposerImages,
                     preparingWorktree: isPreparingWorktree,
-                    hasContent: composerSendState.hasSendableContent,
+                    hasContent:
+                      composerSendState.hasSendableContent ||
+                      (!composerDraft.ambientContextFrozen &&
+                        Boolean(ambientState.bridge) &&
+                        !ambientState.isError &&
+                        selectBoundAmbientItems(
+                          ambientState.data?.items ?? [],
+                          ambientBindings.filter((binding) =>
+                            ambientBindingAvailable(ambientState.data, binding),
+                          ),
+                        ).length > 0),
                     hasPendingUserInputs: pendingUserInputs.length > 0,
                     showPlanFollowUp: showPlanFollowUpPrompt,
                     hasPrompt: prompt.trim().length > 0,
@@ -7157,6 +7311,9 @@ export default function ChatView({
         "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
         CHAT_BACKGROUND_CLASS_NAME,
       )}
+      data-zen-chat={isZenMode ? "true" : undefined}
+      data-zen-expanded={isZenMode ? String(zenMode.state.expanded) : undefined}
+      data-zen-overlay-open={isZenMode && composerOverlayOpen ? "true" : undefined}
       onDragEnter={onComposerDragEnter}
       onDragOver={onComposerDragOver}
       onDragLeave={onComposerDragLeave}
@@ -7172,8 +7329,9 @@ export default function ChatView({
           isDragOverComposer ? "opacity-100" : "opacity-0",
         )}
       />
+      {isZenMode ? <ZenModeToolbar ref={zenToolbarRef} title={activeThreadDisplayTitle} /> : null}
       <ChatSurfaceHeader
-        hidden={hideHeader}
+        hidden={hideHeader || isZenMode}
         className={cn(
           CHAT_SURFACE_HEADER_DIVIDER_CLASS_NAME,
           !isEditorRail && CHAT_SURFACE_HEADER_PADDING_X_CLASS,
@@ -7397,7 +7555,14 @@ export default function ChatView({
         />
       ) : null}
       {/* Main content area with optional plan sidebar */}
-      <div ref={mainContentRef} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+      <div
+        data-zen-main=""
+        ref={mainContentRef}
+        className={cn(
+          "relative flex min-h-0 min-w-0 flex-1 overflow-hidden",
+          isZenMode && "overflow-y-auto",
+        )}
+      >
         {/* Chat column */}
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           <div
@@ -7416,14 +7581,21 @@ export default function ChatView({
                   CHAT_COLUMN_GUTTER_CLASS_NAME,
                 )}
               >
-                {settings.showAsciiBackground && !terminalWorkspaceTerminalTabActive ? (
+                {settings.showAsciiBackground &&
+                !terminalWorkspaceTerminalTabActive &&
+                !isZenMode ? (
                   <AsciiWaveBackground />
                 ) : null}
                 {/* The heading floats centered in the space above the composer, which is
                     anchored to the bottom of the pane (with its workspace-tools rail
                     stacked on top of the input) so starting a chat keeps the composer
                     where it lives for the rest of the conversation. */}
-                <div className="relative flex min-h-0 flex-1 items-center justify-center">
+                <div
+                  className={cn(
+                    "relative flex min-h-0 flex-1 items-center justify-center",
+                    isZenMode && "hidden",
+                  )}
+                >
                   {/* Pinned to the top so the heading stays optically centered; hidden on
                       short panes where it would crowd the heading. */}
                   <div className="absolute inset-x-0 top-4 flex justify-center px-6 [@media(max-height:620px)]:hidden">
@@ -7490,7 +7662,7 @@ export default function ChatView({
                 {/* Positioned so it paints above the ASCII background. */}
                 <div className="relative w-full shrink-0 pb-3 sm:pb-4">
                   {composerSection}
-                  {relocateComposerLeadingControls ? (
+                  {!isZenMode && relocateComposerLeadingControls ? (
                     <div className={COMPOSER_COLUMN_FRAME_CLASS_NAME}>
                       <div className="flex w-full items-center gap-1">
                         <div className="flex shrink-0 items-center gap-1 pl-1">
@@ -7505,7 +7677,17 @@ export default function ChatView({
 
             {shouldRenderChatPaneContent && !isCenteredEmptyLanding ? (
               <div className="flex min-h-0 flex-1 flex-col">
-                <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+                <div
+                  id={isZenMode ? "zen-conversation" : undefined}
+                  data-testid="chat-transcript-drawer"
+                  inert={isZenMode && !zenMode.state.expanded}
+                  aria-hidden={isZenMode && !zenMode.state.expanded}
+                  className={cn(
+                    "relative flex min-h-0 flex-1 flex-col overflow-hidden",
+                    isZenMode && disclosureFadeClassName(zenMode.state.expanded),
+                    isZenMode && !zenMode.state.expanded && "hidden",
+                  )}
+                >
                   <ChatTranscriptPane
                     activeThreadId={activeThread.id}
                     activeTurnId={activeTurnIdForTranscript}
@@ -7624,8 +7806,8 @@ export default function ChatView({
                     scrollButtonVisible={showScrollToBottom}
                     onScrollToBottom={onScrollToBottom}
                     contentInsetRightPx={contentInsetRightPx}
-                    contentInsetBottomPx={composerTranscriptInsetPx}
-                    contentInsetBottomClearancePx={composerOverlayBottomClearancePx}
+                    contentInsetBottomPx={isZenMode ? 0 : composerTranscriptInsetPx}
+                    contentInsetBottomClearancePx={isZenMode ? 0 : composerOverlayBottomClearancePx}
                   />
                   {/* Suggestions reserve clearance for both sets of controls.
                       Without them, the paused banner needs its own minimum gap
@@ -7675,7 +7857,9 @@ export default function ChatView({
                   <div
                     ref={composerOverlayRef}
                     className={cn(
-                      "pointer-events-none absolute inset-x-0 bottom-full w-full overflow-visible",
+                      isZenMode
+                        ? "w-full overflow-visible"
+                        : "pointer-events-none absolute inset-x-0 bottom-full w-full overflow-visible",
                       ENVIRONMENT_CONTENT_INSET_MOTION_CLASS,
                       CHAT_COLUMN_GUTTER_CLASS_NAME,
                     )}
@@ -7685,40 +7869,47 @@ export default function ChatView({
                   >
                     <div className="pointer-events-auto">{composerSection}</div>
                   </div>
-                  <div className="pt-0.5" />
+                  {!isZenMode ? <div className="pt-0.5" /> : null}
                   {/* Row under the composer: permission, branch controls (git threads), then
                       model/effort and the context ring. The footer tiers measure this row. It
                       takes the composer's right inset so it stays under the composer while the
                       Environment card or preview rail is docked. */}
-                  <div
-                    className={cn(
-                      CHAT_COLUMN_GUTTER_CLASS_NAME,
-                      ENVIRONMENT_CONTENT_INSET_MOTION_CLASS,
-                    )}
-                    style={contentInsetRightPx ? { paddingRight: contentInsetRightPx } : undefined}
-                  >
-                    <div className={COMPOSER_COLUMN_FRAME_CLASS_NAME}>
-                      <div
-                        ref={composerStatusRowRef}
-                        data-chat-composer-status-row=""
-                        className="@container flex min-h-9 w-full min-w-0 flex-wrap items-center gap-1 pb-1.5 pt-1"
-                      >
-                        <RuntimeUsageControls {...runtimeUsageControlsProps} className="shrink-0" />
-                        {showTrailingBranchToolbar ? (
-                          <BranchToolbar
-                            {...branchToolbarProps}
-                            className="min-w-0 flex-[1_0_9rem] px-1 py-0"
+                  {!isZenMode ? (
+                    <div
+                      className={cn(
+                        CHAT_COLUMN_GUTTER_CLASS_NAME,
+                        ENVIRONMENT_CONTENT_INSET_MOTION_CLASS,
+                      )}
+                      style={
+                        contentInsetRightPx ? { paddingRight: contentInsetRightPx } : undefined
+                      }
+                    >
+                      <div className={COMPOSER_COLUMN_FRAME_CLASS_NAME}>
+                        <div
+                          ref={composerStatusRowRef}
+                          data-chat-composer-status-row=""
+                          className="@container flex min-h-9 w-full min-w-0 flex-wrap items-center gap-1 pb-1.5 pt-1"
+                        >
+                          <RuntimeUsageControls
+                            {...runtimeUsageControlsProps}
+                            className="shrink-0"
                           />
-                        ) : (
-                          <div className="min-w-0 flex-1" />
-                        )}
-                        <div className="ml-auto flex shrink-0 items-center gap-2 pr-1">
-                          {composerPickerControls}
-                          {composerContextMeter}
+                          {showTrailingBranchToolbar ? (
+                            <BranchToolbar
+                              {...branchToolbarProps}
+                              className="min-w-0 flex-[1_0_9rem] px-1 py-0"
+                            />
+                          ) : (
+                            <div className="min-w-0 flex-1" />
+                          )}
+                          <div className="ml-auto flex shrink-0 items-center gap-2 pr-1">
+                            {composerPickerControls}
+                            {composerContextMeter}
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
+                  ) : null}
                 </div>
               </div>
             ) : null}
@@ -7772,7 +7963,7 @@ export default function ChatView({
             />
           ) : null}
           {/* Environment overlay — always mounted so open/close can transition in lockstep with inset. */}
-          {environmentEnabled ? (
+          {environmentEnabled && !isZenMode ? (
             <EnvironmentPanel
               {...environmentPanelProps}
               open={environmentPanelVisibleEffective}
@@ -7791,7 +7982,7 @@ export default function ChatView({
               }
             />
           ) : null}
-          {projectPanelEnabled ? (
+          {projectPanelEnabled && !isZenMode ? (
             <ProjectPanel
               open={projectPanelVisible}
               variant={environmentOverlayVariant}
@@ -7815,7 +8006,7 @@ export default function ChatView({
               }}
             />
           ) : null}
-          {projectPanelEnabled ? (
+          {projectPanelEnabled && !isZenMode ? (
             <LibraryPanel
               open={libraryPanelVisible}
               variant={environmentOverlayVariant}
@@ -7845,7 +8036,7 @@ export default function ChatView({
         {/* end chat column */}
 
         {/* Plan sidebar */}
-        {planSidebarOpen ? (
+        {planSidebarOpen && !isZenMode ? (
           <PlanSidebar
             activeTaskList={activeTaskList}
             activeProposedPlan={sidebarProposedPlan}

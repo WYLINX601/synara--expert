@@ -1,3 +1,4 @@
+import { useZenMode } from "../components/chat/ZenModeProvider";
 import type { ResolvedKeybindingsConfig } from "@synara/contracts";
 import { CHAT_SURFACE_HEADER_HEIGHT_PX } from "@synara/shared/desktopChrome";
 import { useQuery } from "@tanstack/react-query";
@@ -567,6 +568,7 @@ function ChatRouteGlobalShortcuts() {
 }
 
 function ChatRouteLayout() {
+  const { state: zenState } = useZenMode();
   const isEditorView = useLocation({
     select: (location) => (location.search as { view?: unknown }).view === "editor",
   });
@@ -579,7 +581,8 @@ function ChatRouteLayout() {
   const railPanelView = useRailShellStore((store) => store.panelView);
   const selectRailPanelItem = useRailShellStore((store) => store.selectPanelItem);
   const railHidesPanel = !railItemShowsPanel(railActiveItem);
-  const resolvedSidebarOpen = isEditorView || railHidesPanel ? false : sidebarOpen;
+  const resolvedSidebarOpen =
+    zenState.isActive || isEditorView || railHidesPanel ? false : sidebarOpen;
   // Toggling the panel open on a full-width route brings back the current panel item.
   const handleSidebarOpenChange = useCallback(
     (open: boolean) => {
@@ -620,8 +623,8 @@ function ChatRouteLayout() {
   // `data-sidebar-side` on the provider selects the seam geometry.
   const mainContentShell = (
     <div ref={setRouteColumn} className="relative flex h-svh min-h-0 min-w-0 flex-1">
-      <div aria-hidden className="app-rail-header-divider" />
-      {isEditorView ? null : (
+      <div aria-hidden className={cn("app-rail-header-divider", zenState.isActive && "hidden")} />
+      {isEditorView || zenState.isActive ? null : (
         <SidebarInstanceProvider side="left" resizable={THREAD_SIDEBAR_RESIZABLE}>
           <SidebarRail placement="content-seam" />
         </SidebarInstanceProvider>
@@ -644,6 +647,7 @@ function ChatRouteLayout() {
       style={{ "--app-top-strip-height": `${CHAT_SURFACE_HEADER_HEIGHT_PX}px` } as CSSProperties}
       data-sidebar-side="left"
       data-sidebar-layout="rail"
+      data-zen-mode={zenState.isActive ? "true" : undefined}
     >
       <ThreadRetentionMaintenanceToast />
       <ChatRouteGlobalShortcuts />
@@ -652,9 +656,9 @@ function ChatRouteLayout() {
           {isMobile ? (
             // Phones show the sidebar as a sheet that carries its own rail (see ThreadSidebar),
             // so the shell keeps no left column.
-            sidebarElement
+            <div className={zenState.isActive ? "hidden" : "contents"}>{sidebarElement}</div>
           ) : (
-            <div className="flex min-h-0 shrink-0 flex-col">
+            <div className={cn("flex min-h-0 shrink-0 flex-col", zenState.isActive && "hidden")}>
               <AppShellTopStrip />
               <div className="flex min-h-0 flex-1">
                 <div ref={setRailSlot} className="flex shrink-0" />

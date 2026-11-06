@@ -4,19 +4,27 @@
 
 ## 安装与配对
 
-1. 使用包含 Ambient Context 的 Synara 开发版；已有安装版不会因源码变更自动获得功能。
-2. 把本目录的 `manifest.json`、`main.js` 和 `capture.cjs` 放进目标 Vault 的 `.obsidian/plugins/synara-context/`，在 Obsidian 社区插件设置启用 **Synara Context**。
-3. 在 Synara 的 Settings → Connectors 中开启 Obsidian context，选择允许的信息类型，显示配对信息。
-4. 在 Obsidian 的 Synara Context 设置中填入 Local endpoint 与 Pairing code，点击 Connect。凭证只保留在本次应用会话中，不写入 Vault。
-5. 打开笔记并选中文字，切回 Synara。点击 **Attach context** 固定当时的上下文，或在输入框用 `@` 搜索 Vault 文件。检查引用后发送。
+1. 使用包含 Ambient Context 的 Synara 版本；已有安装版不会因源码变更自动获得功能。
+2. 从仓库根目录运行 `bun run obsidian-plugin:build`，把本目录的 `manifest.json` 与 `dist/main.js` 放进目标 Vault 的 `.obsidian/plugins/synara-context/`，在 Obsidian 社区插件设置启用 **Synara Context**。不要直接复制源码 `main.js`：Obsidian 的插件加载器不能按插件目录解析其中的 `./capture.cjs`。
+3. 在 Synara 的 设置 → 应用上下文 中开启 Obsidian context，并选择允许的信息类型。
+4. 在 Obsidian 的 Synara Context 设置中选择工作台，点击“连接 / 请求授权”，然后在 Synara 设置的“应用上下文”中批准此知识库。配对码与可复用授权保存在用户应用数据目录，不写入 Vault。
+5. 打开笔记并选中文字，切回 Synara，在会话中通过 `@ → 上下文` 选择并绑定知识库。绑定按会话保存，默认每个会话最多 5 个，可在应用上下文设置中调整；文件引用优先，选区会随已允许类型附加，正文只在 Synara 明确允许且用户选择正文时发送。
 
-重新启动 Synara/Obsidian 或改变来源策略后重新配对；只接受 `ws://127.0.0.1:端口`。同一 Synara 来源一次连接一个 Vault，第二个连接不会替换第一个。断开或关闭来源立即清空实时状态，已固定引用仍可手动移除。
+重复构建入口（在仓库根目录运行）：
+
+```sh
+bun run obsidian-plugin:build
+```
+
+自动发现只使用当前操作系统用户的应用数据目录。Vault 身份保存在该目录，基于规范化路径的哈希区分，不暴露绝对路径；凭证只在单独的授权文件中，不进入 Vault 或发现记录。不同 Vault 与 Stable、Beta、Dev 工作台分别使用独立连接 ID；多工作台时必须选择目标实例。首次批准后可自动重连；手动连接留在“高级”区域。只接受 `ws://127.0.0.1:端口`，拒绝非本机地址和不可信 Origin。断开会清空实时状态，撤销批准会删除可复用授权；已发送的历史消息不会被追溯修改。
+
+插件每 5 秒读取一次 Obsidian 当前活动 Markdown 视图，编辑窗口或阅读视图都按用户允许的类型发布；这不会判断操作系统当前焦点窗口。每个会话默认不绑定上下文，必须在该会话里显式选择 Vault。阅读模式只读取当前视图范围内的选区，不读取旧编辑器缓存，也不生成行号。
 
 ## 已知边界
 
-- 首版面向 Markdown 编辑视图；阅读模式、Canvas、PDF、移动端和弹出窗口未作实机验收。
+- 仅支持 Markdown 编辑视图与该视图内的阅读模式选区；Canvas、PDF、移动端和弹出窗口未实现。
 - 不把笔记名称或插件实例 ID 当作系统窗口身份；首版未开放窗口身份采集。
-- 实时状态最多保留 30 秒；没有持续操作历史。切回 Synara 不立即抹去刚刚选中的文字。
+- 实时状态最多保留 30 秒；没有持续操作历史。切回 Synara 后仍保留最近选区供显式绑定使用，切换文件会用新焦点完整替换旧批次。
 - 单项文本最多 16,384 个 UTF-16 字符，正文截断会标记；过长选区不伪装完整。传输/快照另有总量限制，序列化超量会清空上一批次并显示通知。
 - 不改写笔记，不安装系统辅助功能或屏幕录制权限。资源路径只是来源信息，不能授权模型访问文件。
-- 本目录无需构建即可复制，但仅源码/协议测试通过不代表已完成真实 Obsidian 联调。实际结果见仓库验收记录。
+- 插件需要先打包再安装。2026-11-06 在 Obsidian 1.15.0 的 Paper 库验证了首版打包产物可启用；本轮多库优化尚未更新到实际安装；这不代表配对和上下文传输已完成实机验收。

@@ -1,3 +1,10 @@
+import { useTranslation } from "~/i18n";
+import { ambientConnectionPresentation } from "~/lib/ambientContextBinding";
+import {
+  useAmbientContextBindingStore,
+  validAmbientBindingLimit,
+  MAX_AMBIENT_BINDING_LIMIT,
+} from "~/ambientContextBindingStore";
 import type { AmbientContextSourcePolicy, AmbientContextType } from "@synara/contracts";
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -6,26 +13,35 @@ import { Input } from "../ui/input";
 import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { Checkbox } from "../ui/checkbox";
+import { Menu, MenuItem, MenuTrigger } from "../ui/menu";
+import { ComposerPickerMenuPopup } from "../chat/ComposerPickerMenuPopup";
 import { SettingsRow, SettingsSection } from "./SettingsPanelPrimitives";
 
-const TYPE_LABELS: Record<AmbientContextType, string> = {
-  "application.identity": "Application identity",
-  "window.identity": "Window title",
-  "resource.identity": "File identity and resource search",
-  "selection.text": "Selected text",
-  "selection.location": "Selection location",
-  "element.identity": "Element identity",
-  "resource.content": "Document content",
-};
-
 export function AmbientContextSettingsPanel({ active }: { active: boolean }) {
+  const { t } = useTranslation();
+  const TYPE_LABELS: Record<AmbientContextType, string> = {
+    "application.identity": t("settings:ambientTypeApplication"),
+    "window.identity": t("settings:ambientTypeWindow"),
+    "resource.identity": t("settings:ambientTypeResource"),
+    "selection.text": t("settings:ambientTypeText"),
+    "selection.location": t("settings:ambientTypeLocation"),
+    "element.identity": t("settings:ambientTypeElement"),
+    "resource.content": t("settings:ambientTypeContent"),
+  };
   const { bridge, data, error } = useAmbientContext(active);
+  const connectionPeers = [...(data?.connections ?? []), ...(data?.pendingConnections ?? [])];
+  const presentConnection = (connection: { id: string; label: string }) =>
+    ambientConnectionPresentation(connection, connectionPeers);
+  const bindingLimit = useAmbientContextBindingStore((state) => state.maxBindings);
+  const [limitDraft, setLimitDraft] = useState(String(bindingLimit));
+  useEffect(() => setLimitDraft(String(bindingLimit)), [bindingLimit]);
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState(false);
   const pairingEpoch = useRef(0);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<{
     sourceId: string;
+    label: string;
     endpoint: string;
     token: string;
   } | null>(null);
@@ -35,7 +51,43 @@ export function AmbientContextSettingsPanel({ active }: { active: boolean }) {
       pairingEpoch.current += 1;
     };
   }, [active]);
-  if (!active || !bridge) return null;
+  if (!active) return null;
+  if (!bridge)
+    return (
+      <p className="text-ui-sm text-muted-foreground">{t("settings:ambientDesktopRequired")}</p>
+    );
+  async function connectionAction(id: string, approve: boolean) {
+    if (!bridge) return;
+    const action = approve ? bridge.approveConnection : bridge.revokeConnection;
+    if (!action) return;
+    setBusy(true);
+    setActionError(null);
+    setPairing(null);
+    pairingEpoch.current += 1;
+    try {
+      await action(id);
+      await queryClient.invalidateQueries({ queryKey: AMBIENT_CONTEXT_QUERY_KEY });
+    } catch {
+      setActionError(t("settings:ambientConnectionUpdateFailed"));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function showPairing(sourceId: string, label: string) {
+    if (!bridge) return;
+    setBusy(true);
+    setActionError(null);
+    setPairing(null);
+    const requestEpoch = ++pairingEpoch.current;
+    try {
+      const details = await bridge.getPairing(sourceId);
+      if (requestEpoch === pairingEpoch.current) setPairing({ sourceId, label, ...details });
+    } catch {
+      setActionError(t("settings:ambientPairingFailed"));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function configure(sourceId: string, policy: AmbientContextSourcePolicy) {
     if (!bridge) return;
     setBusy(true);
@@ -47,28 +99,190 @@ export function AmbientContextSettingsPanel({ active }: { active: boolean }) {
       queryClient.setQueryData(AMBIENT_CONTEXT_QUERY_KEY, next);
       await queryClient.invalidateQueries({ queryKey: ["desktop", "ambient-resources"] });
     } catch {
-      setActionError("Could not save the context source settings. Try again.");
+      setActionError(t("settings:ambientSaveFailed"));
     } finally {
       setBusy(false);
     }
   }
   return (
     <div className="space-y-6">
+      <SettingsSection title={t("settings:ambientChatBindings")}>
+        <SettingsRow
+          title={t("settings:ambientVaultLimit")}
+          description={t("settings:ambientVaultLimitDescription")}
+        >
+          <Input
+            type="number"
+            min={1}
+            max={MAX_AMBIENT_BINDING_LIMIT}
+            step={1}
+            aria-label={t("settings:ambientVaultLimit")}
+            className="w-20"
+            value={limitDraft}
+            aria-invalid={!validAmbientBindingLimit(Number(limitDraft))}
+            onChange={(event) => {
+              setLimitDraft(event.target.value);
+              const value = Number(event.target.value);
+              if (validAmbientBindingLimit(value))
+                useAmbientContextBindingStore.getState().setMaxBindings(value);
+            }}
+            onBlur={() =>
+              setLimitDraft(String(useAmbientContextBindingStore.getState().maxBindings))
+            }
+          />
+        </SettingsRow>
+      </SettingsSection>
+      <SettingsSection title={t("settings:ambientConnectedVaults")}>
+        {data?.connections?.length ? (
+          data.connections.map((connection) => (
+            <SettingsRow
+              key={connection.id}
+              title={
+                <span title={presentConnection(connection).title}>
+                  {presentConnection(connection).label}
+                </span>
+              }
+              description={
+                connection.error ??
+                (connection.connected
+                  ? t("settings:ambientBindViaMention")
+                  : t("settings:ambientDisconnectedNoStale"))
+              }
+              status={
+                connection.connected
+                  ? t("settings:ambientConnected")
+                  : t("settings:ambientUnavailable")
+              }
+            >
+              <Menu>
+                <MenuTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="ghost"
+                      disabled={busy}
+                      aria-label={t("settings:ambientConnectionOptionsLabel", {
+                        label: presentConnection(connection).label,
+                      })}
+                      title={presentConnection(connection).title}
+                    />
+                  }
+                >
+                  {t("settings:ambientConnectionOptions")}
+                </MenuTrigger>
+                <ComposerPickerMenuPopup align="end" className="w-44 min-w-44">
+                  <MenuItem
+                    disabled={
+                      !data.sources.some(
+                        (source) => source.manifest.id === "obsidian" && source.policy.enabled,
+                      )
+                    }
+                    onClick={() =>
+                      void showPairing(connection.sourceId, presentConnection(connection).label)
+                    }
+                  >
+                    {t("settings:ambientManualPairing")}
+                  </MenuItem>
+                  <MenuItem
+                    variant="destructive"
+                    disabled={!bridge.revokeConnection}
+                    onClick={() => void connectionAction(connection.id, false)}
+                  >
+                    {t("settings:ambientRevoke")}
+                  </MenuItem>
+                </ComposerPickerMenuPopup>
+              </Menu>
+            </SettingsRow>
+          ))
+        ) : (
+          <p className="px-4 py-3 text-ui-sm text-muted-foreground">
+            {t("settings:ambientNoConnections")}
+          </p>
+        )}
+        {pairing ? (
+          <div className="space-y-2 px-4 py-3 text-ui-sm">
+            <p className="text-muted-foreground">
+              {t("settings:ambientCredentialsNotice", { label: pairing.label })}
+            </p>
+            <label className="block">
+              {t("settings:ambientEndpoint")}
+              <Input
+                aria-label={t("settings:ambientEndpointLabel")}
+                readOnly
+                value={pairing.endpoint}
+                className="mt-1 w-full rounded border bg-background px-2 py-1 text-ui-sm"
+              />
+            </label>
+            <label className="block">
+              {t("settings:ambientToken")}
+              <Input
+                aria-label={t("settings:ambientTokenLabel")}
+                readOnly
+                value={pairing.token}
+                className="mt-1 w-full rounded border bg-background px-2 py-1 text-ui-sm"
+              />
+            </label>
+            <Button type="button" size="xs" variant="ghost" onClick={() => setPairing(null)}>
+              {t("settings:ambientHidePairing")}
+            </Button>
+          </div>
+        ) : null}
+      </SettingsSection>
+      {data?.pendingConnections?.length ? (
+        <SettingsSection title={t("settings:ambientPendingConnections")}>
+          {data.pendingConnections.map((connection) => (
+            <SettingsRow
+              key={connection.id}
+              title={
+                <span title={presentConnection(connection).title}>
+                  {presentConnection(connection).label}
+                </span>
+              }
+              description={t("settings:ambientApprovalDescription")}
+            >
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost"
+                  disabled={busy || !bridge.revokeConnection}
+                  onClick={() => void connectionAction(connection.id, false)}
+                >
+                  {t("settings:ambientIgnore")}
+                </Button>
+                <Button
+                  type="button"
+                  size="xs"
+                  disabled={busy || !bridge.approveConnection}
+                  title={presentConnection(connection).title}
+                  onClick={() => void connectionAction(connection.id, true)}
+                >
+                  {t("settings:ambientApprove")}
+                </Button>
+              </div>
+            </SettingsRow>
+          ))}
+        </SettingsSection>
+      ) : null}
       {data?.sources.map((source) => (
-        <SettingsSection key={source.manifest.id} title={`${source.manifest.label} context`}>
+        <SettingsSection
+          key={source.manifest.id}
+          title={t("settings:ambientSourceTitle", { source: source.manifest.label })}
+        >
           <SettingsRow
-            title="Enable context source"
-            description="Choose which information this app can share. Attach context explicitly in a chat to send it."
+            title={t("settings:ambientEnableSource")}
+            description={t("settings:ambientSourceDescription")}
             status={
               source.error
-                ? "Source connection unavailable"
+                ? t("settings:ambientSourceUnavailable")
                 : source.connected
-                  ? "Connected"
-                  : "Not connected"
+                  ? t("settings:ambientConnected")
+                  : t("settings:ambientNotConnected")
             }
           >
             <Switch
-              aria-label={`Enable ${source.manifest.label} context`}
+              aria-label={t("settings:ambientEnableSourceLabel", { source: source.manifest.label })}
               checked={source.policy.enabled}
               disabled={busy}
               onCheckedChange={(enabled) =>
@@ -94,8 +308,8 @@ export function AmbientContextSettingsPanel({ active }: { active: boolean }) {
               title={TYPE_LABELS[capability.type]}
               description={
                 capability.type === "resource.content"
-                  ? "Includes document text when you attach context. Off by default."
-                  : "Shared only when this source is enabled."
+                  ? t("settings:ambientFullTextDescription")
+                  : t("settings:ambientShareWhenEnabled")
               }
             >
               <Checkbox
@@ -113,65 +327,11 @@ export function AmbientContextSettingsPanel({ active }: { active: boolean }) {
               />
             </SettingsRow>
           ))}
-          <SettingsRow
-            title="Connect Obsidian"
-            description="Enter the endpoint and token in the Obsidian companion plugin. Changing these permissions or restarting Synara requires pairing again."
-          >
-            <Button
-              type="button"
-              size="xs"
-              variant="outline"
-              disabled={busy || !source.policy.enabled}
-              onClick={async () => {
-                setBusy(true);
-                setActionError(null);
-                const requestEpoch = ++pairingEpoch.current;
-                try {
-                  const details = await bridge.getPairing(source.manifest.id);
-                  if (requestEpoch === pairingEpoch.current) {
-                    setPairing({ sourceId: source.manifest.id, ...details });
-                  }
-                } catch {
-                  setActionError("Could not create pairing credentials. Try again.");
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              Show pairing details
-            </Button>
-          </SettingsRow>
-          {pairing?.sourceId === source.manifest.id ? (
-            <div className="space-y-2 px-4 py-3 text-ui-sm">
-              <p className="text-muted-foreground">Session credentials — keep them private.</p>
-              <label className="block">
-                Endpoint
-                <Input
-                  aria-label="Obsidian endpoint"
-                  readOnly
-                  value={pairing.endpoint}
-                  className="mt-1 w-full rounded border bg-background px-2 py-1 text-ui-sm"
-                />
-              </label>
-              <label className="block">
-                Token
-                <Input
-                  aria-label="Obsidian pairing token"
-                  readOnly
-                  value={pairing.token}
-                  className="mt-1 w-full rounded border bg-background px-2 py-1 text-ui-sm"
-                />
-              </label>
-              <Button type="button" size="xs" variant="ghost" onClick={() => setPairing(null)}>
-                Hide pairing details
-              </Button>
-            </div>
-          ) : null}
         </SettingsSection>
       ))}
       {actionError || error ? (
         <p role="status" className="text-ui-sm text-destructive">
-          {actionError ?? "Context sources are unavailable."}
+          {actionError ?? t("settings:ambientSourcesUnavailable")}
         </p>
       ) : null}
     </div>

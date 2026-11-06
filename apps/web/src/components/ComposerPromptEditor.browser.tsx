@@ -185,3 +185,25 @@ describe("ComposerPromptEditor focus ownership", () => {
     expect(window.getSelection()?.anchorOffset).toBe("Restored draft".length);
   });
 });
+
+describe("ComposerPromptEditor mention keyboard", () => {
+  it("forwards left/right and Escape without changing the draft, but ignores IME keys", async () => {
+    const mounted = await mountEditor();
+    const onCommandKeyDown = vi.fn(() => true);
+    await mounted.update({ value: "Keep @", cursor: 6, onCommandKeyDown });
+    mounted.ref.current?.focus();
+    await settleSelection();
+    for (const key of ["ArrowLeft", "ArrowRight", "Escape"]) {
+      mounted.editor.dispatchEvent(
+        new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }),
+      );
+      expect(onCommandKeyDown).toHaveBeenLastCalledWith(key, expect.any(KeyboardEvent));
+    }
+    expect(mounted.ref.current?.readSnapshot().value).toBe("Keep @");
+    onCommandKeyDown.mockClear();
+    mounted.editor.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }),
+    );
+    expect(onCommandKeyDown).not.toHaveBeenCalled();
+  });
+});

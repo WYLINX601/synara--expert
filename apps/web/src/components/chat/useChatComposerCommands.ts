@@ -1,3 +1,4 @@
+import { useAmbientContextBindingStore } from "~/ambientContextBindingStore";
 import { toastManager } from "../ui/toast";
 import { ambientResourceSnapshot, mergeAmbientContext } from "~/lib/ambientContext";
 import {
@@ -7,7 +8,7 @@ import {
   type ProviderSkillReference,
 } from "@synara/contracts";
 import type { Dispatch, RefObject, SetStateAction } from "react";
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { formatComposerMentionToken, skillMentionPrefix } from "~/lib/composerMentions";
 import type { AppSettings } from "../../appSettings";
 import { resolveFollowUpDispatchMode } from "../../appSettings";
@@ -36,6 +37,8 @@ import { useComposerReferences } from "./useComposerReferences";
 import type { ComposerModelSelectionOptions } from "./ComposerModelPicker";
 
 interface ChatComposerCommandsInput {
+  mentionTab?: "files" | "context";
+  onMentionTabChange?: (tab: "files" | "context") => void;
   threadId: ThreadId;
   composerSelectLockRef: RefObject<boolean>;
   setComposerCommandPicker: Dispatch<SetStateAction<"fork-target" | "review-target" | null>>;
@@ -129,6 +132,8 @@ interface ChatComposerCommandsInput {
 }
 
 export function useChatComposerCommands({
+  mentionTab,
+  onMentionTabChange,
   threadId,
   composerSelectLockRef,
   setComposerCommandPicker,
@@ -180,6 +185,7 @@ export function useChatComposerCommands({
   pendingUserInputs,
   composerDraft,
 }: ChatComposerCommandsInput) {
+  const dismissedMentionPrompt = useRef<string | null>(null);
   const onSelectComposerItem = useCallback(
     (item: ComposerCommandItem) => {
       if ("disabled" in item && item.disabled) return;
@@ -202,6 +208,30 @@ export function useChatComposerCommands({
       }
       const { snapshot, trigger } = resolveActiveComposerTrigger();
       if (!trigger) return;
+      if (item.type === "ambient-connection") {
+        const bindings = useAmbientContextBindingStore.getState();
+        if ((bindings.byThreadId[threadId]?.length ?? 0) >= bindings.maxBindings) {
+          toastManager.add({
+            type: "warning",
+            title: `本会话最多绑定 ${bindings.maxBindings} 个知识库`,
+            description: "请先解绑一个库，或在应用上下文设置中提高上限。",
+          });
+          return;
+        }
+        applyComposerTriggerReplacement({
+          snapshot,
+          trigger,
+          base: "",
+          onApplied: () => {
+            useAmbientContextBindingStore.getState().bind(threadId, item.connection);
+            const store = useComposerDraftStore.getState();
+            store.setAmbientContext(threadId, store.draftsByThreadId[threadId]?.ambientContext, {
+              frozen: false,
+            });
+          },
+        });
+        return;
+      }
       if (item.type === "ambient-resource") {
         const store = useComposerDraftStore.getState();
         // React Compiler cannot lower optional-chain value blocks inside try/catch.
@@ -480,9 +510,33 @@ export function useChatComposerCommands({
   );
 
   const onComposerCommandKey = (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Slash",
+    key:
+      | "ArrowDown"
+      | "ArrowUp"
+      | "ArrowLeft"
+      | "ArrowRight"
+      | "Escape"
+      | "Enter"
+      | "Tab"
+      | "Slash",
     event: KeyboardEvent,
   ) => {
+    if (event.isComposing || event.keyCode === 229) return false;
+    if (key === "Escape" && composerMenuOpenRef.current) {
+      dismissedMentionPrompt.current = resolveActiveComposerTrigger().snapshot.value;
+      setComposerTrigger(null);
+      setComposerCommandPicker(null);
+      return true;
+    }
+    if (
+      (key === "ArrowLeft" || key === "ArrowRight") &&
+      composerMenuOpenRef.current &&
+      resolveActiveComposerTrigger().trigger?.kind === "mention"
+    ) {
+      onMentionTabChange?.(mentionTab === "context" ? "files" : "context");
+      return true;
+    }
+    if (key === "ArrowLeft" || key === "ArrowRight" || key === "Escape") return false;
     if (key === "Slash" && !event.metaKey && !event.ctrlKey && !event.altKey) {
       const { snapshot, trigger } = resolveActiveComposerTrigger();
       const slashTriggerText =
@@ -506,7 +560,9 @@ export function useChatComposerCommands({
     if (key === "Tab" && event.shiftKey) return false;
 
     const { snapshot, trigger } = resolveActiveComposerTrigger();
-    const menuIsActive = composerMenuOpenRef.current || trigger !== null;
+    const menuIsActive =
+      composerMenuOpenRef.current ||
+      (trigger !== null && dismissedMentionPrompt.current !== snapshot.value);
     if (
       key === "Enter" &&
       !event.shiftKey &&
@@ -524,7 +580,7 @@ export function useChatComposerCommands({
       return true;
     }
 
-    if (menuIsActive && isLocalFolderBrowserOpen) {
+    if (menuIsActive && isLocalFolderBrowserOpen && mentionTab !== "context") {
       if (key === "ArrowDown") {
         localDirectoryMenuRef.current?.moveHighlight("down");
         return true;
@@ -551,10 +607,8 @@ export function useChatComposerCommands({
       }
       if (key === "Tab" || key === "Enter") {
         const selectedItem = activeComposerMenuItemRef.current ?? currentItems[0];
-        if (selectedItem) {
-          onSelectComposerItem(selectedItem);
-          return true;
-        }
+        if (selectedItem) onSelectComposerItem(selectedItem);
+        return true;
       }
     }
 

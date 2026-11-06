@@ -249,6 +249,7 @@ type PersistedQueuedComposerChatTurn = typeof PersistedQueuedComposerChatTurn.Ty
 const PersistedQueuedComposerPlanFollowUp = Schema.Struct({
   id: Schema.String,
   kind: Schema.Literal("plan-follow-up"),
+  ambientContext: Schema.optionalKey(AmbientContextSnapshot),
   createdAt: Schema.String,
   previewText: Schema.String,
   text: Schema.String,
@@ -287,6 +288,7 @@ const PersistedComposerPromptHistorySavedDraft = Schema.Union([
     skills: Schema.optionalKey(Schema.Array(ProviderSkillReference)),
     mentions: Schema.optionalKey(Schema.Array(ProviderMentionReference)),
     ambientContext: Schema.optionalKey(AmbientContextSnapshot),
+    ambientContextFrozen: Schema.optionalKey(Schema.Boolean),
   }),
 ]);
 
@@ -317,6 +319,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   skills: Schema.optionalKey(Schema.Array(ProviderSkillReference)),
   mentions: Schema.optionalKey(Schema.Array(ProviderMentionReference)),
   ambientContext: Schema.optionalKey(AmbientContextSnapshot),
+  ambientContextFrozen: Schema.optionalKey(Schema.Boolean),
   queuedTurns: Schema.optionalKey(Schema.Array(PersistedQueuedComposerTurn)),
   queueStoppedTurnId: Schema.optionalKey(Schema.String),
   queueResumedTurnId: Schema.optionalKey(Schema.String),
@@ -481,6 +484,7 @@ function normalizePersistedPromptHistorySavedDraft(
     ...(skills.length > 0 ? { skills } : {}),
     ...(mentions.length > 0 ? { mentions } : {}),
     ...(ambientContext ? { ambientContext } : {}),
+    ...(candidate.ambientContextFrozen === true ? { ambientContextFrozen: true } : {}),
   };
 }
 
@@ -827,9 +831,11 @@ function normalizePersistedQueuedTurns(
       if (interactionMode === null) {
         continue;
       }
+      const ambientContext = cloneAmbientContext(candidate.ambientContext);
       normalizedTurns.push({
         id,
         kind: "plan-follow-up",
+        ...(ambientContext ? { ambientContext } : {}),
         createdAt,
         previewText,
         text,
@@ -1151,7 +1157,11 @@ function normalizePersistedDraftsByThreadId(
     const hasModelData =
       Object.keys(modelSelectionByProvider).length > 0 || activeProvider !== null;
     const hasQueuedTurns = normalizedQueuedTurns.length > 0;
-    const hasReferenceData = skills.length > 0 || mentions.length > 0 || Boolean(ambientContext);
+    const hasReferenceData =
+      skills.length > 0 ||
+      mentions.length > 0 ||
+      Boolean(ambientContext) ||
+      draftCandidate.ambientContextFrozen === true;
     if (
       Object.keys(pendingUserInputDrafts).length === 0 &&
       promptCandidate.length === 0 &&
@@ -1189,6 +1199,7 @@ function normalizePersistedDraftsByThreadId(
       ...(skills.length > 0 ? { skills } : {}),
       ...(mentions.length > 0 ? { mentions } : {}),
       ...(ambientContext ? { ambientContext } : {}),
+      ...(draftCandidate.ambientContextFrozen === true ? { ambientContextFrozen: true } : {}),
       ...(hasQueuedTurns ? { queuedTurns: normalizedQueuedTurns } : {}),
       ...(hasQueuedTurns && typeof draftCandidate.queueStoppedTurnId === "string"
         ? { queueStoppedTurnId: draftCandidate.queueStoppedTurnId }
@@ -1332,6 +1343,9 @@ export function partializeComposerDraftStoreState(
       persistedQueuedTurns.push({
         id: queuedTurn.id,
         kind: "plan-follow-up",
+        ...(queuedTurn.ambientContext
+          ? { ambientContext: cloneAmbientContext(queuedTurn.ambientContext) }
+          : {}),
         createdAt: queuedTurn.createdAt,
         previewText: queuedTurn.previewText,
         text: queuedTurn.text,
@@ -1362,7 +1376,10 @@ export function partializeComposerDraftStoreState(
       Object.keys(draft.modelSelectionByProvider).length > 0 || draft.activeProvider !== null;
     const hasQueuedTurns = persistedQueuedTurns.length > 0;
     const hasReferenceData =
-      draft.skills.length > 0 || draft.mentions.length > 0 || Boolean(draft.ambientContext);
+      draft.skills.length > 0 ||
+      draft.mentions.length > 0 ||
+      Boolean(draft.ambientContext) ||
+      draft.ambientContextFrozen === true;
     if (
       Object.keys(draft.pendingUserInputDrafts ?? {}).length === 0 &&
       draft.prompt.length === 0 &&
@@ -1460,6 +1477,9 @@ export function partializeComposerDraftStoreState(
               ...(draft.promptHistorySavedDraft.skills.length > 0
                 ? { skills: [...draft.promptHistorySavedDraft.skills] }
                 : {}),
+              ...(draft.promptHistorySavedDraft.ambientContextFrozen
+                ? { ambientContextFrozen: true }
+                : {}),
               ...(draft.promptHistorySavedDraft.ambientContext
                 ? {
                     ambientContext: cloneAmbientContext(
@@ -1528,6 +1548,7 @@ export function partializeComposerDraftStoreState(
         : {}),
       ...(draft.skills.length > 0 ? { skills: [...draft.skills] } : {}),
       ...(draft.mentions.length > 0 ? { mentions: [...draft.mentions] } : {}),
+      ...(draft.ambientContextFrozen ? { ambientContextFrozen: true } : {}),
       ...(draft.ambientContext
         ? { ambientContext: cloneAmbientContext(draft.ambientContext) }
         : {}),
@@ -1709,6 +1730,7 @@ function hydratePromptHistorySavedDraft(
     skills: [...(savedDraft.skills ?? [])],
     mentions: [...(savedDraft.mentions ?? [])],
     ambientContext: cloneAmbientContext(savedDraft.ambientContext),
+    ambientContextFrozen: savedDraft.ambientContextFrozen,
   };
 }
 
@@ -1752,6 +1774,7 @@ export function toHydratedThreadDraft(
     skills: [...(persistedDraft.skills ?? [])],
     mentions: [...(persistedDraft.mentions ?? [])],
     ambientContext: cloneAmbientContext(persistedDraft.ambientContext),
+    ambientContextFrozen: persistedDraft.ambientContextFrozen,
     queuedTurns: hydrateQueuedTurnsFromPersisted(threadId, persistedDraft.queuedTurns),
     ...(persistedDraft.queueStoppedTurnId
       ? { queueStoppedTurnId: persistedDraft.queueStoppedTurnId }

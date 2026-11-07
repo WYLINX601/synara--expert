@@ -10,7 +10,7 @@ export interface HubGraphRuntimeState {
   readonly stateVersion: number;
   readonly nodes: Readonly<Record<string, HubGraphNodeExecutionStatus>>;
   readonly interactions: Readonly<
-    Record<string, { readonly status: HubGraphInteractionStatus; readonly round: number; readonly maxRounds: number; readonly initiatorNodeId: string; readonly responderNodeId: string }>
+    Record<string, { readonly status: HubGraphInteractionStatus; readonly round: number; readonly maxRounds: number; readonly initiatorNodeId: string; readonly responderNodeId: string; readonly outcome: string | null }>
   >;
   readonly gates: Readonly<Record<string, HubGraphGateStatus>>;
 }
@@ -34,8 +34,8 @@ export type HubGraphRuntimeEvent =
   | { readonly type: "node.stale"; readonly nodeId: string }
   | { readonly type: "interaction.requested"; readonly blockId: string }
   | { readonly type: "interaction.responder_dispatched"; readonly blockId: string }
-  | { readonly type: "interaction.response_received"; readonly blockId: string; readonly requiresRevision?: boolean }
-  | { readonly type: "interaction.completed"; readonly blockId: string }
+  | { readonly type: "interaction.response_received"; readonly blockId: string; readonly outcome: string; readonly requiresRevision?: boolean }
+  | { readonly type: "interaction.completed"; readonly blockId: string; readonly outcome: string }
   | { readonly type: "interaction.approved"; readonly blockId: string }
   | { readonly type: "interaction.exhausted"; readonly blockId: string }
   | { readonly type: "interaction.blocked"; readonly blockId: string }
@@ -85,7 +85,7 @@ export function createHubGraphRuntimeState(input: {
     interactions: Object.fromEntries(
       input.interactionBlocks.map((block) => [
         block.id,
-        { status: "waiting_initiator" as const, round: 0, maxRounds: block.maxRounds, initiatorNodeId: block.initiatorNodeId, responderNodeId: block.responderNodeId },
+        { status: "waiting_initiator" as const, round: 0, maxRounds: block.maxRounds, initiatorNodeId: block.initiatorNodeId, responderNodeId: block.responderNodeId, outcome: null },
       ] as const),
     ),
     gates: Object.fromEntries(input.gateIds.map((id) => [id, "not_opened" as const] as const)),
@@ -286,7 +286,7 @@ export function reduceHubGraphEvent(
       }
       next = {
         ...next,
-        interactions: { ...state.interactions, [event.blockId]: { ...current, status, round } },
+        interactions: { ...state.interactions, [event.blockId]: { ...current, status, round, outcome: event.type === "interaction.response_received" || event.type === "interaction.completed" ? event.outcome : event.type === "interaction.approved" ? "approved" : event.type === "interaction.exhausted" ? "exhausted" : event.type === "interaction.blocked" ? "blocked" : event.type === "interaction.reopened" || event.type === "interaction.requested" ? null : current.outcome } },
         ...(status === "completed" || status === "exhausted"
           ? { nodes: { ...next.nodes, [current.responderNodeId]: "completed" } }
           : {}),

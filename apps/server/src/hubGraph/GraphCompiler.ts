@@ -2,9 +2,7 @@ import { Schema } from "effect";
 
 import {
   HubGraphDefinition,
-  type HubGraphAgentNode,
   type HubGraphDefinition as HubGraphDefinitionType,
-  type HubGraphEdge,
   type HubGraphInteractionBlock,
   type HubGraphNode,
 } from "@synara/contracts";
@@ -51,7 +49,6 @@ const issue = (
 
 const unique = (values: readonly string[]) => new Set(values).size === values.length;
 
-const isAgentNode = (node: HubGraphNode): node is HubGraphAgentNode => node.kind === "agent";
 
 function stableTopologicalSort(
   vertices: readonly string[],
@@ -115,7 +112,7 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
   if (!unique(edgeIds)) issues.push(issue("duplicate_id", "edges", "Edge IDs must be unique."));
   for (const id of blockIds) {
     if (nodeIds.includes(id)) {
-      issues.push(issue("duplicate_id", "interactionBlocks", \`ID "\${id}" is already used by a node.\`));
+      issues.push(issue("duplicate_id", "interactionBlocks", `ID "${id}" is already used by a node.`));
     }
   }
 
@@ -130,7 +127,7 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
   const addDependency = (from: string, to: string, path: string) => {
     if (!outgoing.has(from) || !incoming.has(to)) {
       issues.push(
-        issue("missing_reference", path, \`Dependency "\${from}" → "\${to}" references an unknown vertex.\`),
+        issue("missing_reference", path, `Dependency "${from}" → "${to}" references an unknown vertex.`),
       );
       return;
     }
@@ -142,7 +139,7 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
   const participantOwners = new Map<string, string>();
 
   definition.interactionBlocks.forEach((block, index) => {
-    const path = \`interactionBlocks[\${index}]\`;
+    const path = `interactionBlocks[${index}]`;
     const initiator = nodeById[block.initiatorNodeId];
     const responder = nodeById[block.responderNodeId];
 
@@ -164,14 +161,14 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
       issues.push(issue("invalid_role", path, "A responder operation cannot initiate an Interaction Block."));
     }
     if (block.maxRounds > 10) {
-      issues.push(issue("invalid_interaction", \`\${path}.maxRounds\`, "Interaction rounds cannot exceed the hard limit of 10."));
+      issues.push(issue("invalid_interaction", `${path}.maxRounds`, "Interaction rounds cannot exceed the hard limit of 10."));
     }
 
     for (const participantId of [initiator.id, responder.id]) {
       const owner = participantOwners.get(participantId);
       if (owner && owner !== block.id) {
         issues.push(
-          issue("invalid_interaction", path, \`Node "\${participantId}" already participates in Interaction Block "\${owner}".\`),
+          issue("invalid_interaction", path, `Node "${participantId}" already participates in Interaction Block "${owner}".`),
         );
       } else {
         participantOwners.set(participantId, block.id);
@@ -186,49 +183,49 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
 
   definition.nodes.forEach((node, index) => {
     if (node.kind !== "agent") return;
-    const path = \`nodes[\${index}]\`;
+    const path = `nodes[${index}]`;
     if (node.operation !== "respond" && !node.output) {
-      issues.push(issue("invalid_output", \`\${path}.output\`, "Task, merge and decision nodes require an output contract.") as HubGraphCompileIssue);
+      issues.push(issue("invalid_output", `${path}.output`, "Task, merge and decision nodes require an output contract."));
     }
-    if (node.operation === "respond" && !node.output) {
-      issues.push(issue("invalid_output", \`\${path}.output\`, "Respond nodes require a structured output contract.") as HubGraphCompileIssue);
+    if (node.operation === "respond" && (!node.output || node.output.kind !== "structured")) {
+      issues.push(issue("invalid_output", `${path}.output`, "Respond nodes require a structured output contract."));
     }
     const seenInputs = new Set<string>();
     node.inputs.forEach((input, inputIndex) => {
       const key =
         input.kind === "node_output"
-          ? \`node:\${input.nodeId}\`
+          ? `node:${input.nodeId}`
           : input.kind === "interaction_response"
-            ? \`interaction:\${input.blockId}\`
+            ? `interaction:${input.blockId}`
             : "user_request";
       if (seenInputs.has(key)) {
-        issues.push(issue("invalid_input", \`\${path}.inputs[\${inputIndex}]\`, "Input references must be unique."));
+        issues.push(issue("invalid_input", `${path}.inputs[${inputIndex}]`, "Input references must be unique."));
       }
       seenInputs.add(key);
 
       if (input.kind === "node_output") {
         const source = nodeById[input.nodeId];
         if (!source) {
-          issues.push(issue("missing_reference", \`\${path}.inputs[\${inputIndex}]\`, \`Node "\${input.nodeId}" does not exist.\`));
+          issues.push(issue("missing_reference", `${path}.inputs[${inputIndex}]`, `Node "${input.nodeId}" does not exist.`));
         } else if (source.id === node.id) {
-          issues.push(issue("invalid_input", \`\${path}.inputs[\${inputIndex}]\`, "A node cannot consume its own output."));
+          issues.push(issue("invalid_input", `${path}.inputs[${inputIndex}]`, "A node cannot consume its own output."));
         } else {
-          addDependency(source.id, node.id, \`\${path}.inputs[\${inputIndex}]\`);
+          addDependency(source.id, node.id, `${path}.inputs[${inputIndex}]`);
         }
       } else if (input.kind === "interaction_response") {
         const block = interactionById[input.blockId];
         if (!block) {
-          issues.push(issue("missing_reference", \`\${path}.inputs[\${inputIndex}]\`, \`Interaction Block "\${input.blockId}" does not exist.\`));
-        } else if (block.responderNodeId !== node.id && block.initiatorNodeId !== node.id) {
-          issues.push(issue("invalid_input", \`\${path}.inputs[\${inputIndex}]\`, "Only a participant can consume this Interaction Block response."));
+          issues.push(issue("missing_reference", `${path}.inputs[${inputIndex}]`, `Interaction Block "${input.blockId}" does not exist.`));
+        } else if (block.responderNodeId === node.id || block.initiatorNodeId === node.id) {
+          issues.push(issue("invalid_input", `${path}.inputs[${inputIndex}]`, "Interaction results must be consumed by a downstream node, not by either participant."));
         } else {
-          addDependency(block.id, node.id, \`\${path}.inputs[\${inputIndex}]\`);
+          addDependency(block.id, node.id, `${path}.inputs[${inputIndex}]`);
         }
       }
     });
 
     if (node.operation === "merge" && node.inputs.filter((input) => input.kind === "node_output").length < 2) {
-      issues.push(issue("invalid_input", \`\${path}.inputs\`, "Merge nodes require at least two node outputs."));
+      issues.push(issue("invalid_input", `${path}.inputs`, "Merge nodes require at least two node outputs."));
     }
     if (node.operation === "respond" && !responderOwners.has(node.id)) {
       issues.push(issue("invalid_role", path, "Respond nodes must be owned by an Interaction Block."));
@@ -236,7 +233,7 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
   });
 
   definition.edges.forEach((edge, index) => {
-    const path = \`edges[\${index}]\`;
+    const path = `edges[${index}]`;
     if (!vertices.includes(edge.from) || !vertices.includes(edge.to)) {
       issues.push(issue("missing_reference", path, "Edge endpoints must reference an existing node or Interaction Block."));
       return;
@@ -288,13 +285,13 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
     (node) => node.kind === "agent" && !reachable.has(node.id) && !responderOwners.has(node.id),
   );
   for (const node of unreachable) {
-    issues.push(issue("unreachable_node", \`nodes.\${node.id}\`, \`Node "\${node.id}" is not reachable from a user request.\`));
+    issues.push(issue("unreachable_node", `nodes.${node.id}`, `Node "${node.id}" is not reachable from a user request.`));
   }
 
   const sorted = stableTopologicalSort(vertices, outgoing, incoming);
   if (sorted.cyclic.length > 0) {
     issues.push(
-      issue("cycle_detected", "$.edges", \`Outer Graph contains a cycle involving: \${sorted.cyclic.join(", ")}.\`),
+      issue("cycle_detected", "$.edges", `Outer Graph contains a cycle involving: ${sorted.cyclic.join(", ")}.`),
     );
   }
   if (issues.length > 0) return { ok: false, issues };

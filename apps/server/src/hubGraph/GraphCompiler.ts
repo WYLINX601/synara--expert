@@ -224,10 +224,13 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
       }
     });
 
+    if (node.join === "any" && node.inputs.filter((input) => input.kind === "node_output").length < 2) {
+      issues.push(issue("invalid_input", `${path}.join`, "The any join policy requires at least two node outputs."));
+    }
     if (node.operation === "merge" && node.inputs.filter((input) => input.kind === "node_output").length < 2) {
       issues.push(issue("invalid_input", `${path}.inputs`, "Merge nodes require at least two node outputs."));
     }
-    if (node.operation === "respond" && !responderOwners.has(node.id)) {
+    if (node.kind === "agent" && node.operation === "respond" && !responderOwners.has(node.id)) {
       issues.push(issue("invalid_role", path, "Respond nodes must be owned by an Interaction Block."));
     }
   });
@@ -282,7 +285,7 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
     }
   }
   const unreachable = definition.nodes.filter(
-    (node) => node.kind === "agent" && !reachable.has(node.id) && !responderOwners.has(node.id),
+    (node) => !reachable.has(node.id) && !responderOwners.has(node.id),
   );
   for (const node of unreachable) {
     issues.push(issue("unreachable_node", `nodes.${node.id}`, `Node "${node.id}" is not reachable from a user request.`));

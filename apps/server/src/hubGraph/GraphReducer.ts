@@ -10,7 +10,7 @@ export interface HubGraphRuntimeState {
   readonly stateVersion: number;
   readonly nodes: Readonly<Record<string, HubGraphNodeExecutionStatus>>;
   readonly interactions: Readonly<
-    Record<string, { readonly status: HubGraphInteractionStatus; readonly round: number; readonly maxRounds: number }>
+    Record<string, { readonly status: HubGraphInteractionStatus; readonly round: number; readonly maxRounds: number; readonly initiatorNodeId: string; readonly responderNodeId: string }>
   >;
   readonly gates: Readonly<Record<string, HubGraphGateStatus>>;
 }
@@ -23,6 +23,7 @@ export type HubGraphRuntimeEvent =
   | { readonly type: "graph.failed" }
   | { readonly type: "graph.completed" }
   | { readonly type: "node.ready"; readonly nodeId: string }
+  | { readonly type: "node.retry"; readonly nodeId: string }
   | { readonly type: "node.queued"; readonly nodeId: string }
   | { readonly type: "node.started"; readonly nodeId: string }
   | { readonly type: "node.settled"; readonly nodeId: string }
@@ -33,11 +34,13 @@ export type HubGraphRuntimeEvent =
   | { readonly type: "node.stale"; readonly nodeId: string }
   | { readonly type: "interaction.requested"; readonly blockId: string }
   | { readonly type: "interaction.responder_dispatched"; readonly blockId: string }
-  | { readonly type: "interaction.response_received"; readonly blockId: string }
+  | { readonly type: "interaction.response_received"; readonly blockId: string; readonly requiresRevision?: boolean }
+  | { readonly type: "interaction.completed"; readonly blockId: string }
   | { readonly type: "interaction.approved"; readonly blockId: string }
   | { readonly type: "interaction.exhausted"; readonly blockId: string }
   | { readonly type: "interaction.blocked"; readonly blockId: string }
   | { readonly type: "gate.opened"; readonly gateId: string }
+  | { readonly type: "gate.reopened"; readonly gateId: string }
   | {
       readonly type: "gate.decided";
       readonly gateId: string;
@@ -68,6 +71,8 @@ export function createHubGraphRuntimeState(input: {
   readonly interactionBlocks: readonly {
     readonly id: string;
     readonly maxRounds: number;
+    readonly initiatorNodeId: string;
+    readonly responderNodeId: string;
   }[];
   readonly gateIds: readonly string[];
 }): HubGraphRuntimeState {
@@ -78,7 +83,7 @@ export function createHubGraphRuntimeState(input: {
     interactions: Object.fromEntries(
       input.interactionBlocks.map((block) => [
         block.id,
-        { status: "waiting_initiator", round: 0, maxRounds: block.maxRounds },
+        { status: "waiting_initiator", round: 0, maxRounds: block.maxRounds, initiatorNodeId: block.initiatorNodeId, responderNodeId: block.responderNodeId },
       ]),
     ),
     gates: Object.fromEntries(input.gateIds.map((id) => [id, "pending"])),
@@ -159,6 +164,7 @@ export function reduceHubGraphEvent(
       next = { ...state, runStatus: "completed" };
       break;
     case "node.ready":
+    case "node.retry":
     case "node.queued":
     case "node.started":
     case "node.settled":
@@ -171,6 +177,7 @@ export function reduceHubGraphEvent(
       const current = requireTarget(state.nodes, event.nodeId, "node");
       const transitions: Readonly<Record<string, readonly string[]>> = {
         "node.ready": ["pending", "stale"],
+        "node.retry": ["failed", "blocked"],
         "node.queued": ["ready"],
         "node.started": ["queued"],
         "node.settled": ["running"],
@@ -188,7 +195,7 @@ export function reduceHubGraphEvent(
         );
       }
       const status: HubGraphNodeExecutionStatus =
-        event.type === "node.ready" ? "ready" :
+        event.type === "node.ready" || event.type === "node.retry" ? "ready" :
         event.type === "node.queued" ? "queued" :
         event.type === "node.started" ? "running" :
         event.type === "node.settled" ? "settled" :
@@ -202,6 +209,7 @@ export function reduceHubGraphEvent(
     case "interaction.requested":
     case "interaction.responder_dispatched":
     case "interaction.response_received":
+    case "interaction.completed":
     case "interaction.approved":
     case "interaction.exhausted":
     case "interaction.blocked": {
@@ -225,6 +233,17 @@ export function reduceHubGraphEvent(
           throw new HubGraphTransitionError("invalid_interaction_transition", "No responder result is expected.");
         }
         status = "waiting_initiator";
+        if (event.requiresRevision) {
+          const initiatorStatus = requireTarget(state.nodes, current.initiatorNodeId, "initiator node");
+          if (initiatorStatus === "completed" || initiatorStatus === "settled") {
+            next = { ...state, nodes: { ...state.nodes, [current.initiatorNodeId]: "stale" } };
+          }
+        }
+      } else if (event.type === "interaction.completed") {
+        if (current.status !== "waiting_responder") {
+          throw new HubGraphTransitionError("invalid_interaction_transition", "Interaction cannot complete before a response.");
+        }
+        status = "completed";
       } else if (event.type === "interaction.approved") {
         if (current.status !== "waiting_responder") {
           throw new HubGraphTransitionError("invalid_interaction_transition", "Approval is not expected.");
@@ -242,8 +261,11 @@ export function reduceHubGraphEvent(
         status = "blocked";
       }
       next = {
-        ...state,
+        ...next,
         interactions: { ...state.interactions, [event.blockId]: { ...current, status, round } },
+        ...(status === "completed" || status === "exhausted"
+          ? { nodes: { ...next.nodes, [current.responderNodeId]: "completed" } }
+          : {}),
       };
       break;
     }
@@ -255,6 +277,15 @@ export function reduceHubGraphEvent(
       }
       // pending is the durable waiting state; opening is an idempotent UI projection.
       next = state;
+      break;
+    }
+    case "gate.reopened": {
+      requireRunStatus(state, ["active"]);
+      const current = requireTarget(state.gates, event.gateId, "gate");
+      if (current !== "returned") {
+        throw new HubGraphTransitionError("invalid_gate_transition", "Only a returned Gate can be reopened.");
+      }
+      next = { ...state, gates: { ...state.gates, [event.gateId]: "pending" } };
       break;
     }
     case "gate.decided": {

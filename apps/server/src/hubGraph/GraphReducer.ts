@@ -86,7 +86,7 @@ export function createHubGraphRuntimeState(input: {
         { status: "waiting_initiator", round: 0, maxRounds: block.maxRounds, initiatorNodeId: block.initiatorNodeId, responderNodeId: block.responderNodeId },
       ]),
     ),
-    gates: Object.fromEntries(input.gateIds.map((id) => [id, "pending"])),
+    gates: Object.fromEntries(input.gateIds.map((id) => [id, "not_opened"])),
   };
 }
 
@@ -184,7 +184,7 @@ export function reduceHubGraphEvent(
         "node.output_accepted": ["settled"],
         "node.failed": ["queued", "running", "settled"],
         "node.blocked": ["pending", "ready", "queued", "running", "settled"],
-        "node.cancelled": ["pending", "ready", "queued", "blocked", "stale"],
+        "node.cancelled": ["pending", "ready", "queued", "running", "settled", "blocked", "stale"],
         "node.stale": ["completed", "settled"],
       };
       const allowed = transitions[event.type] ?? [];
@@ -276,11 +276,10 @@ export function reduceHubGraphEvent(
     case "gate.opened": {
       requireRunStatus(state, ["active"]);
       const current = requireTarget(state.gates, event.gateId, "gate");
-      if (current !== "pending") {
-        throw new HubGraphTransitionError("invalid_gate_transition", "Only a pending Gate can be opened.");
+      if (current !== "not_opened") {
+        throw new HubGraphTransitionError("invalid_gate_transition", "Only a not-yet-opened Gate can be opened.");
       }
-      // pending is the durable waiting state; opening is an idempotent UI projection.
-      next = state;
+      next = { ...state, gates: { ...state.gates, [event.gateId]: "pending" } };
       break;
     }
     case "gate.reopened": {

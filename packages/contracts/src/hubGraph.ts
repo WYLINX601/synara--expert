@@ -195,5 +195,6 @@ export const HubGraphInteractionRuntime = Schema.Struct({
   status: HubGraphInteractionStatus,
   round: NonNegativeInt,
   maxRounds: PositiveInt,
+  outcome: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
 }).annotate({ parseOptions: { onExcessProperty: "error" } });
 export type HubGraphInteractionRuntime = typeof HubGraphInteractionRuntime.Type;

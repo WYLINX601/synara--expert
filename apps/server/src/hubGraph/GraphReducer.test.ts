@@ -89,6 +89,16 @@ describe("Hub Graph runtime reducer", () => {
     ).toThrow(HubGraphTransitionError);
   });
 
+  it("reopens a returned Human Gate for a new decision", () => {
+    let state = reduceHubGraphEvent(createState(), { type: "graph.started" });
+    state = reduceHubGraphEvent(state, { type: "gate.decided", gateId: "release", decision: "return" });
+    expect(state.gates.release).toBe("returned");
+    state = reduceHubGraphEvent(state, { type: "gate.reopened", gateId: "release" });
+    expect(state.gates.release).toBe("pending");
+    state = reduceHubGraphEvent(state, { type: "gate.decided", gateId: "release", decision: "approve" });
+    expect(state.gates.release).toBe("approved");
+  });
+
   it("rejects completion while any node, interaction or gate remains unresolved", () => {
     const state = reduceHubGraphEvent(createState(), { type: "graph.started" });
     expect(() =>

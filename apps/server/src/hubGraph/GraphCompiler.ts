@@ -55,8 +55,8 @@ function stableTopologicalSort(
   outgoing: ReadonlyMap<string, ReadonlySet<string>>,
   incoming: ReadonlyMap<string, ReadonlySet<string>>,
 ): { readonly order: readonly string[]; readonly cyclic: readonly string[] } {
-  const rank = new Map(vertices.map((id, index) => [id, index]));
-  const indegree = new Map(vertices.map((id) => [id, incoming.get(id)?.size ?? 0]));
+  const rank = new Map(vertices.map((id, index) => [id, index] as const));
+  const indegree = new Map(vertices.map((id) => [id, incoming.get(id)?.size ?? 0] as const));
   const ready = vertices.filter((id) => indegree.get(id) === 0);
   const order: string[] = [];
 
@@ -121,7 +121,7 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
     definition.interactionBlocks.map((block) => [block.id, block]),
   );
   const vertices = [...new Set(allIds)];
-  const outgoing = new Map(vertices.map((id) => [id, new Set<string>()]));
+  const outgoing = new Map(vertices.map((id) => [id, new Set<string>()] as const));
   const incoming = new Map(vertices.map((id) => [id, new Set<string>()]));
 
   const addDependency = (from: string, to: string, path: string) => {

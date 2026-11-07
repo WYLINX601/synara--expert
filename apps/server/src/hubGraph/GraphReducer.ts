@@ -39,6 +39,8 @@ export type HubGraphRuntimeEvent =
   | { readonly type: "interaction.approved"; readonly blockId: string }
   | { readonly type: "interaction.exhausted"; readonly blockId: string }
   | { readonly type: "interaction.blocked"; readonly blockId: string }
+  | { readonly type: "interaction.reopened"; readonly blockId: string }
+  | { readonly type: "interaction.cancelled"; readonly blockId: string }
   | { readonly type: "gate.opened"; readonly gateId: string }
   | { readonly type: "gate.reopened"; readonly gateId: string }
   | {
@@ -143,7 +145,13 @@ export function reduceHubGraphEvent(
       break;
     case "graph.cancelled":
       requireRunStatus(state, ["draft", "active", "paused", "failed"]);
-      next = { ...state, runStatus: "cancelled" };
+      next = {
+        ...state,
+        runStatus: "cancelled",
+        nodes: Object.fromEntries(Object.entries(state.nodes).map(([id, status]) => [id, ["completed", "cancelled"].includes(status) ? status : "cancelled"])),
+        interactions: Object.fromEntries(Object.entries(state.interactions).map(([id, item]) => [id, ["completed", "exhausted", "cancelled"].includes(item.status) ? item : { ...item, status: "cancelled" }])),
+        gates: Object.fromEntries(Object.entries(state.gates).map(([id, status]) => [id, ["approved", "rejected", "cancelled"].includes(status) ? status : "cancelled"])),
+      };
       break;
     case "graph.failed":
       requireRunStatus(state, ["active"]);
@@ -212,7 +220,9 @@ export function reduceHubGraphEvent(
     case "interaction.completed":
     case "interaction.approved":
     case "interaction.exhausted":
-    case "interaction.blocked": {
+    case "interaction.blocked":
+    case "interaction.reopened":
+    case "interaction.cancelled": {
       requireRunStatus(state, ["active"]);
       const current = requireTarget(state.interactions, event.blockId, "interaction");
       let status: HubGraphInteractionStatus;
@@ -258,11 +268,21 @@ export function reduceHubGraphEvent(
           throw new HubGraphTransitionError("invalid_interaction_transition", "Interaction has not exhausted its round budget.");
         }
         status = "exhausted";
-      } else {
+      } else if (event.type === "interaction.blocked") {
         if (!["waiting_initiator", "dispatching_responder", "waiting_responder"].includes(current.status)) {
           throw new HubGraphTransitionError("invalid_interaction_transition", "Interaction cannot be blocked from its current state.");
         }
         status = "blocked";
+      } else if (event.type === "interaction.reopened") {
+        if (current.status !== "blocked") {
+          throw new HubGraphTransitionError("invalid_interaction_transition", "Only a blocked Interaction can be reopened.");
+        }
+        status = "waiting_initiator";
+      } else {
+        if (["completed", "exhausted", "cancelled"].includes(current.status)) {
+          throw new HubGraphTransitionError("invalid_interaction_transition", "A terminal Interaction cannot be cancelled again.");
+        }
+        status = "cancelled";
       }
       next = {
         ...next,

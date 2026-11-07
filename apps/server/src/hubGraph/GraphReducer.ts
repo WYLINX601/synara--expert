@@ -3,6 +3,7 @@ import type {
   HubGraphInteractionStatus,
   HubGraphNodeExecutionStatus,
   HubGraphRunStatus,
+  HubGraphNodeExecutionStatus,
 } from "@synara/contracts";
 
 export interface HubGraphRuntimeState {

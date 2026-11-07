@@ -8,9 +8,9 @@ import {
 
 const createState = () =>
   createHubGraphRuntimeState({
-    nodeIds: ["author", "reviewer", "release"],
-    interactionBlocks: [{ id: "review", maxRounds: 3 }],
-    gateIds: ["human_review"],
+    nodeIds: ["author", "reviewer"],
+    interactionBlocks: [{ id: "review", maxRounds: 3, initiatorNodeId: "author", responderNodeId: "reviewer" }],
+    gateIds: ["release"],
   });
 
 describe("Hub Graph runtime reducer", () => {

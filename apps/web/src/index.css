@@ -3754,6 +3754,39 @@ html[data-zen-surface="true"] #root,
   background-image: none !important;
   box-shadow: none !important;
 }
+/* Zen has no native blur or window coat. Its painted islands must carry their
+   own opaque theme fill, even when the normal workspace uses whole-window glass.
+   Scope from html so portaled menus/dialogs receive the same readable backing. */
+html[data-zen-surface="true"]
+  :is(
+    .chat-composer-surface,
+    .chat-composer-stacked-top,
+    .chat-composer-surface-banner,
+    .chat-composer-menu-surface,
+    .chat-raised-panel-surface,
+    .app-popup-surface,
+    .composer-picker-menu-surface,
+    [data-testid="chat-transcript-drawer"],
+    [data-zen-details="true"],
+    [data-testid="zen-status-strip"],
+    [data-thread-find-layout="panel"],
+    [data-slot="command-dialog-popup"],
+    [data-slot="dialog-popup"],
+    [data-slot="sheet-popup"],
+    [data-slot="alert-dialog-popup"],
+    [data-slot="toast-popup"],
+    [data-zen-toast-surface]
+  ) {
+  background: var(--popover) !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+html[data-zen-surface="true"]
+  :is(.chat-composer-surface, .chat-composer-stacked-top, .app-popup-surface)::before {
+  background: var(--popover);
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
 [data-sidebar-layout="rail"][data-zen-mode="true"] {
   --app-rail-inset-gap: 0px;
   --app-rail-card-radii: 0;

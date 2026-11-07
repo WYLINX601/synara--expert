@@ -17,6 +17,7 @@ export type HubGraphCompileIssueCode =
   | "invalid_input"
   | "invalid_edge"
   | "invalid_interaction"
+  | "invalid_output"
   | "unreachable_node"
   | "cycle_detected";
 

@@ -73,8 +73,7 @@ describe("Hub Graph compiler", () => {
 
   it("rejects duplicate IDs and missing references", () => {
     const definition = validDefinition();
-    definition.nodes.push(agent("market"));
-    const result = compileHubGraphDefinition(definition);
+    const result = compileHubGraphDefinition({ ...definition, nodes: [...definition.nodes, agent("market")] });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.issues.some((entry) => entry.code === "duplicate_id")).toBe(true);
@@ -91,12 +90,12 @@ describe("Hub Graph compiler", () => {
 
   it("requires a merge node to have at least two upstream node outputs", () => {
     const definition = validDefinition();
-    definition.nodes = definition.nodes.map((node) =>
+    const nodes = definition.nodes.map((node) =>
       node.id === "synthesis"
         ? { ...node, inputs: [{ kind: "node_output", nodeId: "market" }] }
         : node,
     );
-    const result = compileHubGraphDefinition(definition);
+    const result = compileHubGraphDefinition({ ...definition, nodes });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.issues.some((entry) => entry.code === "invalid_input")).toBe(true);
@@ -104,10 +103,10 @@ describe("Hub Graph compiler", () => {
 
   it("requires a responder to use the respond operation and belong to one block", () => {
     const definition = validDefinition();
-    definition.nodes = definition.nodes.map((node) =>
+    const nodes = definition.nodes.map((node) =>
       node.id === "reviewer" ? { ...node, operation: "task" } : node,
     );
-    const result = compileHubGraphDefinition(definition);
+    const result = compileHubGraphDefinition({ ...definition, nodes });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.issues.some((entry) => entry.code === "invalid_role")).toBe(true);
@@ -115,12 +114,12 @@ describe("Hub Graph compiler", () => {
 
   it("rejects invalid protocol versions and excessive interaction rounds", () => {
     const definition = validDefinition();
-    definition.interactionBlocks[0] = {
-      ...definition.interactionBlocks[0]!,
+    const interactionBlocks = definition.interactionBlocks.map((block) => ({
+      ...block,
       protocol: "review.latest",
       maxRounds: 11,
-    };
-    const result = compileHubGraphDefinition(definition);
+    }));
+    const result = compileHubGraphDefinition({ ...definition, interactionBlocks });
     expect(result.ok).toBe(false);
   });
 });

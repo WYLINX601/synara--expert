@@ -259,7 +259,7 @@ export function compileHubGraphDefinition(input: unknown): HubGraphCompileResult
       issues.push(issue("invalid_edge", path, "An Interaction Block can only be entered from its initiator."));
       return;
     }
-    if (edge.when && (!nodeById[edge.from] || !isAgentNode(nodeById[edge.from]!))) {
+    if (edge.when && !nodeById[edge.from] && !fromBlock) {
       issues.push(issue("invalid_edge", path, "Conditional edges must originate from an Agent Node."));
       return;
     }

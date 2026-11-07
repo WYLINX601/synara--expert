@@ -176,6 +176,7 @@ export const HubGraphInteractionStatus = Schema.Literals([
 export type HubGraphInteractionStatus = typeof HubGraphInteractionStatus.Type;
 
 export const HubGraphGateStatus = Schema.Literals([
+  "not_opened",
   "pending",
   "approved",
   "returned",

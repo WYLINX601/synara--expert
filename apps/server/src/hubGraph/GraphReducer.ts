@@ -3,7 +3,6 @@ import type {
   HubGraphInteractionStatus,
   HubGraphNodeExecutionStatus,
   HubGraphRunStatus,
-  HubGraphNodeExecutionStatus,
 } from "@synara/contracts";
 
 export interface HubGraphRuntimeState {
@@ -89,7 +88,7 @@ export function createHubGraphRuntimeState(input: {
 function requireTarget<T>(record: Readonly<Record<string, T>>, id: string, kind: string): T {
   const value = record[id];
   if (value === undefined) {
-    throw new HubGraphTransitionError("unknown_target", \`Unknown \${kind} "\${id}".\`);
+    throw new HubGraphTransitionError("unknown_target", `Unknown ${kind} "${id}".`);
   }
   return value;
 }
@@ -101,7 +100,7 @@ function requireRunStatus(
   if (!allowed.includes(state.runStatus)) {
     throw new HubGraphTransitionError(
       "invalid_run_transition",
-      \`Run status "\${state.runStatus}" does not allow this event.\`,
+      `Run status "${state.runStatus}" does not allow this event.`,
     );
   }
 }
@@ -118,7 +117,7 @@ export function reduceHubGraphEvent(
   if (expectedStateVersion !== state.stateVersion) {
     throw new HubGraphTransitionError(
       "stale_version",
-      \`Expected state version \${expectedStateVersion}; current version is \${state.stateVersion}.\`,
+      `Expected state version ${expectedStateVersion}; current version is ${state.stateVersion}.`,
     );
   }
 
@@ -185,7 +184,7 @@ export function reduceHubGraphEvent(
       if (!allowed.includes(current)) {
         throw new HubGraphTransitionError(
           "invalid_node_transition",
-          \`Node "\${event.nodeId}" cannot transition from "\${current}" via "\${event.type}".\`,
+          `Node "${event.nodeId}" cannot transition from "${current}" via "${event.type}".`,
         );
       }
       const status: HubGraphNodeExecutionStatus =

@@ -5,9 +5,9 @@ import { compileHubGraphDefinition } from "./GraphCompiler.ts";
 const agent = (id: string, operation: "task" | "merge" | "decision" | "respond" = "task", inputs: unknown[] = []) => ({
   id,
   kind: "agent",
-  expertId: \`expert_\${id}\`,
+  expertId: `expert_${id}`,
   operation,
-  prompt: { objective: \`Do \${id}\` },
+  prompt: { objective: `Do ${id}` },
   inputs,
   output: { kind: "artifact", required: true },
 });

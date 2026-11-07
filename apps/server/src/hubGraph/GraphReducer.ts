@@ -148,9 +148,9 @@ export function reduceHubGraphEvent(
       next = {
         ...state,
         runStatus: "cancelled",
-        nodes: Object.fromEntries(Object.entries(state.nodes).map(([id, status]) => [id, ["completed", "cancelled"].includes(status) ? status : "cancelled"])),
-        interactions: Object.fromEntries(Object.entries(state.interactions).map(([id, item]) => [id, ["completed", "exhausted", "cancelled"].includes(item.status) ? item : { ...item, status: "cancelled" }])),
-        gates: Object.fromEntries(Object.entries(state.gates).map(([id, status]) => [id, ["approved", "rejected", "cancelled"].includes(status) ? status : "cancelled"])),
+        nodes: Object.fromEntries(Object.entries(state.nodes).map(([id, status]) => [id, ["completed", "cancelled"].includes(status) ? status : "cancelled"])) as HubGraphRuntimeState["nodes"],
+        interactions: Object.fromEntries(Object.entries(state.interactions).map(([id, item]) => [id, ["completed", "exhausted", "cancelled"].includes(item.status) ? item : { ...item, status: "cancelled" }])) as HubGraphRuntimeState["interactions"],
+        gates: Object.fromEntries(Object.entries(state.gates).map(([id, status]) => [id, ["approved", "rejected", "cancelled"].includes(status) ? status : "cancelled"])) as HubGraphRuntimeState["gates"],
       };
       break;
     case "graph.failed":

@@ -79,14 +79,14 @@ export function createHubGraphRuntimeState(input: {
   return {
     runStatus: "draft",
     stateVersion: 0,
-    nodes: Object.fromEntries(input.nodeIds.map((id) => [id, "pending"])),
+    nodes: Object.fromEntries(input.nodeIds.map((id) => [id, "pending" as const] as const)),
     interactions: Object.fromEntries(
       input.interactionBlocks.map((block) => [
         block.id,
-        { status: "waiting_initiator", round: 0, maxRounds: block.maxRounds, initiatorNodeId: block.initiatorNodeId, responderNodeId: block.responderNodeId },
-      ]),
+        { status: "waiting_initiator" as const, round: 0, maxRounds: block.maxRounds, initiatorNodeId: block.initiatorNodeId, responderNodeId: block.responderNodeId },
+      ] as const),
     ),
-    gates: Object.fromEntries(input.gateIds.map((id) => [id, "not_opened"])),
+    gates: Object.fromEntries(input.gateIds.map((id) => [id, "not_opened" as const] as const)),
   };
 }
 

@@ -9,7 +9,7 @@ const agent = (id: string, operation: "task" | "merge" | "decision" | "respond" 
   operation,
   prompt: { objective: `Do ${id}` },
   inputs,
-  output: { kind: "artifact", required: true },
+  output: { kind: operation === "respond" ? "structured" : "artifact", required: true },
 });
 
 const validDefinition = () => ({

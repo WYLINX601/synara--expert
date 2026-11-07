@@ -286,7 +286,7 @@ export function reduceHubGraphEvent(
       }
       next = {
         ...next,
-        interactions: { ...state.interactions, [event.blockId]: { ...current, status, round, outcome: event.type === "interaction.response_received" || event.type === "interaction.completed" ? event.outcome : event.type === "interaction.approved" ? "approved" : event.type === "interaction.exhausted" ? "exhausted" : event.type === "interaction.blocked" ? "blocked" : event.type === "interaction.reopened" || event.type === "interaction.requested" ? null : current.outcome } },
+        interactions: { ...state.interactions, [event.blockId]: { ...current, status, round, outcome: event.type === "interaction.response_received" || event.type === "interaction.completed" ? event.outcome : event.type === "interaction.approved" ? "approved" : event.type === "interaction.exhausted" ? "exhausted" : event.type === "interaction.blocked" ? "blocked" : event.type === "interaction.cancelled" ? "cancelled" : event.type === "interaction.reopened" || event.type === "interaction.requested" ? null : current.outcome } },
         ...(status === "completed" || status === "exhausted"
           ? { nodes: { ...next.nodes, [current.responderNodeId]: "completed" } }
           : {}),

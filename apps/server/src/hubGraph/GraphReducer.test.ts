@@ -81,6 +81,7 @@ describe("Hub Graph runtime reducer", () => {
 
   it("allows only one authenticated decision for a pending Human Gate", () => {
     let state = reduceHubGraphEvent(createState(), { type: "graph.started" });
+    state = reduceHubGraphEvent(state, { type: "gate.opened", gateId: "release" });
     state = reduceHubGraphEvent(state, { type: "gate.decided", gateId: "release", decision: "approve" });
     expect(state.gates.release).toBe("approved");
 
@@ -91,6 +92,7 @@ describe("Hub Graph runtime reducer", () => {
 
   it("reopens a returned Human Gate for a new decision", () => {
     let state = reduceHubGraphEvent(createState(), { type: "graph.started" });
+    state = reduceHubGraphEvent(state, { type: "gate.opened", gateId: "release" });
     state = reduceHubGraphEvent(state, { type: "gate.decided", gateId: "release", decision: "return" });
     expect(state.gates.release).toBe("returned");
     state = reduceHubGraphEvent(state, { type: "gate.reopened", gateId: "release" });

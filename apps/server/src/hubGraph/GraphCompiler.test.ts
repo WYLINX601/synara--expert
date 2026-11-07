@@ -116,7 +116,7 @@ describe("Hub Graph compiler", () => {
   it("rejects invalid protocol versions and excessive interaction rounds", () => {
     const definition = validDefinition();
     definition.interactionBlocks[0] = {
-      ...definition.interactionBlocks[0],
+      ...definition.interactionBlocks[0]!,
       protocol: "review.latest",
       maxRounds: 11,
     };

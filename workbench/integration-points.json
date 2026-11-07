@@ -1063,21 +1063,32 @@
         "apps/desktop/src/browserManager.ts",
         "apps/web/src/lib/nativeSurfaceOcclusion.ts",
         "apps/web/src/components/ui/popover.tsx",
-        "apps/web/src/components/chat/ContextWindowMeter.tsx"
+        "apps/web/src/components/chat/ContextWindowMeter.tsx",
+        "apps/web/src/components/chat/ComposerGoalHeader.tsx",
+        "apps/web/src/components/PlanSidebar.tsx",
+        "apps/web/src/components/chat/ExpandedImageOverlay.tsx",
+        "apps/web/src/components/chat/SelectionNewChatComposer.tsx",
+        "apps/web/src/components/chat/TranscriptSelectionAction.tsx",
+        "apps/web/src/components/ui/toast.tsx",
+        "apps/desktop/src/windowMaterial.ts"
       ],
       "featureFiles": [
         "apps/web/src/components/chat/ZenModeToolbar.tsx",
         "apps/web/src/lib/zenMode.ts",
         "apps/desktop/src/zenModeManager.ts",
         "apps/desktop/src/zenModeIpc.ts",
-        "apps/web/src/components/chat/useZenCompactHeight.ts"
+        "apps/web/src/components/chat/useZenCompactHeight.ts",
+        "apps/web/src/components/chat/useZenPointerPassthrough.ts"
       ],
-      "responsibility": "Exclusive compact presentation of the same main BrowserWindow, mounted ChatView, thread, context bindings and queue; no second window or execution runtime. Main owns reversible geometry, always-on-top policy, shortcut, renderer reload/close persistence and native browser-view occlusion. Trusted main-frame IPC exposes enter, exit, disclosure and bounded compact content height. ZenModeProvider is the host adapter for route/terminal ownership and optional DesktopBridge; useZenCompactHeight observes only intrinsic composer and toolbar content, never transcript or remaining viewport height. Existing permission/model menus move into the shared composer through optional compact presentation and metadata slots. Standard-window layout and business state remain shared. Runtime acceptance is recorded separately from static boundary coverage. Open interactive menus temporarily reserve bounded compact window space through the existing native-surface notification boundary; tooltips do not expand the window. Inline composer overlays retain their existing open state and can use the reserved area without opening the transcript.",
+      "responsibility": "Exclusive compact presentation of the same main BrowserWindow, mounted ChatView, thread, context bindings and queue; no second window or execution runtime. Main owns reversible geometry, always-on-top and workspace policy, shadow and material suspension, shortcut, reload/close persistence and native browser-view occlusion. Trusted main-frame IPC exposes enter, exit, disclosure, bounded compact content height and active-Zen-only pointer passthrough. ZenModeProvider is the host adapter for route/terminal ownership and optional DesktopBridge. Intrinsic composer content determines compact height; transcript and remaining viewport never feed measurement. Painted surfaces and interactive portals retain pointer input; transparent void passes through, and native restoration clears passthrough. Idle shows only the shared composer, running shows a summary, and the upward drawer reuses transcript, Goal, Plan and pending-input owners. Permission/model triggers remain compact inside the composer. The hover/focus disclosure grip sits at the composer upper edge, and restore sits at the open drawer upper right; the bottom hover grip uses the native window drag region. Standard-window layout and business state remain shared. Interactive menus reserve bounded compact space without opening the transcript; tooltips do not expand the window. Static coverage is distinct from native fullscreen, pointer and material runtime acceptance.",
       "tests": [
         "apps/web/src/lib/zenMode.test.ts",
         "apps/web/src/components/ChatView.browser.tsx",
+        "apps/web/src/components/chat/useZenPointerPassthrough.browser.tsx",
         "apps/desktop/src/zenModeManager.test.ts",
-        "apps/desktop/src/zenModeIpc.test.ts"
+        "apps/desktop/src/zenModeIpc.test.ts",
+        "apps/desktop/src/windowMaterial.test.ts",
+        "apps/desktop/scripts/zen-mode-smoke.ts"
       ]
     }
   ]

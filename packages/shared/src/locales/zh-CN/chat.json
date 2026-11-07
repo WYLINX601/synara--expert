@@ -3,6 +3,7 @@
   "zenExpand": "展开对话",
   "zenCollapse": "收起对话",
   "zenReturn": "返回工作台",
+  "zenMoveWindow": "拖动窗口",
   "zenChooseChat": "请先打开一个聊天",
   "zenShortcutUnavailable": "全局快捷键不可用",
   "zenUnavailable": "当前视图暂不支持禅模式",

@@ -3741,7 +3741,19 @@ diffs-container {
   max-width: 1120px;
 }
 
-/* Zen changes the existing chat's presentation; the route and composer stay mounted. */
+/* Zen changes presentation only; the route, editor, and draft remain mounted. */
+html[data-zen-surface="true"],
+html[data-zen-surface="true"] body,
+html[data-zen-surface="true"] #root,
+[data-sidebar-layout="rail"][data-zen-mode="true"],
+[data-zen-mode="true"] [data-slot="sidebar-inset"],
+[data-zen-mode="true"] [data-slot="sidebar-inset-surface"],
+[data-zen-mode="true"] .chat-content-card,
+[data-zen-chat="true"] {
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
 [data-sidebar-layout="rail"][data-zen-mode="true"] {
   --app-rail-inset-gap: 0px;
   --app-rail-card-radii: 0;
@@ -3751,31 +3763,89 @@ diffs-container {
 [data-zen-mode="true"] .chat-content-card::after {
   display: none;
 }
-
-/* Only the surrounding layout changes; composer styling stays shared with the main window. */
 [data-zen-chat="true"] {
   justify-content: flex-end;
+  padding-top: 12px;
+  padding-bottom: 20px;
   --zen-chat-gutter: var(--app-density-chat-gutter-x, 0.75rem);
 }
 [data-zen-chat="true"] > [data-zen-main] {
   flex: 0 1 auto;
-  overflow-y: auto;
+  overflow: visible;
 }
 [data-zen-chat="true"][data-zen-expanded="true"] > [data-zen-main] {
   flex: 1 1 0%;
+  overflow: hidden;
 }
-
-/* The drawer is an inset surface above the unchanged shared composer. */
+[data-zen-chat="true"] [data-empty-landing-composer-block] {
+  padding-bottom: 0;
+}
+[data-zen-chat="true"] [data-testid="chat-transcript-drawer"],
+[data-zen-chat="true"] [data-zen-details="true"] {
+  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+  border-radius: var(--radius-xl);
+  background: var(--background);
+  box-shadow: var(--shadow-sm);
+  padding-right: 2rem;
+}
 [data-zen-chat="true"] [data-testid="chat-transcript-drawer"] {
   width: calc((100% - 2 * var(--zen-chat-gutter)) * 14 / 15);
   max-width: calc(var(--app-chat-max-width, 46rem) * 14 / 15);
   margin-inline: auto;
   margin-bottom: 0.25rem;
-  border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+}
+[data-zen-chat="true"] [data-zen-details="true"] {
+  width: calc(100% * 14 / 15);
+  margin: 0 auto 0.25rem;
+  max-height: 48vh;
+  overflow-y: auto;
+}
+/* Empty chats still need a real drawer surface for the restore control. */
+[data-zen-chat="true"] [data-empty-landing-composer-block="true"] [data-zen-details="true"] {
+  min-height: 2.5rem;
+}
+/* Both existing sections share one inset drawer edge; the editor never moves. */
+[data-zen-chat="true"][data-zen-has-transcript="true"] [data-testid="chat-transcript-drawer"] {
+  margin-bottom: 0;
+  border-bottom: 0;
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  box-shadow: none;
+}
+[data-zen-chat="true"][data-zen-has-transcript="true"] [data-zen-details="true"] {
+  min-height: 0.5rem;
   border-top: 0;
-  border-radius: 0 0 var(--radius-xl) var(--radius-xl);
-  background: var(--background);
-  box-shadow: var(--shadow-sm);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  box-shadow: none;
+}
+.zen-drawer-toggle-mark {
+  opacity: 0;
+}
+.zen-drawer-toggle:hover .zen-drawer-toggle-mark,
+.zen-drawer-toggle:focus-visible .zen-drawer-toggle-mark {
+  opacity: 1;
+}
+.zen-drag-grip {
+  position: absolute;
+  z-index: 20;
+  bottom: 0;
+  left: calc(50% - 40px);
+  width: 80px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.zen-drag-grip > span {
+  width: 28px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--muted-foreground);
+  opacity: 0;
+}
+.zen-drag-grip:hover > span {
+  opacity: 0.65;
 }
 @media (min-width: 640px) {
   [data-zen-chat="true"] {
@@ -3783,7 +3853,11 @@ diffs-container {
   }
 }
 
-/* Inline @/+ panels are absolute; let them use the temporary compact window space. */
-[data-zen-chat="true"][data-zen-expanded="false"][data-zen-overlay-open="true"] > [data-zen-main] {
-  overflow: visible;
+html[data-zen-surface="true"] [data-expanded-image-overlay],
+html[data-zen-surface="true"] [data-slot="dialog-backdrop"],
+html[data-zen-surface="true"] [data-slot="command-dialog-backdrop"],
+html[data-zen-surface="true"] [data-slot="sheet-backdrop"],
+html[data-zen-surface="true"] [data-slot="alert-dialog-backdrop"] {
+  background: transparent;
+  backdrop-filter: none;
 }

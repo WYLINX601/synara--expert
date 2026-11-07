@@ -1,63 +1,52 @@
-import type { Ref } from "react";
 import { useTranslation } from "~/i18n";
-import { ArrowLeftIcon, ChevronDownIcon, ChevronUpIcon } from "~/lib/icons";
+import { ChevronDownIcon, ChevronUpIcon, Maximize2 } from "~/lib/icons";
+import { DISCLOSURE_FADE_MOTION_CLASS } from "~/lib/disclosureMotion";
 import { IconButton } from "../ui/icon-button";
 import { useZenMode } from "./ZenModeProvider";
-import { ComposerColumnFrame, ComposerStackedHeaderFrame } from "./ComposerColumnFrame";
-import { CHAT_COLUMN_GUTTER_CLASS_NAME } from "./composerPickerStyles";
 
-/** Small surrounding controls; the original composer is unchanged. */
-export function ZenModeToolbar({ title, ref }: { title: string; ref?: Ref<HTMLDivElement> }) {
+/** Separate edge controls; neither occupies the composer's metadata row. */
+export function ZenModeToolbar({ action }: { action: "drawer" | "return" }) {
   const { t } = useTranslation();
   const { state, pending, setExpanded, exit } = useZenMode();
   if (!state.isActive) return null;
+  if (action === "return") {
+    if (!state.expanded) return null;
+    return (
+      <IconButton
+        type="button"
+        data-testid="zen-drawer-return"
+        data-zen-hit-surface=""
+        className="pointer-events-auto absolute right-1 top-1 z-20 rounded-full [-webkit-app-region:no-drag]"
+        label={t("chat:zenReturn")}
+        title={t("chat:zenReturn")}
+        disabled={pending}
+        onClick={exit}
+      >
+        <Maximize2 className="size-4" />
+      </IconButton>
+    );
+  }
   const toggleLabel = t(state.expanded ? "chat:zenCollapse" : "chat:zenExpand");
   return (
-    <div
-      ref={ref}
-      data-zen-toolbar-frame=""
-      className={`${CHAT_COLUMN_GUTTER_CLASS_NAME} relative z-10 shrink-0 pt-2`}
+    <IconButton
+      type="button"
+      data-testid="zen-drawer-toggle"
+      data-zen-hit-surface=""
+      className="zen-drawer-toggle absolute -top-2 left-1/2 z-20 h-5 w-14 -translate-x-1/2 sm:h-5 sm:w-14 rounded-full [-webkit-app-region:no-drag]"
+      label={toggleLabel}
+      title={toggleLabel}
+      aria-expanded={state.expanded}
+      aria-controls="zen-conversation zen-details"
+      disabled={pending}
+      onClick={() => setExpanded(!state.expanded)}
     >
-      <ComposerColumnFrame>
-        <ComposerStackedHeaderFrame>
-          <header
-            data-testid="zen-mode-toolbar"
-            className="drag-region flex h-9 min-w-0 items-center gap-1 rounded-t-xl border border-border/70 bg-background px-3 shadow-sm"
-          >
-            <div className="min-w-0 flex-1">
-              <span className="block truncate text-ui-xs text-muted-foreground" title={title}>
-                {title}
-              </span>
-            </div>
-            <IconButton
-              type="button"
-              className="[-webkit-app-region:no-drag]"
-              label={toggleLabel}
-              title={toggleLabel}
-              aria-expanded={state.expanded}
-              aria-controls="zen-conversation"
-              disabled={pending}
-              onClick={() => setExpanded(!state.expanded)}
-            >
-              {state.expanded ? (
-                <ChevronDownIcon className="size-3.5" />
-              ) : (
-                <ChevronUpIcon className="size-3.5" />
-              )}
-            </IconButton>
-            <IconButton
-              type="button"
-              className="[-webkit-app-region:no-drag]"
-              label={t("chat:zenReturn")}
-              title={t("chat:zenReturn")}
-              disabled={pending}
-              onClick={exit}
-            >
-              <ArrowLeftIcon className="size-3.5" />
-            </IconButton>
-          </header>
-        </ComposerStackedHeaderFrame>
-      </ComposerColumnFrame>
-    </div>
+      <span className={`zen-drawer-toggle-mark ${DISCLOSURE_FADE_MOTION_CLASS}`}>
+        {state.expanded ? (
+          <ChevronDownIcon className="size-3.5" />
+        ) : (
+          <ChevronUpIcon className="size-3.5" />
+        )}
+      </span>
+    </IconButton>
   );
 }

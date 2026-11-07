@@ -19,6 +19,7 @@ interface ChatComposerFooterProps {
   /** `row`: the single-row composer. The footer box becomes `display: contents` so its
    *  leading and trailing clusters sit beside the editor in the surface's grid. */
   layout?: "row" | "block";
+  hideIdleSend?: boolean;
   isComposerFooterCompact: boolean;
   leadingControls: ReactNode;
   composerPickerControls: ReactNode;
@@ -68,6 +69,7 @@ interface ChatComposerFooterProps {
 
 export function ChatComposerFooter({
   layout: layoutProp,
+  hideIdleSend: hideIdleSendProp,
   isComposerFooterCompact,
   leadingControls,
   composerPickerControls,
@@ -82,6 +84,7 @@ export function ChatComposerFooter({
 }: ChatComposerFooterProps) {
   const { t } = useTranslation();
 
+  const hideIdleSend = hideIdleSendProp ?? false;
   const row = (layoutProp ?? "block") === "row";
   const voiceActive = voice.recording || voice.transcribing;
   return (
@@ -344,68 +347,73 @@ export function ChatComposerFooter({
                   onClick={voice.onToggle}
                 />
               ) : null}
-              <Button
-                type="submit"
-                variant="prominent"
-                size="icon-xs"
-                className={COMPOSER_ACTION_CIRCLE_CLASS_NAME}
-                disabled={
-                  submission.busy ||
-                  submission.connecting ||
-                  submission.expired ||
-                  submission.expertBlocked ||
-                  submission.hasPendingCacheReview ||
-                  voice.transcribing ||
-                  submission.preparingImages ||
-                  !submission.hasContent
-                }
-                aria-label={
-                  submission.connecting
-                    ? t("chat:composer_connecting")
-                    : voice.transcribing
-                      ? t("chat:composer_transcribingVoice")
-                      : submission.preparingImages
-                        ? t("chat:optimizingImage")
-                        : submission.preparingWorktree
-                          ? t("workspace:composer_preparingWorktree")
-                          : submission.busy
-                            ? t("chat:sending")
-                            : t("chat:composer_sendMessage")
-                }
-                title={
-                  submission.hasPendingCacheReview
-                    ? t("chat:chooseHowToResumeTheHeldMessageAbove")
-                    : submission.expertBlocked
-                      ? "所选专家当前不可用，请查看专家预检或选择“通用”后发送"
-                      : undefined
-                }
-              >
-                {submission.connecting || submission.busy || submission.preparingImages ? (
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 14 14"
-                    fill="none"
-                    className="animate-spin"
-                    aria-hidden="true"
-                  >
-                    <circle
-                      cx="7"
-                      cy="7"
-                      r="5.5"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                      strokeLinecap="round"
-                      strokeDasharray="20 12"
+              {!hideIdleSend ||
+              submission.hasContent ||
+              submission.busy ||
+              submission.preparingImages ? (
+                <Button
+                  type="submit"
+                  variant="prominent"
+                  size="icon-xs"
+                  className={COMPOSER_ACTION_CIRCLE_CLASS_NAME}
+                  disabled={
+                    submission.busy ||
+                    submission.connecting ||
+                    submission.expired ||
+                    submission.expertBlocked ||
+                    submission.hasPendingCacheReview ||
+                    voice.transcribing ||
+                    submission.preparingImages ||
+                    !submission.hasContent
+                  }
+                  aria-label={
+                    submission.connecting
+                      ? t("chat:composer_connecting")
+                      : voice.transcribing
+                        ? t("chat:composer_transcribingVoice")
+                        : submission.preparingImages
+                          ? t("chat:optimizingImage")
+                          : submission.preparingWorktree
+                            ? t("workspace:composer_preparingWorktree")
+                            : submission.busy
+                              ? t("chat:sending")
+                              : t("chat:composer_sendMessage")
+                  }
+                  title={
+                    submission.hasPendingCacheReview
+                      ? t("chat:chooseHowToResumeTheHeldMessageAbove")
+                      : submission.expertBlocked
+                        ? "所选专家当前不可用，请查看专家预检或选择“通用”后发送"
+                        : undefined
+                  }
+                >
+                  {submission.connecting || submission.busy || submission.preparingImages ? (
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 14 14"
+                      fill="none"
+                      className="animate-spin"
+                      aria-hidden="true"
+                    >
+                      <circle
+                        cx="7"
+                        cy="7"
+                        r="5.5"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                        strokeLinecap="round"
+                        strokeDasharray="20 12"
+                      />
+                    </svg>
+                  ) : (
+                    <ComposerSendArrowIcon
+                      aria-hidden="true"
+                      className="size-5 shrink-0 translate-y-px"
                     />
-                  </svg>
-                ) : (
-                  <ComposerSendArrowIcon
-                    aria-hidden="true"
-                    className="size-5 shrink-0 translate-y-px"
-                  />
-                )}
-              </Button>
+                  )}
+                </Button>
+              ) : null}
             </>
           )
         ) : null}

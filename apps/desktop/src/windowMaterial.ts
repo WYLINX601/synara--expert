@@ -63,6 +63,12 @@ export interface WindowMaterialAddon {
 
 type MaterialWindow = Pick<BrowserWindow, "getNativeWindowHandle" | "setVibrancy">;
 
+export interface WindowMaterialApplier {
+  (window: MaterialWindow, input: DesktopWindowMaterial): boolean;
+  suspend: (window: MaterialWindow) => void;
+  resume: (window: MaterialWindow) => boolean;
+}
+
 export function parseDesktopWindowMaterial(raw: unknown): DesktopWindowMaterial | null {
   if (!raw || typeof raw !== "object") return null;
   const { material, blurRadius } = raw as Record<string, unknown>;
@@ -82,7 +88,9 @@ export function parseDesktopWindowMaterial(raw: unknown): DesktopWindowMaterial 
  */
 export function createWindowMaterialApplier(loadAddon: () => WindowMaterialAddon | null) {
   let addon: WindowMaterialAddon | null | undefined;
-  return (window: MaterialWindow, input: DesktopWindowMaterial): boolean => {
+  const preferences = new WeakMap<MaterialWindow, DesktopWindowMaterial>();
+  const suspended = new WeakSet<MaterialWindow>();
+  const applyImmediately = (window: MaterialWindow, input: DesktopWindowMaterial): boolean => {
     if (input.material === "opaque") {
       window.setVibrancy(MAC_WINDOW_VIBRANCY);
       addon?.setBackgroundBlurRadius(window.getNativeWindowHandle(), 0);
@@ -98,4 +106,21 @@ export function createWindowMaterialApplier(loadAddon: () => WindowMaterialAddon
     window.setVibrancy(MAC_WINDOW_VIBRANCY);
     return false;
   };
+  const apply = ((window: MaterialWindow, input: DesktopWindowMaterial): boolean => {
+    preferences.set(window, input);
+    return suspended.has(window) ? true : applyImmediately(window, input);
+  }) as WindowMaterialApplier;
+  apply.suspend = (window) => {
+    suspended.add(window);
+    window.setVibrancy(null);
+    addon?.setBackgroundBlurRadius(window.getNativeWindowHandle(), 0);
+  };
+  apply.resume = (window) => {
+    suspended.delete(window);
+    return applyImmediately(
+      window,
+      preferences.get(window) ?? { material: "opaque", blurRadius: 0 },
+    );
+  };
+  return apply;
 }

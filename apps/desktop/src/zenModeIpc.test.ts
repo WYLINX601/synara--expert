@@ -27,6 +27,7 @@ describe("Zen mode IPC", () => {
       exit: vi.fn(async () => undefined),
       setExpanded: vi.fn(async () => undefined),
       setCompactHeight: vi.fn(async () => undefined),
+      setPointerPassthrough: vi.fn(async () => undefined),
     };
     registerZenModeIpc(
       ipc as unknown as IpcMain,
@@ -35,7 +36,7 @@ describe("Zen mode IPC", () => {
     );
 
     const channels = DESKTOP_IPC_CHANNELS.zenMode;
-    expect(handlers.size).toBe(5);
+    expect(handlers.size).toBe(6);
     const frame = {};
     const trusted = {
       sender: { id: 1, mainFrame: frame },
@@ -47,6 +48,7 @@ describe("Zen mode IPC", () => {
       channels.exit,
       channels.setExpanded,
       channels.setCompactHeight,
+      channels.setPointerPassthrough,
     ];
     for (const channel of channelsToCheck) {
       const handler = handlers.get(channel)!;
@@ -69,6 +71,9 @@ describe("Zen mode IPC", () => {
     await expect(handlers.get(channels.exit)!(trusted)).resolves.toBeUndefined();
     await expect(handlers.get(channels.setExpanded)!(trusted, true)).resolves.toBeUndefined();
     await expect(handlers.get(channels.setCompactHeight)!(trusted, 160)).resolves.toBeUndefined();
+    await expect(
+      handlers.get(channels.setPointerPassthrough)!(trusted, true),
+    ).resolves.toBeUndefined();
     expect(manager.setExpanded).toHaveBeenCalledWith(true);
     expect(manager.setCompactHeight).toHaveBeenCalledWith(160);
 
@@ -78,5 +83,13 @@ describe("Zen mode IPC", () => {
       );
     }
     expect(manager.setCompactHeight).toHaveBeenCalledTimes(1);
+    expect(manager.setPointerPassthrough).toHaveBeenCalledWith(true);
+
+    for (const invalid of [1, "true", null]) {
+      expect(() => handlers.get(channels.setPointerPassthrough)!(trusted, invalid)).toThrow(
+        "Invalid Zen mode pointer passthrough state",
+      );
+    }
+    expect(manager.setPointerPassthrough).toHaveBeenCalledTimes(1);
   });
 });

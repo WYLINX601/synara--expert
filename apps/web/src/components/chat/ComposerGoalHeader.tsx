@@ -46,6 +46,7 @@ export function goalElapsedMs(
 
 interface ComposerGoalHeaderProps {
   goal: string;
+  inline?: boolean;
   goalStartedAt?: string | null | undefined;
   goalPausedAt?: string | null | undefined;
   onEdit: () => void;
@@ -58,6 +59,7 @@ interface ComposerGoalHeaderProps {
 
 export function ComposerGoalHeader({
   goal,
+  inline = false,
   goalStartedAt,
   goalPausedAt,
   onEdit,
@@ -73,6 +75,72 @@ export function ComposerGoalHeader({
   const stateLabel = canPause ? (paused ? "Goal paused" : "Pursuing goal") : "Goal";
   const elapsedLabel = elapsedMs !== null ? formatClockDuration(elapsedMs) : null;
 
+  const detail = (close: () => void) => (
+    <>
+      <ComposerStackedPanelRow>
+        <ComposerStackedPanelRowMain>
+          <GoalIcon className={COMPOSER_STACKED_PANEL_ICON_CLASS_NAME} />
+          <ComposerStackedPanelRowLabel className="shrink-0">
+            {stateLabel}
+          </ComposerStackedPanelRowLabel>
+          {elapsedLabel ? (
+            <span className="shrink-0 tabular-nums text-muted-foreground/80">{elapsedLabel}</span>
+          ) : null}
+        </ComposerStackedPanelRowMain>
+        <div className="flex shrink-0 items-center gap-0">
+          <IconButton
+            variant="ghost"
+            size="icon-chip"
+            label={t("chat:editGoal")}
+            onClick={() => {
+              close();
+              onEdit();
+            }}
+          >
+            <PencilIcon />
+          </IconButton>
+          {canPause ? (
+            <IconButton
+              variant="ghost"
+              size="icon-chip"
+              label={paused ? t("chat:resumeGoal") : t("chat:pauseGoal")}
+              onClick={() => void onSetPaused(!paused)}
+            >
+              {paused ? <PlayOutlineIcon /> : <PauseOutlineIcon />}
+            </IconButton>
+          ) : null}
+          <IconButton
+            variant="ghost"
+            size="icon-chip"
+            label={t("chat:deleteGoal")}
+            onClick={() => void onClear()}
+          >
+            <TrashCanIcon />
+          </IconButton>
+        </div>
+      </ComposerStackedPanelRow>
+      <div
+        className={cn(
+          COMPOSER_STACKED_PANEL_BODY_PADDING_CLASS_NAME,
+          COMPOSER_STACKED_PANEL_SCROLL_REGION_CLASS_NAME,
+        )}
+      >
+        <p
+          data-testid="composer-goal-text"
+          className="whitespace-pre-wrap break-words text-ui text-muted-foreground/80"
+        >
+          {goal}
+        </p>
+      </div>
+    </>
+  );
+  if (inline)
+    return (
+      <div data-testid="composer-goal-detail" className="pointer-events-auto w-full">
+        {detail(() => {})}
+      </div>
+    );
+
   return (
     <ComposerCapsulePopover
       icon={<GoalIcon className={COMPOSER_STACKED_PANEL_ICON_CLASS_NAME} />}
@@ -87,67 +155,7 @@ export function ComposerGoalHeader({
       title={goal}
       testId="composer-goal-header"
     >
-      {(close) => (
-        <>
-          <ComposerStackedPanelRow>
-            <ComposerStackedPanelRowMain>
-              <GoalIcon className={COMPOSER_STACKED_PANEL_ICON_CLASS_NAME} />
-              <ComposerStackedPanelRowLabel className="shrink-0">
-                {stateLabel}
-              </ComposerStackedPanelRowLabel>
-              {elapsedLabel ? (
-                <span className="shrink-0 tabular-nums text-muted-foreground/80">
-                  {elapsedLabel}
-                </span>
-              ) : null}
-            </ComposerStackedPanelRowMain>
-            <div className="flex shrink-0 items-center gap-0">
-              <IconButton
-                variant="ghost"
-                size="icon-chip"
-                label={t("chat:editGoal")}
-                onClick={() => {
-                  close();
-                  onEdit();
-                }}
-              >
-                <PencilIcon />
-              </IconButton>
-              {canPause ? (
-                <IconButton
-                  variant="ghost"
-                  size="icon-chip"
-                  label={paused ? t("chat:resumeGoal") : t("chat:pauseGoal")}
-                  onClick={() => void onSetPaused(!paused)}
-                >
-                  {paused ? <PlayOutlineIcon /> : <PauseOutlineIcon />}
-                </IconButton>
-              ) : null}
-              <IconButton
-                variant="ghost"
-                size="icon-chip"
-                label={t("chat:deleteGoal")}
-                onClick={() => void onClear()}
-              >
-                <TrashCanIcon />
-              </IconButton>
-            </div>
-          </ComposerStackedPanelRow>
-          <div
-            className={cn(
-              COMPOSER_STACKED_PANEL_BODY_PADDING_CLASS_NAME,
-              COMPOSER_STACKED_PANEL_SCROLL_REGION_CLASS_NAME,
-            )}
-          >
-            <p
-              data-testid="composer-goal-text"
-              className="whitespace-pre-wrap break-words text-ui text-muted-foreground/80"
-            >
-              {goal}
-            </p>
-          </div>
-        </>
-      )}
+      {(close) => detail(close)}
     </ComposerCapsulePopover>
   );
 }

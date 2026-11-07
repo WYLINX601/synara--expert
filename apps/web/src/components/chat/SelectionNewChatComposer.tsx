@@ -137,7 +137,7 @@ export function SelectionNewChatComposer({
       // surface's shadow into hard corners. The editor caps and scrolls its own height.
       style={{ left: action.left, top: action.top }}
     >
-      <div className={COMPOSER_INPUT_SHELL_CLASS_NAME}>
+      <div data-zen-hit-surface="" className={COMPOSER_INPUT_SHELL_CLASS_NAME}>
         <div className={COMPOSER_INPUT_SURFACE_CLASS_NAME}>
           <DisclosureRegion open>
             <form

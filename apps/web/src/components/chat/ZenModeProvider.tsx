@@ -1,3 +1,4 @@
+import { useZenPointerPassthrough } from "./useZenPointerPassthrough";
 import { ThreadId, type ZenModeState } from "@synara/contracts";
 import { useLocation, useParams } from "@tanstack/react-router";
 import {
@@ -55,6 +56,14 @@ export function ZenModeProvider({ children }: { children: ReactNode }) {
   const bridge = window.desktopBridge?.zenMode;
   const [state, setState] = useState(INITIAL_STATE);
   const [pending, setPending] = useState(false);
+  useZenPointerPassthrough(state.isActive);
+  useEffect(() => {
+    if (!state.isActive) return;
+    document.documentElement.dataset.zenSurface = "true";
+    return () => {
+      delete document.documentElement.dataset.zenSurface;
+    };
+  }, [state.isActive]);
   const operationPending = useRef(false);
   const automaticExitRequested = useRef(false);
   const shortcutWarningShown = useRef(false);

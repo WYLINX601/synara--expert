@@ -51,11 +51,17 @@ it("buffers one Zen shortcut toggle until React subscribes, then cleans up the s
   await zenMode.exit();
   await zenMode.setExpanded(true);
   await zenMode.setCompactHeight(145);
+  await zenMode.setPointerPassthrough(true);
   expect(ipc.invoke).toHaveBeenNthCalledWith(1, DESKTOP_IPC_CHANNELS.zenMode.getState);
   expect(ipc.invoke).toHaveBeenNthCalledWith(2, DESKTOP_IPC_CHANNELS.zenMode.enter);
   expect(ipc.invoke).toHaveBeenNthCalledWith(3, DESKTOP_IPC_CHANNELS.zenMode.exit);
   expect(ipc.invoke).toHaveBeenNthCalledWith(4, DESKTOP_IPC_CHANNELS.zenMode.setExpanded, true);
   expect(ipc.invoke).toHaveBeenNthCalledWith(5, DESKTOP_IPC_CHANNELS.zenMode.setCompactHeight, 145);
+  expect(ipc.invoke).toHaveBeenNthCalledWith(
+    6,
+    DESKTOP_IPC_CHANNELS.zenMode.setPointerPassthrough,
+    true,
+  );
 
   expect(ipc.on).toHaveBeenCalledWith(
     DESKTOP_IPC_CHANNELS.zenMode.toggleRequested,

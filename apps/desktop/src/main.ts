@@ -685,7 +685,11 @@ const browserManager = new DesktopBrowserManager({
     );
   },
 });
+// Electron exposes the all-workspaces getter, but not the visibleOnFullScreen option. The
+// desktop process is the only writer, so retain that option alongside the native window.
+const macWindowFullScreenVisibility = new WeakMap<BrowserWindow, boolean>();
 const zenModeManager = new ZenModeManager({
+  platform: process.platform,
   getWindow: () =>
     mainWindow && !mainWindow.isDestroyed() ? (mainWindow as unknown as ZenModeWindow) : null,
   getDisplayWorkAreas: () => screen.getAllDisplays().map((display) => display.workArea),
@@ -703,6 +707,32 @@ const zenModeManager = new ZenModeManager({
   setTrafficLightsVisible: (window, visible) => {
     if (process.platform !== "darwin" || mainWindow !== window || window.isDestroyed()) return;
     (window as unknown as BrowserWindow).setWindowButtonVisibility(visible);
+  },
+  getVisibleOnFullScreen: (window) =>
+    macWindowFullScreenVisibility.get(window as unknown as BrowserWindow) ?? false,
+  setVisibleOnAllWorkspaces: (window, visible, visibleOnFullScreen) => {
+    const nativeWindow = window as unknown as BrowserWindow;
+    if (
+      process.platform !== "darwin" ||
+      mainWindow !== nativeWindow ||
+      nativeWindow.isDestroyed()
+    ) {
+      return;
+    }
+    nativeWindow.setVisibleOnAllWorkspaces(visible, { visibleOnFullScreen });
+    macWindowFullScreenVisibility.set(nativeWindow, visibleOnFullScreen);
+  },
+  setZenWindowMaterial: (window, active) => {
+    const nativeWindow = window as unknown as BrowserWindow;
+    if (
+      process.platform !== "darwin" ||
+      mainWindow !== nativeWindow ||
+      nativeWindow.isDestroyed()
+    ) {
+      return;
+    }
+    if (active) applyWindowMaterial.suspend(nativeWindow);
+    else applyWindowMaterial.resume(nativeWindow);
   },
   shortcutRegistry: globalShortcut,
   setFullScreenAndWait: (window, fullScreen) =>
@@ -5945,6 +5975,7 @@ function getWindowMaterialOptions(): BrowserWindowConstructorOptions {
     return { backgroundColor: nativeTheme.shouldUseDarkColors ? "#181818" : "#ffffff" };
   }
   return {
+    transparent: true,
     vibrancy: MAC_WINDOW_VIBRANCY,
     // "followWindow" lets macOS drop vibrancy blending to inactive when the
     // window is backgrounded, so WindowServer stops continuously recompositing

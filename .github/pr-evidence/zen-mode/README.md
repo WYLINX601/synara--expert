@@ -2,6 +2,22 @@
 
 These browser-fixture captures use synthetic chat and Obsidian context. They demonstrate the user-approved layout, not a production profile, live provider response, or native-window acceptance.
 
+## 2026-11-07 refinement
+
+The refinement removes the permanent title rail and outer backing surface, places a hover/focus disclosure grip at the composer upper edge and the paired restore icon at the open drawer upper right, and shows a bottom drag grip on hover. Goal, Plan, approvals and questions reuse their existing owners in the upward drawer. A collapsed running or attention state gets one summary strip; expanded content supplies the detail.
+
+![Idle composer at its measured compact height](edge-idle.png)
+
+![Upper-edge disclosure revealed on hover](edge-idle-hover.png)
+
+![Collapsed running summary with Stop inside the composer](edge-running.png)
+
+![Interactive question in the upward drawer](edge-question.png)
+
+Browser captures flatten transparent pixels onto a white page. The separate isolated macOS Electron smoke checks renderer alpha, native shadow and material handling, production preload/IPC, pointer reset, workspace settings, window geometry and restoration. Its same-process synthetic fullscreen host does not establish cross-application fullscreen z-order; physical mouse dragging remains a manual check. These captures do not imply the installed application was updated.
+
+## Earlier merged layout
+
 | Previous preview                                           | Accepted compact layout                                                   |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------- |
 | ![Separate permission and model row](previous-preview.png) | ![Compact permission and model controls inside the composer](compact.png) |

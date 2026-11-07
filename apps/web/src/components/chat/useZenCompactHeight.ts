@@ -11,19 +11,18 @@ import { zenCompactHeight } from "~/lib/zenMode";
 /** Measures only intrinsic blocks, never the viewport-sized chat/transcript flex boxes. */
 export function useZenCompactHeight(input: {
   active: boolean;
+  layoutKey: boolean;
   inlineOverlayOpen: boolean;
   composerRef: RefObject<HTMLFormElement | null>;
-  toolbarRef: RefObject<HTMLDivElement | null>;
   onHeightChange: (height: number) => Promise<void>;
 }) {
-  const { active, inlineOverlayOpen, composerRef, toolbarRef, onHeightChange } = input;
+  const { active, layoutKey, inlineOverlayOpen, composerRef, onHeightChange } = input;
   const inlineOverlayOpenRef = useRef(inlineOverlayOpen);
   const scheduleRef = useRef<() => void>(() => {});
   useEffect(() => {
     if (!active) return;
     const composer = composerRef.current;
-    const toolbar = toolbarRef.current;
-    if (!composer || !toolbar) return;
+    if (!composer) return;
     let disposed = false;
     let frame = 0;
     let lastReported: number | undefined;
@@ -51,15 +50,20 @@ export function useZenCompactHeight(input: {
         inlineOverlayOpenRef.current ||
         Boolean(
           document.querySelector(
-            `${NATIVE_SURFACE_MENU_OVERLAY_SELECTOR}[data-open], ${NATIVE_SURFACE_COMPACT_POPOVER_SELECTOR}[data-open]`,
+            `${NATIVE_SURFACE_MENU_OVERLAY_SELECTOR}[data-open], ${NATIVE_SURFACE_COMPACT_POPOVER_SELECTOR}[data-open], [data-slot='dialog-popup'][data-open], [data-slot='command-dialog-popup'][data-open], [data-slot='alert-dialog-popup'][data-open], [data-slot='sheet-popup'][data-open]`,
           ),
         );
       // Portal/absolute panels need space but their collision-limited height must
       // never feed back into window sizing. Pure tooltips are not in this selector.
+      const chat = composer.closest<HTMLElement>("[data-zen-chat]");
+      const chatStyle = chat ? getComputedStyle(chat) : null;
+      const edgeClearance = chatStyle
+        ? Number.parseFloat(chatStyle.paddingTop) + Number.parseFloat(chatStyle.paddingBottom)
+        : 0;
       latest = overlayOpen
         ? ZEN_MODE_COMPACT_MAX_HEIGHT
         : zenCompactHeight(
-            toolbar.getBoundingClientRect().height,
+            edgeClearance, // Stable top disclosure and bottom native-drag clearances.
             composer.getBoundingClientRect().height,
           );
       flush();
@@ -71,16 +75,18 @@ export function useZenCompactHeight(input: {
     scheduleRef.current = schedule;
     window.addEventListener(NATIVE_SURFACE_OCCLUSION_SYNC_EVENT, schedule);
     observer?.observe(composer);
-    observer?.observe(toolbar);
+    const portals = new MutationObserver(schedule);
+    portals.observe(document.body, { childList: true });
     schedule();
     return () => {
       disposed = true;
       scheduleRef.current = () => {};
       window.removeEventListener(NATIVE_SURFACE_OCCLUSION_SYNC_EVENT, schedule);
       observer?.disconnect();
+      portals.disconnect();
       if (frame) cancelAnimationFrame(frame);
     };
-  }, [active, composerRef, toolbarRef, onHeightChange]);
+  }, [active, layoutKey, composerRef, onHeightChange]);
   useEffect(() => {
     inlineOverlayOpenRef.current = inlineOverlayOpen;
     scheduleRef.current();

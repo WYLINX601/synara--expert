@@ -28,6 +28,14 @@ export function registerZenModeIpc(
         return manager.setCompactHeight(contentHeight);
       },
     ],
+    [
+      channels.setPointerPassthrough,
+      (_event, ignore) => {
+        if (typeof ignore !== "boolean")
+          throw new Error("Invalid Zen mode pointer passthrough state.");
+        return manager.setPointerPassthrough(ignore);
+      },
+    ],
   ];
 
   for (const [channel, handler] of handlers) {

@@ -4,7 +4,6 @@ import { ZEN_MODE_COMPACT_MAX_HEIGHT, ZEN_MODE_COMPACT_MIN_HEIGHT } from "@synar
 import {
   ZEN_MODE_DEFAULT_WIDTH,
   ZEN_MODE_EXPANDED_HEIGHT,
-  ZEN_MODE_INITIAL_COMPACT_HEIGHT,
   ZEN_MODE_MIN_WIDTH,
   ZEN_MODE_SHORTCUT,
   ZenModeManager,
@@ -22,6 +21,12 @@ class FakeWindow implements ZenModeWindow {
   fullScreen = false;
   resizable = true;
   alwaysOnTop = false;
+  visibleOnAllWorkspaces = false;
+  visibleOnFullScreen = false;
+  shadow = true;
+  ignoreMouseEvents = false;
+  failIgnoreMouseEvents = false;
+  ignoreMouseCalls: Array<[boolean, { forward?: boolean } | undefined]> = [];
   minimumSize = [840, 620];
   maximumSize = [0, 0];
   bounds: DesktopWindowBounds = { x: 100, y: 200, width: 1100, height: 800 };
@@ -65,6 +70,14 @@ class FakeWindow implements ZenModeWindow {
     return this.alwaysOnTop;
   }
 
+  isVisibleOnAllWorkspaces(): boolean {
+    return this.visibleOnAllWorkspaces;
+  }
+
+  hasShadow(): boolean {
+    return this.shadow;
+  }
+
   getMinimumSize(): number[] {
     return [...this.minimumSize];
   }
@@ -104,6 +117,22 @@ class FakeWindow implements ZenModeWindow {
     this.alwaysOnTop = alwaysOnTop;
   }
 
+  setVisibleOnAllWorkspaces(visible: boolean, options?: { visibleOnFullScreen?: boolean }): void {
+    this.visibleOnAllWorkspaces = visible;
+    this.visibleOnFullScreen = options?.visibleOnFullScreen ?? false;
+  }
+
+  setHasShadow(hasShadow: boolean): void {
+    this.shadow = hasShadow;
+  }
+
+  setIgnoreMouseEvents(ignore: boolean, options?: { forward?: boolean }): void {
+    this.ignoreMouseCalls.push([ignore, options]);
+    if (ignore && this.failIgnoreMouseEvents)
+      throw new Error("synthetic pointer passthrough failure");
+    this.ignoreMouseEvents = ignore;
+  }
+
   maximize(): void {
     this.maximized = true;
   }
@@ -130,6 +159,7 @@ class FakeWindow implements ZenModeWindow {
 function fixture(
   input: {
     window?: FakeWindow;
+    platform?: NodeJS.Platform;
     workAreas?: ReadonlyArray<DesktopWindowBounds>;
     shortcutRegisterResult?: boolean;
     setFullScreenAndWait?: (window: ZenModeWindow, fullScreen: boolean) => Promise<void>;
@@ -140,17 +170,27 @@ function fixture(
   const onToggleRequested = vi.fn();
   const setBrowserViewsZenMode = vi.fn();
   const setTrafficLightsVisible = vi.fn();
+  const setZenWindowMaterial = vi.fn();
+  const setVisibleOnAllWorkspaces = vi.fn(
+    (target: ZenModeWindow, visible: boolean, visibleOnFullScreen: boolean) => {
+      target.setVisibleOnAllWorkspaces(visible, { visibleOnFullScreen });
+    },
+  );
   const register = vi.fn(
     (_shortcut: string, _callback: () => void) => input.shortcutRegisterResult ?? true,
   );
   const unregister = vi.fn();
   const manager = new ZenModeManager({
+    platform: input.platform ?? "darwin",
     getWindow: () => (window.destroyed ? null : window),
     getDisplayWorkAreas: () => input.workAreas ?? [workArea],
     onStateChanged: (state) => states.push(state),
     onToggleRequested,
     setBrowserViewsZenMode,
     setTrafficLightsVisible,
+    getVisibleOnFullScreen: (target) => (target as FakeWindow).visibleOnFullScreen,
+    setVisibleOnAllWorkspaces,
+    setZenWindowMaterial,
     shortcutRegistry: { register, unregister },
     ...(input.setFullScreenAndWait ? { setFullScreenAndWait: input.setFullScreenAndWait } : {}),
   });
@@ -161,6 +201,8 @@ function fixture(
     onToggleRequested,
     setBrowserViewsZenMode,
     setTrafficLightsVisible,
+    setZenWindowMaterial,
+    setVisibleOnAllWorkspaces,
     register,
     unregister,
   };
@@ -209,6 +251,10 @@ describe("ZenModeManager", () => {
     expect(f.window.getMaximumSize()).toEqual([1500, 1000]);
     expect(f.setBrowserViewsZenMode).toHaveBeenLastCalledWith(f.window, false);
     expect(f.setTrafficLightsVisible).toHaveBeenLastCalledWith(f.window, true);
+    expect(f.setZenWindowMaterial.mock.calls).toEqual([
+      [f.window, true],
+      [f.window, false],
+    ]);
   });
 
   it("uses finite measured compact content height and keeps the bottom edge anchored", async () => {
@@ -287,10 +333,16 @@ describe("ZenModeManager", () => {
     await f.manager.enter();
     expect(window.isFullScreen()).toBe(false);
     expect(window.isMinimized()).toBe(false);
+    expect(window.visibleOnAllWorkspaces).toBe(true);
+    expect(window.visibleOnFullScreen).toBe(true);
+    expect(window.shadow).toBe(false);
     await f.manager.exit();
     expect(fullScreenChanges).toEqual([false, true]);
     expect(window.isFullScreen()).toBe(true);
     expect(window.isMinimized()).toBe(true);
+    expect(window.visibleOnAllWorkspaces).toBe(false);
+    expect(window.visibleOnFullScreen).toBe(false);
+    expect(window.shadow).toBe(true);
   });
 
   it("keeps normal geometry available to close persistence during async entry", async () => {
@@ -395,5 +447,54 @@ describe("ZenModeManager", () => {
     await f.manager.exit();
     expect(f.manager.getState().isActive).toBe(false);
     expect(f.window.getBounds()).toEqual(original);
+  });
+
+  it("clears pointer passthrough on exit, renderer reload, dispose, and restoration failure", async () => {
+    await expect(fixture().manager.setPointerPassthrough(true)).rejects.toThrow("only available");
+
+    for (const finish of ["exit", "reload", "dispose"] as const) {
+      const f = fixture();
+      await f.manager.enter();
+      await f.manager.setPointerPassthrough(true);
+      expect(f.window.ignoreMouseEvents).toBe(true);
+      expect(f.window.ignoreMouseCalls.at(-1)).toEqual([true, { forward: true }]);
+
+      if (finish === "exit") await f.manager.exit();
+      else if (finish === "reload") await f.manager.resetForRendererReload();
+      else await f.manager.dispose();
+      expect(f.window.ignoreMouseEvents).toBe(false);
+      expect(f.window.ignoreMouseCalls.at(-1)?.[0]).toBe(false);
+    }
+
+    const failing = fixture();
+    await failing.manager.enter();
+    failing.window.failIgnoreMouseEvents = true;
+    await expect(failing.manager.setPointerPassthrough(true)).rejects.toThrow(
+      "synthetic pointer passthrough failure",
+    );
+    expect(failing.window.ignoreMouseEvents).toBe(false);
+    expect(failing.window.ignoreMouseCalls.at(-1)?.[0]).toBe(false);
+
+    failing.window.failIgnoreMouseEvents = false;
+    await failing.manager.setPointerPassthrough(true);
+    failing.window.failRestoreBounds = true;
+    await expect(failing.manager.exit()).rejects.toThrow("synthetic restore failure");
+    expect(failing.window.ignoreMouseEvents).toBe(false);
+  });
+
+  it("leaves Linux mouse events enabled because Chromium cannot receive forwarded movement", async () => {
+    const f = fixture({ platform: "linux" });
+    await f.manager.enter();
+
+    await expect(f.manager.setPointerPassthrough(true)).resolves.toBeUndefined();
+    expect(f.window.ignoreMouseEvents).toBe(false);
+    expect(f.window.ignoreMouseCalls.some(([ignore]) => ignore)).toBe(false);
+
+    // Cleanup requests remain accepted on unsupported platforms and always clear native state.
+    f.window.ignoreMouseEvents = true;
+    await f.manager.setPointerPassthrough(false);
+    expect(f.window.ignoreMouseEvents).toBe(false);
+    expect(f.window.ignoreMouseCalls.at(-1)?.[0]).toBe(false);
+    await f.manager.exit();
   });
 });

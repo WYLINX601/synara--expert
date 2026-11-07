@@ -59,6 +59,10 @@ describe("Hub Graph runtime reducer", () => {
     state = reduceHubGraphEvent(state, { type: "interaction.response_received", blockId: "review", requiresRevision: true });
     expect(state.nodes.author).toBe("stale");
     state = reduceHubGraphEvent(state, { type: "node.retry", nodeId: "author" });
+    state = reduceHubGraphEvent(state, { type: "node.queued", nodeId: "author" });
+    state = reduceHubGraphEvent(state, { type: "node.started", nodeId: "author" });
+    state = reduceHubGraphEvent(state, { type: "node.settled", nodeId: "author" });
+    state = reduceHubGraphEvent(state, { type: "node.output_accepted", nodeId: "author" });
     state = reduceHubGraphEvent(state, { type: "interaction.requested", blockId: "review" });
     state = reduceHubGraphEvent(state, { type: "interaction.responder_dispatched", blockId: "review" });
     state = reduceHubGraphEvent(state, { type: "interaction.response_received", blockId: "review" });

@@ -221,6 +221,10 @@ export function reduceHubGraphEvent(
         if (current.status !== "waiting_initiator" || current.round >= current.maxRounds) {
           throw new HubGraphTransitionError("invalid_interaction_transition", "Interaction cannot accept another request.");
         }
+        const initiatorStatus = requireTarget(state.nodes, current.initiatorNodeId, "initiator node");
+        if (initiatorStatus !== "completed" && initiatorStatus !== "settled") {
+          throw new HubGraphTransitionError("invalid_interaction_transition", "The initiator must submit a current result before the next interaction round.");
+        }
         round += 1;
         status = "dispatching_responder";
       } else if (event.type === "interaction.responder_dispatched") {

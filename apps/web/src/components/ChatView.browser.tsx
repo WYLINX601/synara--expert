@@ -190,6 +190,7 @@ interface TestFixture {
   providerStatusesSnapshot: ServerConfig["providers"] | null;
   welcome: WsWelcomePayload;
   gitBranchByCwd: Record<string, string>;
+  nonGitCwds?: string[];
   projectAgentOverviews: Record<string, unknown>;
   experts: ExpertDefinition[];
   packageExpertPreview?: ExpertPreview;
@@ -1384,6 +1385,9 @@ function resolveWsRpc(body: WsRequestEnvelope["body"]): unknown {
   }
   if (tag === WS_METHODS.gitListBranches) {
     const cwd = typeof body.cwd === "string" ? body.cwd : null;
+    if (cwd && fixture.nonGitCwds?.includes(cwd)) {
+      return { isRepo: false, hasOriginRemote: false, branches: [] };
+    }
     const branchName = cwd ? (fixture.gitBranchByCwd[cwd] ?? "main") : "main";
     return {
       isRepo: true,
@@ -2426,6 +2430,7 @@ function installZenModeBridge(initial: Partial<ZenModeState> = {}) {
     exit: vi.fn(async () => update({ isActive: false, expanded: false })),
     setExpanded: vi.fn(async (expanded: boolean) => update({ expanded })),
     setCompactHeight: vi.fn(async (_height: number) => {}),
+    setPointerPassthrough: vi.fn(async (_ignore: boolean) => {}),
     onStateChanged: (listener: (value: ZenModeState) => void) => {
       listeners.add(listener);
       return () => {
@@ -2461,6 +2466,441 @@ function installZenModeBridge(initial: Partial<ZenModeState> = {}) {
 }
 
 describe("ChatView transcript geometry (full app)", () => {
+  it.each(["empty", "goal", "context"] as const)(
+    "Zen new-chat %s drawer keeps restore above the bottom-anchored editor",
+    async (content) => {
+      const bridge = installZenModeBridge();
+      const snapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-zen-empty" as MessageId,
+        targetText: "",
+      });
+      useComposerDraftStore.getState().setPrompt(THREAD_ID, "Keep this new-chat draft");
+      if (content === "context") {
+        useComposerDraftStore.getState().setAmbientContext(
+          THREAD_ID,
+          ambientResourceSnapshot({
+            sourceId: "obsidian",
+            targetKey: "zen-new-chat",
+            uri: "obsidian://open?file=Note.md",
+            title: "Note.md",
+          }),
+        );
+      }
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        configureFixture: (nextFixture) => {
+          nextFixture.nonGitCwds = ["/repo/project"];
+        },
+        snapshot: {
+          ...snapshot,
+          threads: [
+            {
+              ...snapshot.threads[0]!,
+              branch: null,
+              messages: [],
+              ...(content === "goal"
+                ? {
+                    goal: "Finish the new-chat outline",
+                    goalStartedAt: NOW_ISO,
+                    goalPausedAt: NOW_ISO,
+                  }
+                : {}),
+            },
+          ],
+        },
+      });
+      try {
+        const editor = await waitForComposerEditor();
+        bridge.toggleShortcut();
+        await mounted.setViewport({ name: "zen-new-chat", width: 720, height: 560 });
+        await vi.waitFor(() =>
+          expect(document.querySelector('[data-zen-chat="true"]')).not.toBeNull(),
+        );
+        await waitForLayout();
+        const shell = queryComposerShell();
+        const bottom = shell.getBoundingClientRect().bottom;
+        expect(bottom).toBeGreaterThan(530);
+        expect(document.querySelector('[data-testid="zen-drawer-return"]')).toBeNull();
+        expect(document.querySelector('[data-testid="chat-transcript-drawer"]')).toBeNull();
+        await page.getByTestId("zen-drawer-toggle").click();
+        await expect.element(page.getByTestId("zen-drawer-return")).toBeVisible();
+        await waitForLayout();
+        const drawer = document.querySelector<HTMLElement>('[data-zen-details="true"]')!;
+        const drawerBox = drawer.getBoundingClientRect();
+        const restore = page.getByTestId("zen-drawer-return").element();
+        const restoreBox = restore.getBoundingClientRect();
+        expect(drawer.contains(restore)).toBe(true);
+        expect(drawerBox.height).toBeGreaterThanOrEqual(40);
+        expect(restoreBox.top).toBeGreaterThanOrEqual(drawerBox.top);
+        expect(restoreBox.bottom).toBeLessThanOrEqual(drawerBox.bottom);
+        expect(restoreBox.bottom).toBeLessThan(shell.getBoundingClientRect().top);
+        expect(Math.abs(shell.getBoundingClientRect().bottom - bottom)).toBeLessThan(1);
+        const toggleBox = page.getByTestId("zen-drawer-toggle").element().getBoundingClientRect();
+        expect(
+          document
+            .elementFromPoint(toggleBox.x + toggleBox.width / 2, toggleBox.y + 2)
+            ?.closest('[data-testid="zen-drawer-toggle"]'),
+        ).not.toBeNull();
+        if (content === "goal")
+          await expect
+            .element(page.getByRole("button", { name: t("chat:resumeGoal"), exact: true }))
+            .toBeVisible();
+        if (content === "context") expect(drawer.textContent).toContain("Note.md");
+        await page.screenshot({
+          path: `../../../../.github/pr-evidence/zen-mode/edge-new-chat-${content}.png`,
+        });
+        await page.getByTestId("zen-drawer-toggle").click();
+        expect(Math.abs(shell.getBoundingClientRect().bottom - bottom)).toBeLessThan(1);
+        await page.getByTestId("zen-drawer-toggle").click();
+        await page.getByTestId("zen-drawer-return").click();
+        await vi.waitFor(() => expect(document.documentElement.dataset.zenSurface).toBeUndefined());
+        expect(await waitForComposerEditor()).toBe(editor);
+        expect(editor.textContent).toBe("Keep this new-chat draft");
+      } finally {
+        await mounted.cleanup();
+      }
+    },
+  );
+  it("Zen idle is a transparent pill with a stable bottom, inline Goal actions, and a hover drag grip", async () => {
+    const bridge = installZenModeBridge();
+    const snapshot = createSnapshotWithLongAssistantResponse();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: {
+        ...snapshot,
+        threads: [
+          {
+            ...snapshot.threads[0]!,
+            goal: "Finish the research outline",
+            goalStartedAt: NOW_ISO,
+            goalPausedAt: NOW_ISO,
+          },
+        ],
+      },
+    });
+    try {
+      const editor = await waitForComposerEditor();
+      await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
+      await mounted.setViewport({ name: "zen-idle", width: 720, height: 560 });
+      await waitForLayout();
+      expect(document.documentElement.dataset.zenSurface).toBe("true");
+      for (const element of [
+        document.documentElement,
+        document.body,
+        document.querySelector("#root"),
+        document.querySelector('[data-zen-mode="true"]'),
+        document.querySelector('[data-zen-chat="true"]'),
+      ]) {
+        if (element) expect(getComputedStyle(element).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+      }
+      expect(document.querySelector('[data-testid="zen-status-strip"]')).toBeNull();
+      await expect
+        .element(page.getByRole("button", { name: t("chat:composer_sendMessage"), exact: true }))
+        .not.toBeInTheDocument();
+      await expect.element(page.getByTestId("composer-goal-detail")).not.toBeVisible();
+      expect(document.querySelector("[data-zen-toolbar-frame]")).toBeNull();
+      const shell = queryComposerShell();
+      const bottom = shell.getBoundingClientRect().bottom;
+      const toggle = page.getByTestId("zen-drawer-toggle");
+      const toggleElement = toggle.element() as HTMLButtonElement;
+      const toggleMark = toggleElement.firstElementChild!;
+      expect(shell.contains(toggleElement)).toBe(true);
+      expect(document.querySelector("[data-chat-composer-surface]")?.contains(toggleElement)).toBe(
+        false,
+      );
+      expect(document.querySelector('[data-testid="zen-drawer-return"]')).toBeNull();
+      expect(getComputedStyle(toggleMark).opacity).toBe("0");
+      const heightCalls = bridge.setCompactHeight.mock.calls.length;
+      await toggle.hover();
+      await vi.waitFor(() => expect(getComputedStyle(toggleMark).opacity).toBe("1"));
+      await userEvent.keyboard("{Tab}");
+      toggleElement.focus();
+      await vi.waitFor(() => expect(toggleElement.matches(":focus-visible")).toBe(true));
+      await page.getByTestId("composer-editor").hover();
+      expect(getComputedStyle(toggleMark).opacity).toBe("1");
+      expect(shell.getBoundingClientRect().bottom).toBe(bottom);
+      expect(bridge.setCompactHeight).toHaveBeenCalledTimes(heightCalls);
+      editor.focus();
+      await vi.waitFor(() => expect(getComputedStyle(toggleMark).opacity).toBe("0"));
+      const grip = document.querySelector<HTMLElement>('[data-testid="zen-drag-grip"]')!;
+      expect(getComputedStyle(grip).getPropertyValue("-webkit-app-region")).toBe("drag");
+      expect(grip.getBoundingClientRect().width).toBe(80);
+      expect(getComputedStyle(grip.firstElementChild!).opacity).toBe("0");
+      await page.getByTestId("zen-drag-grip").hover();
+      await vi.waitFor(() =>
+        expect(Number(getComputedStyle(grip.firstElementChild!).opacity)).toBeGreaterThan(0.5),
+      );
+      await mounted.setViewport({
+        name: "zen-idle-native",
+        width: 720,
+        height: bridge.setCompactHeight.mock.calls.at(-1)?.[0] ?? 96,
+      });
+      await waitForLayout();
+      await page.screenshot({ path: "../../../../.github/pr-evidence/zen-mode/edge-idle.png" });
+      await toggle.hover();
+      await vi.waitFor(() => expect(getComputedStyle(toggleMark).opacity).toBe("1"));
+      await page.screenshot({
+        path: "../../../../.github/pr-evidence/zen-mode/edge-idle-hover.png",
+      });
+      await mounted.setViewport({ name: "zen-idle", width: 720, height: 560 });
+      await waitForLayout();
+      await page.getByRole("button", { name: t("chat:zenExpand"), exact: true }).click();
+      await expect
+        .element(page.getByRole("button", { name: t("chat:resumeGoal"), exact: true }))
+        .toBeVisible();
+      const returnButton = page.getByTestId("zen-drawer-return").element();
+      const returnBox = returnButton.getBoundingClientRect();
+      const drawerBox = document
+        .querySelector('[data-testid="chat-transcript-drawer"]')!
+        .getBoundingClientRect();
+      expect(returnButton.closest("[data-chat-composer-form]")).toBeNull();
+      expect(returnBox.top - drawerBox.top).toBeGreaterThanOrEqual(0);
+      expect(returnBox.top - drawerBox.top).toBeLessThan(8);
+      expect(drawerBox.right - returnBox.right).toBeGreaterThanOrEqual(0);
+      expect(drawerBox.right - returnBox.right).toBeLessThan(8);
+      await page.screenshot({
+        path: "../../../../.github/pr-evidence/zen-mode/edge-drawer-controls.png",
+      });
+      expect(Math.abs(shell.getBoundingClientRect().bottom - bottom)).toBeLessThan(1);
+      await page.getByRole("button", { name: t("chat:resumeGoal"), exact: true }).click();
+      await vi.waitFor(() =>
+        expect(
+          wsRequests.some(
+            (request) =>
+              (request.command as { type?: string; goalPaused?: boolean })?.type ===
+                "thread.meta.update" &&
+              (request.command as { goalPaused?: boolean }).goalPaused === false,
+          ),
+        ).toBe(true),
+      );
+      await page.getByRole("button", { name: t("chat:zenCollapse"), exact: true }).click();
+      expect(document.querySelector('[data-testid="zen-drawer-return"]')).toBeNull();
+      expect(Math.abs(shell.getBoundingClientRect().bottom - bottom)).toBeLessThan(1);
+      const move = async (x: number, y: number, ignore: boolean) => {
+        window.dispatchEvent(
+          new MouseEvent("mousemove", { clientX: x, clientY: y, bubbles: true }),
+        );
+        await vi.waitFor(() =>
+          expect(bridge.setPointerPassthrough).toHaveBeenLastCalledWith(ignore),
+        );
+      };
+      await move(2, 2, true);
+      const box = shell.getBoundingClientRect();
+      await move(box.x + box.width / 2, box.y + box.height / 2, false);
+      await move(2, box.y + 5, true);
+      // The real portaled model menu receives clicks; its full-screen wrappers do not.
+      await page
+        .getByRole("button", { name: t("chat:modelEffort_changeModelAndReasoning"), exact: true })
+        .click();
+      const popup = await vi.waitFor(() => {
+        const result = document.querySelector<HTMLElement>('[data-slot="menu-popup"][data-open]');
+        expect(result).not.toBeNull();
+        return result!;
+      });
+      const popupBox = popup.getBoundingClientRect();
+      await move(popupBox.x + 12, popupBox.y + 12, false);
+      await move(2, 2, true);
+      await move(popupBox.x + 12, popupBox.y + 12, false);
+      await userEvent.keyboard("{Escape}");
+      // Closing a popup must resample the last pointer position without another move.
+      await vi.waitFor(() => expect(bridge.setPointerPassthrough).toHaveBeenLastCalledWith(true));
+      bridge.toggleShortcut();
+      await vi.waitFor(() => expect(bridge.setPointerPassthrough).toHaveBeenLastCalledWith(false));
+      expect(document.documentElement.dataset.zenSurface).toBeUndefined();
+      expect(await waitForComposerEditor()).toBe(editor);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("Zen opens a pending question once and keeps its answer options actionable", async () => {
+    const bridge = installZenModeBridge();
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: MessageId.makeUnsafe("zen-question-message"),
+      targetText: "Choose a direction",
+    });
+    const thread = snapshot.threads[0]!;
+    const requestId = ApprovalRequestId.makeUnsafe("zen-question");
+    const questions = [
+      {
+        id: "direction",
+        header: "Direction",
+        question: "Which direction should we take?",
+        options: [
+          { label: "Research", description: "Continue the research" },
+          { label: "Draft", description: "Start the draft" },
+        ],
+      },
+    ];
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: {
+        ...snapshot,
+        threads: [
+          {
+            ...thread,
+            activities: [
+              {
+                id: EventId.makeUnsafe("zen-question-event"),
+                createdAt: NOW_ISO,
+                kind: "user-input.requested",
+                summary: "Choose a direction",
+                tone: "info",
+                turnId: null,
+                sequence: 1,
+                payload: { requestId, questions },
+              },
+            ],
+            pendingInteractions: [
+              {
+                interactionKind: "userInput",
+                requestId,
+                threadId: thread.id,
+                turnId: null,
+                lifecycleGeneration: null,
+                status: "pending",
+                decision: null,
+                responseCommandId: null,
+                responseRequestedAt: null,
+                createdAt: NOW_ISO,
+                resolvedAt: null,
+              },
+            ],
+          },
+        ],
+      },
+    });
+    try {
+      const editor = await waitForComposerEditor();
+      await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
+      await mounted.setViewport({ name: "zen-question", width: 720, height: 560 });
+      await expect.element(page.getByRole("button", { name: /Research.*Continue/ })).toBeVisible();
+      expect(bridge.setExpanded).toHaveBeenCalledTimes(1);
+      await expect.element(page.getByTestId("zen-drawer-return")).toBeVisible();
+      await page.getByRole("button", { name: t("chat:zenCollapse"), exact: true }).click();
+      await waitForLayout();
+      expect(bridge.setExpanded).toHaveBeenCalledTimes(2);
+      await expect
+        .element(page.getByTestId("zen-status-strip"))
+        .toHaveTextContent(questions[0]!.question);
+      await page.getByTestId("zen-status-strip").click();
+      await page.getByRole("button", { name: /Research.*Continue/ }).click();
+      await page.screenshot({
+        path: "../../../../.github/pr-evidence/zen-mode/edge-question.png",
+      });
+      await page.getByRole("button", { name: "Submit answers", exact: true }).click();
+      await vi.waitFor(() =>
+        expect(
+          wsRequests.some(
+            (request) =>
+              (request.command as { type?: string })?.type === "thread.user-input.respond",
+          ),
+        ).toBe(true),
+      );
+      expect(await waitForComposerEditor()).toBe(editor);
+      await page.getByRole("button", { name: t("chat:zenReturn"), exact: true }).click();
+      await vi.waitFor(() => expect(bridge.exit).toHaveBeenCalledOnce());
+      expect(await waitForComposerEditor()).toBe(editor);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("Zen surfaces a settled Plan for confirmation without reopening after collapse", async () => {
+    const bridge = installZenModeBridge();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithSettledPlanAwaitingFollowUp(),
+    });
+    try {
+      await waitForComposerEditor();
+      useComposerDraftStore.getState().setInteractionMode(THREAD_ID, "plan");
+      await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
+      await mounted.setViewport({ name: "zen-plan", width: 720, height: 560 });
+      await expect
+        .element(page.getByTestId("zen-status-strip"))
+        .toHaveTextContent(t("chat:planReady"));
+      await expect
+        .element(page.getByRole("button", { name: t("chat:composer_implement"), exact: true }))
+        .toBeVisible();
+      expect(bridge.setExpanded).toHaveBeenCalledWith(true);
+      await page.getByRole("button", { name: t("chat:zenCollapse"), exact: true }).click();
+      const calls = bridge.setExpanded.mock.calls.length;
+      await waitForLayout();
+      expect(bridge.setExpanded).toHaveBeenCalledTimes(calls);
+      await page.getByTestId("zen-status-strip").click();
+      await expect
+        .element(page.getByRole("button", { name: t("chat:composer_implement"), exact: true }))
+        .toBeEnabled();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it.each(["pending", "failed", "uncertain"] as const)(
+    "Zen exposes held Claude cache review choices (%s)",
+    async (status) => {
+      const bridge = installZenModeBridge();
+      const snapshot = createSnapshotWithLongAssistantResponse();
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: {
+          ...snapshot,
+          threads: [
+            {
+              ...snapshot.threads[0]!,
+              claudeCacheReview: {
+                reviewId: "zen-cache-review",
+                messageId: MessageId.makeUnsafe("zen-held-message"),
+                sourceEventSequence: 1,
+                assessment: {
+                  observedAt: NOW_ISO,
+                  state: "likely-expired",
+                  source: "session-start",
+                  contextTokens: 887036,
+                },
+                status,
+                createdAt: NOW_ISO,
+              },
+            },
+          ],
+        },
+      });
+      try {
+        await waitForComposerEditor();
+        await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
+        await mounted.setViewport({ name: "zen-cache", width: 720, height: 560 });
+        await expect
+          .element(page.getByRole("region", { name: t("chat:claudeCacheReview") }))
+          .toBeVisible();
+        await expect
+          .element(page.getByTestId("zen-status-strip"))
+          .toHaveTextContent(t("chat:chooseHowToResumeTheHeldMessageAbove"));
+        expect(bridge.setExpanded).toHaveBeenCalledWith(true);
+        await page.getByRole("button", { name: t("chat:zenCollapse"), exact: true }).click();
+        const calls = bridge.setExpanded.mock.calls.length;
+        await waitForLayout();
+        expect(bridge.setExpanded).toHaveBeenCalledTimes(calls);
+        await page.getByTestId("zen-status-strip").click();
+        const cancel = page.getByRole("button", { name: new RegExp(t("chat:cancelThisSend")) });
+        await expect.element(cancel).toBeVisible();
+        if (status !== "uncertain") {
+          await cancel.click();
+          await vi.waitFor(() =>
+            expect(
+              wsRequests.some(
+                (request) =>
+                  (request.command as { type?: string })?.type === "thread.claude-cache.respond",
+              ),
+            ).toBe(true),
+          );
+        } else await expect.element(cancel).toBeDisabled();
+      } finally {
+        await mounted.cleanup();
+      }
+    },
+  );
+
   it("Zen preview keeps the shared editor with compact inline permissions and model controls", async () => {
     installZenModeBridge();
     setLanguagePreference("zh-CN");
@@ -2578,6 +3018,12 @@ describe("ChatView transcript geometry (full app)", () => {
       await waitForLayout();
       const originalWidth = queryComposerShell().getBoundingClientRect().width;
       const originalAppearance = appearance();
+      const surfaceContainsToolbar = () =>
+        Boolean(
+          document
+            .querySelector("[data-chat-composer-surface]")
+            ?.contains(document.querySelector('[data-testid="zen-drawer-toggle"]')),
+        );
 
       await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
       await mounted.setViewport({ name: "zen-comparison", width: 720, height: 240 });
@@ -2593,12 +3039,8 @@ describe("ChatView transcript geometry (full app)", () => {
       expect(
         Math.abs(queryComposerShell().getBoundingClientRect().width - originalWidth),
       ).toBeLessThan(1);
-      expect(appearance()).toEqual(originalAppearance);
-      await expect
-        .element(
-          page.getByRole("button", { name: t("chat:ambientViewContext", { label: "Paper" }) }),
-        )
-        .toBeVisible();
+      expect(surfaceContainsToolbar()).toBe(false);
+      expect(document.getElementById("zen-details")?.hidden).toBe(true);
       const modelLabel = t("chat:modelEffort_changeModelAndReasoning");
       const permissionLabel = t("settings:runtimeFullLabel");
       const modelButton = page.getByRole("button", { name: modelLabel, exact: true });
@@ -2631,11 +3073,8 @@ describe("ChatView transcript geometry (full app)", () => {
       // Fit the preview window to the actual compact stack, not a cropped screenshot.
       // Native sizing remains outside this fixture.
       const stackHeight = () => {
-        const toolbar = document.querySelector('[data-testid="zen-mode-toolbar"]')!;
         const footer = document.querySelector('[data-chat-composer-form="true"]')!;
-        return Math.ceil(
-          footer.getBoundingClientRect().bottom - toolbar.getBoundingClientRect().top + 16,
-        );
+        return Math.max(96, Math.ceil(footer.getBoundingClientRect().height + 32));
       };
       await mounted.setViewport({
         name: "zen-compact",
@@ -2644,14 +3083,22 @@ describe("ChatView transcript geometry (full app)", () => {
       });
       await waitForLayout();
       const compactToolbar = document
-        .querySelector('[data-testid="zen-mode-toolbar"]')!
+        .querySelector('[data-testid="zen-drawer-toggle"]')!
         .getBoundingClientRect();
       const compactForm = document
         .querySelector('[data-chat-composer-form="true"]')!
         .getBoundingClientRect();
-      expect(Math.abs(compactForm.top - compactToolbar.bottom)).toBeLessThanOrEqual(1);
+      expect(compactToolbar.top).toBeGreaterThanOrEqual(0);
+      expect(compactToolbar.top).toBeLessThan(compactForm.top);
+      expect(
+        Math.abs(
+          compactToolbar.left +
+            compactToolbar.width / 2 -
+            (compactForm.left + compactForm.width / 2),
+        ),
+      ).toBeLessThan(1);
       await page.screenshot({
-        path: "../../../../output/playwright/zen-inline-controls-compact.png",
+        path: "../../../../.github/pr-evidence/zen-mode/edge-compact.png",
       });
       await mounted.setViewport({ name: "zen-narrow", width: 520, height: 240 });
       await mounted.setViewport({ name: "zen-narrow", width: 520, height: stackHeight() });
@@ -2660,7 +3107,7 @@ describe("ChatView transcript geometry (full app)", () => {
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(520);
       expect(editor.getBoundingClientRect().width).toBeGreaterThanOrEqual(160);
       await page.screenshot({
-        path: "../../../../output/playwright/zen-inline-controls-narrow.png",
+        path: "../../../../.github/pr-evidence/zen-mode/edge-narrow.png",
       });
       useComposerDraftStore
         .getState()
@@ -2688,7 +3135,7 @@ describe("ChatView transcript geometry (full app)", () => {
       await waitForLayout();
       expect(await waitForComposerEditor()).toBe(editor);
       await page.screenshot({
-        path: "../../../../output/playwright/zen-inline-controls-empty.png",
+        path: "../../../../.github/pr-evidence/zen-mode/edge-empty.png",
       });
       useComposerDraftStore
         .getState()
@@ -2699,23 +3146,23 @@ describe("ChatView transcript geometry (full app)", () => {
       await mounted.setViewport({ name: "zen-expanded", width: matchedViewportWidth, height: 560 });
       await waitForLayout();
       expect(await waitForComposerEditor()).toBe(editor);
-      expect(appearance()).toEqual(originalAppearance);
+      expect(surfaceContainsToolbar()).toBe(false);
       const expandedToolbar = document
-        .querySelector('[data-testid="zen-mode-toolbar"]')!
+        .querySelector('[data-testid="zen-drawer-toggle"]')!
         .getBoundingClientRect();
       const drawer = document
         .querySelector('[data-testid="chat-transcript-drawer"]')!
         .getBoundingClientRect();
-      expect(Math.abs(drawer.left - expandedToolbar.left)).toBeLessThan(1);
-      expect(Math.abs(drawer.width - expandedToolbar.width)).toBeLessThan(1);
-      expect(Math.abs(drawer.top - expandedToolbar.bottom)).toBeLessThanOrEqual(1);
+      expect(drawer.bottom).toBeLessThanOrEqual(expandedToolbar.top);
+      expect(drawer.width).toBeGreaterThan(expandedToolbar.width);
       await page.screenshot({
-        path: "../../../../output/playwright/zen-inline-controls-expanded.png",
+        path: "../../../../.github/pr-evidence/zen-mode/edge-expanded.png",
       });
       await page.getByRole("button", { name: t("chat:zenReturn"), exact: true }).click();
       await mounted.setViewport({ name: "main-return", width: 720, height: 560 });
       await waitForLayout();
       expect(await waitForComposerEditor()).toBe(editor);
+      expect(appearance()).toEqual(originalAppearance);
       const restoredRow = document.querySelector("[data-chat-composer-status-row]")!;
       expect(restoredRow.querySelector(`button[aria-label="${modelLabel}"]`)).not.toBeNull();
       expect(restoredRow.textContent).toContain(permissionLabel);
@@ -2751,6 +3198,11 @@ describe("ChatView transcript geometry (full app)", () => {
         .setPrompt(THREAD_ID, "First line\nSecond line\nThird line\nFourth line");
       await vi.waitFor(() => expect(height()).toBeGreaterThan(emptyHeight));
       expect(height()).toBeLessThanOrEqual(600);
+      await mounted.setViewport({ name: "zen-multiline-native", width: 720, height: height() });
+      await waitForLayout();
+      const toggleBox = page.getByTestId("zen-drawer-toggle").element().getBoundingClientRect();
+      expect(toggleBox.top).toBeGreaterThanOrEqual(0);
+      expect(toggleBox.bottom).toBeLessThan(window.innerHeight);
       useComposerDraftStore.getState().setPrompt(THREAD_ID, "");
       await vi.waitFor(() => expect(height()).toBe(emptyHeight));
       await page.getByRole("button", { name: t("chat:zenExpand"), exact: true }).click();
@@ -2769,7 +3221,8 @@ describe("ChatView transcript geometry (full app)", () => {
       expect(height()).toBeGreaterThan(emptyHeight);
       expect(height()).toBeLessThan(560);
       expect(await waitForComposerEditor()).toBe(editor);
-      await page.getByRole("button", { name: t("chat:zenReturn"), exact: true }).click();
+      bridge.toggleShortcut();
+      await vi.waitFor(() => expect(bridge.exit).toHaveBeenCalledOnce());
       const exitedCalls = bridge.setCompactHeight.mock.calls.length;
       useComposerDraftStore.getState().setPrompt(THREAD_ID, "Normal draft");
       await waitForLayout();
@@ -2936,6 +3389,10 @@ describe("ChatView transcript geometry (full app)", () => {
         )
         .toBeVisible();
       expect(await waitForComposerEditor()).toBe(editor);
+      await expect.element(page.getByTestId("zen-status-strip")).toBeVisible();
+      await page.screenshot({
+        path: "../../../../.github/pr-evidence/zen-mode/edge-running.png",
+      });
       await page
         .getByRole("button", { name: t("chat:stopGeneration_ariaLabel"), exact: true })
         .click();
@@ -2976,7 +3433,7 @@ describe("ChatView transcript geometry (full app)", () => {
         .bind(THREAD_ID, { id: "zen-vault", sourceId: "obsidian", label: "Zen vault" });
       await page.getByRole("button", { name: t("chat:zenMode"), exact: true }).click();
       await mounted.setViewport({ name: "zen", width: 720, height: 360 });
-      await expect.element(page.getByTestId("zen-mode-toolbar")).toBeVisible();
+      await expect.element(page.getByTestId("zen-drawer-toggle")).toBeVisible();
       expect(await waitForComposerEditor()).toBe(editor);
       expect(
         getComputedStyle(document.querySelector('[data-testid="chat-transcript-drawer"]')!).display,
@@ -2994,7 +3451,7 @@ describe("ChatView transcript geometry (full app)", () => {
       expect((await bridge.getState()).alwaysOnTop).toBe(true);
       await page.getByRole("button", { name: t("chat:zenReturn"), exact: true }).click();
       await mounted.setViewport(DEFAULT_VIEWPORT);
-      await expect.element(page.getByTestId("zen-mode-toolbar")).not.toBeInTheDocument();
+      await expect.element(page.getByTestId("zen-drawer-toggle")).not.toBeInTheDocument();
       expect(await waitForComposerEditor()).toBe(editor);
       expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
         "Keep this Zen draft",
@@ -3078,19 +3535,16 @@ describe("ChatView transcript geometry (full app)", () => {
           const form = document
             .querySelector('[data-chat-composer-form="true"]')!
             .getBoundingClientRect();
-          const toolbar = document
-            .querySelector("[data-zen-toolbar-frame]")!
-            .getBoundingClientRect();
-          expect(bridge.setCompactHeight.mock.calls.at(-1)?.[0]).toBe(
-            Math.min(600, Math.max(96, Math.ceil(form.height + toolbar.height))),
-          );
+          expect(form.bottom).toBeLessThanOrEqual(window.innerHeight - 19);
+          expect(bridge.setExpanded).toHaveBeenCalledWith(true);
         });
         if (oversized) {
-          expect(bridge.setCompactHeight.mock.calls.at(-1)?.[0]).toBe(600);
-          const scroll = document.querySelector<HTMLElement>("[data-zen-main]")!;
+          const scroll = document.querySelector<HTMLElement>("[data-zen-details]")!;
           expect(scroll.scrollHeight).toBeGreaterThan(scroll.clientHeight);
         } else {
-          await page.screenshot({ path: "../../../../output/playwright/zen-approval-360.png" });
+          await page.screenshot({
+            path: "../../../../.github/pr-evidence/zen-mode/edge-pending.png",
+          });
         }
         await page.getByRole("button", { name: /Approve once/u }).click();
         await vi.waitFor(() =>

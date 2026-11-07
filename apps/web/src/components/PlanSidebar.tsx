@@ -37,6 +37,7 @@ function stepStatusIcon(status: string): React.ReactNode {
 }
 
 interface PlanSidebarProps {
+  inline?: boolean;
   activeTaskList: ActiveTaskListState | null;
   activeProposedPlan: LatestProposedPlanState | null;
   markdownCwd: string | undefined;
@@ -46,6 +47,7 @@ interface PlanSidebarProps {
 }
 
 const PlanSidebar = function PlanSidebar({
+  inline = false,
   activeTaskList,
   activeProposedPlan,
   markdownCwd,
@@ -61,7 +63,12 @@ const PlanSidebar = function PlanSidebar({
   const planTitle = planMarkdown ? proposedPlanTitle(planMarkdown) : null;
 
   return (
-    <div className="flex h-full w-[340px] shrink-0 flex-col border-l border-border/70 bg-card/50">
+    <div
+      className={cn(
+        "flex shrink-0 flex-col",
+        inline ? "h-64 w-full" : "h-full w-[340px] border-l border-border/70 bg-card/50",
+      )}
+    >
       {/* Header */}
       <DockPaneHeader
         title={

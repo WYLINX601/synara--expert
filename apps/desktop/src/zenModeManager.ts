@@ -24,6 +24,8 @@ export interface ZenModeWindow {
   isFullScreen(): boolean;
   isResizable(): boolean;
   isAlwaysOnTop(): boolean;
+  isVisibleOnAllWorkspaces(): boolean;
+  hasShadow(): boolean;
   getMinimumSize(): number[];
   getMaximumSize(): number[];
   setBounds(bounds: DesktopWindowBounds): void;
@@ -31,6 +33,9 @@ export interface ZenModeWindow {
   setMaximumSize(width: number, height: number): void;
   setResizable(resizable: boolean): void;
   setAlwaysOnTop(alwaysOnTop: boolean): void;
+  setVisibleOnAllWorkspaces(visible: boolean, options?: { visibleOnFullScreen?: boolean }): void;
+  setHasShadow(hasShadow: boolean): void;
+  setIgnoreMouseEvents(ignore: boolean, options?: { forward?: boolean }): void;
   maximize(): void;
   unmaximize(): void;
   minimize(): void;
@@ -45,17 +50,28 @@ export interface ZenModeSnapshot {
   isFullScreen: boolean;
   isResizable: boolean;
   isAlwaysOnTop: boolean;
+  isVisibleOnAllWorkspaces: boolean;
+  visibleOnFullScreen: boolean;
+  hasShadow: boolean;
   minimumSize: WindowSize;
   maximumSize: WindowSize;
 }
 
 export interface ZenModeManagerOptions {
+  platform: NodeJS.Platform;
   getWindow: () => ZenModeWindow | null;
   getDisplayWorkAreas: () => ReadonlyArray<DesktopWindowBounds>;
   onStateChanged: (state: ZenModeState) => void;
   onToggleRequested: () => void;
   setBrowserViewsZenMode: (window: ZenModeWindow, active: boolean) => void;
   setTrafficLightsVisible: (window: ZenModeWindow, visible: boolean) => void;
+  getVisibleOnFullScreen: (window: ZenModeWindow) => boolean;
+  setVisibleOnAllWorkspaces: (
+    window: ZenModeWindow,
+    visible: boolean,
+    visibleOnFullScreen: boolean,
+  ) => void;
+  setZenWindowMaterial: (window: ZenModeWindow, active: boolean) => void;
   shortcutRegistry?: {
     register: (shortcut: string, callback: () => void) => boolean;
     unregister: (shortcut: string) => void;
@@ -129,7 +145,10 @@ function centerResize(
   };
 }
 
-function captureWindowState(window: ZenModeWindow): ZenModeSnapshot {
+function captureWindowState(
+  window: ZenModeWindow,
+  getVisibleOnFullScreen: (window: ZenModeWindow) => boolean,
+): ZenModeSnapshot {
   return {
     bounds: window.getNormalBounds(),
     isMaximized: window.isMaximized(),
@@ -137,6 +156,9 @@ function captureWindowState(window: ZenModeWindow): ZenModeSnapshot {
     isFullScreen: window.isFullScreen(),
     isResizable: window.isResizable(),
     isAlwaysOnTop: window.isAlwaysOnTop(),
+    isVisibleOnAllWorkspaces: window.isVisibleOnAllWorkspaces(),
+    visibleOnFullScreen: getVisibleOnFullScreen(window),
+    hasShadow: window.hasShadow(),
     minimumSize: sizeFromNative(window.getMinimumSize()),
     maximumSize: sizeFromNative(window.getMaximumSize()),
   };
@@ -197,7 +219,7 @@ export class ZenModeManager {
       this.#assertNotDisposed();
       if (this.#snapshot) return;
       const window = this.#requireLiveWindow();
-      const snapshot = captureWindowState(window);
+      const snapshot = captureWindowState(window, this.#options.getVisibleOnFullScreen);
       const generation = this.#windowGeneration;
       // Close-time persistence reads this before the first native transition begins.
       this.#snapshot = snapshot;
@@ -212,6 +234,10 @@ export class ZenModeManager {
         this.#assertCurrentWindow(window, generation);
 
         this.#setTrafficLightsVisible(window, false);
+        this.#setPointerPassthrough(window, false);
+        this.#setZenWindowMaterial(window, true);
+        this.#options.setVisibleOnAllWorkspaces(window, true, true);
+        window.setHasShadow(false);
         const frame = frameSize(window);
         const initialBounds = centerResize(
           snapshot.bounds,
@@ -279,6 +305,27 @@ export class ZenModeManager {
     });
   }
 
+  /** Ignore native mouse input only while Zen is active; keep movement events flowing to Chromium. */
+  setPointerPassthrough(ignore: boolean): Promise<void> {
+    if (typeof ignore !== "boolean") {
+      return Promise.reject(new Error("Invalid Zen mode pointer passthrough state."));
+    }
+    if (this.#disposed) return Promise.reject(new Error("Zen mode manager is disposed."));
+    return this.#enqueue(() => {
+      this.#assertNotDisposed();
+      const window = this.#liveWindow();
+      if (!window) return;
+      if (ignore && (!this.#snapshot || this.#rendererReloadResetPending)) {
+        throw new Error("Pointer passthrough is only available while Zen mode is active.");
+      }
+      // Only macOS currently combines a transparent Zen window with forwarded mousemove
+      // events. Windows is intentionally opaque; Linux cannot forward the events needed to
+      // leave a click-through region, so enabling ignore there could trap the user.
+      if (ignore && this.#options.platform !== "darwin") return;
+      this.#setPointerPassthrough(window, ignore);
+    });
+  }
+
   /** Return saved normal geometry while Zen is active, including in-flight entry. */
   getWindowStateForPersistence(): Pick<ZenModeSnapshot, "bounds" | "isMaximized"> | null {
     if (!this.#snapshot) return null;
@@ -303,6 +350,8 @@ export class ZenModeManager {
 
   /** Clear mode state after the native window has actually gone away. */
   windowClosed(): void {
+    const window = this.#liveWindow();
+    if (window) this.#setPointerPassthrough(window, false);
     this.#windowGeneration += 1;
     this.#snapshot = null;
     this.#expanded = false;
@@ -433,12 +482,16 @@ export class ZenModeManager {
   async #rollbackEnter(window: ZenModeWindow, snapshot: ZenModeSnapshot): Promise<void> {
     let restored = false;
     try {
+      this.#setPointerPassthrough(window, false);
       if (this.#liveWindow() === window) {
         await this.#restoreWindow(window, snapshot);
         restored = true;
       }
     } catch {
       // Retain the recovery snapshot; a later exit or close still needs normal bounds.
+    } finally {
+      this.#setPointerPassthrough(window, false);
+      this.#setZenWindowMaterial(window, false);
     }
     if (restored) {
       if (this.#snapshot === snapshot) this.#snapshot = null;
@@ -466,7 +519,13 @@ export class ZenModeManager {
       return;
     }
 
-    await this.#restoreWindow(window, snapshot);
+    try {
+      this.#setPointerPassthrough(window, false);
+      await this.#restoreWindow(window, snapshot);
+    } finally {
+      this.#setPointerPassthrough(window, false);
+      this.#setZenWindowMaterial(window, false);
+    }
     this.#snapshot = null;
     this.#expanded = false;
     this.#compactHeight = ZEN_MODE_INITIAL_COMPACT_HEIGHT;
@@ -499,6 +558,12 @@ export class ZenModeManager {
     const normalBounds = this.#visibleBounds(snapshot.bounds, [minWidth, minHeight]);
     window.setBounds(normalBounds);
     window.setAlwaysOnTop(snapshot.isAlwaysOnTop);
+    this.#options.setVisibleOnAllWorkspaces(
+      window,
+      snapshot.isVisibleOnAllWorkspaces,
+      snapshot.visibleOnFullScreen,
+    );
+    window.setHasShadow(snapshot.hasShadow);
     this.#setTrafficLightsVisible(window, true);
 
     if (snapshot.isMaximized) window.maximize();
@@ -519,6 +584,36 @@ export class ZenModeManager {
       this.#options.setTrafficLightsVisible(window, visible);
     } catch {
       // Window teardown can race the renderer or application quit path.
+    }
+  }
+
+  #setPointerPassthrough(window: ZenModeWindow, ignore: boolean): void {
+    try {
+      window.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
+    } catch (error) {
+      if (ignore) {
+        try {
+          window.setIgnoreMouseEvents(false);
+        } catch {
+          // Preserve the original failure; a later state transition retries the reset.
+        }
+      }
+      throw error;
+    }
+  }
+
+  #setZenWindowMaterial(window: ZenModeWindow, active: boolean): void {
+    try {
+      this.#options.setZenWindowMaterial(window, active);
+    } catch {
+      if (active) {
+        try {
+          this.#options.setZenWindowMaterial(window, false);
+        } catch {
+          // Keep the outer failure; renderer reload or exit can retry material restoration.
+        }
+      }
+      throw new Error("Failed to apply the native Zen window material state.");
     }
   }
 

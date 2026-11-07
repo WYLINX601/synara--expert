@@ -19,6 +19,7 @@ export const DESKTOP_IPC_CHANNELS = {
     exit: "desktop:zen-mode-exit",
     setExpanded: "desktop:zen-mode-set-expanded",
     setCompactHeight: "desktop:zen-mode-set-compact-height",
+    setPointerPassthrough: "desktop:zen-mode-set-pointer-passthrough",
     stateChanged: "desktop:zen-mode-state-changed",
     toggleRequested: "desktop:zen-mode-toggle-requested",
   },

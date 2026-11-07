@@ -72,6 +72,11 @@ const HOT_PATH_MODULES: readonly HotPathModule[] = [
     allowedBailoutReasons: [],
   },
   {
+    relativePath: "chat/ZenModeToolbar.tsx",
+    requiredFunction: "ZenModeToolbar",
+    allowedBailoutReasons: [],
+  },
+  {
     relativePath: "chat/ChatComposerFooter.tsx",
     requiredFunction: "ChatComposerFooter",
     allowedBailoutReasons: [],

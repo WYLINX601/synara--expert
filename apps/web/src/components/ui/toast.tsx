@@ -668,6 +668,7 @@ function Toasts({ position: positionProp }: { position: ToastPosition }) {
 
           return (
             <Toast.Root
+              data-zen-toast-surface=""
               className={cn(
                 "absolute z-[calc(9999-var(--toast-index))] h-(--toast-calc-height) select-none [transition:transform_.5s_cubic-bezier(.22,1,.36,1),opacity_.5s,height_.15s]",
                 archiveUndoToast

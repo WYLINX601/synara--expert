@@ -43,6 +43,7 @@ export function ExpandedImageOverlay({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 px-4 py-6 [-webkit-app-region:no-drag]"
+      data-expanded-image-overlay=""
       role="dialog"
       aria-modal="true"
       aria-label={t("chat:imagePreview_expandedPreview")}
@@ -57,6 +58,7 @@ export function ExpandedImageOverlay({
         <Button
           type="button"
           size="icon"
+          data-zen-hit-surface=""
           variant="ghost"
           className="absolute left-2 top-1/2 z-20 -translate-y-1/2 text-white/90 hover:bg-white/10 hover:text-white sm:left-6"
           aria-label={t("chat:imagePreview_previousImage")}
@@ -65,7 +67,7 @@ export function ExpandedImageOverlay({
           <ChevronLeftIcon className="size-5" />
         </Button>
       ) : null}
-      <div className="relative isolate z-10 max-h-[92vh] max-w-[92vw]">
+      <div data-zen-hit-surface="" className="relative isolate z-10 max-h-[92vh] max-w-[92vw]">
         <Button
           type="button"
           size="icon-xs"
@@ -96,6 +98,7 @@ export function ExpandedImageOverlay({
         <Button
           type="button"
           size="icon"
+          data-zen-hit-surface=""
           variant="ghost"
           className="absolute right-2 top-1/2 z-20 -translate-y-1/2 text-white/90 hover:bg-white/10 hover:text-white sm:right-6"
           aria-label={t("chat:imagePreview_nextImage")}

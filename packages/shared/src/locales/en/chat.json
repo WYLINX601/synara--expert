@@ -3,6 +3,7 @@
   "zenExpand": "Expand conversation",
   "zenCollapse": "Collapse conversation",
   "zenReturn": "Return to workbench",
+  "zenMoveWindow": "Move window",
   "zenChooseChat": "Open a chat first",
   "zenShortcutUnavailable": "Global shortcut unavailable",
   "zenUnavailable": "Zen mode is unavailable in this view",

@@ -370,6 +370,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     setExpanded: (expanded) => ipcRenderer.invoke(IPC.zenMode.setExpanded, expanded),
     setCompactHeight: (contentHeight) =>
       ipcRenderer.invoke(IPC.zenMode.setCompactHeight, contentHeight),
+    setPointerPassthrough: (ignore) =>
+      ipcRenderer.invoke(IPC.zenMode.setPointerPassthrough, ignore),
     onStateChanged: (listener) => {
       const changed = (_event: Electron.IpcRendererEvent, payload: unknown) => {
         const state = parseZenModeState(payload);

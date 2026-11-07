@@ -17,6 +17,7 @@ export interface ZenModeDesktopMethods {
   exit: () => Promise<void>;
   setExpanded: (expanded: boolean) => Promise<void>;
   setCompactHeight: (contentHeight: number) => Promise<void>;
+  setPointerPassthrough: (ignore: boolean) => Promise<void>;
   onStateChanged: (listener: (state: ZenModeState) => void) => () => void;
   onToggleRequested: (listener: () => void) => () => void;
 }

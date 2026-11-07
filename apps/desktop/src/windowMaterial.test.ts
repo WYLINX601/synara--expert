@@ -140,4 +140,24 @@ describe("createWindowMaterialApplier", () => {
     expect(apply(window, { material: "translucent", blurRadius: 20 })).toBe(false);
     expect(window.setVibrancy).toHaveBeenLastCalledWith(MAC_WINDOW_VIBRANCY);
   });
+
+  it("suspends both native backdrops in Zen and reapplies the latest saved preference", () => {
+    const addon = { setBackgroundBlurRadius: vi.fn(() => true) };
+    const apply = createWindowMaterialApplier(() => addon);
+    const window = fakeWindow();
+
+    expect(apply(window, { material: "translucent", blurRadius: 18 })).toBe(true);
+    apply.suspend(window);
+    expect(window.setVibrancy).toHaveBeenLastCalledWith(null);
+    expect(addon.setBackgroundBlurRadius).toHaveBeenLastCalledWith(window.handle, 0);
+
+    // Preference writes during Zen are remembered but do not restore a backdrop early.
+    expect(apply(window, { material: "translucent", blurRadius: 32 })).toBe(true);
+    expect(window.setVibrancy).toHaveBeenLastCalledWith(null);
+    expect(addon.setBackgroundBlurRadius).toHaveBeenLastCalledWith(window.handle, 0);
+
+    expect(apply.resume(window)).toBe(true);
+    expect(window.setVibrancy).toHaveBeenLastCalledWith(null);
+    expect(addon.setBackgroundBlurRadius).toHaveBeenLastCalledWith(window.handle, 32);
+  });
 });

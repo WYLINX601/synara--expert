@@ -48,10 +48,17 @@ describe("Hub Graph runtime reducer", () => {
 
   it("enforces bounded interaction rounds and terminal outcomes", () => {
     let state = reduceHubGraphEvent(createState(), { type: "graph.started" });
+    state = reduceHubGraphEvent(state, { type: "node.ready", nodeId: "author" });
+    state = reduceHubGraphEvent(state, { type: "node.queued", nodeId: "author" });
+    state = reduceHubGraphEvent(state, { type: "node.started", nodeId: "author" });
+    state = reduceHubGraphEvent(state, { type: "node.settled", nodeId: "author" });
+    state = reduceHubGraphEvent(state, { type: "node.output_accepted", nodeId: "author" });
     state = reduceHubGraphEvent(state, { type: "interaction.requested", blockId: "review" });
     expect(state.interactions.review.round).toBe(1);
     state = reduceHubGraphEvent(state, { type: "interaction.responder_dispatched", blockId: "review" });
-    state = reduceHubGraphEvent(state, { type: "interaction.response_received", blockId: "review" });
+    state = reduceHubGraphEvent(state, { type: "interaction.response_received", blockId: "review", requiresRevision: true });
+    expect(state.nodes.author).toBe("stale");
+    state = reduceHubGraphEvent(state, { type: "node.retry", nodeId: "author" });
     state = reduceHubGraphEvent(state, { type: "interaction.requested", blockId: "review" });
     state = reduceHubGraphEvent(state, { type: "interaction.responder_dispatched", blockId: "review" });
     state = reduceHubGraphEvent(state, { type: "interaction.response_received", blockId: "review" });
@@ -60,6 +67,7 @@ describe("Hub Graph runtime reducer", () => {
     state = reduceHubGraphEvent(state, { type: "interaction.response_received", blockId: "review" });
     state = reduceHubGraphEvent(state, { type: "interaction.exhausted", blockId: "review" });
     expect(state.interactions.review.status).toBe("exhausted");
+    expect(state.nodes.reviewer).toBe("completed");
     expect(state.interactions.review.round).toBe(3);
 
     expect(() =>

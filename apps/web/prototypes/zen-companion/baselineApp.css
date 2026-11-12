@@ -1,0 +1,4 @@
+@import "../../src/index.css";
+
+/* The standalone Vite root is outside src; scan the unchanged app classes. */
+@source "../../src";

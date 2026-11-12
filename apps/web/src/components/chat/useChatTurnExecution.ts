@@ -143,8 +143,6 @@ type ChatTurnExecutionInput = Pick<
   | "armLocalDispatchAckFallback"
   | "setQueuedSteerGate"
   | "threadId"
-  | "planSidebarDismissedForTurnRef"
-  | "setPlanSidebarOpen"
   | "setRestoredQueuedSourceProposedPlan"
   | "failLocalDispatchWorktreeSetup"
   | "setOptimisticUserMessages"
@@ -188,8 +186,6 @@ export function useChatTurnExecution({
   armLocalDispatchAckFallback,
   setQueuedSteerGate,
   threadId,
-  planSidebarDismissedForTurnRef,
-  setPlanSidebarOpen,
   setRestoredQueuedSourceProposedPlan,
   failLocalDispatchWorktreeSetup,
   setOptimisticUserMessages,
@@ -755,10 +751,6 @@ export function useChatTurnExecution({
           setQueuedSteerGate(nextSteerGate);
           armQueuedComposerSteerGate(threadId, nextSteerGate);
         }
-        if (sourceProposedPlanForSend) {
-          planSidebarDismissedForTurnRef.current = null;
-          setPlanSidebarOpen(true);
-        }
         if (queuedChatTurn === null) {
           (activeThreadIdRef.current === threadIdForSend
             ? setRestoredQueuedSourceProposedPlan
@@ -1032,8 +1024,6 @@ export function useChatTurnExecution({
       armLocalDispatchAckFallback,
       setQueuedSteerGate,
       threadId,
-      planSidebarDismissedForTurnRef,
-      setPlanSidebarOpen,
       setRestoredQueuedSourceProposedPlan,
       failLocalDispatchWorktreeSetup,
       setOptimisticUserMessages,

@@ -1,0 +1,176 @@
+@import "../../src/index.css";
+@source "../../src";
+@source "./";
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+.review-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  color: var(--color-text-foreground);
+  background: var(--color-background-elevated-secondary);
+  font-family: var(--font-sans);
+}
+
+.review-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  min-height: 44px;
+  padding: 8px 16px;
+  font-size: var(--app-font-size-ui-sm);
+}
+
+.review-label {
+  color: var(--color-text-foreground-tertiary);
+  font-size: var(--app-font-size-ui-xs);
+}
+
+.review-scene {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.review-scene select {
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-foreground);
+  background: var(--color-background-elevated-primary-opaque);
+  font: inherit;
+}
+
+.review-scene select:disabled {
+  opacity: 0.64;
+}
+
+.review-scene select:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 2px;
+}
+
+.review-stage {
+  --companion-inset: 28px;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* This is only the native-window equivalent. Production owns every pixel inside
+   the retained iframe, including its 680px composer and 560px expanded history. */
+.companion-window {
+  position: absolute;
+  right: var(--companion-inset);
+  bottom: var(--companion-inset);
+  display: flex;
+  flex-direction: column;
+  width: min(720px, calc(100% - 2 * var(--companion-inset)));
+  height: min(var(--companion-height), calc(100% - 2 * var(--companion-inset)));
+}
+
+.companion-window[data-visible="false"] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.companion-window[data-mode="workspace"] {
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.review-frame {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+}
+
+.companion-entry {
+  position: absolute;
+  right: var(--companion-inset);
+  bottom: var(--companion-inset);
+}
+
+.companion-badge,
+.companion-unread {
+  position: absolute;
+  pointer-events: none;
+  border: 2px solid var(--color-background-elevated-secondary);
+  border-radius: 999px;
+}
+
+.companion-badge {
+  top: -3px;
+  right: -3px;
+  display: grid;
+  width: 19px;
+  height: 19px;
+  place-items: center;
+  color: var(--color-primary-foreground);
+  background: var(--color-primary);
+  font-size: var(--app-font-size-ui-xs);
+  line-height: 1;
+}
+
+.companion-badge[data-phase="question"],
+.companion-badge[data-phase="approval"] {
+  color: var(--color-warning-foreground);
+  background: var(--color-warning);
+}
+
+.companion-badge[data-phase="error"] {
+  color: var(--color-destructive-foreground);
+  background: var(--color-destructive);
+}
+
+.companion-unread {
+  right: 0;
+  bottom: 0;
+  width: 10px;
+  height: 10px;
+  background: var(--color-primary);
+}
+
+.review-notice {
+  position: absolute;
+  top: 16px;
+  right: 24px;
+  left: 24px;
+  margin: 0;
+  color: var(--color-text-foreground-secondary);
+  font-size: var(--app-font-size-ui-sm);
+  white-space: pre-wrap;
+}
+
+.review-error {
+  color: var(--color-destructive);
+}
+
+@media (max-height: 640px), (max-width: 780px) {
+  .review-stage {
+    --companion-inset: 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .review-toolbar {
+    gap: 8px;
+    padding-inline: 8px;
+  }
+}

@@ -1,6 +1,7 @@
 import {
   ZEN_MODE_COMPACT_MAX_HEIGHT,
   ZEN_MODE_COMPACT_MIN_HEIGHT,
+  type ZenModeDragRegion,
   type ZenModeState,
 } from "@synara/contracts";
 import type { DesktopWindowBounds } from "./windowState";
@@ -18,6 +19,7 @@ export interface ZenModeWindow {
   isDestroyed(): boolean;
   getBounds(): DesktopWindowBounds;
   getNormalBounds(): DesktopWindowBounds;
+  getContentBounds(): DesktopWindowBounds;
   getContentSize(): number[];
   isMaximized(): boolean;
   isMinimized(): boolean;
@@ -41,6 +43,9 @@ export interface ZenModeWindow {
   minimize(): void;
   restore(): void;
   setFullScreen(fullScreen: boolean): void;
+  show(): void;
+  hide(): void;
+  focus(): void;
 }
 
 export interface ZenModeSnapshot {
@@ -62,6 +67,8 @@ export interface ZenModeManagerOptions {
   getWindow: () => ZenModeWindow | null;
   getDisplayWorkAreas: () => ReadonlyArray<DesktopWindowBounds>;
   onStateChanged: (state: ZenModeState) => void;
+  getCursorScreenPoint: () => { x: number; y: number };
+  getWindowZoomFactor: (window: ZenModeWindow) => number;
   onToggleRequested: () => void;
   setBrowserViewsZenMode: (window: ZenModeWindow, active: boolean) => void;
   setTrafficLightsVisible: (window: ZenModeWindow, visible: boolean) => void;
@@ -177,6 +184,14 @@ export class ZenModeManager {
   #rendererReloadResetPending = false;
   #operation: Promise<unknown> = Promise.resolve();
   #windowGeneration = 0;
+  #panelSnapshot: ZenModeSnapshot | null = null;
+  #bubble = false;
+  #bubbleHidden = false;
+  #surfaceGeneration = 0;
+  #dragRegion: ZenModeDragRegion | null = null;
+  #requestedPassthrough = false;
+  #appliedPassthrough: boolean | null = null;
+  #pointerTimer: NodeJS.Timeout | undefined;
 
   constructor(options: ZenModeManagerOptions) {
     this.#options = options;
@@ -187,6 +202,9 @@ export class ZenModeManager {
     const window = this.#liveWindow();
     return {
       isActive: Boolean(window && this.#snapshot && !this.#rendererReloadResetPending),
+      isBubble: Boolean(
+        window && this.#snapshot && this.#bubble && !this.#rendererReloadResetPending,
+      ),
       expanded: this.#expanded,
       alwaysOnTop: window?.isAlwaysOnTop() ?? false,
       shortcut: this.#shortcut,
@@ -267,12 +285,115 @@ export class ZenModeManager {
     });
   }
 
-  setExpanded(expanded: boolean): Promise<void> {
+  collapseToBubble(): Promise<void> {
     if (this.#disposed) return Promise.reject(new Error("Zen mode manager is disposed."));
     return this.#enqueue(async () => {
       this.#assertNotDisposed();
+      this.#assertBubbleSupported();
+      const window = this.#requireLiveWindow();
+      if (!this.#snapshot || this.#bubble || this.#rendererReloadResetPending) return;
+      const panel = captureWindowState(window, this.#options.getVisibleOnFullScreen);
+      this.#resetPointerPolicy(window);
+      const area = workAreaFor(panel.bounds, this.#options.getDisplayWorkAreas());
+      if (!area) throw new Error("The desktop work area is unavailable.");
+      const margin = area.width < 720 || area.height < 560 ? 16 : 28;
+      const { width, height } = this.#bubbleSize(window);
+      try {
+        window.setMinimumSize(0, 0);
+        window.setMaximumSize(0, 0);
+        window.setResizable(false);
+        window.setBounds({
+          x: Math.max(area.x, area.x + area.width - width - margin),
+          y: Math.max(area.y, area.y + area.height - height - margin),
+          width,
+          height,
+        });
+      } catch (error) {
+        this.#restorePanelWindow(window, panel);
+        throw error;
+      }
+      this.#panelSnapshot = panel;
+      this.#bubble = true;
+      this.#emitState();
+    });
+  }
+
+  syncBubbleZoom(): Promise<void> {
+    if (this.#disposed) return Promise.resolve();
+    const generation = this.#surfaceGeneration;
+    return this.#enqueue(() => {
       const window = this.#liveWindow();
-      if (!window || !this.#snapshot || expanded === this.#expanded) return;
+      if (
+        !window ||
+        !this.#snapshot ||
+        !this.#bubble ||
+        this.#rendererReloadResetPending ||
+        generation !== this.#surfaceGeneration
+      )
+        return;
+      const bounds = window.getBounds();
+      const { width, height } = this.#bubbleSize(window);
+      if (bounds.width === width && bounds.height === height) return;
+      window.setBounds(
+        this.#visibleBounds(
+          {
+            x: bounds.x + bounds.width - width,
+            y: bounds.y + bounds.height - height,
+            width,
+            height,
+          },
+          [width, height],
+        ),
+      );
+    });
+  }
+
+  restoreFromBubble(): Promise<void> {
+    if (this.#disposed) return Promise.reject(new Error("Zen mode manager is disposed."));
+    return this.#enqueue(() => {
+      this.#assertNotDisposed();
+      this.#assertBubbleSupported();
+      const window = this.#requireLiveWindow();
+      if (!this.#snapshot || !this.#bubble || !this.#panelSnapshot) return;
+      this.#resetPointerPolicy(window);
+      this.#restorePanelWindow(window, this.#panelSnapshot);
+      window.show();
+      window.focus();
+      this.#panelSnapshot = null;
+      this.#bubble = false;
+      this.#bubbleHidden = false;
+      this.#emitState();
+    });
+  }
+
+  hideBubble(): Promise<void> {
+    if (this.#disposed) return Promise.reject(new Error("Zen mode manager is disposed."));
+    return this.#enqueue(() => {
+      this.#assertNotDisposed();
+      this.#assertBubbleSupported();
+      const window = this.#requireLiveWindow();
+      if (!this.#snapshot || !this.#bubble) return;
+      this.#resetPointerPolicy(window);
+      window.hide();
+      this.#bubbleHidden = true;
+    });
+  }
+
+  setExpanded(expanded: boolean): Promise<void> {
+    if (this.#disposed) return Promise.reject(new Error("Zen mode manager is disposed."));
+    const generation = this.#surfaceGeneration;
+    return this.#enqueue(async () => {
+      this.#assertNotDisposed();
+      const window = this.#liveWindow();
+      if (
+        !window ||
+        !this.#snapshot ||
+        this.#bubble ||
+        this.#rendererReloadResetPending ||
+        generation !== this.#surfaceGeneration ||
+        expanded === this.#expanded
+      )
+        return;
       const frame = frameSize(window);
       const requestedHeight = expanded ? ZEN_MODE_EXPANDED_HEIGHT : this.#compactHeight;
       const target = this.#resizeHeight(window.getBounds(), requestedHeight, frame);
@@ -288,9 +409,16 @@ export class ZenModeManager {
       return Promise.reject(new Error("Zen mode height must be a finite number."));
     }
     if (this.#disposed) return Promise.reject(new Error("Zen mode manager is disposed."));
+    const generation = this.#surfaceGeneration;
     return this.#enqueue(async () => {
       this.#assertNotDisposed();
-      if (!this.#snapshot) return;
+      if (
+        !this.#snapshot ||
+        this.#bubble ||
+        this.#rendererReloadResetPending ||
+        generation !== this.#surfaceGeneration
+      )
+        return;
       this.#compactHeight = Math.max(
         ZEN_MODE_COMPACT_MIN_HEIGHT,
         Math.min(ZEN_MODE_COMPACT_MAX_HEIGHT, Math.round(contentHeight)),
@@ -311,10 +439,12 @@ export class ZenModeManager {
       return Promise.reject(new Error("Invalid Zen mode pointer passthrough state."));
     }
     if (this.#disposed) return Promise.reject(new Error("Zen mode manager is disposed."));
+    const generation = this.#surfaceGeneration;
     return this.#enqueue(() => {
       this.#assertNotDisposed();
       const window = this.#liveWindow();
       if (!window) return;
+      if (this.#bubble || generation !== this.#surfaceGeneration) return;
       if (ignore && (!this.#snapshot || this.#rendererReloadResetPending)) {
         throw new Error("Pointer passthrough is only available while Zen mode is active.");
       }
@@ -322,7 +452,53 @@ export class ZenModeManager {
       // events. Windows is intentionally opaque; Linux cannot forward the events needed to
       // leave a click-through region, so enabling ignore there could trap the user.
       if (ignore && this.#options.platform !== "darwin") return;
-      this.#setPointerPassthrough(window, ignore);
+      this.#requestedPassthrough = ignore;
+      if (ignore) this.#applyPointerPolicy(window);
+      else this.#setPointerPassthrough(window, false);
+    });
+  }
+
+  setDragRegion(region: ZenModeDragRegion | null): Promise<void> {
+    if (
+      region !== null &&
+      (![region.x, region.y, region.width, region.height].every(Number.isFinite) ||
+        region.width <= 0 ||
+        region.height <= 0)
+    )
+      return Promise.reject(new Error("Invalid Zen mode drag region."));
+    if (this.#disposed) return Promise.reject(new Error("Zen mode manager is disposed."));
+    const generation = this.#surfaceGeneration;
+    return this.#enqueue(() => {
+      const window = this.#liveWindow();
+      if (
+        !window ||
+        !this.#snapshot ||
+        this.#bubble ||
+        this.#rendererReloadResetPending ||
+        generation !== this.#surfaceGeneration
+      )
+        return;
+      this.#dragRegion = region ? { ...region } : null;
+      this.#stopPointerTimer();
+      this.#applyPointerPolicy(window);
+      if (region && this.#options.platform === "darwin") {
+        // Native drag regions do not reliably deliver DOM movement events. Observe the
+        // real cursor so a stale renderer click-through request cannot disable dragging.
+        this.#pointerTimer = setInterval(() => {
+          const current = this.#liveWindow();
+          if (!current || !this.#snapshot || this.#bubble || this.#rendererReloadResetPending) {
+            this.#stopPointerTimer();
+            return;
+          }
+          try {
+            this.#applyPointerPolicy(current);
+          } catch {
+            this.#requestedPassthrough = false;
+            this.#stopPointerTimer();
+          }
+        }, 16);
+        this.#pointerTimer.unref();
+      }
     });
   }
 
@@ -335,6 +511,7 @@ export class ZenModeManager {
   /** Renderer reloads always return to normal mode; a new document must opt in again. */
   resetForRendererReload(): Promise<void> {
     this.#windowGeneration += 1;
+    this.#resetPointerPolicy(this.#liveWindow());
     if (this.#disposed || !this.#snapshot) return Promise.resolve();
     this.#rendererReloadResetPending = true;
     this.#emitState();
@@ -351,9 +528,12 @@ export class ZenModeManager {
   /** Clear mode state after the native window has actually gone away. */
   windowClosed(): void {
     const window = this.#liveWindow();
-    if (window) this.#setPointerPassthrough(window, false);
+    this.#resetPointerPolicy(window);
     this.#windowGeneration += 1;
     this.#snapshot = null;
+    this.#panelSnapshot = null;
+    this.#bubble = false;
+    this.#bubbleHidden = false;
     this.#expanded = false;
     this.#compactHeight = ZEN_MODE_INITIAL_COMPACT_HEIGHT;
     this.#rendererReloadResetPending = false;
@@ -364,6 +544,7 @@ export class ZenModeManager {
     if (this.#disposed) return this.#enqueue(async () => undefined);
     this.#disposed = true;
     this.#windowGeneration += 1;
+    this.#resetPointerPolicy(this.#liveWindow());
     return this.#enqueue(async () => {
       let restoreError: unknown;
       try {
@@ -377,6 +558,9 @@ export class ZenModeManager {
           this.#setTrafficLightsVisible(window, true);
         }
         this.#snapshot = null;
+        this.#panelSnapshot = null;
+        this.#bubble = false;
+        this.#bubbleHidden = false;
         this.#expanded = false;
         this.#compactHeight = ZEN_MODE_INITIAL_COMPACT_HEIGHT;
         this.unregisterShortcut();
@@ -430,6 +614,72 @@ export class ZenModeManager {
     ) {
       throw new Error("The desktop window changed during the Zen mode transition.");
     }
+  }
+
+  #assertBubbleSupported(): void {
+    if (this.#options.platform !== "darwin") {
+      throw new Error("Zen mode bubbles are unavailable on this platform.");
+    }
+  }
+
+  #bubbleSize(window: ZenModeWindow): FrameSize {
+    const zoom = this.#options.getWindowZoomFactor(window);
+    if (!Number.isFinite(zoom) || zoom <= 0) {
+      throw new Error("The desktop window zoom factor is unavailable.");
+    }
+    const frame = frameSize(window);
+    const contentSize = Math.ceil(36 * zoom);
+    return { width: contentSize + frame.width, height: contentSize + frame.height };
+  }
+
+  #restorePanelWindow(window: ZenModeWindow, panel: ZenModeSnapshot): void {
+    window.setMaximumSize(0, 0);
+    window.setMinimumSize(panel.minimumSize[0], panel.minimumSize[1]);
+    window.setMaximumSize(panel.maximumSize[0], panel.maximumSize[1]);
+    window.setResizable(panel.isResizable);
+    window.setBounds(this.#visibleBounds(panel.bounds, panel.minimumSize));
+  }
+
+  #stopPointerTimer(): void {
+    clearInterval(this.#pointerTimer);
+    this.#pointerTimer = undefined;
+  }
+
+  #resetPointerPolicy(window: ZenModeWindow | null): void {
+    this.#surfaceGeneration += 1;
+    this.#stopPointerTimer();
+    this.#dragRegion = null;
+    this.#requestedPassthrough = false;
+    if (window) this.#setPointerPassthrough(window, false);
+    else this.#appliedPassthrough = null;
+  }
+
+  #applyPointerPolicy(window: ZenModeWindow): void {
+    let ignore = this.#requestedPassthrough && this.#options.platform === "darwin";
+    const region = this.#dragRegion;
+    if (ignore && region) {
+      const point = this.#options.getCursorScreenPoint();
+      const bounds = window.getContentBounds();
+      const zoom = this.#options.getWindowZoomFactor(window);
+      if (!Number.isFinite(zoom) || zoom <= 0) {
+        ignore = false;
+      } else {
+        const x = (point.x - bounds.x) / zoom;
+        const y = (point.y - bounds.y) / zoom;
+        if (
+          x >= 0 &&
+          y >= 0 &&
+          x < bounds.width / zoom &&
+          y < bounds.height / zoom &&
+          x >= region.x &&
+          y >= region.y &&
+          x < region.x + region.width &&
+          y < region.y + region.height
+        )
+          ignore = false;
+      }
+    }
+    if (ignore !== this.#appliedPassthrough) this.#setPointerPassthrough(window, ignore);
   }
 
   async #setFullScreen(window: ZenModeWindow, fullScreen: boolean): Promise<void> {
@@ -510,9 +760,13 @@ export class ZenModeManager {
   async #restoreSnapshot(disposeAfter = false): Promise<void> {
     const snapshot = this.#snapshot;
     if (!snapshot) return;
+    this.#resetPointerPolicy(this.#liveWindow());
     const window = this.#liveWindow();
     if (!window) {
       this.#snapshot = null;
+      this.#panelSnapshot = null;
+      this.#bubble = false;
+      this.#bubbleHidden = false;
       this.#expanded = false;
       this.#compactHeight = ZEN_MODE_INITIAL_COMPACT_HEIGHT;
       this.#emitState();
@@ -526,6 +780,10 @@ export class ZenModeManager {
       this.#setPointerPassthrough(window, false);
       this.#setZenWindowMaterial(window, false);
     }
+    if (this.#bubbleHidden) window.show();
+    this.#panelSnapshot = null;
+    this.#bubble = false;
+    this.#bubbleHidden = false;
     this.#snapshot = null;
     this.#expanded = false;
     this.#compactHeight = ZEN_MODE_INITIAL_COMPACT_HEIGHT;
@@ -590,10 +848,13 @@ export class ZenModeManager {
   #setPointerPassthrough(window: ZenModeWindow, ignore: boolean): void {
     try {
       window.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
+      this.#appliedPassthrough = ignore;
     } catch (error) {
       if (ignore) {
+        this.#requestedPassthrough = false;
         try {
           window.setIgnoreMouseEvents(false);
+          this.#appliedPassthrough = false;
         } catch {
           // Preserve the original failure; a later state transition retries the reset.
         }

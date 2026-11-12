@@ -140,8 +140,6 @@ export interface ChatTurnSubmissionInput {
   threadNotes: string;
   setSettledThreadBranchWarningDismissedThreadId: Dispatch<SetStateAction<ThreadId | null>>;
   setQueuedSteerGate: Dispatch<SetStateAction<QueuedSteerGate | null>>;
-  planSidebarDismissedForTurnRef: RefObject<string | null>;
-  setPlanSidebarOpen: Dispatch<SetStateAction<boolean>>;
   settings: AppSettings;
   isSendBusy: ReturnType<typeof useChatLocalDispatch>["isSendBusy"];
   worktreeSetupResolutionRef: ReturnType<typeof useChatLocalDispatch>["worktreeSetupResolutionRef"];

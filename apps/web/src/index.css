@@ -3741,6 +3741,31 @@ diffs-container {
   max-width: 1120px;
 }
 
+[data-zen-retained-content][data-hidden="true"],
+[data-zen-suppressed-portal] {
+  display: none !important;
+}
+.zen-mode-bubble {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+html[data-zen-bubble="true"] .zen-mode-bubble {
+  position: fixed;
+  inset: 0;
+}
+.zen-bubble-status {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  pointer-events: none;
+}
+
 /* Zen changes presentation only; the route, editor, and draft remain mounted. */
 html[data-zen-surface="true"],
 html[data-zen-surface="true"] body,
@@ -3799,7 +3824,7 @@ html[data-zen-surface="true"]
 [data-zen-chat="true"] {
   justify-content: flex-end;
   padding-top: 12px;
-  padding-bottom: 20px;
+  padding-bottom: 36px;
   --zen-chat-gutter: var(--app-density-chat-gutter-x, 0.75rem);
 }
 [data-zen-chat="true"] > [data-zen-main] {
@@ -3808,7 +3833,6 @@ html[data-zen-surface="true"]
 }
 [data-zen-chat="true"][data-zen-expanded="true"] > [data-zen-main] {
   flex: 1 1 0%;
-  overflow: hidden;
 }
 [data-zen-chat="true"] [data-empty-landing-composer-block] {
   padding-bottom: 0;
@@ -3819,7 +3843,6 @@ html[data-zen-surface="true"]
   border-radius: var(--radius-xl);
   background: var(--background);
   box-shadow: var(--shadow-sm);
-  padding-right: 2rem;
 }
 [data-zen-chat="true"] [data-testid="chat-transcript-drawer"] {
   width: calc((100% - 2 * var(--zen-chat-gutter)) * 14 / 15);
@@ -3852,20 +3875,20 @@ html[data-zen-surface="true"]
   border-top-right-radius: 0;
   box-shadow: none;
 }
-.zen-drawer-toggle-mark {
+.zen-mode-toolbar {
   opacity: 0;
 }
-.zen-drawer-toggle:hover .zen-drawer-toggle-mark,
-.zen-drawer-toggle:focus-visible .zen-drawer-toggle-mark {
+.zen-mode-toolbar:hover,
+.zen-mode-toolbar:has(:focus-visible) {
   opacity: 1;
 }
 .zen-drag-grip {
   position: absolute;
   z-index: 20;
   bottom: 0;
-  left: calc(50% - 40px);
-  width: 80px;
-  height: 20px;
+  left: calc(50% - 80px);
+  width: 160px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3875,9 +3898,7 @@ html[data-zen-surface="true"]
   height: 3px;
   border-radius: 999px;
   background: var(--muted-foreground);
-  opacity: 0;
-}
-.zen-drag-grip:hover > span {
+  /* Native drag regions do not reliably deliver DOM hover events. */
   opacity: 0.65;
 }
 @media (min-width: 640px) {

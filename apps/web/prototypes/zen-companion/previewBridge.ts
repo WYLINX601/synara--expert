@@ -1,0 +1,230 @@
+import type { DesktopBridge, ZenModeDesktopMethods, ZenModeState } from "@synara/contracts";
+import type { BaselineFrameMessage, BaselineScene, BaselineStatusMessage } from "./baseline.types";
+
+export type PreviewControlMessage =
+  | { source: "synara-zen-review"; type: "connect"; scene: BaselineScene }
+  | { source: "synara-zen-review"; type: "scene"; scene: BaselineScene }
+  | { source: "synara-zen-review"; type: "toggle-mode" }
+  | {
+      source: "synara-zen-review";
+      type: "show-mode";
+      mode: "zen" | "workspace";
+      requestId: number;
+    }
+  | { source: "synara-zen-review"; type: "focus-composer" }
+  | { source: "synara-zen-review"; type: "hide-bubble" };
+
+export type PreviewLifecycleMessage =
+  | { source: "synara-zen-baseline"; type: "ready" }
+  | { source: "synara-zen-baseline"; type: "error"; message: string }
+  | { source: "synara-zen-baseline"; type: "bubble-collapsed" | "bubble-hidden" }
+  | {
+      source: "synara-zen-baseline";
+      type: "mode-result";
+      requestId: number;
+      mode: "zen" | "workspace";
+    };
+
+export function isBaselineScene(value: unknown): value is BaselineScene {
+  return (
+    value === "idle" ||
+    value === "history" ||
+    value === "running" ||
+    value === "question" ||
+    value === "approval" ||
+    value === "error"
+  );
+}
+
+export function postToReview(
+  message: BaselineFrameMessage | BaselineStatusMessage | PreviewLifecycleMessage,
+): void {
+  if (window.parent !== window) window.parent.postMessage(message, window.location.origin);
+}
+
+function unavailable(): Promise<never> {
+  return Promise.reject(
+    new Error("Native desktop services are unavailable in this isolated browser preview."),
+  );
+}
+
+/** Only window geometry is simulated. This is not an Electron or OS implementation. */
+
+export interface PreviewBridgeController {
+  publish: () => void;
+  requestToggle: () => void;
+  requestMode: (mode: "zen" | "workspace") => void;
+  isZenActive: () => boolean;
+  hideBubble: () => void;
+  dispose: () => void;
+}
+export function installPreviewBridge(): PreviewBridgeController {
+  if (window.desktopBridge || window.nativeApi) {
+    throw new Error("Open this isolated preview in a browser, not in a native application window.");
+  }
+  let state: ZenModeState = {
+    isActive: true,
+    isBubble: true,
+    expanded: false,
+    alwaysOnTop: false,
+    shortcut: "",
+    shortcutAvailable: false,
+  };
+  let compactHeight = 160;
+  let lastZenExpanded = state.expanded;
+  const listeners = new Set<(next: ZenModeState) => void>();
+  const toggles = new Set<() => void>();
+  const publish = () =>
+    postToReview({
+      source: "synara-zen-baseline",
+      mode: state.isActive ? "zen" : "workspace",
+      expanded: state.expanded,
+      isBubble: state.isBubble,
+      height: state.isBubble ? 36 : state.expanded ? 560 : compactHeight,
+    });
+  const update = (patch: Partial<ZenModeState>) => {
+    state = { ...state, ...patch };
+    for (const listener of listeners) listener(state);
+    publish();
+  };
+  const zenMode: ZenModeDesktopMethods = {
+    getState: async () => state,
+    enter: async () => update({ isActive: true, isBubble: false, expanded: lastZenExpanded }),
+    exit: async () => {
+      if (state.isActive) lastZenExpanded = state.expanded;
+      update({ isActive: false, isBubble: false, expanded: false });
+    },
+    setExpanded: async (expanded) => {
+      if (state.isBubble) return;
+      if (state.isActive) lastZenExpanded = expanded;
+      update({ expanded });
+    },
+    bubble: {
+      collapse: async () => {
+        update({ isBubble: true });
+        postToReview({ source: "synara-zen-baseline", type: "bubble-collapsed" });
+      },
+      restore: async () => update({ isBubble: false }),
+      hide: async () => {
+        update({ isBubble: true });
+        postToReview({ source: "synara-zen-baseline", type: "bubble-hidden" });
+      },
+    },
+    setCompactHeight: async (height) => {
+      if (state.isBubble) return;
+      if (!Number.isFinite(height)) throw new Error("Invalid preview frame height.");
+      compactHeight = Math.min(600, Math.max(96, Math.ceil(height)));
+      publish();
+    },
+    // Browsers cannot forward native click-through mouse events. Fail interactive,
+    // as the production useZenPointerPassthrough hook already specifies.
+    setPointerPassthrough: unavailable,
+    setDragRegion: unavailable,
+    onStateChanged: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    onToggleRequested: (listener) => {
+      toggles.add(listener);
+      return () => {
+        toggles.delete(listener);
+      };
+    },
+  };
+
+  // Production consumers guard absent desktop-only capabilities. Keep them absent
+  // rather than pretending to implement capture, OS permissions, updates or menus.
+  // Browser event subscriptions exist only to let the unchanged coordinator mount;
+  // no native browser events are generated by this isolated page.
+  const browserEvents = new EventTarget();
+  const subscribeBrowserEvent = (name: string, listener: (value: never) => void) => {
+    const handler = (event: Event) => listener((event as CustomEvent<never>).detail);
+    browserEvents.addEventListener(name, handler);
+    return () => browserEvents.removeEventListener(name, handler);
+  };
+  const browser: DesktopBridge["browser"] = {
+    open: unavailable,
+    close: unavailable,
+    hide: unavailable,
+    getState: unavailable,
+    setPanelBounds: unavailable,
+    attachWebview: unavailable,
+    detachWebview: unavailable,
+    copyLink: unavailable,
+    copyScreenshotToClipboard: unavailable,
+    captureScreenshot: unavailable,
+    capturePreview: unavailable,
+    navigate: unavailable,
+    reload: unavailable,
+    goBack: unavailable,
+    goForward: unavailable,
+    newTab: unavailable,
+    closeTab: unavailable,
+    selectTab: unavailable,
+    openDevTools: unavailable,
+    onState: (listener) => subscribeBrowserEvent("state", listener),
+    onBrowserUseOpenPanelRequest: (listener) => subscribeBrowserEvent("open", listener),
+    onBrowserCopyLink: (listener) => subscribeBrowserEvent("copy", listener),
+    annotations: {
+      start: unavailable,
+      cancel: unavailable,
+      syncMarkers: unavailable,
+      onEvent: (listener) => subscribeBrowserEvent("annotation", listener),
+    },
+  };
+  const bridge: Partial<DesktopBridge> = {
+    getWsUrl: () => null,
+    zenMode,
+    browser,
+    setTheme: unavailable,
+    setAppIcon: unavailable,
+    pickFolder: unavailable,
+    saveFile: unavailable,
+    confirm: unavailable,
+    showContextMenu: unavailable,
+    openExternal: unavailable,
+    showInFolder: unavailable,
+    notifications: { isSupported: async () => false, show: unavailable },
+  };
+  // Same narrow DesktopBridge boundary used by installZenModeBridge in the
+  // production browser suite; importantly, window.nativeApi is never replaced.
+  window.desktopBridge = bridge as DesktopBridge;
+  document.documentElement.dataset.runtime = "electron";
+  document.documentElement.dataset.zenSurface = "true";
+
+  return {
+    publish,
+    requestToggle: () => {
+      // Route through ZenModeProvider's real entry guards and pending state.
+      for (const listener of toggles) listener();
+    },
+    requestMode: (mode) => {
+      if (state.isBubble) {
+        if (mode === "zen") void zenMode.bubble!.restore();
+        else void zenMode.exit();
+        return;
+      }
+      if (state.isActive === (mode === "zen")) {
+        publish();
+        return;
+      }
+      // Do not call enter/exit directly: the real provider owns entry guards.
+      for (const listener of toggles) listener();
+      // A blocked entry still acknowledges the actual mode, never fake success.
+      if (state.isActive !== (mode === "zen")) publish();
+    },
+    isZenActive: () => state.isActive,
+    hideBubble: () => {
+      void zenMode.bubble!.hide();
+    },
+    dispose: () => {
+      listeners.clear();
+      toggles.clear();
+      if (window.desktopBridge === bridge) delete window.desktopBridge;
+      delete document.documentElement.dataset.runtime;
+      delete document.documentElement.dataset.zenSurface;
+    },
+  };
+}

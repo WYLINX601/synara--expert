@@ -54,8 +54,6 @@ function setup() {
     persistThreadSettingsForNextTurn: vi.fn(async () => undefined),
     setComposerDraftInteractionMode: vi.fn(),
     rememberCustomBinaryPathForDispatch: vi.fn(),
-    setPlanSidebarOpen: vi.fn(),
-    planSidebarDismissedForTurnRef: { current: null },
     armLocalDispatchAckFallback: vi.fn(),
   };
   return {

@@ -21,6 +21,19 @@ const IPC = DESKTOP_IPC_CHANNELS;
 let computerPreviewListenerCount = 0;
 const zenModeToggleListeners = new Set<() => void>();
 let pendingZenModeToggle = false;
+let zenModeIsBubble = false;
+
+ipcRenderer.on(IPC.zenMode.stateChanged, (_event, payload: unknown) => {
+  const state = parseZenModeState(payload);
+  if (state) zenModeIsBubble = state.isActive && state.isBubble;
+});
+
+globalThis.addEventListener?.("resize", () => {
+  if (!zenModeIsBubble) return;
+  // Native menu roles and programmatic zoom do not guarantee zoom-changed.
+  // A viewport resize reuses the host's current-zoom notification path.
+  ipcRenderer.sendSync(IPC.zoomFactor);
+});
 
 // Install before the React provider mounts so a first global-shortcut toggle
 // sent during window activation is buffered until the view subscribes.
@@ -144,6 +157,7 @@ function parseZenModeState(payload: unknown): ZenModeState | null {
   const state = payload as Record<string, unknown>;
   if (
     typeof state.isActive !== "boolean" ||
+    typeof state.isBubble !== "boolean" ||
     typeof state.expanded !== "boolean" ||
     typeof state.alwaysOnTop !== "boolean" ||
     typeof state.shortcut !== "string" ||
@@ -153,6 +167,7 @@ function parseZenModeState(payload: unknown): ZenModeState | null {
   }
   return {
     isActive: state.isActive,
+    isBubble: state.isBubble,
     expanded: state.expanded,
     alwaysOnTop: state.alwaysOnTop,
     shortcut: state.shortcut,
@@ -372,6 +387,16 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.invoke(IPC.zenMode.setCompactHeight, contentHeight),
     setPointerPassthrough: (ignore) =>
       ipcRenderer.invoke(IPC.zenMode.setPointerPassthrough, ignore),
+    setDragRegion: (region) => ipcRenderer.invoke(IPC.zenMode.setDragRegion, region),
+    ...(process.platform === "darwin"
+      ? {
+          bubble: {
+            collapse: () => ipcRenderer.invoke(IPC.zenMode.collapseToBubble),
+            restore: () => ipcRenderer.invoke(IPC.zenMode.restoreFromBubble),
+            hide: () => ipcRenderer.invoke(IPC.zenMode.hideBubble),
+          },
+        }
+      : {}),
     onStateChanged: (listener) => {
       const changed = (_event: Electron.IpcRendererEvent, payload: unknown) => {
         const state = parseZenModeState(payload);

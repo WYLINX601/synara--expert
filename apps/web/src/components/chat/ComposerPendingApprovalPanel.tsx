@@ -20,6 +20,7 @@ interface ComposerPendingApprovalPanelProps {
   approval: PendingApproval;
   pendingCount: number;
   isResponding: boolean;
+  compact?: boolean;
   onRespond: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -158,6 +159,7 @@ export const ComposerPendingApprovalPanel = function ComposerPendingApprovalPane
   pendingCount,
   isResponding,
   onRespond,
+  compact = false,
 }: ComposerPendingApprovalPanelProps) {
   const { t } = useTranslation();
   const parsed = parseApprovalDetail(approval.detail);
@@ -213,9 +215,18 @@ export const ComposerPendingApprovalPanel = function ComposerPendingApprovalPane
   return (
     <div
       onKeyDown={handleKeyDown}
-      className={cn(COMPOSER_INPUT_SURFACE_CLASS_NAME, "overflow-hidden px-3.5 py-3")}
+      className={cn(
+        COMPOSER_INPUT_SURFACE_CLASS_NAME,
+        "px-3.5 py-3",
+        compact ? "max-h-80 overflow-y-auto overscroll-contain" : "overflow-hidden",
+      )}
     >
-      <div className="flex items-start justify-between gap-3">
+      <div
+        className={cn(
+          "flex items-start justify-between gap-3",
+          compact && "sticky top-0 z-20 bg-background",
+        )}
+      >
         <p className="min-w-0 text-ui-lg font-medium leading-snug text-foreground/90">
           {t(computerScope?.promptKey ?? KIND_PROMPT[approval.requestKind])}
           {!computerScope && (approval.toolName ?? parsed.tool) ? (

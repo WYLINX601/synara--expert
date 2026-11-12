@@ -74,12 +74,13 @@ it("buffers one Zen shortcut toggle until React subscribes, then cleans up the s
 
   const stateListener = vi.fn();
   const unsubscribeState = zenMode.onStateChanged(stateListener);
-  const stateChangedListener = ipc.on.mock.calls.find(
+  const stateChangedListener = ipc.on.mock.calls.findLast(
     ([channel]) => channel === DESKTOP_IPC_CHANNELS.zenMode.stateChanged,
   )?.[1] as ((_event: unknown, payload: unknown) => void) | undefined;
   const state = {
     isActive: true,
     expanded: false,
+    isBubble: false,
     alwaysOnTop: true,
     shortcut: "CommandOrControl+Shift+Space",
     shortcutAvailable: true,
@@ -87,6 +88,8 @@ it("buffers one Zen shortcut toggle until React subscribes, then cleans up the s
   stateChangedListener?.({}, state);
   expect(stateListener).toHaveBeenCalledWith(state);
   stateChangedListener?.({}, { ...state, expanded: "invalid" });
+  expect(stateListener).toHaveBeenCalledOnce();
+  stateChangedListener?.({}, { ...state, isBubble: "invalid" });
   expect(stateListener).toHaveBeenCalledOnce();
   unsubscribeState();
   expect(ipc.removeListener).toHaveBeenCalledWith(
@@ -108,4 +111,79 @@ it("buffers one Zen shortcut toggle until React subscribes, then cleans up the s
   expect(secondListener).toHaveBeenCalledTimes(2);
   expect(firstListener).toHaveBeenCalledOnce();
   unsubscribeSecond();
+});
+
+it("exposes an atomic bubble capability only on macOS and forwards drag-region reports", async () => {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+  try {
+    for (const platform of ["darwin", "win32", "linux"]) {
+      Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
+      vi.resetModules();
+      ipc.expose.mockClear();
+      ipc.invoke.mockClear();
+      // Platform capabilities are selected at module evaluation, so each host needs a fresh preload.
+      await import("./preload");
+      const bridge = ipc.expose.mock.calls[0]?.[1] as DesktopBridge;
+      const zenMode = bridge.zenMode!;
+      const region = { x: 12, y: 100, width: 320, height: 24 };
+      await zenMode.setDragRegion(region);
+      await zenMode.setDragRegion(null);
+      expect(ipc.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.zenMode.setDragRegion, region);
+      expect(ipc.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.zenMode.setDragRegion, null);
+      if (platform === "darwin") {
+        expect(zenMode.bubble).toEqual({
+          collapse: expect.any(Function),
+          restore: expect.any(Function),
+          hide: expect.any(Function),
+        });
+        await zenMode.bubble!.collapse();
+        await zenMode.bubble!.restore();
+        await zenMode.bubble!.hide();
+        expect(ipc.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.zenMode.collapseToBubble);
+        expect(ipc.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.zenMode.restoreFromBubble);
+        expect(ipc.invoke).toHaveBeenCalledWith(DESKTOP_IPC_CHANNELS.zenMode.hideBubble);
+      } else {
+        expect(zenMode.bubble).toBeUndefined();
+      }
+    }
+  } finally {
+    Object.defineProperty(process, "platform", platformDescriptor);
+  }
+});
+
+it("reports viewport changes through the existing zoom channel only while a bubble is active", async () => {
+  const addEventListener = vi.fn((_event: string, _listener: () => void) => undefined);
+  vi.stubGlobal("addEventListener", addEventListener);
+  try {
+    vi.resetModules();
+    ipc.on.mockClear();
+    // The resize subscription belongs to preload evaluation, before any React subscriber.
+    await import("./preload");
+    const resize = addEventListener.mock.calls.find(([event]) => event === "resize")?.[1];
+    const stateChanged = ipc.on.mock.calls.find(
+      ([channel]) => channel === DESKTOP_IPC_CHANNELS.zenMode.stateChanged,
+    )?.[1] as (_event: unknown, payload: unknown) => void;
+    expect(resize).toBeTypeOf("function");
+    ipc.sendSync.mockClear();
+    resize?.();
+    expect(ipc.sendSync).not.toHaveBeenCalled();
+    const state = {
+      isActive: true,
+      isBubble: true,
+      expanded: false,
+      alwaysOnTop: true,
+      shortcut: "CommandOrControl+Shift+Space",
+      shortcutAvailable: true,
+    };
+    stateChanged({}, state);
+    resize?.();
+    expect(ipc.sendSync).toHaveBeenCalledExactlyOnceWith(DESKTOP_IPC_CHANNELS.zoomFactor);
+    stateChanged({}, { ...state, isBubble: false });
+    resize?.();
+    stateChanged({}, { ...state, isActive: false });
+    resize?.();
+    expect(ipc.sendSync).toHaveBeenCalledOnce();
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

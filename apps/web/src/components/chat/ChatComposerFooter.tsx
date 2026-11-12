@@ -141,6 +141,7 @@ export function ChatComposerFooter({
 
             {sidebarAction ? (
               <Button
+                data-testid="chat-tasks-toggle"
                 variant="ghost"
                 className={cn(
                   "shrink-0 whitespace-nowrap text-ui-sm sm:text-ui-sm font-normal",

@@ -57,6 +57,8 @@ interface ChatPendingInteractionsInput {
   setComposerCursor: Dispatch<SetStateAction<number>>;
   setComposerTrigger: Dispatch<SetStateAction<ComposerTrigger | null>>;
   setComposerHighlightedItemId: Dispatch<SetStateAction<string | null>>;
+  /** Inline fields own their answer text; the hidden composer draft stays untouched. */
+  userInputPresentation?: "composer" | "inline";
 }
 
 export function useChatPendingInteractions({
@@ -68,8 +70,10 @@ export function useChatPendingInteractions({
   setComposerCursor,
   setComposerTrigger,
   setComposerHighlightedItemId,
+  userInputPresentation,
 }: ChatPendingInteractionsInput) {
   const activeThreadId = activeThread?.id ?? null;
+  const usesComposerForUserInput = userInputPresentation !== "inline";
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const setStoreThreadError = useStore((store) => store.setError);
   const [respondingRequestKeys, setRespondingRequestKeys] = useState<string[]>([]);
@@ -78,6 +82,9 @@ export function useChatPendingInteractions({
   );
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] =
     useState<Record<string, number>>({});
+  const approvalSubmissionsRef = useRef(
+    new Map<ThreadId, Map<string, { responseAttemptKey: string | null }>>(),
+  );
 
   // A closed or errored session has no live provider callback, so its requests
   // can never be answered. Gate them exactly like the sidebar pill, Kanban and
@@ -210,7 +217,7 @@ export function useChatPendingInteractions({
 
   useEffect(() => {
     const nextCustomAnswer = activePendingProgress?.customAnswer;
-    if (typeof nextCustomAnswer !== "string") {
+    if (!usesComposerForUserInput || typeof nextCustomAnswer !== "string") {
       lastSyncedPendingInputRef.current = null;
       return;
     }
@@ -242,6 +249,7 @@ export function useChatPendingInteractions({
     setComposerHighlightedItemId(null);
   }, [
     promptRef,
+    usesComposerForUserInput,
     setComposerCursor,
     setComposerTrigger,
     setComposerHighlightedItemId,
@@ -249,6 +257,47 @@ export function useChatPendingInteractions({
     activePendingUserInput?.requestId,
     activePendingProgress?.activeQuestion?.id,
   ]);
+
+  useEffect(() => {
+    if (!activeThreadId) return;
+    const claims = approvalSubmissionsRef.current.get(activeThreadId);
+    if (!claims) return;
+    for (const [requestKey, claim] of claims) {
+      const approval = pendingApprovals.find(
+        (request) =>
+          pendingRequestInstanceKey(request.requestId, request.lifecycleGeneration) === requestKey,
+      );
+      if (approval) {
+        if (
+          approval.responseAttemptKey !== undefined &&
+          approval.responseAttemptKey !== claim.responseAttemptKey
+        ) {
+          claims.delete(requestKey);
+        }
+        continue;
+      }
+      // A responding settlement hides its card but has not removed the request.
+      // Keep its accepted claim until settlement or a newer retryable attempt.
+      const settlement = activeThread?.pendingInteractions?.find(
+        (interaction) =>
+          interaction.interactionKind === "approval" &&
+          pendingRequestInstanceKey(
+            interaction.requestId,
+            interaction.lifecycleGeneration ?? undefined,
+          ) === requestKey,
+      );
+      if (
+        settlement &&
+        (settlement.status === "pending" ||
+          settlement.status === "responding" ||
+          settlement.status === "retryable")
+      ) {
+        continue;
+      }
+      claims.delete(requestKey);
+    }
+    if (claims.size === 0) approvalSubmissionsRef.current.delete(activeThreadId);
+  }, [activeThreadId, activeThread?.pendingInteractions, pendingApprovals]);
 
   const onRespondToApproval = useCallback(
     async (
@@ -260,6 +309,26 @@ export function useChatPendingInteractions({
       const api = readNativeApi();
       if (!api || !activeThreadId) return;
       const requestKey = pendingRequestInstanceKey(requestId, lifecycleGeneration);
+      const responseAttemptKey = pendingApprovals.find(
+        (approval) =>
+          pendingRequestInstanceKey(approval.requestId, approval.lifecycleGeneration) ===
+          requestKey,
+      )?.responseAttemptKey;
+      let claims = approvalSubmissionsRef.current.get(activeThreadId);
+      if (!claims) {
+        claims = new Map();
+        approvalSubmissionsRef.current.set(activeThreadId, claims);
+      }
+      const existingClaim = claims.get(requestKey);
+      if (
+        existingClaim &&
+        (responseAttemptKey === undefined ||
+          existingClaim.responseAttemptKey === responseAttemptKey)
+      ) {
+        return;
+      }
+      const claim = { responseAttemptKey: responseAttemptKey ?? null };
+      claims.set(requestKey, claim);
 
       setRespondingRequestKeys((existing) =>
         existing.includes(requestKey) ? existing : [...existing, requestKey],
@@ -271,13 +340,19 @@ export function useChatPendingInteractions({
         lifecycleGeneration,
         requestKind,
         runtimeMode,
-      }).catch((err: unknown) => {
-        setRespondingRequestKeys((existing) => existing.filter((key) => key !== requestKey));
-        throw err;
-      });
-      setRespondingRequestKeys((existing) => existing.filter((key) => key !== requestKey));
+      })
+        .catch((err: unknown) => {
+          if (claims.get(requestKey) === claim) claims.delete(requestKey);
+          throw err;
+        })
+        .finally(() => {
+          const currentClaim = claims.get(requestKey);
+          if (!currentClaim || currentClaim === claim) {
+            setRespondingRequestKeys((existing) => existing.filter((key) => key !== requestKey));
+          }
+        });
     },
-    [activeThreadId, runtimeMode],
+    [activeThreadId, pendingApprovals, runtimeMode],
   );
 
   const userInputSubmissionsRef = useRef(new Set<string>());
@@ -341,10 +416,12 @@ export function useChatPendingInteractions({
     if (!activePendingUserInput || activePendingIsResponding) {
       return;
     }
-    promptRef.current = "";
-    setPrompt("");
-    setComposerCursor(0);
-    setComposerTrigger(null);
+    if (usesComposerForUserInput) {
+      promptRef.current = "";
+      setPrompt("");
+      setComposerCursor(0);
+      setComposerTrigger(null);
+    }
     void onRespondToUserInput(
       activePendingUserInput.requestId,
       {},
@@ -352,6 +429,7 @@ export function useChatPendingInteractions({
     );
   }, [
     promptRef,
+    usesComposerForUserInput,
     setComposerCursor,
     setComposerTrigger,
     activePendingIsResponding,
@@ -399,13 +477,16 @@ export function useChatPendingInteractions({
         ...existing,
         [activePendingUserInputKey]: nextRequestAnswers,
       }));
-      promptRef.current = nextDraftAnswer.customAnswer ?? "";
-      if (promptRef.current.length === 0) setComposerCursor(0);
-      setComposerTrigger(null);
+      if (usesComposerForUserInput) {
+        promptRef.current = nextDraftAnswer.customAnswer ?? "";
+        if (promptRef.current.length === 0) setComposerCursor(0);
+        setComposerTrigger(null);
+      }
       return nextDraftAnswer;
     },
     [
       promptRef,
+      usesComposerForUserInput,
       setComposerCursor,
       setComposerTrigger,
       activePendingUserInput,
@@ -426,7 +507,6 @@ export function useChatPendingInteractions({
       if (!activePendingUserInputKey) {
         return;
       }
-      promptRef.current = value;
       const nextDraftAnswer = setPendingUserInputCustomAnswer(
         pendingUserInputAnswersByRequestIdRef.current[activePendingUserInputKey]?.[questionId],
         value,
@@ -444,13 +524,17 @@ export function useChatPendingInteractions({
         ...existing,
         [activePendingUserInputKey]: nextRequestAnswers,
       }));
-      setComposerCursor(nextCursor);
-      setComposerTrigger(
-        cursorAdjacentToMention ? null : detectComposerTrigger(value, expandedCursor),
-      );
+      if (usesComposerForUserInput) {
+        promptRef.current = value;
+        setComposerCursor(nextCursor);
+        setComposerTrigger(
+          cursorAdjacentToMention ? null : detectComposerTrigger(value, expandedCursor),
+        );
+      }
     },
     [
       promptRef,
+      usesComposerForUserInput,
       setComposerCursor,
       setComposerTrigger,
       activePendingUserInputKey,

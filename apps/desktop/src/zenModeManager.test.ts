@@ -24,6 +24,8 @@ class FakeWindow implements ZenModeWindow {
   visibleOnAllWorkspaces = false;
   visibleOnFullScreen = false;
   shadow = true;
+  visible = true;
+  focused = false;
   ignoreMouseEvents = false;
   failIgnoreMouseEvents = false;
   ignoreMouseCalls: Array<[boolean, { forward?: boolean } | undefined]> = [];
@@ -33,6 +35,8 @@ class FakeWindow implements ZenModeWindow {
   normalBounds = { ...this.bounds };
   failRestoreBounds = false;
   failZenBounds = false;
+  failBubbleBounds = false;
+  failShow = false;
 
   isDestroyed(): boolean {
     return this.destroyed;
@@ -44,6 +48,15 @@ class FakeWindow implements ZenModeWindow {
 
   getNormalBounds(): DesktopWindowBounds {
     return { ...this.normalBounds };
+  }
+
+  getContentBounds(): DesktopWindowBounds {
+    return {
+      x: this.bounds.x + nativeFrame.width / 2,
+      y: this.bounds.y + nativeFrame.height,
+      width: this.bounds.width - nativeFrame.width,
+      height: this.bounds.height - nativeFrame.height,
+    };
   }
 
   getContentSize(): number[] {
@@ -87,6 +100,9 @@ class FakeWindow implements ZenModeWindow {
   }
 
   setBounds(bounds: DesktopWindowBounds): void {
+    if (this.failBubbleBounds && bounds.width === 36 + nativeFrame.width) {
+      throw new Error("synthetic bubble failure");
+    }
     if (this.failZenBounds && bounds.width < 1100) {
       this.bounds = { ...bounds };
       this.normalBounds = { ...bounds };
@@ -154,6 +170,19 @@ class FakeWindow implements ZenModeWindow {
   setFullScreen(fullScreen: boolean): void {
     this.fullScreen = fullScreen;
   }
+
+  show(): void {
+    if (this.failShow) throw new Error("synthetic show failure");
+    this.visible = true;
+  }
+
+  hide(): void {
+    this.visible = false;
+  }
+
+  focus(): void {
+    this.focused = true;
+  }
 }
 
 function fixture(
@@ -162,12 +191,15 @@ function fixture(
     platform?: NodeJS.Platform;
     workAreas?: ReadonlyArray<DesktopWindowBounds>;
     shortcutRegisterResult?: boolean;
+    cursor?: { x: number; y: number };
+    zoom?: number;
     setFullScreenAndWait?: (window: ZenModeWindow, fullScreen: boolean) => Promise<void>;
   } = {},
 ) {
   const window = input.window ?? new FakeWindow();
   const states: ZenModeState[] = [];
   const onToggleRequested = vi.fn();
+  const cursor = input.cursor ?? { x: -1, y: -1 };
   const setBrowserViewsZenMode = vi.fn();
   const setTrafficLightsVisible = vi.fn();
   const setZenWindowMaterial = vi.fn();
@@ -184,6 +216,8 @@ function fixture(
     platform: input.platform ?? "darwin",
     getWindow: () => (window.destroyed ? null : window),
     getDisplayWorkAreas: () => input.workAreas ?? [workArea],
+    getCursorScreenPoint: () => cursor,
+    getWindowZoomFactor: () => input.zoom ?? 1,
     onStateChanged: (state) => states.push(state),
     onToggleRequested,
     setBrowserViewsZenMode,
@@ -198,6 +232,7 @@ function fixture(
     manager,
     window,
     states,
+    cursor,
     onToggleRequested,
     setBrowserViewsZenMode,
     setTrafficLightsVisible,
@@ -303,6 +338,33 @@ describe("ZenModeManager", () => {
     expect(f.window.getBounds().height).toBe(216);
     expect(ZEN_MODE_DEFAULT_WIDTH).toBe(720);
     expect(ZEN_MODE_MIN_WIDTH).toBe(520);
+  });
+
+  it("clamps expansion at the work-area top only when the compact anchor leaves insufficient room", async () => {
+    const area = { x: -100, y: 24, width: 1920, height: 1040 };
+    const f = fixture({ workAreas: [area] });
+    await f.manager.enter();
+    const compact = f.window.getBounds();
+    // Synthetic fixture placement exercises geometry; it does not stand in for native input.
+    f.window.setBounds({ ...compact, y: area.y + 8 });
+    const constrained = f.window.getBounds();
+    await f.manager.setExpanded(true);
+    const expandedHeight = ZEN_MODE_EXPANDED_HEIGHT + nativeFrame.height;
+    expect(f.window.getBounds()).toEqual({ ...constrained, y: area.y, height: expandedHeight });
+    expect(f.window.getBounds().y + f.window.getBounds().height).toBeGreaterThan(
+      constrained.y + constrained.height,
+    );
+    await f.manager.setExpanded(false);
+    f.window.setBounds({ ...compact, y: area.y + area.height - compact.height });
+    const anchored = f.window.getBounds();
+    await f.manager.setExpanded(true);
+    expect(f.window.getBounds()).toEqual({
+      ...anchored,
+      y: area.y + area.height - expandedHeight,
+      height: expandedHeight,
+    });
+    expect(f.window.getBounds().y + f.window.getBounds().height).toBe(anchored.y + anchored.height);
+    await f.manager.dispose();
   });
 
   it("restores off-screen original bounds to a visible work area and clamps minimum constraints", async () => {
@@ -496,5 +558,223 @@ describe("ZenModeManager", () => {
     expect(f.window.ignoreMouseEvents).toBe(false);
     expect(f.window.ignoreMouseCalls.at(-1)?.[0]).toBe(false);
     await f.manager.exit();
+  });
+  it("keeps independent panel and workbench geometry through a real 36px bubble and hide/restore", async () => {
+    const f = fixture();
+    const original = f.window.getBounds();
+    await f.manager.enter();
+    await f.manager.setCompactHeight(245);
+    await f.manager.setExpanded(true);
+    const panel = f.window.getBounds();
+    const minimum = f.window.getMinimumSize();
+
+    await f.manager.collapseToBubble();
+    expect(f.manager.getState()).toMatchObject({ isActive: true, isBubble: true, expanded: true });
+    expect(f.window.getContentSize()).toEqual([36, 36]);
+    expect(f.window.getBounds()).toMatchObject({
+      x: workArea.width - 28 - 36 - nativeFrame.width,
+      y: workArea.height - 28 - 36 - nativeFrame.height,
+    });
+    expect(f.window.isMinimized()).toBe(false);
+    expect(f.window.isResizable()).toBe(false);
+    expect(f.manager.getWindowStateForPersistence()?.bounds).toEqual(original);
+    const bubble = f.window.getBounds();
+    await f.manager.setExpanded(false);
+    await f.manager.setCompactHeight(96);
+    await f.manager.setPointerPassthrough(true);
+    await f.manager.setDragRegion({ x: 0, y: 0, width: 36, height: 36 });
+    expect(f.window.getBounds()).toEqual(bubble);
+    expect(f.window.ignoreMouseEvents).toBe(false);
+
+    await f.manager.hideBubble();
+    expect(f.window.visible).toBe(false);
+    await f.manager.setCompactHeight(500);
+    expect(f.window.visible).toBe(false);
+    await f.manager.restoreFromBubble();
+    expect(f.window.getBounds()).toEqual(panel);
+    expect(f.window.getMinimumSize()).toEqual(minimum);
+    expect(f.window.isResizable()).toBe(true);
+    expect(f.window.visible).toBe(true);
+    expect(f.window.focused).toBe(true);
+    expect(f.manager.getState()).toMatchObject({ isActive: true, isBubble: false, expanded: true });
+    await f.manager.setExpanded(false);
+    expect(f.window.getContentSize()[1]).toBe(245);
+    await f.manager.exit();
+    expect(f.window.getBounds()).toEqual(original);
+  });
+
+  it("restores the workbench directly from a hidden bubble on exit, reload, or disposal", async () => {
+    for (const finish of ["exit", "reload", "dispose"] as const) {
+      const f = fixture();
+      const original = f.window.getBounds();
+      await f.manager.enter();
+      await f.manager.collapseToBubble();
+      await f.manager.hideBubble();
+      if (finish === "exit") await f.manager.exit();
+      else if (finish === "reload") await f.manager.resetForRendererReload();
+      else await f.manager.dispose();
+      expect(f.window.getBounds()).toEqual(original);
+      expect(f.window.visible).toBe(true);
+      expect(f.manager.getState()).toMatchObject({ isActive: false, isBubble: false });
+    }
+  });
+
+  it("keeps a usable panel when collapse fails and keeps recovery available when showing fails", async () => {
+    const f = fixture();
+    await f.manager.enter();
+    const panel = f.window.getBounds();
+    f.window.failBubbleBounds = true;
+    await expect(f.manager.collapseToBubble()).rejects.toThrow("synthetic bubble failure");
+    expect(f.manager.getState().isBubble).toBe(false);
+    expect(f.window.getBounds()).toEqual(panel);
+    expect(f.window.isResizable()).toBe(true);
+    f.window.failBubbleBounds = false;
+    await f.manager.collapseToBubble();
+    await f.manager.hideBubble();
+    f.window.failShow = true;
+    await expect(f.manager.restoreFromBubble()).rejects.toThrow("synthetic show failure");
+    expect(f.manager.getState().isBubble).toBe(true);
+    f.window.failShow = false;
+    await f.manager.restoreFromBubble();
+    expect(f.window.visible).toBe(true);
+    expect(f.window.getBounds()).toEqual(panel);
+    await f.manager.dispose();
+  });
+
+  it("only enables bubbles on macOS and docks to the panel display's work area", async () => {
+    const f = fixture({ workAreas: [{ x: -800, y: 40, width: 640, height: 400 }] });
+    await f.manager.enter();
+    await f.manager.collapseToBubble();
+    expect(f.window.getBounds()).toMatchObject({
+      x: -160 - 16 - 36 - nativeFrame.width,
+      y: 440 - 16 - 36 - nativeFrame.height,
+    });
+    await f.manager.dispose();
+    for (const platform of ["win32", "linux"] as const) {
+      const unsupported = fixture({ platform });
+      await unsupported.manager.enter();
+      await expect(unsupported.manager.collapseToBubble()).rejects.toThrow("unavailable");
+      await expect(unsupported.manager.restoreFromBubble()).rejects.toThrow("unavailable");
+      await expect(unsupported.manager.hideBubble()).rejects.toThrow("unavailable");
+      expect(unsupported.manager.getState().isBubble).toBe(false);
+      await unsupported.manager.dispose();
+    }
+  });
+
+  it("fits the 36 CSS pixel bubble at non-default renderer zoom without changing saved panel geometry", async () => {
+    for (const zoom of [0.8, 1.25, 2]) {
+      const f = fixture({ zoom });
+      const original = f.window.getBounds();
+      await f.manager.enter();
+      const panel = f.window.getBounds();
+      await f.manager.collapseToBubble();
+      const contentSize = Math.ceil(36 * zoom);
+      expect(f.window.getContentSize()).toEqual([contentSize, contentSize]);
+      expect(f.window.getBounds()).toMatchObject({
+        x: workArea.width - 28 - contentSize - nativeFrame.width,
+        y: workArea.height - 28 - contentSize - nativeFrame.height,
+      });
+      expect(f.manager.getWindowStateForPersistence()?.bounds).toEqual(original);
+      await f.manager.restoreFromBubble();
+      expect(f.window.getBounds()).toEqual(panel);
+      await f.manager.dispose();
+    }
+  });
+
+  it("resizes an existing bubble on zoom notifications without waking hidden windows or changing panel bounds", async () => {
+    const options = { zoom: 1 };
+    const f = fixture(options);
+    await f.manager.enter();
+    const panel = f.window.getBounds();
+    await f.manager.collapseToBubble();
+    const bubble = f.window.getBounds();
+    const bottom = bubble.y + bubble.height;
+    const right = bubble.x + bubble.width;
+    options.zoom = 1.25;
+    await f.manager.syncBubbleZoom();
+    expect(f.window.getContentSize()).toEqual([45, 45]);
+    expect(f.window.getBounds().x + f.window.getBounds().width).toBe(right);
+    expect(f.window.getBounds().y + f.window.getBounds().height).toBe(bottom);
+    const setBounds = vi.spyOn(f.window, "setBounds");
+    await f.manager.syncBubbleZoom();
+    expect(setBounds).not.toHaveBeenCalled();
+    await f.manager.hideBubble();
+    options.zoom = 2;
+    await f.manager.syncBubbleZoom();
+    expect(f.window.getContentSize()).toEqual([72, 72]);
+    expect(f.window.visible).toBe(false);
+    await f.manager.restoreFromBubble();
+    expect(f.window.getBounds()).toEqual(panel);
+    options.zoom = 0.8;
+    setBounds.mockClear();
+    await f.manager.syncBubbleZoom();
+    expect(setBounds).not.toHaveBeenCalled();
+    await f.manager.dispose();
+    await f.manager.syncBubbleZoom();
+  });
+
+  it("arbitrates a stale click-through request from real cursor, content origin, and zoom", async () => {
+    vi.useFakeTimers();
+    const f = fixture({ zoom: 2 });
+    await f.manager.enter();
+    const bounds = f.window.getContentBounds();
+    const region = { x: 24, y: 40, width: 160, height: 20 };
+    await f.manager.setDragRegion(region);
+    await f.manager.setPointerPassthrough(true);
+    expect(f.window.ignoreMouseEvents).toBe(true);
+    f.cursor.x = bounds.x + 50 * 2;
+    f.cursor.y = bounds.y + 50 * 2;
+    await vi.advanceTimersByTimeAsync(16);
+    expect(f.window.ignoreMouseEvents).toBe(false);
+    // A late renderer request cannot override the native drag region.
+    await f.manager.setPointerPassthrough(true);
+    expect(f.window.ignoreMouseEvents).toBe(false);
+    const calls = f.window.ignoreMouseCalls.length;
+    await vi.advanceTimersByTimeAsync(64);
+    expect(f.window.ignoreMouseCalls).toHaveLength(calls);
+    f.cursor.x = bounds.x + bounds.width + 1;
+    await vi.advanceTimersByTimeAsync(16);
+    expect(f.window.ignoreMouseEvents).toBe(true);
+    await f.manager.collapseToBubble();
+    expect(f.window.ignoreMouseEvents).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    await f.manager.restoreFromBubble();
+    expect(f.window.ignoreMouseEvents).toBe(false);
+    await f.manager.dispose();
+  });
+
+  it("discards queued geometry and pointer requests across a bubble transition", async () => {
+    const f = fixture();
+    await f.manager.enter();
+    const panel = f.window.getBounds();
+    const collapse = f.manager.collapseToBubble();
+    const lateResize = f.manager.setCompactHeight(500);
+    const lateExpand = f.manager.setExpanded(true);
+    const latePointer = f.manager.setPointerPassthrough(true);
+    const lateDrag = f.manager.setDragRegion({ x: 0, y: 0, width: 100, height: 20 });
+    const restore = f.manager.restoreFromBubble();
+    await Promise.all([collapse, lateResize, lateExpand, latePointer, lateDrag, restore]);
+    expect(f.window.getBounds()).toEqual(panel);
+    expect(f.window.ignoreMouseEvents).toBe(false);
+    expect(f.manager.getState().expanded).toBe(false);
+    await f.manager.dispose();
+  });
+
+  it("cleans up native pointer observation on region removal, reload, close, and dispose", async () => {
+    vi.useFakeTimers();
+    for (const finish of ["region", "reload", "close", "dispose"] as const) {
+      const f = fixture();
+      await f.manager.enter();
+      await f.manager.setDragRegion({ x: 0, y: 0, width: 100, height: 20 });
+      expect(vi.getTimerCount()).toBe(1);
+      if (finish === "region") await f.manager.setDragRegion(null);
+      else if (finish === "reload") await f.manager.resetForRendererReload();
+      else if (finish === "close") {
+        f.window.destroyed = true;
+        f.manager.windowClosed();
+      } else await f.manager.dispose();
+      expect(vi.getTimerCount()).toBe(0);
+      await f.manager.dispose();
+    }
   });
 });

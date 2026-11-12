@@ -19,6 +19,9 @@ import { AppNavigationButtons } from "./AppNavigationButtons";
 import { SIDEBAR_OFFCANVAS_MOTION_CLASS, SidebarTrigger, useSidebar } from "./ui/sidebar";
 import { cn } from "~/lib/utils";
 import { useTranslation } from "~/i18n";
+import { useZenMode } from "./chat/ZenModeProvider";
+import { IconButton } from "./ui/icon-button";
+import { Minimize2 } from "~/lib/icons";
 
 const LEADING_CONTROLS_CLASS = "flex shrink-0 items-center gap-0.5";
 
@@ -31,6 +34,7 @@ const LEADING_CONTROLS_CLASS = "flex shrink-0 items-center gap-0.5";
  */
 export function SidebarLeadingControls({ className }: { className?: string }) {
   const { t } = useTranslation();
+  const zenMode = useZenMode();
 
   return (
     <div className={cn(LEADING_CONTROLS_CLASS, className)}>
@@ -38,6 +42,25 @@ export function SidebarLeadingControls({ className }: { className?: string }) {
         className="size-7 shrink-0 text-muted-foreground/75 hover:text-foreground"
         aria-label={t("workspace:sidebar_toggleThreadSidebar")}
       />
+      {zenMode.available ? (
+        <IconButton
+          type="button"
+          data-testid="zen-mode-entry"
+          size="icon-sm"
+          variant="ghost"
+          className="size-7 shrink-0 text-muted-foreground/75 hover:text-foreground"
+          label={t("chat:zenMode")}
+          tooltip={
+            zenMode.state.shortcutAvailable
+              ? `${t("chat:zenMode")} · ${zenMode.state.shortcut}`
+              : t("chat:zenShortcutUnavailable")
+          }
+          disabled={zenMode.pending}
+          onClick={zenMode.toggle}
+        >
+          <Minimize2 className="size-4" />
+        </IconButton>
+      ) : null}
       <AppNavigationButtons className="ms-0" />
     </div>
   );
@@ -186,6 +209,7 @@ function SidebarLeadingControlsAnchor({
   active?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const zenMode = useZenMode();
   useLayoutEffect(
     () => (active && ref.current ? register(ref.current) : undefined),
     [active, register],
@@ -198,6 +222,7 @@ function SidebarLeadingControlsAnchor({
       className={cn(LEADING_CONTROLS_CLASS, active && "[-webkit-app-region:no-drag]")}
     >
       <div className="size-7 shrink-0 sm:size-6" />
+      {zenMode.available ? <div className="size-7 shrink-0" /> : null}
       {isElectron ? (
         <div className="flex shrink-0 items-center gap-0.5">
           <div className="size-8 sm:size-7" />

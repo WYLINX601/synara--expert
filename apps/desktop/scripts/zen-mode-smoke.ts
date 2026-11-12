@@ -9,7 +9,7 @@ import { ThreadId } from "@synara/contracts";
 import { DesktopBrowserManager } from "../src/browserManager";
 import { DESKTOP_IPC_CHANNELS } from "../src/ipcChannels";
 import { registerZenModeIpc } from "../src/zenModeIpc";
-import { ZenModeManager } from "../src/zenModeManager";
+import { ZEN_MODE_EXPANDED_HEIGHT, ZenModeManager } from "../src/zenModeManager";
 import { createWindowMaterialApplier } from "../src/windowMaterial";
 
 const profile = mkdtempSync(join(tmpdir(), "synara-zen-smoke-"));
@@ -72,6 +72,8 @@ async function smoke() {
     platform: process.platform,
     getWindow: () => (window.isDestroyed() ? null : window),
     getDisplayWorkAreas: () => screen.getAllDisplays().map((display) => display.workArea),
+    getCursorScreenPoint: () => screen.getCursorScreenPoint(),
+    getWindowZoomFactor: () => window.webContents.getZoomFactor(),
     onStateChanged: (state) => {
       if (!window.isDestroyed()) {
         window.webContents.send(DESKTOP_IPC_CHANNELS.zenMode.stateChanged, state);
@@ -99,9 +101,26 @@ async function smoke() {
     shortcutRegistry: globalShortcut,
   });
   registerZenModeIpc(ipcMain, manager, (event) => event.sender === window.webContents);
+  let zoomSyncError: unknown;
+  ipcMain.on(DESKTOP_IPC_CHANNELS.zoomFactor, (event) => {
+    event.returnValue = event.sender.getZoomFactor();
+    if (event.sender === window.webContents) {
+      void manager.syncBubbleZoom().catch((error: unknown) => {
+        zoomSyncError = error;
+      });
+    }
+  });
   try {
     await window.loadURL(
-      `data:text/html,${encodeURIComponent("<title>Zen isolated smoke</title><textarea id='draft'>retained synthetic draft</textarea>")}`,
+      `data:text/html,${encodeURIComponent(`
+        <title>Zen isolated smoke</title>
+        <style>
+          body { margin: 0; background: transparent; }
+          textarea { position: fixed; left: 24px; top: 28px; width: 180px; height: 48px; -webkit-app-region: no-drag; }
+          #drag { position: fixed; left: 24px; right: 24px; bottom: 0; height: 24px; background: #6080a0; -webkit-app-region: drag; }
+        </style>
+        <textarea id="draft">retained synthetic draft</textarea><div id="drag"></div>
+      `)}`,
     );
     const invoke = (expression: string) => window.webContents.executeJavaScript(expression);
     await invoke("window.originalEditor = document.querySelector('#draft')");
@@ -184,27 +203,125 @@ async function smoke() {
     assert.deepEqual(manager.getWindowStateForPersistence()?.bounds, original.bounds);
     await invoke("window.desktopBridge.zenMode.setCompactHeight(145)");
     await eventually(() => Math.abs(window.getContentBounds().height - 145) <= 1, "compact height");
-    const compact = window.getBounds();
-    // Native drag regions move this same window; disclosure must retain the new anchor.
-    const workArea = screen.getDisplayMatching(compact).workArea;
-    window.setBounds({
-      ...compact,
-      x: Math.min(compact.x + 16, workArea.x + workArea.width - compact.width),
-      y: Math.max(workArea.y, workArea.y + workArea.height - compact.height - 24),
-    });
-    const moved = window.getBounds();
+    const region = await invoke(`(() => {
+      const { x, y, width, height } = document.querySelector('#drag').getBoundingClientRect();
+      return { x, y, width, height };
+    })()`);
+    await invoke(`window.desktopBridge.zenMode.setDragRegion(${JSON.stringify(region)})`);
+    const panelBounds = window.getBounds();
+    const workArea = screen.getDisplayMatching(panelBounds).workArea;
+    const nativeFrameHeight = panelBounds.height - window.getContentBounds().height;
+    const requestedExpandedHeight = ZEN_MODE_EXPANDED_HEIGHT + nativeFrameHeight;
+    const expectedExpandedHeight = Math.min(workArea.height, requestedExpandedHeight);
+    const requestedTop = panelBounds.y + panelBounds.height - requestedExpandedHeight;
+    const expectedExpandedTop = Math.max(
+      workArea.y,
+      Math.min(requestedTop, workArea.y + workArea.height - expectedExpandedHeight),
+    );
     await invoke("window.desktopBridge.zenMode.setExpanded(true)");
-    await eventually(() => window.getContentBounds().height >= 500, "expanded height");
-    assert.equal(window.getBounds().x, moved.x);
-    assert.equal(window.getBounds().width, moved.width);
+    await eventually(
+      () => window.getBounds().height === expectedExpandedHeight,
+      "expanded height fits the available work area",
+    );
+    assert.equal(window.getBounds().x, panelBounds.x);
+    assert.equal(window.getBounds().width, panelBounds.width);
+    assert.equal(window.getBounds().y, expectedExpandedTop, "expansion clamps to the work area");
+    if (requestedTop >= workArea.y) {
+      assert.equal(
+        window.getBounds().y + window.getBounds().height,
+        panelBounds.y + panelBounds.height,
+        "expansion retains the bottom anchor when there is room above",
+      );
+    } else {
+      assert.equal(
+        window.getBounds().y,
+        workArea.y,
+        "insufficient space clamps to the work-area top",
+      );
+    }
+    await invoke("window.desktopBridge.zenMode.setExpanded(false)");
+    const compactBounds = window.getBounds();
+    // Initial placement for the next geometry case only; this is not native drag evidence.
+    const fixtureBounds = {
+      ...compactBounds,
+      y: workArea.y + workArea.height - compactBounds.height,
+    };
+    window.setBounds(fixtureBounds);
+    await eventually(
+      () => window.getBounds().y === fixtureBounds.y,
+      "bottom-edge fixture placement",
+    );
+    const anchoredBounds = window.getBounds();
+    await invoke("window.desktopBridge.zenMode.setExpanded(true)");
+    await eventually(
+      () => window.getBounds().height === expectedExpandedHeight,
+      "anchored expansion height",
+    );
+    assert.equal(window.getBounds().x, anchoredBounds.x);
+    assert.equal(window.getBounds().width, anchoredBounds.width);
     assert.equal(
       window.getBounds().y + window.getBounds().height,
-      moved.y + moved.height,
-      "drawer keeps the dragged window's bottom anchor",
+      anchoredBounds.y + anchoredBounds.height,
+      "a bottom-edge fixture has enough room to retain the expansion anchor",
     );
     const expanded = window.getBounds();
     await invoke("window.desktopBridge.zenMode.setCompactHeight(180)");
     assert.deepEqual(window.getBounds(), expanded, "expanded geometry must ignore compact updates");
+    if (process.platform === "darwin") {
+      await invoke("window.desktopBridge.zenMode.bubble.collapse()");
+      assert.equal(manager.getState().isBubble, true);
+      assert.equal(window.isMinimized(), false, "a bubble is not native minimization");
+      assert.deepEqual(window.getContentSize(), [36, 36]);
+      const bubble = window.getBounds();
+      await invoke("window.desktopBridge.zenMode.setExpanded(false)");
+      await invoke("window.desktopBridge.zenMode.setCompactHeight(600)");
+      await invoke("window.desktopBridge.zenMode.setPointerPassthrough(true)");
+      assert.deepEqual(window.getBounds(), bubble, "late panel IPC must not resize the bubble");
+      assert.equal(pointerPassthrough, false, "a stale request must not disable bubble input");
+      assert.deepEqual(manager.getWindowStateForPersistence()?.bounds, original.bounds);
+      await invoke("window.desktopBridge.zenMode.bubble.hide()");
+      assert.equal(window.isVisible(), false);
+      await invoke("window.desktopBridge.zenMode.setCompactHeight(600)");
+      assert.equal(window.isVisible(), false, "background layout must not wake a hidden bubble");
+      await manager.restoreFromBubble();
+      assert.equal(window.isVisible(), true, "the host activation path restores the panel");
+      assert.equal(manager.getState().isBubble, false);
+      assert.deepEqual(window.getBounds(), expanded);
+      await invoke("window.desktopBridge.zenMode.bubble.collapse()");
+      await invoke("window.desktopBridge.zenMode.bubble.restore()");
+      assert.deepEqual(window.getBounds(), expanded);
+      const originalZoom = window.webContents.getZoomFactor();
+      window.webContents.setZoomFactor(1.25);
+      await invoke("window.desktopBridge.zenMode.bubble.collapse()");
+      assert.deepEqual(
+        window.getContentSize(),
+        [45, 45],
+        "the bubble fits 36 CSS pixels at 125% zoom",
+      );
+      window.webContents.setZoomFactor(2);
+      await eventually(() => {
+        if (zoomSyncError) throw zoomSyncError;
+        return window.getContentSize()[0] === 72 && window.getContentSize()[1] === 72;
+      }, "preload viewport notification resizes an already-visible bubble at 200% zoom");
+      await invoke("window.desktopBridge.zenMode.bubble.hide()");
+      window.webContents.setZoomFactor(0.8);
+      await manager.syncBubbleZoom();
+      assert.deepEqual(
+        window.getContentSize(),
+        [29, 29],
+        "hidden bubbles also retain CSS-pixel sizing",
+      );
+      assert.equal(window.isVisible(), false, "zoom changes must not wake hidden bubbles");
+      await invoke("window.desktopBridge.zenMode.bubble.restore()");
+      assert.deepEqual(
+        window.getBounds(),
+        expanded,
+        "zoomed bubbles retain independent panel bounds",
+      );
+      window.webContents.setZoomFactor(originalZoom);
+    } else {
+      assert.equal(await invoke("window.desktopBridge.zenMode.bubble"), undefined);
+    }
     await invoke("window.desktopBridge.zenMode.setExpanded(false)");
     await eventually(
       () => Math.abs(window.getContentBounds().height - 180) <= 1,
@@ -235,6 +352,10 @@ async function smoke() {
     // A reload must start from normal geometry; this mirrors the main-process exit seam.
     await invoke("window.desktopBridge.zenMode.enter()");
     await invoke("window.desktopBridge.zenMode.setPointerPassthrough(true)");
+    if (process.platform === "darwin") {
+      await invoke("window.desktopBridge.zenMode.bubble.collapse()");
+      await invoke("window.desktopBridge.zenMode.bubble.hide()");
+    }
     await manager.resetForRendererReload();
     assert.equal(pointerPassthrough, false, "reload must restore pointer input");
     await window.webContents.reload();
@@ -245,6 +366,11 @@ async function smoke() {
         passed: true,
         platform: process.platform,
         shortcutRegistered,
+        nativeDrag: {
+          status: "not-run",
+          reason:
+            "Requires separate authorized native input and observed window-coordinate changes.",
+        },
         checks: [
           "production-preload-ipc",
           "always-on-top",
@@ -255,7 +381,16 @@ async function smoke() {
           ...(process.platform === "darwin" ? ["synthetic-fullscreen-host-focus-and-policy"] : []),
           "content-height",
           "expand-collapse",
-          "moved-window-bottom-anchor",
+          "production-drag-region-ipc",
+          "work-area-clamp-and-available-space-bottom-anchor",
+          ...(process.platform === "darwin"
+            ? [
+                "bubble-36px",
+                "bubble-hide-and-host-restore",
+                "bubble-late-ipc",
+                "bubble-panel-geometry",
+              ]
+            : []),
           "invalid-height",
           "restore",
           "same-editor-draft",

@@ -1,12 +1,13 @@
 import type { UserInputQuestion } from "@synara/contracts";
-import { useEffect, useEffectEvent, useRef, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useId, useRef, type ReactNode } from "react";
 import {
   derivePendingUserInputProgress,
   type PendingUserInputDraftAnswer,
 } from "../../pendingUserInput";
+import { Button } from "../ui/button";
 import { CheckIcon, ChevronLeftIcon, ChevronRightIcon } from "~/lib/icons";
 import { cn } from "~/lib/utils";
-import { ComposerChoiceRow } from "./ComposerChoiceRow";
+import { ComposerChoiceChip, ComposerChoiceRow } from "./ComposerChoiceRow";
 import { COMPOSER_INPUT_SURFACE_CLASS_NAME } from "./composerPickerStyles";
 import { useTranslation } from "~/i18n";
 
@@ -25,6 +26,8 @@ export function UserInputQuestionForm({
   onCancel,
   autoAdvance = true,
   keyboardShortcuts = "global",
+  customAnswerEntry,
+  compact = false,
   children,
 }: {
   questions: ReadonlyArray<UserInputQuestion>;
@@ -38,6 +41,9 @@ export function UserInputQuestionForm({
   onCancel?: () => void;
   autoAdvance?: boolean;
   keyboardShortcuts?: "global" | "local";
+  /** Compact decision surfaces answer through the last choice row instead of the composer editor. */
+  customAnswerEntry?: { onChange: (value: string) => void } | undefined;
+  compact?: boolean;
   children?: ReactNode;
 }) {
   const { t } = useTranslation();
@@ -45,6 +51,14 @@ export function UserInputQuestionForm({
   const progress = derivePendingUserInputProgress(questions, answers, questionIndex);
   const activeQuestion = progress.activeQuestion;
   const selectedOptionLabelSet = new Set(progress.selectedOptionLabels);
+  const customAnswerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const customAnswerId = useId();
+  const customAnswerActive = customAnswerEntry !== undefined;
+  const customAnswerValue = progress.customAnswer;
+  const customAnswerShortcut =
+    customAnswerActive && activeQuestion && activeQuestion.options.length < 9
+      ? activeQuestion.options.length + 1
+      : null;
   const autoAdvanceTimerRef = useRef<number | null>(null);
   const onAdvanceRef = useRef(onAdvance);
   useEffect(() => {
@@ -108,9 +122,18 @@ export function UserInputQuestionForm({
       return;
     const digit = Number.parseInt(event.key, 10);
     const option = digit >= 1 && digit <= 9 ? activeQuestion.options[digit - 1] : undefined;
-    if (!option) return;
-    event.preventDefault();
-    handleOptionSelection(activeQuestion.id, option.label);
+    if (option) {
+      event.preventDefault();
+      handleOptionSelection(activeQuestion.id, option.label);
+      return;
+    }
+    if (customAnswerActive && digit === activeQuestion.options.length + 1) {
+      event.preventDefault();
+      const input = customAnswerInputRef.current;
+      input?.focus();
+      // Continue an existing draft instead of inserting at the start.
+      input?.setSelectionRange(input.value.length, input.value.length);
+    }
   };
   const handleEffectShortcut = useEffectEvent(handleShortcut);
 
@@ -134,10 +157,19 @@ export function UserInputQuestionForm({
 
   return (
     <div
-      className={cn(COMPOSER_INPUT_SURFACE_CLASS_NAME, "overflow-hidden px-3.5 py-3")}
+      className={cn(
+        COMPOSER_INPUT_SURFACE_CLASS_NAME,
+        "px-3.5 py-3",
+        compact ? "max-h-80 overflow-y-auto overscroll-contain" : "overflow-hidden",
+      )}
       onKeyDown={keyboardShortcuts === "local" ? handleShortcut : undefined}
     >
-      <div className="flex items-start justify-between gap-3">
+      <div
+        className={cn(
+          "flex items-start justify-between gap-3",
+          compact && "sticky top-0 z-20 bg-background",
+        )}
+      >
         <div className="min-w-0">
           {activeQuestion.header !== activeQuestion.question ? (
             <p className="mb-1 text-ui-sm text-muted-foreground">{activeQuestion.header}</p>
@@ -177,7 +209,7 @@ export function UserInputQuestionForm({
           {t("chat:composerPendingUserInputPanel_selectOneOrMore")}
         </p>
       ) : null}
-      {progress.usingCustomAnswer ? (
+      {!customAnswerActive && progress.usingCustomAnswer ? (
         <p role="status" className="mt-1 text-ui-sm text-muted-foreground">
           {activeQuestion.multiSelect && activeQuestion.allowCustomAnswerWithOptions
             ? "Custom answer included."
@@ -210,19 +242,88 @@ export function UserInputQuestionForm({
           })}
         </div>
       ) : null}
-      {onCancel ? (
-        <div className="mt-2.5 flex justify-end">
-          <button
-            type="button"
-            disabled={isResponding}
-            onClick={handleCancel}
-            className={cn(
-              "rounded-md px-2 py-1 text-ui text-[var(--color-text-foreground-secondary)] transition-colors duration-150 hover:bg-[var(--color-background-button-secondary-hover)] hover:text-[var(--color-text-foreground)]",
-              isResponding && "cursor-not-allowed opacity-50",
-            )}
-          >
-            {t("common:form_cancel")}
-          </button>
+      {customAnswerEntry ? (
+        <div
+          className={cn(
+            "group flex w-full items-start gap-2.5 rounded-lg px-2 py-1.5 transition-colors duration-150",
+            activeQuestion.options.length > 0 ? "mt-0.5" : "mt-2.5",
+            customAnswerValue.trim().length > 0
+              ? "bg-[var(--color-background-button-secondary)]"
+              : "hover:bg-[var(--color-background-button-secondary-hover)]",
+            isResponding && "opacity-50",
+          )}
+          onMouseDown={(event) => {
+            if (event.target instanceof HTMLTextAreaElement) return;
+            event.preventDefault();
+            customAnswerInputRef.current?.focus();
+          }}
+        >
+          <ComposerChoiceChip
+            shortcut={customAnswerShortcut}
+            selected={customAnswerValue.trim().length > 0}
+          />
+          <div className="flex min-w-0 flex-1 items-start gap-1.5 leading-snug">
+            <label
+              htmlFor={customAnswerId}
+              className="shrink-0 text-ui-lg font-medium text-foreground/90"
+            >
+              {t("chat:other")}
+            </label>
+            <textarea
+              ref={customAnswerInputRef}
+              id={customAnswerId}
+              rows={1}
+              value={customAnswerValue}
+              disabled={isResponding}
+              placeholder={t("chat:composerPendingUserInputPanel_customAnswerPlaceholder")}
+              onChange={(event) => customAnswerEntry.onChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (
+                  event.key !== "Enter" ||
+                  event.shiftKey ||
+                  event.nativeEvent.isComposing ||
+                  event.nativeEvent.keyCode === 229
+                ) {
+                  return;
+                }
+                event.preventDefault();
+                if (progress.canAdvance && !isResponding) onAdvance();
+              }}
+              className="field-sizing-content max-h-32 min-h-0 min-w-0 flex-1 resize-none bg-transparent p-0 text-ui-lg leading-snug text-foreground outline-none placeholder:text-muted-foreground/55 disabled:cursor-not-allowed"
+            />
+          </div>
+        </div>
+      ) : null}
+      {onCancel || customAnswerActive ? (
+        <div className="mt-2.5 flex justify-end gap-2">
+          {onCancel ? (
+            <button
+              type="button"
+              disabled={isResponding}
+              onClick={handleCancel}
+              className={cn(
+                "rounded-md px-2 py-1 text-ui text-[var(--color-text-foreground-secondary)] transition-colors duration-150 hover:bg-[var(--color-background-button-secondary-hover)] hover:text-[var(--color-text-foreground)]",
+                isResponding && "cursor-not-allowed opacity-50",
+              )}
+            >
+              {t("common:form_cancel")}
+            </button>
+          ) : null}
+          {customAnswerActive ? (
+            <Button
+              type="button"
+              size="sm"
+              className="rounded-full px-4"
+              disabled={!progress.canAdvance || isResponding}
+              onClick={() => onAdvance()}
+            >
+              {isResponding
+                ? t("chat:submitting2")
+                : progress.isLastQuestion
+                  ? t("chat:submitAnswers")
+                  : t("chat:composerPendingUserInputPanel_nextQuestion")}
+            </Button>
+          ) : null}
         </div>
       ) : null}
       {children}

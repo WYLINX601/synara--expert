@@ -12,6 +12,8 @@ interface PendingUserInputPanelProps {
   onAdvance: (answerOverrides?: Record<string, PendingUserInputDraftAnswer>) => void;
   onPrevious: () => void;
   onCancel: () => void;
+  customAnswerEntry?: { onChange: (value: string) => void } | undefined;
+  compact?: boolean;
 }
 
 // Keep pending-input choices neutral so they read like Codex list controls instead of accent buttons.
@@ -25,6 +27,8 @@ export function ComposerPendingUserInputPanel({
   onAdvance,
   onPrevious,
   onCancel,
+  customAnswerEntry,
+  compact = false,
 }: PendingUserInputPanelProps) {
   if (pendingUserInputs.length === 0) return null;
   const activePrompt = pendingUserInputs[0];
@@ -42,6 +46,8 @@ export function ComposerPendingUserInputPanel({
       onAdvance={onAdvance}
       onPrevious={onPrevious}
       onCancel={onCancel}
+      customAnswerEntry={customAnswerEntry}
+      compact={compact}
     />
   );
 }

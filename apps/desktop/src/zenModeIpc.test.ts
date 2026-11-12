@@ -16,6 +16,7 @@ describe("Zen mode IPC", () => {
     };
     const state: ZenModeState = {
       isActive: false,
+      isBubble: false,
       expanded: false,
       alwaysOnTop: false,
       shortcut: "CommandOrControl+Shift+Space",
@@ -28,6 +29,10 @@ describe("Zen mode IPC", () => {
       setExpanded: vi.fn(async () => undefined),
       setCompactHeight: vi.fn(async () => undefined),
       setPointerPassthrough: vi.fn(async () => undefined),
+      setDragRegion: vi.fn(async () => undefined),
+      collapseToBubble: vi.fn(async () => undefined),
+      restoreFromBubble: vi.fn(async () => undefined),
+      hideBubble: vi.fn(async () => undefined),
     };
     registerZenModeIpc(
       ipc as unknown as IpcMain,
@@ -36,20 +41,15 @@ describe("Zen mode IPC", () => {
     );
 
     const channels = DESKTOP_IPC_CHANNELS.zenMode;
-    expect(handlers.size).toBe(6);
+    expect(handlers.size).toBe(10);
     const frame = {};
     const trusted = {
       sender: { id: 1, mainFrame: frame },
       senderFrame: frame,
     } as unknown as IpcMainInvokeEvent;
-    const channelsToCheck = [
-      channels.getState,
-      channels.enter,
-      channels.exit,
-      channels.setExpanded,
-      channels.setCompactHeight,
-      channels.setPointerPassthrough,
-    ];
+    const channelsToCheck = Object.entries(channels)
+      .filter(([key]) => key !== "stateChanged" && key !== "toggleRequested")
+      .map(([, channel]) => channel);
     for (const channel of channelsToCheck) {
       const handler = handlers.get(channel)!;
       expect(() =>
@@ -91,5 +91,33 @@ describe("Zen mode IPC", () => {
       );
     }
     expect(manager.setPointerPassthrough).toHaveBeenCalledTimes(1);
+
+    const region = { x: 20, y: 120, width: 400, height: 24 };
+    await expect(handlers.get(channels.setDragRegion)!(trusted, region)).resolves.toBeUndefined();
+    expect(manager.setDragRegion).toHaveBeenLastCalledWith(region);
+    await expect(handlers.get(channels.setDragRegion)!(trusted, null)).resolves.toBeUndefined();
+    expect(manager.setDragRegion).toHaveBeenLastCalledWith(null);
+    for (const invalid of [
+      undefined,
+      false,
+      "rect",
+      {},
+      { ...region, width: 0 },
+      { ...region, height: -1 },
+      { ...region, x: Number.NaN },
+      { ...region, y: Number.POSITIVE_INFINITY },
+      { ...region, width: "400" },
+    ]) {
+      expect(() => handlers.get(channels.setDragRegion)!(trusted, invalid)).toThrow(
+        "Invalid Zen mode drag region",
+      );
+    }
+    expect(manager.setDragRegion).toHaveBeenCalledTimes(2);
+    await expect(handlers.get(channels.collapseToBubble)!(trusted)).resolves.toBeUndefined();
+    await expect(handlers.get(channels.restoreFromBubble)!(trusted)).resolves.toBeUndefined();
+    await expect(handlers.get(channels.hideBubble)!(trusted)).resolves.toBeUndefined();
+    expect(manager.collapseToBubble).toHaveBeenCalledOnce();
+    expect(manager.restoreFromBubble).toHaveBeenCalledOnce();
+    expect(manager.hideBubble).toHaveBeenCalledOnce();
   });
 });

@@ -105,8 +105,6 @@ interface ChatTurnFollowUpsInput {
   anchorSentMessagesToTop: boolean;
   activeProposedPlan: LatestProposedPlanState | null;
   setQueuedSteerGate: Dispatch<SetStateAction<QueuedSteerGate | null>>;
-  planSidebarDismissedForTurnRef: RefObject<string | null>;
-  setPlanSidebarOpen: Dispatch<SetStateAction<boolean>>;
   isRevertingCheckpoint: boolean;
   setIsRevertingCheckpoint: Dispatch<SetStateAction<boolean>>;
   isSendBusy: ReturnType<typeof useChatLocalDispatch>["isSendBusy"];
@@ -148,7 +146,6 @@ interface ChatTurnFollowUpsInput {
   activeProject: Project | undefined;
   activeThreadAssociatedWorktree: ReturnType<typeof deriveAssociatedWorktreeMetadata>;
   syncServerShellSnapshot: ReturnType<typeof useStore.getState>["syncServerShellSnapshot"];
-  planSidebarOpenOnNextThreadRef: RefObject<boolean>;
   navigate: ReturnType<typeof useNavigate>;
 }
 
@@ -163,8 +160,6 @@ export function useChatTurnFollowUps({
   anchorSentMessagesToTop,
   activeProposedPlan,
   setQueuedSteerGate,
-  planSidebarDismissedForTurnRef,
-  setPlanSidebarOpen,
   isRevertingCheckpoint,
   setIsRevertingCheckpoint,
   isSendBusy,
@@ -192,7 +187,6 @@ export function useChatTurnFollowUps({
   activeProject,
   activeThreadAssociatedWorktree,
   syncServerShellSnapshot,
-  planSidebarOpenOnNextThreadRef,
   navigate,
 }: ChatTurnFollowUpsInput) {
   async function onSubmitPlanFollowUp({
@@ -386,13 +380,6 @@ export function useChatTurnFollowUps({
         };
         setQueuedSteerGate(nextSteerGate);
         armQueuedComposerSteerGate(threadId, nextSteerGate);
-      }
-      // Optimistically open the plan sidebar when implementing (not refining).
-      // "default" mode here means the agent is executing the plan, which produces
-      // step-tracking activities that the sidebar will display.
-      if (nextInteractionMode === "default") {
-        planSidebarDismissedForTurnRef.current = null;
-        setPlanSidebarOpen(true);
       }
     };
 
@@ -762,8 +749,6 @@ export function useChatTurnFollowUps({
       })
       .then((snapshot) => {
         syncServerShellSnapshot(snapshot);
-        // Signal that the plan sidebar should open on the new thread.
-        planSidebarOpenOnNextThreadRef.current = true;
         return navigate({
           to: "/$threadId",
           params: { threadId: nextThreadId },
@@ -795,7 +780,6 @@ export function useChatTurnFollowUps({
       })
       .then(finish, finish);
   }, [
-    planSidebarOpenOnNextThreadRef,
     sendInFlightRef,
     activeProject,
     activeProposedPlan,

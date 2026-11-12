@@ -1,319 +1,47 @@
-# Linx / Synara Expert 项目上下文
+# Linx 项目上下文
 
-更新日期：2026-11-02
+更新日期为 2026-11-09。本文负责当前目标、任务路由、已确认决定摘要与下一步，执行规范由根 `AGENTS.md` 的 BMAD 托管块维护。
 
-范围：以 Linx V2.0 组织长期方向管理、专业任务执行与能力进化，并在现有 Synara Expert / MCP / 工作台适配层上增量推进。本文只负责项目路由、设计边界与当前状态；产品、技术和验收细节以链接的权威文档为准。
+## 当前目标与已确认边界
+
+- 以 [Linx V2.0](../docs/linx-product-design-v2.md) 组织长期方向管理、专业任务执行与能力进化，复用现有源码持续演进。规划与源码实现、运行证据和用户验收分别核对。
+- Linx 按独立产品管理，产品更新消费自有已发布安装包。发布身份、平台、签名与既有安装承接按 [更新能力计划](../docs/linx-update-development-plan.md) 收敛，Bundle ID、数据目录与仓库来源按实际实现核验。
+- 架构约束、操作与检查、实际结果各有权威记录，入口只维护摘要与链接。每项工作按准确源码与当前工作区核对证据。
 
 <a id="execution-entry"></a>
 
-## Hub Graph 回滚（2026-11-02）
-
-用户明确要求撤销 Hub Graph、团队配置、计划审批执行和定向回复。本次为定向源码回滚，不重置 main，不撤销后续独立 Expert 中心、Skill 管理和进化能力。旧 Hub Graph 方案与验收文档仅保留为历史证据，不作为当前能力说明。
-
-保留 Workbench 已登记的协作／计划迁移及数据表，避免破坏迁移校验与已有数据库；不提供旧计划继续执行入口。不删除历史任务、消息、团队或计划数据。已有通用 Hub／Worker 能力保留。日用应用、数据库、安装和发布未变更。代码检查结果以本次实际执行日志为准，未通过完整门禁不得视为已验收或可发布。
-
-本轮源码检查：fmt、lint（0 errors，保留已有 warnings）、7 包 typecheck、102 文件宿主边界、迁移归属及 Windows 静态边界检查通过。服务端聚焦 251 项、前端聚焦 50 项、contracts 248 项通过。ProviderCommandReactor 486 项通过，1 项因 `listen EPERM ::1` 受阻；全库测试也因沙箱禁止监听端口失败，不能作为完整验收。未执行真实 Provider、浏览器预览或安装验收。
-
-用户随后授权安装回滚后的最新版本。回滚源码固定为本地 main 提交 `d0f89d06f`，日用 **0.1.11** 已安装并健康重启。该源码全库 18,223 项通过、40 项既有跳过，浏览器聚焦 54 项通过；原端口阻塞未重现。日用数据副本兼容性、安装后数据保留及产物来源核对通过，未调用真实模型、推送或公开发布。详情与恢复入口见[本机安装验收](../docs/hub-graph-rollback-install-2026-11-02.md)。上段“未安装”等描述保留其先前检查时点，不代表当前安装状态。
-
-**当前日用为 0.1.12**：用户指出后复核发现，0.1.11 仅包含旧手动进化，遗漏了已合入远端的新版自动学习，不能称为最新版本。用户要求重新安装后，已将远端 `fe61d3af4` 的第一／二阶段自动学习、Space Memory、定向撤销与 Hub 回滚整合为 `4bb3eea52`，完成完整检查、Expert/10→13 副本迁移及保留核对，并安装、正常重启。全库 18,560 项、浏览器 193 项通过，40 项既有跳过；当前 Codex 专家配置保留，自学习缺省关闭，本期支持 Pi／OMP。最新验收及恢复入口见[自动学习安装记录](../docs/expert-autolearning-install-2026-11-02.md)。本次本地整合未推送或公开发布。
-
-**2026-11-04 当前日用更新为 0.1.13**：用户授权安装远端 main `238f5eda0`（PR #7）的专家默认模型与选择器修复。精确源码 CI 全部成功，本机打包、隔离启动、安装后健康及数据保留检查通过；35 个聊天、20 个项目、3 个 Space 和 781 份保护文件保留。当前恢复版本为 0.1.12，详情见[本机安装记录](../docs/workbench-install-2026-11-04.md)。上方 0.1.12 记录为历史时点。
-
-## Ambient Context / Obsidian（2026-11-06）
-
-用户要求落地《整合方案分析》，并确认本轮先交付 Obsidian 闭环、后续逐阶段推进。范围与后续路线见[实施入口](./ambient-context-implementation-plan-2026-11-06.md)，实际检查与未验范围见[验收记录](../docs/ambient-context-obsidian-acceptance-2026-11-06.md)。环境上下文独立于 Space/Project Context：来源与类型分别管理，只有显式固定并发送的快照进入原任务。禅模式、浏览器扩展和系统来源不作为本轮已实现能力；源码、日用安装和真实 Provider 验收分别登记。
-
-用户随后确认多库主动绑定和自动跟随优化，并明确每个聊天默认最多绑定 5 个上下文库、可自行调整。连接、绑定、消息快照分离；集成下独立应用上下文设置与 `@` 上下文 Tab。当前修改及验收状态见[多库跟随验收](../docs/ambient-context-multivault-acceptance-2026-11-06.md)，不将源码检查等同于日用安装更新。
-
-## 禅模式 Phase 2（2026-11-06）
-
-用户已要求在多库优化基础上继续开发禅模式，并明确它是主窗口的缩小形态，两种展示互斥。复用同一窗口、已挂载聊天、上下文绑定和执行链路，不建设双窗口交接。用户已确认精修输入框、权限/模型内收布局，并授权完成原生接入与 GitHub 推送合并；共用当前交付分支 `codex/zen-context-completion` 携带多库优化。当前范围、检查与安装边界见[实施记录](./zen-mode-implementation-2026-11-06.md)；未完成的检查不继承上一轮结果。
-
-2026-11-07：上一轮 `060fd071d` 已合入并安装 0.1.14。用户随后确认去除大背板、状态/操作抽屉、悬停拖动柄、配对恢复图标及 macOS 跨全屏空间策略；本轮优化复用同一聊天与输入组件。当前本地源码与验证状态集中登记于上述实施记录，未更新日用安装。
-
-## OMP Expert 版本兼容（2026-11-06）
-
-用户要求修复 OMP 18.16.0 被旧版精确校验拦截的问题。源码改为能力验证，保留固定 Skill、权限、子任务归属与受限学习请求边界；18.12.1 继续走旧适配，其他正式版本使用官方扩展接口。实际检查、原生 CLI 探针及安装边界见 [OMP 兼容验收](../docs/omp-runtime-compatibility-2026-11-06.md)。源码改动不代表日用应用已更新或原线程已恢复。
-
-## 执行入口：先选任务，再读对应规范
-
-2026-11-06 用户授权执行上游 v1.1.0 合并，先梳理再实施。最新执行入口为 [v1.1.0 合并方案](./synara-v110-merge-execution-2026-11-06.md)：基线包含 Obsidian 闭环与 OMP 18.16 修复，Expert ledger 保留 14；旧方案的冲突统计和验收不直接用于新候选。
-
-2026-10-16，用户在审核修订后明确要求执行《Linx 二次开发流程与工程标准 v1.1》并落地仓库规范与 SOP。规范已分别纳入下列现有文件；本页只维护路由和状态，不再复制完整架构、步骤或检查矩阵。该决定建立工程标准，不代表新的产品功能、上游升级或发布已完成。
-
-| 本次任务                              | 先读的权威材料                                                                                                                                                                                                                                                                                                                               | 使用边界                                                                                                                            |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| 普通开发、修复、UI 或文档调整         | [执行 SOP 与检查矩阵](../docs/workbench-development-workflow.md#execution-sop)                                                                                                                                                                                                                                                               | 按影响选择检查；核心流程/信息架构/重要视觉先确认，小修可实现后预览                                                                  |
-| 应用日用、自修改与预览验收            | [日用与开发预览双环境流程](../docs/workbench-development-workflow.md#browser-daily-preview)                                                                                                                                                                                                                                                  | 应用运行固定验收产物；预览匹配应用源码基线，数据与端口隔离；验收后更新应用                                                          |
-| 环境创建、复用、存储与任务收尾        | [环境与存储生命周期](../docs/workbench-development-workflow.md#environment-lifecycle)                                                                                                                                                                                                                                                        | 先核对归属与容量；交付同步收尾，已生效规则与待实现工具分开                                                                          |
-| 新模块、新页面、宿主接口或依赖        | [v1.1 架构标准](../docs/workbench-adaptation-plan.md#current-standard-v11)、[接入点清单](../workbench/integration-points.json)                                                                                                                                                                                                               | 明确数据所有权、真实父布局、窄能力与扫描覆盖；不按目录名声称隔离                                                                    |
-| 官方更新、候选续跑或基线校准          | [升级 SOP](../docs/workbench-implementation-plan.md#sync-sop)、[基线核对](../workbench/WB-00-upstream-evidence.md#2026-10-16-baseline-audit)、[远端状态](../workbench/WB-05-automation.md#2026-10-16-remote-read-only-audit)                                                                                                                 | 先核对 Git/锁文件/候选/ref/验收，历史 ready 不代表当前 main                                                                         |
-| 数据兼容、恢复或安装                  | [恢复 SOP](../docs/workbench-implementation-plan.md#72-安装与恢复流程)、[发布指南](../docs/release.md)、[Canary](../docs/canary.md)                                                                                                                                                                                                          | 应用与数据恢复分开；实际安装/生产操作按对应授权                                                                                     |
-| 产品范围与优先级                      | [Linx V2.0 原文](../docs/linx-product-design-v2.md)                                                                                                                                                                                                                                                                                          | 用户产品设计来源，未实现内容保留规划状态                                                                                            |
-| Space / Project Context               | [Context V1.1 实现](../docs/space-project-context-v1-implementation.md)、[浏览器整合验收](../docs/space-project-context-v1-acceptance.md#8-2026-10-15-浏览器版整合补充)                                                                                                                                                                      | 实现、运行证据与未发布边界分别核对                                                                                                  |
-| Expert / MCP                          | [已通过产品方案](../docs/expert-center-product-plan-2026-10-28.md)、[技术方案](../docs/expert-center-technical-plan-2026-10-28.md)、[本轮实现验收](../docs/expert-center-implementation-2026-10-28.md)；历史：[原产品与技术方案](../docs/expert-product-technical-design.md)、[MCP 调整验收](../docs/mcp-connection-selection-acceptance.md) | Expert 中心已统一专家/专家团/技能，96a453046 已合入并安装日用 0.1.9；见[整合验收](../docs/expert-center-organization-2026-10-28.md) |
-| Provider / Gateway 真实运行与发布缺口 | [P0 证据](../docs/expert-p0/README.md)、[故障矩阵](../docs/expert-p0/release-fault-matrix.md)                                                                                                                                                                                                                                                | 查对应源码、Provider、平台和场景，不搬用旧结果                                                                                      |
-| 既有适配实现与历史设计                | [适配层验收](../docs/workbench-adaptation-acceptance.md)、[工作台历史架构](../docs/workbench-architecture.md)、[Expert 架构图](../docs/expert-architecture.drawio)                                                                                                                                                                           | 历史路径、tree 和演练保留原范围，不是当前源码入口                                                                                   |
-
-Expert Skill 主动进化已按用户确认的[产品方案](../docs/expert-skill-evolution-product-plan-2026-10-28.md)、[研发方案](../docs/expert-skill-evolution-technical-plan-2026-10-28.md)和[实施计划](../docs/expert-skill-evolution-implementation-plan-2026-10-28.md)完成本轮实现、隔离预览验收与三项私密审查问题修复，实际状态见[实现验收](../docs/expert-skill-evolution-acceptance-2026-10-29.md)。当时范围为手动提炼、候选预览后采用、三类策略与时间环星图；专家不产生 Memory。当前隔离候选已按用户最新决定改为专家绑定的复制改进权限：缺省关闭、首次采用完整专属副本、后续复用、共享原版不变，技能详情只读展示归属；已落地专家工作经验发现、反馈生成草稿、查看差异采用的两阶段流程，两个阶段共用既有受限原生任务，保留明确采用；本轮 18,466 项完整回归及 124 项浏览器通过，OMP 合成样例真实验证发现、生成、派生采用、取消、重启与下一独立 Run 的目录交付；本轮状态以[优化验收](../docs/skill-management-optimization-acceptance-2026-10-29.md)为准。首轮 Pi 真实模型验证专用派生、原包保留、同会话下一独立 Run 装配和取消；修复后全库 18,391 项及浏览器 68 项通过，其他 Provider 未验范围保留。实现提交 `9f313abf7` 已合入 main，日用 0.1.10 已安装并健康重启；恢复组合和验收数据保留。未推送或公开发布，签名元数据及 RPC 未验范围见验收记录。
-
-每项任务先完成 SOP 的范围/基线核对，实施中按需读取表中材料，结束时把结果写入对应验收，只有跨任务目标、入口、决定或状态变化才回写本页。主会话保留需求和架构决策；明确边界后才委派执行。不为小改强制新增需求目录或管理记录。
-
-### Expert 自动学习：第一阶段执行入口（2026-10-31）
-
-用户要求读取《对比学习能力》中的最新方案，保存到 context 并制定实施计划。用户随后授权五批完整实施及提交合并，第一阶段实现及本轮限定范围的隔离验收已完成。以“正常使用与反馈后自动改进，后续独立 Run 使用，星图解释变化，用户关闭学习后固定能力”为目标；保留原手动流程为折叠辅助入口，开启后不要求逐项采用；最小局部原型已获用户明确确认。
-
-| 材料                                                                             | 角色与下一步                                                                                                  |
-| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| [产品 V2 来源正文](./expert-autolearning-product-v2-2026-10-30.md)               | 产品方向与范围；保留来源、待实现状态和附件读取边界                                                            |
-| [第一阶段技术方案来源正文](./expert-autolearning-technical-phase1-2026-10-30.md) | 复用既有服务、原生任务与正式资产，第一阶段做自动 Skill 学习，后续补 Memory 与可选评测                         |
-| [实施计划](./expert-autolearning-implementation-plan-2026-10-30.md)              | 当前执行入口；第一阶段五批依次完成状态／关闭、证据、自动闭环、产品接入与 OMP/Pi 真实验收，估算 12–18 工程人日 |
-
-两份来源文件归档的是已读取的完整方案答复正文；浏览器未授予原 Markdown 附件下载权限，未取得附件原件，详细接口与缺省参数在开工前核对。原方案基线 `879c8036e` 与本地 `ca82e2c6b` 在本次核对时 tree 相同；这不是新增功能的运行验收。缺省关闭、可信自动调用、关闭／固定版本、当前任务证据及自动采用已实现；完整回归 18,548 通过、40 既有跳过，OMP/Pi 已分别验证自动采用、独立任务读取、同一身份更新、关闭／重启和冻结；当前实际结果统一见[第一阶段验收](../docs/expert-autolearning-acceptance-2026-10-31.md)，不将旧手动验收转移为自动学习通过。仍不打包、安装或发布。
-
-合并后复核修复已完成本轮隔离验收：原 Pro 审核正文尚未取得，按用户指定的备用方式由全新 Reviewer 发现实际模型回退及学习采集失败阻断业务投影两项。修复采用持久交接和独立采集重试，迁移仅追加 Expert/12；18,558 项完整回归通过，OMP/Pi 自动闭环及隔离 /11→/12 数据保留核对通过。实际 Git 状态、验证边界与原合并结果分别见[专项验收末节](../docs/expert-autolearning-acceptance-2026-10-31.md)。不增加界面或安装动作。
-
-### Expert 自动学习：第二阶段方案入口（2026-10-31）
-
-用户在第一阶段修复合并后要求制定第二阶段方案，随后明确授权实施并要求完成后由全新子代理审代码、按意见修复。[第二阶段方案与实施计划](./expert-autolearning-phase2-plan-2026-10-31.md)基于 `main@585e3d11d`。正式 Space Memory、前台学习工具、有界资料来源、规则固定与局部撤回后端及本轮隔离验收完成；全新 Reviewer 的问题已修复并复核，后端 v4 回归 18,721 项通过，OMP/Pi 的真实 Memory／资料／Skill 逆向链及独立证据复核完成。本次新增详情原型已获用户“应用这个原型”的明确确认，正式 Memory／Skill 详情及局部撤回已接入，66 项 browser 通过；新独立审核 P2／P3 已修复复核，最新 v6 完整回归 18,728 通过、0 失败、40 既有跳过，6/6 包成功，不移用第一阶段原型授权或验收。继续复用单 Harness、现有提交门、原生任务和进化页，不新增用户审批队列；当前状态与实际验证统一见[第二阶段专项验收](../docs/expert-autolearning-phase2-acceptance-2026-10-31.md)。
-
-第二阶段 Git 交付入口为 [PR #6](https://github.com/WYLINX601/synara--expert/pull/6)，实现提交 `b85adf04b` 已推送。交付前 95 项 v6 输入逐项复核无变化；合并状态以该 PR 实际结果为准。没有打包、安装、发布或改变日用环境，第三阶段评测仍为后续范围。
-
-### 规范落地状态与维护入口
-
-以下保留 2026-10-16 的时点核对，其中“本轮未推送”等限定当时范围；最新源码与环境状态见下方整合结果。
-
-- **规范已落地，代码已对齐**：规范来源与早期文档检查见[规范落地验收](../docs/workbench-adaptation-acceptance.md#standards-rollout-20261016)；后续代码收口与实际检查见[架构对齐验收](../docs/workbench-adaptation-acceptance.md#alignment-implementation-20261016)。Context 窄客户端、Space 命令能力、清单覆盖/依赖检查、迁移归属检查及升级状态范围已实现；正式候选增加第七项边界门禁。
-- **来源基线已校准，当前验收独立**：用户明确确认后，按已核验的历史验收与真实合入记录登记 v0.9.2 来源，完整归档旧 ref 的候选状态，不转移历史 ready。冻结 v1.0.5 前 main B 的 `status` 为 no-candidate、baseline reasons 为空；这份快照不代表后续候选或 main 的验收状态。详见[校准结果与回执](../workbench/WB-00-upstream-evidence.md#baseline-reconciled-20261016)，活动升级见下节。
-- **已登记的兼容例外（升级前状态）**：B 的 Context 原生 tracker 中 `111_ContextV1` 保留不迁移；身份、路径及脚本内容被冻结，后续新增原生迁移必须能证明来自固定上游，Linx 扩展使用独立 ledger。本次 v1.0.5 候选按用户授权改为精确识别后转入 context1 ledger，先备份、事务内审计接管；冻结原文件和摘要保持不变。该候选尚未验收，不表示 main 已执行接管。不要追加本地原生迁移编号。
-- **架构对齐历史检查**：格式、lint、类型、边界、迁移及受影响 browser 通过；完整六包首次 13,364 通过、2 失败、36 跳过，Beta 两项随后修复。具体范围见[架构对齐验收](../docs/workbench-adaptation-acceptance.md#alignment-implementation-20261016)。这些数量不适用于 v1.0.5 候选。
-- **维护续办**：Beta 两项已修复为隔离安装探测，聚焦 32 项通过，完整六包随后为 13,366 通过、0 失败、36 既有跳过，详见[维护验收](../docs/workbench-adaptation-acceptance.md#maintenance-followup-20261016)。远端 prepare 的固定 v1.0.1 有 30 项合并冲突、原本地快照有 46 项；该目标已被 v1.0.5 替代。旧 111 精确兼容授权和原由保留在[兼容方案](../docs/workbench-implementation-plan.md#v101-compatibility-proposal)，活动实现及验收见下节。
-- **远端自动保护未启用**：2026-10-16 只读 API 返回 main 未保护、rulesets 为空；按开发 SOP 人工执行相同门禁，不宣称已有强制保护。
-- **定时链路已触发但未成功验收**：查询返回 1 次 schedule，prepare 失败，verify/publish 跳过；下一维护任务先查该失败，再验收手动与定时路径。运行链接和范围仅维护在[远端核对](../workbench/WB-05-automation.md#2026-10-16-remote-read-only-audit)。本轮未改变仓库设置、触发 workflow、推送或发布。
-
-## 桌面应用日用与独立预览（配置与历史）
-
-2026-11-06 用户要求减少存储浪费、避免重复版本、历史优先交由 Git 管理。已补充[Git 管历史与交付保留规则](../docs/workbench-development-workflow.md#git-first-storage)：普通开发不额外打包或复制完整数据，安装解压副本验收后回收，固定数据恢复点独立核验。当前盘点及实际回收结果统一见[交付与存储收口记录](../docs/delivery-storage-plan-2026-11-05.md)，不沿用下方历史容量推断当前空间。
-
-2026-10-29 用户要求四个私有交付目录只保留最新一个；三个旧交付已清理，必要证据归入最新目录 `history/`，现行安装与恢复入口已更新为 0.1.10／0.1.9 配套组合。实测磁盘可用空间增加 7.37 GiB，日用数据未改动，见[存储收口记录](../docs/storage-management-2026-10-24.md#delivery-cleanup-20261029)。
-
-同日用户确认将防堆积要求纳入长期规范：[单一交付目录与轮换](../docs/workbench-development-workflow.md#single-delivery-root)要求跨任务复用一个长期交付根，复制前盘点、验证替代并更新入口后轮换、交付时清理暂存；AGENTS 已加入入口约束。现阶段为人工门禁，不代表自动清理已实现。
-
-2026-10-24 用户确认以桌面应用作为唯一日用数据主源，在应用内浏览器批注独立预览，并明确允许最新版本打包更新安装；取代此前浏览器日用／预览／应用三角色。流程以[开发规范](../docs/workbench-development-workflow.md#browser-daily-preview)为准，实际配置、安装与恢复依据统一见[应用与预览环境](../docs/application-preview-environments-2026-10-24.md)。
-
-Personal Workbench 已更新为 0.1.5，源码 `8f7143cf6f001aa495d57f0e3867a91c3cb9f351`；使用 `~/.synara-workbench/userdata`，原 23 线程及模型／权限保留，旧 3 个 Hub 和 4 个自动化暂停／停用。当时建立的独立预览使用浏览器 19842／后端 19841；该源码树曾被用户误操作移除、数据保留，后续已恢复受管源码及旧项目路径兼容链接，见下节。
-
-预览按问题显式接收一致性现场，需记录固定成果、外部文件映射和缺失项，不共享数据库、不持续双向同步、测试数据不回写应用。共同网页问题通过应用浏览器批注；桌面专属问题使用隔离桌面预览。现场复制及批注自动关联的产品集成未完成，本轮未提交模型任务。
-
-原 19840 浏览器日用已停止，原数据和产物作历史回退；此前记录的“保留 browser-preview 工作树／未推送”仅描述当时的安装工作范围，不是当前代码整理状态。此后用户已授权整理、合并和推送；本次结果见下方整合记录及其私有推送回执。应用更新前后备份及旧版本均保留。
-
-## 存储收口历史与当前源码状态（2026-10-26 核对）
-
-用户确认执行存储优化：仓库内 `.synara` 约 29.9 GiB 降至 4.9 GiB，四份紧凑快照及上一版恢复组合保留，隔离恢复核对通过；本机备份工具已加入显式排除、压缩安全核验与轮换。收口时旧树已清理、Git 仅登记主目录，误删的预览源码当时尚未恢复。上述容量属于 2026-10-24 整理结果，实际恢复路径与本机工具范围见[存储优化记录](../docs/storage-management-2026-10-24.md)。
-
-后续已恢复唯一开发预览受管工作树及旧项目入口兼容链接；Worker 上下文优化、测试模拟服务修复和 OMP 问答修复已于 2026-10-25 本地合入 main，合入记录提交为 `15c99597c0db524b97061b404f4ff09c22335ead`。2026-10-26 核对时，main 与预览均包含该提交，另有独立 Skill 管理任务工作树，其未合入提交不属于本轮清理。完整门禁及真实模型未验范围见[问答修复验收](../docs/omp-question-answer-preview-2026-10-24.md)与[Worker 预览验收](../docs/worker-context-preview-2026-10-24.md)；本轮未更新日用应用、推送或安装。
-
-用户已确认[环境与存储管理规范](../docs/workbench-development-workflow.md#environment-lifecycle)：常驻主目录与单一预览，临时树按需受限创建，任务交付同步收尾并检查容量。规则已纳入开发规范和 AGENTS；统一管理入口、跨任务互斥及刷新后自动回收仍待实现，不由现有私有备份工具推定完成。
-
-## 历史工作区整合结果（2026-10-24，后续清理前）
-
-以下为存储收口前的时点记录，树数量、进程占用及恢复路径不作为当前状态；当前状态以上节及存储优化记录为准。
-
-当时主目录使用 `main`；审计代码验收提交为 `f9b1214d565930d26ec61bb27beda3701ac17368`，开发预览已同步该代码及固定依赖。日用应用仍为 0.1.5、源码 `8f7143cf6`，不随开发代码自动更新。仅保留主目录与 `application-preview` 两个日常源码角色；实际恢复位置、归档请求与未完成物理清理见[工作区整合记录](../docs/workspace-consolidation-2026-10-24.md)。
-
-- **源码**：原根目录差异已固定为本地归档提交；适用审计修复单独合入，旧工作流差异保存后由当前双环境文档替代。历史功能 HEAD 均已包含在 main，不把旧树数量解释为待合并功能数。
-- **历史环境**：两棵旧树已安全移除；临时审计树已提交应用归档请求。另三棵旧树因 ChatGPT 仍持有 Electron 资源文件加锁暂留，旧后台已确认空闲并停止。31 个历史分支名已转归档 ref。
-- **恢复点**：5 份失败复制、10 份完全重复备份已清理；6 个指定恢复点保留，预览源码切换前另增一份验证备份。旧 userdata 备份移至管理根 `application/rollback/`；活跃 `~/.synara-workbench/userdata` 未移动。
-- **检查**：完整仓库 18,028 通过、40 原有跳过；格式、lint、7 包类型及相关 browser 21 项通过。首次超时与重跑结果分别保留，不将 Windows 静态检查当作实机验收。
-- **未完成**：安全审计 P1 补偿／OAuth／剩余依赖工作、T2 真实成果审核放行闭环、T3 运行中修订、应用自定义 Finder 图标引起的严格签名问题仍待完成。代码合入不等于上述问题全部关闭。
-
-## 持续适用的工作边界
-
-- 不重置用户数据库，不复用生产状态做验证。启动产品实例时使用独立 `SYNARA_HOME` 和未占用端口，并先检查开发启动器的 dry-run。
-- 连接配置只保存环境变量或凭证引用；诊断、日志、导出和 context 不保存凭证值。
-- 真实 Provider 成功、进程退出和取消清理必须由对应运行证据确认；mock、类型检查和本地构建不能替代产品实测。
-
-## Hub 可靠性与技能装配分批修复（历史候选）
-
-2026-10-21 至 22 的候选范围、决定和检查见[分批执行与验收记录](../docs/hub-reliability-2026-10-21-acceptance.md)。这是专项历史进度；是否包含在当前 main 和安装版，须按当前提交核对，不由该记录推断。
-
-## 统一 Skill 管理与按运行装配（本轮集成）
-
-2026-10-29，用户要求基于本地 `main@f879925a4` 完成管理层减负、完整资源交付和 OMP 无工具提炼。本候选位于 `codex/skill-management-optimization` 的隔离预览；用户随后否决新增前端板块、范围／资源选项和更多菜单，沿用原有选择、启停与加载时机。用户最新要求删除旧配置转换及数据适配，直接使用当前技能库绑定，不建立自动迁移。 后续批注统一专家／专家团／技能弹窗编辑，移除重复文案和技能添加者记录／筛选／展示，预览继续保留。用户随后取消 Synara 的启动时加载选项与逻辑，统一原生按需发现和明确调用；当前作者配置不再包含加载时机。当前源码、真实四端加载检查、OMP 真实模型采用和集中门禁结果只见[本轮优化验收](../docs/skill-management-optimization-acceptance-2026-10-29.md)，不继承历史候选通过状态。本轮不包含合入、推送、日用安装或发布。
-
-2026-10-27，用户要求修复合并基线 `e1137f7f44e86da00d07d516845249da2c52ec51` 的 CR-01 至 CR-06，随后授权提交推送及更新日用应用。修复提交 `d189ce8af`、仅测试的 CI 跟进 `4337c7e6e` 已推送 main，后者 CI 成功；日用 Personal Workbench **0.1.6 已安装启动**，包内构建源为 d189ce8af。32 线程、308 消息等原始记录及 699 个配置/资源摘要已核验保留。实际检查、恢复入口与未验边界见[审核修复与交付记录](../docs/skill-management-review-fixes-2026-10-27.md#delivery-20261027)。未创建公开二进制 Release 或刷新独立预览；下述历史候选结果不作为本轮验收。
-
-2026-10-26 后续需求已收敛，用户已授权完成五个开发阶段，开发与本轮可执行验证已完成，Claude 真实模型按用户选择保留认证阻塞：解决 G1、对齐 G4 筛选排序/G6 前后端批量装配/G7 管理 CLI/G11 原生元数据装配；仅四端，不做浏览器目录上传、市场检索、工作区或机器扫描，不创建默认管理 Agent。用户确认更新从下一次 Run 生效：当前运行及恢复保持旧装配，未启动排队与同任务后续 Run 解析最新版本。原生字段不再作为装配拒绝条件；原生执行、相对资源和子运行继承需一并研发验证。见[产品范围](../docs/skill-management-product-discussion-v0.1.md#iteration-20261026)与[研发修订方案](../docs/expert-skill-package-design.md#iteration-plan-20261026)。本轮实际进度和验证见[实施记录](../docs/skill-management-2026-10-26-acceptance.md)，不继承 `bc29ed9bf` 的通过结论；下段保留上一候选原结果。
-
-随后用户补充 Multica 参考并授权详情阅读预览、按需运行时导入、筛选和编辑界面优化；两种详情视图统一 920px、使用浅色边框。2026-10-26 用户已要求合入 main 并推送，集成候选保留已有 main 的 Worker 上下文及 OMP 问答修复；合并后的检查与 Git 结果以对应 PR 为准，界面证据见[审查材料](../.github/pr-evidence/skill-management-20261026/README.md)。该授权不包含更新日用应用或发布。
-
-2026-10-25，用户确认参考 Multica 的统一管理方案并要求实施：Expert 只使用固定装配，空装配为零；普通任务沿用 harness；编辑/来源刷新自动影响新任务，已接受任务固定旧包；无法证明子代理继承则阻断，不建设旧任务兼容/转换层或清理历史数据。当前架构见[固定装配方案](../docs/expert-skill-package-design.md#current-skill-management)，实际检查、运行缺口与交付状态见[本轮验收记录](../docs/skill-management-2026-10-25-acceptance.md)。候选位于 `codex/feature-skill-management` 的独立 worktree，已完成实现、独立审查补强、全库与所列本地门禁及隔离预览验证，等待用户评审；本地提交不代表 main、安装应用或发布已更新。
-
-## 历史验收：专家技能索引与共享版本包
-
-用户已确认并要求实施“共享不可变技能包＋专家入口索引＋任务版本清单＋四端统一目录加载”。隔离分支 `codex/feature-expert-skill-packages` 基于 `49ab5dc9cabcead1bb1b489b4b4aec7576c2232a`，已实现包存储、V2 固定清单、四端目录与显式调用、配置界面、更新/引用保护删除和集中切换工具。
-
-三端真实启动、调用、停止恢复、服务端重启和取消，以及 BMad 六角色/模板输出、12 位现有专家的隔离转换、原生删除与重复切换均已有证据。最终全仓 17,786 通过、40 跳过，受影响浏览器 38 项通过。Claude 现有认证仍返回 401；Linux/Windows 实机未验收。日用状态、main、安装和发布未变。最终检查与源码边界以[实施验收记录](../docs/expert-skill-package-implementation.md)为准，架构与完整范围见[确认方案](../docs/expert-skill-package-design.md)。
-
-## 专家技能包合入与安装交接（0.1.3）
-
-2026-10-21 用户授权合并并安装。本地 main 已快进到技能包功能和 0.1.3 版本提交，受检源码摘要一致，macOS arm64 构建、隔离产物启动和 release smoke 通过。后续用户再次授权安装并更新 GitHub：本机于 2026-10-21 10:04 完成 0.1.3 安装启动、停机备份、副本迁移演练、health 和配置一致性核验，源码已推送个人仓库 main。个人 macOS arm64 包以 workbench-v0.1.3 预览发布，本机 ad-hoc 签名、无 Apple 公证及自动更新 feed。未自动转换日用技能配置；Claude 401 缺口保留。详见[交付与安装结果入口](../docs/expert-skill-package-install-2026-10-21.md)。
-
-## Hub 与输入区 UI 合入安装（0.1.2）
-
-2026-10-20 用户授权两工作树合入 main、推送和安装。冻结构建源 `4c2204427900a2345daf8ba0bdb85198b4ef438e` 已包含 Hub × Expert 及输入区菜单/专家提示修复，已推送并安装启动 Personal Workbench 0.1.2。最终完整测试 17,663 通过、39 原有跳过，相关 browser 118 项；数据库副本升级演练、真实安装包启动及原数据保留均已核对。旧 app/home/profile 与一致性备份只留本机；远端 CI 与本地结果分开记录，详见[集成安装回执](../docs/hub-ui-integration-release-2026-10-20.md)。不包含其他旧工作树、公开二进制 Release 或 Provider 配置更新。
-
-## 安全审计修复（已合入；保留待办）
-
-原审计基线为 `93c7511`；适用修复逐项适配后，以 `f9b1214d565930d26ec61bb27beda3701ac17368` 合入 main。内容包括原生 CAS／事务与依赖关系、失败回执与生命周期边界、成果文件读取、MCP 重定向保护、固定 TOML 依赖及前端异步状态保护。逐项验证、完整测试和未关闭问题统一见[审计接入台账](../docs/security-audit-2026-10-23/README.md)。本次未将这些新修复打包安装，也未调用真实模型复验。
-
-## Hub 专家团协作 T2/T3（代码已合入，业务闭环待验）
-
-2026-10-23 用户授权收尾 T2，再开始 T3，沿用已确认的 [V0.8 技术方案](../docs/hub-review-2026-10-22/Hub_技术方案_V0.8.md)。`codex/feature-hub-collaboration` 候选接入真实 Worker 提问、Hub 内／原线程定向回复、独立草稿和可靠送达门禁；自动化证据与真实运行分别记录在 [T2/T3 实施记录](../docs/hub-review-2026-10-22/T2收尾与T3实施记录-2026-10-23.md)。原生恢复、暂停 CAS、闲置 Work 恢复停滞及成果校验身份接线错误已修复。授权的 Luna 测试真实验证提问、回答送达、同线程同尝试续跑和重放幂等；只读续跑没有登记本线程成果。候选／审核／人工出口完整闭环仍待验收，不能标记完整 T2 交付。T3 仍为纯修订影响分析，运行中修订、分支 hold、确认／撤销和结果沿用尚未接入。上述代码已由 `197993e26` 进入 main，并包含在安装源码 `8f7143cf6`；这不改变真实成果闭环未通过、T3 仅完成纯影响分析的验收边界。
-
-## 历史验收：Hub 参与专家与选择器调整
-
-2026-10-20 用户已批准后续计划：新旧 Hub 默认空参与名单，名单约束发现和新派发，既有接受任务及历史成果不重绑；设置页增加 Experts，多选可为空，无适合专家时仍走原普通 Worker。`@关键产物` 单板块、专家名称及聊天辅助信息浅色右对齐，侧栏三个标题箭头一致。设计和接口见[V1.1 方案补充](../docs/hub-expert-v1-1-design.md#2026-10-20-参与专家与选择器调整)，本轮真实结果见[独立补充验收](../docs/hub-expert-v1-1-acceptance.md#2026-10-20-参与专家与选择器布局补充验收)；旧 V1.1 数量不代表本轮。本轮冻结源码完整测试 17,663 通过、39 原有跳过，格式、lint、类型、迁移、边界通过；受影响浏览器 47 项，真实 Codex 7 项场景断言通过，包含移除后拒绝新派发、旧任务恢复与固定版本读取、空名单/无匹配普通 Worker。当前独立预览端口 19736；继续隔离工作树，未推送/安装/发布。
-
-## 历史验收：Hub × Expert V1.1
-
-2026-10-19 用户确认统一导航、专家选择、关键产物双视图和固定版本引用，并要求实施。Hub 独立归属 Space；从 Project 创建仍进入 Hubs 分组；Hub Worker 默认在 Hub 下展开。专家引用仅限 Coordinator 派发，独立新 Hub 首次固定 Space Context。行为和接口见[V1.1 方案](../docs/hub-expert-v1-1-design.md)，本轮进度与证据见[V1.1 验收](../docs/hub-expert-v1-1-acceptance.md)。沿用 V1 隔离工作树与已保存基线。用户已确认精简原型，并补充 @ 单列和专家 Skill 筛选；正式界面已落地，草稿读取所选专家预览，已有线程读取固定快照。Codex 真实运行覆盖选择、排队归档、固定版本读取、取消与重启恢复。最终冻结源码完整测试 17,645 通过、39 原有跳过；格式、lint、类型、边界及受影响浏览器检查通过。其余 Provider、外部 MCP、Windows 实机及人工回放范围见验收记录。预览端口 19734，未合入、推送或安装 Synara 应用；验收时误触的 Provider CLI 更新已回退并记录。
-
-## 历史验收：Hub × Expert V1
-
-2026-10-19 用户审核通过 [Figma V2 原型](https://www.figma.com/design/mJatQwnjWkdzXUfLBtjNfk/?node-id=15-56) 并允许开发，保留原有 Hub 浮动面板、紧凑线程列表、完整 Worker 对话及分屏和 Library 能力。专项行为、接口及宿主接入见 [Hub × Expert V1](../docs/hub-expert-v1-design.md)。隔离分支 `codex/hub-expert-v1` 从 `850de05e08ab9c116c639e7b1cb8145e0b6e05d5` 开发，不包含原工作区输入框改动。Project 创建入口、接受前 Expert 快照与目标固定、关键集合和原生 Library 增量已实现；真实 Codex 文本链路、队列归档、取消后续接、重启恢复、版本读取及 Library 维护已有独立数据证据。
-
-最终源码、检查与边界以[本地验收记录](../docs/hub-expert-v1-acceptance.md)为准；最终完整测试 17,603 项通过、39 项跳过，相关浏览器 66 项通过，格式、lint、类型、迁移及边界检查通过；源码清单与日志摘要已固定。未验证其他 Provider、Windows 运行包及 PDF／DOCX 的 Agent 正文读取；发布有每文件 1 MB 的工程上限。本轮不包含推送、安装或发布。
-
-## 历史升级记录：Synara v1.0.5 源码与验收入口
-
-2026-10-16 的授权、固定输入及候选恢复记录见下文链接。这是当时的升级快照，不是当前 main、安装版或工作树的状态说明。该轮候选包含精确旧 111 接管、恢复 v3、Context 连接与草稿保护，以及会话重启必需 MCP 预检；实现、独立复核和冻结前检查统一见升级验收。
-
-当时记录的门槛是不推送、不安装日用应用、不迁移用户数据库、不发布，只有候选 C 满足正式要求才快进本地 main。固定输入、归档和兼容决定见 [v1.0.5 升级验收](../docs/workbench-v105-upgrade-acceptance.md)。该文是冻结前来源说明；历史 C 的同源检查、运行与合入结果应以项目 `.synara/upgrades/v1.0.5/evidence/` 回执和 Git common-dir 状态为准，不将这段历史门槛当作当前待办或当前验收。
-
-## 当前目标
-
-按 [Linx V2.0](../docs/linx-product-design-v2.md)构建面向个人学习、研究与工作的 AI-native 工作台，让长期负责与专业执行形成连续闭环。V2.0 继续作为产品规划；Space / Project Context 已完成实现与浏览器范围验证，其余新增能力仍按设计边界推进。既有 Expert 技术目标继续保留如下。
-
-把 Expert 作为可复用、可检查、可固定版本的工作能力配置，组合 Persona、Skills 和 MCP 工具；Task 在首次启动时绑定不可变快照，并记录实际生效的 Provider、模型、SDK / CLI 版本和 lifecycle generation。
-
-Expert / MCP、轻量适配层与 Space / Project Context 已形成可追溯的本地功能提交。10 月 15 日浏览器整合的范围及检查见[Context 接入验收](../docs/space-project-context-v1-acceptance.md#8-2026-10-15-浏览器版整合补充)。当前源码、安装和未关闭候选状态以本页的双环境及整合记录和所链接的专项验收为准；旧运行证据不自动证明 `8f7143cf6` 的最新行为。
-
-## 当前产品方案：Linx V2.0（2026-10-10 归档）
-
-来源：Linx 在 2026-10-10 直接提供《Linx 个人 AI 工作台｜产品设计方案 V2.0》并要求归档与更新 context。[V2.0 原文](../docs/linx-product-design-v2.md)完整保留用户提供的内容，是当前 Linx 产品方向与 MVP 规划的权威设计来源；本文只是路由摘要。原文中的建议与待验证接口仍保留其设计状态，本次归档不等于代码实现、运行验证或发布。
-
-- **产品组织**：Space → Project → Task / Run；日常事项也可直接进入 Space 或全局 Inbox。Space 表达长期方向，Project 表达阶段目标；每个 Space 一个主要 Owner，Project 默认属于一个 Space。
-- **职责分离**：全局 Personal Assistant 负责跨方向协调，Space Owner 负责方向持续推进，Expert 负责具体任务，Agent Team 为复杂任务的可选模式。Hermes 优先作为 Persistent Agent Service 接入；长期身份不等于每个 Space 一个操作系统进程，也不把 Hermes 仅作为普通 Provider 呈现。
-- **复用底座**：保留 Synara Project Workspace、Expert / Skills 配置与已有任务执行能力，增量增加 Space、AgentAssignment、Hermes 服务连接及 Skill Evolution。Linx 持有核心业务对象关系，外部 Runtime 配置不作为业务模型基础。
-- **Context 按需组装**：Personal、Space、Project、Expert 四类上下文有各自范围；任务加载目标、必要项目资料、选定技能和少量相关方向背景，不自动继承 Owner 的全部记忆或历史会话。Obsidian 保存权威知识，其他对象保留索引、引用与必要摘要。
-- **权限与版本**：主动读取、分析和建议依据授权范围；创建任务、状态修改与外部写入按授权执行。Skill Evolution 独立于 Provider 和 Hermes Runtime，从 Run / 反馈提出 Skill 新建或 Patch，用户审核 Diff 后生效，可回滚并追溯来源 Run；运行中固定 Skill 版本，不自动覆盖已发布 Skill。
-- **UI 方向**：Home、Spaces、Tasks、Experts、Settings；Space Overview 提供目标、负责人、重点、项目与关键更新，负责人通过侧边对话面板协作，专业工作继续进入原 Project Workspace。
-- **MVP 顺序**：两条 P0 为 Space + Hermes Owner 基础体验与手动 Skill Evolution；P1 补授权任务推进、主动阻塞发现及定期汇报；P2 再扩展 Expert Team、Coordinator 和自动进化。Team 的首个形态为主 Expert 执行 + 独立 Expert 审查，多 Agent 不是默认执行方式。
-- **范围边界**：不另建知识库、不为所有 Expert 添加长期记忆、不强制每个 Project 创建 Hermes、不默认每次任务启动 Team、不自动发布 Skill 修改、不重建 Synara 已有 Project / 执行功能、不先建设复杂数字员工层级。
-
-### 设计与现有实现的衔接
-
-- V2.0 描述产品目标与阶段规划；下面的 Expert、MCP 和适配层记录描述已有候选及历史证据。原有检查、失败与未发布状态不因归档而改变。
-- 既有 Expert 的快照、工具授权和 Provider Adapter 细节继续查阅[Expert 产品与技术方案](../docs/expert-product-technical-design.md)。其中“不另建 Agent Runtime”限定既有 Expert 首版；V2.0 的 Hermes 外部常驻服务是新增设计，不能据此声称已接入或修改 Expert Runtime 边界。
-- V2.0 的 Task、Run、Thread 是产品层对象划分，不能仅凭此文档认定现有数据模型已有对应独立实体。实施前需核对映射、数据关系及增量迁移需求。
-- 尚需核对当前 Hermes Fork 的 API / MCP、Profile 与记忆隔离、项目状态查询、授权与定时能力；AgentAssignment 字段与空间归属迁移仍需技术方案；Skill 版本存储已有上方专项候选，不能据此认定 Hermes 集成已完成。原文中的“插件”定位不证明 Synara 已具备动态插件 SDK。
-- P0 验收以原文第 13 节为准：一个学术 Space 关联两个 Project，Owner 基于实际项目数据持续汇报；一次任务中的有效改进提炼为 Skill 并在另一任务复用。当前没有上述场景的实现或验收完成结论。
-
-## 既有候选进度（2026-10-09 核对）
-
-本节摘要依据 [2026-10-08 适配层实施验收](../docs/workbench-adaptation-acceptance.md)及其源码交付清单；详细检查与限制只维护在验收文档。预览修复前核对候选与记录的交付 tree 无差异；下述 10 月 9 日修复随后改变候选源码，旧 tree 不代表修复后内容。
-
-- **A0 已完成**：保存此前专家 UI、全局 MCP、本机发现/导入的完整未提交候选基线，可恢复源码；归档不包含依赖、索引或应用数据。
-- **A1–A3 已完成**：统一 UI 注册、搜索和惰性页面装配，收拢窄客户端与服务端静态 handler 接入，扩大依赖检查。现有草稿、缓存、原生认证、CAS 与任务生命周期继续沿用；保留深层依赖逐项登记。
-- **A4 已完成，范围有限**：在独立副本模拟链接参数改名，只改一个宿主产品源文件，12 个 Expert/MCP 功能组件内容保持不变；宿主 6 项单测及真实专家面板 7 项 browser 通过，数据 API 为 mock。这不是一次真实官方升级验收。
-- **本轮检查**：使用 Node 24.13.1 / Bun 1.4.2。格式、lint（0 errors，仍有 warnings）、7 个 workspace 类型检查、22 项候选 browser、6519 项服务端测试及依赖边界检查通过。
-- **完整门禁未绿色**：全量首次执行为 13258 通过、19 失败、36 跳过；降低并发复跑 275 项全部通过，其中 17 项首次失败未再复现。剩余两项 `betaChannel.test.ts` 失败在实施前源码也已复现：安装后启动路径选中本机应用、安装失败用例返回成功。不得把复跑结果改写成完整绿色门禁。
-- **未交付到生产**：没有集成官方新版本、安装或发布候选；本轮没有重验真实 Provider、跨平台安装包或数据迁移。受控演练不能证明任意官方变更均可隔离，也不能推导长期节省比例。
-
-## 历史开发预览（2026-10-09）
-
-- 应用户要求打开候选，在 `http://localhost:17733/settings?section=experts` 启动独立开发预览；服务端端口 15773。数据目录为 `/Users/wangyuelin/.codex/task-artifacts/workbench-preview-2026-10-09/home`，不复用日用数据库。预览地址只在进程运行期间有效。
-- 实机首次打开专家页时发现持续显示 Loading，已把两页 lazy 组件身份移至 Suspense 边界之外；候选新增正常并发根下的首加载回归。首页、专家列表及产品经理编辑页已实际显示；没有发起模型任务、安装应用或升级官方源码。
-- 修复检查与限制记录在[适配层实施验收的 10 月 9 日补充](../docs/workbench-adaptation-acceptance.md#2026-10-09-开发预览与首加载修复)。10 月 8 日归档和完整门禁结果保留原样，不作为修复后候选的完整验收。
-
-## 既有 Expert 子系统已确认决定
-
-以下为既有 Expert 范围内的决定，不代替上面的 Linx V2.0 产品规划。权威说明均在[产品与技术方案](../docs/expert-product-technical-design.md)：
-
-- Expert 是一级产品对象，Task 仍是实际工作的承载者；首版不另建独立 Agent Runtime。
-- Expert 组合 Persona、Skills、连接和运行偏好；凭证不进入 Expert 定义或快照。
-- Task 首次发送时固定 Expert snapshot。修改模板、归档模板、恢复旧任务都不能改变既有任务的快照。
-- 换专家或跨 Provider 继续工作沿用派生任务与 handoff，不在活跃会话中热替换配置。
-- Codex 和 Pi 保留各自协议行为；Provider 专属投影留在 Adapter，跨进程 Schema 留在 `packages/contracts`。
-- 第三方工具统一经过 Synara Gateway。`tools/list` 与 `tools/call` 都按已验证的会话身份和固定快照授权，不能信任工具参数中的 Expert 或 thread 标识。
-- 2026-10-25 当前已确认边界：Expert 只允许固定装配的 Skill，普通任务使用 harness 原生 Skill；这限制发现、上下文和调用，不是任意 Read/Bash 的操作系统沙箱。具体机制和候选验收见上方本轮入口；旧版本“环境 Skill 可能继续出现”不再作为新方案要求。
-
-## 2026-09-29 实现记录（历史基线）
-
-以下是 2026-09-29 工作树中的机械事实，产品语义仍由上面的方案文档解释：
-
-- 专家库已支持新建、编辑、复制、归档、预检和版本化保存。
-- 专家技能配置已支持手动新增、修改、删除本机 Skill 引用，也可从当前机器的发现目录快捷添加或移除；保存前检查空名称、空路径和重复路径。
-- 新任务输入区可选择专家；首次发送创建不可变快照与任务绑定。fork、handoff、恢复和接续任务保留既定继承规则。
-- Codex 通过会话指令和独立 Skill 根目录加载专家资源；Pi 通过会话 ResourceLoader 与 custom tools 加载。
-- 本机 stdio / Streamable HTTP MCP 连接、环境变量凭据引用、连接测试、专家工具允许列表、会话隔离、取消和撤销清理已接入。
-- 任务详情可查看固定快照、任务配置模型、最近一次成功启动的实际 Provider / 模型、Codex CLI 或 Pi SDK 版本、lifecycle generation、资源目录和连接要求。
-- 实际运行记录在成功启动或恢复后覆盖；停止后保留；任务硬删除时清理。记录写入失败会使本次启动失败并清理对应运行时，不能显示虚假成功。
-
-主要实现入口：
-
-- 合同：[expert.ts](../packages/contracts/src/expert.ts)、[provider.ts](../packages/contracts/src/provider.ts)
-- 专家与连接服务：[experts](../apps/server/src/experts/)
-- 生命周期与应用记录：[ProviderService.ts](../apps/server/src/provider/Layers/ProviderService.ts)
-- Codex / Pi 适配：[codexAppServerManager.ts](../apps/server/src/codexAppServerManager.ts)、[PiAdapter.ts](../apps/server/src/provider/Layers/PiAdapter.ts)
-- 专家管理与技能编辑：[ExpertsSettingsPanel.tsx](../apps/web/src/components/settings/ExpertsSettingsPanel.tsx)
-- 任务诊断：[ExpertTaskControl.tsx](../apps/web/src/components/chat/ExpertTaskControl.tsx)
-
-## 2026-09-29 验证记录（历史证据）
-
-- P0 技术可行性已通过：macOS 上 Codex / Pi 真实模型的 Persona、Skill、工具调用、恢复和取消已有证据；两端经过 Gateway 调用本地 MCP、会话 A/B 授权、下游取消与退出清理也已有证据。边界见[P0 技术验证记录](../docs/expert-p0/README.md)。
-- 2026-09-29 本地检查中，格式、lint、类型检查、Windows runtime 静态边界检查、Expert 定向测试、完整 Web 测试和完整 server 测试通过。
-- 当时仓库根完整测试没有形成全绿结论：五个工作区完成，desktop 工作区卡在 Electron `install.js`，8 分 25 秒无进展后终止。2026-10-08 全量执行已完成，当前桌面失败改由本轮验收记录说明。
-- 迁移检查命令正常退出，但当时 checkout 没有可访问的发布标签，因此没有完成历史发布链比较。
-- 当时默认工具为 Node 22.23.1 / Bun 1.4.0，低于仓库声明版本；2026-10-08 适配层检查已使用声明的 Node 24.13.1 / Bun 1.4.2。该检查不等同于签名安装包或跨平台发布验收。
-
-## 历史交付与验收记录（按专项追溯）
-
-以下带日期的进度是各专项在当时提交或工作树上的快照，不自动描述当前 main、安装版或候选副本。当前源码和待办见上方双环境与工作树整理记录；历史验收只支持其明确标注的版本和范围。
-
-- 2026-10-19 专家扩展交付：用户明确要求合入、安装和发布；`caf748a61` 已合入并推送个人仓库 main，原 26 项 MCP 修复完整保留。Personal Workbench 0.1.1 已本机安装启动，旧程序与一致性数据备份、原文件 hash 和应用身份核对通过；实际产物、安装、备份与 Claude 401 限制见[交付记录](../docs/expert-workbench-release-2026-10-19.md)。
-
-- 2026-10-18 Claude Code / oh-my-pi 专家扩展：按用户确认方案，在 `codex/expert-claude-omp` 隔离候选中扩展固定 Persona、Skills、MCP、Context 与恢复/派生，沿用现有专家界面。兼容版本、实际检查与真实回合状态见[扩展验收](../docs/expert-multi-provider-acceptance.md)；该条是实现阶段记录，不继承其他候选的验收；后续合入与本机安装读取 2026-10-19 交付记录。
-
-- 2026-10-18 专家/MCP 审核修复：六类缺陷、主 CI 和局部代码精简已在基于 `9bceb21d` 的 `codex/expert-mcp-reliability` 完成本地验证；完整六包 17,499 项通过、39 项跳过，另有 34 项浏览器回归通过。本轮未提交、推送、安装或发布，实际检查及兼容限制统一见[审核修复验收](../docs/expert-mcp-reliability-acceptance.md)，不复用旧源码的通过结论。
-- 2026-10-15 至 10-16 MCP 交互与授权调整：本机导入取消结果页、改用 toast；专家按连接添加，全部工具由首次任务启动自动读取并固定，后续新任务可读取新增工具。旧配置缺少 `toolMode` 时维持显式允许列表，旧任务不扩权。该增量为本地未提交改动，检查与实测边界统一见 [MCP 调整验收](../docs/mcp-connection-selection-acceptance.md)。
-- 2026-10-15 浏览器整合验收对应产品源码 `3a754ee69`；后续文档／历史整合及未提交 Expert/MCP 增量不自动继承该验收。v1.1 规范核对的 HEAD 与历史状态差异见上方基线入口。当前日用和预览入口以本页新记录为准。
-- 整合预览位于 `.synara/browser-integration`（`codex/browser-integration`），使用独立测试 home；不是正式用户数据库。预览与完整检查见[最新接入验收](../docs/space-project-context-v1-acceptance.md#8-2026-10-15-浏览器版整合补充)。
-- 原 Expert 候选与 Context 候选分别保存为 `0f67f540e`、`4b3705f0b`，仅作历史追溯；不再要求后续工作只在旧候选目录实施。原主目录的文档与原型已保存为 `20d370eb7`。
-- 2026-10-08 历史实施前 tree 为 `560487726a8dffb4432f3d46b8262b3bbe7332f5`、当时交付 tree 为 `490e1320a7a193fb486479e254e24304ce2f8c61`；历史归档位于 `/Users/wangyuelin/.codex/task-artifacts/workbench-adaptation-2026-10-08/`。这些 tree 不作为 10 月 15 日整合源码的验收结果。
-
-## 下一步
-
-### 当前整合顺序
-
-审计代码已合入，历史旧树清理与存储收口已完成，预览源码缺失问题也已修复；当前 Worker／OMP 修复的本地合入与运行验证边界以上节验收记录为准。环境管理按已确认规范执行，统一管理工具仍待按两个阶段落地，不由预览恢复推定完成。后续功能工作按审计台账推进持久补偿、OAuth 与依赖分类，继续保留 T2 真实成果闭环和 T3 运行中修订的未验收边界；应用签名问题另行修复，本次不扩大开发范围。
-
-### Linx V2.0 待开展
-
-1. 以 V2.0 第 13 节验收场景为目标，核对现有 Synara 对象与当前 Hermes Fork 能力，在已落地的 Space / Project Context 契约上制定 Hermes Owner、AgentAssignment 与权限的增量技术方案。
-2. 分别细化 Space + Owner 与 Skill Evolution 两条 P0 的范围、依赖和验收；本轮只落地 Context，未实施 Owner、Skill Evolution 或其自动化。
-3. 产品原文变化时重新核对本页摘要与后续技术方案；原文中的建议不通过摘要自动变成新增实现约束。
-
-### 历史版本与长期验证事项
-
-以下是历史版本证据或长期验证范围，不属于上面的当前整合顺序。v1.0.5 候选的冻结和门槛见上方历史升级记录；旧 Beta 测试修复证据按当时 checkout 解释。为其他源码准备桌面交付时，仍须按准确源码核验产物身份与运行结果。
-
-1. Beta 两项既有测试失败已修复，保留此前失败及当次复跑证据；测试通过不等于安装或发布。
-2. 历史上本地已保存并整合专家 UI / 全局 MCP / 本机导入、适配层与 Context；远端推送、构建、安装与发布分别记录实际状态，不能互相替代。
-3. 按实际交付目标补齐当前源码的真实 Provider、取消/恢复、MCP、跨平台安装包和迁移验证；保留 Linux、Windows 与远端 HTTP MCP 的历史缺口，不搬用旧 SHA 的成功结论。
-4. 后续两到三次真实官方升级记录改动类型、需语义适配的宿主/模块文件、修复与验证时间，评估本层维护成本。没有本轮官方升级或长期收益的完成结论。
-5. P3 导出分享、Git 来源、OAuth、团队分发和项目默认专家，以及已延期的业务看板，仍按实际需求另行启动。
-
-执行时先从本文件选择权威材料，再只读取当前任务需要的章节。后续阶段完成、检查结果变化或源码交接时，及时更新本页进度摘要与证据链接；方案、验收、P0 证据或发布故障矩阵变化时重新核对对应摘要，不以本页日期代替新证据。
+## 执行入口
+
+| 任务                       | 权威材料                                                                                                                                                                                                          | 使用方式                                                |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Agent 规范与上下文维护     | [根规范](../AGENTS.md)、[回写 SOP](../docs/workbench-development-workflow.md#文档与-context-回写-sop)                                                                                                             | 使用 BMAD adopt/refresh/record/audit，规则逐条追踪去向  |
+| 开发、修复、UI、文档与集成 | [开发 SOP](../docs/workbench-development-workflow.md#execution-sop)、[CONTRIBUTING](../CONTRIBUTING.md)                                                                                                           | 先核对范围和已有改动，按影响选检查                      |
+| 模块、数据、路由与宿主接入 | [架构标准](../docs/workbench-adaptation-plan.md#current-standard-v11)、[接入清单](../workbench/integration-points.json)                                                                                           | 明确所有权、父布局、公共能力与失败行为                  |
+| 产品方向、对象与 Provider  | [Linx V2.0](../docs/linx-product-design-v2.md)、[core concepts](../docs/core-concepts.md)、[providers](../docs/providers.md)                                                                                      | 按具体问题分别查规划、当前契约与实现                    |
+| Linx 更新、签名与安装承接  | [更新能力计划](../docs/linx-update-development-plan.md)、[release](../docs/release.md)                                                                                                                            | 当前为计划来源，实施和真实升级单独验收                  |
+| Beta/Stable 与 Canary      | [BETA](../BETA.md)、[Canary](../docs/canary.md)                                                                                                                                                                   | 分别核对身份、数据、更新源和对应交付授权                |
+| 环境、交付根与恢复         | [环境生命周期](../docs/workbench-development-workflow.md#environment-lifecycle)、[应用/预览记录](../docs/application-preview-environments-2026-10-24.md)、[存储记录](../docs/delivery-storage-plan-2026-11-05.md) | 操作前复核当前现场与兼容性，历史容量仅供追溯            |
+| 上游源码导入               | [sync SOP](../docs/workbench-implementation-plan.md#sync-sop)、[来源基线](../workbench/WB-00-upstream-evidence.md)、[自动化记录](../workbench/WB-05-automation.md)                                                | 仅在对应源码导入任务中使用，核对当前候选与远端实际状态  |
+| Marketing                  | [包级规范](../apps/marketing/AGENTS.md)、[包 README](../apps/marketing/README.md)、[manifest](../apps/marketing/package.json)                                                                                     | 读取本包 Next.js 文档，单独选择 docs/browser/性能等检查 |
+
+## 专项工作与证据
+
+| 专项                       | 当前工作入口                                                                                                                                                                                                                                                                                                                               | 验证与交付边界                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| Context 与规范接管         | [根规范](../AGENTS.md)、[接管记录](./BMAD_CONTEXT_ADOPTION.md)、[开发 SOP](../docs/workbench-development-workflow.md#文档与-context-回写-sop)                                                                                                                                                                                              | 按 BMAD 生命周期维护，具体状态与待决项查接管记录                          |
+| 禅模式与任务界面           | [实施记录](./zen-mode-implementation-2026-11-06.md)、[BMAD 当前计划](../_bmad-output/initiative-zen-companion/plan-native-window-and-task-ui.md)、[前端交接](../apps/web/prototypes/zen-companion/FRONTEND_HANDOFF.md)、[当前证据](../apps/web/prototypes/zen-companion/README.md#local-repair-package)                                    | 按记录分别核对源码、候选包、安装及真实 Provider，最新材料含本地未跟踪文件 |
+| Ambient Context / Obsidian | [实施入口](./ambient-context-implementation-plan-2026-11-06.md)、[闭环验收](../docs/ambient-context-obsidian-acceptance-2026-11-06.md)、[多库验收](../docs/ambient-context-multivault-acceptance-2026-11-06.md)                                                                                                                            | 连接、绑定和发送快照分别管理，安装状态按专项证据核对                      |
+| OMP Expert 兼容            | [兼容验收](../docs/omp-runtime-compatibility-2026-11-06.md)                                                                                                                                                                                                                                                                                | 按正式版本、能力探针与对应源码核对，真实线程恢复单独验证                  |
+| Expert / MCP 与学习        | [既有契约](../docs/expert-product-technical-design.md)、[Expert 方案](../docs/expert-center-product-plan-2026-10-28.md)、[技术方案](../docs/expert-center-technical-plan-2026-10-28.md)、[第一阶段验收](../docs/expert-autolearning-acceptance-2026-10-31.md)、[第二阶段验收](../docs/expert-autolearning-phase2-acceptance-2026-10-31.md) | Skill、Memory、Provider 和学习链路按各自范围与版本追溯                    |
+| Hub Graph 回滚及遗留协作   | [回滚安装记录](../docs/hub-graph-rollback-install-2026-11-02.md)、[迁移前记录](./PROJECT_RECORDS.md)                                                                                                                                                                                                                                       | 按用户回滚决定保留迁移与历史数据边界，旧方案作为历史材料                  |
+
+## 后续待办
+
+- [ ] 跨 Provider 接续规则与落地核对。双路径已有源码，先复核产品入口和真实运行验收，再判断是否需要产品方案讨论，并对齐设计文档和 context。来源与边界见 [接管记录](./BMAD_CONTEXT_ADOPTION.md)。
+
+## 后续维护
+
+- 当前任务改变时更新目标、入口、已确认决定摘要和下一步，实际检查只写入对应专项证据。
+- 规划变化时重查相关实现映射，源码或产物变化时重查对应验收范围。当前应用、端口、分支和安装状态在执行时核验。
+- 跨机器交接前核对关键材料的可取得性，禅模式原型、更新计划和 `_bmad-output` 中的过程计划按实际 Git/保留状态登记。
+- 追溯旧安装版本、历史候选、原决定来源和旧检查结果时读取 [迁移前完整记录](./PROJECT_RECORDS.md)。历史记录保持原时点含义，后续状态由本入口及专项权威材料承载。

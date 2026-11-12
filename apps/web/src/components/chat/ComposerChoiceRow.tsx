@@ -43,6 +43,31 @@ const CHIP_TONE_CLASS_NAME: Record<ComposerChoiceTone, string> = {
     "border border-[color:color-mix(in_srgb,var(--destructive)_42%,var(--color-border))] text-destructive group-hover:border-[color:color-mix(in_srgb,var(--destructive)_68%,var(--color-border))]",
 };
 
+/** Numbered leading chip shared by every decision row, including inline free-text answers. */
+export function ComposerChoiceChip({
+  shortcut,
+  selected = false,
+  tone = "neutral",
+}: {
+  shortcut: number | null;
+  selected?: boolean;
+  tone?: ComposerChoiceTone;
+}) {
+  if (shortcut === null) return null;
+  return (
+    <span
+      className={cn(
+        "flex size-[18px] shrink-0 items-center justify-center rounded-full text-ui-sm font-medium tabular-nums transition-colors duration-150",
+        selected
+          ? "bg-[var(--color-text-foreground)] text-[var(--color-background-surface)]"
+          : CHIP_TONE_CLASS_NAME[tone],
+      )}
+    >
+      {shortcut}
+    </span>
+  );
+}
+
 export function ComposerChoiceRow({
   shortcut,
   label,
@@ -68,18 +93,7 @@ export function ComposerChoiceRow({
         disabled && "cursor-not-allowed opacity-50",
       )}
     >
-      {shortcut !== null ? (
-        <span
-          className={cn(
-            "flex size-[18px] shrink-0 items-center justify-center rounded-full text-ui-sm font-medium tabular-nums transition-colors duration-150",
-            selected
-              ? "bg-[var(--color-text-foreground)] text-[var(--color-background-surface)]"
-              : CHIP_TONE_CLASS_NAME[tone],
-          )}
-        >
-          {shortcut}
-        </span>
-      ) : null}
+      <ComposerChoiceChip shortcut={shortcut} selected={selected} tone={tone} />
       <div className="min-w-0 flex-1 leading-snug">
         <span className="text-ui-lg font-medium text-foreground/90">{label}</span>
         {description && description !== label ? (

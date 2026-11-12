@@ -693,6 +693,8 @@ const zenModeManager = new ZenModeManager({
   getWindow: () =>
     mainWindow && !mainWindow.isDestroyed() ? (mainWindow as unknown as ZenModeWindow) : null,
   getDisplayWorkAreas: () => screen.getAllDisplays().map((display) => display.workArea),
+  getCursorScreenPoint: () => screen.getCursorScreenPoint(),
+  getWindowZoomFactor: (window) => (window as unknown as BrowserWindow).webContents.getZoomFactor(),
   onStateChanged: (state) => {
     const window = mainWindow;
     if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
@@ -1862,6 +1864,11 @@ function resolveMenuTargetWindow(): BrowserWindow | null {
 function sendDesktopZoomFactor(webContents: Electron.WebContents): void {
   if (webContents.isDestroyed()) return;
   webContents.send(IPC.zoomFactorChanged, webContents.getZoomFactor());
+  if (webContents === mainWindow?.webContents) {
+    void zenModeManager.syncBubbleZoom().catch((error: unknown) => {
+      console.warn("[desktop] Failed to resize the Zen bubble after zoom changed", error);
+    });
+  }
 }
 
 function attachDesktopZoomFactorSync(window: BrowserWindow): void {
@@ -2354,6 +2361,11 @@ function clearUnreadNotificationBadge(): void {
 function requestZenModeToggle(): void {
   if (isQuitting || desktopStartupBlockedForDatabaseRestore) return;
   if (mainWindow && !mainWindow.isDestroyed()) {
+    // A shortcut that recovers a hidden bubble must not immediately toggle Zen off.
+    if (zenModeManager.getState().isBubble) {
+      focusMainWindow({ stealAppFocus: true });
+      return;
+    }
     focusMainWindow({ stealAppFocus: true });
     const targetWindow = mainWindow;
     const dispatch = () => {
@@ -2453,6 +2465,15 @@ function setWindowFullScreenAndWait(window: BrowserWindow, fullScreen: boolean):
 function focusMainWindow(options: { stealAppFocus?: boolean } = {}): void {
   if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = null;
+    return;
+  }
+  if (zenModeManager.getState().isBubble) {
+    void zenModeManager
+      .restoreFromBubble()
+      .then(() => focusMainWindow(options))
+      .catch((error: unknown) => {
+        console.warn("[desktop] Failed to restore the Zen panel", error);
+      });
     return;
   }
   if (mainWindow.isMinimized()) {
@@ -5212,7 +5233,6 @@ async function confirmRunningChatsThenQuit(reason: string): Promise<void> {
     return;
   }
 
-  const window = mainWindow;
   if (!isMainRendererAvailable()) {
     nativeQuitConfirmationPromise ??= showDesktopConfirmDialog(
       t("desktop:quit4", { value0: APP_DISPLAY_NAME }),
@@ -5228,6 +5248,17 @@ async function confirmRunningChatsThenQuit(reason: string): Promise<void> {
     if (await nativeQuitConfirmationPromise) requestGracefulAppQuit(reason);
     return;
   }
+  // The retained renderer hides portals in bubble mode. Restore native panel
+  // geometry before requesting a confirmation that must be visible and usable.
+  if (zenModeManager.getState().isBubble) {
+    try {
+      await zenModeManager.restoreFromBubble();
+    } catch (error) {
+      console.warn("[desktop] Failed to restore the Zen panel for quit confirmation", error);
+      return;
+    }
+  }
+  const window = mainWindow;
   const presentation = quitConfirmationPresentationForPlatform();
   const allowed = await runningChatsQuitGuard.askRenderer({
     send: (request) => {
@@ -5365,6 +5396,13 @@ function registerIpcHandlers(): void {
   ipcMain.removeAllListeners(IPC.zoomFactor);
   ipcMain.on(IPC.zoomFactor, (event: IpcMainEvent) => {
     event.returnValue = event.sender.getZoomFactor();
+    if (
+      event.sender === mainWindow?.webContents &&
+      event.senderFrame === event.sender.mainFrame &&
+      zenModeManager.getState().isBubble
+    ) {
+      sendDesktopZoomFactor(event.sender);
+    }
   });
 
   ipcMain.removeAllListeners(IPC.windowTranslucency);

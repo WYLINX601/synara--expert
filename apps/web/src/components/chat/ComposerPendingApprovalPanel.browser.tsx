@@ -3,6 +3,7 @@
 // Layer: Chat composer UI browser test
 // Depends on: ComposerPendingApprovalPanel and vitest-browser-react.
 
+import "../../index.css";
 import {
   ApprovalRequestId,
   type ProviderApprovalDecision,
@@ -39,6 +40,7 @@ function makeApproval(overrides: Partial<PendingApproval> = {}): PendingApproval
 async function mountApprovalPanel(input?: {
   approval?: PendingApproval;
   isResponding?: boolean;
+  compact?: boolean;
   onRespond?: ApprovalResponder;
 }) {
   const onRespond =
@@ -58,6 +60,7 @@ async function mountApprovalPanel(input?: {
       approval={approval}
       pendingCount={1}
       isResponding={isResponding}
+      compact={input?.compact ?? false}
       onRespond={onRespond}
     />
   );
@@ -265,4 +268,52 @@ describe("ComposerPendingApprovalPanel", () => {
       await mounted.cleanup();
     }
   });
+
+  it.each(["accept", "acceptForSession", "decline", "cancel"] as const)(
+    "keeps compact %s reachable below long approval details without window controls",
+    async (decision) => {
+      const labels = {
+        accept: "Approve once",
+        acceptForSession: "Always allow this session",
+        decline: "Decline",
+        cancel: "Cancel turn",
+      };
+      const mounted = await mountApprovalPanel({
+        compact: true,
+        approval: makeApproval({
+          requestKind: "tool",
+          toolName: "long_decision",
+          toolParamsDisplay: Array.from({ length: 30 }, (_, index) => ({
+            name: `parameter_${index}`,
+            displayName: `Parameter ${index + 1}`,
+            value: "Long tool context that must remain reachable in the compact decision surface.",
+          })),
+        }),
+      });
+      try {
+        const heading = page.getByText(/^Approve this tool call\?/u).element();
+        const header = heading.parentElement!;
+        const surface = header.parentElement!;
+        const heightLimit =
+          20 * Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+        expect(surface.clientHeight).toBeLessThanOrEqual(heightLimit);
+        expect(surface.scrollHeight).toBeGreaterThan(surface.clientHeight);
+        surface.scrollTop = 40;
+        await expect.poll(() => surface.scrollTop).toBe(40);
+        const headerTop = header.getBoundingClientRect().top;
+        surface.scrollTop = surface.scrollHeight;
+        await expect.poll(() => surface.scrollTop).toBeGreaterThan(0);
+        expect(Math.abs(header.getBoundingClientRect().top - headerTop)).toBeLessThan(1);
+        await page.getByRole("button", { name: new RegExp(labels[decision], "u") }).click();
+        expect(mounted.onRespond).toHaveBeenCalledExactlyOnceWith(
+          APPROVAL_REQUEST_ID,
+          decision,
+          LIFECYCLE_GENERATION,
+          "tool",
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    },
+  );
 });

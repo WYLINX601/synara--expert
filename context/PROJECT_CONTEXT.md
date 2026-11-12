@@ -1,11 +1,11 @@
 # Linx 项目上下文
 
-更新日期为 2026-11-09。本文负责当前目标、任务路由、已确认决定摘要与下一步，执行规范由根 `AGENTS.md` 的 BMAD 托管块维护。
+更新日期为 2026-11-12。本文负责当前目标、任务路由、已确认决定摘要与下一步，执行规范由根 `AGENTS.md` 的 BMAD 托管块维护。
 
 ## 当前目标与已确认边界
 
 - 以 [Linx V2.0](../docs/linx-product-design-v2.md) 组织长期方向管理、专业任务执行与能力进化，复用现有源码持续演进。规划与源码实现、运行证据和用户验收分别核对。
-- Linx 按独立产品管理，产品更新消费自有已发布安装包。发布身份、平台、签名与既有安装承接按 [更新能力计划](../docs/linx-update-development-plan.md) 收敛，Bundle ID、数据目录与仓库来源按实际实现核验。
+- Linx 按独立产品管理，产品更新消费自有已发布安装包。[更新能力计划 v0.2](../docs/linx-update-development-plan.md)已按用户决定收敛为首批 macOS Apple Silicon、自动检查但点击后才下载安装、不依赖 Apple Developer ID／公证；标签触发构建，公开 Release 前人工确认。独立更新辅助程序、自有清单签名及系统安全提示的实机验证尚未实施；Bundle ID／数据目录是否迁移仍待选择。本轮只更新方案，不代表应用、发布源或远端工作流已切换。
 - 架构约束、操作与检查、实际结果各有权威记录，入口只维护摘要与链接。每项工作按准确源码与当前工作区核对证据。
 
 <a id="execution-entry"></a>
@@ -18,7 +18,7 @@
 | 开发、修复、UI、文档与集成 | [开发 SOP](../docs/workbench-development-workflow.md#execution-sop)、[CONTRIBUTING](../CONTRIBUTING.md)                                                                                                           | 先核对范围和已有改动，按影响选检查                      |
 | 模块、数据、路由与宿主接入 | [架构标准](../docs/workbench-adaptation-plan.md#current-standard-v11)、[接入清单](../workbench/integration-points.json)                                                                                           | 明确所有权、父布局、公共能力与失败行为                  |
 | 产品方向、对象与 Provider  | [Linx V2.0](../docs/linx-product-design-v2.md)、[core concepts](../docs/core-concepts.md)、[providers](../docs/providers.md)                                                                                      | 按具体问题分别查规划、当前契约与实现                    |
-| Linx 更新、签名与安装承接  | [更新能力计划](../docs/linx-update-development-plan.md)、[release](../docs/release.md)                                                                                                                            | 当前为计划来源，实施和真实升级单独验收                  |
+| Linx 更新、发布与安装承接  | [更新能力计划 v0.2](../docs/linx-update-development-plan.md)、[release](../docs/release.md) | 先验证无 Apple 付费分发的辅助安装可行性；实现、真实升级和发布分别验收 |
 | Beta/Stable 与 Canary      | [BETA](../BETA.md)、[Canary](../docs/canary.md)                                                                                                                                                                   | 分别核对身份、数据、更新源和对应交付授权                |
 | 环境、交付根与恢复         | [环境生命周期](../docs/workbench-development-workflow.md#environment-lifecycle)、[应用/预览记录](../docs/application-preview-environments-2026-10-24.md)、[存储记录](../docs/delivery-storage-plan-2026-11-05.md) | 操作前复核当前现场与兼容性，历史容量仅供追溯            |
 | 上游源码导入               | [sync SOP](../docs/workbench-implementation-plan.md#sync-sop)、[来源基线](../workbench/WB-00-upstream-evidence.md)、[自动化记录](../workbench/WB-05-automation.md)                                                | 仅在对应源码导入任务中使用，核对当前候选与远端实际状态  |

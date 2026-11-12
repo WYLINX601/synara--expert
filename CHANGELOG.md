@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### In development: Expert Suites
+
+- Import recognized local-folder or GitHub Suites through a preview and immutable publication boundary, preserving role identities, non-role Skills and file resources without running source scripts.
+- Select Suite Experts as task drafts and fix their capability binding on first send. New Hubs choose independent or Suite mode through the existing configuration revision and admission lock; existing Hubs and non-Suite tasks retain their original path.
+- Keep native Expert delegation business records independent of Harness wire formats. OMP support requires a verified isolated 18.16.0 source patch and exact compiled-binary provenance; it does not replace the user's executable or model configuration.
+- Revoke stale-generation native tool authority and preserve unknown execution state. Parent Stop retains the existing ACP process-tree owner and does not wait indefinitely for a native cancel/query reply.
+- Bound outstanding Suite previews before capture and reclaim expired sources only after checking import, Run and artifact references through their owners.
+- Enforce immutable Skill ownership during import and Run admission. Unresolved historical ownership limits only the affected resource; newly copied snapshots and origin-less legacy receipts do not grant access.
+- Keep late native delegation results visible in connected clients and replay without restarting stopped work.
+- Accept portable public GitHub archive directory metadata while retaining link/special-file rejection, and compare canonical roots when staging imported roles through a data-directory alias.
+- Persist a truthful failed native Expert result when an ended SDK run omits its required artifact declaration, revoke the target's tool leases, and preserve already-fixed terminal outboxes when acknowledgements are lost.
+- Include business Expert IDs and catalog revisions in OMP native target descriptions so callers can identify exact Experts without guessing provider aliases; retain the generated names, model lock and child-only artifact declaration.
+- Resolve the WebSocket Hub Expert list through the existing Suite composition owner, keeping Suite members distinct from an independent Hub's empty roster.
+- Carry the assembly owner's actual work-scoped Run identity through Provider dispatch and stale-session recovery, preserving identity validation when an existing Hub Expert worker resumes.
+
+Implementation and the scoped OMP technical acceptance are complete; user acceptance and release are pending. Verification includes the latest compiled native lifecycle matrix, a real BMAD PM → Amelia professional task, actual Suite/Hub journeys, and the full declared workspace test suite. See the [Expert implementation supplement](docs/expert-product-technical-design.md#2026-11-11-suite-与原生委托实施补充) and [development evidence](_bmad-output/initiative-expert-suite-hub/development-readiness.md) for warnings and unverified scope.
+
 ## 1.1.0 — 2026-11-02
 
 **More reliable recovery, opt-in continuation after usage limits, Spanish interface and safer attachments.**

@@ -6,6 +6,23 @@
 调研日期：2026-09-24。代码基线：`eaa61eded31b6755d4f30ba8eabc5d905cf817cb`。  
 范围：在现有 Synara 内增加跨 Provider 的专家能力。Codex / Pi 是首版基线；Claude Code / oh-my-pi 扩展见第 7.4 节。暂按个人使用优先、以后可分享专家包设计；团队权限和公开市场不作为首版前提。
 
+## 2026-11-11 Suite 与原生委托实施补充
+
+本轮依据 [开发冻结附件 r2](../_bmad-output/planning-artifacts/architecture/architecture-synara-expert-2026-11-09/DEVELOPMENT-CONTRACT.md) 实施；该附件的 C-6／G-1～G-6 为公共语义，OMP 的 ACP／Task 握手仅属于 Adapter。首版 Expert、旧任务快照与 v1 Run hash 继续保留，不能用本轮实现记录改写下文历史验收范围。
+
+- Suite 是不可变组合，不是另一种运行器。服务端识别 `synara-suite.json` 或固定 BMAD 结构；本地目录与 GitHub 先生成只读内容快照，预览不执行来源脚本。角色内化为 Expert，非角色 Skill 与纯文件资源保留完整依赖。唯一导入计划、原 SQL journal 与 `committed` 发布屏障共同控制文件／数据库可见性；相同来源和内容重放复用原组合。
+- 预览的 100 项准入与到期回收使用同一资产生命周期队列；捕获前检查预算，取消／到期只能释放未被导入计划、组合、Run 或成果引用的来源包。Suite 所有者通过成果所有者的引用端口查询保护集，不读取其他模块的 SQL 表；成果封存与引用提交也在该队列内。
+- 固定 Skill 引用按不可变包／入口归属授权，不相信 `sourceId`、导入成员或新生成的快照。归属事实随版本替换保留；旧记录可从已提交回执与带 managed ID 的固定装配恢复，无法恢复则局部限制该资源。新 Expert 在持久化前排除无权／归属不明的选择；仅显式完成的宿主包导入回执或本次已捕获资产可补足未知来源证明。无来源标记的旧包导入回执不自动升级为共享授权，不宣称所有历史归属均可重建。
+- 新任务的选择先存草稿，首次发送才固定 Expert 基础快照和 Suite 能力绑定。逻辑 Run 在原装配所有者中固定资源、技能与有效配置；恢复不重新读取最新 Suite。新 Hub 通过原配置 revision／mode lock 决定独立或 Suite 模式，首次准入与保存共享事务；旧 Hub 不重新开放模式选择，Coordinator 不伪造 Expert。
+- 公共委托与 attempt／result 存于 `ExpertDelegationStore`；OMP 原生执行 ID、session 与协议序号存于 `OmpExpertExecutionStore`，由 `OmpExpertDelegationHost` 在原事务与原进程生命周期接入。Gateway 在每次准入核验子身份、固定装配及当前 generation，不取父子能力并集；父回合自然结束不取消异步子任务。父 Stop 本地撤销授权后复用 ACP Scope 的物理关闭，不等待无响应的 native cancel/query；缺少真实终态仍为 `unknown`。
+- 委托终态由显式共享子路径统一映射为活动，服务端投影与在线 Web 消费者按同一事件 ID 去重。停止后晚到结果仍可观察，但不恢复回合、不改消息或会话状态。
+- 私有角色发现目录经 OMP capabilities 握手绑定实际连接，只发现 `agents/*.md`，不启用来源插件或执行同目录脚本。原生委托仅对固定源码 `650f3a108229ee11bf68ba3377f4e8c3391cd424` 的已验证编译指纹和 binary SHA-256 组合开放；源码修改使旧产物失效，不能以版本号或首次构建记录证明最新实现。不会自动替换日用 OMP 或修改用户模型配置。
+- 原生角色目录同时展示业务 Expert ID 与 revision，生成名称仍为宿主映射键；描述用于发现，不授予身份。已结束但缺少产物申报的 SDK 执行固定真实失败终态并撤销租约，不能永久 running 或改写已持久的 terminal outbox。
+- Provider 派发与 stale-session 恢复采用装配所有者实际固定的逻辑 Run，而非把请求消息 ID 当作 Hub work-scoped Run；线程、snapshot、assembly 与内容完整性校验保持。已有 worker 接续沿原绑定与装配，不创建替代工作。
+- 已授权的 Web 变化限于 Suite 导入／成员预览、Expert 草稿选择、任务信息与新 Hub 的 Suite 选择。仍使用原父布局、订阅、快捷键、typed client 与任务流程，不新增运行页面。
+
+实施与实际证据见 [开发 readiness](../_bmad-output/initiative-expert-suite-hub/development-readiness.md) 和 [Build 计划](../_bmad-output/initiative-expert-suite-hub/plan-expert-suite-hub.md)。2026-11-12 已完成最新编译 OMP 的 V-1～V-6、指定真实模型 A3 的原生委托／代码／PM 独立验证，以及轻量 Suite 导入、两 Hub 原 worker 成果接续、实际跨 Hub／角色权限拒绝和无 Suite 回归；R7～R10 两项独立源码复核关闭，最终完整 workspace 20,239 通过／0 失败／47 跳过，适用类型／lint／迁移／平台静态与边界门禁通过。lint 与 Turbo lock-parser 警告如实保留。未验证其他 Harness 原生委托、私有 GitHub 实网、平台安装、签名发布或用户验收。隔离 Hub 正式成果发布按产品机制写入其私有成果库历史，不等同当前业务源码的提交或发布。
+
 ## 1. 建议与产品定位
 
 **Expert 是可复用、可检查、可固定版本的工作能力配置；Task 是实际工作的承载者。**
@@ -227,7 +244,7 @@ Pi SDK 可显式提供 ResourceLoader、SettingsManager 和 customTools；具体
 
 Pi 复用当前凭证与模型来源，单独构造资源加载。不得通过修改 `process.env` 或全局 `agentDir` 为两个并行会话切专家。
 
-首版隔离承诺是：**任务 A 的专家选择不会改掉任务 B 的专家选择。** 用户原有全局或项目 Skills、原生工具可能继续存在，需要在详情中区分“专家提供”和“环境继承”。专家列表不是安全沙箱，也不应标成“仅能使用这些工具”。若以后要严格只允许指定工具，需要额外验证原生扩展、shell 和网络边界。
+首版任务隔离要求继续适用，任务 A 的专家选择只作用于任务 A。固定 Expert 任务按快照与当次固定装配约束 Skill 发现、上下文和调用，普通任务沿用 harness 原生 Skills。Provider 原生工具仍受现有权限控制，Skill 清单只约束装配范围。Read/Bash、shell 和网络访问继续受实际授权及操作系统边界约束，详情分别说明固定装配、原生能力和实际运行证据。
 
 ### 7.3 Skills 的可用不等于每轮强制执行
 
@@ -242,11 +259,11 @@ Persona 作为稳定角色上下文；Skills 先提供名称、触发条件和�
 - 专家契约支持 `codex`、`pi`、`claudeAgent`、`omp`，集中维护支持集合。返回值中的 Provider 枚举扩展会使旧客户端解码失败，因此 WebSocket 协议修订升为 5，要求客户端与服务端配套更新；旧修订在协商阶段明确拒绝。Provider Adapter 通过独立原生预检报告专家兼容性，原生技能发现与专家资源加载分别描述。预检携带实际 Provider instance 与 cwd，服务端按同一实例设置执行原生兼容性检查，启动时再次核验。
 - Expert 定义、不可变快照、任务绑定与 Gateway 授权继续由原服务持有。Provider 专属目录是快照的派生投影，不改写快照哈希、技能来源或 MCP 工具授权。新增运行回执随现有 runtime payload 保存，不增加数据库迁移。
 - Claude 保留 Agent SDK、`claude_code` preset 与原生权限，在附加指令中组合 Expert 与固定 Space / Project Context；快照技能投影为具名的本地 skills-only 插件，通过 initialize 投递。有固定技能时要求 CLI ≥2.1.261，在首条请求前通过控制握手核验 `plugins_applied` 与具名技能命令；后续原生初始化再检查插件路径及错误，不阻塞首次派发。旧 CLI 缺少可靠前置回执时明确提示升级。
-- OMP 保留 ACP、一会话一进程与原有账户目录。进程级附加提示文件保留有效原生 APPEND 内容；进程级只读配置覆盖层将快照技能目录置于自定义目录首位，并保留其他有效自定义目录。原生技能开关、包含/排除规则及禁用项与必需技能冲突时拒绝启动，不自动启用。新建、resume 与 load 使用同一准备路径，Gateway MCP 继续经 ACP session 参数接入。
+- OMP 保留 ACP、一会话一进程与原有账户目录。进程级附加提示文件保留有效原生 APPEND 内容；进程级只读配置覆盖层将快照技能目录置于自定义目录首位，并按固定 catalog 验证完整装配集合，额外环境 Skill 不得进入固定目录。原生技能开关、包含/排除规则及禁用项与必需技能冲突时拒绝启动，不自动启用。新建、resume 与 load 使用同一准备路径，Gateway MCP 继续经 ACP session 参数接入。
 - Space / Project Context 的独立 Provider 门禁同步扩展，支持有专家与无专家的 Context 任务。原生 fork 可先持久化快照和 cursor，目标首次实际启动并核验后再记录 applied；不为未运行的 fork 提前写生效记录。
 - 跨 Provider 接续沿用当前宿主已有的同任务 rebind 与派生任务两条路径，分别维护快照和失败恢复。更换专家创建新的原生会话，避免复用旧角色。必需连接失败阻止启动，可选连接保留明确降级；专家配置不提升原生权限。
 
-加载回执表示该版本运行时已经接收对应投影，不证明模型每轮都会使用所有技能，也不证明提供方专有工具指令可以自动迁移。原生环境技能与工具仍按原授权存在，专家技能清单不构成严格沙箱。
+加载回执表示该版本运行时已经接收对应投影，模型实际使用技能及 Provider 专有工具指令迁移仍须对应运行证据。普通任务沿用原生环境 Skills，固定 Expert 任务按当前固定发现与装配策略交付。原生工具继续受原授权控制，Expert Skill 清单只限定发现、上下文与调用，任意文件读取、Bash、shell 和网络边界分别核验。
 
 ## 8. MCP 方案：复用 Gateway，补足下游连接
 

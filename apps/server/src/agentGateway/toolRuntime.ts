@@ -2,7 +2,10 @@ import type { LearningSessionContext, ProviderKind } from "@synara/contracts";
 import type { Effect } from "effect";
 
 import type { AgentGatewayTargetError } from "./targetResolver.ts";
-import type { AgentGatewayCapability } from "./Services/AgentGatewaySessionRegistry.ts";
+import type {
+  AgentGatewayCapability,
+  AgentGatewayNativeExecution,
+} from "./Services/AgentGatewaySessionRegistry.ts";
 import {
   mcpToolResultJson,
   type JsonRpcId,
@@ -32,16 +35,25 @@ export interface ProviderSessionPrincipal {
   readonly turnId: string | null;
 }
 
+export interface NativeDelegatePrincipal extends Omit<ProviderSessionPrincipal, "kind"> {
+  readonly kind: "native-delegate";
+  readonly nativeExecution: AgentGatewayNativeExecution;
+}
+
 export interface ExternalClientPrincipal {
   readonly kind: "external-client";
   readonly integrationId: string;
   readonly name: string;
 }
 
-export type AgentGatewayPrincipal = ProviderSessionPrincipal | ExternalClientPrincipal;
+export type AgentGatewayPrincipal =
+  | ProviderSessionPrincipal
+  | NativeDelegatePrincipal
+  | ExternalClientPrincipal;
 
 export interface ToolContext {
-  readonly principal: ProviderSessionPrincipal;
+  readonly principal: ProviderSessionPrincipal | NativeDelegatePrincipal;
+  readonly nativeExecution?: AgentGatewayNativeExecution;
   readonly callerThreadId: string;
   /**
    * The caller thread as a human would name it, for surfaces the human sees -

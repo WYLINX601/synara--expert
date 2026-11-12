@@ -411,7 +411,9 @@ export function useHandleNewThread() {
     return runDraftNavigationOnce(
       draftNavigationSlotKey(
         projectId,
-        options?.standalone ? `expert:${options.expertId ?? ""}` : entryPoint,
+        options?.standalone
+          ? `expert:${options.expertId ?? ""}:suite:${options.suiteSelection ? `${options.suiteSelection.suiteId}:${options.suiteSelection.revision}` : "none"}`
+          : entryPoint,
       ),
       async (signal) => {
         const threadId = newThreadId();
@@ -441,6 +443,7 @@ export function useHandleNewThread() {
               projectId,
               ...draftSeed,
               ...(options?.expertId ? { expertId: options.expertId } : {}),
+              suiteSelection: options?.suiteSelection ?? null,
             });
             activateThreadEntryPoint(threadId);
             // Seed the draft from the sticky (last-used) selection so a new chat

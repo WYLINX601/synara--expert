@@ -194,7 +194,6 @@ import { ThreadSearchQuery } from "./threadSearch";
 import { redactSensitiveProcessArgs } from "./processArgumentRedaction";
 import { ServerEnvironment } from "./environment/Services/ServerEnvironment";
 import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
-import { createWorkbenchExpertRuntime } from "./workbench/runtimeLayer.ts";
 import { createExpertStore } from "./experts/ExpertStore";
 import { SkillEvolutionRepository } from "./experts/evolution/SkillEvolutionRepository";
 import { ExpertLearningRepository } from "./experts/evolution/ExpertLearningRepository";
@@ -210,6 +209,9 @@ import {
   makeWorkbenchExpertRpcHandlers,
   makeWorkbenchExpertDiscoveryHandlers,
 } from "./workbench/host/expertRpc.ts";
+import { makeWorkbenchSuiteRpcHandlers } from "./workbench/host/suiteRpc";
+import { SuiteImportService } from "./suites/SuiteImportService";
+import { SuiteCompositionStore } from "./suites/SuiteCompositionStore";
 import { makeWorkbenchContextRpcHandlers } from "./workbench/host/contextRpc.ts";
 import { makeSkillManagementRpcHandlers } from "./workbench/host/skillManagementRpc.ts";
 import { readThreadContextDetails } from "./workbench/host/contextThreadDetails.ts";
@@ -241,8 +243,6 @@ import { ThreadDiagnosticsQuery } from "./diagnostics/Services/ThreadDiagnostics
 import { makeOwnerThreadDiagnosticReader } from "./diagnostics/ownerThreadDiagnostics";
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore";
 import { ProviderRuntimeEventRepository } from "./persistence/Services/ProviderRuntimeEvents";
-import { ExpertAppliedRuntimeRepository } from "./persistence/Services/ExpertAppliedRuntimeRecords.ts";
-import { ExpertAppliedRuntimeRepositoryLive } from "./persistence/Layers/ExpertAppliedRuntimeRecords.ts";
 import { requireWsOwnerSession } from "./wsOwnerAuthorization";
 import { makeWsRequestAdmission } from "./wsRequestAdmission";
 import { voiceUploadAdmissionGate } from "./voiceUploadAdmission";
@@ -613,7 +613,6 @@ const makeWsRpcHandlersLayer = () =>
       const threadDiagnostics = yield* ThreadDiagnosticsQuery;
       const eventStore = yield* OrchestrationEventStore;
       const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
-      const expertAppliedRuntimeRepository = yield* ExpertAppliedRuntimeRepository;
       const contextRepository = yield* ContextRepository;
       const evolutionRepository = yield* Effect.serviceOption(SkillEvolutionRepository);
       const learningRepository = yield* Effect.serviceOption(ExpertLearningRepository);
@@ -621,17 +620,9 @@ const makeWsRpcHandlersLayer = () =>
       const learningActions = yield* Effect.serviceOption(ExpertLearningActions);
       const evolutionTurns = yield* Effect.serviceOption(ProjectionTurnRepository);
       const contextDeliveries = yield* OrchestrationEventDeliveryRepository;
-      const sharedExpertRuntime = yield* Effect.serviceOption(WorkbenchExpertRuntime);
-      const workbenchExpertRuntime =
-        Option.getOrUndefined(sharedExpertRuntime) ??
-        createWorkbenchExpertRuntime({
-          stateDir: config.stateDir,
-          expertAppliedRuntimeRepository,
-        });
-      if (Option.isNone(sharedExpertRuntime))
-        yield* Effect.addFinalizer(() =>
-          Effect.promise(() => workbenchExpertRuntime.skillLibrary.dispose()),
-        );
+      const workbenchExpertRuntime = yield* WorkbenchExpertRuntime;
+      const suiteImportService = yield* SuiteImportService;
+      const suiteCompositionStore = yield* SuiteCompositionStore;
       const readOwnerThreadDiagnostics = makeOwnerThreadDiagnosticReader({
         eventStore,
         providerRuntimeEvents,
@@ -1446,9 +1437,9 @@ const makeWsRpcHandlersLayer = () =>
               shell?.session?.status === "starting" ||
               hasBackground,
             );
-            const assemblies = createRunSkillAssemblyStore(
-              config.stateDir,
-              Option.isSome(learningRepository)
+            const assemblies = createRunSkillAssemblyStore(config.stateDir, {
+              suiteStore: suiteCompositionStore,
+              ...(Option.isSome(learningRepository)
                 ? {
                     frozenEntries: (expertId, bindings) =>
                       frozenLearningEntriesReader(learningRepository.value)(
@@ -1456,12 +1447,19 @@ const makeWsRpcHandlersLayer = () =>
                         bindings ?? [],
                       ),
                   }
-                : {},
-            );
+                : {}),
+            });
             return yield* Effect.tryPromise(async () => {
               if (!running) return assemblies.preview(snapshot.snapshotId);
               const current = await assemblies.current(threadId);
-              return current?.session ?? expertSnapshotSession(snapshot);
+              if (!current) return expertSnapshotSession(snapshot);
+              if (current.schemaVersion === 1) return current.session;
+              const runtimeContext = await assemblies.runtimeContext(current);
+              if (!runtimeContext) throw new Error("Suite Run runtime context is unavailable.");
+              return {
+                ...expertSnapshotSession(snapshot),
+                skillEntries: runtimeContext.skillEntries,
+              };
             });
           }),
         listCommands: (request) => providerDiscoveryService.listCommands(request),
@@ -1535,6 +1533,33 @@ const makeWsRpcHandlersLayer = () =>
         expertRpcEffect,
         loadProjectionThreads: () =>
           projectionReadModelQuery.getSnapshot().pipe(Effect.map((snapshot) => snapshot.threads)),
+      });
+      const workbenchSuiteRpcHandlers = makeWorkbenchSuiteRpcHandlers({
+        service: suiteImportService,
+        store: suiteCompositionStore,
+        stateDir: config.stateDir,
+        requireOwner,
+        rpcEffect,
+        requireThread: (request) =>
+          projectionReadModelQuery.getThreadShellById(request.threadId).pipe(
+            Effect.mapError(() => new WsRpcError({ message: "Failed to load Suite Run thread." })),
+            Effect.flatMap((thread) =>
+              Option.isSome(thread)
+                ? projectionReadModelQuery.getProjectShellById(thread.value.projectId).pipe(
+                    Effect.mapError(
+                      () => new WsRpcError({ message: "Failed to load Suite Run project." }),
+                    ),
+                    Effect.flatMap((project) =>
+                      Option.isSome(project)
+                        ? Effect.succeed(thread.value)
+                        : Effect.fail(
+                            new WsRpcError({ message: "Suite Run project is unavailable." }),
+                          ),
+                    ),
+                  )
+                : Effect.fail(new WsRpcError({ message: "Suite Run thread is unavailable." })),
+            ),
+          ),
       });
       const skillManagementRpcHandlers = makeSkillManagementRpcHandlers({
         config,
@@ -2671,6 +2696,7 @@ const makeWsRpcHandlersLayer = () =>
         [WS_METHODS.serverUpdateSettings]: (input) =>
           rpcEffect(serverSettings.updateSettingsView(input), "Failed to update server settings"),
         ...workbenchExpertRpcHandlers,
+        ...workbenchSuiteRpcHandlers,
         ...evolutionRpc.handlers,
         ...skillManagementRpcHandlers,
         ...workbenchContextRpcHandlers,
@@ -3113,6 +3139,7 @@ const makeWsRpcHandlersLayer = () =>
                   .pipe(Effect.map((config) => (Option.isSome(config) ? config.value : null))),
               dependencies: {
                 expertStore: createExpertStore(config.stateDir),
+                suiteStore: suiteCompositionStore,
                 providerDiscovery: providerDiscoveryService,
                 loadProviderAvailabilities: Effect.all([
                   serverSettings.getSettings,
@@ -3709,10 +3736,7 @@ const makeWsRpcHandlersLayer = () =>
 
 export const makeWsRpcLayer = () =>
   Layer.merge(
-    makeWsRpcHandlersLayer().pipe(
-      Layer.provideMerge(ExpertAppliedRuntimeRepositoryLive),
-      Layer.provideMerge(ContextRepositoryLive),
-    ),
+    makeWsRpcHandlersLayer().pipe(Layer.provideMerge(ContextRepositoryLive)),
     wsRequestAdmissionMiddlewareLayer,
   );
 

@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ExpertDefinition, ExpertSaveInput } from "@synara/contracts";
+import type { ExpertDefinition, ExpertDraftSelection, ExpertSaveInput } from "@synara/contracts";
 import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { Button } from "../ui/button";
 import {
@@ -39,6 +39,7 @@ import type { ExpertDraftIssue } from "./expertSettingsModel";
 import { SKILL_LIBRARY_QUERY_KEY } from "./ExpertSkillBindingsEditor";
 import { EXPERT_CONNECTIONS_QUERY_KEY, EXPERTS_QUERY_KEY } from "./expertSettingsQueries";
 import { useExpertDraftGuard } from "./useExpertDraftGuard";
+import { SuiteCatalog } from "./SuiteCatalog";
 
 const SkillLibrarySettingsPanel = lazy(() =>
   import("./SkillLibrarySettingsPanel").then((module) => ({
@@ -73,7 +74,7 @@ export function ExpertsSettingsPanel(props: {
   readonly renderHistory?: (expertId: string, canExtract: boolean) => ReactNode;
   readonly renderLearning?: (expert: ExpertDefinition, active: boolean) => ReactNode;
   readonly renderEvolution?: (expert: ExpertDefinition, active: boolean) => ReactNode;
-  readonly onUseExpert?: (expertId: string) => Promise<void>;
+  readonly onUseExpert?: (selection: ExpertDraftSelection) => Promise<void>;
   readonly initialExpertId?: string;
   readonly onOpenConnections?: (expertId: string, connectionId?: string) => void;
 }) {
@@ -87,7 +88,8 @@ export function ExpertsSettingsPanel(props: {
   });
   const experts = expertsQuery.data ?? EMPTY_EXPERTS;
   const [view, setView] = useState<"list" | "editor">("list");
-  const settingsKind = props.centerRoute?.kind === "skills" ? "skills" : "experts";
+  const [localKind, setLocalKind] = useState<ExpertCenterKind>("experts");
+  const settingsKind = props.centerRoute?.kind ?? localKind;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [baseline, setBaseline] = useState<ExpertDefinition | null>(null);
   const [draft, setDraft] = useState<ExpertSaveInput | null>(null);
@@ -235,6 +237,8 @@ export function ExpertsSettingsPanel(props: {
     if (!(await confirmLeave())) return;
     if (props.centerRoute?.navigateKind) {
       await props.centerRoute.navigateKind(next);
+    } else {
+      setLocalKind(next);
     }
   };
 
@@ -484,7 +488,8 @@ export function ExpertsSettingsPanel(props: {
       if (!(await confirmLeave())) return;
       let current = baselineRef.current;
       if (!current) current = await saveDraft();
-      if (current && !current.archived) await props.onUseExpert(current.id);
+      if (current && !current.archived)
+        await props.onUseExpert({ expertId: current.id, suite: null });
     } catch (error) {
       setActionError(errorText(error));
     } finally {
@@ -569,6 +574,7 @@ export function ExpertsSettingsPanel(props: {
           ariaLabel="专家设置分类"
           options={[
             { value: "experts", label: props.centerRoute ? "专家" : "单个专家" },
+            { value: "teams", label: "Suite" },
             ...(props.centerRoute ? [{ value: "skills" as const, label: "技能" }] : []),
           ]}
         />
@@ -582,6 +588,8 @@ export function ExpertsSettingsPanel(props: {
             返回专家列表
           </Button>
         </SettingsEmptyState>
+      ) : settingsKind === "teams" ? (
+        <SuiteCatalog {...(props.onUseExpert ? { onUseExpert: props.onUseExpert } : {})} />
       ) : settingsKind === "skills" ? (
         <Suspense
           fallback={<SettingsEmptyState layout="status">正在读取技能库…</SettingsEmptyState>}

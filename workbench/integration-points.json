@@ -2,6 +2,36 @@
   "version": 1,
   "integrationPoints": [
     {
+      "id": "zen.window-chrome",
+      "surface": "zen-mode",
+      "entryFiles": [
+        "packages/contracts/src/zenMode.ts",
+        "apps/web/src/components/chat/ZenModeProvider.tsx",
+        "apps/web/src/components/chat/ZenModeToolbar.tsx",
+        "apps/web/src/components/chat/ZenModeBubble.tsx",
+        "apps/web/src/components/chat/useZenDragRegion.ts",
+        "apps/web/src/components/SidebarHeaderNavigationControls.tsx",
+        "apps/desktop/src/zenModeManager.ts",
+        "apps/desktop/src/zenModeIpc.ts",
+        "apps/desktop/src/preload.ts",
+        "apps/desktop/src/main.ts",
+        "apps/web/src/components/ChatView.tsx",
+        "apps/web/prototypes/zen-companion/previewBridge.ts"
+      ],
+      "responsibility": "One edge-centered Zen control group uses the existing mode owner without changing intrinsic size on hover or keyboard reveal. The atomic optional bubble capability is implemented on macOS: the same native window and retained chat switch between panel and resting bubble; explicit Dock, shortcut or notification actions restore it, without adding a tray. The host owns geometry and arbitrates pointer passthrough against the current CSS drag region, native cursor and zoom. Task panels open only by user action, and the launch control lives beside the shared sidebar toggle. The browser preview simulates host geometry and does not prove OS behavior. Entry registration checks paths, not runtime isolation; actual native input and packaged behavior need separate evidence.",
+      "tests": [
+        "apps/web/src/lib/zenMode.test.ts",
+        "apps/web/src/components/chat/ZenModeToolbar.browser.tsx",
+        "apps/web/src/components/ChatView.browser.tsx",
+        "apps/web/src/components/chat/useZenPointerPassthrough.browser.tsx",
+        "apps/web/src/components/SidebarHeaderNavigationControls.browser.tsx",
+        "apps/desktop/src/zenModeManager.test.ts",
+        "apps/desktop/src/zenModeIpc.test.ts",
+        "apps/desktop/src/preload.language.test.ts",
+        "apps/desktop/scripts/zen-mode-smoke.ts"
+      ]
+    },
+    {
       "id": "expert.skill-evolution",
       "surface": "expert-evolution",
       "entryFiles": [
@@ -1089,6 +1119,103 @@
         "apps/desktop/src/zenModeIpc.test.ts",
         "apps/desktop/src/windowMaterial.test.ts",
         "apps/desktop/scripts/zen-mode-smoke.ts"
+      ]
+    },
+    {
+      "id": "suite.import-native-rpc",
+      "surface": "suite-import",
+      "entryFiles": [
+        "packages/contracts/src/suite.ts",
+        "apps/server/src/suites/SuiteImportService.ts",
+        "apps/server/src/suites/SuiteCompositionStore.ts",
+        "apps/server/src/suites/SuitePublicationHost.ts",
+        "apps/server/src/suites/SuiteSourceSnapshot.ts",
+        "apps/server/src/suites/SuiteSourceAdapters.ts",
+        "apps/server/src/experts/FileResourceStore.ts",
+        "apps/server/src/experts/ExpertStore.ts",
+        "apps/server/src/experts/SkillPackageStore.ts",
+        "apps/server/src/experts/SkillLibraryStore.ts",
+        "apps/server/src/experts/SkillLibraryOperations.ts",
+        "apps/server/src/workbench/host/expertDelegationArtifacts.ts",
+        "apps/server/src/experts/bmadSkillPreset.ts",
+        "apps/server/src/workbench/host/suiteRpc.ts",
+        "apps/server/src/suites/runtimeLayer.ts",
+        "apps/server/src/workbench/runtimeLayer.ts",
+        "apps/server/src/serverLayers.ts",
+        "apps/server/src/wsRpc.ts"
+      ],
+      "responsibility": "The seven native suite RPCs use owner authorization and the existing Effect error boundary. Local/GitHub inputs become sealed immutable source snapshots; persistent expiring previews create no Experts, Suites or connections, and opaque request IDs never become filesystem paths. One asset lifecycle queue admits at most 100 outstanding previews before capture and reaps only expired, unreferenced snapshots; the importer reads external artifact references through the artifact owner's port, never its SQL schema. Artifact sealing and reference publication use that same lifecycle boundary. Commit journals all fixed object identities before asset publication and invisible Expert staging, resumes the selected unique-source winner, then uses the original SQL owner to atomically publish the composition, resource revisions and complete receipt. Imported Expert raw Skill selections require immutable ownership or independently admitted source/import evidence; snapshot presence and sourceId are not authorization. Missing resources stay local, and unverifiable legacy ownership never becomes shared by default. Shared tools remain Suite-only; BMAD identities are internalized and the fixed non-role method projection is reused. Run configuration reads an already persisted v1/v2 assembly, checks its thread/project and trusted v2 binding, reports legacy structured-config absence honestly, and exposes no absolute server resource roots. The application composition provides one shared Suite store/publication host, resolver, import service and Workbench asset runtime to the engine and actual RPC/Hub/Gateway/Provider consumers. Registration is not runtime acceptance.",
+      "tests": [
+        "apps/server/src/suites/SuiteImportService.test.ts",
+        "apps/server/src/workbench/host/suiteRpc.test.ts",
+        "apps/server/src/suites/SuiteSourceAdapters.test.ts",
+        "apps/server/src/suites/SuiteSourceSnapshot.test.ts"
+      ]
+    },
+    {
+      "id": "suite.hub-frozen-worker-creation",
+      "surface": "hub-worker-creation",
+      "entryFiles": [
+        "apps/server/src/agentGateway/hubExpertDispatch.ts",
+        "apps/server/src/agentGateway/hubExpertCatalog.ts",
+        "apps/server/src/provider/suiteRuntimeSupport.ts",
+        "apps/server/src/provider/Layers/ProviderService.ts",
+        "apps/server/src/workbench/host/providerCapabilities.ts",
+        "apps/server/src/agentGateway/hubWorkGateway.ts",
+        "apps/server/src/agentGateway/creationCoordinator.ts",
+        "apps/server/src/agentGateway/Layers/AgentGateway.ts",
+        "apps/server/src/serverLayers.ts",
+        "apps/server/src/suites/runtimeLayer.ts"
+      ],
+      "responsibility": "Hub acceptance uses the application's shared Suite resolver to freeze the worker capability binding and exact Suite revision in the original HubWork creationSpec. Catalog, dispatch preflight and Provider execution consult the same Provider-owned Suite support predicate; unsupported targets are rejected before immutable acceptance, never silently substituted. Queue consumption removes both private references from public create parameters and passes only those persisted references through trusted creation context to the existing engine. Replays reuse the accepted identity, target and binding rather than current Expert or Hub defaults; non-Suite work retains its original path.",
+      "tests": [
+        "apps/server/src/agentGateway/hubWorkGateway.suite.test.ts",
+        "apps/server/src/persistence/Layers/HubSuiteAdmission.test.ts",
+        "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts"
+      ]
+    },
+    {
+      "id": "expert.omp-native-host-composition",
+      "surface": "omp-private-native-delegation",
+      "entryFiles": [
+        "apps/server/src/serverLayers.ts",
+        "apps/server/src/provider/runtimeLayer.ts",
+        "apps/server/src/provider/acp/OmpExpertDelegationHost.ts",
+        "apps/server/src/provider/acp/OmpExpertExecutionStore.ts",
+        "apps/server/src/agentGateway/Services/NativeExecutionOwner.ts",
+        "apps/server/src/agentGateway/nativeExecutionScope.ts",
+        "apps/server/src/agentGateway/Layers/AgentGateway.ts",
+        "apps/server/src/provider/acp/OmpNativeExpertProtocol.ts",
+        "apps/server/src/provider/acp/OmpNativeExpertTransport.ts",
+        "apps/server/src/workbench/host/expertDelegationStore.ts",
+        "apps/server/src/workbench/host/expertDelegationArtifacts.ts",
+        "apps/server/src/workbench/host/nativeExpertReexecutionGate.ts",
+        "apps/server/src/suites/runtimeLayer.ts",
+        "workbench/omp-native-expert.lock.json"
+      ],
+      "responsibility": "The actual application provides the independent OMP native host with the same memoized Suite-aware orchestration engine, SQL ledger, common/private stores, resolver, Workbench runtime, credentials, consent gate and artifact owner used by RPC, Hub, Gateway and Provider. Gateway checks the generic opaque execution-owner validity port on every native tools/list and tools/call admission; the existing private OMP owner verifies the complete execution association and the same SQL runtime generation/status without exposing generation or native session IDs. Missing owners, associations, replaced generations and stopped/error runtimes fail closed; natural parent turn completion and new turns within the same generation do not retire independent native attempts. Parent/session closure revokes admission and leases, records unfinished attempts unknown, and hands physical process teardown to the existing ACP scope/process-group owner without waiting for native cancel/query replies; single-task stop retains the original acknowledgement-bound cancel/query path. Provider receives the private host Tag's protocolFactory without a provider cycle, second engine or lazy global registry. The adapter's trusted binary SHA and handshake fingerprint come only from the statically bundled build lock; missing build receipts disable native Expert delegation without disabling ordinary OMP. OMP protocol and execution association remain private adapter seams, not common Harness DTOs.",
+      "tests": [
+        "apps/server/src/agentGateway/nativeExecutionScope.test.ts",
+        "apps/server/src/provider/acp/OmpExpertDelegationHost.test.ts",
+        "apps/server/src/provider/acp/OmpNativeExpertTransport.test.ts",
+        "apps/server/src/experts/NativeExpertReexecutionGate.test.ts",
+        "apps/server/src/experts/ExpertDelegationArtifacts.test.ts"
+      ]
+    },
+    {
+      "id": "expert.delegation-terminal-activity",
+      "surface": "native-delegation-result",
+      "entryFiles": [
+        "packages/shared/src/expertDelegationActivity.ts",
+        "packages/shared/package.json",
+        "apps/server/src/orchestration/Layers/ProjectionPipeline.ts",
+        "apps/server/src/orchestration/projector.ts",
+        "apps/web/src/storeEventReducer.ts"
+      ],
+      "responsibility": "Server projection and the connected Web reducer map the common terminal delegation event through one explicit shared subpath. Stable event identity deduplicates live and replayed observations, including late/stopped results, without resuming a turn or mutating messages/session state. No OMP execution correlation fields enter this common activity mapping.",
+      "tests": [
+        "apps/web/src/storeEventReducer.test.ts",
+        "apps/server/src/orchestration/projector.test.ts"
       ]
     }
   ]

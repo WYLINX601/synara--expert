@@ -16,6 +16,8 @@ const expert: HubExpertSummary = {
   useCases: "Research evidence",
   preferredProvider: "codex",
   available: true,
+  origin: "roster",
+  issues: [],
 };
 const collection: HubDeliverableCollection = {
   hubId,
@@ -60,10 +62,58 @@ function items(overrides: Partial<Parameters<typeof buildHubReferenceMenuItems>[
 describe("Hub composer references", () => {
   it("offers experts only on the Coordinator and keeps unavailable entries disabled", () => {
     expect(items({ isCoordinator: false }).map((item) => item.type)).toEqual(["hub-deliverable"]);
-    expect(items({ experts: [{ ...expert, available: false }] })[0]).toMatchObject({
+    expect(
+      items({
+        experts: [
+          {
+            ...expert,
+            available: false,
+            issues: [
+              {
+                code: "identity_unavailable",
+                category: "execution",
+                subject: { kind: "expert", id: expert.expertId, path: null },
+                action: "dispatch",
+                effect: "deny-action",
+                message: "该专家已归档",
+                evidenceRef: null,
+                checkedAt: "2026-11-11T00:00:00.000Z",
+                recovery: "choose-alternative",
+              },
+            ],
+          },
+        ],
+      })[0],
+    ).toMatchObject({
       type: "hub-expert",
       disabled: true,
     });
+  });
+  it("does not turn a partial Suite dependency issue into a dispatch gate", () => {
+    expect(
+      items({
+        experts: [
+          {
+            ...expert,
+            origin: "suite",
+            available: false,
+            issues: [
+              {
+                code: "tool_unreachable",
+                category: "dependency",
+                subject: { kind: "connection", id: "lookup", path: null },
+                action: "tool-call",
+                effect: "limit-capability",
+                message: "在线检索暂不可用",
+                evidenceRef: null,
+                checkedAt: "2026-11-11T00:00:00.000Z",
+                recovery: "retry",
+              },
+            ],
+          },
+        ],
+      })[0],
+    ).toMatchObject({ type: "hub-expert", disabled: false });
   });
   it("uses the published identity and version while exposing only the file label", () => {
     const item = items()[1]!;

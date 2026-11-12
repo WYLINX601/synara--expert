@@ -102,6 +102,30 @@ describe("store projection", () => {
     expect(getThreadFromState(state, thread.id)?.expertBinding).toEqual(expertBinding);
   });
 
+  it("adopts a trusted first-send capability event and retires the unbound draft selection", () => {
+    const suite = { suiteId: "suite_10000000-0000-4000-8000-000000000001", revision: 2 };
+    const expertBinding = {
+      expertId: "expert-1",
+      snapshotId: "snapshot-1",
+      displayName: "Author",
+      revision: 1,
+    };
+    const thread = makeThread({ expertDraftSelection: { expertId: "expert-1", suite } });
+    const state = applyOrchestrationEvents(makeState(thread), [
+      makeDomainEvent("thread.capability-bound", {
+        threadId: thread.id,
+        expertBinding,
+        capabilityBindingId: "binding-trusted",
+        suiteSelection: suite,
+      }),
+    ]);
+    const bound = getThreadFromState(state, thread.id);
+    expect(bound?.expertDraftSelection).toBeNull();
+    expect(bound?.expertBinding).toEqual(expertBinding);
+    expect(bound?.capabilityBindingId).toBe("binding-trusted");
+    expect(bound?.suiteSelection).toEqual(suite);
+  });
+
   it("drops missed rollback messages while preserving live text within the same revision", () => {
     const thread = makeReadModelThread({
       messages: [

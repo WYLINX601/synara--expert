@@ -73,6 +73,9 @@ import {
 } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { makeNativeExpertReexecutionGate } from "../../workbench/host/nativeExpertReexecutionGate.ts";
+import { makeExpertDelegationStore } from "../../workbench/host/expertDelegationStore.ts";
+import { runWorkbenchMigrations } from "../../workbench/persistence/WorkbenchMigrations.ts";
 
 import { AgentGatewayOperationRepositoryLive } from "../../agentGateway/Layers/AgentGatewayOperationRepository.ts";
 import { AgentGatewayOperationRepository } from "../../agentGateway/Services/AgentGatewayOperationRepository.ts";
@@ -87,7 +90,7 @@ import {
   ComputerService,
   type ComputerServiceShape,
 } from "../../computer/Services/ComputerService.ts";
-import { deriveServerPaths, ServerConfig } from "../../config.ts";
+import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "../../config.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { createExpertConnectionStore } from "../../experts/ExpertConnectionStore.ts";
 import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
@@ -98,12 +101,19 @@ import {
   type LearningStateRow,
 } from "../../experts/evolution/ExpertLearningRepository.ts";
 import { captureLearningBindings } from "../../experts/evolution/ExpertLearningState.ts";
+import { ExpertLearningRepositoryLive } from "../../workbench/host/expertLearningPersistence.ts";
 import { SpaceMemoryLive } from "../../workbench/host/spaceMemoryPersistence.ts";
 import { SpaceMemoryService } from "../../spaceMemory/SpaceMemoryService.ts";
 import {
   createRunSkillAssemblyStore,
   listRunSkillAssemblies,
 } from "../../experts/RunSkillAssemblyStore.ts";
+import { makeSuiteBindingResolver } from "../../suites/SuiteBindingResolver.ts";
+import {
+  makeSuiteCompositionStore,
+  SuiteCompositionStore,
+} from "../../suites/SuiteCompositionStore.ts";
+import { suiteContentDigest } from "../../suites/suiteIdentity.ts";
 import {
   SkillEvolutionRepository,
   type SkillEvolutionRepositoryShape,
@@ -654,6 +664,11 @@ describe("ProviderCommandReactor", () => {
     >;
     readonly skillEvolutionExecution?: SkillEvolutionRepositoryShape["execution"];
     readonly expertLearningRepository?: ExpertLearningRepositoryShape;
+    readonly expertLearningRepositoryLayer?: Layer.Layer<
+      ExpertLearningRepository,
+      unknown,
+      SqlClient.SqlClient
+    >;
     readonly providerServiceLayer?: Layer.Layer<ProviderService, unknown, ContextRepository>;
     readonly listRetainedSessions?: NonNullable<ProviderServiceShape["listRetainedSessions"]>;
   }) {
@@ -1108,7 +1123,7 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(
         input?.expertLearningRepository
           ? Layer.succeed(ExpertLearningRepository, input.expertLearningRepository)
-          : Layer.empty,
+          : (input?.expertLearningRepositoryLayer ?? Layer.empty),
       ),
       Layer.provideMerge(
         input?.skillEvolutionExecution
@@ -1398,6 +1413,7 @@ describe("ProviderCommandReactor", () => {
       captureStudioOutputBaseline,
       cancelPendingStudioOutputBaseline,
       stateDir,
+      serverConfig: await runtime.runPromise(Effect.service(ServerConfig)),
       stageAttachment: async (
         attachment: {
           readonly type: "image" | "file";
@@ -1551,6 +1567,106 @@ describe("ProviderCommandReactor", () => {
       queuedTurnPromotionRepository,
       interceptEngineDispatch,
     };
+  }
+
+  async function prepareNativeDelegation(
+    harness: {
+      readonly stateDir: string;
+      readonly sql: SqlClient.SqlClient;
+      readonly serverConfig: ServerConfigShape;
+    },
+    input: {
+      readonly threadId: ThreadId;
+      readonly parentRootRunId: string;
+      readonly delegationId: string;
+      readonly attemptId: string;
+      readonly requestId: string;
+      readonly targetExpertId: string;
+      readonly createdAt: string;
+    },
+  ) {
+    await Effect.runPromise(
+      runWorkbenchMigrations().pipe(Effect.provideService(SqlClient.SqlClient, harness.sql)),
+    );
+    const experts = createExpertStore(harness.stateDir);
+    const target = await experts.save({
+      id: input.targetExpertId,
+      name: "Delegated author",
+      description: "",
+      useCases: "",
+      persona: "Produce evidence for the assigned task.",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+      preferredProvider: "omp",
+    });
+    const base = await experts.prepareSnapshot(target.id);
+    const suiteStore = await Effect.runPromise(
+      makeSuiteCompositionStore.pipe(Effect.provideService(SqlClient.SqlClient, harness.sql)),
+    );
+    const resolver = await Effect.runPromise(
+      makeSuiteBindingResolver.pipe(
+        Effect.provideService(SuiteCompositionStore, suiteStore),
+        Effect.provideService(ServerConfig, harness.serverConfig),
+      ),
+    );
+    const binding = await Effect.runPromise(
+      resolver.prepare({
+        suite: null,
+        projectId: asProjectId("project-1"),
+        purpose: {
+          kind: "native-delegate",
+          parentThreadId: input.threadId,
+          parentRootRunId: input.parentRootRunId,
+          delegationId: input.delegationId,
+          attemptId: input.attemptId,
+          expertSnapshotId: base.snapshotId,
+        },
+      }),
+    );
+    const assembly = await createRunSkillAssemblyStore(harness.stateDir, { suiteStore }).prepare({
+      threadId: input.threadId,
+      rootRunId: input.attemptId,
+      baseSnapshotId: base.snapshotId,
+      capabilityBindingId: binding.bindingId,
+      createdAt: input.createdAt,
+      bindThreadRoot: false,
+    });
+    const delegations = await Effect.runPromise(
+      makeExpertDelegationStore.pipe(Effect.provideService(SqlClient.SqlClient, harness.sql)),
+    );
+    const delegation = {
+      delegationId: input.delegationId,
+      parentThreadId: input.threadId,
+      parentRootRunId: input.parentRootRunId,
+      targetExpertId: target.id,
+      task: "Produce the requested change",
+      context: "",
+      deliverable: "",
+    };
+    const { attempt } = await Effect.runPromise(
+      delegations.prepare({
+        delegation,
+        attempt: {
+          attemptId: input.attemptId,
+          delegationId: delegation.delegationId,
+          requestId: input.requestId,
+          requestHash: suiteContentDigest(delegation),
+          provider: "omp",
+          capabilityBindingId: binding.bindingId,
+          assemblyId: assembly.assemblyId,
+          executionBindingId: null,
+          state: "prepared",
+          revision: 1,
+          resultRef: null,
+          resultHash: null,
+          appliedEventId: null,
+          updatedAt: input.createdAt,
+        },
+      }),
+    );
+    return { delegations, attempt };
   }
 
   describe("usage-limit continuation delivery", () => {
@@ -16024,21 +16140,26 @@ describe("ProviderCommandReactor", () => {
         connections: [],
         preferredProvider: provider,
       });
+      const pinnedEvolutionBinding = await createExpertStore(harness.stateDir).prepareSnapshot(
+        expertId,
+      );
       await Effect.runPromise(
-        harness.engine.dispatch({
-          type: "thread.create",
-          commandId: CommandId.makeUnsafe("create-skill-evolution-thread"),
-          threadId: evolutionThreadId,
-          projectId: asProjectId("project-1"),
-          expertId,
-          title: "Skill Evolution",
-          modelSelection: fixedModelSelection,
-          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
-          branch: null,
-          worktreePath: null,
-          createdAt: new Date().toISOString(),
-        }),
+        harness.engine.dispatch(
+          {
+            type: "thread.create",
+            commandId: CommandId.makeUnsafe("create-skill-evolution-thread"),
+            threadId: evolutionThreadId,
+            projectId: asProjectId("project-1"),
+            title: "Skill Evolution",
+            modelSelection: fixedModelSelection,
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: null,
+            createdAt: new Date().toISOString(),
+          },
+          { hubExpertBinding: pinnedEvolutionBinding },
+        ),
       );
       const evolutionBinding = (await readHarnessThread(harness, evolutionThreadId))?.expertBinding;
       expect(evolutionBinding).toBeDefined();
@@ -16220,6 +16341,245 @@ describe("ProviderCommandReactor", () => {
     },
   );
 
+  it.each([
+    { label: "accepted", accepting: true, cancelled: false, admission: true, applyToParent: true },
+    { label: "closed", accepting: false, cancelled: false, admission: true, applyToParent: false },
+    { label: "cancelled", accepting: true, cancelled: true, admission: true, applyToParent: false },
+    {
+      label: "unverified",
+      accepting: true,
+      cancelled: false,
+      admission: false,
+      applyToParent: false,
+    },
+  ])(
+    "applies a trusted delegation result once through the original queued parent Run: $label",
+    async ({ label, accepting, cancelled, admission, applyToParent }) => {
+      const harness = await createHarness({
+        expertLearningRepositoryLayer: ExpertLearningRepositoryLive,
+      });
+      const threadId = ThreadId.makeUnsafe(`delegation-parent-${label}`);
+      const waitForParentSend = async (expectedCalls: number, stage: string) => {
+        try {
+          await waitFor(async () => {
+            const parent = await readHarnessThread(harness, threadId);
+            if (parent?.session?.status === "error")
+              throw new Error(parent.session.lastError ?? "Parent session entered error.");
+            return harness.sendTurn.mock.calls.length === expectedCalls;
+          });
+        } catch (cause) {
+          throw new Error(`${stage} failed for '${threadId}'.`, { cause });
+        }
+      };
+      const experts = createExpertStore(harness.stateDir);
+      const expert = await experts.save({
+        name: "Result owner",
+        description: "",
+        useCases: "",
+        persona: "Keep the original identity.",
+        outputRequirements: "",
+        skills: [],
+        skillBindings: [],
+        references: [],
+        connections: [],
+        preferredProvider: "omp",
+      });
+      const now = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.makeUnsafe(`create-${threadId}`),
+          threadId,
+          projectId: asProjectId("project-1"),
+          expertId: expert.id,
+          title: "Delegation parent",
+          modelSelection: {
+            provider: "omp",
+            instanceId: "omp",
+            model: "openai-codex/gpt-6.1-sol",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe(`start-${threadId}`),
+          threadId,
+          message: {
+            messageId: MessageId.makeUnsafe(`original-${label}`),
+            role: "user",
+            text: "Complete the original task.",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+      await waitForParentSend(1, "Initial parent Run admission");
+      const assemblies = createRunSkillAssemblyStore(harness.stateDir);
+      const original = (await assemblies.current(threadId))!;
+      const parentTurnId = asTurnId(`parent-running-${label}`);
+      harness.setRuntimeSessionTurnState({
+        threadId,
+        status: "running",
+        activeTurnId: parentTurnId,
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.makeUnsafe(`running-${threadId}`),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "omp",
+            runtimeMode: "approval-required",
+            activeTurnId: parentTurnId,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      const library = createSkillLibraryStore(harness.stateDir);
+      const newer = (
+        await library.execute({
+          action: "create",
+          name: "not-for-continuation",
+          body: "---\nname: not-for-continuation\ndescription: Only a new Run may see this\n---\nNew mutable head.",
+          tags: [],
+        })
+      ).skill!;
+      await experts.save({
+        ...expert,
+        expectedRevision: expert.revision,
+        skillBindings: [{ skillId: newer.skillId, enabled: true }],
+      });
+      const { delegations, attempt } = await prepareNativeDelegation(harness, {
+        threadId,
+        parentRootRunId: original.rootRunId,
+        delegationId: "delegation-fixture",
+        attemptId: "attempt-fixture",
+        requestId: "delegation-request",
+        targetExpertId: "target-author",
+        createdAt: now,
+      });
+      await Effect.runPromise(delegations.transition(attempt.attemptId, "starting", now));
+      await Effect.runPromise(delegations.transition(attempt.attemptId, "running", now));
+      if (cancelled)
+        await Effect.runPromise(delegations.transition(attempt.attemptId, "cancel-requested", now));
+      const content = {
+        outcome: "completed" as const,
+        result: { summary: "The verified child produced the requested evidence.", artifacts: [] },
+        issue: null,
+      };
+      const resultCommand = {
+        type: "thread.expert-delegation.result" as const,
+        commandId: CommandId.makeUnsafe(`result-${threadId}`),
+        threadId,
+        parentRootRunId: original.rootRunId,
+        delegationId: attempt.delegationId,
+        attemptId: attempt.attemptId,
+        targetExpertId: "target-author",
+        ...content,
+        resultRef: `ndr_${attempt.attemptId}`,
+        resultHash: suiteContentDigest(content),
+        applyToParent: true,
+        createdAt: now,
+      };
+      const trusted = {
+        expertDelegationContinuation: {
+          parentRootRunId: original.rootRunId,
+          delegationId: attempt.delegationId,
+          attemptId: attempt.attemptId,
+        },
+        expertDelegationResult: {
+          ...(admission
+            ? {
+                canApplyToParent: () =>
+                  delegations
+                    .readAttempt(attempt.attemptId)
+                    .pipe(Effect.map((current) => accepting && current?.state === "running")),
+              }
+            : {}),
+          commit: (eventId: string) =>
+            delegations
+              .commitResult({
+                attemptId: attempt.attemptId,
+                content,
+                appliedEventId: eventId,
+                updatedAt: now,
+              })
+              .pipe(Effect.asVoid),
+        },
+      };
+      await Effect.runPromise(harness.engine.dispatch(resultCommand, trusted));
+      await Effect.runPromise(harness.engine.dispatch(resultCommand, trusted));
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      const events = Array.from(
+        await Effect.runPromise(Stream.runCollect(harness.engine.readThreadEvents(threadId, 0))),
+      );
+      const results = events.filter((event) => event.type === "thread.expert-delegation-result");
+      expect(results).toMatchObject([{ payload: { attemptId: attempt.attemptId, applyToParent } }]);
+      expect(await Effect.runPromise(delegations.readAttempt(attempt.attemptId))).toMatchObject({
+        state: "completed",
+        appliedEventId: results[0]!.eventId,
+        resultRef: resultCommand.resultRef,
+        resultHash: resultCommand.resultHash,
+      });
+      expect(await Effect.runPromise(delegations.readResult(attempt.attemptId))).toMatchObject(
+        content,
+      );
+      harness.setRuntimeSessionTurnState({ threadId, status: "ready" });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.makeUnsafe(`ready-${threadId}`),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "omp",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      await harness.emitRuntimeEvent({
+        type: "turn.completed",
+        eventId: asEventId(`settled-${threadId}`),
+        provider: "omp",
+        threadId,
+        turnId: parentTurnId,
+        createdAt: now,
+        payload: { state: "completed" },
+      });
+      if (applyToParent) await waitForParentSend(2, "Original parent Run continuation");
+      await harness.drain();
+      expect(harness.sendTurn).toHaveBeenCalledTimes(applyToParent ? 2 : 1);
+      expect(await assemblies.current(threadId)).toMatchObject({
+        rootRunId: original.rootRunId,
+        assemblyId: original.assemblyId,
+        baseSnapshotId: original.baseSnapshotId,
+      });
+      const continuedSession = await assemblies.sessionFor((await assemblies.current(threadId))!);
+      expect(continuedSession?.skillEntries).toEqual([]);
+      if (applyToParent)
+        expect(harness.sendTurn.mock.calls[1]?.[0].input).toContain("verified child");
+      await library.dispose();
+    },
+  );
+
   it("injects the immutable server-bound Expert snapshot after runtime recovery", async () => {
     const harness = await createHarness();
     const threadId = ThreadId.makeUnsafe("thread-expert-binding");
@@ -16269,19 +16629,7 @@ describe("ProviderCommandReactor", () => {
         createdAt: now,
       }),
     );
-
-    const boundThread = await readHarnessThread(harness, threadId);
-    expect(boundThread?.expertBinding).toMatchObject({ expertId, revision: 1 });
-    const binding = boundThread!.expertBinding!;
-    const snapshot = await expertStore.readSnapshot(binding.snapshotId);
-    expect(snapshot.schemaVersion).toBe(3);
-    expect(snapshot.skillPolicy).toEqual(FIXED_EXPERT_SKILL_POLICY);
-    await expertStore.save({
-      ...expertDefinition,
-      expectedRevision: 1,
-      persona: "This newer template must not replace the thread snapshot.",
-      outputRequirements: "Use a different output format.",
-    });
+    expect((await readHarnessThread(harness, threadId))?.expertBinding).toBeNull();
 
     const startTurn = (suffix: string) =>
       harness.engine.dispatch({
@@ -16302,6 +16650,18 @@ describe("ProviderCommandReactor", () => {
     await Effect.runPromise(startTurn("initial"));
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const boundThread = await readHarnessThread(harness, threadId);
+    expect(boundThread?.expertBinding).toMatchObject({ expertId, revision: 1 });
+    const binding = boundThread!.expertBinding!;
+    const snapshot = await expertStore.readSnapshot(binding.snapshotId);
+    expect(snapshot.schemaVersion).toBe(3);
+    expect(snapshot.skillPolicy).toEqual(FIXED_EXPERT_SKILL_POLICY);
+    await expertStore.save({
+      ...expertDefinition,
+      expectedRevision: 1,
+      persona: "This newer template must not replace the thread snapshot.",
+      outputRequirements: "Use a different output format.",
+    });
 
     const expectedExpertSession = {
       skillAssemblyId: expect.stringMatching(/^ska_[a-f0-9]{64}$/u),
@@ -16539,7 +16899,9 @@ describe("ProviderCommandReactor", () => {
       (assembly) => assembly.rootRunId === frozenSession?.skillRootRunId,
     );
     expect(frozenAssembly?.assemblyId).toBe(frozenSession?.skillAssemblyId);
-    expect(frozenAssembly?.session.skillEntries?.[0]?.packageId).toBe(originalSkill.packageId);
+    expect(
+      frozenAssembly?.schemaVersion === 1 && frozenAssembly.session.skillEntries?.[0]?.packageId,
+    ).toBe(originalSkill.packageId);
 
     await Effect.runPromise(startRun(threadIds.enabled, "enabled"));
     await waitFor(() => harness.startSession.mock.calls.length === 2);
@@ -16644,7 +17006,9 @@ describe("ProviderCommandReactor", () => {
     }
     const assemblies = await listRunSkillAssemblies(harness.stateDir);
     expect(assemblies).toHaveLength(2);
-    expect(assemblies.every((item) => item.session.knowledge === undefined)).toBe(true);
+    expect(
+      assemblies.every((item) => item.schemaVersion === 1 && item.session.knowledge === undefined),
+    ).toBe(true);
   });
 
   it("does not grant the current epoch to a new managed Worker inheriting an unbound Run", async () => {
@@ -16764,18 +17128,20 @@ describe("ProviderCommandReactor", () => {
         createdAt: new Date().toISOString(),
       }),
     );
-    const binding = (await readHarnessThread(harness, workerThreadId))?.expertBinding;
-    expect(binding).toBeDefined();
+    expect((await readHarnessThread(harness, workerThreadId))?.expertBinding).toBeNull();
+    const binding = await createExpertStore(harness.stateDir).prepareSnapshot(expert.id);
     const priorThreadId = ThreadId.makeUnsafe("thread-managed-worker-predecessor");
     const priorRootRunId = `run:${priorThreadId}:prior-unbound`;
     const assemblies = createRunSkillAssemblyStore(harness.stateDir);
     const predecessor = await assemblies.prepare({
       threadId: priorThreadId,
       rootRunId: priorRootRunId,
-      baseSnapshotId: binding!.snapshotId,
+      baseSnapshotId: binding.snapshotId,
       createdAt: new Date().toISOString(),
       continuationKey: managedContinuationKey,
     });
+    if (predecessor.schemaVersion !== 1)
+      throw new Error("Expected the legacy predecessor Run assembly.");
     expect(predecessor.session.knowledge).toBeUndefined();
 
     await Effect.runPromise(
@@ -16797,11 +17163,16 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSessionWithOutcome.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
 
+    expect((await readHarnessThread(harness, workerThreadId))?.expertBinding).toMatchObject({
+      expertId: expert.id,
+      snapshotId: binding.snapshotId,
+    });
     const childRootRunId = `run:${workerThreadId}:${managedContinuationKey}`;
     const child = (await listRunSkillAssemblies(harness.stateDir)).find(
       (record) => record.rootRunId === childRootRunId,
     );
-    expect(child).toBeDefined();
+    if (child?.schemaVersion !== 1)
+      throw new Error("Expected the legacy managed Worker Run assembly.");
     expect(child?.knowledgeSourceRunId).toBeUndefined();
     expect(child?.session.knowledge).toBeUndefined();
     expect(
@@ -16947,6 +17318,8 @@ describe("ProviderCommandReactor", () => {
     const firstAssembly = (await listRunSkillAssemblies(harness.stateDir)).find(
       (assembly) => assembly.rootRunId === firstKnowledge?.rootRunId,
     );
+    if (firstAssembly?.schemaVersion !== 1)
+      throw new Error("Expected the legacy first Run assembly.");
     expect(firstAssembly?.session.knowledge).toEqual(firstKnowledge);
 
     await harness.emitRuntimeEvent({
@@ -16994,6 +17367,8 @@ describe("ProviderCommandReactor", () => {
     const secondAssembly = (await listRunSkillAssemblies(harness.stateDir)).find(
       (assembly) => assembly.rootRunId === secondKnowledge?.rootRunId,
     );
+    if (secondAssembly?.schemaVersion !== 1)
+      throw new Error("Expected the legacy second Run assembly.");
     expect(secondAssembly?.session.knowledge).toEqual(secondKnowledge);
     const secondInput = harness.sendTurn.mock.calls[1]?.[0].input;
     expect(secondInput).toContain("<thread_context>");
@@ -17016,21 +17391,24 @@ describe("ProviderCommandReactor", () => {
       connections: [],
     });
     const now = new Date().toISOString();
+    const historicalBinding = await createExpertStore(harness.stateDir).prepareSnapshot(expert.id);
     await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.create",
-        commandId: CommandId.makeUnsafe("create-historical-run"),
-        threadId,
-        projectId: asProjectId("project-1"),
-        expertId: expert.id,
-        title: "Historical fixture",
-        modelSelection: { provider: "codex", model: "gpt-5-codex" },
-        runtimeMode: "approval-required",
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        branch: null,
-        worktreePath: null,
-        createdAt: now,
-      }),
+      harness.engine.dispatch(
+        {
+          type: "thread.create",
+          commandId: CommandId.makeUnsafe("create-historical-run"),
+          threadId,
+          projectId: asProjectId("project-1"),
+          title: "Historical fixture",
+          modelSelection: { provider: "codex", model: "gpt-5-codex" },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+        },
+        { hubExpertBinding: historicalBinding },
+      ),
     );
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -17225,8 +17603,19 @@ describe("ProviderCommandReactor", () => {
         );
 
       await setConnectionStatus("required-review", "disabled");
-      await startTurn("initial-disabled");
-      await waitForConnectionFailure();
+      await expect(startTurn("initial-disabled")).rejects.toMatchObject({
+        _tag: "OrchestrationCommandInvariantError",
+        commandType: "thread.turn.start",
+        detail: expect.stringContaining("required-review"),
+      });
+      const rejectedDraft = await readHarnessThread(harness, threadId);
+      expect(rejectedDraft?.expertBinding).toBeNull();
+      expect(rejectedDraft?.expertDraftSelection?.expertId).toBe("connection-reviewer");
+      expect(
+        rejectedDraft?.messages.some(
+          (message) => message.id === asMessageId("user-expert-connection-initial-disabled"),
+        ),
+      ).toBe(false);
       expect(harness.startSession).not.toHaveBeenCalled();
       expect(harness.sendTurn).not.toHaveBeenCalled();
 
@@ -17281,7 +17670,7 @@ describe("ProviderCommandReactor", () => {
   });
 
   it("fails closed when an Expert thread's pinned snapshot cannot be read", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ startReactor: false });
     const threadId = ThreadId.makeUnsafe("thread-expert-snapshot-missing");
     const expertId = "missing-snapshot-reviewer";
     const expertStore = createExpertStore(harness.stateDir);
@@ -17316,18 +17705,6 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    const thread = await readHarnessThread(harness, threadId);
-    expect(thread?.expertBinding).toBeDefined();
-    const manifestPath = path.join(
-      harness.stateDir,
-      "experts",
-      "snapshots",
-      thread!.expertBinding!.snapshotId,
-      "snapshot.json",
-    );
-    fs.chmodSync(manifestPath, 0o600);
-    fs.writeFileSync(manifestPath, "{}\n");
-
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
@@ -17344,6 +17721,18 @@ describe("ProviderCommandReactor", () => {
         createdAt: new Date().toISOString(),
       }),
     );
+    const thread = await readHarnessThread(harness, threadId);
+    expect(thread?.expertBinding).toBeDefined();
+    const manifestPath = path.join(
+      harness.stateDir,
+      "experts",
+      "snapshots",
+      thread!.expertBinding!.snapshotId,
+      "snapshot.json",
+    );
+    fs.chmodSync(manifestPath, 0o600);
+    fs.writeFileSync(manifestPath, "{}\n");
+    await harness.startReactor();
 
     await waitFor(
       async () => (await readHarnessThread(harness, threadId))?.session?.status === "error",
@@ -29461,6 +29850,115 @@ describe("ProviderCommandReactor", () => {
       ThreadId.makeUnsafe("subagent:thread-1:child-provider-steer"),
       expect.anything(),
     );
+  });
+
+  it("hands one claimed native redo decision to the host after the parent provider has stopped", async () => {
+    const harness = await createHarness();
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const now = new Date().toISOString();
+    const { delegations } = await prepareNativeDelegation(harness, {
+      threadId,
+      parentRootRunId: "parent-root",
+      delegationId: "redo-delegation",
+      attemptId: "redo-unknown",
+      requestId: "redo-original-request",
+      targetExpertId: "target-expert",
+      createdAt: now,
+    });
+    const previous = await Effect.runPromise(
+      delegations.transition("redo-unknown", "unknown", now),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("redo-parent-stopped"),
+        threadId,
+        session: {
+          threadId,
+          status: "stopped",
+          providerName: "omp",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    const gate = makeNativeExpertReexecutionGate({
+      delegations,
+      interactions: harness.pendingInteractionRepository,
+    });
+    const controller = new AbortController();
+    harness.respondToRequest.mockImplementationOnce((input) =>
+      Effect.promise(async () => {
+        expect(await gate.respond(input.threadId, input.requestId, input.decision)).toBe(true);
+      }),
+    );
+    const request = gate.request({
+      threadId,
+      generation: "redo-host-generation",
+      delegationId: previous.delegationId,
+      previousAttemptId: previous.attemptId,
+      expectedRevision: previous.revision,
+      requestHash: previous.requestHash,
+      targetExpertId: "target-expert",
+      task: "Run the task again",
+      signal: controller.signal,
+      publish: (command) => harness.engine.dispatch(command),
+    });
+    try {
+      let requestId = "";
+      await waitFor(async () => {
+        const rows = await Effect.runPromise(
+          harness.pendingInteractionRepository.listUnsettled({ threadId }),
+        );
+        requestId =
+          rows.find((row) => row.requestId.startsWith("native-expert-redo:"))?.requestId ?? "";
+        return requestId !== "";
+      });
+      expect(await Effect.runPromise(delegations.readAttempt(previous.attemptId))).toEqual(
+        previous,
+      );
+      expect(harness.respondToRequest).not.toHaveBeenCalled();
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.approval.respond",
+          commandId: CommandId.makeUnsafe("redo-human-accept"),
+          threadId,
+          requestId: asApprovalRequestId(requestId),
+          lifecycleGeneration: "redo-host-generation",
+          decision: "accept",
+          createdAt: now,
+        }),
+      );
+      expect(await request).toBe(true);
+      const row = Option.getOrUndefined(
+        await Effect.runPromise(
+          harness.pendingInteractionRepository.getByIdentity({
+            threadId,
+            interactionKind: "approval",
+            requestId: asApprovalRequestId(requestId),
+          }),
+        ),
+      );
+      expect(row).toMatchObject({
+        status: "confirmed",
+        decision: "accept",
+        responseCommandId: "redo-human-accept",
+        turnId: null,
+      });
+      expect(await gate.respond(threadId, requestId, "accept")).toBe(false);
+      expect(await Effect.runPromise(delegations.listForParent(threadId))).toEqual([previous]);
+      expect(harness.respondToRequest).toHaveBeenCalledTimes(1);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    } finally {
+      controller.abort();
+      await request;
+    }
   });
 
   it("reacts to thread.approval.respond by forwarding provider approval response", async () => {

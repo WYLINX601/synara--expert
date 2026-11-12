@@ -167,6 +167,13 @@ tests("Hub work provenance, ownership and lifecycle", (it) => {
       let preflightCalls = 0;
       const service = makeHubWorkService({
         ...h.dependencies,
+        candidateDependencies: {
+          expertStore: {
+            read: async () => {
+              throw new Error("An empty roster must never discover an Expert.");
+            },
+          },
+        },
         resolveCreationSpec: ({ spec }) => {
           preflightCalls += 1;
           return Effect.succeed({ ...spec, target: { provider: "codex", model: "fixture" } });

@@ -59,6 +59,7 @@ export interface SurfaceContentTab<Key extends string> {
   key: Key;
   /** The tab's label, also its tooltip and the name its close button announces. */
   title: string;
+  titleSuffix?: ReactNode;
   icon: ReactNode;
   /** Omitted for a tab that cannot switch to anything: its label renders as static text. */
   onSelect?: (() => void) | undefined;
@@ -218,7 +219,14 @@ export function SurfaceContentTabs<Key extends string>(props: {
             active && CONTENT_TAB_ACTIVE_CLASS_NAME,
           ),
           title: tab.title,
-          label: tab.title,
+          label: tab.titleSuffix ? (
+            <span className="inline-flex max-w-full items-center gap-2">
+              <span className="min-w-0 truncate">{tab.title}</span>
+              {tab.titleSuffix}
+            </span>
+          ) : (
+            tab.title
+          ),
           icon: tab.icon,
           closeLabel: t("common:closeNamedItem", { title: tab.title }),
           onSelect: tab.onSelect,

@@ -12,11 +12,30 @@ export type AgentGatewayCapability =
   | "learning:read"
   | "learning:write";
 
+/** Server-issued opaque execution reference; no provider wire identity crosses this boundary. */
+export interface AgentGatewayNativeExecution {
+  readonly executionBindingId: string;
+  readonly attemptId: string;
+  readonly capabilityBindingId: string;
+  readonly assemblyId: string;
+  readonly parentRootRunId: string;
+}
+
+export interface AgentGatewayIssueOptions {
+  readonly additionalCapabilities?: readonly AgentGatewayCapability[];
+  readonly learningSession?: LearningSessionContext;
+  readonly nativeExecution?: AgentGatewayNativeExecution;
+  /** Absolute lease deadline. Omitted ordinary credentials retain their existing lifetime. */
+  readonly expiresAt?: number;
+}
+
 export interface AgentGatewaySessionIdentity {
   readonly sessionKey: string;
   readonly threadId: ThreadId;
   readonly provider: ProviderKind;
   readonly issuedAt: number;
+  readonly expiresAt: number;
+  readonly nativeExecution?: AgentGatewayNativeExecution;
   readonly capabilities: ReadonlySet<AgentGatewayCapability>;
   /** Trusted immutable run context captured by the host before lease issuance. */
   readonly learningSession?: LearningSessionContext;
@@ -33,11 +52,14 @@ export interface AgentGatewayIssuedSession extends AgentGatewaySessionIdentity {
  * explicitly retires them. Write authority is narrower: one request/batch is
  * pinned to the exact running turn observed at ingress and must never be
  * rebound to a later `latestTurn` while it executes.
+ * Native credentials instead pin this same cancellation/write slot to their
+ * own attemptId. A parent's natural terminal turn cannot retire that slot.
  */
 export interface AgentGatewayWriteAuthority {
   readonly sessionKey: string;
   readonly threadId: ThreadId;
   readonly provider: ProviderKind;
+  /** Provider turn for ordinary sessions; the immutable attemptId for native sessions. */
   readonly turnId: string;
 }
 
@@ -58,10 +80,7 @@ export interface AgentGatewaySessionRegistryShape {
   readonly issue: (
     threadId: ThreadId,
     provider: ProviderKind,
-    options?: {
-      readonly additionalCapabilities?: readonly AgentGatewayCapability[];
-      readonly learningSession?: LearningSessionContext;
-    },
+    options?: AgentGatewayIssueOptions,
   ) => AgentGatewayIssuedSession;
   readonly verify: (token: string) => AgentGatewaySessionIdentity | null;
   readonly bindWriteAuthority: (token: string, turnId: string) => AgentGatewayWriteAuthority | null;
@@ -74,7 +93,8 @@ export interface AgentGatewaySessionRegistryShape {
    * turn after this transition.
    */
   readonly retireWriteAuthority: (token: string, turnId: string) => boolean;
-  readonly revoke: (token: string) => void;
+  /** Removes even an expired credential and returns its resource owner for precise cleanup. */
+  readonly revoke: (token: string) => AgentGatewaySessionIdentity | null;
   /**
    * Live sessions for one thread whose write authority was already retired.
    * A session stays listed here until its token is revoked, so callers can

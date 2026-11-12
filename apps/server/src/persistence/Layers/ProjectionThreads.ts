@@ -15,6 +15,8 @@ import {
 import {
   ModelSelection,
   ExpertBinding,
+  ExpertDraftSelection,
+  SuiteRef,
   OrchestrationThreadPullRequest,
   PendingClaudeCacheReview,
   ThreadPinnedMessages,
@@ -52,6 +54,8 @@ const ProjectionThreadDbRow = ProjectionThread.mapFields(
     ).pipe(Schema.withDecodingDefault(() => null)),
     modelSelection: Schema.fromJsonString(ModelSelection),
     expertBinding: Schema.NullOr(Schema.fromJsonString(ExpertBinding)),
+    expertDraftSelection: Schema.NullOr(Schema.fromJsonString(ExpertDraftSelection)),
+    suiteSelection: Schema.NullOr(Schema.fromJsonString(SuiteRef)),
   }),
 );
 type ProjectionThreadDbRow = typeof ProjectionThreadDbRow.Type;
@@ -81,6 +85,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           is_pinned,
           parent_thread_id,
           expert_binding_json,
+          expert_draft_selection_json,
+          capability_binding_id,
+          suite_selection_json,
           creation_source,
           source_thread_id,
           source_turn_id,
@@ -141,6 +148,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.isPinned ? 1 : 0},
           ${row.parentThreadId ?? null},
           ${row.expertBinding ? JSON.stringify(row.expertBinding) : null},
+          ${row.expertDraftSelection ? JSON.stringify(row.expertDraftSelection) : null},
+          ${row.capabilityBindingId ?? null},
+          ${row.suiteSelection ? JSON.stringify(row.suiteSelection) : null},
           ${row.creationSource ?? null},
           ${row.sourceThreadId ?? null},
           ${row.sourceTurnId ?? null},
@@ -204,6 +214,21 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
             WHEN ${row.expertBinding === undefined ? 1 : 0} = 1
               THEN projection_threads.expert_binding_json
             ELSE excluded.expert_binding_json
+          END,
+          expert_draft_selection_json = CASE
+            WHEN ${row.expertDraftSelection === undefined ? 1 : 0} = 1
+              THEN projection_threads.expert_draft_selection_json
+            ELSE excluded.expert_draft_selection_json
+          END,
+          capability_binding_id = CASE
+            WHEN ${row.capabilityBindingId === undefined ? 1 : 0} = 1
+              THEN projection_threads.capability_binding_id
+            ELSE excluded.capability_binding_id
+          END,
+          suite_selection_json = CASE
+            WHEN ${row.suiteSelection === undefined ? 1 : 0} = 1
+              THEN projection_threads.suite_selection_json
+            ELSE excluded.suite_selection_json
           END,
           creation_source = excluded.creation_source,
           source_thread_id = excluded.source_thread_id,
@@ -299,6 +324,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           is_pinned AS "isPinned",
           parent_thread_id AS "parentThreadId",
           expert_binding_json AS "expertBinding",
+          expert_draft_selection_json AS "expertDraftSelection",
+          capability_binding_id AS "capabilityBindingId",
+          suite_selection_json AS "suiteSelection",
           creation_source AS "creationSource",
           source_thread_id AS "sourceThreadId",
           source_turn_id AS "sourceTurnId",
@@ -368,6 +396,9 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           is_pinned AS "isPinned",
           parent_thread_id AS "parentThreadId",
           expert_binding_json AS "expertBinding",
+          expert_draft_selection_json AS "expertDraftSelection",
+          capability_binding_id AS "capabilityBindingId",
+          suite_selection_json AS "suiteSelection",
           creation_source AS "creationSource",
           source_thread_id AS "sourceThreadId",
           source_turn_id AS "sourceTurnId",

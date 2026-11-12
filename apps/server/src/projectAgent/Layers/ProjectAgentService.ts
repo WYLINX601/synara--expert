@@ -41,7 +41,7 @@ import {
   type ProjectThreadIndexEntry,
   type ProjectAgentDeleteGroupResult,
   type ProjectAgentGroupThreadEntry,
-  type ProjectAgentOverview,
+  ProjectAgentOverview,
   type ProjectAgentResolveWorkerInput,
   type ProjectAgentSummary,
   type ProjectAgentStreamEvent,
@@ -52,6 +52,9 @@ import {
 import { groupThreadStateLabel, resolveGroupThreadState } from "@synara/shared/groupThreadState";
 import { HubWorkRepository } from "../../persistence/Services/HubWorkRepository";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
+import { SuiteCompositionStore } from "../../suites/SuiteCompositionStore";
+import { canonicalSuiteJson, suiteContentDigest } from "../../suites/suiteIdentity";
+import { resolveHubExpertCandidates } from "../../agentGateway/hubExpertDispatch";
 import { coordinatorCheckinTurnReport } from "@synara/shared/coordinatorCheckin";
 import { resolveThreadWorkspaceCwd } from "@synara/shared/threadEnvironment";
 import { isOrdinaryProjectRow } from "@synara/shared/projectContainers";
@@ -394,6 +397,13 @@ export const makeProjectAgentService = Effect.gen(function* () {
   const automationService = yield* AutomationService;
   const serverConfig = yield* ServerConfig;
   const expertStore = createExpertStore(serverConfig.stateDir);
+  const suiteStore = yield* Effect.serviceOption(SuiteCompositionStore);
+  const resolveCandidates = (config: ProjectAgentConfig) =>
+    resolveHubExpertCandidates({
+      config,
+      expertStore,
+      ...(Option.isSome(suiteStore) ? { suiteStore: suiteStore.value } : {}),
+    });
   const serverSettingsService = yield* ServerSettingsService;
   const providerHealth = yield* ProviderHealth;
   const providerService = yield* ProviderService;
@@ -424,18 +434,20 @@ export const makeProjectAgentService = Effect.gen(function* () {
     threads.length === 0
       ? Effect.void
       : publish({ type: "thread-index-upserted", projectId, threads: [...threads] });
-  const toServiceError = (message: string) => (cause: unknown) =>
-    new ProjectAgentServiceError({
-      message:
-        cause instanceof Error && cause.message.includes("revision mismatch")
-          ? "This project record changed. Reload and retry with the latest revision."
+  const toServiceError = (message: string) => (cause: unknown) => {
+    const revisionConflict = cause instanceof Error && cause.message.includes("revision mismatch");
+    const selectionLocked =
+      cause instanceof Error && cause.message.includes("Suite selection is locked");
+    return new ProjectAgentServiceError({
+      message: revisionConflict
+        ? "This project record changed. Reload and retry with the latest revision."
+        : selectionLocked
+          ? "Suite selection is locked after the Hub's first execution."
           : message,
-      code:
-        cause instanceof Error && cause.message.includes("revision mismatch")
-          ? "conflict"
-          : "invalid",
+      code: revisionConflict || selectionLocked ? "conflict" : "invalid",
       cause,
     });
+  };
 
   const classifyRecoveryInterrupt = (threadId: ThreadId, turnId: string) =>
     Effect.gen(function* () {
@@ -1882,6 +1894,9 @@ export const makeProjectAgentService = Effect.gen(function* () {
       const config = yield* repository
         .getConfig(projectId)
         .pipe(Effect.mapError(toServiceError("Failed to load project coordinator.")));
+      const suiteSelectionOpen = yield* repository
+        .isSuiteSelectionOpen(projectId)
+        .pipe(Effect.mapError(toServiceError("Failed to read the Hub Suite selection state.")));
       const linkedProjectIds = yield* repository
         .listLinkedProjectIds(projectId)
         .pipe(Effect.mapError(toServiceError("Failed to load linked projects.")));
@@ -1895,6 +1910,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
       if (Option.isNone(config)) {
         return {
           projectId,
+          suite: null,
+          suiteSelectionOpen,
           ...(sourceProjectId ? { sourceProjectId } : {}),
           configured: false,
           config: null,
@@ -2001,6 +2018,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
           : config.value;
       return {
         projectId,
+        suite: config.value.suite ?? null,
+        suiteSelectionOpen,
         ...(sourceProjectId ? { sourceProjectId } : {}),
         configured: true,
         config: visibleConfig,
@@ -2860,10 +2879,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
     readonly contextSource?: true;
   }) =>
     Effect.gen(function* () {
-      const existingReceipt = yield* replayReceipt(
-        input.requestId,
-        input.projectId,
-        (json) => JSON.parse(json) as ProjectAgentOverview,
+      const existingReceipt = yield* replayReceipt(input.requestId, input.projectId, (json) =>
+        Schema.decodeUnknownSync(Schema.fromJsonString(ProjectAgentOverview))(json),
       );
       if (existingReceipt) {
         if (
@@ -3069,6 +3086,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
                 .pipe(Effect.mapError(toServiceError("Failed to load hub attention.")));
               visible.push({
                 projectId: row.projectId,
+                suite: row.suite ?? null,
                 configured: true,
                 coordinatorName: row.coordinatorName,
                 coordinatorThreadId: row.coordinatorThreadId,
@@ -3110,6 +3128,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
                 .pipe(Effect.mapError(toServiceError("Failed to load unfinished Hub links.")));
               visible.push({
                 projectId: pending.projectId,
+                suite: null,
                 configured: false,
                 coordinatorName: null,
                 coordinatorThreadId: null,
@@ -3143,12 +3162,55 @@ export const makeProjectAgentService = Effect.gen(function* () {
               fail("Only the user can configure Project Coordinator.", "forbidden"),
             );
           }
-          const existingReceipt = yield* replayReceipt(
-            input.requestId,
-            input.projectId,
-            (json) => JSON.parse(json) as ProjectAgentOverview,
-          );
+          const requestHash = suiteContentDigest({
+            ...input,
+            ...(input.expertIds === undefined
+              ? {}
+              : { expertIds: [...new Set(input.expertIds)].sort() }),
+          });
+          const receipt = yield* repository
+            .getReceipt({
+              requestId: input.requestId,
+              projectId: input.projectId,
+            })
+            .pipe(Effect.mapError(toServiceError("Failed to load request receipt.")));
+          if (Option.isSome(receipt) && receipt.value.operation !== "configure")
+            return yield* Effect.fail(
+              fail("This request ID already belongs to another operation.", "conflict"),
+            );
+          const storedRequestHash = Option.isSome(receipt)
+            ? Schema.decodeUnknownSync(
+                Schema.fromJsonString(
+                  Schema.Struct({
+                    configureRequestHash: Schema.optional(Schema.String),
+                  }),
+                ),
+              )(receipt.value.resultJson).configureRequestHash
+            : undefined;
+          const existingReceipt = Option.isSome(receipt)
+            ? Schema.decodeUnknownSync(Schema.fromJsonString(ProjectAgentOverview))(
+                receipt.value.resultJson,
+              )
+            : null;
           if (existingReceipt) {
+            if (storedRequestHash !== undefined && storedRequestHash !== requestHash)
+              return yield* Effect.fail(
+                fail(
+                  "This configuration request was already used with different settings.",
+                  "conflict",
+                ),
+              );
+            if (
+              input.suite !== undefined &&
+              canonicalSuiteJson(input.suite) !==
+                canonicalSuiteJson(existingReceipt.config?.suite ?? null)
+            )
+              return yield* Effect.fail(
+                fail(
+                  "This configuration request was already used with another Suite selection.",
+                  "conflict",
+                ),
+              );
             if (
               input.expertIds !== undefined &&
               JSON.stringify([...new Set(input.expertIds)].sort()) !==
@@ -3178,6 +3240,25 @@ export const makeProjectAgentService = Effect.gen(function* () {
           const existing = yield* repository
             .getConfig(input.projectId)
             .pipe(Effect.mapError(toServiceError("Failed to load project coordinator.")));
+          const suite =
+            input.suite === undefined
+              ? Option.isSome(existing)
+                ? (existing.value.suite ?? null)
+                : null
+              : input.suite;
+          if (suite !== null && input.expertIds !== undefined)
+            return yield* Effect.fail(
+              fail("Suite selection cannot be combined with an Expert roster edit.", "invalid"),
+            );
+          if (suite !== null) {
+            if (Option.isNone(suiteStore))
+              return yield* Effect.fail(fail("Suite selection storage is unavailable.", "invalid"));
+            const composition = yield* suiteStore.value
+              .read(suite)
+              .pipe(Effect.mapError(toServiceError("Could not read the selected Suite.")));
+            if (!composition)
+              return yield* Effect.fail(fail("Selected Suite revision does not exist.", "invalid"));
+          }
           const expertIds = [
             ...new Set(
               input.expertIds ?? (Option.isSome(existing) ? (existing.value.expertIds ?? []) : []),
@@ -3318,7 +3399,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
           }
           const config: ProjectAgentConfig = {
             projectId: input.projectId,
-            expertIds,
+            suite,
+            ...(input.expertIds === undefined ? {} : { expertIds }),
             ...(sourceProjectId !== undefined ? { sourceProjectId } : {}),
             coordinatorThreadId,
             coordinatorName,
@@ -3624,7 +3706,10 @@ export const makeProjectAgentService = Effect.gen(function* () {
             createdAt: now,
           });
           const overview = yield* buildOverview(input.projectId);
-          yield* storeReceipt(input.requestId, input.projectId, "configure", overview);
+          yield* storeReceipt(input.requestId, input.projectId, "configure", {
+            ...overview,
+            configureRequestHash: requestHash,
+          });
           return overview;
         }),
       ),
@@ -4026,10 +4111,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
         input.projectId,
         Effect.gen(function* () {
           yield* requireUserLifecycleAction("Pausing a hub", principal);
-          const existingReceipt = yield* replayReceipt(
-            input.requestId,
-            input.projectId,
-            (json) => JSON.parse(json) as ProjectAgentOverview,
+          const existingReceipt = yield* replayReceipt(input.requestId, input.projectId, (json) =>
+            Schema.decodeUnknownSync(Schema.fromJsonString(ProjectAgentOverview))(json),
           );
           if (existingReceipt) return existingReceipt;
           yield* resolveGroupCoordinatorProject(input.projectId);
@@ -4103,10 +4186,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
           input.projectId,
           Effect.gen(function* () {
             yield* requireUserLifecycleAction("Resuming a hub", principal);
-            const existingReceipt = yield* replayReceipt(
-              input.requestId,
-              input.projectId,
-              (json) => JSON.parse(json) as ProjectAgentOverview,
+            const existingReceipt = yield* replayReceipt(input.requestId, input.projectId, (json) =>
+              Schema.decodeUnknownSync(Schema.fromJsonString(ProjectAgentOverview))(json),
             );
             if (existingReceipt) return existingReceipt;
             yield* resolveGroupCoordinatorProject(input.projectId);
@@ -4156,10 +4237,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
         input.projectId,
         Effect.gen(function* () {
           yield* requireUserLifecycleAction("Archiving a hub", principal);
-          const existingReceipt = yield* replayReceipt(
-            input.requestId,
-            input.projectId,
-            (json) => JSON.parse(json) as ProjectAgentOverview,
+          const existingReceipt = yield* replayReceipt(input.requestId, input.projectId, (json) =>
+            Schema.decodeUnknownSync(Schema.fromJsonString(ProjectAgentOverview))(json),
           );
           if (existingReceipt) return existingReceipt;
           yield* resolveGroupCoordinatorProject(input.projectId);
@@ -4226,10 +4305,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
           input.projectId,
           Effect.gen(function* () {
             yield* requireUserLifecycleAction("Unarchiving a hub", principal);
-            const existingReceipt = yield* replayReceipt(
-              input.requestId,
-              input.projectId,
-              (json) => JSON.parse(json) as ProjectAgentOverview,
+            const existingReceipt = yield* replayReceipt(input.requestId, input.projectId, (json) =>
+              Schema.decodeUnknownSync(Schema.fromJsonString(ProjectAgentOverview))(json),
             );
             if (existingReceipt) return existingReceipt;
             yield* resolveGroupCoordinatorProject(input.projectId);
@@ -4298,10 +4375,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
     restartCoordinator: (input, principal) =>
       Effect.gen(function* () {
         yield* requireUserLifecycleAction("Restarting the coordinator", principal);
-        const existingReceipt = yield* replayReceipt(
-          input.requestId,
-          input.projectId,
-          (json) => JSON.parse(json) as ProjectAgentOverview,
+        const existingReceipt = yield* replayReceipt(input.requestId, input.projectId, (json) =>
+          Schema.decodeUnknownSync(Schema.fromJsonString(ProjectAgentOverview))(json),
         );
         if (existingReceipt) return existingReceipt;
         yield* resolveGroupCoordinatorProject(input.projectId);
@@ -4553,10 +4628,8 @@ export const makeProjectAgentService = Effect.gen(function* () {
         if (!isUserPrincipal(principal)) {
           return yield* Effect.fail(fail("Unlinking a repository is a user action.", "forbidden"));
         }
-        const existingReceipt = yield* replayReceipt(
-          input.requestId,
-          input.projectId,
-          (json) => JSON.parse(json) as ProjectAgentOverview,
+        const existingReceipt = yield* replayReceipt(input.requestId, input.projectId, (json) =>
+          Schema.decodeUnknownSync(Schema.fromJsonString(ProjectAgentOverview))(json),
         );
         if (existingReceipt) return existingReceipt;
         yield* resolveGroupCoordinatorProject(input.projectId);
@@ -5679,6 +5752,12 @@ export const makeProjectAgentService = Effect.gen(function* () {
               .filter(Boolean)
               .join("\n")
           : "";
+        const participating =
+          isCoordinator && Option.isSome(config)
+            ? yield* resolveCandidates(config.value).pipe(
+                Effect.mapError(toServiceError("Could not resolve Hub participants.")),
+              )
+            : null;
         const budget = truncateToContextBudget(
           [
             {
@@ -5692,7 +5771,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
               ? [
                   {
                     label: "Participating Experts",
-                    text: `Only the user-selected Hub roster is discoverable and available for new Expert work (${Option.isSome(config) ? (config.value.expertIds ?? []).length : 0} selected). Query synara_hub_list_experts for matching participants and current availability. Prefer a suitable participating Expert. If none matches authorized work, omit expertId and provide an explicit target through the existing ordinary Worker flow. Explicit unavailable Expert or target requests fail; never silently substitute. Discussion or mentioning an Expert does not authorize execution. Roster changes do not alter already accepted snapshots.`,
+                    text: `Only ${participating?.suite ? "members of this Hub's selected Suite revision" : "the user-selected Hub roster"} are discoverable for new Expert work (${participating?.candidates.length ?? 0} selected). Query synara_hub_list_experts for matching participants and action-specific issues. Prefer a suitable participating Expert. If none matches authorized work, omit expertId and provide an explicit target through the existing ordinary Worker flow. Explicit unavailable Expert or target requests fail; never silently substitute. Discussion or mentioning an Expert does not authorize execution. Candidate changes do not alter already accepted snapshots.`,
                   },
                   {
                     label: sectionLabel(
@@ -7296,7 +7375,12 @@ export const makeProjectAgentService = Effect.gen(function* () {
         const config = yield* repository
           .getConfig(input.projectId)
           .pipe(Effect.mapError(toServiceError("Could not load Hub participants.")));
-        if (Option.isNone(config) || !(config.value.expertIds ?? []).includes(input.expertId)) {
+        const resolved = Option.isSome(config)
+          ? yield* resolveCandidates(config.value).pipe(
+              Effect.mapError(toServiceError("Could not resolve Hub participants.")),
+            )
+          : null;
+        if (!resolved?.candidates.some((candidate) => candidate.expertId === input.expertId)) {
           return yield* Effect.fail(
             fail("This Expert does not participate in the current Hub.", "forbidden"),
           );

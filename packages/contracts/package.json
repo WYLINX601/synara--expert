@@ -18,6 +18,10 @@
     "./uiLocale": {
       "types": "./src/uiLocale.ts",
       "import": "./src/uiLocale.ts"
+    },
+    "./omp/expertDelegation": {
+      "types": "./src/omp/expertDelegation.ts",
+      "import": "./src/omp/expertDelegation.ts"
     }
   },
   "scripts": {

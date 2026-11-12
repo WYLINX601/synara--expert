@@ -23,6 +23,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 
+import { SuiteRunConfigurationDetails } from "./SuiteRunConfigurationDetails";
 export function ExpertTaskControl(props: {
   threadId: ThreadId;
   binding: ExpertBinding;
@@ -173,6 +174,10 @@ export function ExpertTaskControl(props: {
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4 text-ui">
+            <SuiteRunConfigurationDetails
+              threadId={props.threadId}
+              rootRunId={appliedRuntime.data?.skillApplication?.skillRootRunId ?? null}
+            />
             {snapshot.data ? (
               <>
                 <section>

@@ -40,6 +40,14 @@ import {
   type ProjectAgentRepositoryShape,
   normalizeDigestError,
 } from "../Services/ProjectAgentRepository.ts";
+import {
+  admitHubSuiteExecution,
+  hubSuiteSelectionJson,
+  readHubSuiteModeLock,
+  readHubSuiteSelection,
+  sameHubSuite,
+  writeHubSuiteSelection,
+} from "../hubSuiteState";
 
 const ConfigRow = Schema.Struct({
   projectId: ProjectId,
@@ -153,6 +161,7 @@ const SummaryRow = Schema.Struct({
 function toConfig(row: typeof ConfigRow.Type): ProjectAgentConfig {
   return {
     projectId: row.projectId,
+    suite: null,
     coordinatorThreadId: row.coordinatorThreadId,
     coordinatorName: row.coordinatorName,
     coordinatorModelSelection: row.coordinatorModelSelection,
@@ -523,6 +532,7 @@ const makeProjectAgentRepository = Effect.gen(function* () {
 
   const withLinkedIds = (config: ProjectAgentConfig) =>
     Effect.gen(function* () {
+      const suite = yield* readHubSuiteSelection(sql, config.projectId);
       const rows = yield* listLinkedIds({ projectId: config.projectId });
       const expertRows = yield* sql<{ readonly expertId: string }>`
         SELECT expert_id AS "expertId" FROM hub_expert_participants
@@ -535,6 +545,7 @@ const makeProjectAgentRepository = Effect.gen(function* () {
       `;
       return {
         ...config,
+        suite,
         linkedProjectIds: rows.map((row) => row.linkedProjectId),
         expertIds: expertRows.map((row) => row.expertId),
         ...(origins[0]
@@ -683,6 +694,15 @@ const makeProjectAgentRepository = Effect.gen(function* () {
         `.pipe(
           Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.listSummaries.linked")),
         );
+        const suiteRows = yield* Effect.forEach(rows, (row) =>
+          readHubSuiteSelection(sql, row.projectId).pipe(
+            Effect.map((suite) => [row.projectId, suite] as const),
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError("ProjectAgentRepository.listSummaries.suite", "suite"),
+            ),
+          ),
+        );
+        const suitesByProject = new Map(suiteRows);
         const memberIdsByProject = new Map<string, string[]>();
         for (const row of memberRows) {
           const projectId = String(row.project_id);
@@ -708,6 +728,7 @@ const makeProjectAgentRepository = Effect.gen(function* () {
         return rows.map(
           (row): ProjectAgentConfigSummaryRow => ({
             projectId: row.projectId,
+            suite: suitesByProject.get(row.projectId) ?? null,
             coordinatorName: row.coordinatorName,
             coordinatorThreadId: row.coordinatorThreadId,
             coordinatorIcon: row.coordinatorIcon,
@@ -814,77 +835,93 @@ const makeProjectAgentRepository = Effect.gen(function* () {
           }),
         ),
       ),
-    saveConfig: (config, expectedRevision) => {
-      const row = toConfigRow(config);
-      const normalizedExpertIds =
-        config.expertIds === undefined
-          ? undefined
-          : [...new Set(config.expertIds.map((expertId) => expertId.trim()))].toSorted();
-      const savedConfig =
-        normalizedExpertIds === undefined ? config : { ...config, expertIds: normalizedExpertIds };
-      const saveOrigin =
-        config.sourceProjectId === undefined
-          ? Effect.void
-          : sql`
-        INSERT INTO hub_project_origins (hub_id, source_project_id)
-        VALUES (${config.projectId}, ${config.sourceProjectId})
-        ON CONFLICT (hub_id) DO NOTHING
-      `.pipe(
-              Effect.asVoid,
-              Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveOrigin")),
-            );
-      const saveExpertIds =
-        normalizedExpertIds === undefined
-          ? Effect.void
-          : Effect.gen(function* () {
-              yield* sql`
-                DELETE FROM hub_expert_participants WHERE hub_id = ${config.projectId}
-              `;
-              for (const expertId of normalizedExpertIds) {
-                yield* sql`
-                  INSERT INTO hub_expert_participants (hub_id, expert_id)
-                  VALUES (${config.projectId}, ${expertId})
-                `;
-              }
-            }).pipe(Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveExpertIds")));
-      if (expectedRevision === null) {
-        return sql
-          .withTransaction(
-            insertConfig(row).pipe(
-              Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveConfig:insert")),
-              Effect.andThen(saveOrigin),
-              Effect.andThen(saveExpertIds),
-              Effect.as(savedConfig),
-            ),
-          )
-          .pipe(
-            Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveConfig:transaction")),
-          );
-      }
-      return sql
+    beginSuiteOnboarding: (projectId) =>
+      sql
         .withTransaction(
-          updateConfig({ row, expectedRevision }).pipe(
-            Effect.mapError(
-              toPersistenceSqlOrDecodeError("ProjectAgentRepository.saveConfig:update", "changed"),
-            ),
-            Effect.flatMap((result) =>
-              result.changed === 1
-                ? Effect.succeed(config)
-                : Effect.fail(
-                    toPersistenceSqlError("ProjectAgentRepository.saveConfig")(
-                      revisionMismatch("config"),
-                    ),
-                  ),
-            ),
-            Effect.andThen(saveOrigin),
-            Effect.andThen(saveExpertIds),
-            Effect.as(savedConfig),
-          ),
+          sql`INSERT OR IGNORE INTO hub_suite_mode_locks(hub_id, state, config_revision, selection_json, first_admission_id)
+          SELECT ${projectId}, 'open', 0, 'null', NULL
+          WHERE NOT EXISTS (SELECT 1 FROM project_agent_configs WHERE project_id = ${projectId})`,
         )
         .pipe(
-          Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.saveConfig:transaction")),
-        );
-    },
+          Effect.asVoid,
+          Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.beginSuiteOnboarding")),
+        ),
+    isSuiteSelectionOpen: (projectId) =>
+      readHubSuiteModeLock(sql, projectId).pipe(
+        Effect.map((lock) => lock?.state === "open"),
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectAgentRepository.isSuiteSelectionOpen",
+            "Suite mode lock",
+          ),
+        ),
+      ),
+    admitSuiteExecution: (input) =>
+      sql
+        .withTransaction(admitHubSuiteExecution(sql, input))
+        .pipe(Effect.mapError(toPersistenceSqlError("ProjectAgentRepository.admitSuiteExecution"))),
+    saveConfig: (config, expectedRevision) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const previous = yield* getConfigRow({ projectId: config.projectId });
+            if (
+              (expectedRevision === null && Option.isSome(previous)) ||
+              (expectedRevision !== null &&
+                (Option.isNone(previous) || previous.value.revision !== expectedRevision))
+            )
+              return yield* Effect.fail(revisionMismatch("config"));
+            const previousSuite = yield* readHubSuiteSelection(sql, config.projectId);
+            const suite = config.suite === undefined ? previousSuite : config.suite;
+            const modeLock = yield* readHubSuiteModeLock(sql, config.projectId);
+            if (
+              (!modeLock && previousSuite !== null) ||
+              (modeLock && !sameHubSuite(modeLock.selection, previousSuite))
+            )
+              return yield* Effect.fail(new Error("Hub Suite selection and mode lock disagree."));
+            if (!sameHubSuite(previousSuite, suite) && modeLock?.state !== "open")
+              return yield* Effect.fail(
+                new Error("Suite selection is locked after first execution."),
+              );
+            if (modeLock?.state === "open" && modeLock.configRevision !== (expectedRevision ?? 0))
+              return yield* Effect.fail(revisionMismatch("Suite mode lock"));
+            const normalizedExpertIds =
+              config.expertIds === undefined
+                ? undefined
+                : [...new Set(config.expertIds.map((expertId) => expertId.trim()))].toSorted();
+            const savedConfig = {
+              ...config,
+              suite,
+              ...(normalizedExpertIds === undefined ? {} : { expertIds: normalizedExpertIds }),
+            };
+            if (expectedRevision === null) yield* insertConfig(toConfigRow(savedConfig));
+            else {
+              const result = yield* updateConfig({
+                row: toConfigRow(savedConfig),
+                expectedRevision,
+              });
+              if (result.changed !== 1) return yield* Effect.fail(revisionMismatch("config"));
+            }
+            if (config.sourceProjectId !== undefined)
+              yield* sql`INSERT INTO hub_project_origins (hub_id, source_project_id)
+            VALUES (${config.projectId}, ${config.sourceProjectId}) ON CONFLICT (hub_id) DO NOTHING`;
+            if (normalizedExpertIds !== undefined) {
+              yield* sql`DELETE FROM hub_expert_participants WHERE hub_id = ${config.projectId}`;
+              for (const expertId of normalizedExpertIds)
+                yield* sql`INSERT INTO hub_expert_participants (hub_id, expert_id) VALUES (${config.projectId}, ${expertId})`;
+            }
+            yield* writeHubSuiteSelection(sql, config.projectId, suite);
+            if (modeLock?.state === "open")
+              yield* sql`UPDATE hub_suite_mode_locks SET config_revision = ${config.revision},
+            selection_json = ${hubSuiteSelectionJson(suite)} WHERE hub_id = ${config.projectId} AND state = 'open'`;
+            return savedConfig;
+          }),
+        )
+        .pipe(
+          Effect.mapError(
+            toPersistenceSqlOrDecodeError("ProjectAgentRepository.saveConfig", "config"),
+          ),
+        ),
     getActiveGoal: (projectId) =>
       getActiveGoalRow({ projectId }).pipe(
         Effect.map(Option.map(toGoal)),
@@ -1314,6 +1351,8 @@ const makeProjectAgentRepository = Effect.gen(function* () {
                   "hub_expert_deliverable_collections",
                   "hub_expert_participants",
                   "hub_project_origins",
+                  "hub_suite_selections",
+                  "hub_suite_mode_locks",
                 ] as const,
                 (table) =>
                   sql

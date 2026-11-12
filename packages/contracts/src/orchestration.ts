@@ -1,5 +1,7 @@
 import { Effect, Option, Schema, SchemaIssue, SchemaTransformation, Struct } from "effect";
 import { ExpertBinding } from "./expert";
+import { ExpertDraftSelection, SuiteRef, SuiteIssue, SuiteContentHash } from "./suite";
+import { ExpertDelegationResult } from "./expertDelegation";
 import {
   LoadProjectImportHistoryInput,
   LoadProjectImportHistoryResult,
@@ -1072,6 +1074,9 @@ export const OrchestrationThread = Schema.Struct({
   expertBinding: Schema.optional(Schema.NullOr(ExpertBinding)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
+  expertDraftSelection: Schema.optional(Schema.NullOr(ExpertDraftSelection)),
+  capabilityBindingId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  suiteSelection: Schema.optional(Schema.NullOr(SuiteRef)),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -1183,6 +1188,9 @@ export const OrchestrationThreadShell = Schema.Struct({
   expertBinding: Schema.optional(Schema.NullOr(ExpertBinding)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
+  expertDraftSelection: Schema.optional(Schema.NullOr(ExpertDraftSelection)),
+  capabilityBindingId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  suiteSelection: Schema.optional(Schema.NullOr(SuiteRef)),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -1440,6 +1448,8 @@ const ThreadCreateCommand = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
   expertId: Schema.optional(TrimmedNonEmptyString),
+  suiteSelection: Schema.optional(Schema.NullOr(SuiteRef)),
+  expertDraftSelection: Schema.optional(Schema.NullOr(ExpertDraftSelection)),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
@@ -1671,6 +1681,8 @@ export const ThreadTurnStartCommand = Schema.Struct({
   asyncUserInputResponse: Schema.optional(AsyncUserInputResponse),
   commandId: CommandId,
   threadId: ThreadId,
+  expertId: Schema.optional(TrimmedNonEmptyString),
+  suiteSelection: Schema.optional(Schema.NullOr(SuiteRef)),
   message: Schema.Struct({
     messageId: MessageId,
     role: Schema.Literal("user"),
@@ -1717,6 +1729,8 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   asyncUserInputResponse: Schema.optional(AsyncUserInputResponse),
   commandId: CommandId,
   threadId: ThreadId,
+  expertId: Schema.optional(TrimmedNonEmptyString),
+  suiteSelection: Schema.optional(Schema.NullOr(SuiteRef)),
   message: Schema.Struct({
     messageId: MessageId,
     role: Schema.Literal("user"),
@@ -2215,7 +2229,28 @@ const ThreadUsageLimitCancelCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+export const ThreadExpertDelegationResultPayload = Schema.Struct({
+  threadId: ThreadId,
+  parentRootRunId: TrimmedNonEmptyString,
+  delegationId: TrimmedNonEmptyString,
+  attemptId: TrimmedNonEmptyString,
+  targetExpertId: TrimmedNonEmptyString,
+  outcome: Schema.Literals(["completed", "failed", "stopped"]),
+  resultRef: TrimmedNonEmptyString,
+  resultHash: SuiteContentHash,
+  result: Schema.NullOr(ExpertDelegationResult),
+  issue: Schema.NullOr(SuiteIssue),
+  applyToParent: Schema.Boolean,
+});
+const ThreadExpertDelegationResultCommand = Schema.Struct({
+  type: Schema.Literal("thread.expert-delegation.result"),
+  commandId: CommandId,
+  ...ThreadExpertDelegationResultPayload.fields,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadExpertDelegationResultCommand,
   ThreadUsageLimitAdmitCommand,
   ThreadUsageLimitSourceCommand,
   ThreadUsageLimitScheduleCommand,
@@ -2262,6 +2297,8 @@ export const OrchestrationEventType = Schema.Literals([
   "project.meta-updated",
   "project.deleted",
   "thread.created",
+  "thread.capability-bound",
+  "thread.expert-delegation-result",
   "thread.deleted",
   // Legacy desktop installs can still contain these rows in orchestration_events.
   "thread.archived",
@@ -2368,12 +2405,22 @@ export const ProjectDeletedPayload = Schema.Struct({
   deletedAt: IsoDateTime,
 });
 
+export const ThreadCapabilityBoundPayload = Schema.Struct({
+  threadId: ThreadId,
+  expertBinding: Schema.NullOr(ExpertBinding),
+  capabilityBindingId: Schema.NullOr(TrimmedNonEmptyString),
+  suiteSelection: Schema.NullOr(SuiteRef),
+});
+
 export const ThreadCreatedPayload = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
   expertBinding: Schema.optional(Schema.NullOr(ExpertBinding)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
+  expertDraftSelection: Schema.optional(Schema.NullOr(ExpertDraftSelection)),
+  capabilityBindingId: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  suiteSelection: Schema.optional(Schema.NullOr(SuiteRef)),
   title: TrimmedNonEmptyString,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(() => DEFAULT_RUNTIME_MODE)),
@@ -2782,6 +2829,13 @@ export const ThreadActivityAppendedPayload = Schema.Struct({
 });
 
 export const OrchestrationEventMetadata = Schema.Struct({
+  expertDelegationContinuation: Schema.optional(
+    Schema.Struct({
+      parentRootRunId: TrimmedNonEmptyString,
+      delegationId: TrimmedNonEmptyString,
+      attemptId: TrimmedNonEmptyString,
+    }),
+  ),
   checkpointRuntimeSequence: Schema.optional(NonNegativeInt),
   providerTurnId: Schema.optional(TrimmedNonEmptyString),
   providerItemId: Schema.optional(ProviderItemId),
@@ -2843,6 +2897,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.created"),
     payload: ThreadCreatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.capability-bound"),
+    payload: ThreadCapabilityBoundPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.expert-delegation-result"),
+    payload: ThreadExpertDelegationResultPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

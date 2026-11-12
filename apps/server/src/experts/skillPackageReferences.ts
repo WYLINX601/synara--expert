@@ -5,6 +5,7 @@ import { ExpertDefinition, SkillPackageId } from "@synara/contracts";
 import { Schema } from "effect";
 
 import { expertResourceFiles, readVerifiedStoredExpertSnapshot } from "./ExpertStore.ts";
+import { scanSuiteSkillPackageReferences } from "../suites/SuitePublicationHost";
 
 const EXPERT_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 
@@ -84,9 +85,15 @@ export async function scanSkillPackageReferences(
   }
   const { listRunSkillAssemblies } = await import("./RunSkillAssemblyStore");
   for (const record of await listRunSkillAssemblies(stateDir)) {
-    if (record.session.skillEntries?.some((entry) => entry.packageId === packageId))
+    const entries = record.schemaVersion === 1 ? record.session.skillEntries : record.skillEntries;
+    if (
+      entries?.some((entry) => entry.packageId === packageId) ||
+      (record.schemaVersion === 2 &&
+        record.resources.some((resource) => resource.packageId === packageId))
+    )
       references.push(`Run ${record.rootRunId} (${record.assemblyId})`);
   }
+  references.push(...(await scanSuiteSkillPackageReferences(stateDir, packageId)));
   return [...new Set(references)];
 }
 

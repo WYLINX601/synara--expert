@@ -133,6 +133,7 @@ import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/
 import { AutomationId, ProjectInboxEventId } from "@synara/contracts";
 import { QueuedTurnPromotionRepository } from "../../persistence/Services/QueuedTurnPromotions.ts";
 import { QueuedTurnPromotionRepositoryLive } from "../../persistence/Layers/QueuedTurnPromotions.ts";
+import { SuiteCompositionStoreLive } from "../../suites/SuiteCompositionStore.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.makeUnsafe(value);
 const asTurnId = (value: string): TurnId => TurnId.makeUnsafe(value);
@@ -590,6 +591,8 @@ describe("CheckpointReactor", () => {
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+      Layer.provideMerge(ProjectAgentRepositoryLive),
+      Layer.provideMerge(SuiteCompositionStoreLive),
     );
 
     const checkpointStoreLayer = Layer.effect(
@@ -2488,6 +2491,7 @@ describe("CheckpointReactor", () => {
     );
     const query = await runtime!.runPromise(Effect.service(ProjectionSnapshotQuery));
     const projectId = asProjectId("project-1");
+    expect(await runtime!.runPromise(repository.isSuiteSelectionOpen(projectId))).toBe(true);
     const workerId = ThreadId.makeUnsafe("thread-1");
     const coordinatorId = ThreadId.makeUnsafe("hub-coordinator");
     const createdAt = new Date().toISOString();

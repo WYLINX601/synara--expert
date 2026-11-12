@@ -45,6 +45,7 @@ const caller: OrchestrationThreadShell = {
   id: CALLER_ID,
   projectId: PROJECT_ID,
   title: "Hub coordinator",
+  expertBinding: null,
   modelSelection: TARGET,
   runtimeMode: "approval-required",
   interactionMode: "default",
@@ -427,9 +428,12 @@ layer("Hub work creation saga", (it) => {
         assert.equal(mismatched.isError, true);
         assert.deepEqual(fixture.commands, []);
 
+        const suite = { suiteId: "suite_00000000-0000-0000-0000-000000000001", revision: 1 };
         const result = yield* fixture.handler(input, {
           ...fixture.context,
           expertBinding: binding,
+          capabilityBindingId: "accepted-capability",
+          suite,
         });
         assert.notEqual(result.isError, true);
         const createIndex = fixture.commands.findIndex(
@@ -437,6 +441,25 @@ layer("Hub work creation saga", (it) => {
         );
         assert.isAtLeast(createIndex, 0);
         assert.deepEqual(fixture.dispatchContexts[createIndex]?.hubExpertBinding, binding);
+        assert.equal(
+          fixture.dispatchContexts[createIndex]?.hubCapabilityBindingId,
+          "accepted-capability",
+        );
+        assert.deepEqual(fixture.dispatchContexts[createIndex]?.hubSuiteSelection, suite);
+        assert.equal(fixture.dispatchContexts[createIndex]?.hubWorkId, fixture.workId);
+        assert.equal(fixture.dispatchContexts[createIndex]?.hubId, PROJECT_ID);
+        const changed = yield* fixture.handler(input, {
+          ...fixture.context,
+          expertBinding: binding,
+          capabilityBindingId: "different-capability",
+          suite,
+        });
+        assert.equal(changed.isError, true);
+        assert.include(JSON.stringify(changed), "idempotency_conflict");
+        assert.equal(
+          fixture.commands.filter((command) => command.type === "thread.create").length,
+          1,
+        );
       }),
   );
 

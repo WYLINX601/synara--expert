@@ -14,6 +14,7 @@ import { SYNARA_HARNESS_POLICY_MARKER } from "../../agentGateway/harnessPolicy.t
 import { ServerConfig } from "../../config.ts";
 import { OmpAdapter } from "../Services/OmpAdapter.ts";
 import { makeOmpAdapterLive } from "./OmpAdapter.ts";
+import { makeFakeAcpSessionRuntime } from "../acp/testing/fakeAcpSessionRuntime";
 
 const fixture = vi.hoisted(() => ({
   compatibilityProbeMarker: "OMP_SKILL_EVOLUTION_PROBE_MARKER",
@@ -62,6 +63,7 @@ vi.mock("../acp/OmpAcpSupport.ts", async (original) => ({
   makeOmpAcpRuntime: (input: Record<string, any>) => {
     fixture.runtimeInputs.push(input);
     return Effect.succeed({
+      ...makeFakeAcpSessionRuntime(),
       handleRequestPermission: () => Effect.void,
       handleElicitation: () => Effect.void,
       start: () => {

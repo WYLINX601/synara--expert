@@ -28,7 +28,7 @@ import { GROUPS_BETA_ONLY_MESSAGE, isServerGroupsEnabled } from "../projectAgent
 import { makeHubWorkService } from "../projectAgent/hubWorkService";
 import { resolveHubTargetProjectId } from "../projectAgent/hubTarget";
 import { readHubExpertCatalog } from "./hubExpertCatalog";
-import { resolveHubCreationSpec } from "./hubExpertDispatch";
+import { resolveHubCreationSpec, type HubExpertDispatchDependencies } from "./hubExpertDispatch";
 import type { ProjectAgentServiceShape } from "../projectAgent/Services/ProjectAgentService";
 import type { makeCreateThreadsHandler } from "./creationCoordinator";
 import { stableGatewayDigest } from "./creationUtils";
@@ -69,14 +69,21 @@ export function makeHubWorkGateway(dependencies: {
     unknown
   >;
   readonly createThreads: CreateThreads;
+  readonly suiteStore?: HubExpertDispatchDependencies["suiteStore"];
+  readonly prepareSuiteBinding?: HubExpertDispatchDependencies["prepareSuiteBinding"];
 }) {
   const { repository, projectAgentRepository, projectAgentService, snapshotQuery } = dependencies;
+  const candidateDependencies = {
+    expertStore: dependencies.expertStore,
+    ...(dependencies.suiteStore ? { suiteStore: dependencies.suiteStore } : {}),
+  };
   const service = makeHubWorkService({
     repository,
     projectAgentRepository,
     projectAgentService,
     snapshotQuery,
-    resolveCreationSpec: ({ callerThreadId, targetProjectId, spec }) =>
+    candidateDependencies,
+    resolveCreationSpec: ({ callerThreadId, targetProjectId, spec, hub }) =>
       Effect.gen(function* () {
         const caller = yield* snapshotQuery.getThreadShellById(ThreadId.makeUnsafe(callerThreadId));
         if (Option.isNone(caller))
@@ -86,7 +93,10 @@ export function makeHubWorkGateway(dependencies: {
           return yield* Effect.fail(new ToolInputError("Target project was not found."));
         return yield* resolveHubCreationSpec({
           dependencies: {
-            expertStore: dependencies.expertStore,
+            ...candidateDependencies,
+            ...(dependencies.prepareSuiteBinding
+              ? { prepareSuiteBinding: dependencies.prepareSuiteBinding }
+              : {}),
             providerDiscovery: dependencies.providerDiscovery,
             loadProviderAvailabilities: dependencies.loadProviderAvailabilities,
             getProjectWorkspaceRoot: () => Effect.succeed(project.value.workspaceRoot),
@@ -94,6 +104,7 @@ export function makeHubWorkGateway(dependencies: {
           targetProjectId,
           callerTarget: caller.value.modelSelection,
           spec,
+          hub,
         });
       }),
     ...(dependencies.messages ? { messages: dependencies.messages } : {}),
@@ -157,7 +168,7 @@ export function makeHubWorkGateway(dependencies: {
       // nonterminal saga here would also block the scanner waiting for that saga.
       if (yield* hasUnfinishedCreation(record)) return;
       const spec = record.creationSpec;
-      const { expertBinding, ...creationSpec } = spec;
+      const { expertBinding, capabilityBindingId, suite, ...creationSpec } = spec;
       const result = yield* dependencies.createThreads(
         {
           requestId: record.id,
@@ -177,6 +188,7 @@ export function makeHubWorkGateway(dependencies: {
         {
           kind: "hub-work",
           ...(expertBinding ? { expertBinding } : {}),
+          ...(capabilityBindingId ? { capabilityBindingId, suite: suite ?? null } : {}),
           inheritedRuntimeMode: spec.inheritedRuntimeMode,
           workItemId: record.id,
           batchId: `hub-work-batch:${stableGatewayDigest({ projectId: record.projectId, scopeKey: record.scopeKey }, 40)}`,
@@ -370,7 +382,7 @@ export function makeHubWorkGateway(dependencies: {
                 .getConfig(projectId)
                 .pipe(Effect.map((config) => (Option.isSome(config) ? config.value : null))),
             dependencies: {
-              expertStore: dependencies.expertStore,
+              ...candidateDependencies,
               providerDiscovery: dependencies.providerDiscovery,
               loadProviderAvailabilities: dependencies.loadProviderAvailabilities,
             },

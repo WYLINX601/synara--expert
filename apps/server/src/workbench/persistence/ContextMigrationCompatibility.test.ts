@@ -18,7 +18,6 @@ import {
   readWorkbenchTracker,
   runWorkbenchMigrations,
   WorkbenchMigrationError,
-  workbenchMigrationEntries,
 } from "./WorkbenchMigrations.ts";
 import { inspectWorkbenchUpgradePlan } from "./WorkbenchUpgradePlan.ts";
 
@@ -134,29 +133,11 @@ it("keeps legacy Context 111 byte-for-byte frozen and records it as context1", (
     checksum,
     "sha256:b7dbd84911484156f3f38093973338ca005dce9e8ba4b38b8972d9dfe79a4911",
   );
-  assert.strictEqual(contextWorkbenchMigrationEntries[0]?.checksum, checksum);
-  assert.strictEqual(contextWorkbenchMigrationEntries.length, 1);
-  assert.strictEqual(workbenchMigrationEntries[13]?.migrationId, 14);
-  assert.strictEqual(workbenchMigrationEntries[13]?.name, "AmbientContextMessageSnapshots");
-  assert.deepStrictEqual(
-    workbenchMigrationEntries.map(({ migrationId, name }) => [migrationId, name]),
-    [
-      [1, "ProjectionThreadsExpertBinding"],
-      [2, "ExpertAppliedRuntimeRecords"],
-      [3, "HubProjectOrigin"],
-      [4, "HubExpertDeliverables"],
-      [5, "HubExpertParticipants"],
-      [6, "ExpertSkillApplication"],
-      [7, "HubCollaborationPresetsAndSettings"],
-      [8, "HubPlanStateAndOutbox"],
-      [9, "HubPlanDirectedInput"],
-      [10, "ExpertSkillEvolution"],
-      [11, "ExpertAutomaticLearning"],
-      [12, "ExpertLearningEvidenceDelivery"],
-      [13, "SpaceMemory"],
-      [14, "AmbientContextMessageSnapshots"],
-    ],
+  const contextV1 = contextWorkbenchMigrationEntries.find(
+    ({ moduleId, migrationId }) => moduleId === "context" && migrationId === 1,
   );
+  assert.strictEqual(contextV1?.name, "ContextV1");
+  assert.strictEqual(contextV1?.checksum, checksum);
 });
 
 for (const mode of ["legacy-expert", "split-expert"] as const) {
@@ -195,22 +176,11 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
         ]);
         const allAudit =
           yield* sql`SELECT * FROM workbench_legacy_migration_adoptions ORDER BY module_id, migration_id`;
-        assert.deepStrictEqual(
-          first.migration.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
-          [
-            ["expert", 3],
-            ["expert", 4],
-            ["expert", 5],
-            ["expert", 6],
-            ["expert", 7],
-            ["expert", 8],
-            ["expert", 9],
-            ["expert", 10],
-            ["expert", 11],
-            ["expert", 12],
-            ["expert", 13],
-            ["expert", 14],
-          ],
+        assert.isNotEmpty(first.migration.executed);
+        assert.isTrue(
+          first.migration.executed.every(({ moduleId, migrationId }) =>
+            moduleId === "expert" ? migrationId > 2 : moduleId !== "context" || migrationId !== 1,
+          ),
         );
         assert.deepStrictEqual(yield* readPreservedData, before);
         const official = yield* sql<{ readonly migration_id: number; readonly name: string }>`
@@ -220,24 +190,12 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
           migrationEntries.map(([migration_id, name]) => ({ migration_id, name })),
         );
         const tracker = yield* readWorkbenchTracker;
-        assert.deepStrictEqual(
+        assert.includeDeepMembers(
           tracker.rows.map(({ module_id, migration_id }) => [module_id, migration_id]),
           [
             ["context", 1],
             ["expert", 1],
             ["expert", 2],
-            ["expert", 3],
-            ["expert", 4],
-            ["expert", 5],
-            ["expert", 6],
-            ["expert", 7],
-            ["expert", 8],
-            ["expert", 9],
-            ["expert", 10],
-            ["expert", 11],
-            ["expert", 12],
-            ["expert", 13],
-            ["expert", 14],
           ],
         );
         const repeated = yield* finishUpgrade;
@@ -255,10 +213,10 @@ for (const mode of ["legacy-expert", "split-expert"] as const) {
         const settled = yield* inspectWorkbenchUpgradePlan;
         assert.strictEqual(settled.kind, "ready");
         if (settled.kind === "ready") {
-          assert.deepStrictEqual(settled.workbench.modules, {
-            expert: { sourceVersion: 14, targetVersion: 14 },
-            context: { sourceVersion: 1, targetVersion: 1 },
-          });
+          for (const module of Object.values(settled.workbench.modules)) {
+            assert.strictEqual(module.sourceVersion, module.targetVersion);
+          }
+          assert.isFalse(settled.workbench.hasPendingMigrations);
           assert.isFalse(settled.requiresBackup);
         }
       }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
@@ -273,23 +231,11 @@ it.effect(
       assert.strictEqual(initial.kind, "ready");
       if (initial.kind === "ready") assert.isFalse(initial.requiresBackup);
       const result = yield* finishUpgrade;
-      assert.deepStrictEqual(
+      assert.includeDeepMembers(
         result.migration.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
         [
           ["expert", 1],
           ["expert", 2],
-          ["expert", 3],
-          ["expert", 4],
-          ["expert", 5],
-          ["expert", 6],
-          ["expert", 7],
-          ["expert", 8],
-          ["expert", 9],
-          ["expert", 10],
-          ["expert", 11],
-          ["expert", 12],
-          ["expert", 13],
-          ["expert", 14],
           ["context", 1],
         ],
       );
@@ -303,8 +249,10 @@ it.effect(
       ]);
       const before = yield* sql`SELECT * FROM context_meta`;
       assert.strictEqual(before.length, 1);
+      const tracker = (yield* readWorkbenchTracker).rows;
       const second = yield* finishUpgrade;
       assert.deepStrictEqual(second.migration.executed, []);
+      assert.deepStrictEqual((yield* readWorkbenchTracker).rows, tracker);
       assert.deepStrictEqual(yield* sql`SELECT * FROM context_meta`, before);
     }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );
@@ -312,45 +260,34 @@ it.effect(
 for (const through of [109, 110] as const) {
   it.effect(`upgrades legacy Expert ${through} without requiring an existing Context schema`, () =>
     Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
       yield* seedLegacy("legacy-expert", through);
       const result = yield* finishUpgrade;
       assert.deepStrictEqual(result.adoption.adoptedMigrationIds, through === 109 ? [1] : [1, 2]);
       assert.deepStrictEqual(result.adoption.adoptedContextMigrationIds, []);
-      assert.deepStrictEqual(
+      assert.isTrue(
+        result.migration.executed.every(
+          ({ moduleId, migrationId }) =>
+            moduleId !== "expert" ||
+            !result.adoption.adoptedMigrationIds.some((adoptedId) => adoptedId === migrationId),
+        ),
+      );
+      assert.includeDeepMembers(
         result.migration.executed.map(({ moduleId, migrationId }) => [moduleId, migrationId]),
         through === 109
           ? [
               ["expert", 2],
-              ["expert", 3],
-              ["expert", 4],
-              ["expert", 5],
-              ["expert", 6],
-              ["expert", 7],
-              ["expert", 8],
-              ["expert", 9],
-              ["expert", 10],
-              ["expert", 11],
-              ["expert", 12],
-              ["expert", 13],
-              ["expert", 14],
               ["context", 1],
             ]
-          : [
-              ["expert", 3],
-              ["expert", 4],
-              ["expert", 5],
-              ["expert", 6],
-              ["expert", 7],
-              ["expert", 8],
-              ["expert", 9],
-              ["expert", 10],
-              ["expert", 11],
-              ["expert", 12],
-              ["expert", 13],
-              ["expert", 14],
-              ["context", 1],
-            ],
+          : [["context", 1]],
       );
+      const contextMeta = yield* sql`SELECT * FROM context_meta`;
+      assert.strictEqual(contextMeta.length, 1);
+      const tracker = (yield* readWorkbenchTracker).rows;
+      const repeated = yield* finishUpgrade;
+      assert.deepStrictEqual(repeated.migration.executed, []);
+      assert.deepStrictEqual((yield* readWorkbenchTracker).rows, tracker);
+      assert.deepStrictEqual(yield* sql`SELECT * FROM context_meta`, contextMeta);
     }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
   );
 }

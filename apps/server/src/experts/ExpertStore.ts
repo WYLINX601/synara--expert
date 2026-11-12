@@ -24,6 +24,8 @@ import { readSkillDefinition, resolveSkillBindings } from "./SkillLibraryStore";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle.ts";
 import { verifyPinnedSkillReferences } from "./pinnedSkillReferences";
 import { withExpertLearningCommit } from "./expertLearningCommit";
+import { isExpertImportPublished } from "../suites/SuitePublicationHost.ts";
+import { compileBmadRole } from "../suites/SuiteSourceAdapters";
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES = 100 * 1024 * 1024;
@@ -43,6 +45,7 @@ const ResourceEntry = Schema.Struct({
 const StoredSnapshot = Schema.Struct({
   snapshot: ExpertSnapshotSchema,
   resources: Schema.Array(ResourceEntry),
+  importPlanId: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
 });
 type ResourceEntry = typeof ResourceEntry.Type;
 type StoredSnapshot = typeof StoredSnapshot.Type;
@@ -69,6 +72,34 @@ async function resolvePackageSelections(
   return createSkillPackageStore(stateDir).resolveSelections(selections);
 }
 
+const ExpertImportMetadata = Schema.Struct({
+  planId: Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(200)),
+  identityAvailable: Schema.Boolean,
+  bmadRole: Schema.NullOr(Schema.String),
+  roleSourceRoot: Schema.NullOr(Schema.String),
+  expertIds: Schema.Record(Schema.String, Schema.String),
+  initialIdentity: Schema.Struct({
+    name: Schema.String,
+    description: Schema.String,
+    persona: Schema.String,
+    useCases: Schema.String,
+    outputRequirements: Schema.String,
+  }),
+});
+type ExpertImportMetadata = typeof ExpertImportMetadata.Type;
+type StoredExpertDefinition = {
+  readonly definition: ExpertDefinition;
+  readonly metadata: ExpertImportMetadata | null;
+};
+export interface ExpertImportStageInput {
+  readonly planId: string;
+  readonly definition: ExpertDefinition;
+  readonly identityAvailable: boolean;
+  readonly bmadRole: string | null;
+  readonly roleSourceRoot: string | null;
+  readonly expertIds: Readonly<Record<string, string>>;
+}
+
 export interface ExpertStore {
   list(): Promise<ExpertDefinition[]>;
   read(id: string): Promise<ExpertDefinition | null>;
@@ -77,8 +108,13 @@ export interface ExpertStore {
   restore(id: string, expectedRevision: number): Promise<ExpertDefinition>;
   remove(id: string, expectedRevision: number): Promise<void>;
   preview(input: typeof ExpertPreviewInput.Type): Promise<ExpertPreview>;
-  prepareSnapshot(id: string): Promise<typeof ExpertBinding.Type>;
+  prepareSnapshot(
+    id: string,
+    options?: { readonly projectRoot?: string; readonly allowMissingConnections?: boolean },
+  ): Promise<typeof ExpertBinding.Type>;
   readSnapshot(snapshotId: string): Promise<ExpertSnapshot>;
+  stageImport(input: ExpertImportStageInput): Promise<void>;
+  verifyImport(id: string, planId: string): Promise<void>;
 }
 
 export class ExpertStoreError extends Error {
@@ -182,7 +218,7 @@ function validateDefinitionInput(input: typeof ExpertSaveInput.Type): void {
   const maxText = 32_000;
   if (
     input.name.length > 200 ||
-    input.description.length > 4_000 ||
+    input.description.length > 16_000 ||
     input.useCases.length > maxText ||
     input.persona.length > maxText ||
     input.outputRequirements.length > maxText ||
@@ -818,6 +854,14 @@ export async function readVerifiedStoredExpertSnapshot(
   } catch (cause) {
     throw new ExpertStoreError("Snapshot manifest is invalid.", "snapshot_corrupt", { cause });
   }
+  if (
+    stored.importPlanId &&
+    !(await isExpertImportPublished(
+      path.resolve(snapshotRoot, "..", "..", ".."),
+      stored.importPlanId,
+    ))
+  )
+    throw new ExpertStoreError("This Expert import has not been published.", "not_found");
   const snapshot = stored.snapshot;
   const packageBased = snapshot.schemaVersion === 2 || snapshot.schemaVersion === 3;
   if (
@@ -944,18 +988,44 @@ export function createExpertStore(stateDir: string): ExpertStore {
     return result;
   };
 
-  const readDefinitionFile = async (id: string): Promise<ExpertDefinition | null> => {
+  const readStoredDefinition = async (id: string): Promise<StoredExpertDefinition | null> => {
     const file = definitionPath(definitionsDir, id);
     try {
-      const bytes = await safeReadFile(file);
-      return decodeDefinition(JSON.parse(bytes.toString("utf8")) as unknown);
+      const raw: unknown = JSON.parse((await safeReadFile(file)).toString("utf8"));
+      const definition = decodeDefinition(raw);
+      const metadata =
+        raw !== null && typeof raw === "object" && "suiteImport" in raw
+          ? Schema.decodeUnknownSync(ExpertImportMetadata)(raw.suiteImport)
+          : null;
+      if (metadata && definition.id !== id)
+        throw new ExpertStoreError(
+          "Imported Expert identity does not match its record.",
+          "snapshot_corrupt",
+        );
+      return { definition, metadata };
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw cause;
     }
   };
+  const visibleDefinition = async (
+    stored: StoredExpertDefinition | null,
+  ): Promise<ExpertDefinition | null> => {
+    if (
+      !stored ||
+      (stored.metadata && !(await isExpertImportPublished(stateDir, stored.metadata.planId)))
+    )
+      return null;
+    return stored.definition;
+  };
+  const readDefinitionFile = async (id: string): Promise<ExpertDefinition | null> =>
+    visibleDefinition(await readStoredDefinition(id));
 
-  const writeAtomically = async (filePath: string, contents: string): Promise<void> => {
+  const writeAtomically = async (
+    filePath: string,
+    contents: string,
+    exclusive = false,
+  ): Promise<void> => {
     ensurePrivateDirectorySync(path.dirname(filePath));
     const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
     const noFollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
@@ -983,12 +1053,93 @@ export function createExpertStore(stateDir: string): ExpertStore {
           "snapshot_corrupt",
         );
       }
-      await fs.rename(tempPath, filePath);
+      if (exclusive) await fs.link(tempPath, filePath);
+      else await fs.rename(tempPath, filePath);
       await syncDirectoryEntry(path.dirname(filePath));
     } finally {
       await handle?.close().catch(() => undefined);
       await fs.rm(tempPath, { force: true }).catch(() => undefined);
     }
+  };
+
+  const stageImport = (input: ExpertImportStageInput): Promise<void> =>
+    withSkillPackageLifecycle(stateDir, () =>
+      withWriteLock(async () => {
+        await ensureInitialized();
+        const definition = decodeDefinition(input.definition);
+        validateDefinitionInput(definition);
+        if (
+          definition.revision !== 1 ||
+          definition.archived ||
+          Object.keys(input.expertIds).length > 5_000 ||
+          (input.bmadRole === null) !== (input.roleSourceRoot === null)
+        )
+          throw new ExpertStoreError("Invalid staged Expert import.", "invalid_input");
+        if (input.identityAvailable && !definition.persona.trim())
+          throw new ExpertStoreError("Imported Expert identity is empty.", "invalid_resource");
+        if (input.roleSourceRoot !== null) {
+          const sourceRoot = await fs.realpath(input.roleSourceRoot);
+          const managedRoot = await fs.realpath(stateDir);
+          const sourceStat = await fs.lstat(input.roleSourceRoot);
+          if (
+            !sourceStat.isDirectory() ||
+            sourceStat.isSymbolicLink() ||
+            !isWithin(managedRoot, sourceRoot)
+          )
+            throw new ExpertStoreError(
+              "Imported role source is outside its managed package.",
+              "invalid_resource",
+            );
+        }
+        const metadata = Schema.decodeUnknownSync(ExpertImportMetadata)({
+          planId: input.planId,
+          identityAvailable: input.identityAvailable,
+          bmadRole: input.bmadRole,
+          roleSourceRoot: input.roleSourceRoot,
+          expertIds: input.expertIds,
+          initialIdentity: {
+            name: definition.name,
+            description: definition.description,
+            persona: definition.persona,
+            useCases: definition.useCases,
+            outputRequirements: definition.outputRequirements,
+          },
+        });
+        const expected = { definition, metadata };
+        const previous = await readStoredDefinition(definition.id);
+        if (previous) {
+          if (stableJson(previous) !== stableJson(expected))
+            throw new ExpertStoreError(
+              "Staged Expert identity conflicts with its import plan.",
+              "revision_conflict",
+            );
+          return;
+        }
+        try {
+          await writeAtomically(
+            definitionPath(definitionsDir, definition.id),
+            `${JSON.stringify({ ...definition, suiteImport: metadata }, null, 2)}\n`,
+            true,
+          );
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
+          const winner = await readStoredDefinition(definition.id);
+          if (!winner || stableJson(winner) !== stableJson(expected))
+            throw new ExpertStoreError(
+              "Staged Expert identity conflicts with another publication.",
+              "revision_conflict",
+              { cause },
+            );
+        }
+      }),
+    );
+  const verifyImport = async (id: string, planId: string): Promise<void> => {
+    const stored = await readStoredDefinition(id);
+    if (!stored || stored.definition.id !== id || stored.metadata?.planId !== planId)
+      throw new ExpertStoreError(
+        "Staged Expert does not belong to this import plan.",
+        "snapshot_corrupt",
+      );
   };
 
   const persistRevision = async (definition: ExpertDefinition): Promise<void> => {
@@ -1017,17 +1168,19 @@ export function createExpertStore(stateDir: string): ExpertStore {
       const definitions = await Promise.all(
         names.map(async (name) => {
           const id = name.slice(0, -".json".length);
-          const definition = await readDefinitionFile(id);
-          if (!definition)
+          const stored = await readStoredDefinition(id);
+          if (!stored)
             throw new ExpertStoreError(`Expert manifest disappeared: ${name}`, "snapshot_corrupt");
-          return definition;
+          return visibleDefinition(stored);
         }),
       );
-      return definitions.sort(
-        (left, right) =>
-          right.updatedAt.localeCompare(left.updatedAt) ||
-          left.name.localeCompare(right.name, "zh-Hans"),
-      );
+      return definitions
+        .filter((definition): definition is ExpertDefinition => definition !== null)
+        .sort(
+          (left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt) ||
+            left.name.localeCompare(right.name, "zh-Hans"),
+        );
     });
 
   const save = (rawInput: typeof ExpertSaveInput.Type): Promise<ExpertDefinition> =>
@@ -1068,7 +1221,10 @@ export function createExpertStore(stateDir: string): ExpertStore {
             );
           }
         }
-        const previous = await readDefinitionFile(id);
+        const stored = await readStoredDefinition(id);
+        const previous = await visibleDefinition(stored);
+        if (stored && !previous)
+          throw new ExpertStoreError("This Expert import has not been published.", "not_found");
         if (previous && input.expectedRevision === undefined) {
           throw new ExpertStoreError(
             "Saving an existing expert requires expectedRevision.",
@@ -1106,7 +1262,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
         if (previous) await persistRevision(previous);
         await writeAtomically(
           definitionPath(definitionsDir, id),
-          `${JSON.stringify(definition, null, 2)}\n`,
+          `${JSON.stringify({ ...definition, ...(stored?.metadata ? { suiteImport: stored.metadata } : {}) }, null, 2)}\n`,
         );
         return definition;
       }),
@@ -1116,7 +1272,8 @@ export function createExpertStore(stateDir: string): ExpertStore {
     withSkillPackageLifecycle(stateDir, () =>
       withWriteLock(async () => {
         await ensureInitialized();
-        const definition = await readDefinitionFile(id);
+        const stored = await readStoredDefinition(id);
+        const definition = await visibleDefinition(stored);
         if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
         if (expectedRevision !== undefined && definition.revision !== expectedRevision) {
           throw new ExpertStoreError(
@@ -1134,7 +1291,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
         await persistRevision(definition);
         await writeAtomically(
           definitionPath(definitionsDir, id),
-          `${JSON.stringify(archived, null, 2)}\n`,
+          `${JSON.stringify({ ...archived, ...(stored?.metadata ? { suiteImport: stored.metadata } : {}) }, null, 2)}\n`,
         );
         return archived;
       }),
@@ -1144,7 +1301,8 @@ export function createExpertStore(stateDir: string): ExpertStore {
     withSkillPackageLifecycle(stateDir, () =>
       withWriteLock(async () => {
         await ensureInitialized();
-        const definition = await readDefinitionFile(id);
+        const stored = await readStoredDefinition(id);
+        const definition = await visibleDefinition(stored);
         if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
         if (definition.revision !== expectedRevision) {
           throw new ExpertStoreError(
@@ -1162,7 +1320,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
         await persistRevision(definition);
         await writeAtomically(
           definitionPath(definitionsDir, id),
-          `${JSON.stringify(restored, null, 2)}\n`,
+          `${JSON.stringify({ ...restored, ...(stored?.metadata ? { suiteImport: stored.metadata } : {}) }, null, 2)}\n`,
         );
         return restored;
       }),
@@ -1204,16 +1362,53 @@ export function createExpertStore(stateDir: string): ExpertStore {
     return hydrateSnapshot(snapshot, snapshotRoot);
   };
 
-  const prepareSnapshot = (id: string): Promise<typeof ExpertBinding.Type> =>
+  const prepareSnapshot = (
+    id: string,
+    options: { readonly projectRoot?: string; readonly allowMissingConnections?: boolean } = {},
+  ): Promise<typeof ExpertBinding.Type> =>
     withSkillPackageLifecycle(stateDir, async () => {
       await ensureInitialized();
-      const definition = await readDefinitionFile(id);
+      const storedDefinition = await readStoredDefinition(id);
+      let definition = await visibleDefinition(storedDefinition);
       if (!definition) throw new ExpertStoreError(`Expert not found: ${id}`, "not_found");
       if (definition.archived)
         throw new ExpertStoreError(
           "Archived experts cannot create new snapshots.",
           "invalid_input",
         );
+      const importMetadata = storedDefinition?.metadata;
+      if (importMetadata && !importMetadata.identityAvailable && !definition.persona.trim())
+        throw new ExpertStoreError(
+          "The imported Expert identity is unavailable.",
+          "invalid_resource",
+        );
+      if (importMetadata?.bmadRole && importMetadata.identityAvailable) {
+        if (!importMetadata.roleSourceRoot)
+          throw new ExpertStoreError(
+            "The imported role source is unavailable.",
+            "invalid_resource",
+          );
+        const compiled = await compileBmadRole({
+          sourceRoot: importMetadata.roleSourceRoot,
+          roleKey: importMetadata.bmadRole,
+          ...(options.projectRoot ? { projectRoot: options.projectRoot } : {}),
+          expertIds: importMetadata.expertIds,
+        });
+        const effective = { ...definition };
+        // Explicit Expert edits remain owned by Expert; unchanged source fields
+        // receive project customization once, before this base snapshot is fixed.
+        for (const key of [
+          "name",
+          "description",
+          "persona",
+          "useCases",
+          "outputRequirements",
+        ] as const)
+          if (effective[key] === importMetadata.initialIdentity[key])
+            effective[key] = compiled[key];
+        validateDefinitionInput(effective);
+        definition = effective;
+      }
 
       if (definition.skillSelections === undefined && definition.skills.length > 0) {
         throw new ExpertStoreError(
@@ -1274,7 +1469,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
           continue;
         }
         const config = await connectionStore.pinRevision(connection.id);
-        if (!config && connection.required) {
+        if (!config && connection.required && !options.allowMissingConnections) {
           throw new ExpertStoreError(
             `Required expert connection is not configured: ${connection.id}`,
             "invalid_resource",
@@ -1353,6 +1548,7 @@ export function createExpertStore(stateDir: string): ExpertStore {
         const stored: StoredSnapshot = {
           snapshot: { ...relativeSnapshot, snapshotId, createdAt: new Date().toISOString() },
           resources,
+          ...(importMetadata ? { importPlanId: importMetadata.planId } : {}),
         };
         const manifest = path.join(stagePath, "snapshot.json");
         const handle = await fs.open(
@@ -1625,5 +1821,13 @@ export function createExpertStore(stateDir: string): ExpertStore {
     preview,
     prepareSnapshot,
     readSnapshot,
+    stageImport: (input) =>
+      withExpertLearningCommit(
+        stateDir,
+        () => stageImport(input),
+        { expertIds: [input.definition.id] },
+        "control",
+      ),
+    verifyImport,
   };
 }

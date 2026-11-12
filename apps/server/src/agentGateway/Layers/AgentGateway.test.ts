@@ -501,6 +501,7 @@ function makeHarnessLayer(
             provider:
               token === "token-parent-claude" ? ("claudeAgent" as const) : ("codex" as const),
             issuedAt: 0,
+            expiresAt: Number.POSITIVE_INFINITY,
             capabilities:
               token === "token-parent-readonly"
                 ? new Set(["thread:read"] as const)

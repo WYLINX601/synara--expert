@@ -12,6 +12,7 @@ const THREAD_SHELL_SUMMARY_ACTIVITY_KINDS = new Set([
 export const THREAD_PROJECTION_EVENT_TYPES = new Set<OrchestrationEvent["type"]>([
   "thread.claude-cache-set",
   "thread.created",
+  "thread.capability-bound",
   "thread.meta-updated",
   "thread.pinned-message-added",
   "thread.pinned-message-removed",
@@ -33,6 +34,7 @@ export const THREAD_PROJECTION_EVENT_TYPES = new Set<OrchestrationEvent["type"]>
 
 const OTHER_THREAD_SHELL_EVENT_TYPES = new Set<OrchestrationEvent["type"]>([
   "thread.proposed-plan-upserted",
+  "thread.expert-delegation-result",
   "thread.approval-response-requested",
   "thread.user-input-response-requested",
   "thread.reverted",

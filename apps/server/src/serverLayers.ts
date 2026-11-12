@@ -4,7 +4,7 @@ import { QueuedTurnPromotionRepositoryLive } from "./persistence/Layers/QueuedTu
 import { HubWorkRepositoryLive } from "./persistence/Layers/HubWorkRepository";
 import { ManagedAttachmentRepositoryLive } from "./persistence/Layers/ManagedAttachments";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Layer } from "effect";
+import { Effect, Layer } from "effect";
 
 import { AgentGatewayLive } from "./agentGateway/Layers/AgentGateway";
 import { AgentGatewayOperationRepositoryLive } from "./agentGateway/Layers/AgentGatewayOperationRepository";
@@ -26,7 +26,15 @@ import { ExpertLearningRepositoryLive } from "./workbench/host/expertLearningPer
 import { SpaceMemoryLive } from "./workbench/host/spaceMemoryPersistence.ts";
 import { ExpertLearningActionsLive } from "./workbench/host/expertLearningActions.ts";
 import { ExpertAppliedRuntimeRepositoryLive } from "./persistence/Layers/ExpertAppliedRuntimeRecords.ts";
-import { WorkbenchExpertRuntimeLive } from "./workbench/runtimeLayer.ts";
+import { SuiteRuntimeLayerLive } from "./suites/runtimeLayer";
+import {
+  OmpExpertDelegationHost,
+  OmpExpertDelegationHostLive,
+} from "./provider/acp/OmpExpertDelegationHost";
+import {
+  OmpExpertExecutionStoreLive,
+  OmpNativeExecutionOwnerLive,
+} from "./provider/acp/OmpExpertExecutionStore";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus";
 import { SidechatExpiryReactorLive } from "./orchestration/Layers/SidechatExpiryReactor";
@@ -87,6 +95,13 @@ import { makeServerProviderLayer } from "./provider/runtimeLayer";
 
 export { makeServerProviderLayer } from "./provider/runtimeLayer";
 
+const serverOrchestrationLayer = OrchestrationLayerLive.pipe(
+  Layer.provideMerge(SuiteRuntimeLayerLive),
+  Layer.provideMerge(ProjectAgentRepositoryLive),
+  Layer.provideMerge(ContextRepositoryLive),
+  Layer.provideMerge(ServerSettingsLive),
+);
+
 export function provideThreadDeletionReactorDeviceService<
   ReactorServices,
   ReactorError,
@@ -112,13 +127,13 @@ export function makeServerRuntimeServicesLayer(
   const checkpointStoreLayer = CheckpointStoreLive.pipe(Layer.provide(GitCoreLive));
 
   const checkpointDiffQueryLayer = CheckpointDiffQueryLive.pipe(
-    Layer.provideMerge(OrchestrationLayerLive),
+    Layer.provideMerge(serverOrchestrationLayer),
     Layer.provideMerge(checkpointStoreLayer),
     Layer.provide(ProviderRuntimeEventRepositoryLive),
   );
 
   const runtimeServicesLayer = Layer.mergeAll(
-    OrchestrationLayerLive,
+    serverOrchestrationLayer,
     checkpointStoreLayer,
     checkpointDiffQueryLayer,
     RuntimeReceiptBusLive,
@@ -184,11 +199,11 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(runtimeServicesLayer),
   );
   const threadSnoozeReactorLayer = ThreadSnoozeReactorLive.pipe(
-    Layer.provideMerge(OrchestrationLayerLive),
+    Layer.provideMerge(serverOrchestrationLayer),
   );
   const usageLimitRecoveryReactorLayer = UsageLimitRecoveryReactorLive.pipe(
     Layer.provideMerge(providerCommandReactorLayer),
-    Layer.provideMerge(OrchestrationLayerLive),
+    Layer.provideMerge(serverOrchestrationLayer),
     Layer.provideMerge(serverSettingsLayer),
   );
   const profileStatsArchiveLayer = ProfileStatsArchiveLive.pipe(
@@ -205,7 +220,7 @@ export function makeServerRuntimeServicesLayer(
   const threadDeletionReactorLayer = provideThreadDeletionReactorDeviceService(
     ThreadDeletionReactorLive.pipe(
       Layer.provideMerge(profileStatsArchiveLayer),
-      Layer.provideMerge(OrchestrationLayerLive),
+      Layer.provideMerge(serverOrchestrationLayer),
       Layer.provideMerge(TerminalLayerLive),
       Layer.provideMerge(GitCoreLive),
     ),
@@ -267,7 +282,7 @@ export function makeServerRuntimeServicesLayer(
     Layer.provideMerge(agentGatewayCredentialsLayer),
   );
   const expertLearningActionsLayer = ExpertLearningActionsLive.pipe(
-    Layer.provideMerge(WorkbenchExpertRuntimeLive),
+    Layer.provideMerge(SuiteRuntimeLayerLive),
     Layer.provideMerge(SpaceMemoryLive),
     Layer.provideMerge(ExpertLearningRepositoryLive),
     Layer.provideMerge(ExpertAppliedRuntimeRepositoryLive),
@@ -314,7 +329,7 @@ export function makeServerRuntimeServicesLayer(
   const githubInboxServiceLayer = GitHubInboxServiceLive.pipe(
     Layer.provideMerge(GitLayerLive),
     Layer.provideMerge(ProjectPullRequestPinsLive),
-    Layer.provideMerge(OrchestrationLayerLive),
+    Layer.provideMerge(serverOrchestrationLayer),
     Layer.provideMerge(ServerSettingsLive),
   );
   const pullRequestServiceLayer = PullRequestServiceLive.pipe(
@@ -389,15 +404,31 @@ export function makeServerRuntimeServicesLayer(
  */
 export function makeServerApplicationLayers() {
   const agentGatewayCredentialsLayer = AgentGatewayCredentialsWithSecretsLive;
+  const nativeExecutionOwnerLayer = OmpNativeExecutionOwnerLive.pipe(
+    Layer.provideMerge(OmpExpertExecutionStoreLive.pipe(Layer.provideMerge(SuiteRuntimeLayerLive))),
+  );
+  const nativeExpertHostLayer = OmpExpertDelegationHostLive.pipe(
+    Layer.provideMerge(nativeExecutionOwnerLayer),
+    Layer.provideMerge(serverOrchestrationLayer),
+    Layer.provideMerge(agentGatewayCredentialsLayer),
+    Layer.provideMerge(SpaceMemoryLive),
+    Layer.provideMerge(ExpertLearningRepositoryLive),
+  );
   const runtimeServicesLayer = makeServerRuntimeServicesLayer({
     agentGatewayCredentialsLayer,
-  });
+  }).pipe(Layer.provideMerge(nativeExpertHostLayer));
   // Provider start/discovery gates must observe the same settings instance as
   // the RPC layer. Reusing this layer in the final graph lets Effect memoize a
   // single ServerSettings service instead of capturing private defaults.
-  const providerLayer = makeServerProviderLayer({ agentGatewayCredentialsLayer }).pipe(
-    Layer.provideMerge(ServerSettingsLive),
-  );
+  const providerLayer = Layer.unwrap(
+    Effect.gen(function* () {
+      const host = yield* OmpExpertDelegationHost;
+      return makeServerProviderLayer({
+        agentGatewayCredentialsLayer,
+        nativeExpertProtocolFactory: host.protocolFactory,
+      });
+    }),
+  ).pipe(Layer.provideMerge(nativeExpertHostLayer), Layer.provideMerge(ServerSettingsLive));
   return {
     runtimeServicesLayer,
     providerLayer,

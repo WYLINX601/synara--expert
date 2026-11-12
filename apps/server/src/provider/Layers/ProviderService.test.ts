@@ -160,6 +160,10 @@ import {
   PROVIDER_COMMAND_REACTOR_CONSUMER,
 } from "../../persistence/Services/OrchestrationEventDeliveries.ts";
 
+import {
+  NativeExpertReexecutionGate,
+  type NativeExpertReexecutionGateShape,
+} from "../../workbench/host/nativeExpertReexecutionGate.ts";
 // The fake adapter never prepares Codex storage. Give lifecycle tests real
 // continuation metadata without reading or writing the developer's Codex home.
 let defaultCodexFixtureRoot: string | undefined;
@@ -950,6 +954,7 @@ function makeProviderServiceLayer(
     readonly skillEvolutionRepository?: SkillEvolutionRepositoryShape;
     readonly expertLearningRepository?: ExpertLearningRepositoryShape;
     readonly spaceMemoryService?: SpaceMemoryServiceShape;
+    readonly nativeExpertReexecutionGate?: NativeExpertReexecutionGateShape;
     readonly projectionSnapshotQuery?: Pick<
       ProjectionSnapshotQueryShape,
       "getThreadShellById" | "getProjectShellById"
@@ -1070,6 +1075,11 @@ function makeProviderServiceLayer(
       Layer.provide(expertLearningRepositoryLayer),
       Layer.provide(spaceMemoryServiceLayer),
       Layer.provide(projectionSnapshotQueryLayer),
+      Layer.provide(
+        providers?.nativeExpertReexecutionGate
+          ? Layer.succeed(NativeExpertReexecutionGate, providers.nativeExpertReexecutionGate)
+          : Layer.empty,
+      ),
     ),
     directoryLayer,
     runtimeRepositoryLayer,
@@ -2549,6 +2559,46 @@ automaticAdmissionRouting.layer("ProviderService automatic learning admission", 
 });
 
 const routing = makeProviderServiceLayer();
+const nativeRedoResponse = vi.fn<NativeExpertReexecutionGateShape["respond"]>(async () => true);
+const nativeRedoRouting = makeProviderServiceLayer(undefined, {
+  nativeExpertReexecutionGate: {
+    request: async () => {
+      throw new Error("ProviderService must never request consent itself.");
+    },
+    respond: nativeRedoResponse,
+    cancelThread: () => undefined,
+  },
+});
+nativeRedoRouting.layer("ProviderService host-native approval response bridge", (it) => {
+  it.effect("routes to the host without looking for or starting a parent provider runtime", () =>
+    Effect.gen(function* () {
+      const service = yield* ProviderService;
+      const threadId = ThreadId.makeUnsafe("native-redo-no-runtime");
+      nativeRedoResponse.mockClear();
+      yield* service.respondToRequest({
+        threadId,
+        requestId: ApprovalRequestId.makeUnsafe("native-expert-redo:human-request"),
+        lifecycleGeneration: "host-generation",
+        decision: "accept",
+      });
+      assert.deepEqual(nativeRedoResponse.mock.calls, [
+        [threadId, "native-expert-redo:human-request", "accept"],
+      ]);
+      assert.equal(nativeRedoRouting.codex.respondToRequest.mock.calls.length, 0);
+      assert.equal(nativeRedoRouting.codex.startSession.mock.calls.length, 0);
+      nativeRedoResponse.mockResolvedValueOnce(false);
+      const rejected = yield* service
+        .respondToRequest({
+          threadId,
+          requestId: ApprovalRequestId.makeUnsafe("native-expert-redo:expired"),
+          decision: "accept",
+        })
+        .pipe(Effect.result);
+      assert.isTrue(rejected._tag === "Failure");
+      assert.equal(nativeRedoRouting.codex.respondToRequest.mock.calls.length, 0);
+    }),
+  );
+});
 const expertAppliedRuntimeWrites: ExpertAppliedRuntimeRecord[] = [];
 const expertAppliedRuntimeRouting = makeProviderServiceLayer({
   persistExpertAppliedRuntime: (record) =>
@@ -3694,6 +3744,23 @@ adapterConfirmedFreshRouting.layer("ProviderServiceLive resume confirmation", (i
 });
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect(
+    "rejects a missing native consent callback instead of sending the answer to a provider",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const calls = routing.codex.respondToRequest.mock.calls.length;
+        const result = yield* provider
+          .respondToRequest({
+            threadId: asThreadId("native-redo-after-restart"),
+            requestId: ApprovalRequestId.makeUnsafe("native-expert-redo:orphan"),
+            decision: "accept",
+          })
+          .pipe(Effect.result);
+        assert.isTrue(result._tag === "Failure");
+        assert.equal(routing.codex.respondToRequest.mock.calls.length, calls);
+      }),
+  );
   it.effect("returns and persists the active runtime metadata across turns and restart", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;
@@ -14878,6 +14945,9 @@ expertV2KnowledgeRuntime.layer("ProviderService pinned Run knowledge", (it) => {
         const boundAssembly = yield* Effect.promise(() =>
           assemblies.attachKnowledge(rootRunId, knowledge),
         );
+        if (boundAssembly.schemaVersion !== 1) {
+          throw new Error("Expected a legacy Run assembly for pinned Expert knowledge.");
+        }
         const service = yield* ProviderService;
         const directory = yield* ProviderSessionDirectory;
         const adapter = expertV2KnowledgeRuntime.omp;
@@ -14945,6 +15015,9 @@ expertV2KnowledgeRuntime.layer("ProviderService pinned Run knowledge", (it) => {
         const boundDriftAssembly = yield* Effect.promise(() =>
           assemblies.attachKnowledge(driftRoot, driftKnowledge),
         );
+        if (boundDriftAssembly.schemaVersion !== 1) {
+          throw new Error("Expected a legacy Run assembly for pinned Expert knowledge.");
+        }
         providerKnowledgeManifest = { ...driftManifest, text: "mutated after authorization" };
         const startCount = adapter.startSession.mock.calls.length;
         const rejected = yield* Effect.exit(

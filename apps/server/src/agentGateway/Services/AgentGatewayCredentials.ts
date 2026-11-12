@@ -8,19 +8,21 @@
  *
  * @module agentGateway/Services/AgentGatewayCredentials
  */
-import type { LearningSessionContext, ProviderKind, ThreadId } from "@synara/contracts";
+import type { ProviderKind, ThreadId } from "@synara/contracts";
 import { ServiceMap } from "effect";
 import type {
   AgentGatewaySessionIdentity,
   AgentGatewayRetiredWriteAuthority,
   AgentGatewayWriteAuthority,
-  AgentGatewayCapability,
+  AgentGatewayIssueOptions,
 } from "./AgentGatewaySessionRegistry.ts";
 import type {
   AgentGatewayCancellation,
   AgentGatewayInFlightRequestRegistration,
   AgentGatewayInFlightRequestSelector,
 } from "../inFlightRequestRegistry.ts";
+
+export type { AgentGatewayNativeExecution } from "./AgentGatewaySessionRegistry.ts";
 
 export interface AgentGatewayMcpConnection {
   /** Loopback streamable-HTTP MCP endpoint, e.g. `http://127.0.0.1:3773/mcp`. */
@@ -62,10 +64,7 @@ export interface AgentGatewayCredentialsShape {
   readonly issueSessionToken: (
     threadId: ThreadId,
     provider: ProviderKind,
-    options?: {
-      readonly additionalCapabilities?: readonly AgentGatewayCapability[];
-      readonly learningSession?: LearningSessionContext;
-    },
+    options?: AgentGatewayIssueOptions,
   ) => string;
   /** Resolve a live bearer token back to its thread id, or null when invalid. */
   readonly verifySessionToken: (token: string) => string | null;
@@ -116,10 +115,7 @@ export interface AgentGatewayCredentialsShape {
   readonly connectionForThread: (
     threadId: ThreadId,
     provider: ProviderKind,
-    options?: {
-      readonly additionalCapabilities?: readonly AgentGatewayCapability[];
-      readonly learningSession?: LearningSessionContext;
-    },
+    options?: AgentGatewayIssueOptions,
   ) => AgentGatewayMcpConnection;
   /** Spawn spec for the stdio->HTTP proxy used by stdio-only MCP clients. */
   readonly stdioProxy: AgentGatewayStdioProxySpawn;

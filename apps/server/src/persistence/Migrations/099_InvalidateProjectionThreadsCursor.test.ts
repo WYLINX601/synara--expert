@@ -42,6 +42,7 @@ import projectSourceFoldersSchema from "./131_ProjectSourceFolders.ts";
 import projectionTurnsWorkspaceInitializationSchema from "./133_ProjectionTurnsWorkspaceInitialization.ts";
 import forkSourceMessageSchema from "./134_ProjectionThreadsForkSourceMessage.ts";
 import { AMBIENT_CONTEXT_SNAPSHOT_SQL } from "../../workbench/persistence/AmbientContextSnapshotMigration.ts";
+import { SUITE_COMPOSITION_EFFECT } from "../../workbench/persistence/SuiteCompositionMigration.ts";
 import usageLimitRecoverySchema from "./141_ProjectionThreadsUsageLimitRecovery.ts";
 
 const testLayer = OrchestrationProjectionPipelineLive.pipe(
@@ -91,11 +92,10 @@ it.layer(Layer.fresh(testLayer))("099_InvalidateProjectionThreadsCursor", (it) =
         yield* projectSourceFoldersSchema;
         yield* projectionTurnsWorkspaceInitializationSchema;
         yield* forkSourceMessageSchema;
-        // Normal Sqlite startup applies Workbench extensions after native
-        // migrations. This fixture installs only selected later native
-        // schemas, so add the canonical projection column required by current
-        // readers without changing migration 99's native tracker state.
+        // Install current Workbench projection schemas through their canonical
+        // owners without changing migration 99's native tracker state.
         yield* sql.unsafe(AMBIENT_CONTEXT_SNAPSHOT_SQL);
+        yield* SUITE_COMPOSITION_EFFECT;
         yield* usageLimitRecoverySchema;
 
         const threadId = ThreadId.makeUnsafe("thread-099");

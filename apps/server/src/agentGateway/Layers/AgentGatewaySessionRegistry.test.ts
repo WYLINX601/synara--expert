@@ -233,4 +233,55 @@ describe("AgentGatewaySessionRegistry", () => {
     assert.deepEqual(registry.verify(first.token)?.learningSession, input);
     assert.deepEqual(registry.verify(replacement.token)?.learningSession, input);
   });
+  it("pins native authority to its immutable attempt and expires without losing the cleanup owner", () => {
+    let now = 1_000;
+    const registry = makeAgentGatewaySessionRegistry({ now: () => now });
+    const thread = ThreadId.makeUnsafe("native-parent");
+    const scope = {
+      executionBindingId: "execution-a",
+      attemptId: "attempt-a",
+      capabilityBindingId: "binding-a",
+      assemblyId: "assembly-a",
+      parentRootRunId: "parent-root",
+    };
+    const parent = registry.issue(thread, "omp", { additionalCapabilities: ["computer:control"] });
+    const issued = registry.issue(thread, "omp", {
+      nativeExecution: scope,
+      expiresAt: 2_000,
+      additionalCapabilities: ["thread:write", "automation:write", "diagnostics:read"],
+    });
+    scope.attemptId = "forged-attempt";
+    assert.equal(registry.verify(issued.token)?.nativeExecution?.attemptId, "attempt-a");
+    assert.isTrue(Object.isFrozen(registry.verify(issued.token)?.nativeExecution));
+    assert.isFalse(registry.verify(issued.token)?.capabilities.has("thread:write"));
+    assert.isFalse(registry.verify(issued.token)?.capabilities.has("automation:write"));
+    assert.isTrue(registry.computerControlProvisioned?.(thread, "omp"));
+    assert.isNull(registry.bindWriteAuthority(issued.token, "parent-turn"));
+    assert.isFalse(registry.retireWriteAuthority(issued.token, "parent-turn"));
+    const authority = registry.bindWriteAuthority(issued.token, "attempt-a")!;
+    assert.isTrue(registry.verifyWriteAuthority(authority));
+    assert.isFalse(registry.verifyWriteAuthority({ ...authority, turnId: "attempt-b" }));
+    now = 2_000;
+    assert.isNull(registry.verify(issued.token));
+    assert.isNull(registry.bindWriteAuthority(issued.token, "attempt-a"));
+    assert.isFalse(registry.verifyWriteAuthority(authority));
+    assert.equal(registry.revoke(issued.token)?.sessionKey, issued.sessionKey);
+    assert.isNull(registry.revoke(issued.token));
+    assert.isNotNull(registry.verify(parent.token));
+  });
+
+  it("requires finite future deadlines for native credentials", () => {
+    const registry = makeAgentGatewaySessionRegistry({ now: () => 1_000 });
+    const thread = ThreadId.makeUnsafe("native-parent");
+    const nativeExecution = {
+      executionBindingId: "execution",
+      attemptId: "attempt",
+      capabilityBindingId: "binding",
+      assemblyId: "assembly",
+      parentRootRunId: "parent-root",
+    };
+    assert.throws(() => registry.issue(thread, "omp", { nativeExecution }));
+    assert.throws(() => registry.issue(thread, "omp", { nativeExecution, expiresAt: 1_000 }));
+    assert.throws(() => registry.issue(thread, "omp", { nativeExecution, expiresAt: Number.NaN }));
+  });
 });

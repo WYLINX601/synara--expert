@@ -136,6 +136,16 @@ import { pruneProjectedArchivedManagedWorktrees } from "../../managedWorktrees.t
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { makeExpertGatewayToolResolver } from "../../experts/ExpertGatewayTools.ts";
 import { ExpertLearningActions } from "../../experts/evolution/ExpertLearningActions.ts";
+import { ExpertDelegationStore } from "../../workbench/host/expertDelegationStore.ts";
+import { ExpertDelegationArtifacts } from "../../workbench/host/expertDelegationArtifacts.ts";
+import { makeExpertDelegationResultTools } from "../expertDelegationResultTools.ts";
+import { SuiteCompositionStore } from "../../suites/SuiteCompositionStore.ts";
+import { SuiteBindingResolver } from "../../suites/SuiteBindingResolver.ts";
+import {
+  makeAgentGatewaySessionToolResolver,
+  makeNativeExecutionAuthorizer,
+} from "../nativeExecutionScope.ts";
+import { NativeExecutionOwner } from "../Services/NativeExecutionOwner.ts";
 
 import { buildAgentGatewayProviderAvailabilities } from "../providerAvailability";
 
@@ -187,6 +197,23 @@ export const makeAgentGateway = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
   const learningActions = Option.getOrUndefined(yield* Effect.serviceOption(ExpertLearningActions));
   const learningTools = learningActions ? makeLearningTools(learningActions) : [];
+  const delegationStore = Option.getOrUndefined(yield* Effect.serviceOption(ExpertDelegationStore));
+  const suiteStore = Option.getOrUndefined(yield* Effect.serviceOption(SuiteCompositionStore));
+  const delegationArtifacts = Option.getOrUndefined(
+    yield* Effect.serviceOption(ExpertDelegationArtifacts),
+  );
+  const nativeExecutionOwner = Option.getOrUndefined(
+    yield* Effect.serviceOption(NativeExecutionOwner),
+  );
+  const suiteBindingResolver = Option.getOrUndefined(
+    yield* Effect.serviceOption(SuiteBindingResolver),
+  );
+  const authorizeNativeExecution = makeNativeExecutionAuthorizer({
+    stateDir: serverConfig.stateDir,
+    ...(delegationStore ? { delegations: delegationStore } : {}),
+    ...(suiteStore ? { bindings: suiteStore } : {}),
+    ...(nativeExecutionOwner ? { executionOwner: nativeExecutionOwner } : {}),
+  });
   const expertTools = makeExpertGatewayToolResolver({
     stateDir: serverConfig.stateDir,
   });
@@ -336,6 +363,16 @@ export const makeAgentGateway = Effect.gen(function* () {
       chatWorkspaceRoot: serverConfig.chatWorkspaceRoot,
     },
   });
+  const expertResultTools =
+    delegationArtifacts && delegationStore && suiteStore
+      ? makeExpertDelegationResultTools({
+          stateDir: serverConfig.stateDir,
+          artifacts: delegationArtifacts,
+          delegations: delegationStore,
+          bindings: suiteStore,
+          requireThreadShell,
+        })
+      : [];
   const diagnosticTools = makeThreadDiagnosticTools({
     snapshotQuery,
     diagnostics,
@@ -406,6 +443,8 @@ export const makeAgentGateway = Effect.gen(function* () {
           attachments: attachmentRepository,
           serverConfig,
           expertStore: createExpertStore(serverConfig.stateDir),
+          ...(suiteStore ? { suiteStore } : {}),
+          ...(suiteBindingResolver ? { prepareSuiteBinding: suiteBindingResolver.prepare } : {}),
           providerDiscovery,
           loadProviderAvailabilities,
           createThreads: runCreateThreads,
@@ -1694,8 +1733,42 @@ export const makeAgentGateway = Effect.gen(function* () {
     },
   });
 
+  const deviceTools =
+    deviceService?.supported === true
+      ? makeAgentGatewayDeviceTools({
+          manager: deviceService.manager,
+          authorizeAction: authorizeComputerAction,
+        })
+      : [];
+  const computerTools =
+    computerService?.supported === true
+      ? makeAgentGatewayComputerTools({
+          manager: computerService.manager,
+          resolveWorkspaceRoot,
+          onSetupRequired: surfaceComputerSetupRequired,
+          authorizeAction: authorizeComputerAction,
+          resolveForegroundAuthorization: resolveComputerForegroundAuthorization,
+          requestForegroundConsent: requestComputerForegroundConsent,
+          resolveSpaceDesignation: resolveComputerSpaceDesignation,
+          relatedTools: computerBrowserTools,
+        })
+      : [];
+  // Explicit entry groups, not a name heuristic or the parent Hub role.
+  // Learning actions currently require the thread's own applied-Expert owner;
+  // target knowledge is not permission to impersonate that parent's record.
+  const nativeAllowedToolNames = new Set(
+    [
+      ...browserTools,
+      ...deviceTools,
+      ...computerTools,
+      ...computerBrowserTools,
+      ...expertResultTools,
+    ].map((tool) => tool.definition.name),
+  );
+
   const tools: ReadonlyArray<ToolEntry> = [
     ...readTools,
+    ...expertResultTools,
     ...learningTools,
     ...diagnosticTools,
     createThreads,
@@ -1713,24 +1786,8 @@ export const makeAgentGateway = Effect.gen(function* () {
     ...(isServerBetaFeatureEnabled("tasks") ? todoTools : []),
     // Shared policy enables inline visuals in both Stable and Beta.
     ...(isServerBetaFeatureEnabled(INLINE_VISUALS_BETA_FEATURE) ? inlineVisualTools : []),
-    ...(deviceService?.supported === true
-      ? makeAgentGatewayDeviceTools({
-          manager: deviceService.manager,
-          authorizeAction: authorizeComputerAction,
-        })
-      : []),
-    ...(computerService?.supported === true
-      ? makeAgentGatewayComputerTools({
-          manager: computerService.manager,
-          resolveWorkspaceRoot,
-          onSetupRequired: surfaceComputerSetupRequired,
-          authorizeAction: authorizeComputerAction,
-          resolveForegroundAuthorization: resolveComputerForegroundAuthorization,
-          requestForegroundConsent: requestComputerForegroundConsent,
-          resolveSpaceDesignation: resolveComputerSpaceDesignation,
-          relatedTools: computerBrowserTools,
-        })
-      : []),
+    ...deviceTools,
+    ...computerTools,
     ...computerBrowserTools,
     // Offer Hub tools only when the authoritative shared feature policy enables them.
     ...(isServerGroupsEnabled() ? [...projectAgentTools, ...(hubGateway?.tools ?? [])] : []),
@@ -1751,34 +1808,15 @@ export const makeAgentGateway = Effect.gen(function* () {
       credentials,
       snapshotQuery,
       tools,
-      resolveSessionTools: ({ sessionKey, threadId }) =>
-        snapshotQuery.getThreadShellById(ThreadId.makeUnsafe(threadId)).pipe(
-          Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.succeed<ReadonlyArray<ToolEntry>>([]),
-              onSome: (shell) =>
-                shell.expertBinding
-                  ? Effect.tryPromise(() =>
-                      expertTools.resolve(sessionKey, shell.expertBinding!.snapshotId),
-                    ).pipe(
-                      Effect.catch((error) =>
-                        Effect.logWarning("expert gateway tool resolution failed", {
-                          error,
-                          threadId,
-                          snapshotId: shell.expertBinding!.snapshotId,
-                        }).pipe(Effect.as<ReadonlyArray<ToolEntry>>([])),
-                      ),
-                    )
-                  : Effect.succeed<ReadonlyArray<ToolEntry>>([]),
-            }),
-          ),
-          Effect.catch((error) =>
-            Effect.logWarning("expert gateway thread lookup failed", {
-              error,
-              threadId,
-            }).pipe(Effect.as<ReadonlyArray<ToolEntry>>([])),
-          ),
-        ),
+      nativeAllowedToolNames,
+      validateNativeExecution: (session, parent) =>
+        authorizeNativeExecution(session, parent).pipe(Effect.asVoid),
+      resolveSessionTools: makeAgentGatewaySessionToolResolver({
+        requireThreadShell,
+        authorizeNativeExecution,
+        ...(suiteStore ? { bindings: suiteStore } : {}),
+        expertTools,
+      }),
       onCapabilityDenied: surfaceCapabilityDenial,
       // Namespace-insensitive: a session that never saw the catalog reaches
       // for prefixed spellings (synara_computer_click,

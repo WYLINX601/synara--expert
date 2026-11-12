@@ -273,6 +273,15 @@ export function createSkillLibraryOperations(stateDir: string) {
 
   return {
     begin,
+    /** Committed historical definitions retain ownership even after mutable heads advance. */
+    historicalDefinitions: async (): Promise<ReadonlyArray<typeof SkillDefinition.Type>> => {
+      const definitions: Array<typeof SkillDefinition.Type> = [];
+      for (const record of await read()) {
+        if (record.response?.skill) definitions.push(record.response.skill);
+        if (record.response?.skills) definitions.push(...record.response.skills);
+      }
+      return definitions;
+    },
     read: async (requestId: string) =>
       (await read()).find((entry) => entry.requestId === requestId),
     update,

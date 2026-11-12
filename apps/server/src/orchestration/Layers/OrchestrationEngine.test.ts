@@ -1,7 +1,9 @@
 import {
   CheckpointRef,
   CommandId,
+  ClientOrchestrationCommand,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  DEFAULT_PROJECT_AGENT_LIMITS,
   EventId,
   MessageId,
   ProjectId,
@@ -13,11 +15,22 @@ import {
   type OrchestrationCommand,
   type OrchestrationEvent,
 } from "@synara/contracts";
+import type { ProjectAgentConfig, SuiteComposition } from "@synara/contracts";
 import { makeKeyedDrainableWorker } from "@synara/shared/KeyedDrainableWorker";
 import type { DrainableWorkerStatus } from "@synara/shared/DrainableWorker";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { Cause, Effect, Fiber, Layer, ManagedRuntime, Option, PubSub, Stream } from "effect";
+import {
+  Cause,
+  Effect,
+  Fiber,
+  Layer,
+  ManagedRuntime,
+  Option,
+  PubSub,
+  Schema,
+  Stream,
+} from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
@@ -51,6 +64,18 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
+import { ProjectAgentRepositoryLive } from "../../persistence/Layers/ProjectAgentRepository.ts";
+import { ProjectAgentRepository } from "../../persistence/Services/ProjectAgentRepository.ts";
+import {
+  SuiteCompositionStore,
+  SuiteCompositionStoreLive,
+} from "../../suites/SuiteCompositionStore.ts";
+import {
+  SuiteBindingResolver,
+  SuiteBindingResolverLive,
+} from "../../suites/SuiteBindingResolver.ts";
+import { suiteContentDigest } from "../../suites/suiteIdentity.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 
 const OrchestrationProjectionSnapshotQueryLive = OrchestrationProjectionSnapshotQueryBase.pipe(
   Layer.provide(ServerSettingsService.layerTest()),
@@ -180,10 +205,14 @@ async function createOrchestrationSystem(pipeline?: OrchestrationProjectionPipel
         ? Layer.succeed(OrchestrationProjectionPipeline, pipeline)
         : OrchestrationProjectionPipelineLive,
     ),
-    Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+    Layer.provideMerge(OrchestrationProjectionSnapshotQueryLive),
     Layer.provideMerge(OrchestrationEventStoreLive),
     Layer.provideMerge(OrchestrationCommandReceiptRepositoryLive),
     Layer.provideMerge(ProviderRuntimeEventRepositoryLive),
+    Layer.provideMerge(ProjectAgentRepositoryLive),
+    Layer.provideMerge(
+      SuiteBindingResolverLive.pipe(Layer.provideMerge(SuiteCompositionStoreLive)),
+    ),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provide(ServerSettingsService.layerTest()),
     Layer.provideMerge(ServerConfigLayer),
@@ -204,11 +233,19 @@ async function createOrchestrationSystem(pipeline?: OrchestrationProjectionPipel
     Effect.service(ProviderRuntimeEventRepository),
   );
   const eventStore = await runtime.runPromise(Effect.service(OrchestrationEventStore));
+  const projectAgents = await runtime.runPromise(Effect.service(ProjectAgentRepository));
+  const suites = await runtime.runPromise(Effect.service(SuiteCompositionStore));
+  const suiteBindings = await runtime.runPromise(Effect.service(SuiteBindingResolver));
+  const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
   const projectionPipeline = await runtime.runPromise(
     Effect.service(OrchestrationProjectionPipeline),
   );
   return {
     engine,
+    projectAgents,
+    suites,
+    suiteBindings,
+    snapshotQuery,
     sql,
     receiptRepository,
     runtimeRepository,
@@ -386,6 +423,30 @@ describe("acceptance-frozen Hub Expert creation", () => {
         createdAt: now(),
       };
       await system.run(system.engine.dispatch(create));
+      const send = (threadId: ThreadId, suffix: string) =>
+        system.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.makeUnsafe(`bmad-first-send:${suffix}`),
+          threadId,
+          message: {
+            messageId: asMessageId(`bmad-first-send:${suffix}`),
+            role: "user",
+            text: "Begin",
+            attachments: [],
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt: now(),
+        });
+      expect(
+        (await system.run(system.engine.getReadModel())).threads.find(
+          (thread) => thread.id === create.threadId,
+        ),
+      ).toMatchObject({
+        expertBinding: null,
+        expertDraftSelection: { expertId: definition.id, suite: null },
+      });
+      await system.run(send(create.threadId, "project"));
       const model = await system.run(system.engine.getReadModel());
       expect(
         model.threads.find((thread) => thread.id === create.threadId)?.expertBinding?.expertId,
@@ -419,6 +480,7 @@ describe("acceptance-frozen Hub Expert creation", () => {
         worktreePath: configuredWorktree,
       };
       await system.run(system.engine.dispatch(worktreeCreate));
+      await system.run(send(worktreeCreate.threadId, "worktree"));
       const worktreeModel = await system.run(system.engine.getReadModel());
       expect(
         worktreeModel.threads.find((thread) => thread.id === worktreeCreate.threadId)?.expertBinding
@@ -434,7 +496,7 @@ describe("acceptance-frozen Hub Expert creation", () => {
             threadId: ThreadId.makeUnsafe("bmad-missing-workspace-thread"),
           }),
         ),
-      ).rejects.toThrow("the project workspace is unavailable");
+      ).rejects.toThrow();
     } finally {
       if (originalPath === undefined) delete process.env.PATH;
       else process.env.PATH = originalPath;
@@ -4575,7 +4637,7 @@ describe("OrchestrationEngine", () => {
 
   it("binds Hub Space Context on first execution and rejects unavailable first-run sources clearly", async () => {
     const system = await createOrchestrationSystem();
-    const { engine, contextRepository: context, sql } = system;
+    const { engine, contextRepository: context, projectAgents, sql } = system;
     const createdAt = now();
     const spaceId = SpaceId.makeUnsafe("context-engine-hub-space");
     const hubId = asProjectId("context-engine-hub");
@@ -4662,7 +4724,10 @@ describe("OrchestrationEngine", () => {
       await system.run(createThread(missingSpaceThreadId, hubId));
       await expect(
         system.run(startThread(missingSpaceThreadId, "context-engine-hub-missing-space-turn")),
-      ).rejects.toThrow("assign an active Space before first execution");
+      ).rejects.toMatchObject({
+        _tag: "OrchestrationCommandInvariantError",
+        commandType: "thread.turn.start",
+      });
       expect(await system.run(context.getThreadBinding(missingSpaceThreadId))).toEqual({
         mode: "unbound",
       });
@@ -4671,18 +4736,23 @@ describe("OrchestrationEngine", () => {
       await system.run(createProject(sourceHubId, "Source Hub", "group"));
       await system.run(createThread(sourceHubThreadId, sourceHubId));
       await system.run(
-        sql`
-          INSERT INTO project_agent_configs (
-            project_id, coordinator_thread_id, coordinator_name,
-            coordinator_model_selection_json, coordinator_provider_options_json,
-            worker_routing_json, limits_json, capture_enabled, enabled, automation_id,
-            revision, created_at, updated_at, disabled_at
-          ) VALUES (
-            ${sourceHubId}, ${sourceHubThreadId}, 'Coordinator',
-            '{"provider":"codex","model":"gpt-5-codex"}', NULL,
-            NULL, '{}', 1, 1, NULL, 1, ${createdAt}, ${createdAt}, NULL
-          )
-        `,
+        projectAgents.saveConfig(
+          {
+            projectId: sourceHubId,
+            coordinatorThreadId: sourceHubThreadId,
+            coordinatorName: "Coordinator",
+            coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },
+            limits: { ...DEFAULT_PROJECT_AGENT_LIMITS },
+            captureEnabled: true,
+            enabled: true,
+            automationId: null,
+            revision: 1,
+            createdAt,
+            updatedAt: createdAt,
+            disabledAt: null,
+          },
+          null,
+        ),
       );
       await system.run(
         sql`INSERT INTO hub_project_origins (hub_id, source_project_id)
@@ -4692,9 +4762,14 @@ describe("OrchestrationEngine", () => {
         sql`UPDATE projection_projects SET deleted_at = ${createdAt}
           WHERE project_id = ${sourceProjectId}`,
       );
+      expect(await system.run(projectAgents.isSuiteSelectionOpen(sourceHubId))).toBe(true);
       await expect(
         system.run(startThread(sourceHubThreadId, "context-engine-hub-source-missing-turn")),
-      ).rejects.toThrow("restore or select an active source Project before first execution");
+      ).rejects.toMatchObject({
+        _tag: "OrchestrationCommandInvariantError",
+        commandType: "thread.turn.start",
+      });
+      expect(await system.run(projectAgents.isSuiteSelectionOpen(sourceHubId))).toBe(false);
       expect(await system.run(context.getThreadBinding(sourceHubThreadId))).toEqual({
         mode: "unbound",
       });
@@ -4756,6 +4831,526 @@ describe("OrchestrationEngine", () => {
     } finally {
       fingerprintPoison.delete(poisonedCommandId);
       await system.dispose();
+    }
+  });
+});
+
+async function createSuiteEngineFixture() {
+  const system = await createOrchestrationSystem();
+  const experts = createExpertStore(system.stateDir);
+  const definition = await experts.save({
+    id: "suite-engine-author",
+    name: "Author",
+    description: "",
+    useCases: "",
+    persona: "Write the actual deliverable.",
+    outputRequirements: "",
+    skills: [],
+    references: [],
+    connections: [],
+  });
+  const projectId = asProjectId("suite-engine-project");
+  await system.run(
+    system.engine.dispatch({
+      type: "project.create",
+      commandId: CommandId.makeUnsafe("suite-engine-project-create"),
+      projectId,
+      title: "Suite execution",
+      workspaceRoot: system.stateDir,
+      createdAt: now(),
+    }),
+  );
+  const content = {
+    schemaVersion: 1 as const,
+    ref: { suiteId: "suite_00000000-0000-0000-0000-000000000027", revision: 1 },
+    name: "Execution suite",
+    description: "",
+    source: {
+      kind: "local-folder" as const,
+      sourceId: "fixture-source",
+      contentHash: "a".repeat(64),
+    },
+    adapterId: "fixture",
+    adapterVersion: 1,
+    members: [{ key: "author", expertId: definition.id, roleSourcePath: null }],
+    resources: [],
+    defaults: {},
+  };
+  const composition: SuiteComposition = {
+    ...content,
+    compositionHash: suiteContentDigest(content),
+    createdAt: now(),
+  };
+  await system.run(system.sql`INSERT INTO suite_compositions(suite_id, revision, composition_hash, record_json)
+    VALUES (${composition.ref.suiteId}, 1, ${composition.compositionHash}, ${JSON.stringify(composition)})`);
+  const create = (
+    id: string,
+    selection: boolean = true,
+  ): Extract<OrchestrationCommand, { type: "thread.create" }> => ({
+    type: "thread.create",
+    commandId: CommandId.makeUnsafe(`create:${id}`),
+    threadId: ThreadId.makeUnsafe(id),
+    projectId,
+    title: "Draft",
+    modelSelection: { provider: "omp", model: "fixture" },
+    runtimeMode: "approval-required",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    ...(selection ? { expertId: definition.id, suiteSelection: composition.ref } : {}),
+    createdAt: now(),
+  });
+  const start = (
+    id: string,
+    key: string,
+  ): Extract<OrchestrationCommand, { type: "thread.turn.start" }> => ({
+    type: "thread.turn.start",
+    commandId: CommandId.makeUnsafe(`send:${key}`),
+    threadId: ThreadId.makeUnsafe(id),
+    message: {
+      messageId: asMessageId(`message:${key}`),
+      role: "user",
+      text: "Produce the deliverable",
+      attachments: [],
+    },
+    runtimeMode: "approval-required",
+    interactionMode: "default",
+    createdAt: now(),
+  });
+  const dispose = async () => {
+    const unlock = async (entry: string): Promise<void> => {
+      const stat = await fs.lstat(entry).catch(() => null);
+      if (!stat || stat.isSymbolicLink()) return;
+      await fs.chmod(entry, stat.isDirectory() ? 0o700 : 0o600);
+      if (stat.isDirectory())
+        for (const name of await fs.readdir(entry)) await unlock(path.join(entry, name));
+    };
+    await unlock(path.join(system.stateDir, "experts", "snapshots"));
+    await system.dispose();
+  };
+  return { ...system, experts, definition, projectId, composition, create, start, dispose };
+}
+
+describe("first-send Suite capability ownership", () => {
+  it("keeps a rename-promoted thread unbound, freezes the then-current Expert on send, and reloads all binding references", async () => {
+    const f = await createSuiteEngineFixture();
+    try {
+      const create = f.create("suite-rename-promoted");
+      await f.run(f.engine.dispatch(create));
+      await f.run(
+        f.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.makeUnsafe("rename-promoted"),
+          threadId: create.threadId,
+          title: "Renamed draft",
+        }),
+      );
+      const draft = Option.getOrThrow(
+        await f.run(f.snapshotQuery.getThreadShellById(create.threadId)),
+      );
+      expect(draft).toMatchObject({
+        expertBinding: null,
+        capabilityBindingId: null,
+        suiteSelection: null,
+        expertDraftSelection: { expertId: f.definition.id, suite: f.composition.ref },
+      });
+      expect(
+        await fs.readdir(path.join(f.stateDir, "experts", "snapshots")).catch(() => []),
+      ).toEqual([]);
+      const edited = await f.experts.save({
+        ...f.definition,
+        persona: "Edited before send.",
+        expectedRevision: f.definition.revision,
+      });
+      const send = {
+        ...f.start(create.threadId, "first"),
+        expertId: edited.id,
+        suiteSelection: f.composition.ref,
+      };
+      const accepted = await f.run(f.engine.dispatch(send));
+      const events = await f.run(Stream.runCollect(f.engine.readThreadEvents(create.threadId, 0)));
+      expect(events.filter((event) => event.type === "thread.capability-bound")).toHaveLength(1);
+      const bound = Option.getOrThrow(
+        await f.run(f.snapshotQuery.getThreadShellById(create.threadId)),
+      );
+      expect(bound).toMatchObject({
+        expertBinding: { expertId: edited.id, revision: edited.revision },
+        expertDraftSelection: null,
+        suiteSelection: f.composition.ref,
+      });
+      expect(bound.capabilityBindingId).toBeTruthy();
+      const capability = await f.run(f.suites.readBinding(bound.capabilityBindingId!));
+      expect(capability?.purpose).toEqual({
+        kind: "direct-expert",
+        expertSnapshotId: bound.expertBinding!.snapshotId,
+      });
+      const refreshed = await f.run(f.engine.refreshCommandReadModel());
+      expect(refreshed.threads.find((thread) => thread.id === create.threadId)).toMatchObject({
+        expertBinding: bound.expertBinding,
+        capabilityBindingId: bound.capabilityBindingId,
+        suiteSelection: bound.suiteSelection,
+        expertDraftSelection: null,
+      });
+      expect(await f.run(f.engine.dispatch(send))).toEqual(accepted);
+      await expect(f.run(f.engine.dispatch({ ...send, suiteSelection: null }))).rejects.toThrow();
+      await expect(
+        f.run(f.engine.dispatch({ ...f.start(create.threadId, "switch"), suiteSelection: null })),
+      ).rejects.toThrow("cannot change");
+      await expect(
+        f.run(
+          f.engine.dispatch({
+            ...f.start(create.threadId, "expert-switch"),
+            expertId: "someone-else",
+          }),
+        ),
+      ).rejects.toThrow("cannot change");
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("adopts first-send references only with the original event transaction and can retry a rolled-back send", async () => {
+    const f = await createSuiteEngineFixture();
+    try {
+      const create = f.create("first-send-atomic");
+      await f.run(f.engine.dispatch(create));
+      await f.run(f.sql`
+        CREATE TRIGGER reject_first_send_binding BEFORE INSERT ON orchestration_events
+        WHEN NEW.event_type = 'thread.capability-bound'
+        BEGIN SELECT RAISE(ABORT, 'fixture refuses first-send binding'); END
+      `);
+      const send = f.start(create.threadId, "atomic");
+      await expect(f.run(f.engine.dispatch(send))).rejects.toThrow();
+      const rejected = Option.getOrThrow(
+        await f.run(f.snapshotQuery.getThreadShellById(create.threadId)),
+      );
+      expect(rejected).toMatchObject({
+        expertBinding: null,
+        capabilityBindingId: null,
+        suiteSelection: null,
+        expertDraftSelection: { expertId: f.definition.id, suite: f.composition.ref },
+      });
+      expect(
+        (await f.run(Stream.runCollect(f.engine.readThreadEvents(create.threadId, 0)))).some(
+          (event) =>
+            event.type === "thread.capability-bound" ||
+            event.type === "thread.turn-start-requested",
+        ),
+      ).toBe(false);
+      await f.run(f.sql`DROP TRIGGER reject_first_send_binding`);
+      await f.run(f.engine.dispatch(send));
+      const bound = Option.getOrThrow(
+        await f.run(f.snapshotQuery.getThreadShellById(create.threadId)),
+      );
+      expect(bound.expertBinding?.expertId).toBe(f.definition.id);
+      expect(bound.capabilityBindingId).toBeTruthy();
+      expect(bound.expertDraftSelection).toBeNull();
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("rejects a non-member before binding and retains the ordinary Expert path without a Suite", async () => {
+    const f = await createSuiteEngineFixture();
+    try {
+      const outsider = await f.experts.save({
+        ...f.definition,
+        id: "outside-suite",
+        name: "Outside",
+        expectedRevision: undefined,
+      });
+      const create = f.create("suite-invalid-member", false);
+      await f.run(f.engine.dispatch(create));
+      await expect(
+        f.run(
+          f.engine.dispatch({
+            ...f.start(create.threadId, "invalid-member"),
+            expertId: outsider.id,
+            suiteSelection: f.composition.ref,
+          }),
+        ),
+      ).rejects.toThrow("not a member");
+      expect(
+        (await f.run(Stream.runCollect(f.engine.readThreadEvents(create.threadId, 0)))).some(
+          (event) => event.type === "thread.capability-bound",
+        ),
+      ).toBe(false);
+      expect(
+        Option.getOrThrow(await f.run(f.snapshotQuery.getThreadShellById(create.threadId)))
+          .expertBinding,
+      ).toBeNull();
+      await f.run(
+        f.engine.dispatch({
+          ...f.start(create.threadId, "ordinary"),
+          expertId: outsider.id,
+          suiteSelection: null,
+        }),
+      );
+      const ordinary = Option.getOrThrow(
+        await f.run(f.snapshotQuery.getThreadShellById(create.threadId)),
+      );
+      expect(ordinary).toMatchObject({
+        expertBinding: { expertId: outsider.id },
+        capabilityBindingId: null,
+        suiteSelection: null,
+      });
+      await f.run(f.engine.dispatch(f.start(create.threadId, "ordinary-next")));
+      expect(
+        Option.getOrThrow(await f.run(f.snapshotQuery.getThreadShellById(create.threadId)))
+          .expertBinding,
+      ).toEqual(ordinary.expertBinding);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("opens onboarding only for a genuinely new Hub and binds its coordinator without an Expert", async () => {
+    const f = await createSuiteEngineFixture();
+    try {
+      const hubId = asProjectId("suite-engine-hub");
+      const coordinatorId = ThreadId.makeUnsafe("suite-engine-coordinator");
+      await f.run(
+        f.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.makeUnsafe("suite-hub-create"),
+          projectId: hubId,
+          kind: "group",
+          title: "Suite Hub",
+          workspaceRoot: path.join(f.stateDir, "hub"),
+          createdAt: now(),
+        }),
+      );
+      expect(await f.run(f.projectAgents.isSuiteSelectionOpen(hubId))).toBe(true);
+      const config: ProjectAgentConfig = {
+        projectId: hubId,
+        suite: f.composition.ref,
+        coordinatorThreadId: coordinatorId,
+        coordinatorName: "Coordinator",
+        coordinatorModelSelection: { provider: "omp", model: "fixture" },
+        limits: { ...DEFAULT_PROJECT_AGENT_LIMITS },
+        captureEnabled: true,
+        enabled: true,
+        automationId: null,
+        revision: 1,
+        createdAt: now(),
+        updatedAt: now(),
+        disabledAt: null,
+      };
+      await f.run(f.projectAgents.saveConfig(config, null));
+      await f.run(f.engine.dispatch({ ...f.create(coordinatorId, false), projectId: hubId }));
+      await expect(
+        f.run(
+          f.engine.dispatch({
+            ...f.start(coordinatorId, "forged-coordinator"),
+            expertId: f.definition.id,
+          }),
+        ),
+      ).rejects.toThrow("cannot adopt");
+      await f.run(f.engine.dispatch(f.start(coordinatorId, "coordinator")));
+      const coordinator = Option.getOrThrow(
+        await f.run(f.snapshotQuery.getThreadShellById(coordinatorId)),
+      );
+      expect(coordinator.expertBinding).toBeNull();
+      const binding = await f.run(f.suites.readBinding(coordinator.capabilityBindingId!));
+      expect(binding?.purpose).toEqual({ kind: "hub-coordinator", hubId, hubConfigRevision: 1 });
+      expect(await f.run(f.projectAgents.isSuiteSelectionOpen(hubId))).toBe(false);
+      await expect(
+        f.run(f.projectAgents.saveConfig({ ...config, suite: null, revision: 2 }, 1)),
+      ).rejects.toThrow();
+
+      const historicalHubId = asProjectId("suite-historical-hub");
+      await f.run(f.sql`INSERT INTO projection_projects(project_id, kind, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES (${historicalHubId}, 'group', 'Historical Hub', '/fixture/old-hub', '[]', ${now()}, ${now()})`);
+      const historical = {
+        ...config,
+        projectId: historicalHubId,
+        coordinatorThreadId: ThreadId.makeUnsafe("historical-coordinator"),
+        suite: null,
+      };
+      await f.run(f.projectAgents.saveConfig(historical, null));
+      await f.run(f.engine.refreshCommandReadModel());
+      expect(await f.run(f.projectAgents.isSuiteSelectionOpen(historicalHubId))).toBe(false);
+      await expect(
+        f.run(
+          f.projectAgents.saveConfig({ ...historical, suite: f.composition.ref, revision: 2 }, 1),
+        ),
+      ).rejects.toThrow();
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("creates only a trusted accepted Suite worker and rejects using coordinator authority as a worker", async () => {
+    const f = await createSuiteEngineFixture();
+    try {
+      const expertBinding = await f.experts.prepareSnapshot(f.definition.id, {
+        projectRoot: f.stateDir,
+      });
+      const capability = await f.run(
+        f.suiteBindings.prepare({
+          suite: f.composition.ref,
+          projectId: f.projectId,
+          projectRoot: f.stateDir,
+          purpose: {
+            kind: "hub-worker",
+            hubId: "trusted-hub",
+            workId: "accepted-work",
+            hubConfigRevision: 1,
+            expertSnapshotId: expertBinding.snapshotId,
+          },
+        }),
+      );
+      const create = f.create("trusted-suite-worker", false);
+      const context = {
+        hubExpertBinding: expertBinding,
+        hubCapabilityBindingId: capability.bindingId,
+        hubSuiteSelection: f.composition.ref,
+        hubId: "trusted-hub",
+        hubWorkId: "accepted-work",
+      };
+      await f.run(f.engine.dispatch(create, context));
+      expect(
+        Option.getOrThrow(await f.run(f.snapshotQuery.getThreadShellById(create.threadId))),
+      ).toMatchObject({
+        expertBinding,
+        capabilityBindingId: capability.bindingId,
+        suiteSelection: f.composition.ref,
+        expertDraftSelection: null,
+      });
+      const coordinatorCapability = await f.run(
+        f.suiteBindings.prepare({
+          suite: f.composition.ref,
+          projectId: f.projectId,
+          purpose: { kind: "hub-coordinator", hubId: "trusted-hub", hubConfigRevision: 1 },
+        }),
+      );
+      await expect(
+        f.run(
+          f.engine.dispatch(f.create("invalid-suite-worker", false), {
+            ...context,
+            hubCapabilityBindingId: coordinatorCapability.bindingId,
+          }),
+        ),
+      ).rejects.toThrow("does not match");
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("commits trusted result content with its event once, rolls back a failing host transaction, and projects late author/results without advancing", async () => {
+    const f = await createSuiteEngineFixture();
+    try {
+      const create = f.create("delegation-parent", false);
+      await f.run(f.engine.dispatch(create));
+      await f.run(
+        f.sql`CREATE TABLE fixture_result_commit(event_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL)`,
+      );
+      const command: Extract<OrchestrationCommand, { type: "thread.expert-delegation.result" }> = {
+        type: "thread.expert-delegation.result",
+        commandId: CommandId.makeUnsafe("delegation-result"),
+        threadId: create.threadId,
+        parentRootRunId: "parent-root",
+        delegationId: "delegation",
+        attemptId: "attempt",
+        targetExpertId: f.definition.id,
+        outcome: "completed",
+        resultRef: "result-ref",
+        resultHash: "b".repeat(64),
+        result: {
+          summary: "Actual author result",
+          artifacts: [{ path: "output.txt", sha256: "c".repeat(64), size: 5 }],
+        },
+        issue: null,
+        applyToParent: false,
+        createdAt: now(),
+      };
+      expect(() => Schema.decodeUnknownSync(ClientOrchestrationCommand)(command)).toThrow();
+      await expect(f.run(f.engine.dispatch(command))).rejects.toThrow("trusted server envelope");
+      const failing = { ...command, commandId: CommandId.makeUnsafe("delegation-result-rollback") };
+      await expect(
+        f.run(
+          f.engine.dispatch(failing, {
+            expertDelegationResult: {
+              commit: (eventId) =>
+                Effect.gen(function* () {
+                  yield* f.sql`INSERT INTO fixture_result_commit VALUES (${eventId}, ${"rollback"})`;
+                  return yield* Effect.fail(new Error("host rejected commit"));
+                }),
+            },
+          }),
+        ),
+      ).rejects.toThrow("trusted Expert delegation result");
+      expect(await f.run(f.sql`SELECT * FROM fixture_result_commit`)).toHaveLength(0);
+      let commits = 0;
+      const context = {
+        expertDelegationResult: {
+          commit: (eventId: string) =>
+            Effect.gen(function* () {
+              yield* f.sql`INSERT INTO fixture_result_commit VALUES (${eventId}, ${command.attemptId})`;
+              commits += 1;
+            }),
+        },
+      };
+      const trusted = failing;
+      const accepted = await f.run(f.engine.dispatch(trusted, context));
+      expect(await f.run(f.engine.dispatch(trusted, context))).toEqual(accepted);
+      expect(commits).toBe(1);
+      const events = await f.run(Stream.runCollect(f.engine.readThreadEvents(create.threadId, 0)));
+      expect(
+        events.filter((event) => event.type === "thread.expert-delegation-result"),
+      ).toHaveLength(1);
+      expect(events.some((event) => event.type === "thread.turn-start-requested")).toBe(false);
+      const detail = Option.getOrThrow(
+        await f.run(f.snapshotQuery.getThreadDetailById(create.threadId)),
+      );
+      expect(
+        detail.activities.find((activity) => activity.kind === "expert.delegation.result")?.payload,
+      ).toMatchObject({
+        targetExpertId: f.definition.id,
+        result: command.result,
+        resultRef: "result-ref",
+        applyToParent: false,
+      });
+      await f.run(
+        f.engine.dispatch({
+          type: "thread.archive",
+          commandId: CommandId.makeUnsafe("archive-before-late-result"),
+          threadId: create.threadId,
+        }),
+      );
+      const late = {
+        ...command,
+        commandId: CommandId.makeUnsafe("late-result"),
+        attemptId: "late-attempt",
+        delegationId: "late-delegation",
+        applyToParent: true,
+      };
+      await f.run(
+        f.engine.dispatch(late, {
+          expertDelegationResult: {
+            commit: (eventId) =>
+              f.sql`INSERT INTO fixture_result_commit VALUES (${eventId}, ${late.attemptId})`.pipe(
+                Effect.asVoid,
+              ),
+          },
+        }),
+      );
+      const lateEvents = await f.run(
+        Stream.runCollect(f.engine.readThreadEvents(create.threadId, accepted.sequence)),
+      );
+      expect(
+        lateEvents.find((event) => event.type === "thread.expert-delegation-result"),
+      ).toMatchObject({
+        payload: {
+          attemptId: "late-attempt",
+          targetExpertId: f.definition.id,
+          result: command.result,
+          applyToParent: false,
+        },
+      });
+      expect(lateEvents.some((event) => event.type === "thread.turn-start-requested")).toBe(false);
+    } finally {
+      await f.dispose();
     }
   });
 });

@@ -1,0 +1,3339 @@
+diff --git a/packages/coding-agent/CHANGELOG.md b/packages/coding-agent/CHANGELOG.md
+--- a/packages/coding-agent/CHANGELOG.md
++++ b/packages/coding-agent/CHANGELOG.md
+@@ -2,6 +2,18 @@
+ 
+ ## [Unreleased]
+ 
++### Synara isolated native Expert patch
++
++- Adds seven private ACP lifecycle methods for host-bound target profiles, durable native Task identity/outbox, started acknowledgement before child execution, per-child cancellation and request-time Gateway credentials. Skills, context and MCP identity replace rather than merge parent capabilities; ordinary native Tasks keep their existing scheduler and AgentSession.
++- The host supplies `_meta.synaraNativeTask = {parentGeneration,parentTurnId,targetAgentNames}` on an authorized prompt after the compiled-build capability check. Child ownership is captured at the actual tool call, not at delayed background launch. Final native Task scheduling fixes private `deliveryMode` in prepare and durable recovery: inline results return natively without a second host continuation; async output remains inspectable but only the host's durable terminal owner may automatically continue the parent. Expert speculative admission waits for final scheduling; ordinary Tasks retain speculation.
++- Fixed Expert parents retain `task.maxRecursionDepth: 0`. After private ACP prompt metadata arrives, builtin reconciliation exposes Task only for the verified opaque targets; the depth exception requires an admitted, captured parent tool call for that exact target and generation. Ordinary/unscoped children remain blocked, and withdrawn metadata, cancellation, stale generations, unsupported preparation and invalid target profiles never fall back to ordinary Task execution. Previously admitted async children keep their captured ownership across a natural turn boundary.
++- The private capabilities handshake may bind one canonical, connection-owned `catalogDirectory` before sessions open. Only its `agents/*.md` definitions participate in Task discovery, ahead of ambient names and independently of `omp-plugins`; the root never enters extension/plugin discovery or loads sibling code, hooks, skills, scripts or MCP. No-directory ACP/probes stay valid but do not advertise native targets. Captured native targets missing from their catalogue fail closed. Create-time, reload and in-flight discovery isolate catalogue roots and bridge lifetimes; complete target resources still come only from the prepared profile.
++- Native admission captures the real Task call synchronously in the SDK's before-call hook, before its first await; delayed `tool_execution_start` observations cannot race admission or rewrite its scope. Internal lookups use the durable SDK session identity without changing the ACP protocol parent ID. Temporary native Task output remains owned until the bridge reads the complete terminal summary, then follows the original cleanup/async/isolation retention policy.
++- Interrupted native Expert sessions are transcript-only until explicit host reconciliation: parent resume and query never restart them. Nonterminal records without a live native execution return `not-found`, which the host must treat as unknown, not permission to redispatch. Immutable terminal events remain queryable/retriable.
++- MCP discovery is disabled during child session creation; only a durable started ACK permits target MCP initialization and fresh per-HTTP-request credentials. Initialization completes before the child prompt; no ACK/credential/eager-initialization cycle is introduced.
++- Native Expert children receive the essential, read-only `native_expert_report_artifacts` tool. It declares the exact deliverable relative paths once, including shell/eval/hashline-edit outputs. The in-process executor supplies the actual SDK root, including isolated workspaces; the runtime safely reads real bytes, computes SHA-256/size, and synchronously copies those bytes into the host-issued per-attempt `profile.artifactRoot` before the original isolation cleanup. Terminal delivery checks this captured version, never a removed or mutable workspace. Completed production runs must explicitly report files or `[]`; budgets, traversal, links and staging overwrites fail closed. The host independently verifies and preserves immutable FileResourceStore byte versions, without granting filesystem authority from a Provider path. Ordinary Task result modes, models, credentials and isolation lifecycle are unchanged.
++- Source runs refuse the capability handshake until the isolated builder embeds verified source/patch/toolchain provenance. This patch is not a daily-binary installation, release or runtime acceptance claim.
++
+ ## [18.16.0] - 2026-11-02
+ 
+ ### Added
+diff --git a/packages/coding-agent/src/mcp/native-task-credential.ts b/packages/coding-agent/src/mcp/native-task-credential.ts
+--- /dev/null
++++ b/packages/coding-agent/src/mcp/native-task-credential.ts
+@@ -0,0 +1,5 @@
++/** Non-serializable, in-memory request authorization; never part of MCP config JSON. */
++export const nativeTaskCredential = Symbol("native-task-credential");
++export interface NativeTaskCredentialCarrier {
++	[nativeTaskCredential]?: () => Promise<{ authorization: string; signal: AbortSignal }>;
++}
+diff --git a/packages/coding-agent/src/mcp/transports/http.ts b/packages/coding-agent/src/mcp/transports/http.ts
+--- a/packages/coding-agent/src/mcp/transports/http.ts
++++ b/packages/coding-agent/src/mcp/transports/http.ts
+@@ -35,6 +35,7 @@
+ 	resolveMCPTimeoutMs,
+ } from "../timeout";
+ import { type MCPFetchInit, mcpFetch, withoutHeader } from "./header-policy";
++import { nativeTaskCredential } from "../native-task-credential";
+ 
+ const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
+ const DEFAULT_SSE_RETRY_MS = 3_000;
+@@ -121,8 +122,22 @@
+ 	 * after `initialize`). Before negotiation — the `initialize` request itself —
+ 	 * no protocol-version header is sent from either source.
+ 	 */
+-	#fetch(init: MCPFetchInit, generated: Record<string, string>): Promise<Response> {
+-		const configured = withoutHeader(this.config.headers, "MCP-Protocol-Version");
++	async #fetch(init: MCPFetchInit, generated: Record<string, string>): Promise<Response> {
++		const carrier = this.config.type === "http" ? this.config[nativeTaskCredential] : undefined;
++		const credential = await carrier?.();
++		if (credential) {
++			credential.signal.throwIfAborted();
++			init = {
++				...init,
++				signal: init.signal ? AbortSignal.any([init.signal, credential.signal]) : credential.signal,
++			};
++		}
++		// Keep private authorization in the ephemeral origin-locked bucket:
++		// generated protocol headers intentionally survive cross-origin redirects.
++		const configured = withoutHeader(
++			credential ? { ...this.config.headers, Authorization: credential.authorization } : this.config.headers,
++			"MCP-Protocol-Version",
++		);
+ 		const withVersion =
+ 			this.#protocolVersion === null ? generated : { "MCP-Protocol-Version": this.#protocolVersion, ...generated };
+ 		const request = mcpFetch(
+diff --git a/packages/coding-agent/src/mcp/types.ts b/packages/coding-agent/src/mcp/types.ts
+--- a/packages/coding-agent/src/mcp/types.ts
++++ b/packages/coding-agent/src/mcp/types.ts
+@@ -17,6 +17,7 @@
+ // =============================================================================
+ 
+ import type { SourceMeta } from "../capability/types";
++import type { NativeTaskCredentialCarrier } from "./native-task-credential";
+ 
+ export interface JsonRpcRequest {
+ 	jsonrpc: "2.0";
+@@ -127,7 +128,7 @@
+ }
+ 
+ /** HTTP server configuration (Streamable HTTP transport) */
+-export interface MCPHttpServerConfig extends MCPServerConfigBase {
++export interface MCPHttpServerConfig extends MCPServerConfigBase, NativeTaskCredentialCarrier {
+ 	type: "http";
+ 	url: string;
+ 	headers?: Record<string, string>;
+diff --git a/packages/coding-agent/src/modes/acp/acp-agent.ts b/packages/coding-agent/src/modes/acp/acp-agent.ts
+--- a/packages/coding-agent/src/modes/acp/acp-agent.ts
++++ b/packages/coding-agent/src/modes/acp/acp-agent.ts
+@@ -98,6 +98,7 @@
+ 
+ import { cfgDisabledExtensions } from "../../extensibility/settings";
+ import { cfgPlanEnabled } from "../../plan-mode/settings";
++import { NativeExpertBridge, nativeMethods } from "../../task/native-expert";
+ 
+ const ACP_DEFAULT_MODE_ID = "default";
+ const ACP_PLAN_MODE_ID = "plan";
+@@ -815,6 +816,7 @@
+ 	#initialSession: AgentSession | undefined;
+ 	#createSession: CreateAcpSession;
+ 	#sessions = new Map<string, ManagedSessionRecord>();
++	#nativeExperts = new Map<string, NativeExpertBridge>();
+ 	/** Serializes writes of the handle map ({@link readAcpSessionHandles}). */
+ 	#handleWrites: Promise<void> = Promise.resolve();
+ 	#disposePromise: Promise<void> | undefined;
+@@ -1072,6 +1074,11 @@
+ 					await previousTurn.cleanup;
+ 				}
+ 				this.#throwIfRecordClosed(record);
++				const nativeExperts = this.#nativeExperts.get(record.protocolSessionId);
++				nativeExperts?.beginTurn(params._meta?.synaraNativeTask);
++				// Only the private catalogue can change depth-zero native Task visibility.
++				// Ordinary ACP sessions retain their existing tools without rescanning.
++				if (nativeExperts?.catalogDirectory) await record.session.reconcileBuiltinTools();
+ 
+ 				const converted = this.#convertPromptBlocks(params.prompt);
+ 				const pendingPrompt = Promise.withResolvers<PromptResponse>();
+@@ -1340,6 +1347,7 @@
+ 
+ 	async cancel(params: { sessionId: string }): Promise<void> {
+ 		const record = this.#getSessionRecord(params.sessionId);
++		this.#nativeExperts.get(record.protocolSessionId)?.cancelParent();
+ 		// Stop means stop everything accepted on this session: prompts still
+ 		// inside the dispatch window or queued behind the running turn must not
+ 		// stream after the client believes it stopped the session.
+@@ -1403,6 +1411,7 @@
+ 		if (promptTurn.cleanup) {
+ 			return promptTurn.cleanup;
+ 		}
++		this.#nativeExperts.get(record.protocolSessionId)?.cancelParent();
+ 		promptTurn.cancelRequested = true;
+ 		promptTurn.abortController.abort();
+ 		promptTurn.unsubscribe?.();
+@@ -1438,6 +1447,15 @@
+ 
+ 	async extMethod(method: string, params: { [key: string]: unknown }): Promise<{ [key: string]: unknown }> {
+ 		switch (method) {
++			case nativeMethods.capabilities:
++				if (params.protocolVersion !== 1)
++					throw RequestError.invalidParams(undefined, "Unsupported native protocol");
++				await NativeExpertBridge.bindCatalogDirectory(this.#connection, params.catalogDirectory);
++				return NativeExpertBridge.capabilities();
++			case nativeMethods.query:
++				return NativeExpertBridge.query(this.#connection, params);
++			case nativeMethods.cancel:
++				return NativeExpertBridge.cancel(this.#connection, params);
+ 			case SPEECH_MODELS_LIST_METHOD:
+ 				return buildAcpSpeechModelsCatalog();
+ 			case "_omp/sessions/listAll": {
+@@ -1672,6 +1690,7 @@
+ 	#rememberHandleSession(record: ManagedSessionRecord): void {
+ 		const handle = record.protocolSessionId;
+ 		const sessionId = record.session.sessionId;
++		this.#nativeExperts.get(handle)?.bindSession(record.session.sessionManager.getSessionId());
+ 		this.#handleWrites = this.#handleWrites
+ 			.then(async () => {
+ 				const handles = await readAcpSessionHandles();
+@@ -1736,6 +1755,16 @@
+ 		protocolSessionId = session.sessionId,
+ 	): Promise<ManagedSessionRecord> {
+ 		const record = this.#createManagedSessionRecord(session, setToolUIContext, protocolSessionId);
++		const nativeExpert = new NativeExpertBridge(this.#connection, protocolSessionId);
++		this.#nativeExperts.set(protocolSessionId, nativeExpert);
++		nativeExpert.bindSession(session.sessionManager.getSessionId());
++		if (nativeExpert.catalogDirectory) {
++			await refreshAgentDiscovery(
++				session.sessionManager.getCwd(),
++				session.effectiveExtensionRoots,
++				session.sessionManager,
++			);
++		}
+ 		// Registered before extensions start: a `session_start` handler can already replace the durable session.
+ 		session.registerSessionChangeCallback(() => this.#rememberHandleSession(record));
+ 		session.setClientBridge(
+@@ -2659,7 +2688,7 @@
+ 		const cwd = record.session.sessionManager.getCwd();
+ 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
+ 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+-		await refreshAgentDiscovery(cwd, record.session.effectiveExtensionRoots);
++		await refreshAgentDiscovery(cwd, record.session.effectiveExtensionRoots, record.session.sessionManager);
+ 		await record.session.refreshSkillsAndCommands();
+ 		await this.#emitAvailableCommandsUpdate(record);
+ 	}
+@@ -3281,6 +3310,8 @@
+ 	}
+ 
+ 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
++		this.#nativeExperts.get(record.protocolSessionId)?.close();
++		this.#nativeExperts.delete(record.protocolSessionId);
+ 		record.lifetimeUnsubscribe?.();
+ 		record.commandMetadataUnsubscribe?.();
+ 		record.pendingCompactionNotifications = undefined;
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -145,6 +145,7 @@
+ import type { PythonResult } from "../eval/py/executor";
+ import { EVAL_STATE_CONTEXT_TYPE, formatEvalStateContext, isEvalStateContext } from "../eval/state";
+ import { WorkPoolRegistry } from "../task/workpool";
++import { nativeExpertSessionFor } from "../task/native-expert";
+ import { type BashPtyOptions, type BashResult, releaseShellSessions } from "../exec/bash-executor";
+ import type { TtsrManager } from "../export/ttsr";
+ import type { LoadedCustomCommand } from "../extensibility/custom-commands";
+@@ -5647,6 +5648,11 @@
+ 	 * execution still emit there).
+ 	 */
+ 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
++		// Capture the real loop call before its first await. Streamed execution
++		// events are observations and may reach ACP listeners after dispatch starts.
++		if (ctx.tool.name === "task") {
++			nativeExpertSessionFor(this.sessionManager)?.captureToolCall(ctx.toolCall.id);
++		}
+ 		const runner = this.#extensionRunner;
+ 		runner?.markLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
+ 		const ttsrResult = await this.#ttsr.beforeToolCall(ctx);
+diff --git a/packages/coding-agent/src/session/session-entries.ts b/packages/coding-agent/src/session/session-entries.ts
+--- a/packages/coding-agent/src/session/session-entries.ts
++++ b/packages/coding-agent/src/session/session-entries.ts
+@@ -311,6 +311,9 @@
+ 	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+ 	/** True when the subagent ran inside an isolation worktree: never revivable, transcript-only after park. Absent on older files. */
+ 	isolated?: boolean;
++	/** Native Expert sessions require host reconciliation; never implicitly revive them. */
++	nativeExpertAttemptId?: string;
++	nativeExpertDeliveryMode?: "native-return" | "host-continuation";
+ 	/** Work-pool yield items of the last model call; revival restores them so the yield tool matches. Absent when none. */
+ 	workPoolYieldItems?: WorkPoolYieldItem[];
+ }
+diff --git a/packages/coding-agent/src/session/session-manager.ts b/packages/coding-agent/src/session/session-manager.ts
+--- a/packages/coding-agent/src/session/session-manager.ts
++++ b/packages/coding-agent/src/session/session-manager.ts
+@@ -3675,6 +3675,8 @@
+ 		advisor?: string;
+ 		compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+ 		isolated?: boolean;
++		nativeExpertAttemptId?: string;
++		nativeExpertDeliveryMode?: "native-return" | "host-continuation";
+ 		workPoolYieldItems?: WorkPoolYieldItem[];
+ 	}): string {
+ 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
+@@ -4727,6 +4729,8 @@
+ 	advisor?: string;
+ 	compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+ 	isolated?: boolean;
++	nativeExpertAttemptId?: string;
++	nativeExpertDeliveryMode?: "native-return" | "host-continuation";
+ 	workPoolYieldItems?: WorkPoolYieldItem[];
+ }
+ 
+@@ -4736,8 +4740,12 @@
+  */
+ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSessionInit | null {
+ 	let init: PersistedSessionInit | null = null;
++	let nativeExpertAttemptId: PersistedSessionInit["nativeExpertAttemptId"];
++	let nativeExpertDeliveryMode: PersistedSessionInit["nativeExpertDeliveryMode"];
+ 	for (const entry of entries) {
+ 		if (entry.type !== "session_init") continue;
++		nativeExpertAttemptId = entry.nativeExpertAttemptId ?? nativeExpertAttemptId;
++		nativeExpertDeliveryMode = entry.nativeExpertDeliveryMode ?? nativeExpertDeliveryMode;
+ 		init = {
+ 			systemPrompt: typeof entry.systemPrompt === "string" ? [entry.systemPrompt] : entry.systemPrompt,
+ 			task: entry.task,
+@@ -4758,6 +4766,8 @@
+ 			spawns: entry.spawns,
+ 			advisor: entry.advisor,
+ 			isolated: entry.isolated,
++			nativeExpertAttemptId,
++			nativeExpertDeliveryMode,
+ 			...(entry.compactionThreshold !== undefined ? { compactionThreshold: entry.compactionThreshold } : undefined),
+ 			...(entry.workPoolYieldItems !== undefined ? { workPoolYieldItems: entry.workPoolYieldItems } : undefined),
+ 		};
+diff --git a/packages/coding-agent/src/slash-commands/builtin-marketplace.ts b/packages/coding-agent/src/slash-commands/builtin-marketplace.ts
+--- a/packages/coding-agent/src/slash-commands/builtin-marketplace.ts
++++ b/packages/coding-agent/src/slash-commands/builtin-marketplace.ts
+@@ -32,7 +32,7 @@
+ export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise<void> {
+ 	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
+ 	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+-	await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots);
++	await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots, ctx.sessionManager);
+ 	await ctx.refreshSkillState();
+ 	await ctx.refreshSlashCommandState();
+ 	resetCapabilities();
+diff --git a/packages/coding-agent/src/task/discovery.ts b/packages/coding-agent/src/task/discovery.ts
+--- a/packages/coding-agent/src/task/discovery.ts
++++ b/packages/coding-agent/src/task/discovery.ts
+@@ -75,18 +75,20 @@
+ 
+ /**
+  * Discover agents from filesystem and merge with bundled agents.
+- * Precedence (highest wins): project `.omp/agents`, user `.omp/agents`,
++ * Precedence (highest wins): private ACP catalogue, project `.omp/agents`, user `.omp/agents`,
+  * OMP extension-package agents from the effective `extensions` setting,
+  * installed npm/link plugins, Claude marketplace plugin agents (project scope
+  * before user), then bundled.
+  * @param cwd - Current working directory for project agent discovery
+  * @param home - Home directory for user and marketplace discovery
+  * @param extensionRoots - Session-local extension roots (explicit + mode + configured)
++ * @param catalogDirectory - Validated connection-owned agents-only root; never a plugin root
+  */
+ export async function discoverAgents(
+ 	cwd: string,
+ 	home: string = os.homedir(),
+ 	extensionRoots?: EffectiveExtensionRoots,
++	catalogDirectory?: string,
+ ): Promise<DiscoveryResult> {
+ 	const resolvedCwd = path.resolve(cwd);
+ 
+@@ -167,12 +169,27 @@
+ 		return true;
+ 	});
+ 
++	let agents = [...loadedAgents, ...bundledAgents];
++	const searchedDirs = orderedDirs.map(entry => entry.dir);
++	// Overlay only agents after ambient discovery; the root never enters any plugin lane.
++	if (catalogDirectory) {
++		const catalogDir = path.join(catalogDirectory, "agents");
++		const catalogNames = new Set<string>();
++		const catalogAgents = (await loadAgentsFromDir({ dir: catalogDir, source: "project" })).filter(agent => {
++			if (catalogNames.has(agent.name)) return false;
++			catalogNames.add(agent.name);
++			return true;
++		});
++		agents = agents.filter(agent => !catalogNames.has(agent.name)).concat(catalogAgents);
++		searchedDirs.unshift(catalogDir);
++	}
++
+ 	const projectAgentsDir = projectDirs.length > 0 ? projectDirs[0].path : null;
+ 
+ 	return {
+-		agents: [...loadedAgents, ...bundledAgents],
++		agents,
+ 		projectAgentsDir,
+-		searchedDirs: orderedDirs.map(entry => entry.dir),
++		searchedDirs,
+ 	};
+ }
+ 
+diff --git a/packages/coding-agent/src/task/executor.ts b/packages/coding-agent/src/task/executor.ts
+--- a/packages/coding-agent/src/task/executor.ts
++++ b/packages/coding-agent/src/task/executor.ts
+@@ -165,6 +165,7 @@
+ 	cfgCompactionThresholdTokens,
+ } from "../session/context-settings";
+ 
++import type { NativeExpertExecution } from "./native-expert";
+ export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
+ 
+ const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
+@@ -542,6 +543,7 @@
+ 	 */
+ 	preloadedCustomToolPaths?: ToolPathWithSource[];
+ 	mcpManager?: MCPManager;
++	nativeExpert?: NativeExpertExecution;
+ 	/** User-authorized model agents available to this child and its descendants. */
+ 	inheritedSessionAgents?: CreateAgentSessionOptions["inheritedSessionAgents"];
+ 	authStorage?: AuthStorage;
+@@ -4251,6 +4253,9 @@
+  * Run a single agent in-process.
+  */
+ export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
++	// Isolation has selected the actual SDK root; artifact reads use this root,
++	// never the parent's cwd or a model-supplied path.
++	if (options.nativeExpert) await options.nativeExpert.setWorkRoot(options.worktree ?? options.cwd);
+ 	const {
+ 		cwd,
+ 		agent,
+@@ -4406,7 +4411,8 @@
+ 				: agent.spawns.join(",");
+ 
+ 	const lspEnabled = enableLsp ?? true;
+-	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
++	const skipPythonPreflight =
++		options.nativeExpert !== undefined || (Array.isArray(toolNames) && !toolNames.includes("eval"));
+ 
+ 	const completionProbe = isCompletionProbeEnabled(settings, parentDepth);
+ 	const monitor = createSubagentRunMonitor({
+@@ -4713,7 +4719,7 @@
+ 			}
+ 
+ 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+-			const mcpManager = enableMCP ? options.mcpManager : undefined;
++			const mcpManager = options.nativeExpert?.manager ?? (enableMCP ? options.mcpManager : undefined);
+ 
+ 			// Derive subagent-scoped telemetry from the parent's config so the
+ 			// child loop's spans nest under the parent's active execute_tool span
+@@ -4795,7 +4801,7 @@
+ 					contextFiles: options.contextFiles,
+ 					noContextFiles: options.noContextFiles,
+ 					// Subagents never receive AGENTS.md, including from additional workspace roots they rediscover.
+-					excludeAgentsMd: true,
++					excludeAgentsMd: options.nativeExpert === undefined,
+ 					skills: options.skills,
+ 					promptTemplates: options.promptTemplates,
+ 					workspaceTree: options.workspaceTree,
+@@ -4883,6 +4889,19 @@
+ 					}),
+ 				);
+ 				({ session } = await awaitAbortable(sessionPromise));
++				if (options.nativeExpert) {
++					session.sessionManager.appendSessionInit({
++						systemPrompt: session.agent.state.systemPrompt,
++						task,
++						tools: session.getEnabledToolNames(),
++						nativeExpertAttemptId: options.nativeExpert.record.prepared!.attemptId,
++						nativeExpertDeliveryMode: options.nativeExpert.record.request.deliveryMode,
++					});
++					await session.sessionManager.ensureOnDisk();
++					await options.nativeExpert.started(session);
++					await session.refreshMCPTools(options.nativeExpert.manager.getTools());
++					await options.nativeExpert.initialized();
++				}
+ 				if (preparedSession) untrackedSession = session;
+ 				// Stash the sibling family candidate once the child session exists,
+ 				// independent of its initial model, so a later model change (retry
+@@ -5033,6 +5052,8 @@
+ 				// stamp the contract so cold revival leaves them transcript-only
+ 				// even when the workspace was retained for recovery.
+ 				isolated: worktree !== undefined || undefined,
++				nativeExpertAttemptId: options.nativeExpert?.record.prepared?.attemptId,
++				nativeExpertDeliveryMode: options.nativeExpert?.record.request.deliveryMode,
+ 			});
+ 
+ 			abortSignal.addEventListener(
+diff --git a/packages/coding-agent/src/task/index.ts b/packages/coding-agent/src/task/index.ts
+--- a/packages/coding-agent/src/task/index.ts
++++ b/packages/coding-agent/src/task/index.ts
+@@ -1,6 +1,12 @@
+ import { subprocessToolRegistry } from "./subprocess-tool-registry";
+ import { isTaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+ import { taskSubprocessRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
++import {
++	nativeExpertFor,
++	nativeExpertSessionFor,
++	nativeExpertTaskTargets,
++	type NativeExpertBridge,
++} from "./native-expert";
+ /**
+  * Task tool - Delegate tasks to specialized agents.
+  *
+@@ -27,6 +33,7 @@
+ import type { Usage } from "@oh-my-pi/pi-ai";
+ import { $env, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+ import type { ToolSession } from "..";
++import { isProviderEnabled, isUserSourceEnabled } from "../capability";
+ import type { EffectiveExtensionRoots } from "../capability/types";
+ import type { Settings } from "../config/settings";
+ import type { Theme } from "@oh-my-pi/pi-tui/theme";
+@@ -651,12 +658,12 @@
+ 
+ /**
+  * Process-level create-time discovery memo and published reload snapshots,
+- * keyed by resolved cwd plus the exact effective `extensions` array.
++ * keyed by resolved cwd, effective extension roots, provider switches and native session catalogue.
+  *
+  * `TaskTool.create` runs for every (sub)agent session in this process. Sessions
+  * may share a cwd while carrying different overlay/runtime extension settings,
+  * so cwd alone is not an isolation boundary. Explicit plugin reloads replace
+- * only the matching cwd+extensions snapshot. Execution-time discovery
++ * only the matching session catalogue snapshot. Execution-time discovery
+  * (`#runSpawn`) intentionally stays fresh. The memo also tracks the live
+  * `discoverAgents` binding: test spies swap that binding, which invalidates
+  * both caches automatically.
+@@ -665,22 +672,32 @@
+ const discoverySnapshots = new Map<string, AgentDefinition[]>();
+ let discoveryMemoFn: typeof discoverAgents | undefined;
+ 
+-/** Stable cache identity for the filesystem root and the full effective extension-root struct. */
+-function discoveryCacheKey(cwd: string, extensionRoots?: EffectiveExtensionRoots): string {
+-	return `${path.resolve(cwd)}\0${JSON.stringify(extensionRoots ?? null)}`;
++/** Catalogue roots and bridge lifetimes must not share ambient or other session snapshots. */
++function discoveryCacheKey(cwd: string, extensionRoots?: EffectiveExtensionRoots, native?: NativeExpertBridge): string {
++	const policy = [
++		isProviderEnabled("omp-plugins"),
++		isProviderEnabled("claude-plugins"),
++		isUserSourceEnabled("claude-plugins"),
++		isUserSourceEnabled("claude"),
++	].join(",");
++	return `${path.resolve(cwd)}\0${JSON.stringify(extensionRoots ?? null)}\0${policy}\0${native?.catalogDirectory ?? ""}\0${native?.catalogDirectory ? native.catalogCacheKey : ""}`;
+ }
+ 
+-function discoverAgentsForCreate(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
++function discoverAgentsForCreate(
++	cwd: string,
++	extensionRoots?: EffectiveExtensionRoots,
++	native?: NativeExpertBridge,
++): Promise<DiscoveryResult> {
+ 	const fn = discoverAgents;
+ 	if (discoveryMemoFn !== fn) {
+ 		discoveryMemoFn = fn;
+ 		discoveryMemo.clear();
+ 		discoverySnapshots.clear();
+ 	}
+-	const key = discoveryCacheKey(cwd, extensionRoots);
++	const key = discoveryCacheKey(cwd, extensionRoots, native);
+ 	let pending = discoveryMemo.get(key);
+ 	if (!pending) {
+-		pending = fn(cwd, undefined, extensionRoots);
++		pending = fn(cwd, undefined, extensionRoots, native?.catalogDirectory);
+ 		discoveryMemo.set(key, pending);
+ 		pending.catch(() => {
+ 			if (discoveryMemo.get(key) === pending) discoveryMemo.delete(key);
+@@ -689,11 +706,16 @@
+ 	return pending;
+ }
+ 
+-/** Rescan one cwd and publish its definitions to existing and future task tools. */
+-export async function refreshAgentDiscovery(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<void> {
+-	const key = discoveryCacheKey(cwd, extensionRoots);
++/** Rescan the actual session catalogue without publishing its definitions to another session. */
++export async function refreshAgentDiscovery(
++	cwd: string,
++	extensionRoots?: EffectiveExtensionRoots,
++	session?: Pick<ToolSession, "getSessionId">,
++): Promise<void> {
++	const native = session ? nativeExpertSessionFor(session) : undefined;
++	const key = discoveryCacheKey(cwd, extensionRoots, native);
+ 	discoveryMemo.delete(key);
+-	const pending = discoverAgentsForCreate(cwd, extensionRoots);
++	const pending = discoverAgentsForCreate(cwd, extensionRoots, native);
+ 	const { agents } = await pending;
+ 	if (discoveryMemo.get(key) === pending) {
+ 		discoverySnapshots.set(key, agents);
+@@ -892,15 +914,25 @@
+ 	get description(): string {
+ 		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
+ 		const agents =
+-			discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
+-			this.#discoveredAgents;
++			discoverySnapshots.get(
++				discoveryCacheKey(
++					this.session.cwd,
++					this.session.effectiveExtensionRoots?.(),
++					nativeExpertSessionFor(this.session),
++				),
++			) ?? this.#discoveredAgents;
+ 		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
+ 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
+ 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
+ 		const perCallModel = perCallModelEnabled(this.session.settings, "task");
++		const ordinarySpawning = canSpawnAtDepth(
++			cfgTaskMaxRecursionDepth.get(this.session.settings),
++			this.session.taskDepth ?? 0,
++		);
++		const nativeTargets = ordinarySpawning ? undefined : new Set(nativeExpertTaskTargets(this.session));
+ 		return renderDescription({
+-			agents,
+-			sessionAgents,
++			agents: nativeTargets ? agents.filter(agent => nativeTargets.has(agent.name)) : agents,
++			sessionAgents: nativeTargets ? sessionAgents.filter(agent => nativeTargets.has(agent.name)) : sessionAgents,
+ 			isolationEnabled: !planMode && isolationEnabled,
+ 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
+ 			disabledAgents,
+@@ -978,8 +1010,13 @@
+ 			return undefined;
+ 		}
+ 		const agents =
+-			discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
+-			this.#discoveredAgents;
++			discoverySnapshots.get(
++				discoveryCacheKey(
++					this.session.cwd,
++					this.session.effectiveExtensionRoots?.(),
++					nativeExpertSessionFor(this.session),
++				),
++			) ?? this.#discoveredAgents;
+ 		const sessionAgents = this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [];
+ 		const seanceAgent = [...agents, ...sessionAgents].find(agent => agent.name === SEANCE_AGENT_NAME);
+ 		return seanceAgent && isBundledSeance(seanceAgent) ? seanceTaskSchemaFields : undefined;
+@@ -1045,10 +1082,14 @@
+ 		if (spawn.tools?.length && this.session.getPlanModeState?.()?.enabled === true) return undefined;
+ 		let blocking: boolean;
+ 		try {
+-			blocking = (await this.#resolveSpawnPreflight(spawn)).effectiveAgent.blocking === true;
++			blocking = (await this.#resolveSpawnPreflight(spawn, toolCallId)).effectiveAgent.blocking === true;
+ 		} catch {
+ 			return undefined;
+ 		}
++		// Expert prepare fixes delivery ownership durably. Wait for final dispatch
++		// rather than admitting speculative work under settings that may change.
++		if (nativeExpertFor({ session: this.session, agent: spawn.agent, parentToolCallId: toolCallId }))
++			return undefined;
+ 		const detached =
+ 			cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined && !blocking;
+ 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
+@@ -1076,10 +1117,11 @@
+ 	 * normalized task params rather than smuggling internal policy over the
+ 	 * task wire contract.
+ 	 */
+-	#resolveSpawnPreflight(params: TaskParams) {
++	#resolveSpawnPreflight(params: TaskParams, parentToolCallId: string) {
+ 		return resolveEffectiveSubagentPolicy({
+ 			session: this.session,
+ 			invocationKind: "task",
++			parentToolCallId,
+ 			assignment: (params.task ?? "").trim(),
+ 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
+ 			agent: params.agent,
+@@ -1099,7 +1141,11 @@
+ 	 * Create a TaskTool instance with async agent discovery.
+ 	 */
+ 	static async create(session: ToolSession): Promise<TaskTool> {
+-		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
++		const { agents } = await discoverAgentsForCreate(
++			session.cwd,
++			session.effectiveExtensionRoots?.(),
++			nativeExpertSessionFor(session),
++		);
+ 		return new TaskTool(session, agents);
+ 	}
+ 
+@@ -1169,7 +1215,7 @@
+ 		const preflights = await Promise.all(
+ 			normalizedSpawnParams.map(async spawn => {
+ 				try {
+-					return { policy: await this.#resolveSpawnPreflight(spawn) };
++					return { policy: await this.#resolveSpawnPreflight(spawn, toolCallId) };
+ 				} catch (error) {
+ 					return { error: error instanceof StructuredSubagentError ? error.message : String(error) };
+ 				}
+@@ -1583,7 +1629,7 @@
+ 				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
+ 			})}`;
+ 		};
+-		return manager.register(
++		const jobId = manager.register(
+ 			"task",
+ 			agentId,
+ 			async ({ jobId, signal: runSignal, reportProgress, markRunning }) => {
+@@ -1755,6 +1801,13 @@
+ 				},
+ 			},
+ 		);
++		// Native Expert terminal ACKs belong to the host's durable result owner.
++		// Keep this native job/output inspectable, but never independently wake
++		// a parent (especially after a cancelled child returns late).
++		if (nativeExpertFor({ session: this.session, agent: spawnParams.agent, parentToolCallId: toolCallId })) {
++			manager.acknowledgeDeliveries([jobId]);
++		}
++		return jobId;
+ 	}
+ 
+ 	/**
+@@ -1909,7 +1962,7 @@
+ 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+ 		preAllocatedId?: string,
+ 		spawnIndex = 0,
+-		detached = false,
++		detached?: boolean,
+ 		launchTiming?: { invokedAt: number; acquiredAt: number },
+ 		onArtifactsRetained?: (cleanup: () => Promise<void>) => void,
+ 		tools?: TextTap,
+diff --git a/packages/coding-agent/src/task/native-expert-build.ts b/packages/coding-agent/src/task/native-expert-build.ts
+--- /dev/null
++++ b/packages/coding-agent/src/task/native-expert-build.ts
+@@ -0,0 +1,3 @@
++// Replaced by the isolated build script with a verified source/patch/toolchain digest.
++// Source execution cannot advertise native Expert support; runtime env is never consulted.
++export const nativeExpertBuildFingerprint: string = "";
+diff --git a/packages/coding-agent/src/task/native-expert.ts b/packages/coding-agent/src/task/native-expert.ts
+--- /dev/null
++++ b/packages/coding-agent/src/task/native-expert.ts
+@@ -0,0 +1,951 @@
++import { createHash, randomUUID } from "node:crypto";
++import * as fs from "node:fs/promises";
++import { constants, mkdirSync } from "node:fs";
++import path from "node:path";
++import { Database } from "bun:sqlite";
++import { getAgentDir } from "@oh-my-pi/pi-utils";
++import type { AgentSideConnection } from "@oh-my-pi/pi-utils/acp";
++import { RequestError } from "@oh-my-pi/pi-utils/acp";
++import { type } from "@oh-my-pi/omptype";
++import type { CustomTool } from "../extensibility/custom-tools/types";
++import { MCPManager } from "../mcp/manager";
++import { nativeTaskCredential } from "../mcp/native-task-credential";
++import type { MCPHttpServerConfig } from "../mcp/types";
++import type { ExecutorOptions } from "./executor";
++import type { StructuredSubagentRequest, StructuredSubagentResult } from "./structured-subagent";
++import { nativeExpertBuildFingerprint } from "./native-expert-build";
++import type { AgentSession } from "../session/agent-session";
++import type { ToolSession } from "../tools";
++
++export const nativeMethods = {
++	capabilities: "synara/nativeTaskCapabilities",
++	prepare: "synara/prepareNativeTask",
++	started: "synara/nativeTaskStarted",
++	event: "synara/nativeTaskEvent",
++	query: "synara/queryNativeTask",
++	cancel: "synara/cancelNativeTask",
++	credential: "synara/resolveNativeTaskCredential",
++} as const;
++
++type Profile = {
++	protocolVersion: 1;
++	attemptId: string;
++	capabilityBindingId: string;
++	assemblyId: string;
++	targetAgentName: string;
++	persona: string;
++	artifactRoot: string;
++	skills: Array<{ name: string; path: string }>;
++	skillEntries: Array<{ name: string; path: string; description: string; sha256?: string }>;
++	contextFiles: Array<{ path: string; contentHash: string }>;
++	resourceRoots: Array<{ path: string; contentHash: string }>;
++	mcpServers: Array<{ name: string; url: string; credentialHandle: string }>;
++};
++type Prepared = { attemptId: string; capabilityBindingId: string; assemblyId: string; profile: Profile };
++type Event = {
++	protocolVersion: 1;
++	attemptId: string;
++	nativeTaskId: string;
++	parentGeneration: string;
++	sequence: number;
++	payload: {
++		kind: "terminal";
++		outcome: "completed" | "failed" | "stopped";
++		result: { summary: string; artifacts: Array<{ path: string; sha256: string; size: number }> };
++		issue: null;
++	};
++};
++type RecordValue = {
++	request: {
++		parentSessionId: string;
++		parentGeneration: string;
++		parentTurnId: string;
++		toolCallId: string;
++		taskIndex: number;
++		nativeTaskId: string;
++		agentName: string;
++		task: string;
++		context: string;
++		deliverable: string;
++		deliveryMode: "native-return" | "host-continuation";
++	};
++	requestHash: string;
++	prepared?: Prepared;
++	nativeSessionId?: string;
++	state: "starting" | "running" | "cancel-requested" | "terminal";
++	sequence: number;
++	acknowledged: number;
++	terminalEvent?: Event;
++};
++type Active = { owner: NativeExpertBridge; controller: AbortController; promise: Promise<StructuredSubagentResult> };
++const active = new Map<string, Active>();
++const bindings = new Map<string, NativeExpertBridge>();
++type CatalogBinding = { directory?: string; pending?: Promise<void> };
++const catalogs = new WeakMap<AgentSideConnection, CatalogBinding>();
++let database: Database | undefined;
++function db(): Database {
++	if (!database) {
++		mkdirSync(getAgentDir(), { recursive: true });
++		database = new Database(path.join(getAgentDir(), "synara-native-tasks.sqlite"), { create: true });
++		database.exec(
++			"PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS native_tasks (id TEXT PRIMARY KEY, attempt TEXT UNIQUE, value TEXT NOT NULL)",
++		);
++	}
++	return database;
++}
++export function canonical(value: unknown): string {
++	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
++	if (value !== null && typeof value === "object")
++		return `{${Object.keys(value)
++			.sort()
++			.map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`)
++			.join(",")}}`;
++	const encoded = JSON.stringify(value);
++	if (encoded === undefined) throw new Error("Non-JSON native task value");
++	return encoded;
++}
++export function digest(value: string | Uint8Array): string {
++	return createHash("sha256").update(value).digest("hex");
++}
++function get(id: string): RecordValue | undefined {
++	const row = db().query("SELECT value FROM native_tasks WHERE id=?").get(id) as { value: string } | null;
++	if (!row) return undefined;
++	const record = JSON.parse(row.value) as RecordValue;
++	// No deployed legacy protocol exists: missing scheduling facts are unknown,
++	// never permission to guess delivery ownership or revive an execution.
++	if (!["native-return", "host-continuation"].includes(record.request.deliveryMode)) reject("execution_unknown", id);
++	return record;
++}
++function put(record: RecordValue): void {
++	try {
++		db()
++			.query("UPDATE native_tasks SET attempt=?, value=? WHERE id=?")
++			.run(record.prepared?.attemptId ?? null, JSON.stringify(record), record.request.nativeTaskId);
++	} catch {
++		reject("result_conflict", record.request.nativeTaskId);
++	}
++}
++function reject(
++	code: "execution_unknown" | "result_conflict" | "permission_denied" | "resource_corrupt" | "probe_error",
++	id: string,
++): never {
++	throw new RequestError(-32000, code, {
++		code,
++		category: code === "permission_denied" ? "security" : "execution",
++		subject: { kind: "execution", id, path: null },
++		action: "run",
++		effect: "deny-action",
++		message: code,
++		evidenceRef: null,
++		checkedAt: new Date().toISOString(),
++		recovery: "reconcile",
++	});
++}
++function object(value: unknown): Record<string, unknown> {
++	if (!value || typeof value !== "object" || Array.isArray(value)) reject("probe_error", "protocol");
++	return value as Record<string, unknown>;
++}
++function text(value: unknown, max = 4096): string {
++	if (typeof value !== "string" || !value.length || value.length > max || /[\u0000-\u001f]/u.test(value))
++		reject("probe_error", "protocol");
++	return value;
++}
++function hash(value: unknown): string {
++	const result = text(value, 64);
++	if (!/^[a-f0-9]{64}$/.test(result)) reject("probe_error", "hash");
++	return result;
++}
++async function checkedFile(file: string, expected: string): Promise<Buffer> {
++	if (!path.isAbsolute(file) || (await fs.realpath(file)) !== file || !(await fs.lstat(file)).isFile())
++		reject("resource_corrupt", "profile");
++	const bytes = await fs.readFile(file);
++	if (digest(bytes) !== expected) reject("resource_corrupt", "profile");
++	return bytes;
++}
++async function checkRoot(root: string, expected: string): Promise<void> {
++	if (!path.isAbsolute(root) || (await fs.realpath(root)) !== root) reject("resource_corrupt", "profile");
++	const resources: Array<{ path: string; kind: string; size: number; sha256: string; executable: boolean }> = [];
++	const seen = new Set<string>();
++	let total = 0;
++	async function visit(dir: string): Promise<void> {
++		for (const name of await fs.readdir(dir)) {
++			const full = path.join(dir, name);
++			const relative = path.relative(root, full).split(path.sep).join("/");
++			if (relative !== relative.normalize("NFC") || seen.has(relative.toLowerCase()))
++				reject("resource_corrupt", "profile");
++			seen.add(relative.toLowerCase());
++			const stat = await fs.lstat(full);
++			if (stat.isSymbolicLink() || (!stat.isFile() && !stat.isDirectory()) || resources.length >= 5000)
++				reject("resource_corrupt", "profile");
++			const bytes = stat.isFile() ? await fs.readFile(full) : Buffer.alloc(0);
++			total += bytes.length;
++			if (bytes.length > 16 * 1024 ** 2 || total > 100 * 1024 ** 2) reject("resource_corrupt", "profile");
++			resources.push({
++				path: relative,
++				kind: stat.isFile() ? "file" : "directory",
++				size: bytes.length,
++				sha256: digest(bytes),
++				executable: stat.isFile() && (stat.mode & 0o111) !== 0,
++			});
++			if (stat.isDirectory()) await visit(full);
++		}
++	}
++	await visit(root);
++	resources.sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
++	if (digest(canonical({ schemaVersion: 1, resources })) !== expected) reject("resource_corrupt", "profile");
++}
++function validatePrepared(value: unknown, agent: string): Prepared {
++	const p = object(value);
++	const profile = object(p.profile);
++	for (const key of ["attemptId", "capabilityBindingId", "assemblyId"])
++		if (text(p[key]) !== text(profile[key])) reject("result_conflict", agent);
++	if (
++		profile.protocolVersion !== 1 ||
++		profile.targetAgentName !== agent ||
++		typeof profile.persona !== "string" ||
++		!profile.persona.trim()
++	)
++		reject("probe_error", agent);
++	if (!path.isAbsolute(text(profile.artifactRoot)) || String(profile.artifactRoot).includes("\0"))
++		reject("probe_error", agent);
++	for (const key of ["skills", "skillEntries", "contextFiles", "resourceRoots", "mcpServers"]) {
++		if (!Array.isArray(profile[key]) || profile[key].length > 5000) reject("probe_error", agent);
++		for (const raw of profile[key]) {
++			const entry = object(raw);
++			if (key === "mcpServers") {
++				text(entry.name);
++				text(entry.credentialHandle);
++				const url = new URL(text(entry.url));
++				if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.hash || url.search)
++					reject("probe_error", agent);
++			} else {
++				text(entry.path);
++				if (key === "skills" || key === "skillEntries") text(entry.name);
++				if (key === "skillEntries" && (typeof entry.description !== "string" || entry.description.length > 16000))
++					reject("probe_error", agent);
++				if (key === "contextFiles" || key === "resourceRoots") hash(entry.contentHash);
++				if (key === "skillEntries") hash(entry.sha256);
++			}
++		}
++	}
++	return value as Prepared;
++}
++
++/** Native reporting accepts paths only; hashes and sizes always come from actual bytes. */
++export async function captureNativeExpertArtifacts(
++	root: string,
++	paths: readonly string[],
++	capture?: (artifact: Event["payload"]["result"]["artifacts"][number], bytes: Buffer) => Promise<void>,
++): Promise<Event["payload"]["result"]["artifacts"]> {
++	if (!path.isAbsolute(root) || paths.length > 100) throw new Error("Invalid native artifact root or file budget");
++	const rootStat = await fs.lstat(root);
++	if (!rootStat.isDirectory() || rootStat.isSymbolicLink())
++		throw new Error("Native artifact root must be a real directory");
++	const canonicalRoot = await fs.realpath(root);
++	const seen = new Set<string>();
++	const entries = new Map<string, string>();
++	let total = 0;
++	const artifacts: Event["payload"]["result"]["artifacts"] = [];
++	for (const relative of paths) {
++		const parts = relative.split("/");
++		if (
++			!relative ||
++			relative.length > 4096 ||
++			relative !== relative.normalize("NFC") ||
++			Buffer.from(relative).toString("utf8") !== relative ||
++			parts.some(
++				part =>
++					!part ||
++					part === "." ||
++					part === ".." ||
++					/[\\\p{Cc}:<>"|?*]/u.test(part) ||
++					/[. ]$/u.test(part) ||
++					/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part),
++			) ||
++			seen.has(relative.toLowerCase())
++		)
++			throw new Error("Invalid native artifact relative path");
++		seen.add(relative.toLowerCase());
++		for (let index = 1; index <= parts.length; index++) {
++			const entry = parts.slice(0, index).join("/");
++			const folded = entry.toLowerCase();
++			const previous = entries.get(folded);
++			if (previous !== undefined && previous !== entry) throw new Error("Native artifact parent paths collide");
++			entries.set(folded, entry);
++		}
++		if (entries.size > 5000) throw new Error("Native artifact entry budget exceeded");
++		const check = async () => {
++			let full = canonicalRoot;
++			for (const [index, part] of parts.entries()) {
++				full = path.join(full, part);
++				const stat = await fs.lstat(full);
++				if (
++					stat.isSymbolicLink() ||
++					(index === parts.length - 1 ? !stat.isFile() : !stat.isDirectory()) ||
++					(await fs.realpath(full)) !== full
++				)
++					throw new Error("Native artifact path contains a link or non-regular entry");
++			}
++			return full;
++		};
++		const full = await check();
++		const before = await fs.lstat(full);
++		if (before.size > 16 * 1024 ** 2 || total + before.size > 100 * 1024 ** 2)
++			throw new Error("Native artifact byte budget exceeded");
++		const handle = await fs.open(
++			full,
++			constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NOFOLLOW),
++		);
++		try {
++			const opened = await handle.stat();
++			if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size)
++				throw new Error("Native artifact changed while opening");
++			const bytes = await handle.readFile();
++			const after = await handle.stat();
++			await check();
++			const current = await fs.lstat(full);
++			if (
++				bytes.length !== opened.size ||
++				after.size !== opened.size ||
++				after.mtimeMs !== opened.mtimeMs ||
++				current.dev !== opened.dev ||
++				current.ino !== opened.ino ||
++				current.size !== opened.size ||
++				current.mtimeMs !== opened.mtimeMs
++			)
++				throw new Error("Native artifact changed while reading");
++			total += bytes.length;
++			const artifact = { path: relative, sha256: digest(bytes), size: bytes.length };
++			if (capture) await capture(artifact, bytes);
++			artifacts.push(artifact);
++		} finally {
++			await handle.close();
++		}
++	}
++	return artifacts.sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
++}
++
++/** Write only to the host-issued attempt staging directory, never a model path. */
++async function stageNativeArtifact(root: string, relative: string, bytes: Buffer): Promise<void> {
++	if (!path.isAbsolute(root)) throw new Error("Native artifact staging root must be absolute");
++	const stat = await fs.lstat(root);
++	if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Invalid native artifact staging root");
++	const canonicalRoot = await fs.realpath(root);
++	let directory = canonicalRoot;
++	for (const part of relative.split("/").slice(0, -1)) {
++		directory = path.join(directory, part);
++		try {
++			await fs.mkdir(directory, { mode: 0o700 });
++		} catch (cause) {
++			if ((cause as NodeJS.ErrnoException).code !== "EEXIST") throw cause;
++		}
++		const parent = await fs.lstat(directory);
++		if (!parent.isDirectory() || parent.isSymbolicLink() || (await fs.realpath(directory)) !== directory)
++			throw new Error("Invalid native artifact staging parent");
++	}
++	const destination = path.join(canonicalRoot, relative);
++	const temporary = path.join(directory, `.native-artifact-${randomUUID()}`);
++	const handle = await fs.open(
++		temporary,
++		constants.O_WRONLY |
++			constants.O_CREAT |
++			constants.O_EXCL |
++			(process.platform === "win32" ? 0 : constants.O_NOFOLLOW),
++		0o600,
++	);
++	try {
++		await handle.writeFile(bytes);
++		await handle.sync();
++	} finally {
++		await handle.close();
++	}
++	try {
++		const existing = await fs.lstat(destination).catch((cause: NodeJS.ErrnoException) => {
++			if (cause.code === "ENOENT") return undefined;
++			throw cause;
++		});
++		if (existing) throw new Error("Native artifact staging path is already occupied");
++		if ((await fs.realpath(directory)) !== directory) throw new Error("Native artifact staging parent changed");
++		await fs.rename(temporary, destination);
++	} finally {
++		await fs.rm(temporary, { force: true });
++	}
++}
++
++/** Per real ACP connection, never resolved from model-supplied IDs or environment. */
++export class NativeExpertBridge {
++	#generation = "";
++	#turn = "";
++	#targets = new Set<string>();
++	#knownTargets = new Set<string>();
++	#accepting = false;
++	#retries = new Map<string, NodeJS.Timeout>();
++	#calls = new Map<string, { generation: string; turn: string; targets: Set<string>; admitted: boolean }>();
++	#sessionId: string | undefined;
++	readonly catalogDirectory: string | undefined;
++	#catalogCacheKey = randomUUID();
++	get catalogCacheKey(): string {
++		return this.#catalogCacheKey;
++	}
++	constructor(
++		readonly connection: AgentSideConnection,
++		readonly parentSessionId: string,
++	) {
++		const catalog: CatalogBinding = catalogs.get(connection) ?? {};
++		if (catalog.pending) reject("probe_error", "catalog-not-ready");
++		catalogs.set(connection, catalog);
++		this.catalogDirectory = catalog.directory;
++	}
++	/** Private connection handshake, never a generic extension/plugin root. */
++	static async bindCatalogDirectory(connection: AgentSideConnection, value: unknown): Promise<void> {
++		if (value === undefined) return;
++		const directory = text(value);
++		// Lexically noncanonical input is a protocol error; invalid selected filesystem objects are resource errors.
++		if (!path.isAbsolute(directory) || path.resolve(directory) !== directory)
++			reject("probe_error", "catalog-directory");
++		const existing = catalogs.get(connection);
++		if (existing) {
++			if (existing.directory !== directory) reject("permission_denied", "catalog-directory");
++			await existing.pending;
++			return;
++		}
++		const catalog: CatalogBinding = { directory };
++		catalogs.set(connection, catalog);
++		const validate = async () => {
++			for (const selected of [directory, path.join(directory, "agents")]) {
++				if (!(await fs.lstat(selected)).isDirectory() || (await fs.realpath(selected)) !== selected)
++					reject("resource_corrupt", "catalog-directory");
++			}
++		};
++		catalog.pending = validate();
++		try {
++			await catalog.pending;
++			catalog.pending = undefined;
++		} catch (error) {
++			// A rejected handshake never leaves an apparently assembled catalogue.
++			catalogs.delete(connection);
++			if (error instanceof RequestError) throw error;
++			reject("resource_corrupt", "catalog-directory");
++		}
++	}
++	bindSession(sessionId: string): void {
++		if (this.#sessionId && this.#sessionId !== sessionId) {
++			bindings.delete(this.#sessionId);
++			this.#catalogCacheKey = randomUUID();
++		}
++		this.#sessionId = sessionId;
++		bindings.set(sessionId, this);
++	}
++	beginTurn(meta: unknown): void {
++		this.#accepting = false;
++		if (meta === undefined) return;
++		const value = object(meta);
++		const generation = text(value.parentGeneration);
++		const turn = text(value.parentTurnId);
++		if (this.#generation && this.#generation !== generation) this.cancelParent();
++		this.#generation = generation;
++		this.#turn = turn;
++		if (!Array.isArray(value.targetAgentNames) || value.targetAgentNames.length > 5000)
++			reject("probe_error", this.parentSessionId);
++		this.#targets = new Set(value.targetAgentNames.map(name => text(name)));
++		for (const target of this.#targets) this.#knownTargets.add(target);
++		this.#accepting = !this.connection.signal.aborted;
++	}
++	captureToolCall(id: string): void {
++		this.#calls.set(id, {
++			generation: this.#generation,
++			turn: this.#turn,
++			targets: this.#targets,
++			admitted: this.#accepting,
++		});
++	}
++	targets(): readonly string[] {
++		return this.catalogDirectory && this.#accepting && !this.connection.signal.aborted ? [...this.#targets] : [];
++	}
++	handles(agent: string | undefined, toolCallId?: string): boolean {
++		// Previously advertised opaque targets must never become ordinary Task agents
++		// when metadata disappears, changes generation, or withdraws a target.
++		return (
++			agent !== undefined &&
++			(this.#knownTargets.has(agent) || !!(toolCallId && this.#calls.get(toolCallId)?.targets.has(agent)))
++		);
++	}
++	assertAdmission(agent: string | undefined, toolCallId?: string): void {
++		const call = toolCallId ? this.#calls.get(toolCallId) : undefined;
++		if (
++			!this.catalogDirectory ||
++			!agent ||
++			!call?.admitted ||
++			!call.targets.has(agent) ||
++			this.connection.signal.aborted ||
++			call.generation !== this.#generation
++		)
++			reject("permission_denied", this.parentSessionId);
++	}
++	cancelParent(): void {
++		this.#accepting = false;
++		for (const call of this.#calls.values()) call.admitted = false;
++		for (const [id, running] of active) if (running.owner === this) this.cancelId(id);
++	}
++	close(): void {
++		this.cancelParent();
++		for (const timer of this.#retries.values()) clearTimeout(timer);
++		this.#retries.clear();
++		for (const [id, bridge] of bindings) if (bridge === this) bindings.delete(id);
++	}
++	async run(
++		request: StructuredSubagentRequest,
++		execute: (execution: NativeExpertExecution) => Promise<StructuredSubagentResult>,
++	): Promise<StructuredSubagentResult> {
++		this.assertAdmission(request.agent, request.parentToolCallId);
++		const call = this.#calls.get(request.parentToolCallId!)!;
++		if (typeof request.detached !== "boolean") reject("probe_error", "native-task-scheduling");
++		const identity = {
++			parentSessionId: this.parentSessionId,
++			parentGeneration: call.generation,
++			parentTurnId: call.turn,
++			toolCallId: request.parentToolCallId!,
++			taskIndex: request.index ?? 0,
++		};
++		const id = `snt_${digest(canonical(identity))}`;
++		const input = {
++			...identity,
++			nativeTaskId: id,
++			agentName: request.agent!,
++			task: request.assignment,
++			context: request.context ?? "",
++			deliverable: "",
++			deliveryMode: request.detached ? ("host-continuation" as const) : ("native-return" as const),
++		};
++		const requestHash = digest(canonical(input));
++		const previous = get(id);
++		if (previous) {
++			if (previous.requestHash !== requestHash) reject("result_conflict", id);
++			const running = active.get(id);
++			if (running?.owner === this) return running.promise;
++			await this.deliver(previous);
++			reject("execution_unknown", id);
++		}
++		const record: RecordValue = { request: input, requestHash, state: "starting", sequence: 0, acknowledged: 0 };
++		// Cross-process unique claim precedes any outbound prepare or actual execution.
++		try {
++			db().query("INSERT INTO native_tasks(id,value) VALUES(?,?)").run(id, JSON.stringify(record));
++		} catch {
++			const claimed = get(id);
++			reject(claimed && claimed.requestHash !== requestHash ? "result_conflict" : "execution_unknown", id);
++		}
++		const controller = new AbortController();
++		const signal = request.signal
++			? AbortSignal.any([request.signal, controller.signal, this.connection.signal])
++			: AbortSignal.any([controller.signal, this.connection.signal]);
++		const promise = (async () => {
++			record.prepared = validatePrepared(await this.requestReceipt(nativeMethods.prepare, input), input.agentName);
++			put(record);
++			if (signal.aborted || !call.admitted || this.#generation !== input.parentGeneration) {
++				controller.abort();
++				reject("permission_denied", id);
++			}
++			const execution = new NativeExpertExecution(this, record, signal, request.session.cwd);
++			try {
++				const result = await execute(execution);
++				const summary = result.result.outputPath
++					? await fs.readFile(result.result.outputPath, "utf8")
++					: (result.result.error ?? "");
++				await execution.finish(
++					summary,
++					result.result.aborted
++						? "stopped"
++						: result.result.exitCode === 0 && !result.result.error
++							? "completed"
++							: "failed",
++				);
++				if (record.acknowledged !== record.sequence) reject("execution_unknown", id);
++				// Never publish a late result via the native async reporter after cancellation.
++				if (signal.aborted || record.state === "cancel-requested") reject("execution_unknown", id);
++				return result;
++			} catch (error) {
++				// A settled SDK failure is not an unknown execution. Preserve an
++				// existing immutable outbox (including a lost ACK), otherwise
++				// publish the verified failure only after real deferred cleanup.
++				if (!record.terminalEvent)
++					await execution.finish(
++						error instanceof Error ? error.message : String(error),
++						signal.aborted ? "stopped" : "failed",
++					);
++				throw error;
++			} finally {
++				await execution.dispose();
++			}
++		})().finally(() => active.delete(id));
++		active.set(id, { owner: this, controller, promise });
++		return promise;
++	}
++	async requestReceipt(method: string, params: unknown): Promise<unknown> {
++		for (let retry = 0; retry < 3; retry++) {
++			this.connection.signal.throwIfAborted();
++			const timeout = Promise.withResolvers<never>();
++			const timer = setTimeout(() => timeout.reject(new Error("Native receipt timeout")), 10000);
++			try {
++				return await Promise.race([this.connection.request(method, params), timeout.promise]);
++			} catch (error) {
++				if (error instanceof RequestError || retry === 2 || this.connection.signal.aborted) throw error;
++			} finally {
++				clearTimeout(timer);
++			}
++		}
++		throw new Error("Native receipt unavailable");
++	}
++	async deliver(record: RecordValue): Promise<void> {
++		if (!record.terminalEvent || record.acknowledged === record.sequence || this.connection.signal.aborted) return;
++		try {
++			const ack = object(await this.requestReceipt(nativeMethods.event, record.terminalEvent));
++			if (
++				ack.attemptId !== record.prepared?.attemptId ||
++				ack.sequence !== record.sequence ||
++				!["accepted", "duplicate"].includes(String(ack.disposition)) ||
++				typeof ack.resultRef !== "string" ||
++				ack.resultHash !==
++					digest(
++						canonical({
++							outcome: record.terminalEvent.payload.outcome,
++							result: record.terminalEvent.payload.result,
++							issue: null,
++						}),
++					)
++			)
++				reject("result_conflict", record.request.nativeTaskId);
++			record.acknowledged = record.sequence;
++			put(record);
++		} catch {
++			// The immutable outbox survives this transport/process. Query also redelivers it.
++			const id = record.request.nativeTaskId;
++			if (!this.#retries.has(id) && !this.connection.signal.aborted) {
++				const timer = setTimeout(() => {
++					this.#retries.delete(id);
++					const pending = get(id);
++					if (pending) void this.deliver(pending);
++				}, 1000);
++				timer.unref();
++				this.#retries.set(id, timer);
++			}
++		}
++	}
++	cancelId(id: string): boolean {
++		const record = get(id);
++		const running = active.get(id);
++		if (!record || running?.owner !== this || record.terminalEvent) return false;
++		record.state = "cancel-requested";
++		put(record);
++		running.controller.abort();
++		return true;
++	}
++	static capabilities(): Record<string, unknown> {
++		if (!/^[a-f0-9]{64}$/.test(nativeExpertBuildFingerprint)) reject("probe_error", "unbuilt-source");
++		return {
++			protocolVersion: 1,
++			buildFingerprint: nativeExpertBuildFingerprint,
++			targetProfiles: true,
++			lifecycle: true,
++		};
++	}
++	static async query(
++		connection: AgentSideConnection,
++		params: Record<string, unknown>,
++	): Promise<Record<string, unknown>> {
++		const record = get(text(params.nativeTaskId));
++		if (!record || record.prepared?.attemptId !== text(params.attemptId)) return { state: "not-found" };
++		if (record.terminalEvent && record.nativeSessionId) {
++			// This connection may be a restarted runtime: query is observation only, not a new execution.
++			return { state: "terminal", nativeSessionId: record.nativeSessionId, terminalEvent: record.terminalEvent };
++		}
++		if (active.get(record.request.nativeTaskId)?.owner.connection !== connection) return { state: "not-found" };
++		return { state: record.state, nativeSessionId: record.nativeSessionId ?? null, lastSequence: record.sequence };
++	}
++	static cancel(connection: AgentSideConnection, params: Record<string, unknown>): Record<string, unknown> {
++		const record = get(text(params.nativeTaskId));
++		const running = record && active.get(record.request.nativeTaskId);
++		return {
++			accepted:
++				!!record &&
++				record.prepared?.attemptId === text(params.attemptId) &&
++				running?.owner.connection === connection &&
++				running.owner.cancelId(record.request.nativeTaskId),
++		};
++	}
++}
++/** Lookup uses the actual bound SDK session, never a caller-supplied catalogue path. */
++export function nativeExpertSessionFor(session: Pick<ToolSession, "getSessionId">): NativeExpertBridge | undefined {
++	const id = session.getSessionId?.();
++	return id ? bindings.get(id) : undefined;
++}
++export function nativeExpertFor(
++	request: Pick<StructuredSubagentRequest, "session" | "agent" | "parentToolCallId">,
++): NativeExpertBridge | undefined {
++	const bridge = nativeExpertSessionFor(request.session);
++	return bridge?.handles(request.agent, request.parentToolCallId) ? bridge : undefined;
++}
++
++/** Discovery only: execution still requires the captured real parent tool call. */
++export function nativeExpertTaskTargets(session: Pick<ToolSession, "getSessionId" | "taskDepth">): readonly string[] {
++	if ((session.taskDepth ?? 0) !== 0) return [];
++	return nativeExpertSessionFor(session)?.targets() ?? [];
++}
++
++const nativeArtifactReportSchema = type({ paths: "string[]" });
++export class NativeExpertExecution {
++	readonly manager: MCPManager;
++	#started = false;
++	#artifactPaths: string[] = [];
++	#reportedArtifacts: Event["payload"]["result"]["artifacts"] = [];
++	#reportStarted = false;
++	#reported = false;
++	#requiresReport = false;
++	#cleanup: Promise<void>[] = [];
++	#artifactCleanup: (() => Promise<void>) | undefined;
++	/** Temporary output stays owned until the bridge consumes its complete terminal summary. */
++	deferArtifactCleanup(cleanup: () => Promise<void>): void {
++		this.#artifactCleanup = cleanup;
++	}
++	readonly reportTool: CustomTool = {
++		name: "native_expert_report_artifacts",
++		label: "Report Expert artifacts",
++		loadMode: "essential",
++		approval: "read",
++		description:
++			"Before completing this Expert assignment, declare once the exact deliverable files under your actual SDK working root as NFC POSIX relative paths. Include shell/eval/edit outputs as well as write. Finish file edits before reporting; use [] explicitly for a result with no files. Do not submit hashes or sizes: the runtime safely reads and hashes real bytes, captures them in host-issued attempt staging before isolation cleanup, and the host independently verifies immutable versions.",
++		parameters: nativeArtifactReportSchema,
++		execute: async (_id, params) => {
++			if (!this.#started || this.signal.aborted || this.record.terminalEvent)
++				throw new Error("Native artifact reporting is unavailable");
++			const { paths } = nativeArtifactReportSchema.assert(params);
++			if (this.#reportStarted)
++				throw new Error(
++					"Native artifact declaration has already been captured or failed; it cannot be overwritten",
++				);
++			this.#reportStarted = true;
++			const artifacts = await captureNativeExpertArtifacts(this.cwd, paths, (artifact, bytes) =>
++				stageNativeArtifact(this.record.prepared!.profile.artifactRoot, artifact.path, bytes),
++			);
++			this.#artifactPaths = artifacts.map(artifact => artifact.path);
++			this.#reportedArtifacts = artifacts;
++			this.#reported = true;
++			return { content: [{ type: "text", text: JSON.stringify({ artifacts }) }] };
++		},
++	};
++	constructor(
++		readonly bridge: NativeExpertBridge,
++		readonly record: RecordValue,
++		readonly signal: AbortSignal,
++		public cwd: string,
++	) {
++		this.manager = new MCPManager(cwd);
++	}
++	/** The executor supplies its actual effective cwd, not a parent/model path. */
++	async setWorkRoot(root: string): Promise<void> {
++		if (!path.isAbsolute(root)) throw new Error("Native execution root must be absolute");
++		const stat = await fs.lstat(root);
++		if (!stat.isDirectory() || stat.isSymbolicLink())
++			throw new Error("Native execution root must be a real directory");
++		this.cwd = await fs.realpath(root);
++	}
++	async apply(options: ExecutorOptions): Promise<void> {
++		const profile = this.record.prepared!.profile;
++		this.#requiresReport = true;
++		const onCleanupDeferred = options.onCleanupDeferred;
++		options.onCleanupDeferred = completion => {
++			this.#cleanup.push(completion);
++			onCleanupDeferred?.(completion);
++		};
++		for (const root of profile.resourceRoots) await checkRoot(root.path, root.contentHash);
++		const skills = [];
++		for (const skill of profile.skills) {
++			const entry = profile.skillEntries.find(entry => entry.name === skill.name && entry.path === skill.path);
++			if (!entry?.sha256) reject("resource_corrupt", this.record.request.nativeTaskId);
++			await checkedFile(skill.path, entry.sha256);
++			skills.push({
++				name: skill.name,
++				description: entry.description,
++				filePath: skill.path,
++				baseDir: path.dirname(skill.path),
++				source: "synara-native-expert",
++			});
++		}
++		const contextFiles = [];
++		for (const file of profile.contextFiles)
++			contextFiles.push({
++				path: file.path,
++				content: (await checkedFile(file.path, file.contentHash)).toString("utf8"),
++			});
++		Object.assign(options, {
++			nativeExpert: this,
++			signal: this.signal,
++			agent: {
++				...options.agent,
++				name: profile.targetAgentName,
++				systemPrompt: `${profile.persona}\n\nBefore completing, call native_expert_report_artifacts with the exact deliverable relative paths (or [] explicitly if no files). File contents, hashes and sizes are verified by the runtime; reporting never grants filesystem access.`,
++				autoloadSkills: [],
++				prewalk: undefined,
++				...(options.agent.tools ? { tools: [...options.agent.tools, this.reportTool.name] } : {}),
++			},
++			skills,
++			contextFiles,
++			noContextFiles: true,
++			rules: [],
++			promptTemplates: [],
++			workspaceTree: undefined,
++			// The SDK must not discover/connect MCP before the durable started ACK.
++			// This empty dedicated manager is populated only by started(), afterwards.
++			mcpManager: this.manager,
++			enableMCP: false,
++			customTools: [this.reportTool],
++			preloadedCustomToolPaths: [],
++			preloadedExtensionPaths: [],
++			preloadedPreparedExtensions: [],
++			extensionRoots: () => ({ explicit: [], mode: "explicit-only", configured: [], configuredLevel: "user" }),
++			autoloadSkills: [],
++			parentHindsightSessionState: undefined,
++			parentMnemopiSessionState: undefined,
++			parentTelemetry: undefined,
++			parentArtifactManager: undefined,
++			planReference: undefined,
++			enableIrc: false,
++			keepAlive: false,
++		});
++		options.description = profile.targetAgentName;
++	}
++	async started(session: AgentSession): Promise<void> {
++		const nativeSessionId = session.sessionId;
++		const record = this.record;
++		if (record.nativeSessionId && record.nativeSessionId !== nativeSessionId)
++			reject("result_conflict", record.request.nativeTaskId);
++		record.nativeSessionId = nativeSessionId;
++		put(record);
++		const ack = object(
++			await this.bridge.requestReceipt(nativeMethods.started, {
++				attemptId: record.prepared!.attemptId,
++				nativeTaskId: record.request.nativeTaskId,
++				nativeSessionId,
++				parentGeneration: record.request.parentGeneration,
++			}),
++		);
++		if (
++			ack.attemptId !== record.prepared!.attemptId ||
++			ack.nativeTaskId !== record.request.nativeTaskId ||
++			ack.nativeSessionId !== nativeSessionId ||
++			!["accepted", "duplicate"].includes(String(ack.disposition))
++		)
++			reject("result_conflict", record.request.nativeTaskId);
++		if (this.signal.aborted) reject("permission_denied", record.request.nativeTaskId);
++		this.#started = true;
++		record.state = "running";
++		put(record);
++		const configs: Record<string, MCPHttpServerConfig> = Object.create(null);
++		const sources: Record<string, { provider: string; providerName: string; path: string; level: "project" }> =
++			Object.create(null);
++		for (const server of record.prepared!.profile.mcpServers) {
++			configs[server.name] = {
++				type: "http",
++				url: server.url,
++				headerPolicy: "origin-locked",
++				[nativeTaskCredential]: async () => {
++					if (!this.#started || this.signal.aborted || this.record.terminalEvent)
++						throw new Error("Native task credential unavailable");
++					try {
++						const credential = object(
++							await this.bridge.connection.request(nativeMethods.credential, {
++								attemptId: record.prepared!.attemptId,
++								nativeTaskId: record.request.nativeTaskId,
++								credentialHandle: server.credentialHandle,
++								parentGeneration: record.request.parentGeneration,
++							}),
++						);
++						const expiry = Date.parse(String(credential.expiresAt));
++						if (
++							typeof credential.authorization !== "string" ||
++							!credential.authorization ||
++							/[\r\n]/u.test(credential.authorization) ||
++							!Number.isFinite(expiry) ||
++							expiry <= Date.now()
++						)
++							throw new Error();
++						return { authorization: credential.authorization, signal: this.signal };
++					} catch {
++						throw new Error("Native task credential unavailable");
++					}
++				},
++			};
++			sources[server.name] = {
++				provider: "acp",
++				providerName: "Native Expert",
++				path: `native-task://${record.request.nativeTaskId}`,
++				level: "project",
++			};
++		}
++		// Native Expert admission needs the actual tool set, not the ordinary UI's
++		// eager-start window (which may return before initialization has finished).
++		const result = await this.manager.connectServers(configs, sources, undefined, 0);
++		if (result.errors.size) reject("probe_error", record.request.nativeTaskId);
++	}
++	async initialized(): Promise<void> {
++		const record = this.record;
++		if (!this.#started || !record.nativeSessionId || this.signal.aborted)
++			reject("permission_denied", record.request.nativeTaskId);
++		const ack = object(
++			await this.bridge.requestReceipt(nativeMethods.started, {
++				attemptId: record.prepared!.attemptId,
++				nativeTaskId: record.request.nativeTaskId,
++				nativeSessionId: record.nativeSessionId,
++				parentGeneration: record.request.parentGeneration,
++				initializationComplete: true,
++			}),
++		);
++		if (
++			ack.attemptId !== record.prepared!.attemptId ||
++			ack.nativeTaskId !== record.request.nativeTaskId ||
++			ack.nativeSessionId !== record.nativeSessionId ||
++			!["accepted", "duplicate"].includes(String(ack.disposition))
++		)
++			reject("result_conflict", record.request.nativeTaskId);
++		if (this.signal.aborted) reject("permission_denied", record.request.nativeTaskId);
++	}
++	async finish(summary: string, outcome: "completed" | "failed" | "stopped"): Promise<void> {
++		if (!this.#started) return;
++		// A cleanup timeout is not proof of stopped: wait for the original native
++		// executor's real deferred cleanup instead of fabricating a terminal.
++		await Promise.all(this.#cleanup);
++		const record = this.record;
++		// Do not truncate a result and claim it is the complete delivery.
++		if (outcome === "completed" && this.#requiresReport && !this.#reported)
++			throw new Error("Native Expert completed without declaring its deliverable files");
++		const artifacts = await captureNativeExpertArtifacts(record.prepared!.profile.artifactRoot, this.#artifactPaths);
++		if (canonical(artifacts) !== canonical(this.#reportedArtifacts))
++			reject("resource_corrupt", record.request.nativeTaskId);
++		const terminalEvent: Event = {
++			protocolVersion: 1,
++			attemptId: record.prepared!.attemptId,
++			nativeTaskId: record.request.nativeTaskId,
++			parentGeneration: record.request.parentGeneration,
++			sequence: 1,
++			payload: { kind: "terminal", outcome, result: { summary, artifacts }, issue: null },
++		};
++		if (record.terminalEvent && canonical(record.terminalEvent) !== canonical(terminalEvent))
++			reject("result_conflict", record.request.nativeTaskId);
++		record.sequence = 1;
++		record.terminalEvent = terminalEvent;
++		record.state = "terminal";
++		put(record);
++		await this.bridge.deliver(record);
++	}
++	async dispose(): Promise<void> {
++		this.#started = false;
++		try {
++			await Promise.all(this.#cleanup);
++		} finally {
++			try {
++				await this.manager.disconnectAll();
++			} finally {
++				await this.#artifactCleanup?.();
++			}
++		}
++	}
++}
+diff --git a/packages/coding-agent/src/task/persisted-revive.ts b/packages/coding-agent/src/task/persisted-revive.ts
+--- a/packages/coding-agent/src/task/persisted-revive.ts
++++ b/packages/coding-agent/src/task/persisted-revive.ts
+@@ -141,7 +141,7 @@
+ 		// probe below, so gate on the stamped contract instead — otherwise a
+ 		// restart + peer message revives the agent outside isolation, in the
+ 		// parent cwd, contradicting the delivery notice.
+-		if (peek.init.isolated) return undefined;
++		if (peek.init.isolated || peek.init.nativeExpertAttemptId) return undefined;
+ 		try {
+ 			await fs.stat(restoredSeance?.cwd ?? peek.cwd);
+ 		} catch {
+diff --git a/packages/coding-agent/src/task/restore.ts b/packages/coding-agent/src/task/restore.ts
+--- a/packages/coding-agent/src/task/restore.ts
++++ b/packages/coding-agent/src/task/restore.ts
+@@ -76,7 +76,7 @@
+ 		const id = sub.agentId;
+ 		const ref = registry.get(id);
+ 		const init = extractSessionInit(sub.entries);
+-		if (!ref?.sessionFile || ref.kind !== "sub" || !init || init.isolated) {
++		if (!ref?.sessionFile || ref.kind !== "sub" || !init || init.isolated || init.nativeExpertAttemptId) {
+ 			logger.debug("Interrupted subagent cannot be revived; not restored", { id });
+ 			continue;
+ 		}
+diff --git a/packages/coding-agent/src/task/structured-subagent.ts b/packages/coding-agent/src/task/structured-subagent.ts
+--- a/packages/coding-agent/src/task/structured-subagent.ts
++++ b/packages/coding-agent/src/task/structured-subagent.ts
+@@ -68,6 +68,12 @@
+ } from "@oh-my-pi/pi-tui/tools/task";
+ import type { WorkPoolYieldItem } from "./workpool-yield";
+ import { parseIsolationBackend } from "./worktree";
++import {
++	nativeExpertFor,
++	nativeExpertSessionFor,
++	type NativeExpertBridge,
++	type NativeExpertExecution,
++} from "./native-expert";
+ 
+ import {
+ 	cfgIsolationBackend,
+@@ -323,7 +329,12 @@
+ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentName: string): void {
+ 	const taskDepth = request.session.taskDepth ?? 0;
+ 	const maxDepth = cfgTaskMaxRecursionDepth.get(request.session.settings);
+-	if (!canSpawnAtDepth(maxDepth, taskDepth)) {
++	const native =
++		request.invocationKind === "task" && taskDepth === 0
++			? nativeExpertFor({ ...request, agent: agentName })
++			: undefined;
++	if (native) native.assertAdmission(agentName, request.parentToolCallId);
++	if (!native && !canSpawnAtDepth(maxDepth, taskDepth)) {
+ 		throw new StructuredSubagentError(
+ 			"preflight",
+ 			`Cannot spawn another agent at task depth ${taskDepth}; maximum depth is ${maxDepth}.`,
+@@ -451,7 +462,11 @@
+  */
+ const inflightDiscovery = new Map<string, { fn: typeof discoverAgents; promise: Promise<DiscoveryResult> }>();
+ 
+-function discoverAgentsShared(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
++function discoverAgentsShared(
++	cwd: string,
++	extensionRoots?: EffectiveExtensionRoots,
++	native?: NativeExpertBridge,
++): Promise<DiscoveryResult> {
+ 	const fn = discoverAgents;
+ 	const policy = [
+ 		isProviderEnabled("omp-plugins"),
+@@ -459,10 +474,10 @@
+ 		isUserSourceEnabled("claude-plugins"),
+ 		isUserSourceEnabled("claude"),
+ 	].join(",");
+-	const key = `${path.resolve(cwd)}\0${policy}\0${JSON.stringify(extensionRoots ?? null)}`;
++	const key = `${path.resolve(cwd)}\0${policy}\0${JSON.stringify(extensionRoots ?? null)}\0${native?.catalogDirectory ?? ""}\0${native?.catalogCacheKey ?? ""}`;
+ 	const existing = inflightDiscovery.get(key);
+ 	if (existing && existing.fn === fn) return existing.promise;
+-	const promise = fn(cwd, undefined, extensionRoots);
++	const promise = fn(cwd, undefined, extensionRoots, native?.catalogDirectory);
+ 	const entry = { fn, promise };
+ 	inflightDiscovery.set(key, entry);
+ 	const clear = () => {
+@@ -490,7 +505,12 @@
+ 	if (agentName !== SEANCE_AGENT_NAME) assertPlanControlsAllowed(request, planMode);
+ 	assertDepthAndSpawnAllowed(request, agentName);
+ 
+-	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
++	const sessionBridge = nativeExpertSessionFor(request.session);
++	const discovery = await discoverAgentsShared(
++		request.session.cwd,
++		request.session.effectiveExtensionRoots?.(),
++		sessionBridge,
++	);
+ 	const agents = [...discovery.agents, ...(request.session.getSessionAgents?.() ?? [])];
+ 	const agent = getAgent(agents, agentName);
+ 	if (!agent) {
+@@ -501,6 +521,19 @@
+ 			`Unknown agent "${agentName}". Available: ${available}. Searched: ${searched}`,
+ 		);
+ 	}
++	const catalogAgent =
++		!!sessionBridge?.catalogDirectory &&
++		!!agent.filePath &&
++		path.dirname(agent.filePath) === path.join(sessionBridge.catalogDirectory, "agents");
++	// A host-only definition is never an ordinary Task fallback, even when ordinary spawning is enabled.
++	if (catalogAgent) sessionBridge!.assertAdmission(agentName, request.parentToolCallId);
++	const native = nativeExpertFor({ ...request, agent: agentName });
++	if (native && !catalogAgent) {
++		throw new StructuredSubagentError(
++			"preflight",
++			`Native target "${agentName}" is missing from the connection catalogue.`,
++		);
++	}
+ 	const disabledAgents = cfgTaskDisabledAgents.get(request.session.settings);
+ 	if (disabledAgents.includes(agentName)) {
+ 		const enabled = agents
+@@ -981,6 +1014,17 @@
+  */
+ export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
+ 	const policy = await applySpawnHook(request, await resolveEffectiveSubagentPolicy(request));
++	const bridge = nativeExpertFor(request);
++	return bridge
++		? bridge.run(request, execution => executeStructuredSubagent(request, policy, execution))
++		: executeStructuredSubagent(request, policy);
++}
++
++async function executeStructuredSubagent(
++	request: StructuredSubagentRequest,
++	policy: EffectiveSubagentPolicy,
++	nativeExpert?: NativeExpertExecution,
++): Promise<StructuredSubagentResult> {
+ 	const lease = await leaseArtifacts(request.session, request.invocationKind);
+ 	let changesApplied: boolean | null = null;
+ 	let mergeSummary = "";
+@@ -1008,6 +1052,7 @@
+ 			deferredCleanup = completion;
+ 		};
+ 		baseOptions.planReference = await loadPlanReference(request, policy);
++		if (nativeExpert) await nativeExpert.apply(baseOptions);
+ 		let isolationContext: IsolationContext | null = null;
+ 		if (policy.isIsolated) {
+ 			try {
+@@ -1136,7 +1181,9 @@
+ 			lease.unregister?.();
+ 		};
+ 		if (shouldCleanup) {
+-			if (deferredCleanup) {
++			if (nativeExpert) {
++				nativeExpert.deferArtifactCleanup(cleanupArtifacts);
++			} else if (deferredCleanup) {
+ 				trackLateCleanup(deferredCleanup.then(cleanupArtifacts), {
+ 					resource: "artifacts",
+ 					artifactsDir: lease.artifactsDir,
+diff --git a/packages/coding-agent/src/tools/index.ts b/packages/coding-agent/src/tools/index.ts
+--- a/packages/coding-agent/src/tools/index.ts
++++ b/packages/coding-agent/src/tools/index.ts
+@@ -104,6 +104,7 @@
+ import { cfgLspEnabled } from "../lsp/settings";
+ import { cfgMemoryBackend } from "../memory-backend/settings";
+ import { cfgTaskMaxRecursionDepth } from "../task/settings";
++import { nativeExpertTaskTargets } from "../task/native-expert";
+ 
+ export * from "../edit";
+ export * from "../goals";
+@@ -803,7 +804,10 @@
+ 			);
+ 		}
+ 		if (name === "task") {
+-			return canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(session.settings), session.taskDepth ?? 0);
++			return (
++				canSpawnAtDepth(cfgTaskMaxRecursionDepth.get(session.settings), session.taskDepth ?? 0) ||
++				nativeExpertTaskTargets(session).length > 0
++			);
+ 		}
+ 		return true;
+ 	};
+diff --git a/packages/coding-agent/test/native-expert-lifecycle.test.ts b/packages/coding-agent/test/native-expert-lifecycle.test.ts
+--- /dev/null
++++ b/packages/coding-agent/test/native-expert-lifecycle.test.ts
+@@ -0,0 +1,1546 @@
++import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
++import * as fs from "node:fs/promises";
++import os from "node:os";
++import path from "node:path";
++import { randomUUID } from "node:crypto";
++import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils";
++import type { AgentSideConnection } from "@oh-my-pi/pi-utils/acp";
++import { RequestError } from "@oh-my-pi/pi-utils/acp";
++import { type } from "@oh-my-pi/omptype";
++import type { AgentSession } from "../src/session/agent-session";
++import { extractSessionInit } from "../src/session/session-manager";
++import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
++import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
++import { AsyncJobManager } from "../src/async/job-manager";
++import { ModelRegistry } from "../src/config/model-registry";
++import { Settings } from "../src/config/settings";
++import { isProviderEnabled } from "../src/capability";
++import { AgentLifecycleManager } from "../src/registry/agent-lifecycle";
++import { AgentRegistry } from "../src/registry/agent-registry";
++import { TaskTool, refreshAgentDiscovery } from "../src/task";
++import type { ExecutorOptions } from "../src/task/executor";
++import type { ToolSession } from "../src/tools";
++import type { TaskParams } from "@oh-my-pi/pi-tui/tools/task";
++import { createAgentSession } from "../src/sdk";
++import { SessionManager } from "../src/session/session-manager";
++import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
++import {
++	canonical,
++	digest,
++	captureNativeExpertArtifacts,
++	NativeExpertBridge,
++	nativeMethods,
++	type NativeExpertExecution,
++} from "../src/task/native-expert";
++import type { StructuredSubagentRequest, StructuredSubagentResult } from "../src/task/structured-subagent";
++
++const originalDir = getAgentDir();
++let root: string;
++beforeAll(async () => {
++	root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-native-lifecycle-")));
++	setAgentDir(root);
++	vi.spyOn(os, "homedir").mockReturnValue(root);
++});
++afterAll(async () => {
++	vi.restoreAllMocks();
++	setAgentDir(originalDir);
++	await fs.rm(root, { recursive: true, force: true });
++});
++
++async function fixture(
++	options: {
++		beforeStarted?: (params: Record<string, unknown>) => Promise<void>;
++		persona?: string;
++		mcpServers?: Array<{ name: string; url: string; credentialHandle: string }>;
++		credential?: () => { authorization: string; expiresAt: string };
++		eventAck?: (params: Record<string, unknown>) => unknown;
++		targetAgentNames?: readonly string[];
++		preparedAgentName?: string;
++		prepareError?: Error;
++		skillEntries?: Array<{ name: string; path: string; description: string; sha256: string }>;
++		catalogDirectory?: string | null;
++	} = {},
++) {
++	const closed = new AbortController();
++	const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
++	const artifactRoots = new Map<string, string>();
++	const request = async (method: string, params: Record<string, unknown>) => {
++		calls.push({ method, params });
++		if (method === nativeMethods.prepare) {
++			if (options.prepareError) throw options.prepareError;
++			const attemptId = `attempt_${params.nativeTaskId}`;
++			const artifactRoot = path.join(root, "artifact-staging", attemptId);
++			await fs.mkdir(artifactRoot, { recursive: true });
++			artifactRoots.set(attemptId, artifactRoot);
++			return {
++				attemptId,
++				capabilityBindingId: "binding",
++				assemblyId: "assembly",
++				profile: {
++					protocolVersion: 1,
++					attemptId,
++					capabilityBindingId: "binding",
++					assemblyId: "assembly",
++					targetAgentName: options.preparedAgentName ?? params.agentName,
++					persona: options.persona ?? "target persona",
++					artifactRoot,
++					skills: options.skillEntries?.map(({ name, path }) => ({ name, path })) ?? [],
++					skillEntries: options.skillEntries ?? [],
++					contextFiles: [],
++					resourceRoots: [],
++					mcpServers: options.mcpServers ?? [],
++				},
++			};
++		}
++		if (method === nativeMethods.started) {
++			await options.beforeStarted?.(params);
++			return {
++				attemptId: params.attemptId,
++				nativeTaskId: params.nativeTaskId,
++				nativeSessionId: params.nativeSessionId,
++				disposition: params.initializationComplete ? "duplicate" : "accepted",
++			};
++		}
++		if (method === nativeMethods.credential) {
++			if (!options.credential) throw new Error("No test credential authority");
++			return options.credential();
++		}
++		if (method === nativeMethods.event) {
++			if (options.eventAck) return options.eventAck(params);
++			const payload = params.payload as { outcome: string; result: unknown; issue: null };
++			return {
++				attemptId: params.attemptId,
++				sequence: params.sequence,
++				disposition: "accepted",
++				resultRef: "ndr_fixture",
++				resultHash: digest(canonical({ outcome: payload.outcome, result: payload.result, issue: null })),
++			};
++		}
++		throw new Error(`Unexpected private request ${method}`);
++	};
++	const connection = { signal: closed.signal, request } as unknown as AgentSideConnection;
++	const catalogDirectory =
++		options.catalogDirectory === undefined ? path.join(root, `catalog-${randomUUID()}`) : options.catalogDirectory;
++	if (catalogDirectory) {
++		await fs.mkdir(path.join(catalogDirectory, "agents"), { recursive: true });
++		await NativeExpertBridge.bindCatalogDirectory(connection, catalogDirectory);
++	}
++	const bridge = new NativeExpertBridge(connection, `parent_${randomUUID()}`);
++	bridge.beginTurn({
++		parentGeneration: "generation",
++		parentTurnId: "turn",
++		targetAgentNames: options.targetAgentNames ?? ["target"],
++	});
++	const toolCallId = `call_${randomUUID()}`;
++	bridge.captureToolCall(toolCallId);
++	const invocation = {
++		session: { cwd: root },
++		invocationKind: "task",
++		agent: "target",
++		assignment: "work",
++		parentToolCallId: toolCallId,
++		index: 0,
++		detached: false,
++	} as StructuredSubagentRequest;
++	return { bridge, connection, calls, invocation, closed, artifactRoots, catalogDirectory };
++}
++function child(id: string) {
++	return { sessionId: id, subscribe: () => () => {} } as unknown as AgentSession;
++}
++function completed(): StructuredSubagentResult {
++	return { result: { exitCode: 0 }, temporaryArtifacts: false } as StructuredSubagentResult;
++}
++
++describe("native Expert lifecycle admission", () => {
++	it("does not advertise an unbuilt source fingerprint", () => {
++		expect(() => NativeExpertBridge.capabilities()).toThrow("probe_error");
++	});
++	it("retains actual tool-call ownership across a later parent turn", async () => {
++		const f = await fixture();
++		f.bridge.beginTurn({ parentGeneration: "generation", parentTurnId: "later", targetAgentNames: ["target"] });
++		await f.bridge.run(f.invocation, async execution => {
++			await execution.started(child("session"));
++			return completed();
++		});
++		expect(f.calls.find(call => call.method === nativeMethods.prepare)!.params.parentTurnId).toBe("turn");
++		f.bridge.close();
++	});
++	it("deduplicates an active request and rejects conflicting input", async () => {
++		const f = await fixture();
++		const gate = Promise.withResolvers<void>();
++		let executions = 0;
++		const run = async (execution: NativeExpertExecution) => {
++			executions++;
++			await execution.started(child("session"));
++			await gate.promise;
++			return completed();
++		};
++		const first = f.bridge.run(f.invocation, run);
++		const second = f.bridge.run(f.invocation, run);
++		await expect(f.bridge.run({ ...f.invocation, assignment: "different" }, run)).rejects.toThrow("result_conflict");
++		gate.resolve();
++		await Promise.all([first, second]);
++		expect(executions).toBe(1);
++		f.bridge.close();
++	});
++	it("queries an existing terminal without creating or resuming a child", async () => {
++		const f = await fixture();
++		await f.bridge.run(f.invocation, async execution => {
++			await execution.started(child("session"));
++			return completed();
++		});
++		const prepare = f.calls.find(call => call.method === nativeMethods.prepare)!;
++		const before = f.calls.length;
++		const result = await NativeExpertBridge.query(f.connection, {
++			nativeTaskId: prepare.params.nativeTaskId,
++			attemptId: `attempt_${prepare.params.nativeTaskId}`,
++		});
++		expect(result.state).toBe("terminal");
++		expect(f.calls.length).toBe(before);
++		await expect(
++			f.bridge.run(f.invocation, async () => {
++				throw new Error("must never restart");
++			}),
++		).rejects.toThrow("execution_unknown");
++		f.bridge.close();
++	});
++	it("cancels only one controller; parent cancellation closes later admission", async () => {
++		const f = await fixture();
++		const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
++		const ready = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
++		const signals: AbortSignal[] = [];
++		const run = (index: number) =>
++			f.bridge.run({ ...f.invocation, index }, async execution => {
++				signals[index] = execution.signal;
++				await execution.started(child(`session_${index}`));
++				ready[index]!.resolve();
++				await gates[index]!.promise;
++				return completed();
++			});
++		const first = run(0);
++		const second = run(1);
++		// Await preparation using the actual private request barrier, not model/tool execution.
++		await Promise.all(ready.map(gate => gate.promise));
++		const prepare = f.calls.filter(call => call.method === nativeMethods.prepare)[0]!;
++		expect(
++			NativeExpertBridge.cancel(f.connection, {
++				nativeTaskId: prepare.params.nativeTaskId,
++				attemptId: `attempt_${prepare.params.nativeTaskId}`,
++			}).accepted,
++		).toBe(true);
++		expect(signals[0]!.aborted).toBe(true);
++		expect(signals[1]!.aborted).toBe(false);
++		f.bridge.cancelParent();
++		expect(signals[1]!.aborted).toBe(true);
++		gates.forEach(gate => gate.resolve());
++		await Promise.allSettled([first, second]);
++		await expect(f.bridge.run({ ...f.invocation, index: 2 }, async () => completed())).rejects.toThrow(
++			"permission_denied",
++		);
++		f.bridge.close();
++	});
++	it("keeps the native-attempt marker through later session-init records", () => {
++		const records = [
++			{
++				type: "session_init",
++				systemPrompt: [],
++				task: "work",
++				tools: [],
++				nativeExpertAttemptId: "attempt",
++				nativeExpertDeliveryMode: "host-continuation",
++			},
++			{ type: "session_init", systemPrompt: [], task: "work", tools: [] },
++		] as unknown as Parameters<typeof extractSessionInit>[0];
++		expect(extractSessionInit(records)?.nativeExpertAttemptId).toBe("attempt");
++		expect(extractSessionInit(records)?.nativeExpertDeliveryMode).toBe("host-continuation");
++	});
++	it("requires actual scheduler facts and fixes them across duplicate preparation", async () => {
++		const f = await fixture();
++		await expect(f.bridge.run({ ...f.invocation, detached: undefined }, async () => completed())).rejects.toThrow(
++			"probe_error",
++		);
++		expect(f.calls).toHaveLength(0);
++		const ready = Promise.withResolvers<void>();
++		const release = Promise.withResolvers<void>();
++		const pending = f.bridge.run({ ...f.invocation, detached: true }, async execution => {
++			await execution.started(child("async-child"));
++			ready.resolve();
++			await release.promise;
++			return completed();
++		});
++		await ready.promise;
++		expect(f.calls.find(call => call.method === nativeMethods.prepare)?.params.deliveryMode).toBe(
++			"host-continuation",
++		);
++		await expect(f.bridge.run(f.invocation, async () => completed())).rejects.toThrow("result_conflict");
++		release.resolve();
++		await pending;
++		f.bridge.close();
++	});
++	it("does not cancel admitted async children at a natural parent turn boundary", async () => {
++		const f = await fixture();
++		const ready = Promise.withResolvers<void>();
++		const release = Promise.withResolvers<void>();
++		const run = f.bridge.run({ ...f.invocation, detached: true }, async execution => {
++			await execution.started(child("live-child"));
++			ready.resolve();
++			await release.promise;
++			expect(execution.signal.aborted).toBe(false);
++			return completed();
++		});
++		await ready.promise;
++		f.bridge.beginTurn(undefined);
++		release.resolve();
++		await run;
++		expect(f.calls.filter(call => call.method === nativeMethods.event)).toHaveLength(1);
++		f.bridge.close();
++	});
++	it("keeps a malformed terminal ACK pending and redelivers the exact immutable sequence", async () => {
++		let valid = false;
++		const f = await fixture({
++			eventAck: params => {
++				const payload = params.payload as { outcome: string; result: unknown };
++				return {
++					attemptId: params.attemptId,
++					sequence: valid ? params.sequence : 2,
++					disposition: "duplicate",
++					resultRef: "ndr_fixture",
++					resultHash: digest(canonical({ outcome: payload.outcome, result: payload.result, issue: null })),
++				};
++			},
++		});
++		let execution: NativeExpertExecution | undefined;
++		// A wrong ACK cannot turn a completed native execution into acknowledged delivery.
++		await expect(
++			f.bridge.run(f.invocation, async current => {
++				execution = current;
++				await current.started(child("outbox-child"));
++				return completed();
++			}),
++		).rejects.toThrow("execution_unknown");
++		const terminal = f.calls.find(call => call.method === nativeMethods.event)!.params;
++		valid = true;
++		await f.bridge.deliver(execution!.record);
++		expect(f.calls.filter(call => call.method === nativeMethods.event).map(call => call.params)).toEqual([
++			terminal,
++			terminal,
++		]);
++		expect(execution!.record.acknowledged).toBe(1);
++		const prepare = f.calls.find(call => call.method === nativeMethods.prepare)!;
++		const restarted = { signal: new AbortController().signal } as AgentSideConnection;
++		expect(
++			(
++				await NativeExpertBridge.query(restarted, {
++					nativeTaskId: prepare.params.nativeTaskId,
++					attemptId: `attempt_${prepare.params.nativeTaskId}`,
++				})
++			).state,
++		).toBe("terminal");
++		f.bridge.close();
++	});
++	it("observes a disconnected nonterminal as unknown without preparing or executing it again", async () => {
++		const f = await fixture();
++		const ready = Promise.withResolvers<void>();
++		const release = Promise.withResolvers<void>();
++		let executions = 0;
++		const pending = f.bridge.run({ ...f.invocation, detached: true }, async execution => {
++			executions++;
++			await execution.started(child("interrupted-child"));
++			ready.resolve();
++			await release.promise;
++			throw new Error("interrupted");
++		});
++		const observed = pending.then(
++			() => true,
++			() => false,
++		);
++		await ready.promise;
++		const prepare = f.calls.find(call => call.method === nativeMethods.prepare)!;
++		const restarted = { signal: new AbortController().signal } as AgentSideConnection;
++		expect(
++			await NativeExpertBridge.query(restarted, {
++				nativeTaskId: prepare.params.nativeTaskId,
++				attemptId: `attempt_${prepare.params.nativeTaskId}`,
++			}),
++		).toEqual({ state: "not-found" });
++		release.resolve();
++		expect(await observed).toBe(false);
++		await expect(
++			f.bridge.run({ ...f.invocation, detached: true }, async () => {
++				executions++;
++				return completed();
++			}),
++		).rejects.toMatchObject({ data: { code: "execution_unknown" } });
++		expect(executions).toBe(1);
++		expect(f.calls.filter(call => call.method === nativeMethods.prepare)).toHaveLength(1);
++		f.bridge.close();
++	});
++	it("rejects conflicting terminal content while the real child is still active", async () => {
++		const f = await fixture();
++		await f.bridge.run(f.invocation, async execution => {
++			await execution.started(child("conflict-child"));
++			await execution.finish("", "completed");
++			await expect(execution.finish("conflicting result", "completed")).rejects.toThrow("result_conflict");
++			return completed();
++		});
++		expect(f.calls.filter(call => call.method === nativeMethods.event)).toHaveLength(1);
++		f.bridge.close();
++	});
++	it("rejects selected catalogue links, noncanonical paths and connection hot-switching", async () => {
++		const selected = path.join(root, `selected-catalog-${randomUUID()}`);
++		await fs.mkdir(path.join(selected, "agents"), { recursive: true });
++		const connection = () => ({ signal: new AbortController().signal }) as AgentSideConnection;
++		await expect(NativeExpertBridge.bindCatalogDirectory(connection(), "relative-catalog")).rejects.toThrow(
++			"probe_error",
++		);
++		await expect(
++			NativeExpertBridge.bindCatalogDirectory(connection(), `${selected}/../${path.basename(selected)}`),
++		).rejects.toThrow("probe_error");
++		await expect(NativeExpertBridge.bindCatalogDirectory(connection(), `${selected}/`)).rejects.toThrow(
++			"probe_error",
++		);
++		if (process.platform !== "win32") {
++			const alias = `${selected}-alias`;
++			await fs.symlink(selected, alias);
++			await expect(NativeExpertBridge.bindCatalogDirectory(connection(), alias)).rejects.toThrow("resource_corrupt");
++			const linkedAgents = `${selected}-linked-agents`;
++			await fs.mkdir(linkedAgents);
++			await fs.symlink(path.join(selected, "agents"), path.join(linkedAgents, "agents"));
++			await expect(NativeExpertBridge.bindCatalogDirectory(connection(), linkedAgents)).rejects.toThrow(
++				"resource_corrupt",
++			);
++		}
++		const f = await fixture({ catalogDirectory: selected });
++		try {
++			await NativeExpertBridge.bindCatalogDirectory(f.connection, selected);
++			const other = `${selected}-other`;
++			await fs.mkdir(path.join(other, "agents"), { recursive: true });
++			await expect(NativeExpertBridge.bindCatalogDirectory(f.connection, other)).rejects.toThrow(
++				"permission_denied",
++			);
++			// Rejection cannot replace the already bound native execution owner.
++			await f.bridge.run(f.invocation, async execution => {
++				await execution.started(child("stable-owner"));
++				return completed();
++			});
++			const ordinary = await fixture({ catalogDirectory: null });
++			try {
++				await NativeExpertBridge.bindCatalogDirectory(ordinary.connection, undefined);
++				await expect(NativeExpertBridge.bindCatalogDirectory(ordinary.connection, selected)).rejects.toThrow(
++					"permission_denied",
++				);
++				await expect(
++					ordinary.bridge.run(ordinary.invocation, async () => {
++						throw new Error("Unassembled native execution");
++					}),
++				).rejects.toThrow("permission_denied");
++				expect(ordinary.calls).toHaveLength(0);
++			} finally {
++				ordinary.bridge.close();
++			}
++		} finally {
++			f.bridge.close();
++		}
++	});
++});
++
++describe("native Expert consumer-visible execution", () => {
++	it.each([
++		{
++			asyncEnabled: false,
++			managerPresent: true,
++			blocking: false,
++			mode: "native-return",
++			isolated: false,
++			native: true,
++			producer: "write",
++			persona: `Fixed target instructions.\n${"Full selected context.\n".repeat(1_000)}Full selected target context end.`,
++		},
++		{
++			asyncEnabled: true,
++			managerPresent: true,
++			blocking: true,
++			mode: "native-return",
++			isolated: false,
++			native: true,
++			producer: "write",
++		},
++		{
++			asyncEnabled: true,
++			managerPresent: false,
++			blocking: false,
++			mode: "native-return",
++			isolated: false,
++			native: true,
++			producer: "write",
++		},
++		{
++			asyncEnabled: true,
++			managerPresent: true,
++			blocking: false,
++			mode: "host-continuation",
++			isolated: false,
++			native: true,
++			producer: "write",
++		},
++		{
++			asyncEnabled: false,
++			managerPresent: true,
++			blocking: false,
++			mode: "native-return",
++			isolated: true,
++			native: true,
++			producer: "shell",
++		},
++		{
++			asyncEnabled: true,
++			managerPresent: true,
++			blocking: false,
++			mode: "host-continuation",
++			isolated: true,
++			native: true,
++			producer: "shell",
++		},
++		{
++			asyncEnabled: false,
++			managerPresent: true,
++			blocking: false,
++			mode: "native-return",
++			isolated: false,
++			native: false,
++			producer: "write",
++		},
++	])(
++		"uses real Task scheduling: $asyncEnabled/$managerPresent/$blocking/$isolated/$native -> $mode",
++		async scenario => {
++			const { asyncEnabled, managerPresent, blocking, mode, isolated, native, producer } = scenario;
++			// Only the model is synthetic. TaskTool, native scheduler, executor, session,
++			// durable bridge/outbox and async delivery owner all run their real code.
++			const persona = "persona" in scenario ? scenario.persona : "target persona";
++			const f = await fixture({ persona });
++			const sourceId = `native-consumer-${randomUUID()}`;
++			const cwd = path.join(root, sourceId);
++			await fs.mkdir(cwd);
++			if (isolated) {
++				for (const args of [
++					["init"],
++					["config", "user.name", "Native Test"],
++					["config", "user.email", "native-test@example.invalid"],
++					["commit", "--allow-empty", "-m", "initial"],
++				]) {
++					const git = Bun.spawnSync(["git", ...args], { cwd });
++					if (git.exitCode !== 0) throw new Error(git.stderr.toString());
++				}
++			}
++			const report = `native-result-${sourceId}`;
++			const agentsDir = native ? path.join(f.catalogDirectory!, "agents") : path.join(cwd, ".omp", "agents");
++			await fs.mkdir(agentsDir, { recursive: true });
++			await fs.writeFile(
++				path.join(agentsDir, "target.md"),
++				`---\nname: target\ndescription: Native lifecycle target\nmodel: mock/native-lifecycle\ntools: [read, write, bash]\nblocking: ${blocking}\n---\nTarget role.\n`,
++			);
++			registerMockApi(sourceId);
++			const auth = createInMemoryAuthStorage();
++			auth.keys.setRuntime("mock", "test-key");
++			const code = `export const nativeResult = ${JSON.stringify(sourceId)};\n`;
++			const model = createMockModel({
++				id: "native-lifecycle",
++				responses: [
++					{
++						content: [
++							producer === "shell"
++								? {
++										type: "toolCall",
++										name: "bash",
++										arguments: { command: `printf '%s' '${code}' > result.ts` },
++									}
++								: { type: "toolCall", name: "write", arguments: { path: "result.ts", content: code } },
++						],
++					},
++					...(native
++						? [
++								{
++									content: [
++										{
++											type: "toolCall" as const,
++											name: "native_expert_report_artifacts",
++											arguments: { paths: ["result.ts"] },
++										},
++									],
++								},
++							]
++						: []),
++					{ content: [report] },
++				],
++			});
++			const registry = new ModelRegistry(auth, path.join(cwd, "models.yml"));
++			const find = registry.find.bind(registry);
++			registry.find = (provider, id) => (provider === "mock" && id === model.id ? model : find(provider, id));
++			registry.getAvailable = () => [model];
++			const nativeDeliveries: unknown[] = [];
++			const manager = managerPresent
++				? new AsyncJobManager({
++						onJobComplete: delivery => {
++							nativeDeliveries.push(delivery);
++						},
++					})
++				: undefined;
++			const sessionId = randomUUID();
++			if (native) f.bridge.bindSession(sessionId);
++			const caller = {
++				cwd,
++				hasUI: false,
++				authStorage: auth,
++				modelRegistry: registry,
++				asyncJobManager: manager,
++				settings: Settings.isolated({
++					"async.enabled": asyncEnabled,
++					"task.structured": false,
++					"task.isolation.enabled": isolated,
++					"isolation.backend": "rcopy",
++					"task.isolation.apply": false,
++					"task.maxRecursionDepth": native ? 0 : 2,
++					"task.agentIdleTtlMs": 0,
++					"compaction.enabled": false,
++					"retry.enabled": false,
++					"todo.enabled": false,
++					"todo.reminders": false,
++					"advisor.enabled": false,
++					modelRoles: { default: "mock/native-lifecycle" },
++				}),
++				getSessionFile: () => null,
++				getSessionId: () => sessionId,
++				getSessionSpawns: () => "*",
++				enableLsp: false,
++				enableMCP: false,
++				enableIrc: false,
++			} as unknown as ToolSession;
++			try {
++				const tool = await TaskTool.create(caller);
++				const result = await tool.execute(f.invocation.parentToolCallId!, {
++					agent: "target",
++					name: `Child${sourceId.replaceAll("-", "")}`,
++					task: "Report the assigned result.",
++					solutionSpace: "one fixed change: write and report the requested module with the selected tools",
++					...(isolated ? { isolated: true } : {}),
++				} as TaskParams);
++				if (mode === "host-continuation") {
++					expect(result.details?.async?.jobId, JSON.stringify(result)).toBeTruthy();
++					const job = manager!.getJob(result.details!.async!.jobId!);
++					await job!.promise;
++					expect(job!.status).toBe("completed");
++					expect(job!.resultText).toContain(report);
++					expect(result.details?.results).toHaveLength(0);
++				} else {
++					expect(result.details?.async).toBeUndefined();
++					expect(result.details?.results[0]?.exitCode, JSON.stringify(result)).toBe(0);
++					expect(result.content.some(part => part.type === "text" && part.text.includes(report))).toBe(true);
++					expect(manager?.getAllJobs() ?? []).toHaveLength(0);
++				}
++				expect(model.calls).toHaveLength(native ? 3 : 2);
++				expect(
++					model.calls[0]!.context.tools?.some(tool => tool.name === "native_expert_report_artifacts") ?? false,
++				).toBe(native);
++				if ("persona" in scenario)
++					expect(model.calls[0]!.context.systemPrompt?.join("\n")).toContain("Full selected target context end.");
++				if (!native) {
++					expect(f.calls).toHaveLength(0);
++					expect(f.artifactRoots.size).toBe(0);
++					expect(await fs.readFile(path.join(cwd, "result.ts"), "utf8")).toBe(code);
++					return;
++				}
++				const prepared = f.calls.filter(call => call.method === nativeMethods.prepare);
++				expect(prepared).toHaveLength(1);
++				expect(prepared[0]!.params.deliveryMode).toBe(mode);
++				const terminals = f.calls.filter(call => call.method === nativeMethods.event);
++				expect(terminals).toHaveLength(1);
++				const payload = terminals[0]!.params.payload;
++				expect(payload).toEqual(
++					expect.objectContaining({
++						result: expect.objectContaining({ summary: expect.stringContaining(report) }),
++					}),
++				);
++				const artifactRoot = f.artifactRoots.get(`attempt_${prepared[0]!.params.nativeTaskId}`)!;
++				expect(artifactRoot).toBeTruthy();
++				expect(await fs.readFile(path.join(artifactRoot, "result.ts"), "utf8")).toBe(code);
++				expect(prepared[0]!.params).not.toHaveProperty("workRoot");
++				if (isolated) await expect(fs.access(path.join(cwd, "result.ts"))).rejects.toThrow();
++				else expect(await fs.readFile(path.join(cwd, "result.ts"), "utf8")).toBe(code);
++				expect(payload).toEqual(
++					expect.objectContaining({
++						result: expect.objectContaining({
++							artifacts: [{ path: "result.ts", sha256: digest(code), size: Buffer.byteLength(code) }],
++						}),
++					}),
++				);
++				// Sync returns once inline; async retains output but never independently
++				// delivers a native async-result/wake in addition to the durable host event.
++				expect(nativeDeliveries).toHaveLength(0);
++			} finally {
++				f.bridge.close();
++				await manager?.dispose({ timeoutMs: 1000 });
++				await AgentLifecycleManager.global().dispose();
++				for (const ref of AgentRegistry.global().list()) await ref.session?.dispose();
++				AgentLifecycleManager.resetGlobalForTests();
++				AgentRegistry.resetGlobalForTests();
++				unregisterCustomApis(sourceId);
++				auth.close();
++			}
++		},
++		30_000,
++	);
++
++	it.each([
++		"trusted",
++		"trusted-async",
++		"ordinary",
++		"unscoped",
++		"unknown-target",
++		"no-metadata",
++		"malformed-metadata",
++		"missing-metadata",
++		"missing-capture",
++		"stale-generation",
++		"wrong-target",
++		"cancelled",
++		"unsupported-prepare",
++		"wrong-profile",
++		"plugins-disabled",
++		"hostile-siblings",
++		"ambient-shadow",
++		"no-catalog",
++		"missing-catalog-target",
++	] as const)(
++		"routes an actual depth-zero parent SDK through its registered Task tool: %s",
++		async scenario => {
++			const asyncRun = scenario === "trusted-async";
++			const succeeds =
++				scenario === "trusted" ||
++				asyncRun ||
++				scenario === "plugins-disabled" ||
++				scenario === "hostile-siblings" ||
++				scenario === "ambient-shadow";
++			const hostileSiblings = scenario === "hostile-siblings";
++			const sourceId = `native-parent-${randomUUID()}`;
++			const cwd = path.join(root, sourceId);
++			await fs.mkdir(cwd);
++			const targetName = `expert-${randomUUID()}`;
++			const otherName = `expert-${randomUUID()}`;
++			const ordinaryName = `ordinary-${randomUUID()}`;
++			const parentSkill = path.join(cwd, "parent-skill.md");
++			const targetSkill = path.join(cwd, "target-skill.md");
++			await fs.writeFile(
++				parentSkill,
++				"---\nname: parent-only\ndescription: PARENT_SKILL_ONLY\n---\nParent instructions.",
++			);
++			const skillBytes =
++				"---\nname: target-only\ndescription: TARGET_SKILL_ONLY\n---\nSelected target instructions.";
++			await fs.writeFile(targetSkill, skillBytes);
++			const requests: string[] = [];
++			const siblingRequests: string[] = [];
++			const server = Bun.serve({
++				hostname: "127.0.0.1",
++				port: 0,
++				async fetch(request) {
++					if (request.method !== "POST") return new Response(null, { status: 405 });
++					const message = (await request.json()) as { id?: number; method: string };
++					if (new URL(request.url).pathname === "/catalog-sibling") siblingRequests.push(message.method);
++					requests.push(message.method);
++					if (message.id === undefined) return new Response(null, { status: 202 });
++					const result =
++						message.method === "initialize"
++							? {
++									protocolVersion: "2024-11-05",
++									capabilities: { tools: {} },
++									serverInfo: { name: "target", version: "1" },
++								}
++							: message.method === "tools/list"
++								? {
++										tools: [
++											{
++												name: "lookup",
++												description: "Target-only lookup",
++												inputSchema: { type: "object", properties: {} },
++											},
++										],
++									}
++								: { content: [{ type: "text", text: `target-authority-${sourceId}` }] };
++					return Response.json({ jsonrpc: "2.0", id: message.id, result });
++				},
++			});
++			const f = await fixture({
++				catalogDirectory: scenario === "no-catalog" ? null : undefined,
++				targetAgentNames: [targetName],
++				persona: `TARGET_PERSONA_ONLY ${sourceId}`,
++				preparedAgentName: scenario === "wrong-profile" ? otherName : undefined,
++				prepareError:
++					scenario === "unsupported-prepare"
++						? new RequestError(-32601, "Native preparation unsupported")
++						: undefined,
++				skillEntries: [
++					{ name: "target-only", path: targetSkill, description: "TARGET_SKILL_ONLY", sha256: digest(skillBytes) },
++				],
++				mcpServers: [
++					{
++						name: "target",
++						url: `http://127.0.0.1:${server.port}/mcp`,
++						credentialHandle: "target-only-credential",
++					},
++				],
++				credential: () => ({
++					authorization: "Bearer target-only",
++					expiresAt: new Date(Date.now() + 60_000).toISOString(),
++				}),
++				beforeStarted: async params => {
++					expect(childModel.calls).toHaveLength(0);
++					if (params.initializationComplete === true) expect(requests).toContain("tools/list");
++					else expect(requests).toHaveLength(0);
++				},
++			});
++			f.bridge.beginTurn(undefined);
++			registerMockApi(sourceId);
++			const auth = createInMemoryAuthStorage();
++			auth.keys.setRuntime("mock", "test-key");
++			const callId = `parent-task-${randomUUID()}`;
++			const requestedAgent =
++				scenario === "ordinary" ? ordinaryName : scenario === "unknown-target" ? "unknown-expert" : targetName;
++			const parentModel = createMockModel({
++				id: `parent-${sourceId}`,
++				responses: [
++					{
++						content: [
++							{
++								type: "toolCall",
++								id: callId,
++								name: "task",
++								arguments: {
++									...(scenario === "unscoped" ? {} : { agent: requestedAgent }),
++									name: "TrustedExpert",
++									task: "Produce the selected Expert artifact.",
++									solutionSpace:
++										"one fixed change: produce the selected Expert artifact using its own Skill and tool",
++								},
++							},
++						],
++					},
++					{ content: ["parent settled"] },
++				],
++			});
++			const code = `export const authority = ${JSON.stringify(`target-authority-${sourceId}`)};\n`;
++			const childModel = createMockModel({
++				id: `child-${sourceId}`,
++				responses: [
++					{ content: [{ type: "toolCall", name: "read", arguments: { path: targetSkill } }] },
++					{
++						content: [
++							{ type: "toolCall", name: "write", arguments: { path: "xd://mcp__target_lookup", content: "{}" } },
++						],
++					},
++					{
++						content: [
++							{ type: "toolCall", name: "write", arguments: { path: "actual-target.ts", content: code } },
++						],
++					},
++					{
++						content: [
++							{
++								type: "toolCall",
++								name: "native_expert_report_artifacts",
++								arguments: { paths: ["actual-target.ts"] },
++							},
++						],
++					},
++					{ content: [`target completed ${sourceId}`] },
++				],
++			});
++			const ambientDir = path.join(cwd, ".omp", "agents");
++			await fs.mkdir(ambientDir, { recursive: true });
++			const agentsDir = f.catalogDirectory ? path.join(f.catalogDirectory, "agents") : ambientDir;
++			if (scenario !== "missing-catalog-target")
++				await fs.writeFile(
++					path.join(agentsDir, `${targetName}.md`),
++					`---\nname: ${targetName}\ndescription: Trusted opaque Expert\nmodel: mock/${childModel.id}\ntools: [read, write]\n---\nDISCOVERY_IS_NOT_PERSONA\n`,
++				);
++			await fs.writeFile(
++				path.join(agentsDir, `${otherName}.md`),
++				`---\nname: ${otherName}\ndescription: Other opaque Expert\nmodel: mock/${childModel.id}\ntools: [read]\n---\nOther role.\n`,
++			);
++			await fs.writeFile(
++				path.join(ambientDir, `${ordinaryName}.md`),
++				`---\nname: ${ordinaryName}\ndescription: ORDINARY_AGENT_MUST_NOT_BE_ADVERTISED\nmodel: mock/${childModel.id}\ntools: [read, write]\n---\nOrdinary role.\n`,
++			);
++			if (scenario === "ambient-shadow" || scenario === "missing-catalog-target") {
++				await fs.writeFile(
++					path.join(ambientDir, `${targetName}.md`),
++					`---\nname: ${targetName}\ndescription: AMBIENT_TARGET_MUST_NOT_WIN\nmodel: mock/${parentModel.id}\ntools: [bash]\n---\nAMBIENT_PERSONA_MUST_NOT_WIN\n`,
++				);
++			}
++			const siblingMarker = path.join(cwd, "catalog-sibling-executed");
++			if (hostileSiblings) {
++				const siblingCode = `await Bun.write(${JSON.stringify(siblingMarker)}, "executed");\nexport default function () {}\n`;
++				await fs.writeFile(path.join(f.catalogDirectory!, "index.ts"), siblingCode);
++				await fs.mkdir(path.join(f.catalogDirectory!, "scripts"));
++				await fs.writeFile(path.join(f.catalogDirectory!, "scripts", "catalog_sibling.ts"), siblingCode);
++				await fs.mkdir(path.join(f.catalogDirectory!, "hooks", "pre"), { recursive: true });
++				const hook = path.join(f.catalogDirectory!, "hooks", "pre", "task.sh");
++				await fs.writeFile(hook, `#!/bin/sh\nprintf executed > '${siblingMarker.replaceAll("'", "'\\''")}'\n`);
++				await fs.chmod(hook, 0o755);
++				await fs.mkdir(path.join(f.catalogDirectory!, "tools"));
++				await fs.writeFile(path.join(f.catalogDirectory!, "tools", "catalog_sibling.ts"), siblingCode);
++				await fs.mkdir(path.join(f.catalogDirectory!, "skills", "catalog-sibling"), { recursive: true });
++				await fs.writeFile(
++					path.join(f.catalogDirectory!, "skills", "catalog-sibling", "SKILL.md"),
++					"---\nname: catalog-sibling\ndescription: CATALOG_SIBLING_SKILL_MUST_NOT_LOAD\n---\nUnselected sibling instructions.\n",
++				);
++				await fs.writeFile(
++					path.join(f.catalogDirectory!, ".mcp.json"),
++					JSON.stringify({
++						mcpServers: {
++							catalog_sibling: { type: "http", url: `http://127.0.0.1:${server.port}/catalog-sibling` },
++						},
++					}),
++				);
++				const parentSkillDir = path.join(cwd, ".omp", "skills", "parent-only");
++				await fs.mkdir(parentSkillDir, { recursive: true });
++				await fs.copyFile(parentSkill, path.join(parentSkillDir, "SKILL.md"));
++			}
++			const registry = new ModelRegistry(auth, path.join(cwd, "models.yml"));
++			const find = registry.find.bind(registry);
++			registry.find = (provider, id) =>
++				provider === "mock"
++					? ([parentModel, childModel].find(model => model.id === id) ?? find(provider, id))
++					: find(provider, id);
++			registry.getAvailable = () => [parentModel, childModel];
++			const settings = Settings.isolated({
++				"task.maxRecursionDepth": 0,
++				"task.batch": false,
++				"task.structured": false,
++				"async.enabled": asyncRun,
++				"task.agentIdleTtlMs": 0,
++				"compaction.enabled": false,
++				"retry.enabled": false,
++				"todo.enabled": false,
++				"todo.reminders": false,
++				"advisor.enabled": false,
++				modelRoles: { default: `mock/${parentModel.id}` },
++				disabledProviders: scenario === "plugins-disabled" ? ["omp-plugins"] : [],
++			});
++			let parent: AgentSession | undefined;
++			try {
++				({ session: parent } = await createAgentSession({
++					cwd,
++					agentDir: root,
++					model: parentModel,
++					modelRegistry: registry,
++					authStorage: auth,
++					settings,
++					sessionManager: SessionManager.inMemory(cwd),
++					systemPrompt: base => [...base, "PARENT_PERSONA_ONLY"],
++					toolNames: ["read", "task"],
++					skills: hostileSiblings
++						? undefined
++						: [
++								{
++									name: "parent-only",
++									description: "PARENT_SKILL_ONLY",
++									filePath: parentSkill,
++									baseDir: cwd,
++									source: "test",
++								},
++							],
++					contextFiles: [],
++					promptTemplates: [],
++					rules: [],
++					preloadedCustomToolPaths: hostileSiblings ? undefined : [],
++					disableExtensionDiscovery: !hostileSiblings,
++					enableMCP: hostileSiblings,
++					enableLsp: false,
++					enableIrc: false,
++					skipPythonPreflight: true,
++					cacheWarming: false,
++				}));
++				expect(parent.getEnabledToolNames()).not.toContain("task");
++				f.bridge.bindSession(parent.sessionManager.getSessionId());
++				const beforeCall = parent.agent.beforeToolCall;
++				parent.agent.beforeToolCall = async (context, signal) => {
++					if (context.toolCall.id !== callId) return beforeCall?.(context, signal);
++					if (scenario === "missing-metadata") f.bridge.beginTurn(undefined);
++					// Deliberately omit the real capture hook for the unsupported-host control.
++					const result = scenario === "missing-capture" ? undefined : await beforeCall?.(context, signal);
++					if (scenario === "stale-generation")
++						f.bridge.beginTurn({
++							parentGeneration: "next-generation",
++							parentTurnId: "next-turn",
++							targetAgentNames: [targetName],
++						});
++					if (scenario === "cancelled") f.bridge.cancelParent();
++					return result;
++				};
++				if (scenario !== "no-metadata")
++					f.bridge.beginTurn({
++						parentGeneration: "generation",
++						parentTurnId: "parent-turn",
++						targetAgentNames: [scenario === "wrong-target" ? otherName : targetName],
++					});
++				if (scenario === "malformed-metadata")
++					expect(() =>
++						f.bridge.beginTurn({
++							parentGeneration: "generation",
++							parentTurnId: "invalid-turn",
++							targetAgentNames: "not-an-array",
++						}),
++					).toThrow("probe_error");
++				const taskVisible =
++					scenario !== "no-metadata" && scenario !== "malformed-metadata" && scenario !== "no-catalog";
++				// Same late-binding path as ACP session/prompt: metadata arrives after SDK construction.
++				await parent.reconcileBuiltinTools();
++				await parent.refreshMCPTools([
++					{
++						name: "mcp__parent_secret",
++						label: "Parent only",
++						description: "Parent-only capability",
++						parameters: type({}),
++						execute: async () => {
++							throw new Error("Parent-only MCP must never execute in the target");
++						},
++					},
++				]);
++				expect(parent.getEnabledToolNames().includes("task")).toBe(taskVisible);
++				if (scenario === "plugins-disabled") expect(isProviderEnabled("omp-plugins")).toBe(false);
++				await parent.prompt("Delegate through the real registered Task tool.");
++				if (asyncRun) {
++					// A natural parent turn boundary withdraws discovery, not captured async ownership.
++					f.bridge.beginTurn(undefined);
++					await parent.reconcileBuiltinTools();
++					const jobs = parent.asyncJobManager?.getAllJobs() ?? [];
++					expect(jobs).toHaveLength(1);
++					await jobs[0]!.promise;
++					expect(jobs[0]!.status).toBe("completed");
++					expect(jobs[0]!.resultText).toContain(`target completed ${sourceId}`);
++				}
++				const result = parent.messages.find(
++					message => message.role === "toolResult" && message.toolCallId === callId,
++				);
++				expect(result).toBeDefined();
++				expect(parentModel.calls).toHaveLength(2);
++				const taskDescription =
++					parentModel.calls[0]!.context.tools?.find(tool => tool.name === "task")?.description ?? "";
++				if (taskVisible) {
++					expect(taskDescription).toContain(scenario === "wrong-target" ? otherName : targetName);
++					expect(taskDescription).not.toContain("ORDINARY_AGENT_MUST_NOT_BE_ADVERTISED");
++				}
++				if (!succeeds) {
++					expect(result).toMatchObject({ isError: true });
++					expect(childModel.calls).toHaveLength(0);
++					expect(
++						f.calls.filter(call => call.method === nativeMethods.started || call.method === nativeMethods.event),
++					).toHaveLength(0);
++					expect(f.calls.filter(call => call.method === nativeMethods.prepare)).toHaveLength(
++						scenario === "unsupported-prepare" || scenario === "wrong-profile" ? 1 : 0,
++					);
++					expect(requests).toHaveLength(0);
++					await expect(fs.access(path.join(cwd, "actual-target.ts"))).rejects.toThrow();
++					return;
++				}
++				expect(result).toMatchObject({ isError: false });
++				if (!asyncRun) expect(JSON.stringify(result)).toContain(`target completed ${sourceId}`);
++				expect(childModel.calls).toHaveLength(5);
++				const first = childModel.calls[0]!.context;
++				const targetPrompt = first.systemPrompt?.join("\n") ?? "";
++				expect(targetPrompt).toContain(`TARGET_PERSONA_ONLY ${sourceId}`);
++				expect(targetPrompt).toContain("TARGET_SKILL_ONLY");
++				expect(targetPrompt).not.toContain("PARENT_PERSONA_ONLY");
++				expect(targetPrompt).not.toContain("PARENT_SKILL_ONLY");
++				expect(targetPrompt).not.toContain("DISCOVERY_IS_NOT_PERSONA");
++				expect(targetPrompt).toContain("xd://mcp__target_lookup");
++				expect(targetPrompt).not.toContain("mcp__parent_secret");
++				expect(targetPrompt).not.toContain("AMBIENT_PERSONA_MUST_NOT_WIN");
++				expect(targetPrompt).not.toContain("CATALOG_SIBLING_SKILL_MUST_NOT_LOAD");
++				expect(first.tools?.map(tool => tool.name)).not.toContain("catalog_sibling");
++				expect(JSON.stringify(childModel.calls[1]!.context.messages)).toContain("Selected target instructions.");
++				expect(first.tools?.map(tool => tool.name)).not.toContain("task");
++				expect(JSON.stringify(childModel.calls[2]!.context.messages)).toContain(`target-authority-${sourceId}`);
++				expect(requests.filter(method => method === "tools/call")).toHaveLength(1);
++				const parentPrompt = parentModel.calls[0]!.context.systemPrompt?.join("\n") ?? "";
++				expect(parentPrompt).toContain("PARENT_PERSONA_ONLY");
++				expect(parentPrompt).toContain("PARENT_SKILL_ONLY");
++				expect(parentPrompt).toContain("mcp__parent_secret");
++				expect(parentPrompt).not.toContain("TARGET_PERSONA_ONLY");
++				expect(parentPrompt).not.toContain("TARGET_SKILL_ONLY");
++				expect(parentPrompt).not.toContain("CATALOG_SIBLING_SKILL_MUST_NOT_LOAD");
++				expect(taskDescription).not.toContain("AMBIENT_TARGET_MUST_NOT_WIN");
++				expect(siblingRequests).toHaveLength(0);
++				await expect(fs.access(siblingMarker)).rejects.toThrow();
++				if (scenario === "plugins-disabled") expect(isProviderEnabled("omp-plugins")).toBe(false);
++				const prepares = f.calls.filter(call => call.method === nativeMethods.prepare);
++				expect(prepares).toHaveLength(1);
++				expect(prepares[0]!.params).toMatchObject({
++					agentName: targetName,
++					toolCallId: callId,
++					parentGeneration: "generation",
++					deliveryMode: asyncRun ? "host-continuation" : "native-return",
++				});
++				const starts = f.calls.filter(call => call.method === nativeMethods.started);
++				expect(starts).toHaveLength(2);
++				expect(starts[0]!.params.nativeSessionId).toBeTruthy();
++				expect(starts[0]!.params.nativeSessionId).not.toBe(parent.sessionId);
++				expect(starts[1]!.params).toMatchObject({
++					nativeSessionId: starts[0]!.params.nativeSessionId,
++					initializationComplete: true,
++				});
++				const terminals = f.calls.filter(call => call.method === nativeMethods.event);
++				expect(terminals).toHaveLength(1);
++				expect(terminals[0]!.params).toMatchObject({
++					sequence: 1,
++					payload: {
++						outcome: "completed",
++						result: {
++							artifacts: [{ path: "actual-target.ts", sha256: digest(code), size: Buffer.byteLength(code) }],
++						},
++					},
++				});
++				const stage = f.artifactRoots.get(`attempt_${prepares[0]!.params.nativeTaskId}`)!;
++				expect(await fs.readFile(path.join(stage, "actual-target.ts"), "utf8")).toBe(code);
++				f.bridge.beginTurn(undefined);
++				await parent.reconcileBuiltinTools();
++				expect(parent.getEnabledToolNames()).not.toContain("task");
++			} finally {
++				f.bridge.close();
++				await parent?.dispose();
++				await AgentLifecycleManager.global().dispose();
++				for (const ref of AgentRegistry.global().list()) await ref.session?.dispose();
++				AgentLifecycleManager.resetGlobalForTests();
++				AgentRegistry.resetGlobalForTests();
++				unregisterCustomApis(sourceId);
++				auth.close();
++				server.stop(true);
++			}
++		},
++		30_000,
++	);
++
++	it("isolates real Task definitions, model selection and reload snapshots across catalogues and sessions", async () => {
++		const sourceId = `catalog-isolation-${randomUUID()}`;
++		const cwd = path.join(root, sourceId);
++		await fs.mkdir(cwd);
++		const first = await fixture();
++		const second = await fixture();
++		const fixtures = [first, second];
++		registerMockApi(sourceId);
++		const auth = createInMemoryAuthStorage();
++		auth.keys.setRuntime("mock", "test-key");
++		const code = (label: string) => `export const catalogue = ${JSON.stringify(label)};\n`;
++		const models = ["first", "second"].map(label =>
++			createMockModel({
++				id: `${label}-${sourceId}`,
++				responses: [
++					{
++						content: [
++							{ type: "toolCall", name: "write", arguments: { path: `${label}.ts`, content: code(label) } },
++						],
++					},
++					{
++						content: [
++							{
++								type: "toolCall",
++								name: "native_expert_report_artifacts",
++								arguments: { paths: [`${label}.ts`] },
++							},
++						],
++					},
++					{ content: [`${label} catalogue completed`] },
++				],
++			}),
++		);
++		const registry = new ModelRegistry(auth, path.join(cwd, "models.yml"));
++		const find = registry.find.bind(registry);
++		registry.find = (provider, id) =>
++			provider === "mock" ? (models.find(model => model.id === id) ?? find(provider, id)) : find(provider, id);
++		registry.getAvailable = () => models;
++		const writeDefinition = (catalog: string, description: string, modelId: string) =>
++			fs.writeFile(
++				path.join(catalog, "agents", "target.md"),
++				`---\nname: target\ndescription: ${description}\nmodel: mock/${modelId}\ntools: [write]\n---\nDiscovery only.\n`,
++			);
++		await writeDefinition(first.catalogDirectory!, "FIRST_CATALOGUE", models[0]!.id);
++		await writeDefinition(second.catalogDirectory!, "SECOND_CATALOGUE", models[1]!.id);
++		const caller = (f: typeof first): ToolSession => {
++			const sessionId = randomUUID();
++			f.bridge.bindSession(sessionId);
++			return {
++				cwd,
++				hasUI: false,
++				authStorage: auth,
++				modelRegistry: registry,
++				settings: Settings.isolated({
++					"async.enabled": false,
++					"task.structured": false,
++					"task.maxRecursionDepth": 0,
++					"task.agentIdleTtlMs": 0,
++					"compaction.enabled": false,
++					"retry.enabled": false,
++					"todo.enabled": false,
++					"advisor.enabled": false,
++					modelRoles: { default: `mock/${models[0]!.id}` },
++				}),
++				getSessionFile: () => null,
++				getSessionId: () => sessionId,
++				getSessionSpawns: () => "*",
++				enableLsp: false,
++				enableMCP: false,
++				enableIrc: false,
++			} as unknown as ToolSession;
++		};
++		const firstSession = caller(first);
++		const secondSession = caller(second);
++		try {
++			const [firstTool, secondTool] = await Promise.all([
++				TaskTool.create(firstSession),
++				TaskTool.create(secondSession),
++			]);
++			expect(firstTool.description).toContain("FIRST_CATALOGUE");
++			expect(firstTool.description).not.toContain("SECOND_CATALOGUE");
++			expect(secondTool.description).toContain("SECOND_CATALOGUE");
++			expect(secondTool.description).not.toContain("FIRST_CATALOGUE");
++			await expect(
++				NativeExpertBridge.bindCatalogDirectory(first.connection, second.catalogDirectory),
++			).rejects.toThrow("permission_denied");
++			const results = await Promise.all(
++				[firstTool, secondTool].map((tool, index) =>
++					tool.execute(fixtures[index]!.invocation.parentToolCallId!, {
++						agent: "target",
++						name: index === 0 ? "FirstCatalogue" : "SecondCatalogue",
++						task: "Write and report your own catalogue module.",
++						solutionSpace: "one fixed change: write the selected catalogue module and report its exact path",
++					} as TaskParams),
++				),
++			);
++			for (const [index, label] of ["first", "second"].entries()) {
++				expect(results[index]!.details?.results[0]?.exitCode, JSON.stringify(results[index])).toBe(0);
++				expect(models[index]!.calls).toHaveLength(3);
++				expect(await fs.readFile(path.join(cwd, `${label}.ts`), "utf8")).toBe(code(label));
++				const terminal = fixtures[index]!.calls.find(call => call.method === nativeMethods.event)!;
++				expect(terminal.params).toMatchObject({
++					payload: {
++						outcome: "completed",
++						result: {
++							artifacts: [
++								{ path: `${label}.ts`, sha256: digest(code(label)), size: Buffer.byteLength(code(label)) },
++							],
++						},
++					},
++				});
++			}
++			await writeDefinition(first.catalogDirectory!, "FIRST_CATALOGUE_REVISED", models[0]!.id);
++			// A fresh SDK owner of the same directory cannot inherit an earlier session's memo.
++			const third = await fixture({ catalogDirectory: first.catalogDirectory });
++			fixtures.push(third);
++			const thirdTool = await TaskTool.create(caller(third));
++			expect(thirdTool.description).toContain("FIRST_CATALOGUE_REVISED");
++			expect(firstTool.description).not.toContain("FIRST_CATALOGUE_REVISED");
++			await refreshAgentDiscovery(cwd, undefined, firstSession);
++			expect(firstTool.description).toContain("FIRST_CATALOGUE_REVISED");
++			expect(secondTool.description).toContain("SECOND_CATALOGUE");
++			expect(secondTool.description).not.toContain("FIRST_CATALOGUE_REVISED");
++			expect((await TaskTool.create(firstSession)).description).toContain("FIRST_CATALOGUE_REVISED");
++			await writeDefinition(first.catalogDirectory!, "FIRST_CATALOGUE_REBOUND", models[0]!.id);
++			const reboundTool = await TaskTool.create(caller(first));
++			expect(reboundTool.description).toContain("FIRST_CATALOGUE_REBOUND");
++			expect(firstTool.description).not.toContain("FIRST_CATALOGUE");
++			expect(secondTool.description).toContain("SECOND_CATALOGUE");
++		} finally {
++			for (const f of fixtures) f.bridge.close();
++			await AgentLifecycleManager.global().dispose();
++			for (const ref of AgentRegistry.global().list()) await ref.session?.dispose();
++			AgentLifecycleManager.resetGlobalForTests();
++			AgentRegistry.resetGlobalForTests();
++			unregisterCustomApis(sourceId);
++			auth.close();
++		}
++	}, 30_000);
++
++	it("creates a real SDK session before ACK without eager MCP, then initializes with fresh request credentials", async () => {
++		const ackReached = Promise.withResolvers<void>();
++		const ackRelease = Promise.withResolvers<void>();
++		const initializedReached = Promise.withResolvers<void>();
++		const initializedRelease = Promise.withResolvers<void>();
++		let acked = false;
++		let credentials = 0;
++		const requests: Array<{ method: string; authorization: string | null }> = [];
++		const server = Bun.serve({
++			hostname: "127.0.0.1",
++			port: 0,
++			async fetch(request) {
++				if (request.method !== "POST") return new Response(null, { status: 405 });
++				const message = (await request.json()) as { id?: number; method: string };
++				requests.push({ method: message.method, authorization: request.headers.get("authorization") });
++				if (message.id === undefined) return new Response(null, { status: 202 });
++				const result =
++					message.method === "initialize"
++						? {
++								protocolVersion: "2024-11-05",
++								capabilities: { tools: {} },
++								serverInfo: { name: "isolated", version: "1" },
++							}
++						: message.method === "tools/list"
++							? {
++									tools: [
++										{
++											name: "echo",
++											description: "Read lifecycle identity",
++											inputSchema: { type: "object", properties: {} },
++										},
++									],
++								}
++							: { content: [{ type: "text", text: "isolated-result" }] };
++				return Response.json({ jsonrpc: "2.0", id: message.id, result });
++			},
++		});
++		const f = await fixture({
++			beforeStarted: async params => {
++				if (params.initializationComplete === true) {
++					expect(sdk!.getEnabledToolNames()).toContain("mcp__isolated_echo");
++					expect(requests.some(request => request.method === "tools/list")).toBe(true);
++					initializedReached.resolve();
++					await initializedRelease.promise;
++				} else {
++					ackReached.resolve();
++					await ackRelease.promise;
++					acked = true;
++				}
++			},
++			mcpServers: [
++				{ name: "isolated", url: `http://127.0.0.1:${server.port}/mcp`, credentialHandle: "child-handle" },
++			],
++			credential: () => {
++				expect(acked).toBe(true);
++				credentials++;
++				return {
++					authorization: `Bearer isolated-${credentials}`,
++					expiresAt: new Date(Date.now() + 60_000).toISOString(),
++				};
++			},
++		});
++		const auth = createInMemoryAuthStorage();
++		auth.keys.setRuntime("mock", "test-key");
++		const model = createMockModel({ id: "native-sdk", handler: () => ({ content: ["unused"] }) });
++		let sdk: AgentSession | undefined;
++		let execution: NativeExpertExecution | undefined;
++		let staleCall: (() => Promise<unknown>) | undefined;
++		const invoke = f.bridge.run(f.invocation, async current => {
++			execution = current;
++			const options = { agent: { name: "target" } } as ExecutorOptions;
++			await current.apply(options);
++			expect(options.enableMCP).toBe(false);
++			expect(current.manager.getTools()).toHaveLength(0);
++			({ session: sdk } = await createAgentSession({
++				cwd: root,
++				agentDir: root,
++				model,
++				authStorage: auth,
++				modelRegistry: new ModelRegistry(auth, path.join(root, "sdk-models.yml")),
++				sessionManager: SessionManager.inMemory(root),
++				settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false }),
++				enableMCP: options.enableMCP,
++				mcpManager: options.mcpManager,
++				disableExtensionDiscovery: true,
++				preloadedCustomToolPaths: [],
++				skills: [],
++				contextFiles: [],
++				promptTemplates: [],
++				rules: [],
++				enableLsp: false,
++				skipPythonPreflight: true,
++				cacheWarming: false,
++			}));
++			await current.started(sdk);
++			await sdk.refreshMCPTools(current.manager.getTools());
++			await current.initialized();
++			expect(sdk.getEnabledToolNames()).toContain("mcp__isolated_echo");
++			const tool = current.manager.getTools()[0]!;
++			staleCall = () => tool.execute("after-terminal", {}, undefined, {} as never, undefined);
++			const first = await tool.execute("first", {}, undefined, {} as never, undefined);
++			const second = await tool.execute("second", {}, undefined, {} as never, undefined);
++			expect(first.content).toEqual([{ type: "text", text: "isolated-result" }]);
++			expect(second.content).toEqual(first.content);
++			await current.reportTool.execute("no-files", { paths: [] }, undefined, {} as never);
++			return completed();
++		});
++		try {
++			await ackReached.promise;
++			expect(sdk).toBeDefined();
++			expect(credentials).toBe(0);
++			expect(requests).toHaveLength(0);
++			expect(model.calls).toHaveLength(0); // No model, MCP or script is needed for started ACK.
++			ackRelease.resolve();
++			await initializedReached.promise;
++			expect(requests.filter(request => request.method === "tools/call")).toEqual([]);
++			expect(model.calls).toEqual([]);
++			initializedRelease.resolve();
++			await invoke;
++			const posts = requests.filter(request => request.method !== "notifications/initialized");
++			expect(posts.map(request => request.method)).toContain("initialize");
++			expect(posts.filter(request => request.method === "tools/call")).toHaveLength(2);
++			expect(new Set(requests.map(request => request.authorization)).size).toBe(requests.length);
++			const count = requests.length;
++			const credentialCount = credentials;
++			const [late] = await Promise.allSettled([staleCall!()]);
++			if (late!.status === "fulfilled") expect(late!.value).toMatchObject({ isError: true });
++			expect(execution!.record.state).toBe("terminal");
++			expect(requests).toHaveLength(count);
++			expect(credentials).toBe(credentialCount);
++		} finally {
++			ackRelease.resolve();
++			initializedRelease.resolve();
++			await Promise.allSettled([invoke]);
++			f.bridge.close();
++			await sdk?.dispose();
++			auth.close();
++			server.stop(true);
++		}
++	}, 30_000);
++
++	it("captures actual non-parent SDK-root bytes before cleanup and refuses mutable staged replacements", async () => {
++		for (const corrupt of [false, true]) {
++			const f = await fixture();
++			const actualRoot = path.join(root, `actual-sdk-root-${randomUUID()}`);
++			await fs.mkdir(actualRoot);
++			await fs.writeFile(path.join(actualRoot, "output.ts"), "original code");
++			const run = f.bridge.run(f.invocation, async execution => {
++				await execution.apply({ agent: { name: "target" } } as ExecutorOptions);
++				await execution.setWorkRoot(actualRoot);
++				await execution.started(child(`stage-${randomUUID()}`));
++				await execution.reportTool.execute("report", { paths: ["output.ts"] }, undefined, {} as never);
++				const stage = execution.record.prepared!.profile.artifactRoot;
++				expect(stage).not.toBe(actualRoot);
++				expect(await fs.readFile(path.join(stage, "output.ts"), "utf8")).toBe("original code");
++				await fs.writeFile(path.join(actualRoot, "output.ts"), "changed source");
++				await fs.rm(actualRoot, { recursive: true });
++				await expect(
++					execution.reportTool.execute("overwrite", { paths: ["output.ts"] }, undefined, {} as never),
++				).rejects.toThrow();
++				if (corrupt) await fs.writeFile(path.join(stage, "output.ts"), "tampered staging");
++				return completed();
++			});
++			try {
++				if (corrupt) {
++					await expect(run).rejects.toThrow("resource_corrupt");
++					expect(f.calls.filter(call => call.method === nativeMethods.event)).toHaveLength(0);
++				} else {
++					await run;
++					const terminal = f.calls.find(call => call.method === nativeMethods.event)!;
++					expect(terminal.params.payload).toEqual(
++						expect.objectContaining({
++							result: expect.objectContaining({
++								artifacts: [
++									{
++										path: "output.ts",
++										sha256: digest("original code"),
++										size: Buffer.byteLength("original code"),
++									},
++								],
++							}),
++						}),
++					);
++				}
++			} finally {
++				f.bridge.close();
++			}
++		}
++	});
++
++	it("publishes a settled missing-artifact-declaration failure without claiming completion or restarting it", async () => {
++		const f = await fixture();
++		try {
++			await expect(
++				f.bridge.run(f.invocation, async execution => {
++					await execution.apply({ agent: { name: "target" } } as ExecutorOptions);
++					await execution.started(child("missing-report"));
++					return completed();
++				}),
++			).rejects.toThrow("without declaring");
++			const events = f.calls.filter(call => call.method === nativeMethods.event);
++			expect(events.map(event => event.params.payload)).toEqual([
++				{
++					kind: "terminal",
++					outcome: "failed",
++					result: { summary: expect.stringContaining("without declaring"), artifacts: [] },
++					issue: null,
++				},
++			]);
++			const prepared = f.calls.find(call => call.method === nativeMethods.prepare)!;
++			const observed = await NativeExpertBridge.query(f.connection, {
++				attemptId: `attempt_${prepared.params.nativeTaskId}`,
++				nativeTaskId: prepared.params.nativeTaskId,
++			});
++			expect(observed).toMatchObject({
++				state: "terminal",
++				nativeSessionId: "missing-report",
++				terminalEvent: { payload: { outcome: "failed" } },
++			});
++			await expect(
++				f.bridge.run(f.invocation, async () => {
++					throw new Error("A settled failed child must not restart");
++				}),
++			).rejects.toThrow("execution_unknown");
++			expect(f.calls.filter(call => call.method === nativeMethods.prepare)).toHaveLength(1);
++		} finally {
++			f.bridge.close();
++		}
++	});
++
++	it.skipIf(process.platform === "win32")("does not write through a symlink in host-issued staging", async () => {
++		const f = await fixture();
++		const actualRoot = path.join(root, `stage-link-source-${randomUUID()}`);
++		const outside = path.join(root, `stage-link-outside-${randomUUID()}`);
++		await fs.mkdir(path.join(actualRoot, "nested"), { recursive: true });
++		await fs.mkdir(outside);
++		await fs.writeFile(path.join(actualRoot, "nested", "output.ts"), "real code");
++		try {
++			await expect(
++				f.bridge.run(f.invocation, async execution => {
++					await execution.started(child("stage-link"));
++					await execution.setWorkRoot(actualRoot);
++					await fs.symlink(outside, path.join(execution.record.prepared!.profile.artifactRoot, "nested"));
++					await execution.reportTool.execute("report", { paths: ["nested/output.ts"] }, undefined, {} as never);
++					return completed();
++				}),
++			).rejects.toThrow();
++			await expect(fs.access(path.join(outside, "output.ts"))).rejects.toThrow();
++		} finally {
++			f.bridge.close();
++		}
++	});
++
++	it("hashes explicitly declared real files regardless of producer, rejecting links, escapes and budgets", async () => {
++		const cwd = path.join(root, `native-artifacts-${randomUUID()}`);
++		await fs.mkdir(cwd);
++		const code = "export const fromShell = true;\n";
++		await fs.writeFile(path.join(cwd, "shell-result.ts"), code);
++		const first = await captureNativeExpertArtifacts(cwd, ["shell-result.ts"]);
++		expect(first).toEqual([{ path: "shell-result.ts", sha256: digest(code), size: Buffer.byteLength(code) }]);
++		await fs.writeFile(path.join(cwd, "shell-result.ts"), "changed");
++		expect((await captureNativeExpertArtifacts(cwd, ["shell-result.ts"]))[0]!.sha256).not.toBe(first[0]!.sha256);
++		for (const paths of [
++			["../outside"],
++			["/absolute"],
++			["a/../shell-result.ts"],
++			["shell-result.ts", "shell-result.ts"],
++			Array(101).fill("shell-result.ts"),
++			["e\u0301.ts"],
++		])
++			await expect(captureNativeExpertArtifacts(cwd, paths)).rejects.toThrow();
++		const large = await fs.open(path.join(cwd, "large"), "w");
++		await large.truncate(16 * 1024 ** 2 + 1);
++		await large.close();
++		await expect(captureNativeExpertArtifacts(cwd, ["large"])).rejects.toThrow();
++		if (process.platform !== "win32") {
++			await fs.symlink(path.join(cwd, "shell-result.ts"), path.join(cwd, "linked"));
++			await expect(captureNativeExpertArtifacts(cwd, ["linked"])).rejects.toThrow();
++			await fs.mkdir(path.join(cwd, "real"));
++			await fs.writeFile(path.join(cwd, "real", "file"), "real");
++			await fs.symlink(path.join(cwd, "real"), path.join(cwd, "alias"));
++			await expect(captureNativeExpertArtifacts(cwd, ["alias/file"])).rejects.toThrow();
++		}
++	});
++});

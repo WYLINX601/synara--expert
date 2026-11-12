@@ -204,10 +204,28 @@ export interface GitHubPullRequestDetailData {
   readonly commits: ReadonlyArray<PullRequestCommit>;
 }
 
+/** Fixed, read-only repository bytes; never contains authentication material. */
+export interface GitHubRepositorySnapshot {
+  readonly resolvedCommit: string;
+  readonly entries: ReadonlyArray<{
+    readonly path: string;
+    readonly kind: "file" | "directory";
+    readonly bytes: Buffer;
+    readonly executable: boolean;
+  }>;
+}
+
 /**
  * GitHubCliShape - Service API for executing GitHub CLI commands.
  */
 export interface GitHubCliShape {
+  readonly readRepositorySnapshot: (input: {
+    readonly cwd: string;
+    readonly repository: string;
+    readonly requestedRef: string;
+    readonly subdirectory: string;
+  }) => Effect.Effect<GitHubRepositorySnapshot, GitHubCliError>;
+
   /**
    * Run a background read through the server-wide GitHub read queue. Fails fast with a
    * `rate-limited` error while GitHub is limiting the account. User-initiated mutations and the

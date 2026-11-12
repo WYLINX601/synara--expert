@@ -250,7 +250,12 @@ async function mountCenter(
   withEvolutionFixture = false,
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  const onUseExpert = vi.fn(async (_expertId: string) => {});
+  const onUseExpert = vi.fn(
+    async (_selection: {
+      expertId: string;
+      suite: null | { suiteId: string; revision: number };
+    }) => {},
+  );
   const root = createRootRoute({
     component: () => (
       <QueryClientProvider client={queryClient}>
@@ -1531,7 +1536,7 @@ describe("Expert center routes", () => {
       await page.getByRole("button", { name: "对话", exact: true }).click();
       await page.getByRole("button", { name: "保存并继续", exact: true }).click();
       await expect.poll(() => onUseExpert.mock.calls.length).toBe(1);
-      expect(onUseExpert).toHaveBeenCalledWith("planner");
+      expect(onUseExpert).toHaveBeenCalledWith({ expertId: "planner", suite: null });
       expect(harness.server.saveExpert).toHaveBeenCalledTimes(1);
     } finally {
       await close();

@@ -4,7 +4,10 @@ import { Cause, Deferred, Effect, Exit, Fiber, Option } from "effect";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { AgentGatewayShape } from "./Services/AgentGateway.ts";
 import type { AgentGatewayCredentialsShape } from "./Services/AgentGatewayCredentials.ts";
-import type { AgentGatewayCapability } from "./Services/AgentGatewaySessionRegistry.ts";
+import type {
+  AgentGatewayCapability,
+  AgentGatewaySessionIdentity,
+} from "./Services/AgentGatewaySessionRegistry.ts";
 import { extractBearerToken } from "./bearerToken.ts";
 import {
   buildMcpInitializeResult,
@@ -100,11 +103,16 @@ export function makeAgentGatewayMcpTransport(input: {
     threadId: string,
   ) => Effect.Effect<OrchestrationThreadShell, unknown>;
   /** Resolve tools already authorized for this verified provider session. */
-  readonly resolveSessionTools?: (session: {
-    readonly sessionKey: string;
-    readonly threadId: string;
-    readonly provider: ProviderKind;
-  }) => Effect.Effect<ReadonlyArray<ToolEntry>, never>;
+  readonly resolveSessionTools?: (
+    session: AgentGatewaySessionIdentity,
+  ) => Effect.Effect<ReadonlyArray<ToolEntry>, never>;
+  /** Re-read the common attempt, binding and target owners; missing owners fail closed. */
+  readonly validateNativeExecution?: (
+    session: AgentGatewaySessionIdentity,
+    parent: OrchestrationThreadShell,
+  ) => Effect.Effect<void, GatewayToolError>;
+  /** Explicit curated host groups only. Dynamic target MCP entries are separate. */
+  readonly nativeAllowedToolNames?: ReadonlySet<string>;
   // Lets the gateway surface a capability denial to the user (e.g. as a thread
   // activity). Must not fail; the denial response is returned regardless.
   // Fires only for tool-call denials — never for authority 401s, which carry
@@ -150,16 +158,14 @@ export function makeAgentGatewayMcpTransport(input: {
       inputSchema: sanitizeToolInputSchema(tool.definition.inputSchema) as Record<string, unknown>,
     });
   }
-  const handleRequest = (request: JsonRpcRequest, context: Omit<ToolContext, "jsonRpcRequestId">) =>
+  const handleRequest = (
+    request: JsonRpcRequest,
+    context: Omit<ToolContext, "jsonRpcRequestId">,
+    session: AgentGatewaySessionIdentity,
+  ) =>
     Effect.gen(function* () {
       const resolveDynamicTools = () =>
-        (
-          input.resolveSessionTools?.({
-            sessionKey: context.callerSessionKey,
-            threadId: context.callerThreadId,
-            provider: context.callerProvider,
-          }) ?? Effect.succeed<ReadonlyArray<ToolEntry>>([])
-        ).pipe(
+        (input.resolveSessionTools?.(session) ?? Effect.succeed<ReadonlyArray<ToolEntry>>([])).pipe(
           Effect.map((tools) => {
             const uniqueByName = new Map<string, ToolEntry>();
             for (const tool of tools) {
@@ -172,6 +178,8 @@ export function makeAgentGatewayMcpTransport(input: {
           }),
         );
       const isToolAuthorized = (tool: ToolEntry) => {
+        if (context.nativeExecution && !input.nativeAllowedToolNames?.has(tool.definition.name))
+          return false;
         if (tool.sessionScoped !== true) return true;
         return (
           input.authorizeTool?.({
@@ -195,6 +203,7 @@ export function makeAgentGatewayMcpTransport(input: {
         case "ping":
           return jsonRpcResult(request.id, {});
         case "tools/list": {
+          if (context.nativeExecution) yield* context.assertCallerTurnActive();
           const dynamicTools = yield* resolveDynamicTools();
           return jsonRpcResult(request.id, {
             tools: [
@@ -282,7 +291,7 @@ export function makeAgentGatewayMcpTransport(input: {
           // Turn-active first: an inactive turn reports the authority error
           // and never fires the denial hook, even for a tool whose capability
           // the caller also lacks.
-          if (tool.requiresActiveTurn) {
+          if (context.nativeExecution || tool.requiresActiveTurn) {
             const authorityError = yield* readCallerAuthorityError();
             if (authorityError !== null) {
               return jsonRpcResult(request.id, gatewayToolErrorResult(authorityError));
@@ -355,8 +364,29 @@ export function makeAgentGatewayMcpTransport(input: {
           "re-lease",
         );
       }
-      const callerWriteAuthority =
-        callerThread.value.latestTurn?.state === "running"
+      const nativeExecution = callerSession.nativeExecution;
+      const validateNative = (parent: OrchestrationThreadShell) =>
+        input.validateNativeExecution?.(callerSession, parent) ??
+        Effect.fail(
+          new GatewayToolError(
+            "caller_session_inactive",
+            "Native execution authorization owner is unavailable.",
+          ),
+        );
+      if (nativeExecution) {
+        const authorized = yield* validateNative(callerThread.value).pipe(Effect.result);
+        if (authorized._tag === "Failure") {
+          input.credentials.revokeSessionToken(token);
+          return invalidSessionResponse(
+            "revoked-token",
+            `caller_session_inactive: ${authorized.failure.message}`,
+            "do-not-retry",
+          );
+        }
+      }
+      const callerWriteAuthority = nativeExecution
+        ? input.credentials.bindWriteAuthority(token, nativeExecution.attemptId)
+        : callerThread.value.latestTurn?.state === "running"
           ? input.credentials.bindWriteAuthority(token, callerThread.value.latestTurn.turnId)
           : null;
       const assertCallerTurnActive = () =>
@@ -394,6 +424,16 @@ export function makeAgentGatewayMcpTransport(input: {
                   ),
               ),
             );
+          if (nativeExecution) {
+            yield* validateNative(caller).pipe(
+              Effect.tapError(() =>
+                Effect.sync(() => {
+                  input.credentials.revokeSessionToken(token);
+                }),
+              ),
+            );
+            return;
+          }
           if (
             caller.latestTurn?.state !== "running" ||
             caller.latestTurn.turnId !== callerWriteAuthority.turnId
@@ -413,17 +453,29 @@ export function makeAgentGatewayMcpTransport(input: {
           }
         });
       const context: Omit<ToolContext, "jsonRpcRequestId"> = {
-        principal: {
-          kind: "provider-session",
-          sessionKey: callerSession.sessionKey,
-          threadId: callerThreadId,
-          provider: callerSession.provider,
-          turnId: callerWriteAuthority?.turnId ?? null,
-        },
+        principal: nativeExecution
+          ? {
+              kind: "native-delegate",
+              sessionKey: callerSession.sessionKey,
+              threadId: callerThreadId,
+              provider: callerSession.provider,
+              turnId: callerWriteAuthority?.turnId ?? null,
+              nativeExecution,
+            }
+          : {
+              kind: "provider-session",
+              sessionKey: callerSession.sessionKey,
+              threadId: callerThreadId,
+              provider: callerSession.provider,
+              turnId: callerWriteAuthority?.turnId ?? null,
+            },
+        ...(nativeExecution ? { nativeExecution } : {}),
         callerThreadId,
         // The nickname first: a subagent that has one is known by it, and its
         // title describes the work rather than who is doing it.
-        callerThreadLabel: callerThread.value.subagentNickname ?? callerThread.value.title ?? null,
+        callerThreadLabel: nativeExecution
+          ? `Native attempt ${nativeExecution.attemptId}`
+          : (callerThread.value.subagentNickname ?? callerThread.value.title ?? null),
         callerSessionKey: callerSession.sessionKey,
         callerProvider: callerSession.provider,
         callerCapabilities: callerSession.capabilities,
@@ -475,7 +527,7 @@ export function makeAgentGatewayMcpTransport(input: {
             let requestStarted = false;
             let cancellationRequested = false;
             const requestEffect = Deferred.await(registered).pipe(
-              Effect.andThen(handleRequest(parsed.request, context)),
+              Effect.andThen(handleRequest(parsed.request, context, callerSession)),
               Effect.catch((error) =>
                 Effect.succeed(
                   jsonRpcResult(parsed.request.id, mcpToolResultError(errorText(error))),

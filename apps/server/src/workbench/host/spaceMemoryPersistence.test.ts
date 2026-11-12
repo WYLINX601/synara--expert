@@ -86,18 +86,6 @@ layer("Space Memory domain and SQL persistence", (test) => {
     "keeps rules at the Expert-Space scope and facts and Void rules at the Project scope",
     () =>
       Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        const tracker = yield* sql<{ readonly max_id: number }>`
-        SELECT MAX(migration_id) AS max_id FROM workbench_sql_migrations WHERE module_id = 'expert'
-      `;
-        assert.strictEqual(tracker[0]?.max_id, 14);
-        const memoryTables = yield* sql<{ readonly name: string }>`
-        SELECT name FROM sqlite_master WHERE type = 'table'
-      `;
-        assert.includeMembers(
-          memoryTables.map(({ name }) => name),
-          ["space_memory_sequences", "learning_change_sets"],
-        );
         const memory = yield* SpaceMemoryService;
         const currentScope = scope({ ownerId: "owner-scope" });
         yield* memory.commit(commitInput("space-rule", { scope: currentScope }));

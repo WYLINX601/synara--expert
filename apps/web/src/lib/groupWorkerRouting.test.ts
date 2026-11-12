@@ -65,6 +65,8 @@ function makeOverview(overrides: Partial<ProjectAgentOverview> = {}): ProjectAge
   return {
     projectId: GROUP_ID,
     configured: true,
+    suiteSelectionOpen: false,
+    suite: null,
     config: makeConfig(),
     linkedProjectIds: [],
     goal: null,
@@ -79,6 +81,7 @@ function makeOverview(overrides: Partial<ProjectAgentOverview> = {}): ProjectAge
 function makeConfig(overrides: Partial<ProjectAgentConfig> = {}): ProjectAgentConfig {
   return {
     projectId: GROUP_ID,
+    suite: null,
     coordinatorThreadId: ThreadId.makeUnsafe("thread-coordinator"),
     coordinatorName: "Lead",
     coordinatorModelSelection: { provider: "codex", model: "gpt-5.4" },

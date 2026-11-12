@@ -517,10 +517,18 @@ export function useChatTurnSubmission({
       const selectedModelSelectionForSend = dispatchSettings.modelSelection;
       const providerOptionsForDispatchForSend = dispatchSettings.providerOptions;
       const runtimeModeForSend = dispatchSettings.runtimeMode;
+      const localSelection =
+        useComposerDraftStore.getState().draftThreadsByThreadId[activeThread.id];
+      const savedDraftSelection = activeThread.expertDraftSelection;
       const expertIdForSend = isLocalDraftThread
-        ? useComposerDraftStore.getState().draftThreadsByThreadId[activeThread.id]?.expertId
-        : undefined;
-      if (expertIdForSend) {
+        ? localSelection?.expertId
+        : savedDraftSelection?.expertId;
+      const suiteSelectionForSend = isLocalDraftThread
+        ? (localSelection?.suiteSelection ?? null)
+        : savedDraftSelection
+          ? savedDraftSelection.suite
+          : undefined;
+      if (expertIdForSend && !suiteSelectionForSend) {
         const blockReason = await expertSendBlockReason(
           api.server.previewExpert,
           expertIdForSend,
@@ -1129,6 +1137,7 @@ export function useChatTurnSubmission({
         currentActiveGitBranchForSend,
         queuedChatTurn,
         expertIdForSend,
+        suiteSelectionForSend,
         promptForSend,
         planFollowUpRetryIntent,
         composerImagesSnapshot,

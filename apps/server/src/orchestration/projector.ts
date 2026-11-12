@@ -19,6 +19,7 @@ import {
 } from "@synara/shared/pinnedMessages";
 import { Effect, Schema } from "effect";
 import { resolveModelSelectionInstanceId } from "@synara/shared/providerInstances";
+import { expertDelegationResultActivity } from "@synara/shared/expertDelegationActivity";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
 import {
@@ -561,6 +562,36 @@ export function projectEvent(
         })),
       );
 
+    case "thread.capability-bound":
+      return Effect.succeed({
+        ...nextBase,
+        threads: updateThread(nextBase.threads, event.payload.threadId, {
+          expertBinding: event.payload.expertBinding,
+          expertDraftSelection: null,
+          capabilityBindingId: event.payload.capabilityBindingId,
+          suiteSelection: event.payload.suiteSelection,
+          updatedAt: event.occurredAt,
+        }),
+      });
+
+    case "thread.expert-delegation-result": {
+      const thread = nextBase.threads.find((entry) => entry.id === event.payload.threadId);
+      return Effect.succeed(
+        thread
+          ? {
+              ...nextBase,
+              threads: updateThread(nextBase.threads, thread.id, {
+                activities: upsertThreadActivity(
+                  thread.activities,
+                  expertDelegationResultActivity(event),
+                ),
+                updatedAt: event.occurredAt,
+              }),
+            }
+          : nextBase,
+      );
+    }
+
     case "thread.created":
       return Effect.gen(function* () {
         const payload = yield* decodeForEvent(
@@ -578,6 +609,9 @@ export function projectEvent(
             id: payload.threadId,
             projectId: payload.projectId,
             expertBinding: payload.expertBinding ?? null,
+            expertDraftSelection: payload.expertDraftSelection ?? null,
+            capabilityBindingId: payload.capabilityBindingId ?? null,
+            suiteSelection: payload.suiteSelection ?? null,
             title: payload.title,
             modelSelection: payload.modelSelection,
             runtimeMode: payload.runtimeMode,

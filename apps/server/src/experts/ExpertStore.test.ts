@@ -4,6 +4,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  realpath,
   rename,
   readdir,
   rm,
@@ -91,6 +92,41 @@ async function writeSkill(
 }
 
 describe("ExpertStore", () => {
+  it("retains imported role ownership through a state-directory alias and rejects outside sources", async () => {
+    const root = await makeTempRoot();
+    const canonical = path.join(root, "canonical");
+    const alias = path.join(root, "storage-alias");
+    await mkdir(canonical);
+    await symlink(canonical, alias, process.platform === "win32" ? "junction" : "dir");
+    const stateDir = path.join(alias, "state");
+    const store = createExpertStore(stateDir);
+    const seed = await store.save(definitionInput("Import source"));
+    const source = path.join(canonical, "state", "role-source");
+    await mkdir(source);
+    const input = {
+      definition: { ...seed, id: "imported-alias-role" },
+      planId: "alias-role-plan",
+      identityAvailable: true,
+      bmadRole: "bmad-pm",
+      roleSourceRoot: await realpath(source),
+      expertIds: { "bmad-pm": "imported-alias-role" },
+    };
+    await store.stageImport(input);
+    const reopened = createExpertStore(stateDir);
+    await expect(
+      reopened.stageImport({ ...input, planId: "conflicting-plan" }),
+    ).rejects.toMatchObject({ code: "revision_conflict" });
+    const outside = path.join(root, "outside-role");
+    await mkdir(outside);
+    await expect(
+      reopened.stageImport({
+        ...input,
+        definition: { ...seed, id: "outside-role" },
+        roleSourceRoot: outside,
+        expertIds: { "bmad-pm": "outside-role" },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_resource" });
+  });
   it("initializes the three examples once across simultaneous store users", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");

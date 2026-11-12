@@ -54,6 +54,7 @@ export function resolveProviderSessionInstanceId(
   return input.providerInstanceId ?? input.modelSelection?.instanceId;
 }
 import type { CodexGeneratedImageHomeCandidate } from "../../codexGeneratedImages.ts";
+import type { SuiteRuntimeContext } from "../../experts/SuiteRunMaterialization";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "restart-session" | "unsupported";
 
@@ -78,6 +79,8 @@ export interface ProviderSteerSubagentPayload {
 /** Local preparation controls; never serialized into provider input or persisted history. */
 export interface ProviderTurnDispatchOptions {
   readonly claudeCompactionCancellation?: Deferred.Deferred<void>;
+  /** Trusted logical Run owner for this prompt; never a public/model input. */
+  readonly rootRunId?: string;
 }
 
 export type ProviderConversationRollbackMode = "native" | "restart-session";
@@ -139,6 +142,8 @@ export interface ProviderGeneratedImageHomePathsInput {
 /** Server-internal launch guard; deliberately not part of the public contracts schema. */
 export interface ProviderContinuationLaunchRequirements {
   readonly expectedCodexContinuationGeneration?: string;
+  /** Verified resource materialization, never accepted from the client or model. */
+  readonly suiteRuntimeContext?: SuiteRuntimeContext;
 }
 
 export type ProviderAdapterSessionStartInput = ProviderSessionStartInput &

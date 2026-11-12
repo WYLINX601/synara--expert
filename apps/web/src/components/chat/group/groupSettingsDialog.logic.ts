@@ -8,6 +8,7 @@ import {
   type ProjectAgentConfigureInput,
   type ProjectAgentOverview,
   type ProjectId,
+  type SuiteRef,
 } from "@synara/contracts";
 import { MEMORY_NOTES_DOCUMENT_PREFIX } from "@synara/shared/projectAgent";
 
@@ -67,6 +68,7 @@ export interface GroupSettingsDraft {
   readonly icon: string;
   readonly goal: string;
   readonly expertIds: ReadonlyArray<string>;
+  readonly suite?: SuiteRef | null;
   readonly coordinatorIcon: string;
   readonly coordinatorColor: string;
   readonly coordinatorModelSelection: ModelSelection;
@@ -124,6 +126,7 @@ export function buildGroupSettingsDraft(input: {
     icon: config?.icon ?? "",
     goal: config?.goal ?? "",
     expertIds: [...new Set(config?.expertIds ?? [])],
+    suite: config?.suite ?? null,
     coordinatorIcon: config?.coordinatorIcon ?? "",
     coordinatorColor: config?.coordinatorColor ?? "",
     coordinatorModelSelection: config?.coordinatorModelSelection ?? fallbackSelection,
@@ -208,6 +211,9 @@ export function groupSettingsDirtySections(
   ) {
     dirty.add("general");
   }
+  if (!deepEqualJson(draft.suite ?? null, baseline.suite ?? null)) {
+    dirty.add("general");
+  }
   if (!stringSetsEqual(draft.expertIds, baseline.expertIds)) {
     dirty.add("experts");
   }
@@ -280,7 +286,14 @@ export function buildGroupConfigureInput(input: {
   return {
     requestId: input.requestId,
     projectId: input.projectId,
-    expertIds: [...new Set(draft.expertIds)],
+    ...(draft.suite
+      ? input.mode === "onboarding"
+        ? { suite: draft.suite }
+        : {}
+      : {
+          expertIds: [...new Set(draft.expertIds)],
+          ...(input.mode === "onboarding" ? { suite: null } : {}),
+        }),
     ...(input.sourceProjectId ? { sourceProjectId: input.sourceProjectId } : {}),
     coordinatorModelSelection: draft.coordinatorModelSelection,
     workerRouting,

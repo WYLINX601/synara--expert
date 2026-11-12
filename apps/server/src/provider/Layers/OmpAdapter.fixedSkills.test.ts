@@ -14,6 +14,7 @@ import {
 } from "../../agentGateway/Services/AgentGatewayCredentials.ts";
 import { recordVerifiedNativeSkillAssembly } from "../expertSkillCatalog";
 import { OmpAdapter } from "../Services/OmpAdapter";
+import { makeFakeAcpSessionRuntime } from "../acp/testing/fakeAcpSessionRuntime";
 
 const makeNativeLearningPermissionRequest = (toolCallId: string) => ({
   sessionId: "native-fixed",
@@ -122,6 +123,7 @@ vi.mock("../acp/OmpAcpSupport.ts", async (original) => ({
     preparation.spawnInputs.push(input);
     preparation.runtimeCreations++;
     return Effect.succeed({
+      ...makeFakeAcpSessionRuntime(),
       handleRequestPermission: (handler: unknown) =>
         Effect.sync(() => {
           preparation.permissionHandler = handler;

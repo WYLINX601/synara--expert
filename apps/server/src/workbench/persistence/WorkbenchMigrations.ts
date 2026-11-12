@@ -26,6 +26,7 @@ import {
 } from "./ExpertLearningEvidenceDeliveryMigration.ts";
 import { SPACE_MEMORY_EFFECT, SPACE_MEMORY_SQL } from "./SpaceMemoryMigration.ts";
 import { AMBIENT_CONTEXT_SNAPSHOT_SQL } from "./AmbientContextSnapshotMigration.ts";
+import { SUITE_COMPOSITION_SQL, SUITE_COMPOSITION_EFFECT } from "./SuiteCompositionMigration.ts";
 import {
   CONTEXT_SCHEMA_OBJECTS_QUERY,
   validateFrozenContextSchema,
@@ -433,6 +434,14 @@ export const workbenchMigrationEntries: readonly WorkbenchMigrationDefinition[] 
     name: "AmbientContextMessageSnapshots",
     checksum: "sha256:5053eaa98f33df07dc5dff48b49ac6161829de6711151b528f7ad060aece5a3e",
     statement: AMBIENT_CONTEXT_SNAPSHOT_SQL,
+  },
+  {
+    moduleId: EXPERT_WORKBENCH_MODULE_ID,
+    migrationId: 15,
+    name: "SuiteCompositionAndExpertDelegation",
+    checksum: "sha256:94f1ad160abf738ca9642617ed460ae5cffe2b11ac8968ec03ad923e6fead0fb",
+    statement: SUITE_COMPOSITION_SQL,
+    effect: SUITE_COMPOSITION_EFFECT,
   },
 ];
 

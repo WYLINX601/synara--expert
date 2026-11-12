@@ -6,6 +6,8 @@ import {
   ProjectAgentConfigureInput,
   ProjectAgentListSummariesInput,
   ProjectAgentSummary,
+  ProjectAgentConfig,
+  ProjectAgentOverview,
   ProjectTaskStatus,
 } from "./projectAgent";
 
@@ -73,5 +75,66 @@ it.effect("decodes a configured project agent summary", () =>
     assert.strictEqual(parsed.configured, true);
     assert.strictEqual(parsed.coordinatorName, "Synara Coordinator");
     assert.strictEqual(parsed.revision, 1);
+    assert.strictEqual(parsed.suite, null);
   }),
+);
+
+it.effect(
+  "preserves omitted Suite selection separately from explicit null and a fixed revision",
+  () =>
+    Effect.gen(function* () {
+      const base = {
+        requestId: "req-suite",
+        projectId: "hub-suite",
+        coordinatorModelSelection: { provider: "codex", model: "fixture" },
+      };
+      const suite = { suiteId: "suite_00000000-0000-0000-0000-000000000001", revision: 2 };
+      const omitted = yield* decode(ProjectAgentConfigureInput, base);
+      const cleared = yield* decode(ProjectAgentConfigureInput, { ...base, suite: null });
+      const selected = yield* decode(ProjectAgentConfigureInput, { ...base, suite });
+      assert.isFalse(Object.hasOwn(omitted, "suite"));
+      assert.strictEqual(cleared.suite, null);
+      assert.deepStrictEqual(selected.suite, suite);
+    }),
+);
+
+it.effect(
+  "reads legacy config and overview Suite selections as null without rewriting the payload",
+  () =>
+    Effect.gen(function* () {
+      const config = {
+        projectId: "legacy-hub",
+        coordinatorThreadId: "legacy-coordinator",
+        coordinatorName: "Coordinator",
+        coordinatorModelSelection: { provider: "codex", model: "fixture" },
+        limits: { ...DEFAULT_PROJECT_AGENT_LIMITS },
+        captureEnabled: true,
+        enabled: true,
+        automationId: null,
+        revision: 1,
+        createdAt: "2026-11-11T00:00:00.000Z",
+        updatedAt: "2026-11-11T00:00:00.000Z",
+        disabledAt: null,
+      };
+      const parsedConfig = yield* decode(ProjectAgentConfig, config);
+      const overview = {
+        projectId: "legacy-hub",
+        configured: true,
+        config,
+        linkedProjectIds: [],
+        goal: null,
+        digest: null,
+        blockers: [],
+        recentOutcomes: [],
+        coordinatorStatus: "idle",
+      };
+      const parsedOverview = yield* decode(ProjectAgentOverview, overview);
+      assert.strictEqual(parsedConfig.suite, null);
+      assert.strictEqual(parsedOverview.suite, null);
+      assert.strictEqual(parsedOverview.config?.suite, null);
+      assert.strictEqual(parsedOverview.suiteSelectionOpen, false);
+      assert.isFalse(Object.hasOwn(config, "suite"));
+      assert.isFalse(Object.hasOwn(overview, "suite"));
+      assert.isFalse(Object.hasOwn(overview, "suiteSelectionOpen"));
+    }),
 );

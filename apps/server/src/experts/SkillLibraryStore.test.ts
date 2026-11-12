@@ -321,7 +321,11 @@ describe("managed Skill library", () => {
       expect(
         (await prepare("after-conflict")).session.skillEntries?.map((entry) => entry.name),
       ).toEqual([firstName, "beta"]);
-      expect((await runs.read(pinned.rootRunId))?.session).toEqual(pinned.session);
+      const persisted = await runs.read(pinned.rootRunId);
+      if (persisted?.schemaVersion !== 1) {
+        throw new Error("Expected the pinned legacy Run assembly to remain available.");
+      }
+      expect(persisted.session).toEqual(pinned.session);
       // Names are scoped to effective Expert assemblies, not the whole library.
       expect(
         (await store.execute({ action: "create", name: conflictingName, body, tags: [] })).skill

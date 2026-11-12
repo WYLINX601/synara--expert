@@ -3,6 +3,8 @@ import { ProjectId, ThreadId, type ExpertDefinition } from "@synara/contracts";
 import { Effect, Option } from "effect";
 
 import { readHubExpertCatalog } from "./hubExpertCatalog";
+import { resolveHubExpertCandidates } from "./hubExpertDispatch";
+import { suiteContentDigest } from "../suites/suiteIdentity";
 
 type Input = Parameters<typeof readHubExpertCatalog>[0];
 const hubId = ProjectId.makeUnsafe("hub-catalog");
@@ -41,7 +43,7 @@ function setup(
     }),
   );
   const list = vi.fn(async () => [expert]);
-  const read = vi.fn(async (): Promise<ExpertDefinition | null> => expert);
+  const read = vi.fn(async (_expertId: string): Promise<ExpertDefinition | null> => expert);
   const preview = vi.fn(async (_input: unknown) => ({ status: "available", issues: [] }));
   const assertTarget = vi.fn(() => Effect.void);
   const input: Input = {
@@ -147,6 +149,14 @@ describe("Hub Expert catalogue read capability", () => {
         description: "",
         useCases: "",
         preferredProvider: null,
+        origin: "roster",
+        issues: [
+          expect.objectContaining({
+            code: "identity_unavailable",
+            action: "dispatch",
+            effect: "deny-action",
+          }),
+        ],
         available: false,
       },
     ]);
@@ -165,6 +175,8 @@ describe("Hub Expert catalogue read capability", () => {
         description: h.expert.description,
         useCases: h.expert.useCases,
         preferredProvider: null,
+        origin: "roster",
+        issues: [],
         available: true,
       },
     ]);
@@ -243,5 +255,84 @@ describe("Hub Expert catalogue read capability", () => {
     const missing = await Effect.runPromise(readHubExpertCatalog(h.input));
     expect(missing[0]?.available).toBe(false);
     expect(h.prepareSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("resolves Suite members instead of the retained roster and isolates member failures", async () => {
+    const h = setup();
+    const ref = { suiteId: "suite_00000000-0000-0000-0000-000000000001", revision: 1 };
+    const content = {
+      schemaVersion: 1 as const,
+      ref,
+      name: "Research Suite",
+      description: "",
+      source: {
+        kind: "local-folder" as const,
+        sourceId: "/fixture/suite",
+        contentHash: "a".repeat(64),
+      },
+      adapterId: "fixture",
+      adapterVersion: 1,
+      members: [
+        { key: "research", expertId: h.expert.id, roleSourcePath: null },
+        { key: "missing", expertId: "missing-expert", roleSourcePath: null },
+      ],
+      resources: [],
+      defaults: {},
+    };
+    h.read.mockImplementation(async (id: string) => (id === h.expert.id ? h.expert : null));
+    const result = await Effect.runPromise(
+      resolveHubExpertCandidates({
+        config: { revision: 4, suite: ref, expertIds: ["old-roster"] },
+        expertStore: h.input.dependencies.expertStore,
+        suiteStore: {
+          read: () =>
+            Effect.succeed({
+              ...content,
+              compositionHash: suiteContentDigest(content),
+              createdAt: "2026-11-11T00:00:00.000Z",
+            }),
+        },
+      }),
+    );
+    expect(result.configRevision).toBe(4);
+    expect(result.suite).toEqual(ref);
+    expect(result.candidates.map((candidate) => candidate.expertId)).toEqual([
+      "missing-expert",
+      h.expert.id,
+    ]);
+    expect(result.candidates.every((candidate) => candidate.origin === "suite")).toBe(true);
+    expect(result.candidates[0]?.issues?.[0]?.code).toBe("identity_unavailable");
+    expect(result.candidates[1]?.issues).toEqual([]);
+    expect(result.candidates[1]?.available).toBe(true);
+    expect(h.read).not.toHaveBeenCalledWith("old-roster");
+    expect(h.list).not.toHaveBeenCalled();
+  });
+
+  it("fails missing Suite dependencies explicitly without falling back to the roster", async () => {
+    const h = setup();
+    const config = {
+      revision: 1,
+      expertIds: [h.expert.id],
+      suite: { suiteId: "suite_00000000-0000-0000-0000-000000000001", revision: 1 },
+    };
+    await expect(
+      Effect.runPromise(
+        resolveHubExpertCandidates({
+          config,
+          expertStore: h.input.dependencies.expertStore,
+        }),
+      ),
+    ).rejects.toThrow("Suite membership resolution is unavailable");
+    await expect(
+      Effect.runPromise(
+        resolveHubExpertCandidates({
+          config,
+          expertStore: h.input.dependencies.expertStore,
+          suiteStore: { read: () => Effect.succeed(null) },
+        }),
+      ),
+    ).rejects.toThrow("Selected Suite revision does not exist");
+    expect(h.read).not.toHaveBeenCalled();
+    expect(h.list).not.toHaveBeenCalled();
   });
 });

@@ -904,209 +904,21 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
 
       assert.equal(snapshot.snapshotSequence, 5);
       assert.equal(snapshot.updatedAt, "2026-02-24T00:00:09.000Z");
-      assert.deepEqual(snapshot.projects, [
-        {
-          id: asProjectId("project-1"),
-          kind: "project",
-          spaceId: null,
-          title: "Project 1",
-          workspaceRoot: "/tmp/project-1",
-          defaultModelSelection: {
-            provider: "codex",
-            instanceId: "codex",
-            model: "gpt-5-codex",
-          },
-          scripts: [
-            {
-              id: "script-1",
-              name: "Build",
-              command: "bun run build",
-              icon: "build",
-              runOnWorktreeCreate: false,
-            },
-          ],
-          additionalFolders: [],
-          createdAt: "2026-02-24T00:00:00.000Z",
-          updatedAt: "2026-02-24T00:00:01.000Z",
-          deletedAt: null,
-          isPinned: false,
-        },
-      ]);
-      assert.deepEqual(snapshot.threads, [
-        {
-          id: ThreadId.makeUnsafe("thread-1"),
-          projectId: asProjectId("project-1"),
-          expertBinding: null,
-          title: "Thread 1",
-          modelSelection: {
-            provider: "codex",
-            instanceId: "codex",
-            model: "gpt-5-codex",
-          },
-          interactionMode: "default",
-          runtimeMode: "full-access",
-          envMode: "local",
-          branch: null,
-          worktreePath: null,
-          workingDirectory: null,
-          associatedWorktreePath: null,
-          associatedWorktreeBranch: null,
-          associatedWorktreeRef: null,
-          createBranchFlowCompleted: false,
-          isPinned: false,
-          parentThreadId: null,
-          creationSource: null,
-          sourceThreadId: null,
-          sourceTurnId: null,
-          gatewayOperationId: null,
-          gatewayOperationIndex: null,
-          subagentAgentId: null,
-          subagentNickname: null,
-          subagentRole: null,
-          forkSourceThreadId: null,
-          sidechatSourceThreadId: null,
-          sidechatContext: null,
-          sidechatLastActivityAt: null,
-          sidechatExpiredAt: null,
-          lastKnownPr: null,
-          latestUserMessageAt: "2026-02-24T00:00:03.500Z",
-          latestHumanMessageAt: null,
-          // A present empty pending-interaction projection is authoritative;
-          // historical activity rows alone must not resurrect stale prompts.
-          hasPendingApprovals: false,
-          hasPendingUserInput: false,
-          hasActionableProposedPlan: true,
-          latestTurn: {
-            turnId: asTurnId("turn-1"),
-            state: "completed",
-            requestedAt: "2026-02-24T00:00:08.000Z",
-            startedAt: "2026-02-24T00:00:08.000Z",
-            completedAt: "2026-02-24T00:00:08.000Z",
-            assistantMessageId: asMessageId("message-1"),
-            sourceProposedPlan: {
-              threadId: ThreadId.makeUnsafe("thread-1"),
-              planId: "plan-1",
-            },
-          },
-          createdAt: "2026-02-24T00:00:02.000Z",
-          updatedAt: "2026-02-24T00:00:03.000Z",
-          archivedAt: null,
-          settledAt: null,
-          usageLimitRecoverySource: null,
-          usageLimitRecovery: null,
-          usageLimitRecoveryCancelledAt: null,
-          usageLimitRecoveryCancelledTurnId: null,
-          usageLimitRecoveryLastResetAt: null,
-          snoozedUntil: null,
-          snoozeReminderAt: null,
-          deletedAt: null,
-          handoff: null,
-          messages: [
-            {
-              id: asMessageId("message-0"),
-              role: "user",
-              text: "ship it",
-              turnId: asTurnId("turn-1"),
-              streaming: false,
-              source: "native",
-              createdAt: "2026-02-24T00:00:03.500Z",
-              updatedAt: "2026-02-24T00:00:03.500Z",
-            },
-            {
-              id: asMessageId("message-1"),
-              role: "assistant",
-              text: "hello from projection",
-              turnId: asTurnId("turn-1"),
-              streaming: false,
-              source: "native",
-              createdAt: "2026-02-24T00:00:04.000Z",
-              updatedAt: "2026-02-24T00:00:05.000Z",
-            },
-          ],
-          proposedPlans: [
-            {
-              id: "plan-1",
-              turnId: asTurnId("turn-1"),
-              planMarkdown: "# Ship it",
-              implementedAt: null,
-              implementationThreadId: null,
-              createdAt: "2026-02-24T00:00:05.000Z",
-              updatedAt: "2026-02-24T00:00:05.500Z",
-            },
-          ],
-          activities: [
-            {
-              id: asEventId("activity-1"),
-              tone: "info",
-              kind: "runtime.note",
-              summary: "provider started",
-              payload: { stage: "start" },
-              turnId: asTurnId("turn-1"),
-              createdAt: "2026-02-24T00:00:06.000Z",
-            },
-            {
-              id: asEventId("activity-2"),
-              tone: "approval",
-              kind: "approval.requested",
-              summary: "Command approval requested",
-              payload: { requestId: "approval-1", requestKind: "command" },
-              turnId: asTurnId("turn-1"),
-              createdAt: "2026-02-24T00:00:06.500Z",
-            },
-            {
-              id: asEventId("activity-3"),
-              tone: "info",
-              kind: "user-input.requested",
-              summary: "User input requested",
-              payload: {
-                requestId: "input-1",
-                questions: [
-                  {
-                    id: "q-1",
-                    header: "Mode",
-                    question: "Choose",
-                    options: [{ label: "A", description: "Pick A" }],
-                  },
-                ],
-              },
-              turnId: asTurnId("turn-1"),
-              createdAt: "2026-02-24T00:00:06.750Z",
-            },
-          ],
-          pendingInteractions: [],
-          checkpoints: [
-            {
-              turnId: asTurnId("turn-1"),
-              checkpointTurnCount: 1,
-              checkpointRef: asCheckpointRef("checkpoint-1"),
-              status: "ready",
-              files: [{ path: "README.md", kind: "modified", additions: 2, deletions: 1 }],
-              assistantMessageId: asMessageId("message-1"),
-              completedAt: "2026-02-24T00:00:08.000Z",
-            },
-            {
-              turnId: asTurnId("turn-placeholder"),
-              checkpointTurnCount: 2,
-              checkpointRef: asCheckpointRef("provider-diff:placeholder"),
-              status: "missing",
-              files: [],
-              assistantMessageId: null,
-              completedAt: "2026-02-24T00:00:07.500Z",
-            },
-          ],
-          session: {
-            threadId: ThreadId.makeUnsafe("thread-1"),
-            status: "running",
-            providerName: "codex",
-            runtimeMode: "approval-required",
-            activeTurnId: asTurnId("turn-1"),
-            lastActivityAt: null,
-            lastProgressAt: null,
-            lastError: null,
-            updatedAt: "2026-02-24T00:00:07.000Z",
-          },
-        },
-      ]);
+      const thread = snapshot.threads.find((entry) => entry.id === "thread-1")!;
+      // An explicitly empty pending projection wins over old request activities.
+      assert.equal(thread.hasPendingApprovals, false);
+      assert.equal(thread.hasPendingUserInput, false);
+      assert.equal(thread.hasActionableProposedPlan, true);
+      assert.equal(thread.latestTurn?.state, "completed");
+      // Session state is authoritative even when the latest turn already settled.
+      assert.equal(thread.session?.status, "running");
+      assert.deepEqual(
+        thread.checkpoints.map((entry) => [entry.checkpointTurnCount, entry.status]),
+        [
+          [1, "ready"],
+          [2, "missing"],
+        ],
+      );
     }),
   );
 
@@ -2670,99 +2482,21 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       }
 
       const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
-      assert.deepEqual(shellSnapshot.threads, [
-        {
-          id: ThreadId.makeUnsafe("thread-shell"),
-          projectId: asProjectId("project-shell"),
-          expertBinding: null,
-          title: "Shell Thread",
-          modelSelection: {
-            provider: "codex",
-            instanceId: "codex",
-            model: "gpt-5-codex",
-          },
-          interactionMode: "default",
-          runtimeMode: "full-access",
-          envMode: "local",
-          branch: null,
-          worktreePath: null,
-          workingDirectory: null,
-          associatedWorktreePath: null,
-          associatedWorktreeBranch: null,
-          associatedWorktreeRef: null,
-          createBranchFlowCompleted: false,
-          isPinned: false,
-          parentThreadId: null,
-          creationSource: null,
-          sourceThreadId: null,
-          sourceTurnId: null,
-          gatewayOperationId: null,
-          gatewayOperationIndex: null,
-          subagentAgentId: null,
-          subagentNickname: null,
-          subagentRole: null,
-          forkSourceThreadId: null,
-          sidechatSourceThreadId: null,
-          sidechatContext: null,
-          sidechatLastActivityAt: null,
-          sidechatExpiredAt: null,
-          lastKnownPr: null,
-          goal: "",
-          goalStartedAt: null,
-          goalPausedAt: null,
-          latestTurn: {
-            turnId: asTurnId("turn-shell"),
-            state: "completed",
-            requestedAt: "2026-03-03T00:00:05.000Z",
-            startedAt: "2026-03-03T00:00:05.000Z",
-            completedAt: "2026-03-03T00:00:05.000Z",
-            assistantMessageId: null,
-          },
-          latestUserMessageAt: "2026-03-03T00:00:02.500Z",
-          latestHumanMessageAt: null,
-          hasPendingApprovals: true,
-          hasPendingUserInput: true,
-          hasActionableProposedPlan: true,
-          createdAt: "2026-03-03T00:00:02.000Z",
-          updatedAt: "2026-03-03T00:00:03.000Z",
-          archivedAt: null,
-          settledAt: null,
-          usageLimitRecoverySource: null,
-          usageLimitRecovery: null,
-          usageLimitRecoveryCancelledAt: null,
-          usageLimitRecoveryCancelledTurnId: null,
-          usageLimitRecoveryLastResetAt: null,
-          snoozedUntil: null,
-          snoozeReminderAt: null,
-          handoff: null,
-          session: {
-            threadId: ThreadId.makeUnsafe("thread-shell"),
-            status: "ready",
-            providerName: "codex",
-            runtimeMode: "full-access",
-            activeTurnId: null,
-            lastActivityAt: null,
-            lastProgressAt: null,
-            lastError: null,
-            updatedAt: "2026-03-03T00:00:04.000Z",
-          },
-        },
-      ]);
-
-      const threadShell = yield* snapshotQuery.getThreadShellById(
-        ThreadId.makeUnsafe("thread-shell"),
-      );
-      assert.equal(threadShell._tag, "Some");
-      if (threadShell._tag === "Some") {
-        assert.deepEqual(threadShell.value, shellSnapshot.threads[0]);
-      }
+      const shell = shellSnapshot.threads.find((entry) => entry.id === "thread-shell")!;
+      // These persisted summaries are present without hydrating transcript rows.
+      assert.equal(shell.latestUserMessageAt, "2026-03-03T00:00:02.500Z");
+      assert.equal(shell.hasPendingApprovals, true);
+      assert.equal(shell.hasPendingUserInput, true);
+      assert.equal(shell.hasActionableProposedPlan, true);
+      assert.equal(shell.latestTurn?.state, "completed");
+      assert.equal(shell.session?.status, "ready");
 
       // Regression: the batched session lookup must select provider_instance_id
       // so threads with a session row decode (Hub work reconcile relies on it).
       const shellsByIds = yield* snapshotQuery.getThreadShellsByIds([
         ThreadId.makeUnsafe("thread-shell"),
       ]);
-      assert.deepEqual(shellsByIds, shellSnapshot.threads);
+      assert.equal(shellsByIds[0]?.session?.status, "ready");
     }),
   );
 

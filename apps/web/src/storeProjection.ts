@@ -78,6 +78,9 @@ function toThreadShell(thread: Thread): ThreadShell {
   return {
     id: thread.id,
     expertBinding: thread.expertBinding ?? null,
+    expertDraftSelection: thread.expertDraftSelection ?? null,
+    suiteSelection: thread.suiteSelection ?? null,
+    capabilityBindingId: thread.capabilityBindingId ?? null,
     codexThreadId: thread.codexThreadId,
     projectId: thread.projectId,
     title: thread.title,

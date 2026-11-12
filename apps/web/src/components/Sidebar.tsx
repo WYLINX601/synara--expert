@@ -1669,6 +1669,7 @@ export default function Sidebar() {
     firstMessage?: string;
     /** The dialog opening also created the group — Cancel may offer discard. */
     discardable?: boolean;
+    allowSuiteSelection?: boolean;
   } | null>(null);
   // A coordinator activation scheduled from onboarding outlives the dialog: its
   // poll/timeout must not yank the user to that thread after they have moved on,
@@ -3382,6 +3383,7 @@ export default function Sidebar() {
         mode: "onboarding",
         firstMessage: groupPickupMessageText(thread),
         discardable: true,
+        allowSuiteSelection: true,
       });
     },
     [t, setProjectAgentDialogState],
@@ -4222,6 +4224,7 @@ export default function Sidebar() {
               sourceProjectId: created.sourceProjectId,
               sourceLinkRequestId: created.sourceLinkRequestId,
               discardable: created.overview === null,
+              allowSuiteSelection: true,
             });
           },
         });
@@ -8543,6 +8546,7 @@ export default function Sidebar() {
             });
           }}
           allowDiscard={projectAgentDialogState?.discardable === true}
+          allowSuiteSelection={projectAgentDialogState?.allowSuiteSelection === true}
           onOpenChange={(open) => {
             if (!open) {
               setProjectAgentDialogState(null);

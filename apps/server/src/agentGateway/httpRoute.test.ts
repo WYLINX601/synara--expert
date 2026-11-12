@@ -40,6 +40,7 @@ async function withGatewayServer(
               threadId,
               provider: "cursor",
               issuedAt: 1,
+              expiresAt: Number.POSITIVE_INFINITY,
               capabilities: new Set([
                 "thread:read",
                 "thread:write",

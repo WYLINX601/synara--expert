@@ -29,7 +29,7 @@ const ExpertDefaultModelSelection = Schema.Union([
   OmpModelSelection,
 ]);
 
-const ExpertConnection = Schema.Struct({
+export const ExpertConnection = Schema.Struct({
   id: TrimmedNonEmptyString,
   required: Schema.Boolean,
   tools: Schema.Array(TrimmedNonEmptyString),

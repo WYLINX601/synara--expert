@@ -1,7 +1,7 @@
 // Host adapter: Expert starts a native draft; only the original composer can send it.
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "@tanstack/react-router";
-import { ThreadId, type ProjectId } from "@synara/contracts";
+import { ThreadId, type ExpertDraftSelection, type ProjectId } from "@synara/contracts";
 import { useHandleNewThread } from "~/hooks/useHandleNewThread";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { useStore } from "~/store";
@@ -38,7 +38,8 @@ export function useExpertTaskActions(projectContext?: string, sourceThreadId?: s
     choiceRef.current = null;
     setChoosing(false);
   };
-  const startExpertDraft = (expertId: string): Promise<void> => {
+  const startExpertDraft = (selection: ExpertDraftSelection): Promise<void> => {
+    const { expertId, suite } = selection;
     if (requestRef.current) return requestRef.current;
     const pathname = router.state.location.pathname;
     const locationKey = router.state.location.href;
@@ -80,6 +81,7 @@ export function useExpertTaskActions(projectContext?: string, sourceThreadId?: s
           ...inherited,
           standalone: true,
           expertId,
+          suiteSelection: suite,
           ...(expert.defaultModelSelection
             ? { modelSelection: expert.defaultModelSelection }
             : expert.preferredProvider

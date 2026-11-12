@@ -796,8 +796,11 @@ function createCoordinatorOverview(
   return {
     projectId,
     configured: true,
+    suiteSelectionOpen: false,
+    suite: null,
     config: {
       projectId,
+      suite: null,
       coordinatorThreadId,
       coordinatorName: "Studio lead",
       coordinatorModelSelection: { provider: "codex", model: "gpt-5" },

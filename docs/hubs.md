@@ -48,6 +48,25 @@ The coordinator conversation opens with a welcome message. Until you send your f
 **Suggestions** row offers three shortcuts: **Connect repositories**, **Add a goal**, and **Write
 instructions**. Each one opens the matching settings section, and hides once that setting is filled.
 
+### Suite selection and participating Experts
+
+During setup, select an imported Suite revision or choose **No Suite**. Suite Hubs discover
+that revision's members; other Hubs use their saved participating-Expert roster. An empty roster
+does not expose the global Expert catalogue. Suite selection does not expand or overwrite a
+previous roster, and a Suite selection cannot be saved together with a roster edit.
+
+The first coordinator or worker admission permanently fixes the selected mode and revision,
+including **No Suite**, before execution starts. A later startup failure does not reopen the
+selection. Existing Hubs without a Suite remain unchanged. Hubs sharing a Suite still have
+independent settings, queues, work state and results.
+Returning to unfinished onboarding reads the saved server-side selection lock. A missing legacy
+lock does not reopen Suite selection, and an existing configured Hub does not gain a Suite-change
+control merely because its first execution has not started.
+
+Candidate issues describe the affected action, not a blanket health gate for the whole Hub.
+Missing or archived members cannot start new work; accepted task cards and earlier results
+remain accessible through their original work relationships and current access authorization.
+
 ## Hubs in the sidebar
 
 Each hub is a single row: its coordinator. There is no separate folder row.
@@ -159,6 +178,13 @@ and monitoring rows before the coordinator wakes, without duplicating them or re
 attempt’s report. Repository workers still wait for their checkpoint outcome. Repeating the same delegation after a coordinator wake reuses its saved task cards. An interrupted creation is reconciled conservatively;
 a failed creation remains visible instead of silently spawning a replacement. If cleanup cannot
 finish, the task retains its reserved slot until startup recovery confirms cleanup.
+
+Suite Expert tasks also freeze a server-prepared capability binding beside the existing Expert
+snapshot before joining this same queue. The acceptance transaction rechecks the Hub revision,
+selected Suite, member and binding purpose. Retries and restarts use the accepted creation
+specification instead of recomputing it from current defaults. Execution still rechecks pause,
+archive and actual authorization. Coordinator resources and tools remain coordinator-only;
+Suite membership does not grant ordinary workers coordination authority.
 
 ### Task identity and retries
 

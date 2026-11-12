@@ -6,6 +6,7 @@ import type {
   ProjectScript,
   ProviderMentionReference,
   ProviderSkillReference,
+  SuiteRef,
 } from "@synara/contracts";
 import {
   WS_CONTEXT_V1_CAPABILITY,
@@ -107,6 +108,7 @@ interface PreparedChatTurn {
   currentActiveGitBranchForSend: string | null;
   queuedChatTurn: QueuedComposerChatTurn | null;
   expertIdForSend: string | undefined;
+  suiteSelectionForSend?: SuiteRef | null | undefined;
   turnDispatchSettings: TurnDispatchSettings;
   computerControlSequenceForSend: number;
   promptForSend: string;
@@ -401,6 +403,9 @@ export function useChatTurnExecution({
               threadId: threadIdForSend,
               projectId: targetProjectIdForSend,
               ...(preparedTurn.expertIdForSend ? { expertId: preparedTurn.expertIdForSend } : {}),
+              ...(preparedTurn.suiteSelectionForSend !== undefined
+                ? { suiteSelection: preparedTurn.suiteSelectionForSend }
+                : {}),
               title,
               modelSelection: threadCreateModelSelection,
               runtimeMode: nextRuntimeModeForSend,
@@ -692,6 +697,10 @@ export function useChatTurnExecution({
               type: "thread.turn.start",
               commandId: newCommandId(),
               threadId: threadIdForSend,
+              ...(preparedTurn.expertIdForSend ? { expertId: preparedTurn.expertIdForSend } : {}),
+              ...(preparedTurn.suiteSelectionForSend !== undefined
+                ? { suiteSelection: preparedTurn.suiteSelectionForSend }
+                : {}),
               message: {
                 messageId: messageIdForSend,
                 role: "user",

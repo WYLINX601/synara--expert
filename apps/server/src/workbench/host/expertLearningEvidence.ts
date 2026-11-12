@@ -10,7 +10,11 @@ import {
   type ProviderRuntimeEvent,
 } from "@synara/contracts";
 import { Effect, Option, Schema } from "effect";
-import { readRunSkillAssembly } from "../../experts/RunSkillAssemblyStore.ts";
+import {
+  readRunSkillAssembly,
+  createRunSkillAssemblyStore,
+} from "../../experts/RunSkillAssemblyStore.ts";
+import { SuiteCompositionStore } from "../../suites/SuiteCompositionStore";
 import {
   isLearningEvidenceRelevantEvent,
   learningEvidenceDeltaFromRuntimeEvent,
@@ -237,6 +241,7 @@ export const makeExpertLearningEvidenceCapture = Effect.gen(function* () {
   const projectionQuery = yield* Effect.serviceOption(ProjectionSnapshotQuery);
   const serverConfig = yield* Effect.serviceOption(ServerConfig);
   const spaceMemory = yield* Effect.serviceOption(SpaceMemoryService);
+  const suiteStore = Option.getOrUndefined(yield* Effect.serviceOption(SuiteCompositionStore));
 
   if (Option.isNone(learningRepository)) {
     return (_entry: PersistedProviderRuntimeEvent, _resolvedTurnId?: TurnId) => Effect.void;
@@ -464,6 +469,19 @@ export const makeExpertLearningEvidenceCapture = Effect.gen(function* () {
           try: () => readRunSkillAssembly(serverConfig.value.stateDir, candidateRootRunId),
           catch: () => undefined,
         });
+        const assemblySession = assembly
+          ? yield* Effect.tryPromise({
+              try: async () => {
+                if (assembly.schemaVersion === 1) return assembly.session;
+                const assemblies = createRunSkillAssemblyStore(serverConfig.value.stateDir, {
+                  ...(suiteStore ? { suiteStore } : {}),
+                });
+                await assemblies.runtimeContext(assembly);
+                return assemblies.sessionFor(assembly);
+              },
+              catch: () => undefined,
+            }).pipe(Effect.orElseSucceed(() => undefined))
+          : undefined;
         if (
           assembly &&
           assembly.rootRunId === candidateRootRunId &&
@@ -471,19 +489,19 @@ export const makeExpertLearningEvidenceCapture = Effect.gen(function* () {
           assembly.baseSnapshotId === binding.snapshotId &&
           assembly.assemblyId === application.skillAssemblyId &&
           assembly.phase === "ready" &&
-          assembly.session.expertId === binding.expertId &&
-          assembly.session.snapshotId === binding.snapshotId &&
-          assembly.session.skillRootRunId === candidateRootRunId &&
-          assembly.session.skillAssemblyId === application.skillAssemblyId
+          assemblySession?.expertId === binding.expertId &&
+          assemblySession.snapshotId === binding.snapshotId &&
+          assemblySession.skillRootRunId === candidateRootRunId &&
+          assemblySession.skillAssemblyId === application.skillAssemblyId
         ) {
-          if (assembly.session.knowledge) {
+          if (assemblySession.knowledge) {
             if (!Option.isSome(spaceMemory)) {
               yield* skip("run-knowledge-verification-unavailable");
               return;
             }
             const manifest = yield* verifyRuntimeKnowledge({
               threadId: shell.id,
-              expertSession: assembly.session,
+              expertSession: assemblySession,
               memory: spaceMemory.value,
               learningRepository: learningRepository.value,
               projection: query,
@@ -492,7 +510,7 @@ export const makeExpertLearningEvidenceCapture = Effect.gen(function* () {
             );
             if (
               !manifest ||
-              assembly.session.knowledge.learningEpoch !== state.epoch ||
+              assemblySession.knowledge.learningEpoch !== state.epoch ||
               manifest.learningEpoch !== state.epoch
             ) {
               yield* skip("run-knowledge-learning-epoch-mismatch");

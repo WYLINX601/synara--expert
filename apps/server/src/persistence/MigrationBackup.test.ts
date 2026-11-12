@@ -1157,10 +1157,10 @@ describe("migration backups", () => {
     expect(marker!.payload).toMatchObject({
       version: 3,
       phase: "migration-in-progress",
-      moduleVersions: { source: { expert: 0, context: 0 }, target: { expert: 14, context: 1 } },
+      moduleVersions: { source: { expert: 0, context: 0 }, target: { context: 1 } },
       migrationVersions: {
         source: { official: currentOfficialTarget, workbench: 0, format: 0 },
-        target: { official: currentOfficialTarget, workbench: 14, format: 1 },
+        target: { official: currentOfficialTarget, format: 1 },
       },
     });
 
@@ -1230,14 +1230,21 @@ describe("migration backups", () => {
       phase: "migration-completed",
       backupPath: originalBackupPath,
       resumeAttempts: 2,
-      migrationVersions: {
-        source: { official: currentOfficialTarget, workbench: 0, format: 0 },
-        target: { official: currentOfficialTarget, workbench: 14, format: 1 },
-      },
+      migrationVersions: marker!.payload.migrationVersions,
+      moduleVersions: marker!.payload.moduleVersions,
     });
 
     const live = new DatabaseSync(dbPath);
     try {
+      const target = live
+        .prepare(
+          "SELECT MAX(migration_id) AS version FROM workbench_sql_migrations WHERE module_id = 'expert'",
+        )
+        .get()!;
+      expect(completed).toMatchObject({
+        migrationVersions: { target: { workbench: target.version } },
+        moduleVersions: { target: { expert: target.version } },
+      });
       live.prepare("UPDATE dual_version_probe SET value = 'after-upgrade'").run();
     } finally {
       live.close();
@@ -1291,29 +1298,30 @@ describe("migration backups", () => {
         }),
       );
 
-      await Effect.runPromise(
+      const migratedWorkbenchVersion = await Effect.runPromise(
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
-          const rows = yield* sql<{ readonly migration_id: number }>`
-            SELECT module_id, migration_id FROM workbench_sql_migrations ORDER BY module_id, migration_id
+          const rows = yield* sql`
+            SELECT module_id, migration_id FROM workbench_sql_migrations
+            WHERE (module_id = 'expert' AND migration_id IN (1, 2))
+               OR (module_id = 'context' AND migration_id = 1)
+            ORDER BY module_id, migration_id
           `;
           expect(rows).toEqual([
             { module_id: "context", migration_id: 1 },
             { module_id: "expert", migration_id: 1 },
             { module_id: "expert", migration_id: 2 },
-            { module_id: "expert", migration_id: 3 },
-            { module_id: "expert", migration_id: 4 },
-            { module_id: "expert", migration_id: 5 },
-            { module_id: "expert", migration_id: 6 },
-            { module_id: "expert", migration_id: 7 },
-            { module_id: "expert", migration_id: 8 },
-            { module_id: "expert", migration_id: 9 },
-            { module_id: "expert", migration_id: 10 },
-            { module_id: "expert", migration_id: 11 },
-            { module_id: "expert", migration_id: 12 },
-            { module_id: "expert", migration_id: 13 },
-            { module_id: "expert", migration_id: 14 },
           ]);
+          const settled = yield* inspectWorkbenchUpgradePlan;
+          expect(settled).toMatchObject({
+            kind: "ready",
+            workbench: { hasPendingMigrations: false },
+            requiresBackup: false,
+          });
+          const target = yield* sql<{ readonly version: number }>`
+            SELECT MAX(migration_id) AS version FROM workbench_sql_migrations WHERE module_id = 'expert'
+          `;
+          return target[0]!.version;
         }).pipe(
           Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
         ),
@@ -1353,7 +1361,11 @@ describe("migration backups", () => {
         phase: "migration-completed",
         migrationVersions: {
           source: { official: 108, workbench: 0, format: 0 },
-          target: { official: currentOfficialMigrationCount(), workbench: 14, format: 1 },
+          target: {
+            official: currentOfficialMigrationCount(),
+            workbench: migratedWorkbenchVersion,
+            format: 1,
+          },
         },
         legacyExpertMigrations:
           legacyThrough === 109
@@ -1715,13 +1727,23 @@ describe("migration backups", () => {
       }),
     );
 
-    await Effect.runPromise(
+    const migratedWorkbenchVersion = await Effect.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         const rows = yield* sql<{ readonly value: string }>`
           SELECT value FROM extension_only_probe
         `;
         expect(rows).toEqual([{ value: "preserved" }]);
+        const settled = yield* inspectWorkbenchUpgradePlan;
+        expect(settled).toMatchObject({
+          kind: "ready",
+          workbench: { hasPendingMigrations: false },
+          requiresBackup: false,
+        });
+        const target = yield* sql<{ readonly version: number }>`
+          SELECT MAX(migration_id) AS version FROM workbench_sql_migrations WHERE module_id = 'expert'
+        `;
+        return target[0]!.version;
       }).pipe(
         Effect.provide(makeSqlitePersistenceLive(dbPath).pipe(Layer.provide(NodeServices.layer))),
       ),
@@ -1733,10 +1755,17 @@ describe("migration backups", () => {
     expect(provenance).toMatchObject({
       version: 3,
       phase: "migration-completed",
-      moduleVersions: { source: { expert: 0, context: 0 }, target: { expert: 14, context: 1 } },
+      moduleVersions: {
+        source: { expert: 0, context: 0 },
+        target: { expert: migratedWorkbenchVersion, context: 1 },
+      },
       migrationVersions: {
         source: { official: currentOfficialMigrationCount(), workbench: 0, format: 0 },
-        target: { official: currentOfficialMigrationCount(), workbench: 14, format: 1 },
+        target: {
+          official: currentOfficialMigrationCount(),
+          workbench: migratedWorkbenchVersion,
+          format: 1,
+        },
       },
     });
     expect(await backupPaths(dbPath)).toEqual([provenance.backupPath]);

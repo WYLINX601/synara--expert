@@ -29,6 +29,8 @@ export * from "./learningSources";
 export * from "./learningTools";
 export * from "./skillManagementAuth";
 export * from "./runSkillAssembly";
+export * from "./suite";
+export * from "./expertDelegation";
 export * from "./context";
 export * from "./mcp";
 export * from "./providerInstance";

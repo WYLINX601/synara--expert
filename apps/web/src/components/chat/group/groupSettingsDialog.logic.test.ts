@@ -36,6 +36,7 @@ const claudeSelection: ModelSelection = {
 
 const baseConfig: ProjectAgentConfig = {
   projectId: ProjectId.makeUnsafe("project-1"),
+  suite: null,
   coordinatorThreadId: ThreadId.makeUnsafe("thread-1"),
   coordinatorName: "alpha Coordinator",
   coordinatorModelSelection: codexSelection,
@@ -81,6 +82,64 @@ function makeBaseline(
 ): GroupSettingsBaseline {
   return { draft: makeDraft(overrides), config };
 }
+
+describe("Suite configure selection", () => {
+  const suite = { suiteId: "suite_10000000-0000-4000-8000-000000000001", revision: 2 };
+  it("sends the exact selected revision without the independent Expert roster", () => {
+    const draft = makeDraft({ suite, expertIds: ["retained-roster"], goal: "keep the goal" });
+    const payload = buildGroupConfigureInput({
+      projectId: baseConfig.projectId,
+      requestId: "suite-save",
+      mode: "onboarding",
+      draft,
+      baseline: makeBaseline({}, null),
+    });
+    expect(payload.suite).toEqual(suite);
+    expect(payload).not.toHaveProperty("expertIds");
+    expect(payload.goal).toBe("keep the goal");
+    expect(draft.expertIds).toEqual(["retained-roster"]);
+  });
+  it("explicitly chooses no Suite and preserves independent roster semantics", () => {
+    const payload = buildGroupConfigureInput({
+      projectId: baseConfig.projectId,
+      requestId: "no-suite",
+      mode: "onboarding",
+      draft: makeDraft({ suite: null, expertIds: ["independent"] }),
+      baseline: makeBaseline({}, null),
+    });
+    expect(payload.suite).toBeNull();
+    expect(payload.expertIds).toEqual(["independent"]);
+  });
+  it("does not offer a Suite change when saving an existing Hub", () => {
+    const payload = buildGroupConfigureInput({
+      projectId: baseConfig.projectId,
+      requestId: "edit-suite",
+      mode: "edit",
+      draft: makeDraft({ suite }),
+      baseline: makeBaseline({ suite }, { ...baseConfig, suite }),
+    });
+    expect(payload).not.toHaveProperty("suite");
+    expect(payload).not.toHaveProperty("expertIds");
+  });
+  it("marks only the selection section dirty and includes revision in replay identity", () => {
+    const baseline = makeDraft({ suite });
+    const changed = makeDraft({ suite: { ...suite, revision: 3 } });
+    expect(groupSettingsDirtySections(changed, baseline)).toEqual(new Set(["general"]));
+    expect(
+      saveAttemptFingerprint({
+        mode: "onboarding",
+        draft: changed,
+        importedInstructions: undefined,
+      }),
+    ).not.toBe(
+      saveAttemptFingerprint({
+        mode: "onboarding",
+        draft: baseline,
+        importedInstructions: undefined,
+      }),
+    );
+  });
+});
 
 describe("buildGroupSettingsDraft", () => {
   it("mirrors the persisted config", () => {

@@ -41,6 +41,7 @@ async function withConnectorServer(
               threadId,
               provider: "claudeAgent",
               issuedAt: 1,
+              expiresAt: Number.POSITIVE_INFINITY,
               capabilities: new Set(),
             }
           : null,

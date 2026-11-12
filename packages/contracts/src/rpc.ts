@@ -1,3 +1,16 @@
+import {
+  SuitePreviewInput,
+  SuitePreview,
+  SuiteCancelPreviewInput,
+  SuiteImportRequest,
+  SuiteImportReceipt,
+  SuiteImportReceiptInput,
+  SuiteSummary,
+  SuiteRef,
+  SuiteComposition,
+  SuiteRunConfigurationInput,
+  SuiteRunConfiguration,
+} from "./suite";
 import { SkillLibraryRpcInput, SkillLibraryResponse } from "./skillLibrary";
 import { SkillEvolutionRpcInput, SkillEvolutionResponse } from "./skillEvolution";
 import {
@@ -1519,6 +1532,45 @@ export const WsServerReadExpertRpc = Rpc.make(WS_METHODS.serverReadExpert, {
   error: WsRpcError,
 });
 
+export const WsServerPreviewSuiteRpc = Rpc.make(WS_METHODS.serverPreviewSuite, {
+  payload: SuitePreviewInput,
+  success: SuitePreview,
+  error: WsRpcError,
+});
+export const WsServerCancelSuitePreviewRpc = Rpc.make(WS_METHODS.serverCancelSuitePreview, {
+  payload: SuiteCancelPreviewInput,
+  success: Schema.Struct({ cancelled: Schema.Boolean }),
+  error: WsRpcError,
+});
+export const WsServerCommitSuiteImportRpc = Rpc.make(WS_METHODS.serverCommitSuiteImport, {
+  payload: SuiteImportRequest,
+  success: SuiteImportReceipt,
+  error: WsRpcError,
+});
+export const WsServerGetSuiteImportReceiptRpc = Rpc.make(WS_METHODS.serverGetSuiteImportReceipt, {
+  payload: SuiteImportReceiptInput,
+  success: Schema.NullOr(SuiteImportReceipt),
+  error: WsRpcError,
+});
+export const WsServerListSuitesRpc = Rpc.make(WS_METHODS.serverListSuites, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(SuiteSummary),
+  error: WsRpcError,
+});
+export const WsServerReadSuiteRpc = Rpc.make(WS_METHODS.serverReadSuite, {
+  payload: SuiteRef,
+  success: SuiteComposition,
+  error: WsRpcError,
+});
+export const WsServerReadSuiteRunConfigurationRpc = Rpc.make(
+  WS_METHODS.serverReadSuiteRunConfiguration,
+  {
+    payload: SuiteRunConfigurationInput,
+    success: SuiteRunConfiguration,
+    error: WsRpcError,
+  },
+);
+
 export const WsServerSaveExpertRpc = Rpc.make(WS_METHODS.serverSaveExpert, {
   payload: ExpertSaveInput,
   success: ExpertDefinition,
@@ -2454,6 +2506,13 @@ const WS_FEATURE_RPC_GROUP_3 = RpcGroup.make(
   WsServerUpdateSettingsRpc,
   WsServerListExpertsRpc,
   WsServerReadExpertRpc,
+  WsServerPreviewSuiteRpc,
+  WsServerCancelSuitePreviewRpc,
+  WsServerCommitSuiteImportRpc,
+  WsServerGetSuiteImportReceiptRpc,
+  WsServerListSuitesRpc,
+  WsServerReadSuiteRpc,
+  WsServerReadSuiteRunConfigurationRpc,
   WsServerSaveExpertRpc,
   WsServerArchiveExpertRpc,
   WsServerRestoreExpertRpc,

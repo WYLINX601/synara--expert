@@ -29,6 +29,7 @@ import {
   type GitHubPullRequestSummary,
   type GitHubRepositoryChangeProbe,
   type GitHubRepositoryInboxLookup,
+  type GitHubRepositorySnapshot,
   PULL_REQUEST_SUMMARY_JSON_FIELDS,
 } from "../Services/GitHubCli.ts";
 
@@ -70,6 +71,7 @@ export interface FakeGhScenario {
   mergeCapabilities?: PullRequestMergeCapabilities;
   pullRequestDiff?: { patch: string; truncated: boolean };
   mergeOutcome?: "merged" | "enqueued";
+  repositorySnapshot?: GitHubRepositorySnapshot;
 }
 
 export type FakePullRequest = NonNullable<FakeGhScenario["pullRequest"]>;
@@ -295,6 +297,20 @@ export function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
     service: {
       withRead: (effect) => readSlots.withPermits(1)(effect),
       execute,
+      readRepositorySnapshot: (input) => {
+        ghCalls.push(
+          `api snapshot ${input.repository} ${input.requestedRef} ${input.subdirectory}`,
+        );
+        if (scenario.failWith) return Effect.fail(scenario.failWith);
+        return scenario.repositorySnapshot
+          ? Effect.succeed(scenario.repositorySnapshot)
+          : Effect.fail(
+              new GitHubCliError({
+                operation: "readRepositorySnapshot",
+                detail: "Fake repository snapshot was not configured.",
+              }),
+            );
+      },
       getViewerLogin: (input) => {
         ghCalls.push(`api user --jq .login [cwd=${input.cwd}]`);
         return scenario.failWith

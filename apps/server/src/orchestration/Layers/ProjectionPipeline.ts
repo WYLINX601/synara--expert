@@ -3,6 +3,7 @@ import {
   encodeMessageTextFallback,
 } from "../../persistence/messageTextChunks.ts";
 import { ApprovalRequestId, CommandId, type OrchestrationEvent } from "@synara/contracts";
+import { expertDelegationResultActivity } from "@synara/shared/expertDelegationActivity";
 import { resolveHumanMessageAt } from "@synara/shared/threadSummary";
 import { isSidechatThread } from "@synara/shared/sidechatThread";
 import { clearRemovedAsyncUserInputResponses } from "@synara/shared/asyncUserInput";
@@ -190,6 +191,7 @@ const THREAD_PROPOSED_PLAN_PROJECTION_EVENT_TYPES = new Set<OrchestrationEvent["
 
 const THREAD_ACTIVITY_PROJECTION_EVENT_TYPES = new Set<OrchestrationEvent["type"]>([
   "thread.activity-appended",
+  "thread.expert-delegation-result",
   "thread.turn-interrupt-requested",
   "thread.reverted",
   "thread.conversation-rolled-back",
@@ -584,6 +586,15 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
               event.payload.usageLimitRecoveryCancelledTurnId ?? null,
           }));
         }
+        case "thread.capability-bound":
+          return yield* updateThreadProjection(event.payload.threadId, (thread) => ({
+            ...thread,
+            expertBinding: event.payload.expertBinding,
+            expertDraftSelection: null,
+            capabilityBindingId: event.payload.capabilityBindingId,
+            suiteSelection: event.payload.suiteSelection,
+            updatedAt: event.occurredAt,
+          }));
         case "thread.created": {
           const project = yield* projectionProjectRepository.getById({
             projectId: event.payload.projectId,
@@ -593,6 +604,9 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             threadId: event.payload.threadId,
             projectId: event.payload.projectId,
             expertBinding: event.payload.expertBinding ?? null,
+            expertDraftSelection: event.payload.expertDraftSelection ?? null,
+            capabilityBindingId: event.payload.capabilityBindingId ?? null,
+            suiteSelection: event.payload.suiteSelection ?? null,
             title: event.payload.title,
             modelSelection: event.payload.modelSelection,
             runtimeMode: event.payload.runtimeMode,
@@ -1348,6 +1362,21 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
               createdAt: activity.createdAt,
             });
           }
+          return;
+        }
+        case "thread.expert-delegation-result": {
+          const activity = expertDelegationResultActivity(event);
+          yield* projectionThreadActivityRepository.upsert({
+            activityId: activity.id,
+            threadId: event.payload.threadId,
+            turnId: activity.turnId,
+            tone: activity.tone,
+            kind: activity.kind,
+            summary: activity.summary,
+            payload: activity.payload,
+            sequence: event.sequence,
+            createdAt: activity.createdAt,
+          });
           return;
         }
         case "thread.activity-appended":

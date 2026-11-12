@@ -32,6 +32,8 @@ import {
   type FixedSkillProjection,
 } from "../fixedSkillProjection";
 import { invalidateNativeSkillAssemblyVerification } from "../expertSkillCatalog";
+import type { SuiteRuntimeContext } from "../../experts/SuiteRunMaterialization";
+import { renderSuiteRuntimeInstructions } from "../suiteRuntimeInstructions";
 
 export const OMP_EXPERT_PROJECTION_VERSION = "omp-acp-native-v1" as const;
 /** Legacy source-patch route; newer CLIs must prove their capabilities at runtime. */
@@ -106,6 +108,7 @@ export interface OmpExpertSessionPreparationInput {
   readonly expertSession?: ProviderExpertSession;
   readonly lifecycleGeneration?: string;
   readonly contextSession?: ContextSession;
+  readonly suiteRuntimeContext?: SuiteRuntimeContext;
   /** Used by preview, which receives skill references without the full snapshot. */
   readonly skills?: ReadonlyArray<ProviderSkillReference>;
   /** Used by preview when a caller can supply the snapshot root directly. */
@@ -224,7 +227,7 @@ function parseAutoLearnConfig(stdout: string): EffectiveOmpAutoLearnConfig | und
   }
 }
 
-function parseNativeSkillList(
+export function parseNativeSkillList(
   stdout: string,
 ):
   | { readonly skills: ReadonlyArray<NativeSkill>; readonly warnings: ReadonlyArray<unknown> }
@@ -937,7 +940,13 @@ function prepareFixedOmpExpertSession(
     const nativeAppend = yield* Effect.promise(() =>
       readNativeAppendSystemPrompt(input.cwd, input.env, originalConfig),
     );
-    const projectedInstructions = [nativeAppend?.text, baseInstructions]
+    const projectedInstructions = [
+      nativeAppend?.text,
+      baseInstructions,
+      input.suiteRuntimeContext
+        ? renderSuiteRuntimeInstructions(input.suiteRuntimeContext)
+        : undefined,
+    ]
       .filter(Boolean)
       .join("\n\n");
     temp = yield* Effect.promise(() =>

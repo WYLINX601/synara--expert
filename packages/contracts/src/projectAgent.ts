@@ -21,6 +21,11 @@ import {
 import { ModelSelection, ProviderStartOptions } from "./orchestration";
 import { HubWorkItem } from "./hubWork";
 import { ExpertProviderKind } from "./expert";
+import { SuiteIssue, SuiteRef } from "./suite";
+
+const HubSuiteSelection = Schema.optional(Schema.NullOr(SuiteRef)).pipe(
+  Schema.withDecodingDefault(() => null),
+);
 
 export const PROJECT_AGENT_DOCUMENT_MAX_BYTES = 256 * 1024;
 export const PROJECT_AGENT_CONTEXT_BUDGET_CHARS = 32_000;
@@ -70,6 +75,7 @@ export const LibraryRemoteUrl = TrimmedNonEmptyString.check(
 
 export const ProjectAgentConfig = Schema.Struct({
   projectId: ProjectId,
+  suite: HubSuiteSelection,
   coordinatorThreadId: ThreadId,
   coordinatorName: TrimmedNonEmptyString.check(Schema.isMaxLength(160)),
   coordinatorModelSelection: ModelSelection,
@@ -427,6 +433,9 @@ export type ProjectAgentBlocker = typeof ProjectAgentBlocker.Type;
 
 export const ProjectAgentOverview = Schema.Struct({
   projectId: ProjectId,
+  suite: HubSuiteSelection,
+  /** Observed onboarding lock only; never grants permission to change the mode. */
+  suiteSelectionOpen: Schema.optional(Schema.Boolean).pipe(Schema.withDecodingDefault(() => false)),
   /** Explicit creation origin also survives unfinished onboarding. */
   sourceProjectId: Schema.optional(ProjectId),
   configured: Schema.Boolean,
@@ -487,6 +496,10 @@ export const HubExpertSummary = Schema.Struct({
   description: Schema.String,
   useCases: Schema.String,
   preferredProvider: Schema.NullOr(ExpertProviderKind),
+  origin: Schema.optional(Schema.Literals(["roster", "suite"])).pipe(
+    Schema.withDecodingDefault(() => "roster" as const),
+  ),
+  issues: Schema.optional(Schema.Array(SuiteIssue)).pipe(Schema.withDecodingDefault(() => [])),
   available: Schema.Boolean,
 });
 export type HubExpertSummary = typeof HubExpertSummary.Type;
@@ -495,6 +508,7 @@ export type ProjectAgentListExpertsResult = typeof ProjectAgentListExpertsResult
 
 export const ProjectAgentSummary = Schema.Struct({
   projectId: ProjectId,
+  suite: HubSuiteSelection,
   configured: Schema.Boolean,
   coordinatorName: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(160))),
   coordinatorThreadId: Schema.NullOr(ThreadId),
@@ -528,6 +542,8 @@ export type ProjectAgentListSummariesResult = typeof ProjectAgentListSummariesRe
 export const ProjectAgentConfigureInput = Schema.Struct({
   requestId: ProjectAgentRequestId,
   projectId: ProjectId,
+  /** Omitted preserves the selection; null explicitly chooses no Suite. */
+  suite: Schema.optional(Schema.NullOr(SuiteRef)),
   sourceProjectId: Schema.optional(ProjectId),
   coordinatorName: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(160))),
   coordinatorModelSelection: ModelSelection,

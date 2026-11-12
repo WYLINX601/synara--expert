@@ -40,6 +40,36 @@ import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE } from "./types";
 import { derivePendingApprovals, derivePendingUserInputs } from "./pendingInteractionDerivation";
 
 describe("store event reducer", () => {
+  it("retains a late native terminal observation exactly once without resuming the stopped parent", () => {
+    const threadId = ThreadId.makeUnsafe("thread-1");
+    const initial = makeState(makeThread());
+    const event = makeDomainEvent("thread.expert-delegation-result", {
+      threadId,
+      parentRootRunId: "original-root",
+      delegationId: "native-delegation",
+      attemptId: "native-attempt",
+      targetExpertId: "target-expert",
+      outcome: "stopped",
+      resultRef: "result/native-attempt",
+      resultHash: "a".repeat(64),
+      result: { summary: "Child evidence retained after Stop", artifacts: [] },
+      issue: null,
+      applyToParent: false,
+    });
+    for (const reduce of [applyOrchestrationEvents, applyOrchestrationEventsHotPath]) {
+      const next = reduce(initial, [event]);
+      const thread = threadsOf(next)[0]!;
+      expect(
+        thread.activities
+          .filter((activity) => activity.kind === "expert.delegation.result")
+          .map((activity) => activity.summary),
+      ).toEqual(["Child evidence retained after Stop"]);
+      expect(thread.latestTurn).toBe(threadsOf(initial)[0]!.latestTurn);
+      expect(thread.session).toBe(threadsOf(initial)[0]!.session);
+      expect(thread.messages).toBe(threadsOf(initial)[0]!.messages);
+      expect(reduce(next, [event])).toBe(next);
+    }
+  });
   it.each(["approval", "userInput"] as const)(
     "closes stale %s rows without depending on retained failure activities",
     (interactionKind) => {

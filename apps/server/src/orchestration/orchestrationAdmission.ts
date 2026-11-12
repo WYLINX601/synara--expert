@@ -44,6 +44,7 @@ export function usesReservedCommandAdmission(type: OrchestrationCommand["type"])
     case "thread.turn.dispatch-queued":
     case "thread.session.set":
     case "thread.message.assistant.complete":
+    case "thread.expert-delegation.result":
     case "thread.turn.diff.complete":
     case "thread.revert.complete":
     case "thread.conversation.rollback.complete":

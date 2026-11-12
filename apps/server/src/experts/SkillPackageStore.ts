@@ -33,7 +33,7 @@ import YAML from "yaml";
 
 import { ensurePrivateDirectorySync, syncDirectoryEntry } from "../privatePathPermissions";
 import { parseSkillFrontmatter } from "../provider/skillsCatalog.ts";
-import { writePrivateFileAtomically } from "./ExpertMcpStorage.ts";
+import { readPrivateJsonFile, writePrivateFileAtomically } from "./ExpertMcpStorage.ts";
 import { expertResourceFiles, type CollectedExpertResource } from "./ExpertStore.ts";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle.ts";
 import { withExpertLearningCommit } from "./expertLearningCommit.ts";
@@ -67,6 +67,7 @@ type SkillPackageRemovalRecord = typeof SkillPackageRemovalRecord.Type;
 const SkillPackageImportRecord = Schema.Struct({
   previewId: Schema.String,
   state: Schema.optional(Schema.Literals(["pending", "complete"])),
+  origin: Schema.optional(Schema.Literal("owner-import-v1")),
   result: SkillPackageImportResultSchema,
 });
 
@@ -113,6 +114,41 @@ export interface SkillPackageStore {
   resolveSelections(
     selections: ReadonlyArray<typeof PinnedExpertSkillSelection.Type>,
   ): Promise<ResolvedExpertSkillEntry[]>;
+}
+
+/** Explicit owner import receipts distinguish unmanaged packages from unknown managed history. */
+export async function readCompletedSkillPackageImports(
+  stateDir: string,
+): Promise<ReadonlySet<string>> {
+  const directory = path.join(stateDir, "experts", "skill-imports");
+  let names: string[];
+  try {
+    const stat = await fs.lstat(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new SkillPackageStoreError("Skill import evidence is unsafe.", "package_corrupt");
+    names = await fs.readdir(directory);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return new Set();
+    throw cause;
+  }
+  const imported = new Set<string>();
+  for (const name of names) {
+    if (!/^[a-f0-9]{64}\.json$/u.test(name))
+      throw new SkillPackageStoreError("Skill import evidence is unresolved.", "package_corrupt");
+    const record = Schema.decodeUnknownSync(SkillPackageImportRecord)(
+      await readPrivateJsonFile(
+        path.join(directory, name),
+        MAX_PACKAGE_MANIFEST_BYTES,
+        "Skill import evidence is unavailable.",
+        false,
+      ),
+    );
+    if (record.result.package.packageId !== record.result.source.packageId)
+      throw new SkillPackageStoreError("Skill import evidence conflicts.", "package_corrupt");
+    if (record.state === "complete" && record.origin === "owner-import-v1")
+      imported.add(record.result.package.packageId);
+  }
+  return imported;
 }
 
 function assertPortablePath(relative: string): void {
@@ -1115,7 +1151,12 @@ export function createSkillPackageStore(stateDir: string): SkillPackageStore {
         const publish = async (result: SkillPackageImportResult) => {
           // Journal before updating the source pointer. A lost reply or process
           // restart can complete publication without needing an in-memory preview.
-          const receipt = { previewId: input.previewId, state: "pending" as const, result };
+          const receipt = {
+            previewId: input.previewId,
+            state: "pending" as const,
+            origin: "owner-import-v1" as const,
+            result,
+          };
           await writePrivateFileAtomically(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
           await finish(receipt);
         };

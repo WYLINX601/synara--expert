@@ -109,6 +109,7 @@ import {
   buildStalePendingRequestSettlementCommand,
   pendingInteractionRequestKind,
 } from "../stalePendingInteractions.ts";
+import { NATIVE_EXPERT_REEXECUTION_PREFIX } from "../../workbench/host/nativeExpertReexecutionGate.ts";
 import { isExpiredSidechat } from "../sidechatLifecycle.ts";
 import {
   makeExpertLearningEvidenceCapture,
@@ -3330,17 +3331,22 @@ const make = Effect.gen(function* () {
         );
         const settlesTurnlessRows = (remainingOutstandingTurns?.size ?? 0) === 0;
         const terminalGeneration = event.lifecycleGeneration;
+        const preservesNativeConsent =
+          event.type === "turn.completed" && event.payload.state === "completed";
         yield* settleUnanswerablePendingInteractions(
           thread.id,
           event,
           now,
           (row) =>
-            row.turnId === eventTurnId ||
-            (row.turnId === null &&
-              settlesTurnlessRows &&
-              (terminalGeneration === undefined ||
-                row.lifecycleGeneration === null ||
-                row.lifecycleGeneration === terminalGeneration)),
+            // Only natural completion preserves host consent; Stop/abort still settles it.
+            (!preservesNativeConsent ||
+              !row.requestId.startsWith(NATIVE_EXPERT_REEXECUTION_PREFIX)) &&
+            (row.turnId === eventTurnId ||
+              (row.turnId === null &&
+                settlesTurnlessRows &&
+                (terminalGeneration === undefined ||
+                  row.lifecycleGeneration === null ||
+                  row.lifecycleGeneration === terminalGeneration))),
         );
       } else if (shouldApplyThreadLifecycle && event.type === "session.exited") {
         // The whole session is gone, so every turn in its generation dies with

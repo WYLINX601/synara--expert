@@ -164,11 +164,46 @@ describe("per-run Skill assemblies", () => {
     expect(next.session.persona).toBe(first.session.persona);
     expect((await f.store.continuation("thread-fixture", "goal-fixture"))?.rootRunId).toBe("run-A");
     const reopened = createRunSkillAssemblyStore(f.stateDir);
-    expect((await reopened.read("run-A"))?.session.skillEntries?.[0]?.packageId).toBe(
+    const restored = await reopened.read("run-A");
+    expect(restored?.schemaVersion).toBe(1);
+    expect(restored && (await reopened.sessionFor(restored))?.skillEntries?.[0]?.packageId).toBe(
       f.skill.packageId,
     );
     expect((await reopened.current("thread-fixture"))?.rootRunId).toBe("run-B");
     await expect(reopened.verifySession(first.session)).resolves.toEqual(first.session);
+  });
+
+  it("keeps temporary target assembly ownership without replacing or rewinding the parent Run", async () => {
+    const f = await fixture();
+    await f.prepare("parent-A", "parent-goal");
+    const target = await f.experts.save({
+      name: "Delegated target",
+      description: "",
+      useCases: "",
+      persona: "Independent target identity",
+      outputRequirements: "",
+      skills: [],
+      references: [],
+      connections: [],
+    });
+    const binding = await f.experts.prepareSnapshot(target.id);
+    const input = {
+      threadId: "thread-fixture",
+      rootRunId: "target-attempt",
+      baseSnapshotId: binding.snapshotId,
+      createdAt: "2026-11-11T10:00:00.000Z",
+      bindThreadRoot: false,
+    };
+    const delegated = await f.store.prepare(input);
+    expect(delegated.session.expertId).toBe(target.id);
+    expect((await f.store.current("thread-fixture"))?.rootRunId).toBe("parent-A");
+    await f.prepare("parent-B");
+    const reopened = createRunSkillAssemblyStore(f.stateDir);
+    expect((await reopened.prepare(input)).session.expertId).toBe(target.id);
+    expect((await reopened.current("thread-fixture"))?.rootRunId).toBe("parent-B");
+    expect((await reopened.continuation("thread-fixture", "parent-goal"))?.rootRunId).toBe(
+      "parent-A",
+    );
   });
 
   it("does not apply later Persona edits and rejects a forged runtime identity", async () => {

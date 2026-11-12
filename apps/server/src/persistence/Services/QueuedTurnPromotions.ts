@@ -44,6 +44,8 @@ export interface QueuedTurnPromotionRepositoryShape {
     readonly threadId: string;
     readonly messageId: string;
     readonly updatedAt: string;
+    /** Required to retire an already-claimed row; unclaimed cancellation keeps its old behavior. */
+    readonly claimOwner?: string;
   }) => Effect.Effect<boolean, PersistenceSqlError>;
   /**
    * Cancel all in-flight promotions for a thread. Matches both 'queued' and

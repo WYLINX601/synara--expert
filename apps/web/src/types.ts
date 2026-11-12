@@ -31,6 +31,8 @@ import type {
   ProviderInstanceId,
   ProviderKind,
   ExpertBinding,
+  ExpertDraftSelection,
+  SuiteRef,
   CheckpointRef,
   ProviderInteractionMode,
   ProjectKind,
@@ -222,6 +224,9 @@ export interface Thread extends ThreadWorkspaceState {
   isProjectImport?: boolean;
   id: ThreadId;
   expertBinding?: ExpertBinding | null;
+  expertDraftSelection?: ExpertDraftSelection | null;
+  suiteSelection?: SuiteRef | null;
+  capabilityBindingId?: string | null;
   codexThreadId: string | null;
   projectId: ProjectId;
   title: string;
@@ -285,6 +290,9 @@ export interface ThreadShell extends ThreadWorkspaceState {
   isProjectImport?: boolean;
   id: ThreadId;
   expertBinding?: ExpertBinding | null;
+  expertDraftSelection?: ExpertDraftSelection | null;
+  suiteSelection?: SuiteRef | null;
+  capabilityBindingId?: string | null;
   codexThreadId: string | null;
   projectId: ProjectId;
   title: string;

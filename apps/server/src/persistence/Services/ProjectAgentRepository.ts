@@ -18,6 +18,7 @@ import {
   ProjectTaskId,
   ProjectThreadIndexEntry,
   ThreadId,
+  SuiteRef,
 } from "@synara/contracts";
 import { Option, Schema, ServiceMap } from "effect";
 import type { Effect } from "effect";
@@ -25,6 +26,11 @@ import type { Effect } from "effect";
 import type { PersistenceDecodeError, PersistenceSqlError } from "../Errors.ts";
 
 export type ProjectAgentRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+
+/** Omitted or undefined preserves the stored Suite; only null explicitly selects no Suite. */
+export type ProjectAgentConfigWrite = Omit<ProjectAgentConfig, "suite"> & {
+  readonly suite?: SuiteRef | null | undefined;
+};
 
 export const ProjectAgentReceipt = Schema.Struct({
   requestId: ProjectAgentRequestId,
@@ -37,6 +43,7 @@ export type ProjectAgentReceipt = typeof ProjectAgentReceipt.Type;
 
 export interface ProjectAgentConfigSummaryRow {
   readonly projectId: ProjectId;
+  readonly suite: SuiteRef | null;
   readonly coordinatorName: ProjectAgentConfig["coordinatorName"];
   readonly coordinatorThreadId: ThreadId;
   readonly coordinatorIcon: string | null;
@@ -70,9 +77,24 @@ export interface ProjectAgentRepositoryShape {
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<ProjectAgentConfig>, ProjectAgentRepositoryError>;
   readonly saveConfig: (
-    config: ProjectAgentConfig,
+    config: ProjectAgentConfigWrite,
     expectedRevision: number | null,
   ) => Effect.Effect<ProjectAgentConfig, ProjectAgentRepositoryError>;
+  /** Trusted new-Hub creation only; joins the caller's project-create transaction. */
+  readonly beginSuiteOnboarding: (
+    projectId: ProjectId,
+  ) => Effect.Effect<void, ProjectAgentRepositoryError>;
+  readonly isSuiteSelectionOpen: (
+    projectId: ProjectId,
+  ) => Effect.Effect<boolean, ProjectAgentRepositoryError>;
+  readonly admitSuiteExecution: (input: {
+    readonly projectId: ProjectId;
+    readonly expectedRevision: number;
+    readonly admissionId: string;
+  }) => Effect.Effect<
+    { readonly suite: SuiteRef | null; readonly configRevision: number },
+    ProjectAgentRepositoryError
+  >;
   readonly listLinkedProjectIds: (
     projectId: ProjectId,
   ) => Effect.Effect<ReadonlyArray<ProjectId>, ProjectAgentRepositoryError>;

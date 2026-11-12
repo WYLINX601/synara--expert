@@ -4744,6 +4744,82 @@ describe("ProviderRuntimeIngestion", () => {
     expect(failures[0]?.payload).toMatchObject({ requestId: "req-overlap-turn-a" });
   });
 
+  it.each(["completed", "interrupted"] as const)(
+    "keeps native redo consent only for natural completion (%s), never past session exit",
+    async (state) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("native-redo-parent-turn");
+      const requestId = "native-expert-redo:host-question";
+      const generation = "native-redo-generation";
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("native-redo-parent-start"),
+        provider: "codex",
+        createdAt: new Date().toISOString(),
+        threadId,
+        turnId,
+        lifecycleGeneration: generation,
+      });
+      await harness.drain();
+      const now = new Date().toISOString();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.makeUnsafe("native-redo-open"),
+          threadId,
+          activity: {
+            id: EventId.makeUnsafe("native-redo-open"),
+            tone: "info",
+            kind: "approval.requested",
+            summary: "Run this Expert task again?",
+            payload: {
+              requestId,
+              lifecycleGeneration: generation,
+              requestKind: "tool",
+              sessionApprovalAvailable: false,
+            },
+            turnId: null,
+            createdAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId("native-redo-parent-complete"),
+        provider: "codex",
+        createdAt: new Date().toISOString(),
+        threadId,
+        turnId,
+        lifecycleGeneration: generation,
+        payload: { state },
+      });
+      await harness.drain();
+      expect(pendingInteractionStatus(await harness.readProjectedThread(), requestId)).toBe(
+        state === "completed" ? "pending" : undefined,
+      );
+      harness.emit({
+        type: "session.exited",
+        eventId: asEventId("native-redo-parent-exit"),
+        provider: "codex",
+        createdAt: new Date().toISOString(),
+        threadId,
+        lifecycleGeneration: generation,
+        payload: { reason: "stopped" },
+      });
+      const settled = await waitForProjectedThread(
+        harness.readProjectedThread,
+        (thread) => pendingInteractionStatus(thread, requestId) === undefined,
+      );
+      expect(approvalFailureActivities(settled)).toContainEqual(
+        expect.objectContaining({
+          payload: expect.objectContaining({ requestId }),
+        }),
+      );
+    },
+  );
+
   it("settles a turnless pending approval when the thread's last turn ends", async () => {
     const harness = await createHarness();
 

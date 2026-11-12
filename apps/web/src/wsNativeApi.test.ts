@@ -21,7 +21,7 @@ import {
   type WsPush,
   type ServerProviderStatus,
 } from "@synara/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 let reportShellFailure: ((failure: { code: string | null; error: Error }) => void) | undefined;
 const requestMock = vi.fn<(...args: Array<unknown>) => Promise<unknown>>();
@@ -144,8 +144,12 @@ const defaultProviders: ReadonlyArray<ServerProviderStatus> = [
   },
 ];
 
-beforeEach(() => {
-  vi.resetModules();
+let resetNativeApi: typeof import("./wsNativeApi").resetWsNativeApiForTest;
+beforeAll(async () => {
+  ({ resetWsNativeApiForTest: resetNativeApi } = await import("./wsNativeApi"));
+});
+beforeEach(async () => {
+  await resetNativeApi();
   requestMock.mockReset();
   disposeMock.mockReset();
   unsubscribeProjectAgentEventsMock.mockClear();

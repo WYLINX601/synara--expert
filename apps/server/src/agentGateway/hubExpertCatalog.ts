@@ -4,7 +4,11 @@ import { isGroupContainerKind } from "@synara/shared/projectContainers";
 import { Effect, Option } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery";
-import { listHubExpertSummaries, type HubExpertDispatchDependencies } from "./hubExpertDispatch";
+import {
+  listHubExpertSummaries,
+  type HubCandidateConfig,
+  type HubExpertDispatchDependencies,
+} from "./hubExpertDispatch";
 import { errorText, ToolInputError } from "./toolInput";
 import { resolveHubTargetProjectId } from "../projectAgent/hubTarget";
 
@@ -22,7 +26,8 @@ export function readHubExpertCatalog(input: {
   readonly loadConfig: (
     projectId: ProjectId,
   ) => Effect.Effect<
-    | (Pick<ProjectAgentConfig, "coordinatorThreadId" | "expertIds"> &
+    | (Pick<ProjectAgentConfig, "coordinatorThreadId"> &
+        HubCandidateConfig &
         Partial<Pick<ProjectAgentConfig, "sourceProjectId">>)
     | null,
     unknown
@@ -56,6 +61,7 @@ export function readHubExpertCatalog(input: {
     return yield* listHubExpertSummaries({
       projectId: targetProjectId,
       expertIds: config.expertIds ?? [],
+      config,
       callerTarget: coordinator.value.modelSelection,
       dependencies: {
         ...input.dependencies,

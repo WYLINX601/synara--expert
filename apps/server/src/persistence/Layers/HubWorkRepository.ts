@@ -1,4 +1,4 @@
-import { HubWorkRecord, ProjectId } from "@synara/contracts";
+import { CapabilityBinding, HubWorkRecord, ProjectId } from "@synara/contracts";
 import { Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
@@ -8,9 +8,20 @@ import {
   type HubWorkSubmission,
   type HubWorkRepositoryShape,
 } from "../Services/HubWorkRepository";
+import {
+  admitHubSuiteExecution,
+  readHubSuiteComposition,
+  readHubSuiteSelection,
+  sameHubSuite,
+} from "../hubSuiteState";
+import { capabilityBindingFingerprint } from "../../suites/SuiteCompositionStore";
+import { canonicalSuiteJson } from "../../suites/suiteIdentity";
 
 type RecordRow = { readonly recordJson: string };
 const decodeRecord = Schema.decodeUnknownEffect(Schema.fromJsonString(HubWorkRecord));
+const decodeCreationSpec = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(HubWorkRecord.fields.creationSpec),
+);
 const storageError = (cause: unknown) =>
   cause instanceof HubWorkRepositoryError
     ? cause
@@ -123,19 +134,86 @@ export const makeHubWorkRepository = Effect.gen(function* () {
             }
 
             const newRecords = records.filter((record) => !frozen.has(record.id));
+            if (
+              newRecords.length > 0 &&
+              !input.admission &&
+              ((yield* readHubSuiteSelection(sql, input.projectId)) !== null ||
+                newRecords.some((record) => record.creationSpec.capabilityBindingId !== undefined))
+            )
+              return yield* Effect.fail(
+                conflict("Suite work requires a trusted configuration admission."),
+              );
             if (newRecords.length > 0 && input.admission) {
-              const [config] = yield* sql<{ readonly revision: number }>`
+              const [currentConfig] = yield* sql<{ readonly revision: number }>`
                 SELECT revision FROM project_agent_configs WHERE project_id = ${input.projectId}
               `;
-              if (!config || config.revision !== input.admission.expectedConfigRevision) {
+              if (currentConfig?.revision !== input.admission.expectedConfigRevision)
                 return yield* Effect.fail(
                   conflict("Hub settings changed during work preflight. Reload and retry."),
                 );
+              const admission = yield* admitHubSuiteExecution(sql, {
+                projectId: input.projectId,
+                expectedRevision: input.admission.expectedConfigRevision,
+                admissionId: `hub-work:${input.requestId}`,
+              }).pipe(
+                Effect.mapError((cause) =>
+                  conflict(cause instanceof Error ? cause.message : "Hub admission failed."),
+                ),
+              );
+              // Replays above never consult current membership or recompute bindings.
+              const selected = new Set(
+                admission.suite
+                  ? (yield* readHubSuiteComposition(sql, admission.suite)).members.map(
+                      (member) => member.expertId,
+                    )
+                  : (yield* sql<{ readonly expertId: string }>`
+                    SELECT expert_id AS "expertId" FROM hub_expert_participants WHERE hub_id = ${input.projectId}
+                  `).map((row) => row.expertId),
+              );
+              for (const record of newRecords) {
+                const spec = record.creationSpec;
+                if (spec.expertId === undefined) {
+                  if (spec.capabilityBindingId !== undefined)
+                    return yield* Effect.fail(
+                      conflict("Plain workers cannot adopt Suite Expert bindings."),
+                    );
+                  continue;
+                }
+                if (admission.suite === null) {
+                  if (spec.capabilityBindingId !== undefined)
+                    return yield* Effect.fail(
+                      conflict("Non-Suite work cannot adopt a Suite binding."),
+                    );
+                  continue;
+                }
+                const [row] = yield* sql<{ readonly hash: string; readonly recordJson: string }>`
+                  SELECT binding_hash AS hash, record_json AS "recordJson" FROM suite_capability_bindings
+                  WHERE binding_id = ${spec.capabilityBindingId ?? ""}
+                `;
+                if (!row) return yield* Effect.fail(conflict("Suite worker binding is missing."));
+                const binding = yield* Effect.try({
+                  try: () =>
+                    Schema.decodeUnknownSync(CapabilityBinding)(JSON.parse(row.recordJson)),
+                  catch: (cause) =>
+                    new Error("Suite worker binding could not be decoded.", { cause }),
+                });
+                if (
+                  binding.bindingId !== spec.capabilityBindingId ||
+                  binding.bindingHash !== row.hash ||
+                  capabilityBindingFingerprint(binding) !== row.hash ||
+                  !sameHubSuite(binding.suite, admission.suite) ||
+                  binding.projectId !== record.targetProjectId ||
+                  binding.purpose.kind !== "hub-worker" ||
+                  binding.purpose.hubId !== input.projectId ||
+                  binding.purpose.workId !== record.id ||
+                  binding.purpose.hubConfigRevision !== input.admission.expectedConfigRevision ||
+                  binding.purpose.expertSnapshotId !== spec.expertBinding?.snapshotId ||
+                  spec.expertBinding?.expertId !== spec.expertId
+                )
+                  return yield* Effect.fail(
+                    conflict("Suite worker binding does not match the frozen work decision."),
+                  );
               }
-              const participants = yield* sql<{ readonly expertId: string }>`
-                SELECT expert_id AS "expertId" FROM hub_expert_participants WHERE hub_id = ${input.projectId}
-              `;
-              const selected = new Set(participants.map((row) => row.expertId));
               if (
                 newRecords.some(
                   (record) =>
@@ -273,21 +351,40 @@ export const makeHubWorkRepository = Effect.gen(function* () {
     save: ({ record, expectedRevision }) => {
       if (record.revision !== expectedRevision + 1)
         return Effect.fail(conflict("Hub work revisions must advance once."));
-      return sql<RecordRow>`
-        UPDATE project_agent_work_items
-        SET state = ${record.state}, worker_thread_id = ${record.workerThreadId},
-          slot_held = ${record.slotHeld ? 1 : 0}, revision = ${record.revision}, record_json = ${JSON.stringify(record)}
-        WHERE work_item_id = ${record.id} AND revision = ${expectedRevision}
-        RETURNING record_json AS "recordJson"
-      `.pipe(
-        Effect.mapError(storageError),
-        Effect.flatMap(
-          (rows): Effect.Effect<HubWorkRecord, HubWorkRepositoryError> =>
-            rows[0]
-              ? decodeRecord(rows[0].recordJson).pipe(Effect.mapError(storageError))
-              : Effect.fail(conflict("Hub work changed. Reload and retry.")),
-        ),
-      );
+      return sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const previous = yield* sql<RecordRow>`SELECT record_json AS "recordJson"
+          FROM project_agent_work_items WHERE work_item_id = ${record.id}`.pipe(
+              Effect.flatMap(readOne),
+            );
+            if (!previous || previous.revision !== expectedRevision)
+              return yield* Effect.fail(conflict("Hub work changed. Reload and retry."));
+            // Reads normalize persisted specs (for example, a missing model instance
+            // becomes the provider instance). Compare the same JSON/schema form on
+            // both sides, including callers still holding their submission object.
+            const creationSpec = yield* decodeCreationSpec(JSON.stringify(record.creationSpec));
+            if (
+              previous.projectId !== record.projectId ||
+              previous.targetProjectId !== record.targetProjectId ||
+              canonicalSuiteJson(previous.creationSpec) !== canonicalSuiteJson(creationSpec)
+            )
+              return yield* Effect.fail(
+                conflict("Accepted Hub work cannot change its frozen creation binding."),
+              );
+            const rows = yield* sql<RecordRow>`
+          UPDATE project_agent_work_items
+          SET state = ${record.state}, worker_thread_id = ${record.workerThreadId},
+            slot_held = ${record.slotHeld ? 1 : 0}, revision = ${record.revision}, record_json = ${JSON.stringify({ ...record, creationSpec })}
+          WHERE work_item_id = ${record.id} AND revision = ${expectedRevision}
+          RETURNING record_json AS "recordJson"
+        `;
+            if (!rows[0])
+              return yield* Effect.fail(conflict("Hub work changed. Reload and retry."));
+            return yield* decodeRecord(rows[0].recordJson);
+          }),
+        )
+        .pipe(Effect.mapError(storageError));
     },
 
     deleteProject: (projectId) =>

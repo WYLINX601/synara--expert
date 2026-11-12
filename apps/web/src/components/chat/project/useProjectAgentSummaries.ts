@@ -33,6 +33,7 @@ function summaryFromOverview(
   return {
     projectId: overview.projectId,
     configured: projectAgentOverviewConfigured(overview),
+    suite: overview.suite ?? overview.config?.suite ?? null,
     coordinatorName: overview.config?.coordinatorName ?? null,
     coordinatorThreadId: overview.config?.coordinatorThreadId ?? null,
     coordinatorIcon: overview.config?.coordinatorIcon ?? null,
@@ -138,6 +139,7 @@ export const useProjectAgentSummariesStore = create<ProjectAgentSummariesState>(
         next.set(event.config.projectId, {
           projectId: event.config.projectId,
           configured: projectAgentOverviewConfigured({ config: event.config }),
+          suite: event.config.suite ?? null,
           coordinatorName: event.config.coordinatorName,
           coordinatorThreadId: event.config.coordinatorThreadId,
           coordinatorIcon: event.config.coordinatorIcon ?? null,

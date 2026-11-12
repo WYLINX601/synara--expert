@@ -8,7 +8,7 @@
 //             thread context menu.
 
 import type { ProjectId, ResolvedKeybindingsConfig, ThreadId } from "@synara/contracts";
-import { useEffect, useState, type RefObject } from "react";
+import { useEffect, useState, type ReactNode, type RefObject } from "react";
 
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { useHandleNewThread } from "~/hooks/useHandleNewThread";
@@ -55,6 +55,7 @@ const CLOSE_TABS_MENU_ROWS: readonly { scope: OpenThreadTabCloseScope; labelKey:
 
 export function OpenThreadTabStrip(props: {
   activeThreadId: ThreadId;
+  activeTitleSuffix?: ReactNode;
   keybindings: ResolvedKeybindingsConfig;
   closeActiveTabRef?: RefObject<(() => boolean) | null>;
   onRenameActiveThread: () => void;
@@ -235,6 +236,7 @@ export function OpenThreadTabStrip(props: {
         return {
           key: tab.threadId,
           title: tab.title,
+          titleSuffix: tab.threadId === activeThreadId ? props.activeTitleSuffix : undefined,
           icon:
             // A running thread spins in place of its glyph, like its sidebar row.
             tab.isRunning ? (

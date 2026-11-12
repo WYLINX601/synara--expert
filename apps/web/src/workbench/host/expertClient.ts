@@ -2,9 +2,16 @@ import type { NativeApi } from "@synara/contracts";
 
 import { ensureNativeApi } from "~/nativeApi";
 
-/** The existing wire API, limited to capabilities owned by Expert and MCP modules. */
+/** The existing wire API, limited to capabilities owned by Expert, Suite and MCP modules. */
 export type ExpertClient = Pick<
   NativeApi["server"],
+  | "previewSuite"
+  | "cancelSuitePreview"
+  | "commitSuiteImport"
+  | "getSuiteImportReceipt"
+  | "listSuites"
+  | "readSuite"
+  | "readSuiteRunConfiguration"
   | "listExperts"
   | "readExpert"
   | "saveExpert"

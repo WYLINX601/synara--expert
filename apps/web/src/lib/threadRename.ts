@@ -13,7 +13,7 @@ import {
   type RuntimeMode,
   type ThreadId,
 } from "@synara/contracts";
-import { type DraftThreadEnvMode } from "../composerDraftStore";
+import { useComposerDraftStore, type DraftThreadEnvMode } from "../composerDraftStore";
 import { readNativeApi } from "../nativeApi";
 import type { Thread } from "../types";
 import { promoteThreadCreate } from "./threadCreatePromotion";
@@ -107,12 +107,15 @@ export async function dispatchThreadRename(input: {
   }
 
   if (input.createIfMissing) {
+    const selection = useComposerDraftStore.getState().getDraftThread(input.threadId);
     const promotionResult = await promoteThreadCreate(
       {
         type: "thread.create",
         commandId: newCommandId(),
         threadId: input.threadId,
         projectId: input.createIfMissing.projectId,
+        ...(selection?.expertId ? { expertId: selection.expertId } : {}),
+        suiteSelection: selection?.suiteSelection ?? null,
         title: trimmed,
         modelSelection: input.createIfMissing.modelSelection,
         runtimeMode: input.createIfMissing.runtimeMode,

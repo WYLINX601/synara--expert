@@ -21,13 +21,16 @@ export function buildHubReferenceMenuItems(input: {
         .filter((expert) => matches(expert.displayName, expert.description, expert.useCases))
         .map((expert) => {
           const path = buildHubExpertReferenceUri(expert.expertId);
+          const denied = expert.issues?.find(
+            (issue) => issue.action === "dispatch" && issue.effect === "deny-action",
+          );
           return {
             id: path,
             type: "hub-expert",
             label: expert.displayName,
-            description: expert.useCases || expert.description,
+            description: denied?.message ?? (expert.useCases || expert.description),
             mention: { name: expert.displayName, path },
-            disabled: !expert.available,
+            disabled: Boolean(denied),
           };
         })
     : [];

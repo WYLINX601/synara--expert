@@ -114,7 +114,7 @@ export function SidebarGroupsSurface({
   readonly onOpenGroupSettings: (
     projectId: ProjectId,
     mode: "onboarding" | "edit",
-    options?: { readonly discardable?: boolean },
+    options?: { readonly discardable?: boolean; readonly allowSuiteSelection?: boolean },
   ) => void;
   readonly onProjectContextMenu: (projectId: ProjectId, position: { x: number; y: number }) => void;
 }) {
@@ -285,7 +285,7 @@ export function SidebarGroupsSurface({
       }
     }
     // This dialog opening just created the group — Cancel may offer discard.
-    onOpenGroupSettings(projectId, "onboarding", { discardable: true });
+    onOpenGroupSettings(projectId, "onboarding", { discardable: true, allowSuiteSelection: true });
   };
 
   const emptyState = resolveGroupsListEmptyState({

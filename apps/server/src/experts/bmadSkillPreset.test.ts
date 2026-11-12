@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { BMAD_ROLE_PRESETS, bmadPresetSelections } from "./bmadSkillPreset.ts";
+import { BMAD_ROLE_PRESETS, BMAD_SHARED_METHODS, bmadPresetSelections } from "./bmadSkillPreset.ts";
 import { createSkillPackageStore } from "./SkillPackageStore.ts";
 import { createExpertStore, expertResourceFiles } from "./ExpertStore.ts";
 
@@ -13,12 +13,12 @@ afterEach(async () => {
 });
 
 describe("BMad preset", () => {
-  it("pins role entries and reviewed workflows as native on-demand Skills", async () => {
+  it("publishes only reviewed methods and never reactivates source role entries", async () => {
     const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "bmad-package-")));
     roots.push(root);
     const source = path.join(root, "skills");
     const names = new Set([
-      "bmad",
+      ...BMAD_SHARED_METHODS,
       ...BMAD_ROLE_PRESETS.flatMap((preset) => [preset.role, ...preset.workflows]),
     ]);
     for (const name of names) {
@@ -33,12 +33,11 @@ describe("BMad preset", () => {
     const preview = await packages.preview({ path: source });
     const imported = await packages.import({ previewId: preview.previewId });
     const experts = createExpertStore(state);
-    const rolePaths = new Set<string>();
     for (const preset of BMAD_ROLE_PRESETS) {
       const selections = bmadPresetSelections(imported.package, preset.id);
       expect(selections.every((selection) => !Object.hasOwn(selection, "activation"))).toBe(true);
       expect(selections.map((selection) => selection.entryPath)).toEqual(
-        [preset.role, "bmad", ...preset.workflows].map((name) => `${name}/SKILL.md`),
+        [...BMAD_SHARED_METHODS, ...preset.workflows].map((name) => `${name}/SKILL.md`),
       );
       const definition = await experts.save({
         id: preset.id,
@@ -62,12 +61,11 @@ describe("BMad preset", () => {
       expect(snapshot.skillEntries?.every((entry) => !Object.hasOwn(entry, "activation"))).toBe(
         true,
       );
-      rolePaths.add(snapshot.skillEntries!.find((entry) => entry.name === preset.role)!.path);
+      expect(snapshot.skillEntries?.some((entry) => entry.name === preset.role)).toBe(false);
       expect(
         await fs.readdir(path.join(state, "experts", "snapshots", binding.snapshotId)),
       ).not.toContain("skills");
     }
-    expect(rolePaths.size).toBe(6);
     expect(await packages.list()).toHaveLength(1);
   });
 });

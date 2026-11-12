@@ -5,13 +5,19 @@ import {
   type ProviderKind,
   type SynaraCreateThreadSpec,
   type SynaraResolvedCreateThreadSpec,
+  type ProjectAgentConfig,
+  type SuiteIssue,
+  type SuiteRef,
+  type CapabilityBinding,
+  type ExecutionPurpose,
 } from "@synara/contracts";
-import { EXPERT_PROVIDER_KINDS } from "@synara/contracts";
+import type { ExpertDefinition } from "@synara/contracts";
 import { isExpertProvider } from "@synara/shared/expertProviders";
 import { Effect } from "effect";
 
 import type { ExpertStore } from "../experts/ExpertStore.ts";
 import type { ProviderDiscoveryServiceShape } from "../provider/Services/ProviderDiscoveryService.ts";
+import { supportsSuiteRuntime } from "../workbench/host/providerCapabilities";
 import {
   AgentGatewayTargetError,
   loadAgentGatewayProviderCatalog,
@@ -19,6 +25,99 @@ import {
   type AgentGatewayProviderAvailability,
 } from "./targetResolver.ts";
 import { ToolInputError, errorText } from "./toolInput.ts";
+import type { SuiteCompositionStoreShape } from "../suites/SuiteCompositionStore";
+
+export type HubCandidateConfig = Pick<ProjectAgentConfig, "expertIds"> &
+  Partial<Pick<ProjectAgentConfig, "suite" | "revision">>;
+
+function candidateIssue(expertId: string, code: SuiteIssue["code"], message: string): SuiteIssue {
+  return {
+    code,
+    category: code === "identity_unavailable" ? "execution" : "dependency",
+    subject: { kind: "expert", id: expertId, path: null },
+    action: "dispatch",
+    effect: "deny-action",
+    message: message.slice(0, 2_000),
+    evidenceRef: null,
+    checkedAt: new Date().toISOString(),
+    recovery: "choose-alternative",
+  };
+}
+
+/** The only membership resolver. Availability is diagnostic, never a Hub-wide gate. */
+export function resolveHubExpertCandidates(input: {
+  readonly config: HubCandidateConfig;
+  readonly expertStore: Pick<HubExpertStore, "read">;
+  readonly suiteStore?: Pick<SuiteCompositionStoreShape, "read">;
+  readonly projectId?: ProjectId;
+}): Effect.Effect<
+  {
+    readonly configRevision: number;
+    readonly suite: SuiteRef | null;
+    readonly candidates: readonly HubExpertSummary[];
+  },
+  ToolInputError
+> {
+  return Effect.gen(function* () {
+    const suite = input.config.suite ?? null;
+    let expertIds = input.config.expertIds ?? [];
+    if (suite !== null) {
+      if (!input.suiteStore)
+        return yield* Effect.fail(
+          new ToolInputError("Suite membership resolution is unavailable."),
+        );
+      const composition = yield* input.suiteStore
+        .read(suite)
+        .pipe(Effect.mapError((error) => new ToolInputError(errorText(error))));
+      if (!composition)
+        return yield* Effect.fail(new ToolInputError("Selected Suite revision does not exist."));
+      expertIds = composition.members.map((member) => member.expertId);
+    }
+    const origin = suite === null ? ("roster" as const) : ("suite" as const);
+    const candidates = yield* Effect.forEach([...new Set(expertIds)].sort(), (expertId) =>
+      Effect.gen(function* () {
+        const inspected = yield* Effect.tryPromise({
+          try: () => input.expertStore.read(expertId),
+          catch: (error) => new ToolInputError(errorText(error)),
+        }).pipe(
+          Effect.map((definition) => ({ definition, issue: null as SuiteIssue | null })),
+          Effect.catch((error) =>
+            Effect.succeed({
+              definition: null,
+              issue: candidateIssue(expertId, "resource_corrupt", error.message),
+            }),
+          ),
+        );
+        const definition = inspected.definition;
+        const issues: SuiteIssue[] = inspected.issue
+          ? [inspected.issue]
+          : !definition || definition.archived
+            ? [
+                candidateIssue(
+                  expertId,
+                  "identity_unavailable",
+                  definition
+                    ? "Archived Experts cannot start new Hub work."
+                    : "Expert identity is unavailable.",
+                ),
+              ]
+            : [];
+        return {
+          ...(input.projectId === undefined ? {} : { targetProjectId: input.projectId }),
+          expertId,
+          displayName: definition?.name ?? "Unavailable Expert",
+          description: definition?.description.slice(0, 800) ?? "",
+          useCases: definition?.useCases.slice(0, 1_600) ?? "",
+          preferredProvider: definition?.preferredProvider ?? null,
+          origin,
+          issues,
+          available: issues.length === 0,
+        } satisfies HubExpertSummary;
+      }),
+    );
+    return { configRevision: input.config.revision ?? 0, suite, candidates };
+  });
+}
 
 export type HubExpertStore = Pick<
   ExpertStore,
@@ -33,6 +132,13 @@ export interface HubExpertDispatchDependencies {
     unknown
   >;
   readonly getProjectWorkspaceRoot: (projectId: ProjectId) => Effect.Effect<string, unknown>;
+  readonly suiteStore?: Pick<SuiteCompositionStoreShape, "read">;
+  readonly prepareSuiteBinding?: (input: {
+    readonly suite: SuiteRef;
+    readonly purpose: ExecutionPurpose;
+    readonly projectId: ProjectId;
+    readonly projectRoot?: string;
+  }) => Effect.Effect<CapabilityBinding, unknown>;
 }
 
 function preferredTarget(input: {
@@ -112,9 +218,25 @@ export function resolveHubCreationSpec(input: {
   readonly targetProjectId: ProjectId;
   readonly callerTarget: ModelSelection;
   readonly spec: SynaraCreateThreadSpec;
+  readonly hub?: {
+    readonly projectId: ProjectId;
+    readonly workId: string;
+    readonly config: ProjectAgentConfig;
+  };
 }): Effect.Effect<SynaraResolvedCreateThreadSpec, ToolInputError> {
   const { dependencies } = input;
   return Effect.gen(function* () {
+    if (input.hub && input.spec.expertId !== undefined) {
+      const resolved = yield* resolveHubExpertCandidates({
+        config: input.hub.config,
+        expertStore: dependencies.expertStore,
+        ...(dependencies.suiteStore ? { suiteStore: dependencies.suiteStore } : {}),
+      });
+      if (!resolved.candidates.some((candidate) => candidate.expertId === input.spec.expertId))
+        return yield* Effect.fail(
+          new ToolInputError("This Expert does not participate in the current Hub."),
+        );
+    }
     const cwd = yield* dependencies
       .getProjectWorkspaceRoot(input.targetProjectId)
       .pipe(Effect.mapError((error) => new ToolInputError(errorText(error))));
@@ -169,10 +291,21 @@ export function resolveHubCreationSpec(input: {
       ...(availability !== undefined ? { availability } : {}),
       cwd,
     }).pipe(Effect.mapError((error: AgentGatewayTargetError) => new ToolInputError(error.message)));
-    yield* validateExpertPreview(dependencies.expertStore, definition.id, target, cwd);
+    if (!input.hub?.config.suite)
+      yield* validateExpertPreview(dependencies.expertStore, definition.id, target, cwd);
+    else if (!supportsSuiteRuntime(target.provider))
+      return yield* Effect.fail(
+        new ToolInputError(`Suite execution does not support provider "${target.provider}".`),
+      );
 
     const binding = yield* Effect.tryPromise({
-      try: () => dependencies.expertStore.prepareSnapshot(definition.id),
+      try: () =>
+        input.hub?.config.suite
+          ? dependencies.expertStore.prepareSnapshot(definition.id, {
+              projectRoot: cwd,
+              allowMissingConnections: true,
+            })
+          : dependencies.expertStore.prepareSnapshot(definition.id),
       catch: (error) => new ToolInputError(errorText(error)),
     });
     const snapshot = yield* Effect.tryPromise({
@@ -196,8 +329,40 @@ export function resolveHubCreationSpec(input: {
         new ToolInputError("Expert changed during Hub dispatch preflight; retry the request."),
       );
     }
-    yield* validateExpertPreview(dependencies.expertStore, definition.id, target, cwd);
-    return { ...input.spec, target, expertBinding: binding };
+    if (!input.hub?.config.suite)
+      yield* validateExpertPreview(dependencies.expertStore, definition.id, target, cwd);
+    let capability: CapabilityBinding | undefined;
+    if (input.hub?.config.suite) {
+      if (!dependencies.prepareSuiteBinding)
+        return yield* Effect.fail(
+          new ToolInputError("Suite worker binding preparation is unavailable."),
+        );
+      capability = yield* dependencies
+        .prepareSuiteBinding({
+          suite: input.hub.config.suite,
+          purpose: {
+            kind: "hub-worker",
+            hubId: input.hub.projectId,
+            workId: input.hub.workId,
+            hubConfigRevision: input.hub.config.revision,
+            expertSnapshotId: binding.snapshotId,
+          },
+          projectId: input.targetProjectId,
+          projectRoot: cwd,
+        })
+        .pipe(Effect.mapError((error) => new ToolInputError(errorText(error))));
+    }
+    return {
+      ...input.spec,
+      target,
+      expertBinding: binding,
+      ...(capability === undefined
+        ? {}
+        : {
+            capabilityBindingId: capability.bindingId,
+            suite: capability.suite,
+          }),
+    };
   });
 }
 
@@ -209,43 +374,58 @@ export function listHubExpertSummaries(input: {
   readonly projectId: ProjectId;
   /** Trusted roster loaded from the Hub configuration, never tool input. */
   readonly expertIds: readonly string[];
+  readonly config?: HubCandidateConfig;
 }): Effect.Effect<ReadonlyArray<HubExpertSummary>, ToolInputError> {
   const { dependencies } = input;
   return Effect.gen(function* () {
-    const expertIds = [...new Set(input.expertIds)].sort();
-    // Empty and legacy Hubs do not discover the global catalogue or providers.
-    if (expertIds.length === 0) return [];
-    const definitions = yield* Effect.forEach(expertIds, (expertId) =>
-      Effect.tryPromise({
-        try: () => dependencies.expertStore.read(expertId),
-        catch: (error) => new ToolInputError(errorText(error)),
-      }),
-    );
+    const definitions = new Map<string, ExpertDefinition | null>();
+    const resolved = yield* resolveHubExpertCandidates({
+      config: input.config ?? { expertIds: input.expertIds },
+      expertStore: {
+        read: async (expertId) => {
+          const definition = await dependencies.expertStore.read(expertId);
+          definitions.set(expertId, definition);
+          return definition;
+        },
+      },
+      projectId: input.projectId,
+      ...(dependencies.suiteStore ? { suiteStore: dependencies.suiteStore } : {}),
+    });
+    if (resolved.candidates.every((candidate) => !candidate.available)) return resolved.candidates;
     const workspaceRoot = yield* dependencies
       .getProjectWorkspaceRoot(input.projectId)
       .pipe(Effect.mapError((error) => new ToolInputError(errorText(error))));
     const availabilities = yield* dependencies.loadProviderAvailabilities.pipe(
       Effect.mapError((error) => new ToolInputError(errorText(error))),
     );
-    return yield* Effect.forEach(definitions, (definition, index) =>
+    return yield* Effect.forEach(resolved.candidates, (candidate) =>
       Effect.gen(function* () {
-        if (!definition)
+        if (!candidate.available) return candidate;
+        const definition = definitions.get(candidate.expertId);
+        if (!definition || definition.archived)
           return {
-            targetProjectId: input.projectId,
-            expertId: expertIds[index]!,
-            displayName: "Unavailable Expert",
-            description: "",
-            useCases: "",
-            preferredProvider: null,
+            ...candidate,
             available: false,
-          } satisfies HubExpertSummary;
+            issues: [
+              candidateIssue(
+                candidate.expertId,
+                "identity_unavailable",
+                "Expert identity is unavailable.",
+              ),
+            ],
+          };
         const provider =
           definition.defaultModelSelection?.provider ??
           definition.preferredProvider ??
           input.callerTarget.provider;
         const providerAvailability = availabilities.get(provider);
-        let available = !definition.archived && isExpertProvider(provider);
-        if (available) {
+        const issue = yield* Effect.gen(function* () {
+          if (!isExpertProvider(provider))
+            return candidateIssue(
+              definition.id,
+              "unsupported_capability",
+              `Experts do not support provider "${provider}".`,
+            );
           const target =
             definition.defaultModelSelection ??
             (definition.preferredProvider === undefined
@@ -257,40 +437,36 @@ export function listHubExpertSummaries(input: {
                     ? { availability: providerAvailability }
                     : {}),
                   cwd: workspaceRoot,
-                }).pipe(Effect.catch(() => Effect.succeed(null))));
-          if (target === null) {
-            available = false;
-          } else {
-            const resolved = yield* resolveAgentGatewayTarget({
-              target,
-              discovery: dependencies.providerDiscovery,
-              ...(providerAvailability !== undefined ? { availability: providerAvailability } : {}),
-              cwd: workspaceRoot,
-            }).pipe(Effect.catch(() => Effect.succeed(null)));
-            if (
-              resolved === null ||
-              (yield* validateExpertPreview(
-                dependencies.expertStore,
-                definition.id,
-                resolved,
-                workspaceRoot,
-              ).pipe(
-                Effect.as(true),
-                Effect.catch(() => Effect.succeed(false)),
-              )) === false
-            ) {
-              available = false;
-            }
-          }
-        }
+                }));
+          const targetSelection = yield* resolveAgentGatewayTarget({
+            target,
+            discovery: dependencies.providerDiscovery,
+            ...(providerAvailability !== undefined ? { availability: providerAvailability } : {}),
+            cwd: workspaceRoot,
+          });
+          if (resolved.suite !== null && !supportsSuiteRuntime(targetSelection.provider))
+            return candidateIssue(
+              definition.id,
+              "unsupported_capability",
+              `Suite execution does not support provider "${targetSelection.provider}".`,
+            );
+          if (resolved.suite === null)
+            yield* validateExpertPreview(
+              dependencies.expertStore,
+              definition.id,
+              targetSelection,
+              workspaceRoot,
+            );
+          return null;
+        }).pipe(
+          Effect.catch((error) =>
+            Effect.succeed(candidateIssue(definition.id, "provider_unavailable", errorText(error))),
+          ),
+        );
         return {
-          targetProjectId: input.projectId,
-          expertId: definition.id,
-          displayName: definition.name,
-          description: definition.description.slice(0, 800),
-          useCases: definition.useCases.slice(0, 1600),
-          preferredProvider: definition.preferredProvider ?? null,
-          available,
+          ...candidate,
+          available: issue === null,
+          issues: issue === null ? candidate.issues : [...(candidate.issues ?? []), issue],
         } satisfies HubExpertSummary;
       }),
     );

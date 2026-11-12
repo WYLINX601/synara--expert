@@ -172,6 +172,9 @@ export function threadShellsEqual(left: ThreadShell | undefined, right: ThreadSh
     left !== undefined &&
     left.id === right.id &&
     deepEqualJson(left.expertBinding ?? null, right.expertBinding ?? null) &&
+    deepEqualJson(left.expertDraftSelection ?? null, right.expertDraftSelection ?? null) &&
+    deepEqualJson(left.suiteSelection ?? null, right.suiteSelection ?? null) &&
+    (left.capabilityBindingId ?? null) === (right.capabilityBindingId ?? null) &&
     left.codexThreadId === right.codexThreadId &&
     left.projectId === right.projectId &&
     left.title === right.title &&
@@ -1971,6 +1974,9 @@ export function normalizeThreadFromReadModel(
     previous &&
     previous.projectId === incoming.projectId &&
     deepEqualJson(previous.expertBinding ?? null, incoming.expertBinding ?? null) &&
+    deepEqualJson(previous.expertDraftSelection ?? null, incoming.expertDraftSelection ?? null) &&
+    deepEqualJson(previous.suiteSelection ?? null, incoming.suiteSelection ?? null) &&
+    (previous.capabilityBindingId ?? null) === (incoming.capabilityBindingId ?? null) &&
     previous.title === incoming.title &&
     previous.modelSelection === modelSelection &&
     previous.runtimeMode === incoming.runtimeMode &&
@@ -2039,6 +2045,9 @@ export function normalizeThreadFromReadModel(
   return {
     id: incoming.id,
     expertBinding: incoming.expertBinding ?? null,
+    expertDraftSelection: incoming.expertDraftSelection ?? null,
+    suiteSelection: incoming.suiteSelection ?? null,
+    capabilityBindingId: incoming.capabilityBindingId ?? null,
     codexThreadId: null,
     projectId: incoming.projectId,
     title: incoming.title,
@@ -2201,6 +2210,9 @@ export function normalizeThreadShellSnapshot(
   const shell: ThreadShell = {
     id: incoming.id,
     expertBinding: incoming.expertBinding ?? null,
+    expertDraftSelection: incoming.expertDraftSelection ?? null,
+    suiteSelection: incoming.suiteSelection ?? null,
+    capabilityBindingId: incoming.capabilityBindingId ?? null,
     codexThreadId: previous?.codexThreadId ?? null,
     projectId: incoming.projectId,
     title: incoming.title,

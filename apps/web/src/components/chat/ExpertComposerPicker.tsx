@@ -3,6 +3,7 @@ import {
   type ExpertPreview,
   type ProviderInstanceId,
   type ProviderKind,
+  type SuiteRef,
 } from "@synara/contracts";
 import { useQuery } from "@tanstack/react-query";
 import { isExpertProvider } from "@synara/shared/expertProviders";
@@ -13,6 +14,7 @@ import { Menu, MenuGroup, MenuGroupLabel, MenuItem, MenuTrigger } from "../ui/me
 import { expertPreviewQueryKey } from "../settings/expertSettingsQueries";
 import { ComposerPickerMenuPopup } from "./ComposerPickerMenuPopup";
 import { COMPOSER_TOOLBAR_PICKER_TRIGGER_CLASS_NAME } from "./composerPickerStyles";
+import { suiteQueryKey } from "../settings/expertSettingsQueries";
 
 const EXPERTS_QUERY_KEY = ["server", "experts"] as const;
 
@@ -76,6 +78,7 @@ function statusTone(status: ExpertPreview["status"] | undefined): string {
 
 interface ExpertComposerPickerProps {
   expertId: string | undefined;
+  suiteSelection?: SuiteRef | null | undefined;
   provider: ProviderKind;
   preview: ExpertPreview | undefined;
   previewFetching: boolean;
@@ -87,6 +90,7 @@ interface ExpertComposerPickerProps {
 
 export function ExpertComposerPicker({
   expertId,
+  suiteSelection,
   preview,
   previewFetching,
   previewError,
@@ -95,23 +99,34 @@ export function ExpertComposerPicker({
   onSelectionCommitted,
 }: ExpertComposerPickerProps) {
   const expertsQuery = useExpertDefinitions(true);
+  const suite = useQuery({
+    queryKey: suiteQueryKey(suiteSelection ?? null),
+    queryFn: () => ensureExpertClient().readSuite(suiteSelection!),
+    enabled: Boolean(suiteSelection && expertId),
+  });
   const experts = expertsQuery.data ?? [];
   const activeExperts = experts.filter((expert) => !expert.archived);
   const selectedExpert = activeExperts.find((expert) => expert.id === expertId);
-  const selectedStatus = expertId
-    ? unsupportedProvider
-      ? "incompatible"
-      : preview?.status
-    : undefined;
-  const triggerLabel = selectedExpert?.name ?? (expertId ? "已选专家" : "通用");
-  const previewSummary =
-    (selectedStatus ? statusLabel(selectedStatus) : null) ??
-    (previewFetching ? "正在检查" : previewError ? "检查失败" : null);
+  const selectedStatus =
+    !suiteSelection && expertId
+      ? unsupportedProvider
+        ? "incompatible"
+        : preview?.status
+      : undefined;
+  const expertLabel = selectedExpert?.name ?? (expertId ? "已选专家" : "通用");
+  const triggerLabel = suiteSelection
+    ? `${expertLabel} · ${suite.data?.name ?? "Suite"}`
+    : expertLabel;
+  const previewSummary = suiteSelection
+    ? null
+    : ((selectedStatus ? statusLabel(selectedStatus) : null) ??
+      (previewFetching ? "正在检查" : previewError ? "检查失败" : null));
   const footerStatus = unsupportedProvider
     ? "当前 Provider 不支持专家"
     : (previewSummary ?? (selectedStatus === "available" ? null : "等待预览结果"));
   const showPreviewFooter = Boolean(
     expertId &&
+    !suiteSelection &&
     (selectedStatus !== "available" || previewFetching || previewError || preview?.issues.length),
   );
 
@@ -174,6 +189,12 @@ export function ExpertComposerPicker({
             ))
           )}
         </MenuGroup>
+        {suiteSelection ? (
+          <div className="border-t border-border/60 px-2.5 py-2 text-ui-sm text-muted-foreground">
+            {suite.data?.name ?? (suite.isError ? "Suite 名称暂不可读取" : "正在读取 Suite…")} · r
+            {suiteSelection.revision}
+          </div>
+        ) : null}
         {showPreviewFooter ? (
           <div className="space-y-1.5 border-t border-border/60 px-2.5 py-2">
             {footerStatus ? (

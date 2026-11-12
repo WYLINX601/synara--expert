@@ -66,6 +66,8 @@ function projectAgentOverview(
   return {
     projectId,
     configured: false,
+    suiteSelectionOpen: false,
+    suite: null,
     config: null,
     linkedProjectIds: [sourceProjectId],
     sourceProjectId,

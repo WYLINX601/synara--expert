@@ -14,6 +14,7 @@ export type ProviderIntentEvent = Extract<
       | "thread.interaction-mode-set"
       | "thread.turn-queued"
       | "thread.turn-start-requested"
+      | "thread.expert-delegation-result"
       | "thread.claude-cache-response-requested"
       | "thread.goal-continuation-requested"
       | "thread.turn-interrupt-requested"
@@ -38,6 +39,7 @@ const PROVIDER_INTENT_EVENT_TYPES = new Set<ProviderIntentEvent["type"]>([
   "thread.interaction-mode-set",
   "thread.turn-queued",
   "thread.turn-start-requested",
+  "thread.expert-delegation-result",
   "thread.claude-cache-response-requested",
   "thread.goal-continuation-requested",
   "thread.turn-interrupt-requested",
@@ -62,6 +64,7 @@ export const isReplaySafeClaimedProviderIntent = (event: ProviderIntentEvent): b
   event.type === "thread.created" ||
   event.type === "thread.archived" ||
   event.type === "thread.unarchived" ||
+  event.type === "thread.expert-delegation-result" ||
   // The claimed handler only performs the idempotent durable enqueue. Queue
   // draining runs after the delivery settles, so replay never repeats provider
   // dispatch as part of this claim.

@@ -1,7 +1,15 @@
-import { ProjectId, ThreadId, type HubWorkRecord } from "@synara/contracts";
+import {
+  ProjectId,
+  ThreadId,
+  type CapabilityBinding,
+  type HubWorkRecord,
+  type SuiteComposition,
+} from "@synara/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Exit, Layer } from "effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { suiteContentDigest } from "../../suites/suiteIdentity";
 import { HubWorkRepository, type HubWorkRepositoryShape } from "../Services/HubWorkRepository";
 import { ProjectAgentRepository } from "../Services/ProjectAgentRepository";
 import { HubWorkRepositoryLive } from "./HubWorkRepository";
@@ -226,6 +234,208 @@ layer("Hub work durable admission", (it) => {
         );
         assert.equal(Exit.isFailure(stale), true);
         assert.deepEqual((yield* repository.get(record.id))?.progress, saved.progress);
+      }),
+  );
+
+  it.effect("compares frozen specs across SQL reads, omitted optionals, and reordered keys", () =>
+    Effect.gen(function* () {
+      const repository = yield* HubWorkRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const record: HubWorkRecord = {
+        ...work("normalized-spec", 0),
+        projectId: ProjectId.makeUnsafe("hub-normalized-spec"),
+        creationSpec: {
+          prompt: "Keep the original context",
+          target: { provider: "codex", model: "gpt-5" },
+          contextMessageIds: ["context-first", "context-second"],
+        },
+      };
+      yield* submitWork(repository, [record]);
+      const [raw] = yield* sql<{ readonly instanceId: string | null }>`
+        SELECT json_extract(record_json, '$.creationSpec.target.instanceId') AS "instanceId"
+        FROM project_agent_work_items WHERE work_item_id = ${record.id}
+      `;
+      assert.equal(raw?.instanceId, null);
+      const loaded = yield* repository.get(record.id);
+      assert.equal(loaded?.creationSpec.target.instanceId, "codex");
+      const saved = yield* repository.save({
+        record: {
+          ...record,
+          revision: 1,
+          state: "waiting",
+          creationSpec: {
+            contextMessageIds: record.creationSpec.contextMessageIds,
+            target: { model: "gpt-5", provider: "codex" },
+            notifyCreatorOnComplete: undefined,
+            prompt: record.creationSpec.prompt,
+          },
+        },
+        expectedRevision: 0,
+      });
+      assert.equal(saved.creationSpec.target.instanceId, "codex");
+      const reloaded = yield* repository.get(record.id);
+      assert.deepEqual(reloaded, saved);
+      const completed = yield* repository.save({
+        record: { ...saved, state: "completed", revision: 2 },
+        expectedRevision: 1,
+      });
+      const changedSpecs: readonly HubWorkRecord["creationSpec"][] = [
+        { ...record.creationSpec, target: { provider: "codex", model: "different-model" } },
+        { ...record.creationSpec, contextMessageIds: ["context-second", "context-first"] },
+        { ...record.creationSpec, suite: null },
+      ];
+      for (const creationSpec of changedSpecs) {
+        const rejected = yield* repository
+          .save({
+            record: { ...completed, creationSpec, revision: 3 },
+            expectedRevision: 2,
+          })
+          .pipe(Effect.flip);
+        assert.equal(rejected.code, "conflict");
+        assert.equal(
+          rejected.message,
+          "Accepted Hub work cannot change its frozen creation binding.",
+        );
+      }
+      assert.deepEqual(yield* repository.get(record.id), completed);
+    }),
+  );
+
+  it.effect(
+    "retains Suite identity and context through configuration changes and SQL round trips",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* HubWorkRepository;
+        const configRepository = yield* ProjectAgentRepository;
+        const sql = yield* SqlClient.SqlClient;
+        const hub = ProjectId.makeUnsafe("hub-frozen-suite-spec");
+        const suite = { suiteId: "suite_00000000-0000-0000-0000-000000000002", revision: 1 };
+        const content: Omit<SuiteComposition, "compositionHash" | "createdAt"> = {
+          schemaVersion: 1,
+          ref: suite,
+          name: "Frozen Suite",
+          description: "Preserve accepted work",
+          source: {
+            kind: "local-folder",
+            sourceId: "/fixture/frozen-suite",
+            contentHash: "a".repeat(64),
+          },
+          adapterId: "fixture",
+          adapterVersion: 1,
+          members: [{ key: "worker", expertId: "frozen-expert", roleSourcePath: null }],
+          resources: [],
+          defaults: {},
+        };
+        const composition: SuiteComposition = {
+          ...content,
+          compositionHash: suiteContentDigest(content),
+          createdAt: now,
+        };
+        yield* sql`INSERT INTO suite_compositions(suite_id, revision, composition_hash, record_json)
+        VALUES (${suite.suiteId}, ${suite.revision}, ${composition.compositionHash}, ${JSON.stringify(composition)})`;
+        yield* configRepository.beginSuiteOnboarding(hub);
+        yield* configure(hub);
+        const configured = yield* configRepository.getConfig(hub);
+        if (configured._tag !== "Some") throw new Error("Expected configured hub");
+        yield* configRepository.saveConfig({ ...configured.value, suite, revision: 2 }, 1);
+        const record: HubWorkRecord = {
+          ...work("suite-spec-roundtrip", 0),
+          projectId: hub,
+          targetProjectId: hub,
+          creationSpec: {
+            prompt: "Use the frozen Suite and context",
+            target: { provider: "codex", model: "gpt-5" },
+            expertId: "frozen-expert",
+            expertBinding: {
+              expertId: "frozen-expert",
+              snapshotId: "snapshot:original",
+              displayName: "Frozen Expert",
+              revision: 1,
+            },
+            capabilityBindingId: "binding:frozen-suite-spec",
+            suite,
+            contextMessageIds: ["context:v1"],
+          },
+        };
+        const bindingContent: Pick<
+          CapabilityBinding,
+          "suite" | "purpose" | "projectId" | "connections" | "mcpBinding"
+        > = {
+          suite,
+          purpose: {
+            kind: "hub-worker",
+            hubId: hub,
+            workId: record.id,
+            hubConfigRevision: 2,
+            expertSnapshotId: "snapshot:original",
+          },
+          projectId: hub,
+          connections: [],
+          mcpBinding: null,
+        };
+        const binding: CapabilityBinding = {
+          ...bindingContent,
+          schemaVersion: 1,
+          bindingId: "binding:frozen-suite-spec",
+          bindingHash: suiteContentDigest(bindingContent),
+          createdAt: now,
+        };
+        yield* sql`INSERT INTO suite_capability_bindings(binding_id, binding_hash, record_json)
+        VALUES (${binding.bindingId}, ${binding.bindingHash}, ${JSON.stringify(binding)})`;
+        yield* repository.submit({
+          projectId: hub,
+          requestId: record.requestId,
+          scopeKey: record.scopeKey,
+          fingerprint: record.fingerprint,
+          records: [record],
+          admission: { expectedConfigRevision: 2 },
+        });
+        yield* configRepository.saveConfig(
+          {
+            ...configured.value,
+            suite,
+            coordinatorName: "Updated Hub",
+            coordinatorModelSelection: { provider: "codex", model: "new-default-model" },
+            revision: 3,
+          },
+          2,
+        );
+        const saved = yield* repository.save({
+          record: { ...record, revision: 1, state: "waiting" },
+          expectedRevision: 0,
+        });
+        assert.deepEqual(yield* repository.get(record.id), saved);
+        assert.deepEqual(saved.creationSpec.suite, suite);
+        assert.equal(saved.creationSpec.capabilityBindingId, binding.bindingId);
+        assert.equal(saved.creationSpec.expertBinding?.snapshotId, "snapshot:original");
+        assert.deepEqual(saved.creationSpec.contextMessageIds, ["context:v1"]);
+        const expertBinding = saved.creationSpec.expertBinding;
+        if (!expertBinding) throw new Error("Expected frozen Expert binding");
+        const changedSpecs: readonly HubWorkRecord["creationSpec"][] = [
+          { ...saved.creationSpec, suite: { ...suite, revision: 2 } },
+          { ...saved.creationSpec, suite: null },
+          { ...saved.creationSpec, capabilityBindingId: "binding:replacement" },
+          {
+            ...saved.creationSpec,
+            expertBinding: { ...expertBinding, snapshotId: "snapshot:replacement" },
+          },
+          { ...saved.creationSpec, expertBinding: { ...expertBinding, revision: 2 } },
+          { ...saved.creationSpec, contextMessageIds: ["context:v2"] },
+        ];
+        for (const creationSpec of changedSpecs) {
+          const rejected = yield* repository
+            .save({
+              record: { ...saved, creationSpec, revision: 2 },
+              expectedRevision: 1,
+            })
+            .pipe(Effect.flip);
+          assert.equal(rejected.code, "conflict");
+          assert.equal(
+            rejected.message,
+            "Accepted Hub work cannot change its frozen creation binding.",
+          );
+        }
+        assert.deepEqual(yield* repository.get(record.id), saved);
       }),
   );
 

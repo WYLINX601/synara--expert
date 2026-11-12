@@ -19,7 +19,7 @@ import {
   type SkillLibraryResponse,
   type SkillPackage,
   type SkillSource,
-  type SkillScope,
+  SkillScope,
   type SkillDerivation,
 } from "@synara/contracts";
 import { Schema } from "effect";
@@ -35,7 +35,7 @@ import {
 import { createSkillPackageStore, SkillPackageStoreError } from "./SkillPackageStore";
 import { withSkillPackageLifecycle } from "./skillPackageLifecycle";
 import { retainSkillEvolutionPackagesUnlocked } from "./skillEvolutionPackagePins";
-import { assertSkillScopeForExpert } from "./skillEvolutionPolicy";
+import { assertSkillScopeForExpert, effectiveSkillScope } from "./skillEvolutionPolicy";
 import { withExpertLearningCommit } from "./expertLearningCommit";
 import {
   assertSkillResourcePath,
@@ -45,9 +45,37 @@ import {
   SKILL_PACKAGE_LIMIT,
 } from "./skillLibraryArchive";
 
+const PackageScope = Schema.Struct({
+  packageId: SkillDefinition.fields.packageId,
+  entryPath: SkillDefinition.fields.entryPath,
+  scope: SkillScope,
+});
+type PackageScope = typeof PackageScope.Type;
+
+function retainPackageScopes(
+  retained: ReadonlyArray<PackageScope>,
+  definitions: ReadonlyArray<SkillDefinition>,
+): PackageScope[] {
+  const scopes = new Map<string, PackageScope>();
+  const retain = (record: PackageScope) => {
+    const owner = record.scope.kind === "expert" ? record.scope.expertId : "";
+    scopes.set(`${record.packageId}\0${record.entryPath}\0${record.scope.kind}\0${owner}`, record);
+  };
+  for (const record of retained) retain(record);
+  for (const definition of definitions)
+    retain({
+      packageId: definition.packageId,
+      entryPath: definition.entryPath,
+      scope: effectiveSkillScope(definition),
+    });
+  return [...scopes.values()];
+}
+
 const Registry = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   skills: Schema.Array(SkillDefinition),
+  /** Immutable ownership facts, not package-retention pins or mutable head grants. */
+  packageScopes: Schema.optional(Schema.Array(PackageScope)),
 });
 const pendingWrites = new Map<string, Promise<unknown>>();
 const registryPath = (stateDir: string) => path.join(stateDir, "experts", "skill-library.json");
@@ -166,17 +194,44 @@ const refreshableSource = (skill: SkillDefinition) => {
     return false;
   }
 };
-export async function readSkillLibraryDefinitions(stateDir: string): Promise<SkillDefinition[]> {
+async function readSkillLibraryRegistry(stateDir: string): Promise<typeof Registry.Type> {
   try {
-    return [
-      ...Schema.decodeUnknownSync(Registry)(
-        JSON.parse((await expertResourceFiles.read(registryPath(stateDir))).toString("utf8")),
-      ).skills,
-    ];
+    return Schema.decodeUnknownSync(Registry)(
+      JSON.parse((await expertResourceFiles.read(registryPath(stateDir))).toString("utf8")),
+    );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { schemaVersion: 1, skills: [] };
     throw error;
   }
+}
+
+/** One captured owner view keeps fixed package references independent of source provenance. */
+export async function readSkillLibrarySnapshot(stateDir: string) {
+  const registry = await readSkillLibraryRegistry(stateDir);
+  let scopes = retainPackageScopes(registry.packageScopes ?? [], registry.skills);
+  if (registry.packageScopes === undefined) {
+    const historical = await createSkillLibraryOperations(stateDir).historicalDefinitions();
+    scopes = retainPackageScopes(scopes, historical);
+    const byId = new Map(registry.skills.map((skill) => [skill.skillId, skill]));
+    const { listRunSkillAssemblies } = await import("./RunSkillAssemblyStore");
+    for (const run of await listRunSkillAssemblies(stateDir)) {
+      const entries = run.schemaVersion === 1 ? run.session.skillEntries : run.skillEntries;
+      for (const entry of entries ?? []) {
+        const definition = entry.managedSkillId ? byId.get(entry.managedSkillId) : undefined;
+        if (definition)
+          scopes.push({
+            packageId: entry.packageId,
+            entryPath: entry.entryPath,
+            scope: effectiveSkillScope(definition),
+          });
+      }
+    }
+  }
+  return { skills: [...registry.skills], packageScopes: retainPackageScopes(scopes, []) };
+}
+
+export async function readSkillLibraryDefinitions(stateDir: string): Promise<SkillDefinition[]> {
+  return [...(await readSkillLibraryRegistry(stateDir)).skills];
 }
 export async function readSkillDefinition(
   stateDir: string,
@@ -196,6 +251,8 @@ export async function resolveSkillBindings(
   additions?: {
     skills?: ReadonlyArray<SkillDefinition>;
     packages?: ReadonlyArray<SkillPackage>;
+    /** One already-captured owner view for immutable logical Run resolution. */
+    definitions?: ReadonlyArray<SkillDefinition>;
   },
 ): Promise<ExpertSkillSelection[]> {
   const bindings = Schema.decodeUnknownSync(
@@ -203,7 +260,7 @@ export async function resolveSkillBindings(
   )(rawBindings);
   if (new Set(bindings.map((binding) => binding.skillId)).size !== bindings.length)
     throw new Error("Duplicate Skill binding.");
-  const definitions = await readSkillLibraryDefinitions(stateDir),
+  const definitions = additions?.definitions ?? (await readSkillLibraryDefinitions(stateDir)),
     definitionsById = new Map(definitions.map((definition) => [definition.skillId, definition]));
   for (const skill of additions?.skills ?? []) definitionsById.set(skill.skillId, skill);
   const effectiveDefinitions = [...definitionsById.values()];
@@ -365,10 +422,12 @@ function makeSkillLibraryStore(stateDir: string) {
     lifecycleHeld = false,
     beforeMutation?: () => Promise<void>,
   ) => {
-    const serialized = `${JSON.stringify({ schemaVersion: 1, skills }, null, 2)}\n`;
-    if (Buffer.byteLength(serialized, "utf8") > SKILL_FILE_LIMIT)
-      throw new Error("Skill library registry exceeds the 16 MiB read limit.");
     const write = async () => {
+      const previous = await readSkillLibrarySnapshot(stateDir);
+      const packageScopes = retainPackageScopes(previous.packageScopes, skills);
+      const serialized = `${JSON.stringify({ schemaVersion: 1, skills, packageScopes }, null, 2)}\n`;
+      if (Buffer.byteLength(serialized, "utf8") > SKILL_FILE_LIMIT)
+        throw new Error("Skill library registry exceeds the 16 MiB read limit.");
       await beforeMutation?.();
       await writePrivateFileAtomically(registryPath(stateDir), serialized);
     };

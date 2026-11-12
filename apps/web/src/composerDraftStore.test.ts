@@ -104,6 +104,7 @@ describe("composerDraftStore project draft thread mapping", () => {
     expect(useComposerDraftStore.getState().getDraftThreadByProjectId(projectId)).toEqual({
       threadId,
       projectId,
+      suiteSelection: null,
       entryPoint: "chat",
       branch: "feature/test",
       worktreePath: "/tmp/worktree-test",
@@ -116,6 +117,7 @@ describe("composerDraftStore project draft thread mapping", () => {
     });
     expect(useComposerDraftStore.getState().getDraftThread(threadId)).toEqual({
       projectId,
+      suiteSelection: null,
       entryPoint: "chat",
       branch: "feature/test",
       worktreePath: "/tmp/worktree-test",

@@ -33,10 +33,32 @@ import { SkillEvolutionRepositoryLive } from "../workbench/host/skillEvolutionPe
 import { ExpertLearningRepositoryLive } from "../workbench/host/expertLearningPersistence";
 import { SpaceMemoryLive } from "../workbench/host/spaceMemoryPersistence";
 import { OrchestrationProjectionSnapshotQueryLive } from "../orchestration/Layers/ProjectionSnapshotQuery";
+import type { OmpNativeExpertProtocolFactory } from "./acp/OmpNativeExpertProtocol";
+import type { OmpNativeExpertBuild } from "./acp/OmpNativeExpertTransport";
+import ompNativeExpertLock from "../../../../workbench/omp-native-expert.lock.json" with { type: "json" };
+
+const nativeExpertBuildManifest: {
+  readonly binary: { readonly sha256: string } | null;
+  readonly buildFingerprint: string | null;
+} = ompNativeExpertLock;
+const trustedNativeExpertBuilds: readonly OmpNativeExpertBuild[] =
+  nativeExpertBuildManifest.binary !== null &&
+  /^[a-f0-9]{64}$/u.test(nativeExpertBuildManifest.binary.sha256) &&
+  nativeExpertBuildManifest.buildFingerprint !== null &&
+  /^[a-f0-9]{64}$/u.test(nativeExpertBuildManifest.buildFingerprint)
+    ? [
+        {
+          binarySha256: nativeExpertBuildManifest.binary.sha256,
+          buildFingerprint: nativeExpertBuildManifest.buildFingerprint,
+        },
+      ]
+    : [];
 
 export function makeServerProviderLayer(
   options: {
     readonly agentGatewayCredentialsLayer?: typeof AgentGatewayCredentialsWithSecretsLive;
+    readonly nativeExpertProtocolFactory?: OmpNativeExpertProtocolFactory;
+    readonly nativeExpertBuilds?: readonly OmpNativeExpertBuild[];
   } = {},
 ) {
   return Effect.gen(function* () {
@@ -99,7 +121,13 @@ export function makeServerProviderLayer(
     ).pipe(Layer.provide(agentGatewayCredentialsLayer));
     const ompAdapterLayer = makeOmpAdapterLive(
       {},
-      nativeEventLogger ? { nativeEventLogger } : undefined,
+      {
+        ...(nativeEventLogger ? { nativeEventLogger } : {}),
+        ...(options.nativeExpertProtocolFactory
+          ? { nativeExpertProtocolFactory: options.nativeExpertProtocolFactory }
+          : {}),
+        nativeExpertBuilds: options.nativeExpertBuilds ?? trustedNativeExpertBuilds,
+      },
     ).pipe(Layer.provide(agentGatewayCredentialsLayer));
     const adapterRegistryLayer = ProviderAdapterRegistryLive.pipe(
       Layer.provide(codexAdapterLayer),

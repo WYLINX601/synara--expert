@@ -4,6 +4,7 @@ import { ThreadErrorBanner } from "./chat/ThreadErrorBanner";
 import { useZenMode } from "./chat/ZenModeProvider";
 import { ZenModeToolbar } from "./chat/ZenModeToolbar";
 import { disclosureFadeClassName } from "~/lib/disclosureMotion";
+import { HubSuiteLabel } from "./chat/group/HubSuiteLabel";
 import {
   ambientConnectionPresentation,
   ambientBindingAvailable,
@@ -5338,13 +5339,14 @@ export default function ChatView({
   );
   const composerExpertSendBlocked =
     Boolean(composerExpertId) &&
+    !draftThread?.suiteSelection &&
     (composerExpertPreview.unsupportedProvider ||
       composerExpertPreview.preview?.status === "blocked" ||
       composerExpertPreview.preview?.status === "incompatible");
   const handleComposerExpertSelect = useCallback(
     (expertId: string | undefined) => {
       if (isLocalDraftThread) {
-        setDraftThreadContext(threadId, { expertId: expertId ?? "" });
+        setDraftThreadContext(threadId, { expertId: expertId ?? "", suiteSelection: null });
         if (expertId !== composerExpertId) {
           const selection = composerExpertsQuery.data?.find(
             (expert) => expert.id === expertId,
@@ -5418,6 +5420,7 @@ export default function ChatView({
       {isLocalDraftThread ? (
         <ExpertComposerPicker
           expertId={composerExpertId}
+          suiteSelection={draftThread?.suiteSelection}
           provider={selectedProvider}
           preview={composerExpertPreview.preview}
           previewFetching={composerExpertPreview.isFetching}
@@ -7485,6 +7488,11 @@ export default function ChatView({
         <ChatHeader
           activeThreadId={activeThread.id}
           activeThreadTitle={activeThreadDisplayTitle}
+          suiteLabel={
+            isCoordinatorConversation && activeGroupSummary?.suite ? (
+              <HubSuiteLabel suite={activeGroupSummary.suite} />
+            ) : undefined
+          }
           activeThreadEntryPoint={terminalState.entryPoint}
           activeProvider={activeThread.session?.provider ?? activeThread.modelSelection.provider}
           activeProjectName={isEditorRail ? undefined : activeProjectDisplayName}
@@ -7531,6 +7539,11 @@ export default function ChatView({
                 threadTabs: (
                   <OpenThreadTabStrip
                     activeThreadId={activeThread.id}
+                    activeTitleSuffix={
+                      isCoordinatorConversation && activeGroupSummary?.suite ? (
+                        <HubSuiteLabel suite={activeGroupSummary.suite} />
+                      ) : undefined
+                    }
                     keybindings={keybindings}
                     closeActiveTabRef={closeActiveThreadTabRef}
                     onRenameActiveThread={() => setRenameDialogOpen(true)}

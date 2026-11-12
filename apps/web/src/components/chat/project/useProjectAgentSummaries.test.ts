@@ -43,6 +43,7 @@ function makeSummary(overrides: Partial<ProjectAgentSummary> = {}): ProjectAgent
   return {
     projectId: groupId,
     configured: true,
+    suite: null,
     coordinatorName: "Astra Bot",
     coordinatorThreadId,
     coordinatorIcon: null,
@@ -153,6 +154,7 @@ describe("useProjectAgentSummaries store", () => {
       type: "config-upserted",
       config: {
         projectId: groupId,
+        suite: null,
         coordinatorThreadId,
         coordinatorName: "Astra Bot",
         coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },
@@ -173,8 +175,11 @@ describe("useProjectAgentSummaries store", () => {
     useProjectAgentSummariesStore.getState().applyOverview({
       projectId: groupId,
       configured: true,
+      suiteSelectionOpen: false,
+      suite: null,
       config: {
         projectId: groupId,
+        suite: null,
         coordinatorThreadId,
         coordinatorName: "Astra Bot",
         coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },
@@ -240,6 +245,7 @@ describe("useProjectAgentSummaries store", () => {
   it("reports member lists loaded only after a full list, not after a row patch", () => {
     const config: ProjectAgentConfig = {
       projectId: groupId,
+      suite: null,
       coordinatorThreadId,
       coordinatorName: "Astra Bot",
       coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },
@@ -260,6 +266,8 @@ describe("useProjectAgentSummaries store", () => {
     state().applyOverview({
       projectId: groupId,
       configured: true,
+      suite: null,
+      suiteSelectionOpen: false,
       config,
       linkedProjectIds: [repoId],
       goal: null,
@@ -416,6 +424,7 @@ describe("list membership race regressions", () => {
       type: "config-upserted",
       config: {
         projectId: groupId,
+        suite: null,
         coordinatorThreadId,
         coordinatorName: "Astra Bot",
         coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },

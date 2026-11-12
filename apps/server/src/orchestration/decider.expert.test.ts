@@ -87,7 +87,7 @@ async function readModel() {
 }
 
 describe("expert thread binding", () => {
-  it("requires a server-prepared binding when creating an expert thread", async () => {
+  it("saves an Expert draft without freezing its snapshot before first send", async () => {
     const model = await readModel();
     const command = {
       type: "thread.create" as const,
@@ -104,15 +104,12 @@ describe("expert thread binding", () => {
       worktreePath: null,
       createdAt: at,
     };
-    await expect(
-      Effect.runPromise(decideOrchestrationCommand({ command, readModel: model })),
-    ).rejects.toThrow("was not prepared by the server");
     const created = await Effect.runPromise(
-      decideOrchestrationCommand({ command, readModel: model, expertBinding: updated }),
+      decideOrchestrationCommand({ command, readModel: model }),
     );
     expect(Array.isArray(created) ? created[0] : created).toMatchObject({
       type: "thread.created",
-      payload: { expertBinding: updated },
+      payload: { expertBinding: null, expertDraftSelection: { expertId: "reviewer", suite: null } },
     });
   });
 
@@ -154,4 +151,72 @@ describe("expert thread binding", () => {
       });
     },
   );
+
+  it("does not authorize an untrusted draft by its chosen parent thread", async () => {
+    const model = await readModel();
+    const command = {
+      type: "thread.create" as const,
+      commandId: CommandId.makeUnsafe("untrusted-child"),
+      threadId: continuationId,
+      projectId,
+      parentThreadId: sourceId,
+      title: "Child draft",
+      modelSelection: { provider: "omp" as const, model: "fixture" },
+      runtimeMode: "approval-required" as const,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      branch: null,
+      worktreePath: null,
+      createdAt: at,
+    };
+    const created = await Effect.runPromise(
+      decideOrchestrationCommand({ command, readModel: model }),
+    );
+    expect(Array.isArray(created) ? created[0] : created).toMatchObject({
+      payload: { expertBinding: null },
+    });
+  });
+
+  it("preserves an unknown observation without applying it to the parent", async () => {
+    const model = await readModel();
+    const result = await Effect.runPromise(
+      decideOrchestrationCommand({
+        readModel: model,
+        trustedExpertDelegationResult: true,
+        command: {
+          type: "thread.expert-delegation.result",
+          commandId: CommandId.makeUnsafe("unknown-result"),
+          threadId: sourceId,
+          parentRootRunId: "original-root",
+          delegationId: "delegation",
+          attemptId: "attempt",
+          targetExpertId: "actual-author",
+          outcome: "failed",
+          resultRef: "actual-result",
+          resultHash: "a".repeat(64),
+          result: null,
+          applyToParent: true,
+          createdAt: at,
+          issue: {
+            code: "execution_unknown",
+            category: "unknown",
+            subject: { kind: "execution", id: "attempt", path: null },
+            action: "run",
+            effect: "observe",
+            message: "Execution could not be reconciled.",
+            evidenceRef: null,
+            checkedAt: at,
+            recovery: "reconcile",
+          },
+        },
+      }),
+    );
+    expect(Array.isArray(result) ? result[0] : result).toMatchObject({
+      type: "thread.expert-delegation-result",
+      payload: {
+        targetExpertId: "actual-author",
+        resultRef: "actual-result",
+        applyToParent: false,
+      },
+    });
+  });
 });

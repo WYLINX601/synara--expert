@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { assert, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, Layer } from "effect";
 import { TestClock } from "effect/testing";
@@ -34,6 +35,91 @@ afterEach(() => {
 });
 
 layer("GitHubCliLive", (it) => {
+  it.effect("reads private snapshot objects only after one fixed ref resolution", () =>
+    Effect.gen(function* () {
+      const commit = "a".repeat(40);
+      const bytes = Buffer.from("private rules");
+      const blob = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+      mockedRunProcess
+        .mockResolvedValueOnce(processResult(JSON.stringify({ sha: commit })))
+        .mockResolvedValueOnce(
+          processResult(
+            JSON.stringify({
+              truncated: false,
+              tree: [{ path: "suite", type: "tree", mode: "040000", sha: "b".repeat(40) }],
+            }),
+          ),
+        )
+        .mockResolvedValueOnce(
+          processResult(
+            JSON.stringify({
+              truncated: false,
+              tree: [
+                { path: "empty", type: "tree", mode: "040000" },
+                { path: "rules.md", type: "blob", mode: "100755", sha: blob, size: bytes.length },
+              ],
+            }),
+          ),
+        )
+        .mockResolvedValueOnce(
+          processResult(JSON.stringify({ encoding: "base64", content: bytes.toString("base64") })),
+        );
+      const gh = yield* GitHubCli;
+      const snapshot = yield* gh.readRepositorySnapshot({
+        cwd: "/repo",
+        repository: "owner/private",
+        requestedRef: "main",
+        subdirectory: "suite",
+      });
+      expect(snapshot).toEqual({
+        resolvedCommit: commit,
+        entries: [
+          { path: "empty", kind: "directory", bytes: Buffer.alloc(0), executable: false },
+          { path: "rules.md", kind: "file", bytes, executable: true },
+        ],
+      });
+      expect(mockedRunProcess.mock.calls.map((call) => call[1])).toEqual([
+        ["api", "--hostname", "github.com", "repos/owner/private/commits/main"],
+        ["api", "--hostname", "github.com", `repos/owner/private/git/trees/${commit}`],
+        [
+          "api",
+          "--hostname",
+          "github.com",
+          `repos/owner/private/git/trees/${"b".repeat(40)}?recursive=1`,
+        ],
+        ["api", "--hostname", "github.com", `repos/owner/private/git/blobs/${blob}`],
+      ]);
+      expect(mockedRunProcess.mock.calls.every((call) => !call[1].includes("token"))).toBe(true);
+    }),
+  );
+
+  it.effect("rejects symlink and truncated snapshot trees before downloading any blob", () =>
+    Effect.gen(function* () {
+      const gh = yield* GitHubCli;
+      for (const tree of [
+        { truncated: true, tree: [] },
+        {
+          truncated: false,
+          tree: [{ path: "linked", type: "blob", mode: "120000", size: 3, sha: "b".repeat(40) }],
+        },
+      ]) {
+        mockedRunProcess
+          .mockResolvedValueOnce(processResult(JSON.stringify({ sha: "a".repeat(40) })))
+          .mockResolvedValueOnce(processResult(JSON.stringify(tree)));
+        const result = yield* Effect.result(
+          gh.readRepositorySnapshot({
+            cwd: "/repo",
+            repository: "owner/private",
+            requestedRef: "main",
+            subdirectory: "",
+          }),
+        );
+        expect(result._tag).toBe("Failure");
+      }
+      expect(mockedRunProcess).toHaveBeenCalledTimes(4);
+    }),
+  );
+
   it.effect("parses pull request view output", () =>
     Effect.gen(function* () {
       mockedRunProcess.mockResolvedValueOnce({

@@ -43,6 +43,7 @@ const workerId = ThreadId.makeUnsafe("worker-needs-recovery");
 const summary: ProjectAgentSummary = {
   projectId,
   configured: true,
+  suite: null,
   coordinatorName: "Coordinator",
   coordinatorThreadId: ThreadId.makeUnsafe("coordinator-polling"),
   coordinatorIcon: null,
@@ -88,6 +89,7 @@ describe("closed Hub recovery attention", () => {
           type: "config-upserted",
           config: {
             projectId,
+            suite: null,
             coordinatorThreadId: summary.coordinatorThreadId!,
             coordinatorName: "Renamed coordinator",
             coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },

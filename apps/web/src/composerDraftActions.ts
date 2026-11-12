@@ -230,6 +230,7 @@ export const createComposerDraftStoreState =
         const nextDraftThread: DraftThreadState = {
           projectId: options.projectId,
           ...(options.expertId?.trim() ? { expertId: options.expertId.trim() } : {}),
+          suiteSelection: options.suiteSelection ?? null,
           createdAt: options.createdAt ?? new Date().toISOString(),
           runtimeMode: options.runtimeMode ?? DEFAULT_RUNTIME_MODE,
           interactionMode: options.interactionMode ?? DEFAULT_INTERACTION_MODE,

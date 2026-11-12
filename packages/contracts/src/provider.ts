@@ -52,6 +52,31 @@ export const ProviderExpertApplication = Schema.Struct({
   skills: Schema.Array(ProviderSkillReference),
 });
 export type ProviderExpertApplication = typeof ProviderExpertApplication.Type;
+/** Trusted assembly reference: resource paths and coordinator identity are resolved by the server. */
+export const ProviderSuiteExecution = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("expert"),
+    capabilityBindingId: TrimmedNonEmptyString,
+    assemblyId: TrimmedNonEmptyString,
+    rootRunId: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("hub-coordinator"),
+    capabilityBindingId: TrimmedNonEmptyString,
+    assemblyId: TrimmedNonEmptyString,
+    rootRunId: TrimmedNonEmptyString,
+  }),
+]);
+export type ProviderSuiteExecution = typeof ProviderSuiteExecution.Type;
+export const ProviderSuiteApplication = Schema.Struct({
+  capabilityBindingId: TrimmedNonEmptyString,
+  assemblyId: TrimmedNonEmptyString,
+  rootRunId: TrimmedNonEmptyString,
+  configHash: TrimmedNonEmptyString,
+  resourceHashes: Schema.Array(TrimmedNonEmptyString),
+  contextFileHashes: Schema.Array(TrimmedNonEmptyString),
+});
+export type ProviderSuiteApplication = typeof ProviderSuiteApplication.Type;
 
 export const ProviderSession = Schema.Struct({
   provider: ProviderDriverKind,
@@ -73,6 +98,7 @@ export const ProviderSession = Schema.Struct({
   /** Catalog submission receipt; never evidence that a model executed a skill. */
   skillApplication: Schema.optional(ExpertSkillApplication),
   contextAppliedSnapshotId: Schema.optional(TrimmedNonEmptyString),
+  suiteApplication: Schema.optional(ProviderSuiteApplication),
 });
 export type ProviderSession = typeof ProviderSession.Type;
 
@@ -134,6 +160,7 @@ export const ProviderSessionStartInput = Schema.Struct({
   enableComputerControl: Schema.optional(Schema.Boolean),
   /** Immutable Expert snapshot resolved server-side from the thread binding. */
   expertSession: Schema.optional(ProviderExpertSession),
+  suiteExecution: Schema.optional(ProviderSuiteExecution),
   /** Runtime notices compiled after the immutable Expert snapshot is validated. */
   expertRuntimeNotices: Schema.optional(ProviderExpertRuntimeNotices),
   /** Frozen Space + Project Context resolved for this thread, independent of Expert. */
@@ -204,6 +231,7 @@ export const ProviderForkThreadInput = Schema.Struct({
   enableComputerControl: Schema.optional(Schema.Boolean),
   /** Immutable Expert snapshot inherited by a native provider fork when present. */
   expertSession: Schema.optional(ProviderExpertSession),
+  suiteExecution: Schema.optional(ProviderSuiteExecution),
   /** Runtime notices compiled after the immutable Expert snapshot is validated. */
   expertRuntimeNotices: Schema.optional(ProviderExpertRuntimeNotices),
   /** Frozen Space + Project Context carried independently into a native fork. */

@@ -25,6 +25,33 @@ import {
 } from "./lib/terminalContext";
 
 describe("composerDraftStore persisted-state hydration", () => {
+  it("round-trips an exact Suite selection and clears it only for a new independent Expert choice", () => {
+    resetComposerDraftStore();
+    const threadId = ThreadId.makeUnsafe("suite-draft");
+    const suite = { suiteId: "suite_10000000-0000-4000-8000-000000000001", revision: 3 };
+    const store = useComposerDraftStore.getState();
+    store.registerDraftThread(threadId, {
+      projectId: ProjectId.makeUnsafe("project-suite"),
+      expertId: "member",
+      suiteSelection: suite,
+    });
+    store.setPrompt(threadId, "保留未发送的目标");
+    store.setDraftThreadContext(threadId, { branch: "feature/suite" });
+    expect(useComposerDraftStore.getState().getDraftThread(threadId)?.suiteSelection).toEqual(
+      suite,
+    );
+    const persisted = normalizeCurrentPersistedComposerDraftStoreState(
+      JSON.parse(
+        JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+      ),
+    );
+    expect(persisted.draftThreadsByThreadId[threadId]?.suiteSelection).toEqual(suite);
+    store.setDraftThreadContext(threadId, { expertId: "independent", suiteSelection: null });
+    expect(useComposerDraftStore.getState().getDraftThread(threadId)?.suiteSelection).toBeNull();
+    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]?.prompt).toBe(
+      "保留未发送的目标",
+    );
+  });
   it("keeps the queue stop and resume markers only while the queue has entries", () => {
     resetComposerDraftStore();
     const threadId = ThreadId.makeUnsafe("thread-queue-resume");

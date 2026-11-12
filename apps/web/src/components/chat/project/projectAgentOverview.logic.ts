@@ -21,5 +21,10 @@ export function projectAgentOverviewWithConfig(
   overview: ProjectAgentOverview,
   config: ProjectAgentConfig,
 ): ProjectAgentOverview {
-  return { ...overview, config, configured: projectAgentOverviewConfigured({ config }) };
+  return {
+    ...overview,
+    config,
+    suite: config.suite ?? null,
+    configured: projectAgentOverviewConfigured({ config }),
+  };
 }

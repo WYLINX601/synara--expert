@@ -292,6 +292,22 @@ describe("Expert binding normalization", () => {
     revision: 3,
   };
 
+  it("preserves Suite selection and trusted binding references from both snapshot surfaces", () => {
+    const suiteSelection = { suiteId: "suite_10000000-0000-4000-8000-000000000001", revision: 4 };
+    const incoming = makeReadModelThread({
+      expertBinding,
+      suiteSelection,
+      capabilityBindingId: "binding-host-owned",
+    });
+    const thread = normalizeThreadFromReadModel(incoming, undefined);
+    expect(thread.suiteSelection).toEqual(suiteSelection);
+    expect(thread.capabilityBindingId).toBe("binding-host-owned");
+    const shell = normalizeThreadShellSnapshot(incoming, thread).shell;
+    expect(shell.suiteSelection).toEqual(suiteSelection);
+    expect(shell.capabilityBindingId).toBe("binding-host-owned");
+    expect(threadShellsEqual(shell, { ...shell, suiteSelection: null })).toBe(false);
+    expect(threadShellsEqual(shell, { ...shell, capabilityBindingId: null })).toBe(false);
+  });
   it("normalizes the binding from detail and shell snapshots and treats changes as significant", () => {
     const incoming = makeReadModelThread({ expertBinding });
     const thread = normalizeThreadFromReadModel(incoming, undefined);

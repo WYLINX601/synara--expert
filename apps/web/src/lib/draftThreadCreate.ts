@@ -13,6 +13,7 @@ import type {
   ProviderKind,
   ProviderStartOptions,
   RuntimeMode,
+  SuiteRef,
   ThreadId,
 } from "@synara/contracts";
 
@@ -29,6 +30,7 @@ import { isRequestOutcomeUnknown } from "./requestOutcome";
 export interface DraftThreadInput {
   projectId: ProjectId;
   expertId?: string;
+  suiteSelection?: SuiteRef | null;
   prompt: string;
   /** Optional scratch composer whose full transferable content seeds the new thread. */
   sourceComposerThreadId?: ThreadId;
@@ -53,6 +55,7 @@ export function createDraftThread(input: DraftThreadInput): ThreadId {
   store.registerDraftThread(threadId, {
     projectId: input.projectId,
     ...(input.expertId !== undefined ? { expertId: input.expertId } : {}),
+    suiteSelection: input.suiteSelection ?? null,
     envMode: input.envMode,
     runtimeMode: input.runtimeMode,
     interactionMode: input.interactionMode,

@@ -16,6 +16,7 @@ import {
   type ProviderInteractionMode,
   type ProviderKind,
   type RuntimeMode,
+  type SuiteRef,
   type SynaraCreateThreadsInput,
   type SynaraCreateThreadsResult,
 } from "@synara/contracts";
@@ -136,6 +137,8 @@ export type GatewayCreationContext =
       readonly kind: "hub-work";
       /** Server-owned, acceptance-frozen Expert binding. Never tool input. */
       readonly expertBinding?: ExpertBinding | undefined;
+      readonly capabilityBindingId?: string | undefined;
+      readonly suite?: SuiteRef | null | undefined;
       readonly inheritedRuntimeMode?: RuntimeMode | undefined;
       readonly callerThreadId: string;
       readonly workItemId: string;
@@ -397,13 +400,31 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
       };
       const legacyFingerprint = stableGatewayDigest(
         context.kind === "hub-work"
-          ? { input, expertBinding: context.expertBinding ?? null }
+          ? {
+              input,
+              expertBinding: context.expertBinding ?? null,
+              ...(context.capabilityBindingId || context.suite
+                ? {
+                    capabilityBindingId: context.capabilityBindingId ?? null,
+                    suite: context.suite ?? null,
+                  }
+                : {}),
+            }
           : input,
         64,
       );
       const fingerprint = stableGatewayDigest(
         context.kind === "hub-work"
-          ? { input: normalizedInput, expertBinding: context.expertBinding ?? null }
+          ? {
+              input: normalizedInput,
+              expertBinding: context.expertBinding ?? null,
+              ...(context.capabilityBindingId || context.suite
+                ? {
+                    capabilityBindingId: context.capabilityBindingId ?? null,
+                    suite: context.suite ?? null,
+                  }
+                : {}),
+            }
           : normalizedInput,
         64,
       );
@@ -578,6 +599,15 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
           ) {
             return yield* Effect.fail(
               new ToolInputError("Hub Expert work does not match its acceptance-frozen binding."),
+            );
+          }
+          if (
+            context.kind === "hub-work" &&
+            ((context.suite != null && !context.capabilityBindingId) ||
+              (context.capabilityBindingId !== undefined && context.expertBinding === undefined))
+          ) {
+            return yield* Effect.fail(
+              new ToolInputError("Suite work is missing its acceptance-frozen execution binding."),
             );
           }
           if (context.kind === "external-client" && spec.projectId === undefined) {
@@ -1047,6 +1077,13 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
                   plannedWorktreePath: entry.plannedWorktreePath,
                   ownershipPreflightPassed: entry.ownershipPreflightPassed,
                   ids: entry.ids,
+                  ...(context.kind === "hub-work"
+                    ? {
+                        expertBinding: context.expertBinding ?? null,
+                        capabilityBindingId: context.capabilityBindingId ?? null,
+                        suite: context.suite ?? null,
+                      }
+                    : {}),
                 })),
               ),
               now: gatewayIsoNow(),
@@ -1267,7 +1304,17 @@ export const makeCreateThreadsHandler = Effect.fn(function* (
                         createdAt: gatewayIsoNow(),
                       },
                       context.kind === "hub-work" && context.expertBinding
-                        ? { hubExpertBinding: context.expertBinding }
+                        ? {
+                            hubExpertBinding: context.expertBinding,
+                            ...(context.capabilityBindingId
+                              ? {
+                                  hubCapabilityBindingId: context.capabilityBindingId,
+                                  hubSuiteSelection: context.suite ?? null,
+                                  hubWorkId: context.workItemId,
+                                  hubId: caller!.projectId,
+                                }
+                              : {}),
+                          }
                         : undefined,
                     )
                     .pipe(

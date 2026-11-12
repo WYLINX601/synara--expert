@@ -2,6 +2,8 @@ import { isExpertProvider } from "@synara/shared/expertProviders";
 import type {
   ChatAttachment,
   ExpertBinding,
+  CapabilityBinding,
+  ProviderKind,
   OrchestrationEvent,
   OrchestrationReadModel,
   ProjectId,
@@ -34,6 +36,9 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ServerConfig } from "../../config.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
+import { SuiteBindingResolver } from "../../suites/SuiteBindingResolver.ts";
+import { SuiteCompositionStore } from "../../suites/SuiteCompositionStore.ts";
+import { ProjectAgentRepository } from "../../persistence/Services/ProjectAgentRepository.ts";
 import {
   ContextRepository,
   ContextRepositoryLive,
@@ -105,6 +110,7 @@ import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
 } from "../Services/OrchestrationEngine.ts";
+import type { OrchestrationDispatchContext } from "../Services/OrchestrationEngine.ts";
 
 const ORCHESTRATION_DISPATCH_TIMEOUT_MS = 45_000;
 const ORCHESTRATION_COMMAND_CONCURRENCY = 4;
@@ -144,11 +150,9 @@ function commandAttachmentClaim(command: OrchestrationCommand): {
   return null;
 }
 
-interface CommandEnvelope {
+interface CommandEnvelope extends OrchestrationDispatchContext {
   command: OrchestrationCommand;
   settleOnly: boolean;
-  contextOrigin?: "historical" | "provider_native";
-  hubExpertBinding?: ExpertBinding;
   attachmentPrincipal: ManagedAttachmentPrincipal;
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
   executionState: Ref.Ref<CommandExecutionState>;
@@ -238,6 +242,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig;
   const expertStore = createExpertStore(serverConfig.stateDir);
   const serverSettings = yield* Effect.serviceOption(ServerSettingsService);
+  const suiteBindingResolver = yield* Effect.serviceOption(SuiteBindingResolver);
+  const suiteStore = yield* Effect.serviceOption(SuiteCompositionStore);
+  const projectAgents = Option.getOrUndefined(yield* Effect.serviceOption(ProjectAgentRepository));
   const deciderWorkspacePaths = {
     homeDir: serverConfig.homeDir,
     chatWorkspaceRoot: serverConfig.chatWorkspaceRoot,
@@ -1456,101 +1463,218 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             }
           }
 
-          let expertBinding: ExpertBinding | undefined;
-          if (envelope.hubExpertBinding !== undefined) {
-            if (command.type !== "thread.create" || command.expertId !== undefined) {
-              return yield* new OrchestrationCommandInvariantError({
-                commandType: command.type,
-                detail: "A Hub Expert binding is valid only for a plain thread.create command.",
-              });
-            }
-            const provider = command.modelSelection.provider;
-            if (!isExpertProvider(provider)) {
-              return yield* new OrchestrationCommandInvariantError({
-                commandType: command.type,
-                detail: `Experts do not support '${provider}'.`,
-              });
-            }
-            const binding = envelope.hubExpertBinding;
-            const snapshot = yield* Effect.tryPromise({
-              try: () => expertStore.readSnapshot(binding.snapshotId),
-              catch: (error) =>
-                new OrchestrationCommandInvariantError({
-                  commandType: command.type,
-                  detail: `Could not read frozen Hub Expert '${binding.expertId}': ${String(error)}`,
-                }),
+          const invalid = (detail: string) =>
+            new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail,
             });
-            if (
-              snapshot.expertId !== binding.expertId ||
-              snapshot.displayName !== binding.displayName ||
-              snapshot.revision !== binding.revision
-            ) {
-              return yield* new OrchestrationCommandInvariantError({
-                commandType: command.type,
-                detail: "The frozen Hub Expert binding does not match its immutable snapshot.",
-              });
-            }
-            expertBinding = binding;
-          } else if (
-            (command.type === "thread.create" || command.type === "thread.handoff.create") &&
-            command.expertId
-          ) {
-            const requestedExpert = command.expertId;
-            const provider = command.modelSelection.provider;
-            if (!isExpertProvider(provider)) {
-              return yield* new OrchestrationCommandInvariantError({
-                commandType: command.type,
-                detail: `Experts do not support '${provider}'.`,
-              });
-            }
-            const projectShell = yield* projectionSnapshotQuery
-              .getProjectShellById(command.projectId)
-              .pipe(
-                Effect.map(Option.getOrUndefined),
-                Effect.catch((cause) =>
-                  Effect.fail(
-                    new OrchestrationCommandInvariantError({
-                      commandType: command.type,
-                      detail: `Could not resolve the workspace for expert '${requestedExpert}': ${String(cause)}`,
-                    }),
-                  ),
+          // The Hub owner commits its mode lock before event admission. A later
+          // binding/event/start failure must never reopen Suite selection.
+          const coordinatorAdmission = yield* Effect.gen(function* () {
+            if (command.type !== "thread.turn.start" || !projectAgents) return undefined;
+            const thread = commandReadModel.threads.find((entry) => entry.id === command.threadId);
+            if (!thread || thread.expertBinding != null || thread.capabilityBindingId != null)
+              return undefined;
+            const hub = Option.getOrUndefined(
+              yield* projectAgents
+                .getConfigByCoordinatorThread(command.threadId)
+                .pipe(
+                  Effect.mapError(() => invalid("Could not read the Hub execution configuration.")),
                 ),
+            );
+            if (!hub) return undefined;
+            if (command.expertId !== undefined || thread.expertDraftSelection != null)
+              return yield* invalid("A Hub coordinator cannot adopt an Expert identity.");
+            if (
+              command.suiteSelection !== undefined &&
+              (command.suiteSelection?.suiteId !== hub.suite?.suiteId ||
+                command.suiteSelection?.revision !== hub.suite?.revision)
+            )
+              return yield* invalid("A Hub coordinator must use its saved Suite selection.");
+            const admission = yield* projectAgents
+              .admitSuiteExecution({
+                projectId: hub.projectId,
+                expectedRevision: hub.revision,
+                admissionId: `coordinator:${thread.id}`,
+              })
+              .pipe(
+                Effect.mapError(() => invalid("The Hub Suite selection changed before execution.")),
               );
-            if (!projectShell?.workspaceRoot) {
-              return yield* new OrchestrationCommandInvariantError({
-                commandType: command.type,
-                detail: `Could not check expert '${requestedExpert}': the project workspace is unavailable.`,
-              });
-            }
-            const preview = yield* Effect.tryPromise({
-              try: () =>
-                expertStore.preview({
-                  expertId: requestedExpert,
-                  provider,
-                  cwd: command.worktreePath ?? projectShell.workspaceRoot,
-                }),
-              catch: (error) =>
-                new OrchestrationCommandInvariantError({
-                  commandType: command.type,
-                  detail: `Could not check expert '${requestedExpert}': ${String(error)}`,
-                }),
-            });
-            if (preview.status === "blocked" || preview.status === "incompatible") {
-              return yield* new OrchestrationCommandInvariantError({
-                commandType: command.type,
-                detail: preview.issues.join("; ") || `Expert '${requestedExpert}' is unavailable.`,
-              });
-            }
-            expertBinding = yield* Effect.tryPromise({
-              try: () => expertStore.prepareSnapshot(requestedExpert),
-              catch: (error) =>
-                new OrchestrationCommandInvariantError({
-                  commandType: command.type,
-                  detail: `Could not prepare expert '${requestedExpert}': ${String(error)}`,
-                }),
-            });
-          }
+            return { ...admission, hubId: hub.projectId };
+          });
+
+          let expertBinding: ExpertBinding | undefined;
+          let capabilityBinding: CapabilityBinding | undefined;
           let deciderReadModel = yield* buildDeciderReadModel(command);
+          const prepareExpert = (
+            expertId: string,
+            cwd: string,
+            provider: ProviderKind,
+            suite: boolean,
+          ) =>
+            Effect.gen(function* () {
+              if (!isExpertProvider(provider))
+                return yield* invalid(`Experts do not support '${provider}'.`);
+              if (!suite) {
+                const preview = yield* Effect.tryPromise({
+                  try: () => expertStore.preview({ expertId, provider, cwd }),
+                  catch: () => invalid(`Could not check expert '${expertId}'.`),
+                });
+                if (preview.status === "blocked" || preview.status === "incompatible")
+                  return yield* invalid(
+                    preview.issues.join("; ") || `Expert '${expertId}' is unavailable.`,
+                  );
+              }
+              return yield* Effect.tryPromise({
+                try: () =>
+                  expertStore.prepareSnapshot(expertId, {
+                    projectRoot: cwd,
+                    ...(suite ? { allowMissingConnections: true } : {}),
+                  }),
+                catch: () => invalid(`Could not prepare expert '${expertId}'.`),
+              });
+            });
+          if (
+            envelope.hubExpertBinding !== undefined ||
+            envelope.hubCapabilityBindingId !== undefined
+          ) {
+            if (
+              command.type !== "thread.create" ||
+              command.expertId !== undefined ||
+              command.expertDraftSelection != null ||
+              command.suiteSelection !== undefined
+            )
+              return yield* invalid(
+                "A frozen Hub binding is valid only for a plain thread.create command.",
+              );
+            if (!isExpertProvider(command.modelSelection.provider))
+              return yield* invalid(`Experts do not support '${command.modelSelection.provider}'.`);
+            expertBinding = envelope.hubExpertBinding;
+            if (expertBinding) {
+              const binding = expertBinding;
+              const snapshot = yield* Effect.tryPromise({
+                try: () => expertStore.readSnapshot(binding.snapshotId),
+                catch: () => invalid(`Could not read frozen Hub Expert '${binding.expertId}'.`),
+              });
+              if (
+                snapshot.expertId !== binding.expertId ||
+                snapshot.displayName !== binding.displayName ||
+                snapshot.revision !== binding.revision
+              )
+                return yield* invalid(
+                  "The frozen Hub Expert binding does not match its immutable snapshot.",
+                );
+            }
+            if (envelope.hubCapabilityBindingId !== undefined) {
+              if (Option.isNone(suiteStore))
+                return yield* invalid("Suite binding storage is unavailable.");
+              const binding = yield* suiteStore.value
+                .readBinding(envelope.hubCapabilityBindingId)
+                .pipe(
+                  Effect.mapError(() =>
+                    invalid("Could not read the frozen Hub capability binding."),
+                  ),
+                );
+              if (
+                !binding ||
+                binding.projectId !== command.projectId ||
+                binding.purpose.kind !== "hub-worker" ||
+                binding.purpose.hubId !== envelope.hubId ||
+                binding.purpose.workId !== envelope.hubWorkId ||
+                binding.purpose.expertSnapshotId !== expertBinding?.snapshotId ||
+                binding.suite?.suiteId !== envelope.hubSuiteSelection?.suiteId ||
+                binding.suite?.revision !== envelope.hubSuiteSelection?.revision
+              )
+                return yield* invalid(
+                  "The frozen Hub capability binding does not match the accepted worker.",
+                );
+              capabilityBinding = binding;
+            } else if (envelope.hubSuiteSelection != null) {
+              return yield* invalid("Suite work is missing its frozen capability binding.");
+            }
+          } else if (command.type === "thread.handoff.create" && command.expertId) {
+            const project = deciderReadModel.projects.find(
+              (entry) => entry.id === command.projectId,
+            );
+            if (!project) return yield* invalid("The project workspace is unavailable.");
+            expertBinding = yield* prepareExpert(
+              command.expertId,
+              command.worktreePath ?? project.workspaceRoot,
+              command.modelSelection.provider,
+              false,
+            );
+          } else if (command.type === "thread.turn.start") {
+            const thread = deciderReadModel.threads.find((entry) => entry.id === command.threadId);
+            if (thread && thread.expertBinding == null && thread.capabilityBindingId == null) {
+              const project = deciderReadModel.projects.find(
+                (entry) => entry.id === thread.projectId,
+              );
+              if (!project) return yield* invalid("The project workspace is unavailable.");
+              const cwd = thread.worktreePath ?? thread.workingDirectory ?? project.workspaceRoot;
+              if (coordinatorAdmission) {
+                if (coordinatorAdmission.suite) {
+                  if (Option.isNone(suiteBindingResolver))
+                    return yield* invalid("Suite binding resolution is unavailable.");
+                  capabilityBinding = yield* suiteBindingResolver.value
+                    .prepare({
+                      suite: coordinatorAdmission.suite,
+                      projectId: thread.projectId,
+                      projectRoot: cwd,
+                      purpose: {
+                        kind: "hub-coordinator",
+                        hubId: coordinatorAdmission.hubId,
+                        hubConfigRevision: coordinatorAdmission.configRevision,
+                      },
+                    })
+                    .pipe(Effect.mapError((error) => invalid(error.message)));
+                }
+              } else {
+                const expertId = command.expertId ?? thread.expertDraftSelection?.expertId;
+                const suite =
+                  command.suiteSelection !== undefined
+                    ? command.suiteSelection
+                    : (thread.expertDraftSelection?.suite ?? null);
+                if (suite && !expertId)
+                  return yield* invalid("A direct Suite task requires a selected Expert.");
+                if (expertId) {
+                  const executed = yield* Stream.runHead(
+                    eventStore.readThreadEventsFromSequence(thread.id, 0, 1, undefined, [
+                      "thread.turn-start-requested",
+                    ]),
+                  ).pipe(
+                    Effect.mapError(() =>
+                      invalid("Could not verify the first-send binding boundary."),
+                    ),
+                  );
+                  if (Option.isSome(executed))
+                    return yield* invalid(
+                      "An executing thread cannot change its Expert or Suite binding.",
+                    );
+                  expertBinding = yield* prepareExpert(
+                    expertId,
+                    cwd,
+                    command.modelSelection?.provider ?? thread.modelSelection.provider,
+                    suite !== null,
+                  );
+                  if (suite) {
+                    if (Option.isNone(suiteBindingResolver))
+                      return yield* invalid("Suite binding resolution is unavailable.");
+                    capabilityBinding = yield* suiteBindingResolver.value
+                      .prepare({
+                        suite,
+                        projectId: thread.projectId,
+                        projectRoot: cwd,
+                        purpose: {
+                          kind: "direct-expert",
+                          expertSnapshotId: expertBinding.snapshotId,
+                        },
+                      })
+                      .pipe(Effect.mapError((error) => invalid(error.message)));
+                  }
+                }
+              }
+            }
+          }
           if (resolvedGoal !== null && command.type === "thread.meta.update") {
             const currentThread = deciderReadModel.threads.find(
               (entry) => entry.id === command.threadId,
@@ -1566,6 +1690,9 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             readModel: deciderReadModel,
             workspacePaths: deciderWorkspacePaths,
             expertBinding,
+            capabilityBinding,
+            trustedExpertDelegationResult: envelope.expertDelegationResult !== undefined,
+            trustedNativeThread: envelope.contextOrigin === "provider_native",
           });
           const eventBases = Array.isArray(eventBase) ? eventBase : [eventBase];
           const transactionalCommitEffect: Effect.Effect<
@@ -1573,6 +1700,41 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             OrchestrationDispatchError,
             never
           > = Effect.gen(function* () {
+            // Files/package lifecycle locks are acquired only before this SQL
+            // transaction. Adopt immutable prepared records after rechecking
+            // their SQL-owned identity and composition in the atomic commit.
+            if (capabilityBinding) {
+              if (Option.isNone(suiteStore))
+                return yield* invalid("Suite binding storage is unavailable.");
+              const binding = yield* suiteStore.value
+                .readBinding(capabilityBinding.bindingId)
+                .pipe(
+                  Effect.mapError(() =>
+                    invalid("Could not verify the prepared Suite capability binding."),
+                  ),
+                );
+              if (!binding || binding.bindingHash !== capabilityBinding.bindingHash)
+                return yield* invalid(
+                  "The prepared Suite capability binding changed before admission.",
+                );
+              if (binding.suite) {
+                const composition = yield* suiteStore.value
+                  .read(binding.suite)
+                  .pipe(
+                    Effect.mapError(() => invalid("Could not verify the prepared Suite revision.")),
+                  );
+                if (
+                  !composition ||
+                  (binding.purpose.kind !== "hub-coordinator" &&
+                    !composition.members.some(
+                      (member) => member.expertId === expertBinding?.expertId,
+                    ))
+                )
+                  return yield* invalid(
+                    "The Expert is not a member of the selected Suite revision.",
+                  );
+              }
+            }
             if (command.type === "thread.sidechat.expire") {
               // The timer may have fired before a live settings update while this
               // command waited in the queue. Validate at the persistence owner, since
@@ -1665,6 +1827,35 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               : undefined;
             for (const nextEvent of eventsToCommit) {
               let preparedEvent = nextEvent;
+              if (
+                (nextEvent.type === "thread.turn-start-requested" ||
+                  nextEvent.type === "thread.turn-queued" ||
+                  nextEvent.type === "thread.expert-delegation-result") &&
+                envelope.expertDelegationContinuation
+              ) {
+                preparedEvent = {
+                  ...nextEvent,
+                  metadata: {
+                    ...nextEvent.metadata,
+                    expertDelegationContinuation: envelope.expertDelegationContinuation,
+                  },
+                };
+              }
+              if (
+                nextEvent.type === "project.created" &&
+                nextEvent.payload.kind === "group" &&
+                command.type === "project.create"
+              ) {
+                if (!projectAgents)
+                  return yield* invalid("Hub Suite onboarding storage is unavailable.");
+                yield* projectAgents
+                  .beginSuiteOnboarding(nextEvent.payload.projectId)
+                  .pipe(
+                    Effect.mapError(() =>
+                      invalid("Could not initialize the new Hub Suite selection."),
+                    ),
+                  );
+              }
               switch (nextEvent.type) {
                 case "context.space.save-requested":
                   preparedEvent = yield* contextRepository.prepareSpaceSave(nextEvent);
@@ -1687,6 +1878,38 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 default:
                   break;
               }
+              if (preparedEvent.type === "thread.expert-delegation-result") {
+                const canApply = envelope.expertDelegationResult?.canApplyToParent;
+                const applyToParent = canApply
+                  ? yield* canApply().pipe(
+                      Effect.mapError(() =>
+                        makeCommandInternalError(
+                          command,
+                          "Could not verify Expert result continuation admission.",
+                        ),
+                      ),
+                    )
+                  : false;
+                const parent = nextCommandReadModel.threads.find(
+                  (thread) => thread.id === preparedEvent.aggregateId,
+                );
+                const continuation = envelope.expertDelegationContinuation;
+                preparedEvent = {
+                  ...preparedEvent,
+                  payload: {
+                    ...preparedEvent.payload,
+                    applyToParent:
+                      applyToParent &&
+                      continuation !== undefined &&
+                      continuation.delegationId === preparedEvent.payload.delegationId &&
+                      continuation.attemptId === preparedEvent.payload.attemptId &&
+                      parent !== undefined &&
+                      parent.deletedAt === null &&
+                      parent.archivedAt === null &&
+                      preparedEvent.payload.issue?.code !== "execution_unknown",
+                  },
+                };
+              }
               const savedEvent = yield* eventStore.append(
                 checkpointRuntimeSequence === undefined
                   ? preparedEvent
@@ -1698,6 +1921,22 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                       },
                     },
               );
+              if (savedEvent.type === "thread.expert-delegation-result") {
+                if (!envelope.expertDelegationResult)
+                  return yield* invalid(
+                    "Expert delegation results require a trusted server envelope.",
+                  );
+                yield* envelope.expertDelegationResult
+                  .commit(savedEvent.eventId)
+                  .pipe(
+                    Effect.mapError(() =>
+                      makeCommandInternalError(
+                        command,
+                        "Could not commit the trusted Expert delegation result.",
+                      ),
+                    ),
+                  );
+              }
               nextCommandReadModel = yield* projectEvent(nextCommandReadModel, savedEvent);
               if (isShellMetadataEvent(savedEvent)) {
                 yield* projectionPipeline.projectMetadataEvent(savedEvent);
@@ -1776,7 +2015,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               if (
                 Option.isSome(typedFailure) &&
                 (typedFailure.value instanceof OrchestrationCommandInvariantError ||
-                  typedFailure.value instanceof OrchestrationCommandIdentityCollisionError)
+                  typedFailure.value instanceof OrchestrationCommandIdentityCollisionError ||
+                  typedFailure.value instanceof OrchestrationCommandInternalError)
               ) {
                 return Effect.fail(typedFailure.value);
               }
@@ -2228,6 +2468,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       const executionState = yield* Ref.make<CommandExecutionState>("queued");
       const envelope: CommandEnvelope = {
         command,
+        ...context,
         settleOnly: context?.settleOnly === true,
         ...(context?.contextOrigin !== undefined ? { contextOrigin: context.contextOrigin } : {}),
         ...(context?.hubExpertBinding !== undefined

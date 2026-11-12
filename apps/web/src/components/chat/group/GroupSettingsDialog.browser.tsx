@@ -2,7 +2,7 @@ import "~/index.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ProjectId, SpaceId, ThreadId } from "@synara/contracts";
-import type { ExpertDefinition, ProjectAgentOverview } from "@synara/contracts";
+import type { ExpertDefinition, NativeApi, ProjectAgentOverview } from "@synara/contracts";
 import { page } from "vitest/browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -80,6 +80,8 @@ const api = vi.hoisted(() => {
     server: {
       getConfig: vi.fn(async () => ({ cwd: "/srv" })),
       listExperts: vi.fn(async () => [] as ReadonlyArray<ExpertDefinition>),
+      listSuites: vi.fn<NativeApi["server"]["listSuites"]>(),
+      readSuite: vi.fn<NativeApi["server"]["readSuite"]>(),
     },
     provider: {
       listModels: vi.fn(async () => ({ models: [], source: "disabled" })),
@@ -105,8 +107,11 @@ function overview(overrides: Partial<ProjectAgentOverview> = {}): ProjectAgentOv
   return {
     projectId: PROJECT_ID,
     configured: true,
+    suiteSelectionOpen: false,
+    suite: null,
     config: {
       projectId: PROJECT_ID,
+      suite: null,
       coordinatorThreadId: ThreadId.makeUnsafe("thread-1"),
       coordinatorName: "alpha Coordinator",
       coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },
@@ -159,9 +164,59 @@ function renderDialog(props: Partial<Parameters<typeof GroupSettingsDialog>[0]> 
 }
 
 describe("GroupSettingsDialog", () => {
+  it("does not expose Suite replacement on an existing Hub, including legacy unconfigured setup", async () => {
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({ configured: false, config: null, suite: null }),
+    );
+    await renderDialog({ mode: "onboarding", allowSuiteSelection: true });
+    await expect.element(page.getByLabelText("Hub name")).toBeInTheDocument();
+    expect(page.getByRole("combobox", { name: "选择 Suite", exact: true }).elements()).toHaveLength(
+      0,
+    );
+    expect(api.server.listSuites).not.toHaveBeenCalled();
+  });
+  it("selects a Suite only during onboarding, previews members and keeps other creation fields", async () => {
+    const ref = { suiteId: "suite_10000000-0000-4000-8000-000000000001", revision: 2 };
+    api.projectAgent.getOverview.mockResolvedValue(
+      overview({ configured: false, config: null, suite: null, suiteSelectionOpen: true }),
+    );
+    api.server.listSuites.mockResolvedValue([
+      { ref, name: "规范套件", description: "编写并审阅规范" },
+    ]);
+    api.server.readSuite.mockResolvedValue({
+      schemaVersion: 1,
+      ref,
+      name: "规范套件",
+      description: "编写并审阅规范",
+      source: { kind: "local-folder", sourceId: "local-source", contentHash: "a".repeat(64) },
+      adapterId: "synara-suite-v1",
+      adapterVersion: 1,
+      members: [{ key: "author", expertId: "writer", roleSourcePath: "roles/author.md" }],
+      resources: [],
+      defaults: {},
+      compositionHash: "b".repeat(64),
+      createdAt: "2026-11-11T00:00:00.000Z",
+    });
+    api.server.listExperts.mockResolvedValue([expert({ id: "writer", name: "规范作者" })]);
+    await renderDialog({ mode: "onboarding" });
+    await page.getByLabelText("Hub goal").fill("保留这个目标");
+    await page.getByRole("combobox", { name: "选择 Suite", exact: true }).click();
+    await page.getByRole("option", { name: "规范套件", exact: true }).click();
+    await expect.element(page.getByText("编写并审阅规范", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "规范作者", exact: true }).click();
+    await expect.element(page.getByText("规范作者 description", { exact: true })).toBeVisible();
+    await expect.element(page.getByLabelText("Hub goal")).toHaveValue("保留这个目标");
+    await page.getByRole("button", { name: "Create hub", exact: true }).click();
+    await expect.poll(() => api.projectAgent.configure.mock.calls.length).toBe(1);
+    const request = api.projectAgent.configure.mock.calls[0]![0] as Record<string, unknown>;
+    expect(request.suite).toEqual(ref);
+    expect(request).not.toHaveProperty("expertIds");
+    expect(request.goal).toBe("保留这个目标");
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     api.server.listExperts.mockResolvedValue([]);
+    api.server.listSuites.mockResolvedValue([]);
     api.projectAgent.getOverview.mockResolvedValue(overview());
     api.projectAgent.configure.mockResolvedValue(overview());
     useStore.setState({ projects: [], sidebarThreadSummaryById: {} });

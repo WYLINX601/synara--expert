@@ -28,6 +28,9 @@
   "include": [
     "**/*.ts",
     "../apps/server/src/device/helperSandbox.ts",
+    "../apps/server/src/platform/supervisedProcessTeardown.ts",
+    "../apps/server/src/platform/processTreeController.ts",
+    "../apps/server/src/platform/windowsProcessSnapshot.ts",
     "../apps/desktop/src/desktopAppIcon.ts"
   ],
   "exclude": ["computer-use-fixtures", "expert-p0"]

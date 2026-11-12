@@ -9,6 +9,7 @@ import {
 } from "@synara/contracts";
 import { resolveThreadBranchRegressionGuard } from "@synara/shared/git";
 import { deriveTurnStopActivity } from "@synara/shared/turnStopActivity";
+import { expertDelegationResultActivity } from "@synara/shared/expertDelegationActivity";
 import { isSidechatThread } from "@synara/shared/sidechatThread";
 import {
   clearRemovedAsyncUserInputResponses,
@@ -1003,14 +1004,28 @@ function applyOrchestrationEvent(
       return removeDeletedThreadFromClientState(state, event.payload.threadId, event.sequence);
 
     case "thread.created":
+    case "thread.capability-bound":
       return applyThreadUpdate(
         state,
         event.payload.threadId,
         (thread) => {
           const expertBinding = event.payload.expertBinding ?? null;
-          return deepEqualJson(thread.expertBinding ?? null, expertBinding)
+          const suiteSelection = event.payload.suiteSelection ?? null;
+          const capabilityBindingId = event.payload.capabilityBindingId ?? null;
+          const expertDraftSelection =
+            event.type === "thread.created" ? (event.payload.expertDraftSelection ?? null) : null;
+          return deepEqualJson(thread.expertBinding ?? null, expertBinding) &&
+            deepEqualJson(thread.expertDraftSelection ?? null, expertDraftSelection) &&
+            deepEqualJson(thread.suiteSelection ?? null, suiteSelection) &&
+            (thread.capabilityBindingId ?? null) === capabilityBindingId
             ? thread
-            : { ...thread, expertBinding };
+            : {
+                ...thread,
+                expertBinding,
+                expertDraftSelection,
+                suiteSelection,
+                capabilityBindingId,
+              };
         },
         { ...options, recomputeSummarySignals: false, updateSidebarSummary: false },
       );
@@ -1615,6 +1630,26 @@ function applyOrchestrationEvent(
           ...options,
           updateSidebarSummary: true,
         },
+      );
+
+    case "thread.expert-delegation-result":
+      return applyThreadUpdate(
+        state,
+        event.payload.threadId,
+        (thread) => {
+          const activity = expertDelegationResultActivity(event);
+          const activities = normalizeActivities(
+            [...thread.activities, activity],
+            thread.activities,
+          );
+          if (activities === thread.activities) return thread;
+          return {
+            ...thread,
+            activities,
+            updatedAt: resolveEventUpdatedAt(thread, activity.createdAt),
+          };
+        },
+        { ...options, updateSidebarSummary: true },
       );
 
     case "thread.activity-appended":

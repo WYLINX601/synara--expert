@@ -1,3 +1,16 @@
+import type {
+  SuitePreviewInput,
+  SuitePreview,
+  SuiteCancelPreviewInput,
+  SuiteImportRequest,
+  SuiteImportReceipt,
+  SuiteImportReceiptInput,
+  SuiteSummary,
+  SuiteRef,
+  SuiteComposition,
+  SuiteRunConfigurationInput,
+  SuiteRunConfiguration,
+} from "./suite";
 import { SkillLibraryRequest, SkillLibraryResponse } from "./skillLibrary";
 import type { AmbientContextDesktopMethods } from "./ambientContext";
 import type { ZenModeDesktopMethods } from "./zenMode";
@@ -1417,6 +1430,17 @@ export interface NativeApi {
     restoreExpert: (input: ExpertRestoreInput) => Promise<ExpertDefinition>;
     deleteExpert: (input: ExpertDeleteInput) => Promise<void>;
     previewExpert: (input: ExpertPreviewInput) => Promise<ExpertPreview>;
+    previewSuite: (input: SuitePreviewInput) => Promise<SuitePreview>;
+    cancelSuitePreview: (
+      input: SuiteCancelPreviewInput,
+    ) => Promise<{ readonly cancelled: boolean }>;
+    commitSuiteImport: (input: SuiteImportRequest) => Promise<SuiteImportReceipt>;
+    getSuiteImportReceipt: (input: SuiteImportReceiptInput) => Promise<SuiteImportReceipt | null>;
+    listSuites: () => Promise<ReadonlyArray<SuiteSummary>>;
+    readSuite: (input: SuiteRef) => Promise<SuiteComposition>;
+    readSuiteRunConfiguration: (
+      input: SuiteRunConfigurationInput,
+    ) => Promise<SuiteRunConfiguration>;
     skillLibrary: (input: SkillLibraryRequest) => Promise<SkillLibraryResponse>;
     skillEvolution: (input: SkillEvolutionRequest) => Promise<SkillEvolutionResponse>;
     readSkillManagementAccess: () => Promise<SkillManagementAccess>;

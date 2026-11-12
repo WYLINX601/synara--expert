@@ -14,6 +14,12 @@ import {
   type ThreadId,
   type TurnId,
 } from "@synara/contracts";
+import type { ProjectAgentConfig } from "@synara/contracts";
+import { resolveHubExpertCandidates } from "../agentGateway/hubExpertDispatch";
+import type {
+  HubExpertDispatchDependencies,
+  HubExpertStore,
+} from "../agentGateway/hubExpertDispatch";
 import { Effect, Option, Schema } from "effect";
 
 import { stableGatewayDigest } from "../agentGateway/creationUtils";
@@ -52,10 +58,19 @@ type HubWorkDependencies = {
   readonly messages?: Pick<ProjectionThreadMessageRepositoryShape, "getByThreadAndMessageId">;
   readonly commandReceipts?: Pick<OrchestrationCommandReceiptRepositoryShape, "getByCommandId">;
   readonly snapshotQuery?: Pick<ProjectionSnapshotQueryShape, "getThreadShellsByIds">;
+  readonly candidateDependencies?: {
+    readonly expertStore: Pick<HubExpertStore, "read">;
+    readonly suiteStore?: HubExpertDispatchDependencies["suiteStore"];
+  };
   readonly resolveCreationSpec?: (input: {
     readonly callerThreadId: ThreadId;
     readonly targetProjectId: ProjectId;
     readonly spec: SynaraCreateThreadSpec;
+    readonly hub: {
+      readonly projectId: ProjectId;
+      readonly workId: string;
+      readonly config: ProjectAgentConfig;
+    };
   }) => Effect.Effect<SynaraResolvedCreateThreadSpec, unknown>;
   readonly queuedTurnPromotions?: Pick<QueuedTurnPromotionRepositoryShape, "listPendingThreadIds">;
 };
@@ -373,10 +388,30 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
         const now = new Date().toISOString();
         let taskIndex = frozen.reduce((highest, record) => Math.max(highest, record.taskIndex), -1);
         const records: HubWorkRecord[] = [];
+        const candidates =
+          fresh.some((decision) => decision.spec.expertId !== undefined) &&
+          dependencies.candidateDependencies
+            ? (yield* resolveHubExpertCandidates({
+                config,
+                expertStore: dependencies.candidateDependencies.expertStore,
+                ...(dependencies.candidateDependencies.suiteStore === undefined
+                  ? {}
+                  : {
+                      suiteStore: dependencies.candidateDependencies.suiteStore,
+                    }),
+              }).pipe(Effect.mapError(serviceError))).candidates
+            : null;
+        if (fresh.some((decision) => decision.spec.expertId !== undefined) && candidates === null)
+          return yield* Effect.fail(
+            fail("Hub Expert membership resolution is unavailable.", "invalid"),
+          );
         for (const decision of fresh) {
           taskIndex += 1;
           const spec = decision.spec;
-          if (spec.expertId !== undefined && !(config.expertIds ?? []).includes(spec.expertId)) {
+          if (
+            spec.expertId !== undefined &&
+            !candidates?.some((candidate) => candidate.expertId === spec.expertId)
+          ) {
             return yield* Effect.fail(
               fail("This Expert does not participate in the current Hub.", "forbidden"),
             );
@@ -387,6 +422,15 @@ export function makeHubWorkService(dependencies: HubWorkDependencies): HubWorkSe
                   callerThreadId: input.callerThreadId,
                   targetProjectId: decision.targetProjectId,
                   spec: spec,
+                  hub: {
+                    projectId: principal.projectId,
+                    config,
+                    workId: hubWorkWorkItemId({
+                      projectId: principal.projectId,
+                      scopeKey,
+                      taskKey: decision.taskKey,
+                    }),
+                  },
                 })
                 .pipe(Effect.mapError(serviceError))
             : spec.expertId !== undefined || spec.target === undefined

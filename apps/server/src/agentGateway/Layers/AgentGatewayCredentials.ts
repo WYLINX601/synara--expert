@@ -140,6 +140,10 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
   const sessionRegistry = yield* AgentGatewaySessionRegistry;
   const inFlightRequests = makeAgentGatewayInFlightRequestRegistry();
   const revokedListeners = new Set<(sessionKey: string) => void | Promise<void>>();
+  const expiryTimers = new Map<string, NodeJS.Timeout>();
+  // Cleanup barriers only, never an authorization source. Retain a drain after
+  // expiry removes authentication so host cancellation can still await it.
+  const revocations = new Map<string, Promise<void>>();
 
   const endpoint = makeAgentGatewayEndpoint(config.host, config.port);
   const stdioProxyScriptPath = yield* ensureAgentGatewayStdioProxyScript(config.stateDir);
@@ -155,23 +159,56 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
     threadId,
     provider,
     options,
-  ) => sessionRegistry.issue(threadId, provider, options).token;
+  ) => {
+    const session = sessionRegistry.issue(threadId, provider, options);
+    if (Number.isFinite(session.expiresAt)) {
+      const scheduleExpiry = () => {
+        const remaining = session.expiresAt - Date.now();
+        if (remaining <= 0) {
+          revokeSessionToken(session.token);
+          return;
+        }
+        const timer = setTimeout(scheduleExpiry, Math.min(remaining, 2_147_483_647));
+        timer.unref();
+        expiryTimers.set(session.token, timer);
+      };
+      scheduleExpiry();
+    }
+    return session.token;
+  };
 
-  const verifySessionToken: AgentGatewayCredentialsShape["verifySessionToken"] = (token) =>
-    sessionRegistry.verify(token)?.threadId ?? null;
-
-  const revokeSessionToken = (token: string): void => {
+  const verifySession: AgentGatewayCredentialsShape["verifySession"] = (token) => {
     const session = sessionRegistry.verify(token);
-    sessionRegistry.revoke(token);
+    if (!session) revokeSessionToken(token);
+    return session;
+  };
+  const verifySessionToken: AgentGatewayCredentialsShape["verifySessionToken"] = (token) =>
+    verifySession(token)?.threadId ?? null;
+
+  const revokeAndDrain = (token: string): Promise<void> => {
+    const pending = revocations.get(token);
+    if (pending) return pending;
+    const session = sessionRegistry.revoke(token);
+    clearTimeout(expiryTimers.get(token));
+    expiryTimers.delete(token);
     connectors.revokeSession(token);
     stdioBootstraps.revokeSession(token);
-    if (session) {
-      void inFlightRequests
-        .revokeSession(session.sessionKey)
-        .settled.then(() =>
-          Promise.allSettled([...revokedListeners].map((listener) => listener(session.sessionKey))),
+    if (!session) return Promise.resolve();
+    const drained = inFlightRequests
+      .revokeSession(session.sessionKey)
+      .settled.then(async () => {
+        await Promise.allSettled(
+          [...revokedListeners].map(async (listener) => listener(session.sessionKey)),
         );
-    }
+      })
+      .finally(() => {
+        revocations.delete(token);
+      });
+    revocations.set(token, drained);
+    return drained;
+  };
+  const revokeSessionToken = (token: string): void => {
+    void revokeAndDrain(token);
   };
 
   const issueStdioBootstrapToken: AgentGatewayCredentialsShape["issueStdioBootstrapToken"] = (
@@ -191,13 +228,13 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
     turnId,
   ) => {
     const session = sessionRegistry.verify(token);
-    if (!session) return Promise.resolve();
+    if (!session) return revokeAndDrain(token);
     return inFlightRequests.cancelTurn(session.sessionKey, turnId).settled;
   };
 
   const retireSessionTurn: AgentGatewayCredentialsShape["retireSessionTurn"] = (token, turnId) => {
     const session = sessionRegistry.verify(token);
-    if (!session) return Promise.resolve();
+    if (!session) return revokeAndDrain(token);
     // Retire synchronously before exposing the asynchronous drain barrier.
     // Requests racing the terminal event can no longer bind this bearer to B.
     sessionRegistry.retireWriteAuthority(token, turnId);
@@ -211,7 +248,7 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
     setListeningPort: endpoint.setListeningPort,
     issueSessionToken,
     verifySessionToken,
-    verifySession: sessionRegistry.verify,
+    verifySession,
     issueStdioBootstrapToken,
     exchangeStdioBootstrapToken,
     bindWriteAuthority: sessionRegistry.bindWriteAuthority,
@@ -228,10 +265,14 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
     },
     connectionForThread: (threadId, provider, options) => {
       const bearerToken = issueSessionToken(threadId, provider, options);
-      const granted = connectors.grant(bearerToken, provider).map((registration) => ({
-        name: registration.name,
-        url: agentGatewayConnectorUrl(endpoint.url, registration.connectorId),
-      }));
+      // Native leases never inherit global connector grants, even if a caller
+      // uses the convenience API rather than the host's issue-only path.
+      const granted = options?.nativeExecution
+        ? []
+        : connectors.grant(bearerToken, provider).map((registration) => ({
+            name: registration.name,
+            url: agentGatewayConnectorUrl(endpoint.url, registration.connectorId),
+          }));
       return {
         url: endpoint.url,
         bearerToken,

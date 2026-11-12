@@ -118,7 +118,11 @@ import {
   stampAcpRuntimeEventLifecycleGeneration,
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import { type AcpToolCallState, parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
-import { makeAcpDebugLoggers, makeAcpNativeLoggers } from "../acp/AcpNativeLogging.ts";
+import {
+  makeAcpDebugLoggers,
+  makeAcpNativeLoggers,
+  redactAcpLogSecrets,
+} from "../acp/AcpNativeLogging.ts";
 import {
   forkAcpTurnIdleWatchdog,
   isAcpTurnProgressEventTag,
@@ -172,6 +176,17 @@ import { AcpRequestError } from "../acp/AcpErrors.ts";
 import { OmpAdapter, type OmpAdapterShape } from "../Services/OmpAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { createLogger } from "../../logger.ts";
+import type { OmpNativeExpertProtocolFactory } from "../acp/OmpNativeExpertProtocol";
+import {
+  createOmpNativeExpertTransport,
+  verifiedOmpNativeExpertBuild,
+  type OmpNativeExpertBuild,
+  type OmpNativeExpertTransport,
+} from "../acp/OmpNativeExpertTransport";
+import { prepareOmpSuiteCoordinator } from "../acp/OmpSuiteSession";
+import type { SuiteRuntimeContext } from "../../experts/SuiteRunMaterialization";
+import { suiteContentDigest } from "../../suites/suiteIdentity";
+import { OMP_NATIVE_EXPERT_METHODS } from "@synara/contracts/omp/expertDelegation";
 
 const PROVIDER = "omp" as const;
 const log = createLogger(PROVIDER);
@@ -232,6 +247,8 @@ function isOmpAcpDebugEnabled(): boolean {
 export interface OmpAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+  readonly nativeExpertProtocolFactory?: OmpNativeExpertProtocolFactory;
+  readonly nativeExpertBuilds?: readonly OmpNativeExpertBuild[];
 }
 
 interface PendingApproval {
@@ -248,6 +265,8 @@ type OmpNestedTaskLifecycleState = "active" | "active-async" | "completed";
 
 interface OmpSessionContext {
   readonly fixedExpertSession?: ProviderAdapterSessionStartInput["expertSession"];
+  readonly nativeExpertTransport?: OmpNativeExpertTransport;
+  readonly suiteRuntimeContext?: SuiteRuntimeContext;
   readonly verifyFixedSkills?: () => Effect.Effect<void, unknown>;
   readonly fixedSkillCommands?: ReadonlyArray<string>;
   readonly skillEvolution: boolean;
@@ -606,7 +625,10 @@ export function makeOmpAdapter(
     ) =>
       PubSub.publish(
         runtimeEventPubSub,
-        stampAcpRuntimeEventLifecycleGeneration(event, lifecycleGeneration),
+        stampAcpRuntimeEventLifecycleGeneration(
+          redactAcpLogSecrets(event) as ProviderRuntimeEvent,
+          lifecycleGeneration,
+        ),
       ).pipe(Effect.asVoid);
 
     // Discovery sessions are disposable and never enter the live session directory.
@@ -666,6 +688,7 @@ export function makeOmpAdapter(
       readonly expertSession?: ProviderAdapterSessionStartInput["expertSession"];
       readonly lifecycleGeneration?: string;
       readonly contextSession?: ProviderAdapterSessionStartInput["contextSession"];
+      readonly suiteRuntimeContext?: SuiteRuntimeContext;
       readonly skills?: ReadonlyArray<ProviderSkillReference>;
     }) => {
       const env = buildOmpProcessEnv(input.settings);
@@ -687,6 +710,7 @@ export function makeOmpAdapter(
         ...(input.lifecycleGeneration ? { lifecycleGeneration: input.lifecycleGeneration } : {}),
         ...(input.contextSession ? { contextSession: input.contextSession } : {}),
         ...(input.skills ? { skills: input.skills } : {}),
+        ...(input.suiteRuntimeContext ? { suiteRuntimeContext: input.suiteRuntimeContext } : {}),
         runCli: (args, cwd, childEnv) =>
           runOmpAcpCliCommand({
             childProcessSpawner,
@@ -779,7 +803,7 @@ export function makeOmpAdapter(
               createdAt: observedAt,
               method,
               threadId,
-              payload,
+              payload: redactAcpLogSecrets(payload),
             },
           },
           threadId,
@@ -889,6 +913,12 @@ export function makeOmpAdapter(
         Effect.gen(function* () {
           if (!ctx.stopped) {
             ctx.stopped = true;
+            if (ctx.nativeExpertTransport)
+              yield* Effect.promise(() => ctx.nativeExpertTransport!.close()).pipe(
+                Effect.catchCause(() =>
+                  Effect.logWarning("omp.native_expert.close_failed", { threadId: ctx.threadId }),
+                ),
+              );
             yield* cancelAgentGatewayTurn(ctx.gatewaySessionLease, ctx.activeTurnId);
             ctx.gatewaySessionLease?.release();
             sessionTeardownGate.track(ctx.threadId, ctx.teardownComplete);
@@ -1186,6 +1216,95 @@ export function makeOmpAdapter(
           });
           const providerInstanceId = resolveProviderSessionInstanceId(input);
           const effectiveSettings = effectiveOmpSettings(input.providerOptions, providerInstanceId);
+          const nativeBuild =
+            !skillEvolution && options?.nativeExpertProtocolFactory
+              ? yield* Effect.tryPromise({
+                  try: () =>
+                    verifiedOmpNativeExpertBuild(
+                      resolveOmpCliBinaryPath(effectiveSettings.binaryPath, {
+                        cwd,
+                        env: buildOmpProcessEnv(effectiveSettings),
+                      }),
+                      options.nativeExpertBuilds,
+                    ),
+                  catch: () => undefined,
+                }).pipe(Effect.orElseSucceed(() => undefined))
+              : undefined;
+          const nativeExpertTransport =
+            nativeBuild && options?.nativeExpertProtocolFactory && input.lifecycleGeneration
+              ? createOmpNativeExpertTransport({
+                  factory: options.nativeExpertProtocolFactory,
+                  context: {
+                    threadId: input.threadId,
+                    generation: input.lifecycleGeneration,
+                    cwd,
+                    buildFingerprint: nativeBuild.buildFingerprint,
+                    ...(input.expertSession ? { expertSession: input.expertSession } : {}),
+                    ...(input.suiteRuntimeContext
+                      ? { runtimeContext: input.suiteRuntimeContext }
+                      : {}),
+                    ...(input.suiteExecution
+                      ? {
+                          capabilityBindingId: input.suiteExecution.capabilityBindingId,
+                          assemblyId: input.suiteExecution.assemblyId,
+                        }
+                      : {}),
+                  },
+                  onTask: (update) =>
+                    Effect.runPromise(
+                      Effect.gen(function* () {
+                        const stamp = {
+                          eventId: EventId.makeUnsafe(
+                            `native-expert:${update.taskId}:${update.state === "running" ? "started" : "terminal"}`,
+                          ),
+                          createdAt: yield* nowIso,
+                        };
+                        if (update.state === "running") {
+                          yield* offerRuntimeEvent(input.lifecycleGeneration, {
+                            type: "task.started",
+                            ...stamp,
+                            provider: PROVIDER,
+                            threadId: input.threadId,
+                            turnId: TurnId.makeUnsafe(update.parentTurnId),
+                            payload: {
+                              taskId: RuntimeTaskId.makeUnsafe(update.taskId),
+                              taskType: "subagent",
+                              description: "Expert delegation",
+                            },
+                          });
+                        } else {
+                          yield* offerRuntimeEvent(input.lifecycleGeneration, {
+                            type: "task.completed",
+                            ...stamp,
+                            provider: PROVIDER,
+                            threadId: input.threadId,
+                            turnId: TurnId.makeUnsafe(update.parentTurnId),
+                            payload: {
+                              taskId: RuntimeTaskId.makeUnsafe(update.taskId),
+                              status: update.state,
+                              ...(update.description ? { summary: update.description } : {}),
+                            },
+                          });
+                        }
+                      }),
+                    ),
+                })
+              : undefined;
+          const nativeExpertProtocol = nativeExpertTransport
+            ? yield* Effect.tryPromise({
+                try: () => nativeExpertTransport.prepare(),
+                catch: () => undefined,
+              }).pipe(Effect.orElseSucceed(() => null))
+            : null;
+          if (nativeExpertTransport)
+            yield* Scope.addFinalizer(
+              sessionScope,
+              Effect.promise(() => nativeExpertTransport.close()).pipe(
+                Effect.catchCause(() =>
+                  Effect.logWarning("omp.native_expert.close_failed", { threadId: input.threadId }),
+                ),
+              ),
+            );
 
           if (input.expertSession?.skillLoading === "index" && !input.lifecycleGeneration) {
             return yield* new ProviderAdapterRequestError({
@@ -1195,17 +1314,49 @@ export function makeOmpAdapter(
             });
           }
           const expertPreparation =
-            input.expertSession || input.contextSession?.hasContent
-              ? yield* prepareExpertProjection({
+            input.suiteRuntimeContext && !input.expertSession
+              ? yield* prepareOmpSuiteCoordinator(input.suiteRuntimeContext, {
                   cwd,
-                  settings: effectiveSettings,
-                  ...(input.lifecycleGeneration
-                    ? { lifecycleGeneration: input.lifecycleGeneration }
+                  env: buildOmpProcessEnv(effectiveSettings),
+                  ...(input.contextSession?.hasContent
+                    ? { contextText: input.contextSession.text }
                     : {}),
-                  ...(input.expertSession ? { expertSession: input.expertSession } : {}),
-                  ...(input.contextSession ? { contextSession: input.contextSession } : {}),
-                })
-              : undefined;
+                  runCli: (args, probeCwd, env) =>
+                    runOmpAcpCliCommand({
+                      childProcessSpawner,
+                      binaryPath: resolveOmpCliBinaryPath(effectiveSettings.binaryPath, {
+                        cwd: probeCwd,
+                        env,
+                      }),
+                      args,
+                      cwd: probeCwd,
+                      env,
+                    }),
+                }).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapterRequestError({
+                        provider: PROVIDER,
+                        method: "session/start",
+                        detail: cause.message,
+                        cause,
+                      }),
+                  ),
+                )
+              : input.expertSession || input.contextSession?.hasContent
+                ? yield* prepareExpertProjection({
+                    cwd,
+                    settings: effectiveSettings,
+                    ...(input.lifecycleGeneration
+                      ? { lifecycleGeneration: input.lifecycleGeneration }
+                      : {}),
+                    ...(input.expertSession ? { expertSession: input.expertSession } : {}),
+                    ...(input.contextSession ? { contextSession: input.contextSession } : {}),
+                    ...(input.suiteRuntimeContext
+                      ? { suiteRuntimeContext: input.suiteRuntimeContext }
+                      : {}),
+                  })
+                : undefined;
           if (expertPreparation?.issues.length) {
             return yield* new ProviderAdapterRequestError({
               provider: PROVIDER,
@@ -1261,7 +1412,9 @@ export function makeOmpAdapter(
           let nativeCompat: OmpNativeCompatLaunch | undefined;
           if (
             useNativeCompat &&
-            (inheritNativeTasks || learningPermissionContext || skillEvolution)
+            ((!nativeExpertProtocol && inheritNativeTasks) ||
+              learningPermissionContext ||
+              skillEvolution)
           ) {
             const privateTempDirectory = skillEvolution
               ? skillEvolutionWorkspace?.preloadDir
@@ -1347,7 +1500,10 @@ export function makeOmpAdapter(
             }
           }
           let idleTaskCompat: Awaited<ReturnType<typeof prepareOmpAcpIdleTaskCompat>> | undefined;
-          if (!useNativeCompat && (inheritNativeTasks || learningPermissionContext)) {
+          if (
+            !useNativeCompat &&
+            ((!nativeExpertProtocol && inheritNativeTasks) || learningPermissionContext)
+          ) {
             if (!expertPreparation?.ownedTempDirectory) {
               return yield* new ProviderAdapterRequestError({
                 provider: PROVIDER,
@@ -1553,6 +1709,18 @@ export function makeOmpAdapter(
             ...(resumeSessionId ? { resumeSessionId } : {}),
             clientCapabilities: { elicitation: { form: {} } },
             clientInfo: { name: "Synara", version: "0.0.0" },
+            ...(nativeExpertTransport
+              ? {
+                  validateInitializeResult: () =>
+                    Effect.tryPromise({
+                      try: () => nativeExpertTransport.negotiate(),
+                      catch: () => undefined,
+                    }).pipe(
+                      Effect.orElseSucceed(() => false),
+                      Effect.asVoid,
+                    ),
+                }
+              : {}),
             ...acpRuntimeLoggers,
             ...(requiredCompatMarker
               ? {
@@ -1600,6 +1768,17 @@ export function makeOmpAdapter(
             ),
           );
           yield* startAgentGatewaySessionLeaseExitWatcher(gatewaySessionLease, acp.awaitExit);
+          if (nativeExpertTransport) yield* nativeExpertTransport.connect(acp);
+          else
+            for (const method of Object.values(OMP_NATIVE_EXPERT_METHODS))
+              yield* acp.handleExtRequest(method, Schema.Unknown, () =>
+                Effect.fail(
+                  new AcpRequestError({
+                    code: -32000,
+                    errorMessage: "Native Expert delegation is not verified for this runtime.",
+                  }),
+                ),
+              );
 
           const started = yield* Effect.gen(function* () {
             yield* acp.handleRequestPermission((params) =>
@@ -1799,6 +1978,8 @@ export function makeOmpAdapter(
                 : mapAcpToAdapterError(PROVIDER, input.threadId, "session/start", error),
             ),
           );
+          if (nativeExpertTransport)
+            yield* Effect.promise(() => nativeExpertTransport.bind(started.sessionId));
 
           if (resumeSessionId !== undefined && started.sessionSetupMethod === "new") {
             return yield* new ProviderAdapterRequestError({
@@ -1836,6 +2017,22 @@ export function makeOmpAdapter(
             },
             createdAt: now,
             updatedAt: now,
+            ...(input.suiteRuntimeContext
+              ? {
+                  suiteApplication: {
+                    capabilityBindingId: input.suiteRuntimeContext.bindingId,
+                    assemblyId: input.suiteRuntimeContext.assemblyId,
+                    rootRunId: input.suiteRuntimeContext.rootRunId,
+                    configHash: suiteContentDigest(input.suiteRuntimeContext.effectiveConfig),
+                    resourceHashes: input.suiteRuntimeContext.resources.map(
+                      (resource) => resource.contentHash,
+                    ),
+                    contextFileHashes: input.suiteRuntimeContext.contextFiles.map(
+                      (file) => file.contentHash,
+                    ),
+                  },
+                }
+              : {}),
             ...(input.expertSession && expertPreparation
               ? input.expertSession.skillLoading === "index"
                 ? {
@@ -1861,6 +2058,10 @@ export function makeOmpAdapter(
 
           ctx = {
             ...(input.expertSession ? { fixedExpertSession: input.expertSession } : {}),
+            ...(nativeExpertTransport ? { nativeExpertTransport } : {}),
+            ...(input.suiteRuntimeContext
+              ? { suiteRuntimeContext: input.suiteRuntimeContext }
+              : {}),
             ...(expertPreparation?.verify
               ? {
                   verifyFixedSkills: expertPreparation.verify,
@@ -2359,7 +2560,7 @@ export function makeOmpAdapter(
         });
       });
 
-    const sendTurn: OmpAdapterShape["sendTurn"] = (input) =>
+    const sendTurn: OmpAdapterShape["sendTurn"] = (input, dispatchOptions) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
         // A second sendTurn entering while another turn is starting or still in
@@ -2374,7 +2575,7 @@ export function makeOmpAdapter(
         }
         ctx.turnStarting = true;
         ctx.pendingTurnInterrupted = false;
-        return yield* startOmpTurn(ctx, input).pipe(
+        return yield* startOmpTurn(ctx, input, dispatchOptions).pipe(
           Effect.ensuring(
             Effect.sync(() => {
               ctx.turnStarting = false;
@@ -2386,6 +2587,7 @@ export function makeOmpAdapter(
     const startOmpTurn = (
       ctx: OmpSessionContext,
       input: Parameters<OmpAdapterShape["sendTurn"]>[0],
+      dispatchOptions?: Parameters<OmpAdapterShape["sendTurn"]>[1],
     ) =>
       Effect.gen(function* () {
         // Startup registers the session before its config RPCs settle; a turn
@@ -2593,17 +2795,32 @@ export function makeOmpAdapter(
           payload: { ...(model ? { model } : {}) },
         });
 
-        const runPrompt = Effect.suspend(() =>
-          // interruptTurn during the pre-prompt waits (resume replay, attachment
-          // reads) or between turn.started publishing and this fiber being
-          // registered sets pendingTurnInterrupted; honor it (and a concurrent
-          // stop) here so a cancelled turn is never prompted. Self-interrupting
-          // routes through the onInterrupt branch below, which completes the
-          // turn as cancelled rather than as a provider failure.
-          ctx.pendingTurnInterrupted || ctx.stopped
-            ? Effect.interrupt
-            : ctx.acp.prompt({ prompt: promptParts }),
-        ).pipe(
+        const runPrompt = Effect.gen(function* () {
+          if (ctx.pendingTurnInterrupted || ctx.stopped) return yield* Effect.interrupt;
+          const parentRootRunId =
+            dispatchOptions?.rootRunId ??
+            ctx.suiteRuntimeContext?.rootRunId ??
+            ctx.fixedExpertSession?.skillRootRunId;
+          const nativeMetadata =
+            parentRootRunId && ctx.nativeExpertTransport
+              ? yield* Effect.promise(() =>
+                  ctx.nativeExpertTransport!.prompt(turnId, parentRootRunId),
+                )
+              : undefined;
+          return yield* ctx.acp.prompt({
+            prompt: promptParts,
+            ...(nativeMetadata
+              ? {
+                  _meta: {
+                    synaraNativeTask: {
+                      ...nativeMetadata,
+                      targetAgentNames: [...nativeMetadata.targetAgentNames],
+                    },
+                  },
+                }
+              : {}),
+          });
+        }).pipe(
           Effect.mapError((error) =>
             mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
           ),
@@ -3261,6 +3478,27 @@ export function makeOmpAdapter(
         ),
       );
 
+    const stopTask: NonNullable<OmpAdapterShape["stopTask"]> = (threadId, taskId) =>
+      Effect.gen(function* () {
+        const ctx = yield* requireSession(threadId);
+        if (!ctx.nativeExpertTransport)
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "stopTask",
+            issue: "This task has no verified native Expert execution.",
+          });
+        yield* Effect.tryPromise({
+          try: () => ctx.nativeExpertTransport!.cancelTask(taskId),
+          catch: () =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "stopTask",
+              detail:
+                "The native Expert stop was not confirmed. Reconcile this execution before retrying.",
+            }),
+        });
+      });
+
     const stopAll: OmpAdapterShape["stopAll"] = () =>
       settleConcurrentTeardowns(sessions.values(), stopSessionInternal);
 
@@ -3297,6 +3535,7 @@ export function makeOmpAdapter(
       startSession,
       sendTurn,
       interruptTurn,
+      stopTask,
       readThread,
       readExternalThread,
       rollbackThread,

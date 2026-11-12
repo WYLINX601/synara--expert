@@ -25,11 +25,16 @@ export function assertSkillResourcePath(value: string): void {
   }
 }
 
-type SkillArchiveFile = { name: string; data: Buffer; executable: boolean; directory: boolean };
+export type SkillArchiveFile = {
+  name: string;
+  data: Buffer;
+  executable: boolean;
+  directory: boolean;
+};
 /** Read only explicitly selected entries, validating their bytes before any write. */
-function readSkillArchive(
+export function readSkillArchive(
   bytes: Buffer,
-  include?: (name: string, mode: number) => boolean,
+  include?: (name: string, mode: number, directory: boolean) => boolean,
 ): SkillArchiveFile[] {
   if (bytes.length > SKILL_PACKAGE_LIMIT || bytes.length < 22)
     throw new Error("Invalid or oversized Skill archive.");
@@ -75,7 +80,7 @@ function readSkillArchive(
       name = directory ? decoded.slice(0, -1) : decoded;
     if (!Buffer.from(decoded).equals(rawName)) throw new Error("ZIP names must be UTF-8.");
     assertSkillResourcePath(name);
-    if (include && !include(name, mode)) {
+    if (include && !include(name, mode, directory)) {
       cursor = next;
       continue;
     }

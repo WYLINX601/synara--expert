@@ -50,6 +50,8 @@ import {
   type ContextSession as ContextSessionType,
   type ContextAppliedRuntimeRecord,
   type ResolvedExpertSkillEntry,
+  type ExpertSkillBinding,
+  ProviderSuiteExecution,
 } from "@synara/contracts";
 import {
   mergeProviderStartOptions,
@@ -84,6 +86,10 @@ import { nonEmptyTrimmed } from "@synara/shared/text";
 import { formatAmbientContext } from "@synara/shared/ambientContext";
 import { composeProviderBaseInstructions } from "@synara/shared/contextInstructions";
 import { computerApprovalGate } from "../../computer/ComputerApprovalGate.ts";
+import {
+  NativeExpertReexecutionGate,
+  NATIVE_EXPERT_REEXECUTION_PREFIX,
+} from "../../workbench/host/nativeExpertReexecutionGate.ts";
 import { ContextRepository, type ContextRepositoryError } from "../../context/ContextRepository.ts";
 import {
   createSkillPackageStore,
@@ -110,6 +116,10 @@ import {
   sha256Utf8,
 } from "../expertSkillCatalog.ts";
 import { skillRuntimeEntries, verifySkillRunResources } from "../../experts/skillRunResources";
+import { supportsSuiteRuntime } from "../suiteRuntimeSupport";
+import { SuiteCompositionStore } from "../../suites/SuiteCompositionStore";
+import type { SuiteRuntimeContext } from "../../experts/SuiteRunMaterialization";
+import { suiteContentDigest } from "../../suites/suiteIdentity";
 
 import {
   type ProviderAdapterError,
@@ -1143,21 +1153,87 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
     const learningRepository = yield* Effect.serviceOption(ExpertLearningRepository);
     const spaceMemoryService = yield* Effect.serviceOption(SpaceMemoryService);
     const projectionSnapshotQuery = yield* Effect.serviceOption(ProjectionSnapshotQuery);
+    const suiteStore = Option.getOrUndefined(yield* Effect.serviceOption(SuiteCompositionStore));
+    const nativeExpertReexecutionGate = Option.getOrUndefined(
+      yield* Effect.serviceOption(NativeExpertReexecutionGate),
+    );
     const skillPackageStore: SkillPackageStore | undefined = options?.stateDir
       ? createSkillPackageStore(options.stateDir)
       : undefined;
     const expertStore = options?.stateDir ? createExpertStore(options.stateDir) : undefined;
     const runSkillAssemblyStore = options?.stateDir
-      ? createRunSkillAssemblyStore(
-          options.stateDir,
-          Option.isSome(learningRepository)
+      ? createRunSkillAssemblyStore(options.stateDir, {
+          ...(suiteStore ? { suiteStore } : {}),
+          ...(Option.isSome(learningRepository)
             ? {
-                frozenEntries: (expertId, bindings) =>
+                frozenEntries: (
+                  expertId: string,
+                  bindings: readonly ExpertSkillBinding[] | undefined,
+                ) =>
                   frozenLearningEntriesReader(learningRepository.value)(expertId, bindings ?? []),
               }
-            : {},
-        )
+            : {}),
+        })
       : undefined;
+    const prepareSuiteRuntime = (
+      execution: ProviderSessionStartInput["suiteExecution"],
+      threadId: ThreadId,
+      provider: string,
+    ) =>
+      Effect.tryPromise({
+        try: async () => {
+          if (!execution) return undefined;
+          if (!supportsSuiteRuntime(provider))
+            throw new Error("Suite runtime materialization is supported only by OMP.");
+          if (!runSkillAssemblyStore) throw new Error("Suite Run storage is unavailable.");
+          const record = await runSkillAssemblyStore.read(execution.rootRunId);
+          if (
+            !record ||
+            record.schemaVersion !== 2 ||
+            record.threadId !== threadId ||
+            record.bindingId !== execution.capabilityBindingId ||
+            record.assemblyId !== execution.assemblyId ||
+            (execution.kind === "hub-coordinator") !== (record.baseSnapshotId === null)
+          )
+            throw new Error("Suite execution does not match its durable Run.");
+          if (Option.isNone(projectionSnapshotQuery))
+            throw new Error("Suite thread authorization context is unavailable.");
+          const shell = Option.getOrUndefined(
+            await Effect.runPromise(projectionSnapshotQuery.value.getThreadShellById(threadId)),
+          );
+          if (!shell || shell.capabilityBindingId !== record.bindingId)
+            throw new Error("Suite execution is not bound to this thread.");
+          return runSkillAssemblyStore.runtimeContext(record);
+        },
+        catch: (cause) =>
+          toValidationError(
+            "ProviderService.startSession",
+            "Suite Run resources could not be verified.",
+            cause,
+          ),
+      });
+    const verifySuiteReceipt = (
+      context: SuiteRuntimeContext | undefined,
+      session: ProviderSession,
+    ) => {
+      if (!context) return Effect.void;
+      const expected = {
+        capabilityBindingId: context.bindingId,
+        assemblyId: context.assemblyId,
+        rootRunId: context.rootRunId,
+        configHash: suiteContentDigest(context.effectiveConfig),
+        resourceHashes: context.resources.map((resource) => resource.contentHash),
+        contextFileHashes: context.contextFiles.map((file) => file.contentHash),
+      };
+      return isDeepStrictEqual(session.suiteApplication, expected)
+        ? Effect.void
+        : Effect.fail(
+            toValidationError(
+              "ProviderService.startSession",
+              "OMP did not acknowledge the complete Suite runtime projection.",
+            ),
+          );
+    };
     const canonicalEventLogger =
       options?.canonicalEventLogger ??
       (options?.canonicalEventLogPath !== undefined
@@ -1746,9 +1822,10 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       });
     type ResolvedProviderSessionStartInput = ProviderSessionStartInput & {
       readonly provider: ProviderKind;
+      readonly suiteRuntimeContext?: SuiteRuntimeContext;
     };
     const withRunSkillAssemblyInitialization = <A, E, R>(
-      expertSession: ProviderExpertSession | undefined,
+      expertSession: Pick<ProviderExpertSession, "skillRootRunId"> | undefined,
       operation: string,
       nativeStart: () => Effect.Effect<A, E, R>,
     ) => {
@@ -1801,14 +1878,19 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       startSession = adapter.startSession,
     ) =>
       withRunSkillAssemblyInitialization(
-        startInput.expertSession,
+        startInput.expertSession ??
+          (startInput.suiteExecution
+            ? { skillRootRunId: startInput.suiteExecution.rootRunId }
+            : undefined),
         "ProviderService.startSession",
         () =>
           Effect.suspend(() => startSession(startInput)).pipe(
+            Effect.tap((session) => verifySuiteReceipt(startInput.suiteRuntimeContext, session)),
             Effect.map((session) => ({ session, staleSessionFallbackOccurred: false })),
             Effect.catchIf(
               (error) =>
                 hasResumeCursor(startInput.resumeCursor) &&
+                !(error instanceof ProviderValidationError) &&
                 isStaleNativeSessionLoadError(startInput.provider, error),
               (error) =>
                 adapter.hasSession(startInput.threadId).pipe(
@@ -1816,6 +1898,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     if (hasLiveSession) return Effect.fail(error);
                     const { resumeCursor: _staleResumeCursor, ...freshStartInput } = startInput;
                     return Effect.suspend(() => adapter.startSession(freshStartInput)).pipe(
+                      Effect.tap((session) =>
+                        verifySuiteReceipt(startInput.suiteRuntimeContext, session),
+                      ),
                       Effect.map((session) => ({ session, staleSessionFallbackOccurred: true })),
                     );
                   }),
@@ -2425,6 +2510,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           ...toRuntimePayloadFromSession(session, credentialsFingerprintKey, extra),
           ...extra?.runtimePayload,
           ...(session.expertApplication ? { expertApplication: session.expertApplication } : {}),
+          ...(session.suiteApplication ? { suiteApplication: session.suiteApplication } : {}),
           ...(session.contextAppliedSnapshotId
             ? { contextAppliedSnapshotId: session.contextAppliedSnapshotId }
             : {}),
@@ -3294,6 +3380,28 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               binding.runtimePayload,
             );
             const persistedContextSession = readPersistedContextSession(binding.runtimePayload);
+            const rawSuiteExecution = runtimePayloadRecord(binding.runtimePayload).suiteExecution;
+            const persistedSuiteExecution =
+              rawSuiteExecution == null
+                ? undefined
+                : yield* decodeInputOrValidationError({
+                    operation: input.operation,
+                    schema: ProviderSuiteExecution,
+                    payload: rawSuiteExecution,
+                  });
+            const suiteRuntimeContext = yield* prepareSuiteRuntime(
+              persistedSuiteExecution,
+              threadId,
+              binding.provider,
+            );
+            if (
+              persistedExpertSession?.skillAssemblyId?.startsWith("sca_") &&
+              !persistedSuiteExecution
+            )
+              return yield* toValidationError(
+                input.operation,
+                "The persisted Suite Run reference is missing.",
+              );
             if (persistedExpertSession === null) {
               return yield* toValidationError(
                 input.operation,
@@ -3482,6 +3590,8 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               ...(resolved.providerOptions ? { providerOptions: resolved.providerOptions } : {}),
               ...(persistedComputerControl ? { enableComputerControl: true } : {}),
               ...(verifiedExpertSession ? { expertSession: verifiedExpertSession } : {}),
+              ...(persistedSuiteExecution ? { suiteExecution: persistedSuiteExecution } : {}),
+              ...(suiteRuntimeContext ? { suiteRuntimeContext } : {}),
               ...(persistedContextSession ? { contextSession: persistedContextSession } : {}),
               ...(persistedAutoApproveSynaraTools ? { autoApproveSynaraTools: true } : {}),
               ...(persistedAdditionalDirectories.length > 0
@@ -3496,10 +3606,14 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             // Prompt construction has already happened here. Only explicit startup
             // may replace lost native history and request a transcript recap.
             const startedSession = yield* withRunSkillAssemblyInitialization(
-              verifiedExpertSession,
+              verifiedExpertSession ??
+                (persistedSuiteExecution
+                  ? { skillRootRunId: persistedSuiteExecution.rootRunId }
+                  : undefined),
               input.operation,
               () => adapter.startSession(resumeStartInput),
             );
+            yield* verifySuiteReceipt(suiteRuntimeContext, startedSession);
             inheritedRuntimeGenerations.delete(threadId);
             const resumed: ProviderSession = startedSession;
             if (resumed.provider !== adapter.provider) {
@@ -4214,11 +4328,33 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           ...(input.cwd ? { cwd: input.cwd } : {}),
           runtimeNotices: input.expertRuntimeNotices ?? [],
         });
+        const suiteRuntimeContext = yield* prepareSuiteRuntime(
+          input.suiteExecution,
+          threadId,
+          input.provider,
+        );
+        if (input.expertSession?.skillAssemblyId?.startsWith("sca_") && !input.suiteExecution)
+          return yield* toValidationError(
+            "ProviderService.startSession",
+            "A Suite Expert requires its complete trusted Run reference.",
+          );
+        if (
+          input.suiteExecution &&
+          (input.suiteExecution.kind === "hub-coordinator"
+            ? input.expertSession !== undefined
+            : input.expertSession?.skillAssemblyId !== input.suiteExecution.assemblyId ||
+              input.expertSession?.skillRootRunId !== input.suiteExecution.rootRunId)
+        )
+          return yield* toValidationError(
+            "ProviderService.startSession",
+            "Suite runtime and Expert session identities disagree.",
+          );
         const { expertRuntimeNotices: _expertRuntimeNotices, ...adapterInputWithoutNotices } =
           input;
         const adapterInput = {
           ...adapterInputWithoutNotices,
           ...(verifiedExpertSession ? { expertSession: verifiedExpertSession } : {}),
+          ...(suiteRuntimeContext ? { suiteRuntimeContext } : {}),
         };
         // Reject disabled providers before waiting on lifecycle work, then
         // check again immediately before spawning in case settings changed.
@@ -4578,6 +4714,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                       [AGENT_GATEWAY_CREDENTIAL_ROTATION_REQUIRED]: false,
                       ...(effectiveComputerControl ? { enableComputerControl: true } : {}),
                       expertSession: input.expertSession ?? null,
+                      suiteExecution: input.suiteExecution ?? null,
                       expertRuntimeNotices: input.expertRuntimeNotices ?? [],
                       contextSession: input.contextSession ?? null,
                       ...(input.executionPurpose
@@ -4745,8 +4882,27 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                             runtimeNotices: previousExpertRuntimeNotices,
                           },
                         );
+                        const rawPreviousSuite = runtimePayloadRecord(
+                          persistedBinding.runtimePayload,
+                        ).suiteExecution;
+                        const previousSuiteExecution =
+                          rawPreviousSuite == null
+                            ? undefined
+                            : yield* decodeInputOrValidationError({
+                                operation: "ProviderService.startSession.restore",
+                                schema: ProviderSuiteExecution,
+                                payload: rawPreviousSuite,
+                              });
+                        const previousSuiteRuntimeContext = yield* prepareSuiteRuntime(
+                          previousSuiteExecution,
+                          threadId,
+                          persistedBinding.provider,
+                        );
                         const restored: ProviderSession = yield* withRunSkillAssemblyInitialization(
-                          restoredExpertSession,
+                          restoredExpertSession ??
+                            (previousSuiteExecution
+                              ? { skillRootRunId: previousSuiteExecution.rootRunId }
+                              : undefined),
                           "ProviderService.startSession.restore",
                           () =>
                             previousAdapter.startSession({
@@ -4767,6 +4923,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                               ...(restoredExpertSession !== undefined
                                 ? { expertSession: restoredExpertSession }
                                 : {}),
+                              ...(previousSuiteExecution
+                                ? { suiteExecution: previousSuiteExecution }
+                                : {}),
+                              ...(previousSuiteRuntimeContext
+                                ? { suiteRuntimeContext: previousSuiteRuntimeContext }
+                                : {}),
                               ...(previousContextSession !== undefined
                                 ? { contextSession: previousContextSession }
                                 : {}),
@@ -4782,6 +4944,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                                 : {}),
                             }),
                         );
+                        yield* verifySuiteReceipt(previousSuiteRuntimeContext, restored);
                         if (restored.provider !== previousAdapter.provider) {
                           return yield* toValidationError(
                             "ProviderService.startSession",
@@ -5163,6 +5326,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             runtimeNotices: effectiveExpertRuntimeNotices,
           },
         );
+        if (effectiveExpertSession?.skillAssemblyId?.startsWith("sca_") && !input.suiteExecution)
+          return null;
+        const suiteRuntimeContext = yield* prepareSuiteRuntime(
+          input.suiteExecution,
+          input.threadId,
+          resolvedSource.instance.driver,
+        );
         const { expertRuntimeNotices: _expertRuntimeNotices, ...adapterInputWithoutNotices } =
           input;
 
@@ -5190,6 +5360,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 : {}),
               ...(sourceCwd ? { sourceCwd } : {}),
               ...(verifiedExpertSession ? { expertSession: verifiedExpertSession } : {}),
+              ...(suiteRuntimeContext ? { suiteRuntimeContext } : {}),
               ...(effectiveContextSession ? { contextSession: effectiveContextSession } : {}),
               lifecycleGeneration: lease.generation,
               runtimeMode: input.runtimeMode,
@@ -5243,6 +5414,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 launchOptionsAuthoritative: true,
                 runtimePayload: {
                   expertSession: effectiveExpertSession ?? null,
+                  suiteExecution: input.suiteExecution ?? null,
                   expertRuntimeNotices: effectiveExpertRuntimeNotices,
                   contextSession: effectiveContextSession ?? null,
                 },
@@ -5306,6 +5478,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 launchOptionsAuthoritative: true,
                 runtimePayload: {
                   expertSession: effectiveExpertSession ?? null,
+                  suiteExecution: input.suiteExecution ?? null,
                   expertRuntimeNotices: effectiveExpertRuntimeNotices,
                   contextSession: effectiveContextSession ?? null,
                 },
@@ -5610,6 +5783,28 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               turnInput: input,
               routed,
             });
+            if (dispatchOptions?.rootRunId)
+              yield* Effect.tryPromise({
+                try: async () => {
+                  const record = await runSkillAssemblyStore?.read(dispatchOptions.rootRunId!);
+                  if (
+                    !record ||
+                    record.threadId !== input.threadId ||
+                    record.baseSnapshotId !== (verifiedExpertSession?.snapshotId ?? null) ||
+                    (verifiedExpertSession?.skillAssemblyId !== undefined &&
+                      record.assemblyId !== verifiedExpertSession.skillAssemblyId)
+                  )
+                    throw new Error("The trusted prompt Run does not match this runtime identity.");
+                  if (record.schemaVersion === 2)
+                    await runSkillAssemblyStore!.runtimeContext(record);
+                },
+                catch: (cause) =>
+                  toValidationError(
+                    "ProviderService.sendTurn",
+                    "The original prompt Run could not be verified.",
+                    cause,
+                  ),
+              });
             const skillInvocation = yield* prepareExpertSkillInvocations({
               expertSession: verifiedExpertSession,
               skills: input.skills,
@@ -6297,6 +6492,42 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
 
     const respondToInteraction = (response: InteractionResponse) => {
       const { input } = response;
+      if (
+        response.kind === "approval" &&
+        input.requestId.startsWith(NATIVE_EXPERT_REEXECUTION_PREFIX)
+      ) {
+        return Effect.gen(function* () {
+          if (!nativeExpertReexecutionGate) {
+            return yield* new ProviderValidationError({
+              operation: "ProviderService.respondToRequest",
+              issue: "The native Expert approval callback is unavailable.",
+              reason: "stale-interaction",
+            });
+          }
+          const consumed = yield* Effect.tryPromise({
+            try: () =>
+              nativeExpertReexecutionGate.respond(
+                input.threadId,
+                input.requestId,
+                response.input.decision,
+              ),
+            catch: (cause) =>
+              new ProviderValidationError({
+                operation: "ProviderService.respondToRequest",
+                issue: "The native Expert approval could not be settled.",
+                cause,
+              }),
+          });
+          if (!consumed) {
+            return yield* new ProviderValidationError({
+              operation: "ProviderService.respondToRequest",
+              issue:
+                "This native Expert approval expired, changed, or belongs to another conversation.",
+              reason: "stale-interaction",
+            });
+          }
+        });
+      }
       if (response.kind === "approval" && input.requestId.startsWith("computer:")) {
         return Effect.gen(function* () {
           if (

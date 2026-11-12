@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./expertDelegationActivity": {
+      "types": "./src/expertDelegationActivity.ts",
+      "import": "./src/expertDelegationActivity.ts"
+    },
     "./turnStopActivity": {
       "types": "./src/turnStopActivity.ts",
       "import": "./src/turnStopActivity.ts"

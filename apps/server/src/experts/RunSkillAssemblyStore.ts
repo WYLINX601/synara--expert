@@ -11,6 +11,9 @@ import {
   type ResolvedExpertSkillEntry,
   type ExpertSkillBinding,
   type LearningSessionContext,
+  type RunSkillAssemblyV1,
+  type SuiteRunAssemblyV2,
+  LearningSessionContext as LearningSessionContextSchema,
 } from "@synara/contracts";
 import { ensurePrivateDirectorySync } from "../privatePathPermissions";
 import { createExpertStore, expertResourceFiles } from "./ExpertStore";
@@ -21,6 +24,11 @@ import { withSkillPackageLifecycle } from "./skillPackageLifecycle";
 import { expertSnapshotSession } from "./expertSnapshotSession";
 import { verifyPinnedSkillReferences } from "./pinnedSkillReferences";
 import { prepareSkillRunResources, verifySkillRunResources } from "./skillRunResources";
+import {
+  createSuiteRunMaterialization,
+  suiteAssemblyFingerprint,
+  type SuiteRunStore,
+} from "./SuiteRunMaterialization";
 
 const LIMIT = 16 * 1024 * 1024;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -40,6 +48,14 @@ export function skillAssemblyFingerprint(session: ProviderExpertSession): string
 }
 
 function validateRecord(record: RunSkillAssembly, rootRunId?: string): RunSkillAssembly {
+  if (record.schemaVersion === 2) {
+    if (
+      (rootRunId !== undefined && record.rootRunId !== rootRunId) ||
+      record.assemblyId !== suiteAssemblyFingerprint(record)
+    )
+      throw new Error("Suite Run assembly identity is corrupt.");
+    return record;
+  }
   if (
     (rootRunId !== undefined && record.rootRunId !== rootRunId) ||
     record.session.skillRootRunId !== record.rootRunId ||
@@ -104,6 +120,30 @@ const pointers = Schema.Struct({
   continuations: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 });
 
+export interface PrepareRunSkillAssemblyInput {
+  readonly threadId: string;
+  readonly rootRunId: string;
+  readonly baseSnapshotId: string | null;
+  readonly capabilityBindingId?: string;
+  readonly createdAt: string;
+  readonly continuationKey?: string;
+  readonly inheritContinuation?: boolean;
+  readonly projectRoot?: string;
+  /** Temporary native targets share thread ownership, not the parent's current Run pointer. */
+  readonly bindThreadRoot?: boolean;
+}
+export interface PrepareRunSkillAssembly {
+  (
+    input: PrepareRunSkillAssemblyInput & { readonly capabilityBindingId: string },
+  ): Promise<SuiteRunAssemblyV2>;
+  (
+    input: PrepareRunSkillAssemblyInput & {
+      readonly capabilityBindingId?: undefined;
+      readonly baseSnapshotId: string;
+    },
+  ): Promise<RunSkillAssemblyV1>;
+  (input: PrepareRunSkillAssemblyInput): Promise<RunSkillAssembly>;
+}
 export function createRunSkillAssemblyStore(
   stateDir: string,
   options: {
@@ -111,11 +151,35 @@ export function createRunSkillAssemblyStore(
       expertId: string,
       bindings: readonly ExpertSkillBinding[] | undefined,
     ) => Promise<readonly ResolvedExpertSkillEntry[] | undefined>;
+    readonly suiteStore?: SuiteRunStore;
   } = {},
 ) {
   const experts = createExpertStore(stateDir);
   const packages = createSkillPackageStore(stateDir);
-  const initializationHasEffects = async (session: ProviderExpertSession): Promise<boolean> => {
+  const suiteRuns = createSuiteRunMaterialization(
+    stateDir,
+    options.suiteStore,
+    options.frozenEntries,
+  );
+  const knowledgePath = (rootRunId: string) =>
+    path.join(stateDir, "experts", "run-knowledge-bindings", `${digest(rootRunId)}.json`);
+  const readKnowledge = async (rootRunId: string): Promise<LearningSessionContext | undefined> => {
+    try {
+      return Schema.decodeUnknownSync(LearningSessionContextSchema)(
+        JSON.parse((await expertResourceFiles.read(knowledgePath(rootRunId))).toString("utf8")),
+      );
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw cause;
+    }
+  };
+  const sessionFor = async (record: RunSkillAssembly): Promise<ProviderExpertSession | undefined> =>
+    record.schemaVersion === 1
+      ? record.session
+      : suiteRuns.sessionFor(record, await readKnowledge(record.rootRunId));
+  const initializationHasEffects = async (
+    session: Pick<ProviderExpertSession, "skillEntries">,
+  ): Promise<boolean> => {
     const entries = session.skillEntries ?? [];
     for (const packageId of new Set(entries.map((entry) => entry.packageId))) {
       const manifest = await packages.read(packageId);
@@ -163,7 +227,9 @@ export function createRunSkillAssemblyStore(
     );
   };
   const refreshInitializationEffects = async (record: RunSkillAssembly) => {
-    if (record.hasInitializationEffects || !(await initializationHasEffects(record.session)))
+    const session =
+      record.schemaVersion === 2 ? { skillEntries: record.skillEntries } : record.session;
+    if (record.hasInitializationEffects || !(await initializationHasEffects(session)))
       return record;
     const refreshed = {
       ...record,
@@ -230,11 +296,16 @@ export function createRunSkillAssemblyStore(
     rootRunId: string;
     continuationKey?: string;
     inheritContinuation?: boolean;
+    bindThreadRoot?: boolean;
   }) => {
+    if (input.bindThreadRoot === false && input.continuationKey === undefined) return;
     const current = await readPointers();
     const next = {
       ...current,
-      roots: { ...current.roots, [input.threadId]: input.rootRunId },
+      roots:
+        input.bindThreadRoot === false
+          ? current.roots
+          : { ...current.roots, [input.threadId]: input.rootRunId },
       ...(input.continuationKey
         ? {
             continuations: {
@@ -254,10 +325,36 @@ export function createRunSkillAssemblyStore(
   };
   const store = {
     read: (rootRunId: string) => readRunSkillAssembly(stateDir, rootRunId),
+    sessionFor,
+    runtimeContext: (record: RunSkillAssembly) =>
+      record.schemaVersion === 2 ? suiteRuns.runtimeContext(record) : Promise.resolve(undefined),
     async attachKnowledge(rootRunId: string, knowledge: LearningSessionContext) {
       return withSkillPackageLifecycle(stateDir, async () => {
         const record = await readRunSkillAssembly(stateDir, rootRunId);
         if (!record) throw new Error("Run Skill assembly is unavailable for knowledge binding.");
+        if (record.schemaVersion === 2) {
+          const session = await sessionFor(record);
+          if (
+            !session ||
+            knowledge.rootRunId !== record.rootRunId ||
+            knowledge.snapshotId !== record.baseSnapshotId ||
+            knowledge.scope.expertId !== session.expertId
+          )
+            throw new Error("Suite Run knowledge identity does not match its Expert.");
+          const previous = await readKnowledge(rootRunId);
+          if (previous && !isDeepStrictEqual(previous, knowledge))
+            throw new Error("Run knowledge binding is already fixed.");
+          ensurePrivateDirectorySync(path.dirname(knowledgePath(rootRunId)));
+          await writePrivateFileAtomically(
+            knowledgePath(rootRunId),
+            serializeJsonWithinByteLimit(
+              knowledge,
+              LIMIT,
+              "Run knowledge binding exceeds its limit.",
+            ),
+          );
+          return record;
+        }
         if (record.session.knowledge) {
           if (!isDeepStrictEqual(record.session.knowledge, knowledge))
             throw new Error("Run knowledge binding is already fixed to a different manifest.");
@@ -293,17 +390,23 @@ export function createRunSkillAssemblyStore(
     async prepare(input: {
       threadId: string;
       rootRunId: string;
-      baseSnapshotId: string;
+      baseSnapshotId: string | null;
+      capabilityBindingId?: string;
       createdAt: string;
       continuationKey?: string;
       inheritContinuation?: boolean;
+      projectRoot?: string;
+      bindThreadRoot?: boolean;
     }) {
       return withSkillPackageLifecycle(stateDir, async () => {
         const existing = await readRunSkillAssembly(stateDir, input.rootRunId);
         if (existing) {
           if (
             existing.threadId !== input.threadId ||
-            existing.baseSnapshotId !== input.baseSnapshotId
+            existing.baseSnapshotId !== input.baseSnapshotId ||
+            (existing.schemaVersion === 2
+              ? existing.bindingId !== input.capabilityBindingId
+              : input.capabilityBindingId !== undefined)
           )
             throw new Error("Run Skill assembly belongs to another task identity.");
           await bindPointers(input);
@@ -329,10 +432,38 @@ export function createRunSkillAssemblyStore(
           throw new Error(
             "Skill initialization outcome is uncertain; continuation cannot replay startup side effects.",
           );
+        if (input.capabilityBindingId !== undefined) {
+          if (inherited && inherited.schemaVersion !== 2)
+            throw new Error("Suite continuation cannot inherit a legacy assembly.");
+          let record: SuiteRunAssemblyV2 = await suiteRuns.prepare(
+            {
+              ...input,
+              threadId: input.threadId as SuiteRunAssemblyV2["threadId"],
+              capabilityBindingId: input.capabilityBindingId,
+            },
+            inherited,
+          );
+          const inheritedKnowledge = inherited
+            ? await readKnowledge(inherited.rootRunId)
+            : undefined;
+          record = {
+            ...record,
+            hasInitializationEffects: await initializationHasEffects({
+              skillEntries: record.skillEntries,
+            }),
+            ...(inheritedKnowledge ? { knowledgeSourceRunId: inherited!.rootRunId } : {}),
+          };
+          await write(record);
+          await bindPointers(input);
+          return record;
+        }
+        if (input.baseSnapshotId === null || inherited?.schemaVersion === 2)
+          throw new Error("Legacy Run assembly requires an Expert snapshot.");
+        const baseSnapshotId = input.baseSnapshotId;
         const resolved = inherited
           ? (() => {
               const entries = inherited.session.skillEntries ?? [];
-              return experts.readSnapshot(input.baseSnapshotId).then((snapshot) => {
+              return experts.readSnapshot(baseSnapshotId).then((snapshot) => {
                 const base = expertSnapshotSession(snapshot);
                 if (base.expertId !== inherited.session.expertId)
                   throw new Error("Skill continuation changed its assigned Expert.");
@@ -351,7 +482,7 @@ export function createRunSkillAssemblyStore(
                 };
               });
             })()
-          : resolveLatest(input.baseSnapshotId);
+          : resolveLatest(baseSnapshotId);
         const { definition, entries, session: base } = await resolved;
         const resources = await prepareSkillRunResources(
           stateDir,
@@ -370,12 +501,12 @@ export function createRunSkillAssemblyStore(
         };
         const assemblyId = skillAssemblyFingerprint(session);
         const hasInitializationEffects = await initializationHasEffects(session);
-        const record: RunSkillAssembly = {
+        const record: RunSkillAssemblyV1 = {
           schemaVersion: 1,
           assemblyId,
           rootRunId: input.rootRunId,
           threadId: input.threadId,
-          baseSnapshotId: input.baseSnapshotId,
+          baseSnapshotId,
           bindingRevision: definition.revision,
           createdAt: input.createdAt,
           hasInitializationEffects,
@@ -392,8 +523,12 @@ export function createRunSkillAssemblyStore(
       if (!session.skillRootRunId || !session.skillAssemblyId)
         throw new Error("Run Skill assembly reference is incomplete.");
       const record = await readRunSkillAssembly(stateDir, session.skillRootRunId);
-      if (!record || !isDeepStrictEqual(record.session, session))
+      const durableSession = record ? await sessionFor(record) : undefined;
+      if (!record || !durableSession || !isDeepStrictEqual(durableSession, session))
         throw new Error("Run Skill assembly does not match its durable record.");
+      if (record.baseSnapshotId === null)
+        throw new Error("Coordinator cannot present an Expert session.");
+      if (record.schemaVersion === 2) await suiteRuns.runtimeContext(record);
       const snapshot = await experts.readSnapshot(record.baseSnapshotId);
       const base = expertSnapshotSession(snapshot);
       const identity = (value: ProviderExpertSession) => ({
@@ -412,7 +547,7 @@ export function createRunSkillAssemblyStore(
         session.skillEntries ?? [],
         session.skillResourceRefs,
       );
-      return record.session;
+      return durableSession;
     },
     async beginInitialization(rootRunId: string) {
       return withSkillPackageLifecycle(stateDir, async () => {
@@ -441,9 +576,12 @@ export function createRunSkillAssemblyStore(
         const record = await readRunSkillAssembly(stateDir, rootRunId);
         if (!record || record.initializationAttempt !== attempt)
           throw new Error("Native initialization attempt changed.");
+        const session = await sessionFor(record);
         const hasInitializationEffects =
           record.hasInitializationEffects ||
-          (error !== undefined && (await initializationHasEffects(record.session)));
+          (error !== undefined &&
+            session !== undefined &&
+            (await initializationHasEffects(session)));
         await write({
           ...record,
           hasInitializationEffects,
@@ -455,5 +593,5 @@ export function createRunSkillAssemblyStore(
       });
     },
   };
-  return store;
+  return store as Omit<typeof store, "prepare"> & { readonly prepare: PrepareRunSkillAssembly };
 }

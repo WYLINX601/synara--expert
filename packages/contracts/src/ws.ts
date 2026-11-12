@@ -1,3 +1,11 @@
+import {
+  SuitePreviewInput,
+  SuiteCancelPreviewInput,
+  SuiteImportRequest,
+  SuiteImportReceiptInput,
+  SuiteRef,
+  SuiteRunConfigurationInput,
+} from "./suite";
 import { SkillLibraryRpcInput } from "./skillLibrary";
 import { SkillEvolutionRpcInput } from "./skillEvolution";
 import { SkillManagementCredentialRevokeInput } from "./skillManagementAuth";
@@ -369,6 +377,13 @@ export const WS_METHODS = {
   serverRestoreExpert: "server.restoreExpert",
   serverDeleteExpert: "server.deleteExpert",
   serverPreviewExpert: "server.previewExpert",
+  serverPreviewSuite: "suite.preview",
+  serverCancelSuitePreview: "suite.cancelPreview",
+  serverCommitSuiteImport: "suite.commitImport",
+  serverGetSuiteImportReceipt: "suite.getImportReceipt",
+  serverListSuites: "suite.list",
+  serverReadSuite: "suite.read",
+  serverReadSuiteRunConfiguration: "suite.readRunConfiguration",
   serverSkillLibrary: "server.skillLibrary",
   serverSkillEvolution: "server.skillEvolution",
   serverReadSkillManagementAccess: "server.readSkillManagementAccess",
@@ -707,6 +722,13 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverRestoreExpert, ExpertRestoreInput),
   tagRequestBody(WS_METHODS.serverDeleteExpert, ExpertDeleteInput),
   tagRequestBody(WS_METHODS.serverPreviewExpert, ExpertPreviewInput),
+  tagRequestBody(WS_METHODS.serverPreviewSuite, SuitePreviewInput),
+  tagRequestBody(WS_METHODS.serverCancelSuitePreview, SuiteCancelPreviewInput),
+  tagRequestBody(WS_METHODS.serverCommitSuiteImport, SuiteImportRequest),
+  tagRequestBody(WS_METHODS.serverGetSuiteImportReceipt, SuiteImportReceiptInput),
+  tagRequestBody(WS_METHODS.serverListSuites, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverReadSuite, SuiteRef),
+  tagRequestBody(WS_METHODS.serverReadSuiteRunConfiguration, SuiteRunConfigurationInput),
   tagRequestBody(WS_METHODS.serverSkillLibrary, SkillLibraryRpcInput),
   tagRequestBody(WS_METHODS.serverSkillEvolution, SkillEvolutionRpcInput),
   tagRequestBody(WS_METHODS.serverReadSkillManagementAccess, Schema.Struct({})),

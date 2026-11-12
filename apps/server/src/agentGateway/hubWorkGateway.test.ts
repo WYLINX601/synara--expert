@@ -14,6 +14,7 @@ import {
   type RuntimeMode,
   type SynaraCreateThreadsInput,
 } from "@synara/contracts";
+import { suiteContentDigest } from "../suites/suiteIdentity";
 import { Effect, Layer, Option } from "effect";
 
 import {
@@ -77,6 +78,7 @@ function harness(name: string) {
     const sql = yield* SqlClient.SqlClient;
     yield* sql`INSERT INTO projection_projects (project_id, kind, title, workspace_root, scripts_json, created_at, updated_at)
       VALUES (${projectId}, 'group', 'Hub', '/tmp/hub', '[]', ${now}, ${now})`;
+    yield* projectAgentRepository.beginSuiteOnboarding(projectId);
     yield* projectAgentRepository.saveConfig(
       {
         projectId,
@@ -124,6 +126,9 @@ function harness(name: string) {
     let defaultModelSelection: ExpertDefinition["defaultModelSelection"];
     let expertPreviewBlocked = false;
     const expertSnapshots = new Map<string, ExpertSnapshot>();
+    const snapshotOptions: Array<
+      { readonly projectRoot?: string; readonly allowMissingConnections?: boolean } | undefined
+    > = [];
     const expertDefinition = (): ExpertDefinition => ({
       id: "expert-v1",
       name: expertName,
@@ -148,7 +153,8 @@ function harness(name: string) {
         status: expertPreviewBlocked ? "blocked" : "available",
         issues: expertPreviewBlocked ? ["Required Expert resource is unavailable."] : [],
       }),
-      prepareSnapshot: async (id) => {
+      prepareSnapshot: async (id, options) => {
+        snapshotOptions.push(options);
         const definition = expertDefinition();
         if (id !== definition.id || definition.archived) throw new Error("Expert unavailable");
         const snapshotId = `snapshot-${definition.revision}`;
@@ -183,6 +189,7 @@ function harness(name: string) {
       },
     };
     const expertBindings: Array<ExpertBinding | undefined> = [];
+    const capabilityBindingIds: Array<string | undefined> = [];
     const dependencies = {
       repository: {
         ...repository,
@@ -268,6 +275,9 @@ function harness(name: string) {
           expertBindings.push(
             creationContext.kind === "hub-work" ? creationContext.expertBinding : undefined,
           );
+          capabilityBindingIds.push(
+            creationContext.kind === "hub-work" ? creationContext.capabilityBindingId : undefined,
+          );
           if (failWithPendingCleanup) {
             cleanupPending = true;
             return mcpToolResultError("Cleanup remains pending");
@@ -293,6 +303,9 @@ function harness(name: string) {
     };
     return {
       gateway,
+      dependencies,
+      snapshotOptions,
+      capabilityBindingIds,
       messages,
       context,
       recreate: () => makeHubWorkGateway(dependencies),
@@ -551,6 +564,101 @@ tests("Hub work gateway integration", (it) => {
     }),
   );
 
+  it.effect(
+    "prepares Suite worker bindings before admission and replays only the frozen trusted spec",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness("suite-worker-binding");
+        const sql = yield* SqlClient.SqlClient;
+        const suite = { suiteId: "suite_00000000-0000-0000-0000-000000000002", revision: 1 };
+        const content = {
+          schemaVersion: 1 as const,
+          ref: suite,
+          name: "Research Suite",
+          description: "",
+          source: {
+            kind: "local-folder" as const,
+            sourceId: "/fixture/suite",
+            contentHash: "a".repeat(64),
+          },
+          adapterId: "fixture",
+          adapterVersion: 1,
+          members: [{ key: "research", expertId: "expert-v1", roleSourcePath: null }],
+          resources: [],
+          defaults: {},
+        };
+        const composition = {
+          ...content,
+          compositionHash: suiteContentDigest(content),
+          createdAt: now,
+        };
+        yield* sql`INSERT INTO suite_compositions(suite_id, revision, composition_hash, record_json)
+        VALUES (${suite.suiteId}, ${suite.revision}, ${composition.compositionHash}, ${JSON.stringify(composition)})`;
+        const previous = Option.getOrThrow(yield* h.projectAgentRepository.getConfig(h.projectId));
+        yield* h.projectAgentRepository.saveConfig(
+          { ...previous, suite, revision: previous.revision + 1 },
+          previous.revision,
+        );
+        const prepared: string[] = [];
+        const gateway = makeHubWorkGateway({
+          ...h.dependencies,
+          loadProviderAvailabilities: Effect.succeed(new Map([["omp", { enabled: true }]])),
+          suiteStore: { read: () => Effect.succeed(composition) },
+          prepareSuiteBinding: (input) =>
+            Effect.gen(function* () {
+              assert.equal(input.projectRoot, "/fixture");
+              assert.equal(input.purpose.kind, "hub-worker");
+              if (input.purpose.kind !== "hub-worker") throw new Error("Expected worker purpose");
+              assert.equal(input.purpose.hubId, h.projectId);
+              assert.equal(input.purpose.hubConfigRevision, 2);
+              assert.equal(input.purpose.expertSnapshotId, "snapshot-1");
+              const bindingContent = {
+                suite: input.suite,
+                purpose: input.purpose,
+                projectId: input.projectId,
+                connections: [],
+                mcpBinding: null,
+              };
+              const stored = {
+                ...bindingContent,
+                schemaVersion: 1 as const,
+                bindingId: `suite-binding:${input.purpose.workId}`,
+                bindingHash: suiteContentDigest(bindingContent),
+                createdAt: now,
+              };
+              yield* sql`INSERT INTO suite_capability_bindings(binding_id, binding_hash, record_json)
+            VALUES (${stored.bindingId}, ${stored.bindingHash}, ${JSON.stringify(stored)})`;
+              prepared.push(stored.bindingId);
+              return stored;
+            }),
+        });
+        // The Suite resolver owns effective capability diagnostics, not the old
+        // Expert preview's all-capabilities verdict.
+        h.blockExpertPreview();
+        const input: SynaraCreateThreadsInput = {
+          requestId: "suite-expert-work",
+          threads: [
+            {
+              prompt: "Research with shared methods",
+              expertId: "expert-v1",
+              target: { provider: "omp", model: "fixture-model" },
+            },
+          ],
+        };
+        yield* gateway.submit(input, h.context);
+        const frozen = (yield* h.repository.list(h.projectId))[0]!;
+        assert.equal(frozen.state, "queued");
+        assert.equal(frozen.creationSpec.target.provider, "omp");
+        assert.deepEqual(prepared, [frozen.creationSpec.capabilityBindingId]);
+        h.editExpert(2, "Updated identity");
+        yield* gateway.submit(input, h.context);
+        assert.equal(prepared.length, 1);
+        yield* gateway.tick;
+        assert.deepEqual(h.capabilityBindingIds, [frozen.creationSpec.capabilityBindingId]);
+        assert.deepEqual(h.expertBindings, [frozen.creationSpec.expertBinding]);
+        assert.isFalse(Object.hasOwn(h.calls[0]!.threads[0]!, "capabilityBindingId"));
+      }),
+  );
   it.effect("freezes Expert binding and preferred-provider target before queue replay", () =>
     Effect.gen(function* () {
       const h = yield* harness("expert-binding-freeze");

@@ -734,6 +734,103 @@ const leftoverConfig = {
 };
 
 it.effect(
+  "rejects ambiguous Suite/roster edits and binds configure receipts to the complete request",
+  () => {
+    const harness = makeTestLayer();
+    return Effect.gen(function* () {
+      const service = yield* ProjectAgentService;
+      const base = { projectId: groupId, coordinatorModelSelection: modelSelection };
+      const ambiguous = yield* Effect.exit(
+        service.configure(
+          {
+            ...base,
+            requestId: "suite-ambiguous",
+            suite: { suiteId: "suite_00000000-0000-0000-0000-000000000001", revision: 1 },
+            expertIds: [],
+          },
+          { kind: "user" },
+        ),
+      );
+      assert.isTrue(Exit.isFailure(ambiguous));
+      const repository = yield* ProjectAgentRepository;
+      assert.isTrue(Option.isNone(yield* repository.getConfig(groupId)));
+      const initial = { ...base, requestId: "suite-request-digest", suite: null };
+      const saved = yield* service.configure(initial, { kind: "user" });
+      assert.equal(saved.suite, null);
+      assert.equal(saved.config?.suite, null);
+      assert.deepEqual(yield* service.configure(initial, { kind: "user" }), saved);
+      const changed = yield* Effect.exit(
+        service.configure(
+          {
+            ...initial,
+            suite: { suiteId: "suite_00000000-0000-0000-0000-000000000001", revision: 1 },
+          },
+          { kind: "user" },
+        ),
+      );
+      assert.isTrue(Exit.isFailure(changed));
+      const omitted = { ...base, requestId: initial.requestId };
+      assert.isTrue(
+        Exit.isFailure(yield* Effect.exit(service.configure(omitted, { kind: "user" }))),
+      );
+      const sql = yield* SqlClient.SqlClient;
+      const { suite: _overviewSuite, ...legacyOverview } = saved;
+      const { suite: _configSuite, ...legacyConfig } = saved.config!;
+      const legacyJson = JSON.stringify({ ...legacyOverview, config: legacyConfig });
+      yield* sql`UPDATE project_agent_receipts SET result_json = ${legacyJson}
+      WHERE project_id = ${groupId} AND request_id = ${initial.requestId}`;
+      const legacyReplay = yield* service.configure(omitted, { kind: "user" });
+      assert.equal(legacyReplay.suite, null);
+      assert.equal(legacyReplay.config?.suite, null);
+      const stored = Option.getOrThrow(
+        yield* repository.getReceipt({ projectId: groupId, requestId: initial.requestId }),
+      );
+      assert.equal(stored.resultJson, legacyJson);
+    }).pipe(Effect.provide(harness.layer));
+  },
+);
+
+it.effect("projects only the durable Suite lock when unfinished onboarding is reopened", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const repository = yield* ProjectAgentRepository;
+    const service = yield* ProjectAgentService;
+    const before = yield* service.getOverview({ projectId: groupId }, { kind: "user" });
+    assert.equal(before.configured, false);
+    assert.equal(before.suiteSelectionOpen, false);
+    yield* repository.beginSuiteOnboarding(groupId);
+    const opened = yield* service.getOverview({ projectId: groupId }, { kind: "user" });
+    const reopened = yield* service.getOverview({ projectId: groupId }, { kind: "user" });
+    assert.equal(opened.configured, false);
+    assert.equal(opened.suiteSelectionOpen, true);
+    assert.equal(reopened.suiteSelectionOpen, true);
+    const configured = yield* service.configure(
+      {
+        projectId: groupId,
+        requestId: "suite-open-observation",
+        coordinatorModelSelection: modelSelection,
+        suite: null,
+      },
+      { kind: "user" },
+    );
+    assert.equal(configured.configured, true);
+    assert.equal(configured.suiteSelectionOpen, true);
+    yield* repository.admitSuiteExecution({
+      projectId: groupId,
+      expectedRevision: configured.config!.revision,
+      admissionId: "suite-open-first-admission",
+    });
+    assert.equal(
+      (yield* service.getOverview({ projectId: groupId }, { kind: "user" })).suiteSelectionOpen,
+      false,
+    );
+    const historical = yield* service.getOverview({ projectId: groupId2 }, { kind: "user" });
+    assert.equal(historical.configured, false);
+    assert.equal(historical.suiteSelectionOpen, false);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect(
   "defaults to no participants, preserves unavailable selections on other saves, and clears explicitly",
   () => {
     const harness = makeTestLayer();

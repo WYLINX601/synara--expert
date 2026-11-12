@@ -5,6 +5,8 @@ import type {
   OrchestrationReadModel,
   OrchestrationThread,
   ExpertBinding,
+  CapabilityBinding,
+  SuiteRef,
   ProjectKind,
   ThreadGoalAchievement,
 } from "@synara/contracts";
@@ -623,11 +625,24 @@ function deriveConversationRollbackTarget(
   };
 }
 
+function sameSuiteSelection(
+  left: SuiteRef | null | undefined,
+  right: SuiteRef | null | undefined,
+): boolean {
+  return (
+    (left?.suiteId ?? null) === (right?.suiteId ?? null) &&
+    (left?.revision ?? null) === (right?.revision ?? null)
+  );
+}
+
 const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
   command,
   readModel,
   workspacePaths,
   expertBinding,
+  capabilityBinding,
+  trustedExpertDelegationResult,
+  trustedNativeThread,
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
@@ -635,6 +650,9 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
   readonly workspacePaths?: SpaceAssignmentWorkspacePaths | undefined;
   /** Resolved by the server before admission; never copied from a client command. */
   readonly expertBinding?: ExpertBinding | undefined;
+  readonly capabilityBinding?: CapabilityBinding | undefined;
+  readonly trustedExpertDelegationResult?: boolean;
+  readonly trustedNativeThread?: boolean;
 }): Effect.fn.Return<
   Omit<OrchestrationEvent, "sequence"> | ReadonlyArray<Omit<OrchestrationEvent, "sequence">>,
   OrchestrationCommandInvariantError
@@ -1501,10 +1519,21 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
     }
 
     case "thread.create": {
-      if (command.expertId && !expertBinding) {
+      const selection =
+        command.expertDraftSelection ??
+        (command.expertId
+          ? { expertId: command.expertId, suite: command.suiteSelection ?? null }
+          : null);
+      if (
+        (command.suiteSelection && !selection) ||
+        (command.expertId && selection?.expertId !== command.expertId) ||
+        (command.suiteSelection !== undefined &&
+          selection &&
+          !sameSuiteSelection(command.suiteSelection, selection.suite))
+      ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: `Expert '${command.expertId}' was not prepared by the server.`,
+          detail: "The Expert draft selection is inconsistent.",
         });
       }
       const project = yield* requireProject({
@@ -1541,10 +1570,15 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
           projectId: command.projectId,
           expertBinding:
             expertBinding ??
-            (command.parentThreadId
+            (trustedNativeThread &&
+            command.creationSource === "provider_native" &&
+            command.parentThreadId
               ? (readModel.threads.find((thread) => thread.id === command.parentThreadId)
                   ?.expertBinding ?? null)
               : null),
+          expertDraftSelection: expertBinding ? null : selection,
+          capabilityBindingId: capabilityBinding?.bindingId ?? null,
+          suiteSelection: capabilityBinding?.suite ?? null,
           title: command.title,
           modelSelection: command.modelSelection,
           runtimeMode: command.runtimeMode,
@@ -1647,6 +1681,11 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
           threadId: command.threadId,
           projectId: command.projectId,
           expertBinding: expertBinding ?? sourceThread.expertBinding ?? null,
+          expertDraftSelection: command.expertId
+            ? null
+            : (sourceThread.expertDraftSelection ?? null),
+          capabilityBindingId: command.expertId ? null : (sourceThread.capabilityBindingId ?? null),
+          suiteSelection: command.expertId ? null : (sourceThread.suiteSelection ?? null),
           title: command.title,
           modelSelection: command.modelSelection,
           runtimeMode: command.runtimeMode,
@@ -1748,6 +1787,9 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
           threadId: command.threadId,
           projectId: command.projectId,
           expertBinding: sourceThread.expertBinding ?? null,
+          expertDraftSelection: sourceThread.expertDraftSelection ?? null,
+          capabilityBindingId: sourceThread.capabilityBindingId ?? null,
+          suiteSelection: sourceThread.suiteSelection ?? null,
           title: command.sidechatSourceThreadId
             ? command.title
             : buildForkThreadTitle(
@@ -2342,12 +2384,67 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
       };
     }
 
+    case "thread.expert-delegation.result": {
+      if (!trustedExpertDelegationResult) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Expert delegation results require a trusted server envelope.",
+        });
+      }
+      const thread = readModel.threads.find((entry) => entry.id === command.threadId);
+      const { type: _type, commandId: _commandId, createdAt, ...payload } = command;
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.expert-delegation-result",
+        payload: {
+          ...payload,
+          applyToParent:
+            payload.applyToParent &&
+            thread !== undefined &&
+            thread.deletedAt === null &&
+            thread.archivedAt === null &&
+            payload.issue?.code !== "execution_unknown",
+        },
+      };
+    }
+
     case "thread.turn.start": {
       const targetThread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      const fixed = targetThread.expertBinding != null || targetThread.capabilityBindingId != null;
+      if (
+        fixed &&
+        ((command.expertId !== undefined &&
+          command.expertId !== targetThread.expertBinding?.expertId) ||
+          (command.suiteSelection !== undefined &&
+            !sameSuiteSelection(command.suiteSelection, targetThread.suiteSelection)))
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "An executing thread cannot change its Expert or Suite binding.",
+        });
+      }
+      const selectedExpertId = command.expertId ?? targetThread.expertDraftSelection?.expertId;
+      if (!fixed && selectedExpertId && expertBinding?.expertId !== selectedExpertId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Expert '${selectedExpertId}' was not prepared by the server.`,
+        });
+      }
+      if (!fixed && command.suiteSelection && !expertBinding && !capabilityBinding) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A Suite execution binding was not prepared by the server.",
+        });
+      }
       yield* validateSidechatExecutionAvailable(command, targetThread);
       // Native reviews accept only their review target, never prompt attachments.
       // Reject before message acceptance so callers can preserve and resend the draft.
@@ -2519,6 +2616,23 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
               },
             ]
           : [];
+      if (!fixed && (expertBinding || capabilityBinding)) {
+        snoozeEvents.unshift({
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.capability-bound",
+          payload: {
+            threadId: command.threadId,
+            expertBinding: expertBinding ?? null,
+            capabilityBindingId: capabilityBinding?.bindingId ?? null,
+            suiteSelection: capabilityBinding?.suite ?? null,
+          },
+        });
+      }
       const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...withEventBase({
           aggregateKind: "thread",

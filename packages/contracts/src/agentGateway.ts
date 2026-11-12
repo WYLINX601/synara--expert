@@ -13,6 +13,7 @@ import { ProviderModelDescriptor } from "./providerDiscovery";
 import { ProviderInstanceId } from "./providerInstance";
 import { ServerProviderAuthStatus } from "./server";
 import { ExpertBinding } from "./expert";
+import { SuiteRef } from "./suite";
 
 export const SYNARA_GATEWAY_MAX_THREADS_PER_OPERATION = 20;
 export const SYNARA_GATEWAY_MAX_REQUEST_ID_LENGTH = 256;
@@ -105,6 +106,8 @@ export const SynaraResolvedCreateThreadSpec = Schema.Struct({
   ...SynaraCreateThreadSpec.fields,
   target: ModelSelection,
   expertBinding: Schema.optional(ExpertBinding),
+  capabilityBindingId: Schema.optional(Schema.String.check(Schema.isNonEmpty())),
+  suite: Schema.optional(Schema.NullOr(SuiteRef)),
 });
 export type SynaraResolvedCreateThreadSpec = typeof SynaraResolvedCreateThreadSpec.Type;
 

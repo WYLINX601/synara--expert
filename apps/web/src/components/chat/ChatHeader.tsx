@@ -83,6 +83,7 @@ const HEADER_COMPACT_BREAKPOINT = 700;
 interface ChatHeaderProps {
   activeThreadId: ThreadId;
   activeThreadTitle: string;
+  suiteLabel?: React.ReactNode;
   activeThreadEntryPoint: ThreadPrimarySurface;
   activeProvider: ProviderKind;
   activeProjectName: string | undefined;
@@ -433,6 +434,7 @@ function resolveChatHeaderThreadIconKind(
 export function ChatHeader({
   activeThreadId,
   activeThreadTitle,
+  suiteLabel,
   activeThreadEntryPoint,
   activeProvider,
   activeProjectName,
@@ -706,6 +708,7 @@ export function ChatHeader({
                   >
                     {activeThreadTitle}
                   </h2>
+                  {suiteLabel}
                   {showSidechatTitleChip && !isSplitPane && onCloseThreadPane ? (
                     <IconButton
                       variant="chrome"

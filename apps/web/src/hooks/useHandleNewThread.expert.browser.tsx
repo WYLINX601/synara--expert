@@ -200,6 +200,7 @@ describe("useHandleNewThread Expert standalone bootstrap", () => {
       const createdThreadId = await hook.result.current.handleNewThread(projectId, {
         standalone: true,
         expertId: "expert-new",
+        suiteSelection: { suiteId: "suite_10000000-0000-4000-8000-000000000001", revision: 3 },
       });
 
       expect(createdThreadId).toBeTruthy();
@@ -217,6 +218,10 @@ describe("useHandleNewThread Expert standalone bootstrap", () => {
         beforeComposer.modelSelectionByProvider,
       );
       expect(after.getDraftThread(createdThreadId!)?.expertId).toBe("expert-new");
+      expect(after.getDraftThread(createdThreadId!)?.suiteSelection).toEqual({
+        suiteId: "suite_10000000-0000-4000-8000-000000000001",
+        revision: 3,
+      });
       expect(after.draftsByThreadId[createdThreadId!]?.prompt ?? "").toBe("");
       expect(hookMocks.navigate).toHaveBeenCalledOnce();
       expect(hookMocks.dispatchCommand).not.toHaveBeenCalled();

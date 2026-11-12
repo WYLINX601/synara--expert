@@ -417,6 +417,8 @@ async function dispatchDraftThreadOnce(
           commandId: newCommandId(),
           threadId,
           projectId,
+          ...(draftThread?.expertId ? { expertId: draftThread.expertId } : {}),
+          suiteSelection: draftThread?.suiteSelection ?? null,
           title: fallbackTitle,
           modelSelection,
           runtimeMode,
@@ -482,6 +484,17 @@ async function dispatchDraftThreadOnce(
         type: "thread.turn.start",
         commandId: newCommandId(),
         threadId,
+        ...(thread === null
+          ? {
+              ...(draftThread?.expertId ? { expertId: draftThread.expertId } : {}),
+              suiteSelection: draftThread?.suiteSelection ?? null,
+            }
+          : existingThread?.expertDraftSelection
+            ? {
+                expertId: existingThread.expertDraftSelection.expertId,
+                suiteSelection: existingThread.expertDraftSelection.suite,
+              }
+            : {}),
         message: {
           messageId,
           role: "user",

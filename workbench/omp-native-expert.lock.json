@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/can1357/oh-my-pi",
+    "tag": "v18.16.0",
+    "commit": "650f3a108229ee11bf68ba3377f4e8c3391cd424",
+    "version": "18.16.0",
+    "archiveUrl": "https://codeload.github.com/can1357/oh-my-pi/tar.gz/650f3a108229ee11bf68ba3377f4e8c3391cd424",
+    "archiveSha256": "5988bc63bae01f242138333572e45551ced2cea602656ff225ac5bfab6f92821",
+    "treeSha256": "dbe603d96a81307f4163198c672fb85a676cd063066708c2049acf69da0e5792",
+    "bunLockSha256": "248190ddf7337288f33867e5bad69baa77b3dbff5b88fb6c27ab799926b8488f"
+  },
+  "patch": {
+    "path": "patches/omp-native-expert-18.16.0.patch",
+    "sha256": "3271964a607720f9909c57142b389001af75a1df059189adfa4f71c2c648df22",
+    "patchedTreeSha256": "9aedf8d0f1519bc1b4dcb6d736fb7b851f3a47addfe577533ea4c3f962700a1d",
+    "files": [
+      "packages/coding-agent/CHANGELOG.md",
+      "packages/coding-agent/src/mcp/native-task-credential.ts",
+      "packages/coding-agent/src/mcp/transports/http.ts",
+      "packages/coding-agent/src/mcp/types.ts",
+      "packages/coding-agent/src/modes/acp/acp-agent.ts",
+      "packages/coding-agent/src/session/agent-session.ts",
+      "packages/coding-agent/src/session/session-entries.ts",
+      "packages/coding-agent/src/session/session-manager.ts",
+      "packages/coding-agent/src/slash-commands/builtin-marketplace.ts",
+      "packages/coding-agent/src/task/discovery.ts",
+      "packages/coding-agent/src/task/executor.ts",
+      "packages/coding-agent/src/task/index.ts",
+      "packages/coding-agent/src/task/native-expert-build.ts",
+      "packages/coding-agent/src/task/native-expert.ts",
+      "packages/coding-agent/src/task/persisted-revive.ts",
+      "packages/coding-agent/src/task/restore.ts",
+      "packages/coding-agent/src/task/structured-subagent.ts",
+      "packages/coding-agent/src/tools/index.ts",
+      "packages/coding-agent/test/native-expert-lifecycle.test.ts"
+    ]
+  },
+  "toolchain": {
+    "node": "24.13.1",
+    "bun": "1.4.4",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "nativeLeaf": {
+    "name": "@oh-my-pi/pi-natives-darwin-arm64",
+    "version": "18.16.0",
+    "metadataUrl": "https://registry.npmjs.org/@oh-my-pi%2Fpi-natives-darwin-arm64/18.16.0",
+    "url": "https://registry.npmjs.org/@oh-my-pi/pi-natives-darwin-arm64/-/pi-natives-darwin-arm64-18.16.0.tgz",
+    "integrity": "sha512-nxNxfhnAshdiraZXslP155Qn0WJ/5AMardPsXOu3qcPoeNeZmmZ0mcT5Hm7Xt95bn6Y8gsaBBrvqVmKjzq8q1w==",
+    "archiveMember": "package/pi_natives.darwin-arm64.node",
+    "metadataObservedUnpackedBytes": 106567193,
+    "archiveSha256": "7a910be03a22d4540c98398a53ddbe1b758a8d90cb720ffbee3e74dd464b262a",
+    "addonSha256": "7511776f8bc005b739e984315fbedeaae05ab9ea809fee6082a87eef9608553d"
+  },
+  "operationRoot": ".synara/expert-evolution-delivery-20261029/operations/omp-native-expert",
+  "sourceDirectory": ".synara/expert-evolution-delivery-20261029/operations/omp-native-expert/oh-my-pi-650f3a108229ee11bf68ba3377f4e8c3391cd424",
+  "buildFingerprint": "ef1bd5238297a5eb580430e89829753db46a94df834a16bb3d27940eace9cd00",
+  "binary": {
+    "path": ".synara/expert-evolution-delivery-20261029/operations/omp-native-expert/oh-my-pi-650f3a108229ee11bf68ba3377f4e8c3391cd424/packages/coding-agent/dist/omp",
+    "sha256": "c4228ae375ec1bc2da3bc8085a894b82349f0e5b0735eb9301af68268e8cadae",
+    "size": 225800176
+  },
+  "build": {
+    "command": "mise exec -- bun scripts/build-omp-native-expert.ts --operation-dir .synara/expert-evolution-delivery-20261029/operations/omp-native-expert",
+    "officialCommand": "bun run build (packages/coding-agent)",
+    "receiptPath": ".synara/expert-evolution-delivery-20261029/operations/omp-native-expert/build-receipt.json",
+    "status": "isolated-runtime-matrix-and-real-A3-verified",
+    "environment": "explicit toolchain/platform/locale/network-certificate allowlist only; operation-local HOME/USERPROFILE/config/data/state/cache/tmp; no inherited provider/Synara credentials or daily OMP configuration; child output is drained without logging secrets",
+    "builderSha256": "676619c546e72cd4f3a1970b927ce4174481816be6b81f242871c1c7c70415ab",
+    "dailyBinaryReplacement": "not-performed"
+  },
+  "capacity": {
+    "policySource": "required --operation-dir/operation.json.capacity; values below describe this authorized operation, not generic script defaults",
+    "maximumNewPeakGiB": 6,
+    "conservativeStopThresholdGiB": 5,
+    "minimumPreservedGiB": 10,
+    "otherInFlightReservationGiB": 2,
+    "requiredFreeBeforeGiB": 18
+  },
+  "protocol": {
+    "version": 1,
+    "methods": [
+      "synara/nativeTaskCapabilities",
+      "synara/prepareNativeTask",
+      "synara/nativeTaskStarted",
+      "synara/nativeTaskEvent",
+      "synara/queryNativeTask",
+      "synara/cancelNativeTask",
+      "synara/resolveNativeTaskCredential"
+    ],
+    "trustedPromptMetadata": "_meta.synaraNativeTask = {parentGeneration,parentTurnId,targetAgentNames}",
+    "nonterminalAfterRestart": "not-found observation; host retains unknown; never redispatch",
+    "asyncDeliveryOwner": "host durable terminal event; native job acknowledgeDeliveries suppresses auto wake",
+    "deliveryMode": "required private prepare field; final native Task detached scheduling fixes native-return or host-continuation and is included in durable request identity; no missing-field default",
+    "startedMcpOrdering": "SDK discovery disabled before first started ACK; target MCP initialization and per-request dynamic credentials start afterwards; second started request initializationComplete:true is acknowledged only after actual MCP refresh and durable Run readiness, before child prompt",
+    "profileResourceHash": "F4 canonical {schemaVersion:1,resources} SHA256; context/skill file hashes are raw bytes",
+    "artifactCapture": "R4: early prepare has no child workRoot; required host-issued per-attempt profile.artifactRoot; native_expert_report_artifacts reads actual executor effectiveCwd and stages exact bytes before unchanged isolation cleanup; terminal rechecks staged sha256/size; host independently verifies/seals its own staging root; ordinary Task unchanged",
+    "agentCatalogue": "optional catalogDirectory in the private capabilities request; bound immutably to the actual ACP connection before creating parent sessions; discovers agents/*.md only, never plugin hooks, tools, skills or sibling scripts; ambient ACP discovery keeps its original shared cache"
+  },
+  "provenance": {
+    "fingerprint": "SHA256 of canonical verified archive/patch/patched-source/dependency-lock/builder/toolchain-binary/native-leaf inputs, embedded as a literal before official compilation; no runtime environment identity",
+    "binarySha256": "Populated from the successful isolated build receipt; this trusted tuple does not select or replace the user's executable",
+    "treeDigest": "SHA256 of canonical sorted {path,kind,sha256,executable} file/symlink entries; excludes node_modules, .git, generated coding-agent/dist and the separately pinned native addon"
+  },
+  "verification": {
+    "build": "completed-latest-settled-failure-source",
+    "tests": "194 passed across 9 focused native/ACP/Task/cleanup files after settled-failure correction",
+    "lint": "0 warnings, 0 errors across 18 owned TypeScript files",
+    "formatter": "18 owned TypeScript files passed oxfmt --check",
+    "runtime": "Latest exact tuple passed V1-V6 through actual compiled ACP/native Task, production host/SQL/Gateway, fixed Skills, readonly MCP, lost receipts, cancellation and physical SIGKILL/restart recovery; unknown work was not redispatched",
+    "realModel": "Isolated A3 completed: actual fixed BMAD PM delegated to actual Amelia, nine artifacts declared and authenticated, PM independently ran 48 passing tests and the CLI; child metadata contains only openai-codex/gpt-6.1-sol and high",
+    "types": "coding-agent check:types passed"
+  }
+}

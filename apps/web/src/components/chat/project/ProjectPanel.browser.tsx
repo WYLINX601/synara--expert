@@ -106,6 +106,8 @@ function overview(overrides: Partial<ProjectAgentOverview> = {}): ProjectAgentOv
   return {
     projectId: PROJECT_ID,
     configured: true,
+    suiteSelectionOpen: false,
+    suite: null,
     config: configPayload(),
     goal: null,
     digest: null,
@@ -120,6 +122,7 @@ function overview(overrides: Partial<ProjectAgentOverview> = {}): ProjectAgentOv
 function configPayload(projectId: ProjectId = PROJECT_ID): ProjectAgentConfig {
   return ProjectAgentConfig.makeUnsafe({
     projectId,
+    suite: null,
     coordinatorThreadId: ThreadId.makeUnsafe("thread-coordinator"),
     coordinatorName: "alpha Coordinator",
     coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },
@@ -426,6 +429,7 @@ describe("ProjectPanel polished sections", () => {
     const hubSummary: ProjectAgentSummary = {
       projectId: HUB_PROJECT_ID,
       configured: true,
+      suite: null,
       coordinatorThreadId: ThreadId.makeUnsafe("thread-hub-coordinator"),
       coordinatorName: "Hub Alpha Coordinator",
       coordinatorIcon: null,
@@ -601,6 +605,7 @@ describe("ProjectPanel polished sections", () => {
     const initialSummary: ProjectAgentSummary = {
       projectId: PROJECT_ID,
       configured: true,
+      suite: null,
       coordinatorThreadId: COORDINATOR_THREAD_ID,
       coordinatorName: "alpha Coordinator",
       coordinatorIcon: null,

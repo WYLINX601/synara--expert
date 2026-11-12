@@ -318,7 +318,12 @@ async function prepareNativeAssembly(input: {
   });
   const attempt = await assemblies.beginInitialization(record.rootRunId);
   await assemblies.finishInitialization(record.rootRunId, attempt);
-  record = (await assemblies.read(record.rootRunId))!;
+  const initialized = await assemblies.read(record.rootRunId);
+  if (initialized?.schemaVersion !== 1) {
+    throw new Error("Expected an initialized legacy Run assembly.");
+  }
+  expect(initialized.phase).toBe("ready");
+  record = initialized;
 
   let manifest: RunKnowledgeManifest | undefined;
   let memory: SpaceMemoryServiceShape | undefined;
@@ -352,7 +357,12 @@ async function prepareNativeAssembly(input: {
       knowledgeHash: manifest.hash,
       learningEpoch: input.knowledgeEpoch ?? 2,
     };
-    record = await assemblies.attachKnowledge(record.rootRunId, knowledge);
+    const bound = await assemblies.attachKnowledge(record.rootRunId, knowledge);
+    if (bound.schemaVersion !== 1) {
+      throw new Error("Expected a legacy Run assembly with pinned knowledge.");
+    }
+    expect(bound.session.knowledge).toEqual(knowledge);
+    record = bound;
     memory = {
       readManifest: (requestedScope: MemoryScope, manifestId: string) =>
         requestedScope.ownerId === scope.ownerId &&

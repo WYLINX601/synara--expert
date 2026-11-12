@@ -9,6 +9,8 @@
 import {
   IsoDateTime,
   ExpertBinding,
+  ExpertDraftSelection,
+  SuiteRef,
   MessageId,
   ModelSelection,
   NonNegativeInt,
@@ -41,6 +43,9 @@ export const ProjectionThread = Schema.Struct({
   expertBinding: Schema.optional(Schema.NullOr(ExpertBinding)).pipe(
     Schema.withDecodingDefault(() => null),
   ),
+  expertDraftSelection: Schema.optional(Schema.NullOr(ExpertDraftSelection)),
+  capabilityBindingId: Schema.optional(Schema.NullOr(Schema.String)),
+  suiteSelection: Schema.optional(Schema.NullOr(SuiteRef)),
   title: Schema.String,
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,

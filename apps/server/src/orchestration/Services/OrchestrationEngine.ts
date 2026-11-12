@@ -16,6 +16,7 @@ import type {
   OrchestrationEvent,
   OrchestrationReadModel,
 } from "@synara/contracts";
+import type { SuiteRef } from "@synara/contracts";
 import { ServiceMap } from "effect";
 import type { Effect, Scope, Stream } from "effect";
 
@@ -34,6 +35,22 @@ export interface OrchestrationDispatchContext {
   readonly settleOnly?: boolean;
   /** Server-only Hub creation capability carrying an acceptance-frozen Expert binding. */
   readonly hubExpertBinding?: ExpertBinding;
+  readonly hubCapabilityBindingId?: string;
+  readonly hubSuiteSelection?: SuiteRef | null;
+  readonly hubWorkId?: string;
+  readonly hubId?: string;
+  /** Trusted host callback; participates in the event/receipt/projection SQL transaction. */
+  readonly expertDelegationResult?: {
+    /** Recheck cancellation/acceptance in the original event transaction, without filesystem work. */
+    readonly canApplyToParent?: () => Effect.Effect<boolean, unknown>;
+    readonly commit: (eventId: string) => Effect.Effect<void, unknown>;
+  };
+  /** Server-owned continuation; never decoded from a public client command. */
+  readonly expertDelegationContinuation?: {
+    readonly parentRootRunId: string;
+    readonly delegationId: string;
+    readonly attemptId: string;
+  };
 }
 
 export interface OrchestrationProjectionCatchUpStatus {

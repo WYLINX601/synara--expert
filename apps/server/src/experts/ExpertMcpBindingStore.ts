@@ -12,7 +12,9 @@ import {
 } from "./ExpertMcpStorage.ts";
 
 const MAX_BINDING_BYTES = 256 * 1024;
-const SNAPSHOT_ID_PATTERN = /^exp_[a-f0-9]{64}$/u;
+// The existing owner also freezes all-mode enumeration for an opaque CapabilityBinding.
+// Legacy exp_ filenames and serialized authorization/hash content remain unchanged.
+const AUTHORIZATION_ID_PATTERN = /^(?:exp|cap)_[a-f0-9]{64}$/u;
 const writeTails = new Map<string, Promise<void>>();
 
 export class ExpertMcpBindingStoreError extends Error {
@@ -74,8 +76,8 @@ function stableJson(value: unknown): string {
 }
 
 function validateSnapshotId(snapshotId: string): void {
-  if (!SNAPSHOT_ID_PATTERN.test(snapshotId)) {
-    throw new ExpertMcpBindingStoreError("Snapshot ID is invalid.", "invalid_input");
+  if (!AUTHORIZATION_ID_PATTERN.test(snapshotId)) {
+    throw new ExpertMcpBindingStoreError("MCP authorization owner ID is invalid.", "invalid_input");
   }
 }
 

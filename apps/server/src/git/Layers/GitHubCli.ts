@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { Effect, Layer, Option, Schema } from "effect";
 import {
   PositiveInt,
@@ -24,6 +26,11 @@ import {
 } from "@synara/shared/githubRepository";
 
 import { runProcess } from "../../processRunner";
+import {
+  assertSkillResourcePath,
+  SKILL_FILE_LIMIT,
+  SKILL_PACKAGE_LIMIT,
+} from "../../experts/skillLibraryArchive";
 import { makeKeyedSingleFlightCache } from "../../pullRequests/KeyedSingleFlightCache";
 import { GitHubCliError } from "../Errors.ts";
 import { makeGitHubReadGate } from "../githubReadGate.ts";
@@ -2130,6 +2137,188 @@ const makeGitHubCli = Effect.gen(function* () {
 
   const service: Omit<GitHubCliShape, "withRead"> = {
     execute,
+    readRepositorySnapshot: (input) =>
+      readGate.withRead(
+        Effect.gen(function* () {
+          const repository = yield* validateRepository(input.repository, "readRepositorySnapshot");
+          const invalid = (detail: string) =>
+            new GitHubCliError({ operation: "readRepositorySnapshot", detail, reason: "other" });
+          let transferred = 0;
+          const parse = (text: string): Effect.Effect<unknown, GitHubCliError> =>
+            Effect.try({
+              try: () => JSON.parse(text) as unknown,
+              catch: () => invalid("GitHub returned invalid snapshot JSON."),
+            });
+          const api = (endpoint: string, maxBufferBytes: number) =>
+            execute({
+              cwd: input.cwd,
+              args: ["api", "--hostname", GITHUB_HOST, endpoint],
+              maxBufferBytes,
+              outputMode: "error",
+            }).pipe(
+              Effect.flatMap((result) => {
+                transferred += Buffer.byteLength(result.stdout);
+                return transferred > SKILL_PACKAGE_LIMIT
+                  ? Effect.fail(invalid("GitHub snapshot transfer exceeds 100 MiB."))
+                  : parse(result.stdout);
+              }),
+            );
+          yield* Effect.try({
+            try: () => {
+              if (
+                !input.requestedRef ||
+                input.requestedRef.length > 4096 ||
+                /[\p{Cc}]/u.test(input.requestedRef)
+              )
+                throw new Error("Invalid GitHub ref.");
+              if (input.subdirectory) assertSkillResourcePath(input.subdirectory);
+              if (input.subdirectory !== input.subdirectory.normalize("NFC"))
+                throw new Error("GitHub subdirectory must be NFC.");
+            },
+            catch: () => invalid("Invalid snapshot ref or subdirectory."),
+          });
+          // This is the only ref resolution. Every subsequent request uses this commit or its object IDs.
+          const commit = yield* api(
+            `repos/${repository}/commits/${encodeURIComponent(input.requestedRef)}`,
+            1024 * 1024,
+          );
+          if (
+            !commit ||
+            typeof commit !== "object" ||
+            !("sha" in commit) ||
+            typeof commit.sha !== "string" ||
+            !/^[a-f0-9]{40}$/u.test(commit.sha)
+          )
+            return yield* Effect.fail(
+              invalid("GitHub did not resolve a fixed 40-character commit."),
+            );
+          const resolvedCommit = commit.sha;
+          let selectedTree = resolvedCommit;
+          for (const segment of input.subdirectory.split("/").filter(Boolean)) {
+            const parentTree = yield* api(
+              `repos/${repository}/git/trees/${selectedTree}`,
+              4 * 1024 * 1024,
+            );
+            if (
+              !parentTree ||
+              typeof parentTree !== "object" ||
+              !("tree" in parentTree) ||
+              !Array.isArray(parentTree.tree) ||
+              !("truncated" in parentTree) ||
+              parentTree.truncated !== false
+            )
+              return yield* Effect.fail(invalid("GitHub directory tree is invalid or truncated."));
+            const directory = parentTree.tree.find((entry) => entry && entry.path === segment);
+            if (
+              !directory ||
+              directory.type !== "tree" ||
+              directory.mode !== "040000" ||
+              typeof directory.sha !== "string" ||
+              !/^[a-f0-9]{40}$/u.test(directory.sha)
+            )
+              return yield* Effect.fail(
+                invalid(
+                  "Selected GitHub directory is absent, linked or inaccessible to the current login.",
+                ),
+              );
+            selectedTree = directory.sha;
+          }
+          const tree = yield* api(
+            `repos/${repository}/git/trees/${selectedTree}?recursive=1`,
+            4 * 1024 * 1024,
+          );
+          if (
+            !tree ||
+            typeof tree !== "object" ||
+            !("tree" in tree) ||
+            !Array.isArray(tree.tree) ||
+            !("truncated" in tree) ||
+            tree.truncated !== false
+          )
+            return yield* Effect.fail(invalid("GitHub snapshot tree is invalid or truncated."));
+          const entries: Array<{
+            path: string;
+            kind: "file" | "directory";
+            bytes: Buffer;
+            executable: boolean;
+          }> = [];
+          const seenPaths = new Set<string>();
+          let total = 0;
+          for (const item of tree.tree) {
+            if (!item || typeof item !== "object" || typeof item.path !== "string")
+              return yield* Effect.fail(invalid("GitHub snapshot has an invalid tree entry."));
+            const relative = item.path;
+            if (!relative) continue;
+            yield* Effect.try({
+              try: () => assertSkillResourcePath(relative),
+              catch: () => invalid("Unsafe GitHub snapshot path."),
+            });
+            if (
+              relative !== relative.normalize("NFC") ||
+              Buffer.from(relative).toString("utf8") !== relative ||
+              entries.length >= 5000 ||
+              seenPaths.has(relative.toLowerCase())
+            )
+              return yield* Effect.fail(
+                invalid("GitHub snapshot path, collision or entry budget is invalid."),
+              );
+            seenPaths.add(relative.toLowerCase());
+            if (item.type === "tree" && item.mode === "040000") {
+              entries.push({
+                path: relative,
+                kind: "directory",
+                bytes: Buffer.alloc(0),
+                executable: false,
+              });
+              continue;
+            }
+            if (
+              item.type !== "blob" ||
+              !["100644", "100755"].includes(item.mode) ||
+              typeof item.sha !== "string" ||
+              !/^[a-f0-9]{40}$/u.test(item.sha) ||
+              !Number.isSafeInteger(item.size) ||
+              item.size < 0 ||
+              item.size > SKILL_FILE_LIMIT
+            )
+              return yield* Effect.fail(
+                invalid("Linked, special or oversized GitHub snapshot entry."),
+              );
+            total += item.size;
+            if (total > SKILL_PACKAGE_LIMIT)
+              return yield* Effect.fail(invalid("GitHub snapshot exceeds 100 MiB."));
+            const blob = yield* api(
+              `repos/${repository}/git/blobs/${item.sha}`,
+              Math.ceil(SKILL_FILE_LIMIT * 1.5),
+            );
+            if (
+              !blob ||
+              typeof blob !== "object" ||
+              !("encoding" in blob) ||
+              blob.encoding !== "base64" ||
+              !("content" in blob) ||
+              typeof blob.content !== "string"
+            )
+              return yield* Effect.fail(invalid("GitHub returned an invalid blob."));
+            const encoded = blob.content.replace(/[\r\n]/gu, "");
+            const bytes = Buffer.from(encoded, "base64");
+            if (
+              bytes.toString("base64") !== encoded ||
+              bytes.length !== item.size ||
+              createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex") !==
+                item.sha
+            )
+              return yield* Effect.fail(invalid("GitHub blob integrity mismatch."));
+            entries.push({
+              path: relative,
+              kind: "file",
+              bytes,
+              executable: item.mode === "100755",
+            });
+          }
+          return { resolvedCommit, entries };
+        }),
+      ),
     getViewerLogin: (input) =>
       execute({
         cwd: input.cwd,

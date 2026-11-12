@@ -12,6 +12,7 @@ import {
   type ProviderInstanceId,
   type ProviderKind,
   type RuntimeMode,
+  type SuiteRef,
   type ThreadEnvironmentMode,
   type ThreadId,
 } from "@synara/contracts";
@@ -37,6 +38,7 @@ export interface NewThreadOptions {
   /** Create an independent draft without claiming the project composer slot. */
   standalone?: boolean;
   expertId?: string;
+  suiteSelection?: SuiteRef | null;
 }
 
 export interface InheritedThreadContext {
@@ -232,6 +234,9 @@ export function createFreshDraftThreadSeed(input: {
     runtimeMode: DEFAULT_RUNTIME_MODE,
     entryPoint: input.entryPoint,
     ...(input.options?.temporary ? { isTemporary: true } : {}),
+    ...(input.options?.suiteSelection !== undefined
+      ? { suiteSelection: input.options.suiteSelection }
+      : {}),
   };
 }
 

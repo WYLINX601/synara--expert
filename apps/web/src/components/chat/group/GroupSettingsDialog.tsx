@@ -62,6 +62,7 @@ import { EXPERTS_QUERY_KEY } from "~/components/settings/expertSettingsQueries";
 
 import { GroupEnvironmentSection } from "./GroupEnvironmentSection";
 import { GroupExpertsSection } from "./GroupExpertsSection";
+import { GroupSuiteSection } from "./GroupSuiteSection";
 import { GroupGeneralSection } from "./GroupGeneralSection";
 import { GroupLifecycleSection } from "./GroupLifecycleSection";
 import { GroupMemorySection } from "./GroupMemorySection";
@@ -100,6 +101,7 @@ export function GroupSettingsDialog(props: {
   readonly projectName: string;
   readonly workspacePath: string;
   readonly defaultModelSelection: ModelSelection | null;
+  readonly allowSuiteSelection?: boolean;
   readonly initialSection?: GroupSettingsSection | undefined;
   readonly importedInstructions?: string | undefined;
   /** The explicitly linked source for a Hub created from a Project. */
@@ -574,6 +576,18 @@ export function GroupSettingsDialog(props: {
                       setDraft((current) => (current ? { ...current, ...patch } : current))
                     }
                   />
+                  {props.mode === "onboarding" &&
+                  !agent.overview?.configured &&
+                  Boolean(agent.overview?.suiteSelectionOpen ?? props.allowSuiteSelection) ? (
+                    <div className="mt-5">
+                      <GroupSuiteSection
+                        suite={draft.suite ?? null}
+                        onChange={(suite) =>
+                          setDraft((current) => (current ? { ...current, suite } : current))
+                        }
+                      />
+                    </div>
+                  ) : null}
                   {props.mode === "edit" ? (
                     <GroupLifecycleSection
                       agent={agent}
@@ -582,6 +596,8 @@ export function GroupSettingsDialog(props: {
                     />
                   ) : null}
                 </>
+              ) : section === "experts" && draft.suite ? (
+                <GroupSuiteSection suite={draft.suite} readonly />
               ) : section === "experts" ? (
                 <GroupExpertsSection
                   expertIds={draft.expertIds}

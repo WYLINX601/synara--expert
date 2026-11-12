@@ -8,7 +8,7 @@ import {
   type LearningSessionContext,
   type MemoryScope,
   type RunKnowledgeManifest,
-  type RunSkillAssembly,
+  type RunSkillAssemblyV1 as RunSkillAssembly,
 } from "@synara/contracts";
 import { Effect, Option } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -73,6 +73,7 @@ function scope(patch: Partial<MemoryScope> = {}): MemoryScope {
 
 function stateRow(
   input: {
+    expertId?: string;
     enabled?: boolean;
     epoch?: number;
     frozenRuleSequence?: number;
@@ -81,7 +82,7 @@ function stateRow(
   } = {},
 ): LearningStateRow {
   const state = {
-    expertId: "expert-1",
+    expertId: input.expertId ?? "expert-1",
     enabled: input.enabled ?? true,
     epoch: input.epoch ?? 3,
     revision: 1,
@@ -654,6 +655,262 @@ describe("runtime Run knowledge binding", () => {
     await expect(Effect.runPromise(verifyRuntimeKnowledge(input))).rejects.toThrow(
       /manifest identity/u,
     );
+  });
+
+  it("pins the native target's own knowledge under a different parent Expert and rechecks host lifecycle proof", async () => {
+    const f = fixture();
+    const stateDir = await f.stateDirPromise;
+    roots.push(stateDir);
+    vi.mocked(f.projection.getThreadShellById).mockImplementation((id) =>
+      Effect.succeed(
+        Option.some({
+          id,
+          projectId: ProjectId.makeUnsafe("project-1"),
+          expertBinding: { expertId: "parent-expert", snapshotId: "parent-snapshot" },
+        } as never),
+      ),
+    );
+    const input = assembly("native-attempt");
+    let phase = "prepared";
+    const targetBinding = {
+      expertId: "expert-1",
+      snapshotId: "snapshot-1",
+      projectId: "project-1",
+      attemptId: input.rootRunId,
+      assemblyId: input.assemblyId,
+      verify: vi.fn(async () => phase === "prepared" || phase === "starting"),
+    };
+    const attached = await Effect.runPromise(
+      prepareRuntimeKnowledge({
+        stateDir,
+        threadId: input.threadId,
+        provider: "omp",
+        assembly: input,
+        allowCreate: true,
+        memory: f.memory,
+        learningRepository: f.learningRepository,
+        projection: f.projection,
+        attachKnowledge: f.attachKnowledge,
+        targetBinding,
+      }),
+    );
+    expect(attached.session.knowledge).toMatchObject({
+      rootRunId: "native-attempt",
+      scope: scope(),
+    });
+    expect(f.findRootRequests).toEqual(["native-attempt"]);
+    expect(f.prepareArgs[0]).not.toHaveProperty("inheritManifestId");
+    expect(targetBinding.verify).toHaveBeenCalled();
+    phase = "running";
+    const runningProof = { ...targetBinding, verify: vi.fn(async () => phase === "running") };
+    const verified = await Effect.runPromise(
+      verifyRuntimeKnowledge({
+        threadId: input.threadId,
+        expertSession: attached.session,
+        memory: f.memory,
+        learningRepository: f.learningRepository,
+        projection: f.projection,
+        targetBinding: runningProof,
+      }),
+    );
+    expect(verified?.rootRunId).toBe("native-attempt");
+    phase = "unknown";
+    await expect(
+      Effect.runPromise(
+        verifyRuntimeKnowledge({
+          threadId: input.threadId,
+          expertSession: attached.session,
+          memory: f.memory,
+          learningRepository: f.learningRepository,
+          projection: f.projection,
+          targetBinding: runningProof,
+        }),
+      ),
+    ).rejects.toThrow();
+    // Removing the host-only proof must not turn the parent thread into the target.
+    await expect(
+      Effect.runPromise(
+        verifyRuntimeKnowledge({
+          threadId: input.threadId,
+          expertSession: attached.session,
+          memory: f.memory,
+          learningRepository: f.learningRepository,
+          projection: f.projection,
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it.each(["project", "snapshot", "root", "assembly", "proof", "inherit"])(
+    "rejects native %s forgery before preparing or attaching knowledge",
+    async (forgery) => {
+      const f = fixture();
+      const stateDir = await f.stateDirPromise;
+      roots.push(stateDir);
+      const input = assembly("native-attempt");
+      const targetBinding = {
+        expertId: "expert-1",
+        snapshotId: forgery === "snapshot" ? "forged-snapshot" : "snapshot-1",
+        projectId: forgery === "project" ? "foreign-project" : "project-1",
+        attemptId: forgery === "root" ? "parent-root" : input.rootRunId,
+        assemblyId: forgery === "assembly" ? "other-assembly" : input.assemblyId,
+        verify: async () => forgery !== "proof",
+      };
+      await expect(
+        Effect.runPromise(
+          prepareRuntimeKnowledge({
+            stateDir,
+            threadId: input.threadId,
+            provider: "omp",
+            assembly:
+              forgery === "inherit" ? { ...input, knowledgeSourceRunId: "parent-root" } : input,
+            allowCreate: true,
+            memory: f.memory,
+            learningRepository: f.learningRepository,
+            projection: f.projection,
+            attachKnowledge: f.attachKnowledge,
+            targetBinding,
+          }),
+        ),
+      ).rejects.toThrow();
+      expect(f.prepareArgs).toEqual([]);
+      expect(f.attachKnowledge).not.toHaveBeenCalled();
+    },
+  );
+
+  it("revalidates native binding even without learning ownership or a manifest", async () => {
+    const f = fixture({ row: null });
+    const stateDir = await f.stateDirPromise;
+    roots.push(stateDir);
+    const input = assembly("native-attempt");
+    const targetBinding = {
+      expertId: "expert-1",
+      snapshotId: "snapshot-1",
+      projectId: "project-1",
+      attemptId: input.rootRunId,
+      assemblyId: input.assemblyId,
+      verify: async () => false,
+    };
+    await expect(
+      Effect.runPromise(
+        prepareRuntimeKnowledge({
+          stateDir,
+          threadId: input.threadId,
+          provider: "omp",
+          assembly: input,
+          allowCreate: true,
+          memory: f.memory,
+          learningRepository: f.learningRepository,
+          projection: f.projection,
+          attachKnowledge: f.attachKnowledge,
+          targetBinding,
+        }),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      Effect.runPromise(
+        verifyRuntimeKnowledge({
+          threadId: input.threadId,
+          expertSession: input.session,
+          memory: f.memory,
+          learningRepository: f.learningRepository,
+          projection: f.projection,
+          targetBinding,
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("keeps concurrent native roles' owner scopes and immutable proof identities separate", async () => {
+    const targets = ["expert-1", "expert-2"].map((expertId, index) => {
+      const f = fixture({ scope: scope({ expertId }), row: stateRow({ expertId }) });
+      const base = assembly(`attempt-${index}`);
+      const input = { ...base, session: { ...base.session, expertId } };
+      vi.mocked(f.projection.getThreadShellById).mockImplementation((id) =>
+        Effect.succeed(
+          Option.some({
+            id,
+            projectId: ProjectId.makeUnsafe("project-1"),
+            expertBinding: null,
+          } as never),
+        ),
+      );
+      const targetBinding = {
+        expertId,
+        snapshotId: "snapshot-1",
+        projectId: "project-1",
+        attemptId: input.rootRunId,
+        assemblyId: input.assemblyId,
+        verify: async () => true,
+      };
+      return { f, input, targetBinding };
+    });
+    const prepared = await Promise.all(
+      targets.map(async ({ f, input, targetBinding }) => {
+        const stateDir = await f.stateDirPromise;
+        roots.push(stateDir);
+        const effect = prepareRuntimeKnowledge({
+          stateDir,
+          threadId: input.threadId,
+          provider: "omp",
+          assembly: input,
+          allowCreate: true,
+          memory: f.memory,
+          learningRepository: f.learningRepository,
+          projection: f.projection,
+          attachKnowledge: async (_rootRunId, knowledge) => ({
+            ...input,
+            session: { ...input.session, knowledge },
+          }),
+          targetBinding,
+        });
+        // The effect captures the host identity, not a mutable caller-owned object.
+        targetBinding.expertId = "mutated-after-capture";
+        return Effect.runPromise(effect);
+      }),
+    );
+    expect(prepared.map((item) => item.session.knowledge?.scope.expertId)).toEqual([
+      "expert-1",
+      "expert-2",
+    ]);
+    expect(prepared.map((item) => item.session.knowledge?.rootRunId)).toEqual([
+      "attempt-0",
+      "attempt-1",
+    ]);
+    const first = targets[0]!;
+    await expect(
+      Effect.runPromise(
+        verifyRuntimeKnowledge({
+          threadId: first.input.threadId,
+          expertSession: prepared[0]!.session,
+          memory: first.f.memory,
+          learningRepository: first.f.learningRepository,
+          projection: first.f.projection,
+          targetBinding: { ...targets[1]!.targetBinding, expertId: "expert-2" },
+        }),
+      ),
+    ).rejects.toThrow();
+    first.f.changeScope(scope({ spaceId: "other-space" }));
+    await expect(
+      Effect.runPromise(
+        verifyRuntimeKnowledge({
+          threadId: first.input.threadId,
+          expertSession: prepared[0]!.session,
+          memory: first.f.memory,
+          learningRepository: first.f.learningRepository,
+          projection: first.f.projection,
+          targetBinding: { ...first.targetBinding, expertId: "expert-1" },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("renders native pinned rules without claiming unavailable learning actions", () => {
+    const rendered = renderRuntimeKnowledge(manifest(), { learningActionsAvailable: false });
+    expect(rendered).toContain("Keep conclusions first.");
+    expect(rendered).toContain("no learning-action authority");
+    expect(rendered).not.toContain("synara_learning_commit");
+    expect(rendered).not.toContain("synara_learning_read");
   });
 
   it("renders only pinned rules and an index, with facts kept out of the manifest text", () => {

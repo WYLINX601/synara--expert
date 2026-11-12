@@ -15,6 +15,26 @@ import {
 } from "./AcpNativeLogging.ts";
 
 describe("AcpNativeLogging", () => {
+  it("redacts private native credential results in decoded and raw protocol forms", () => {
+    const response = {
+      jsonrpc: "2.0",
+      id: "credential-request",
+      result: {
+        authorization: "Bearer native-attempt-secret-SENTINEL",
+        expiresAt: "2026-11-11T12:00:00.000Z",
+      },
+    };
+    for (const payload of [
+      response,
+      JSON.stringify(response),
+      new TextEncoder().encode(JSON.stringify(response)),
+    ]) {
+      const redacted = JSON.stringify(redactAcpLogSecrets(payload));
+      assert.notInclude(redacted, "native-attempt-secret-SENTINEL");
+      assert.include(redacted, "credential-request");
+      assert.include(redacted, ACP_LOG_REDACTED_VALUE);
+    }
+  });
   it.effect("redacts gateway credentials from request and protocol NDJSON logs", () =>
     Effect.gen(function* () {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "synara-acp-secret-log-"));

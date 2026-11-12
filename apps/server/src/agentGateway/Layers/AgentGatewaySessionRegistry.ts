@@ -20,6 +20,7 @@ const PROVIDER_SESSION_CAPABILITIES = [
   "device:control",
 ] as const;
 const LEARNING_PROVIDERS = new Set(["omp", "pi"]);
+const NATIVE_SESSION_CAPABILITIES = ["thread:read", "browser:control", "device:control"] as const;
 
 function trustedLearningSession(
   provider: string,
@@ -73,7 +74,11 @@ export function makeAgentGatewaySessionRegistry(options?: {
     },
     computerControlProvisioned: (threadId, provider) => {
       const candidates = [...sessionsByKey.values()].filter(
-        (row) => row.identity.threadId === threadId && row.identity.provider === provider,
+        (row) =>
+          row.identity.threadId === threadId &&
+          row.identity.provider === provider &&
+          !row.identity.nativeExecution &&
+          row.identity.expiresAt > now(),
       );
       return candidates.at(-1)?.identity.capabilities.has("computer:control") ?? false;
     },
@@ -83,6 +88,31 @@ export function makeAgentGatewaySessionRegistry(options?: {
       // runtime revokes its own token during teardown. Reusing a token here
       // would therefore let old-session cleanup invalidate the replacement.
       const issuedAt = now();
+      const expiresAt = issueOptions?.expiresAt ?? Number.POSITIVE_INFINITY;
+      if (
+        (issueOptions?.expiresAt !== undefined && !Number.isFinite(expiresAt)) ||
+        expiresAt <= issuedAt
+      ) {
+        throw new Error("Gateway session expiry must be a future absolute timestamp.");
+      }
+      const nativeExecution = issueOptions?.nativeExecution
+        ? Object.freeze({
+            executionBindingId: issueOptions.nativeExecution.executionBindingId,
+            attemptId: issueOptions.nativeExecution.attemptId,
+            capabilityBindingId: issueOptions.nativeExecution.capabilityBindingId,
+            assemblyId: issueOptions.nativeExecution.assemblyId,
+            parentRootRunId: issueOptions.nativeExecution.parentRootRunId,
+          })
+        : undefined;
+      if (
+        nativeExecution &&
+        (!Number.isFinite(expiresAt) ||
+          Object.values(nativeExecution).some(
+            (value) => typeof value !== "string" || value.length === 0,
+          ))
+      ) {
+        throw new Error("Native Gateway sessions require an execution scope and finite expiry.");
+      }
       const sessionKey = `gateway-session:${randomId()}`;
       const token = `sagw_session_${randomId()}`;
       const learningSession = trustedLearningSession(provider, issueOptions?.learningSession);
@@ -90,17 +120,20 @@ export function makeAgentGatewaySessionRegistry(options?: {
         (capability) =>
           capability !== "learning:read" &&
           capability !== "learning:write" &&
-          (capability !== "computer:control" || !disabledComputerThreads.has(threadId)),
+          (capability !== "computer:control" || !disabledComputerThreads.has(threadId)) &&
+          (!nativeExecution || capability === "computer:control"),
       );
       const identity: AgentGatewaySessionIdentity = {
         sessionKey,
         threadId,
         provider,
         issuedAt,
+        expiresAt,
+        ...(nativeExecution ? { nativeExecution } : {}),
         capabilities: new Set<AgentGatewayCapability>([
-          ...PROVIDER_SESSION_CAPABILITIES,
+          ...(nativeExecution ? NATIVE_SESSION_CAPABILITIES : PROVIDER_SESSION_CAPABILITIES),
           ...additionalCapabilities,
-          ...(learningSession
+          ...(learningSession && !nativeExecution
             ? [
                 "learning:read" as const,
                 ...(learningSession.learningEpoch === undefined ? [] : ["learning:write" as const]),
@@ -119,12 +152,18 @@ export function makeAgentGatewaySessionRegistry(options?: {
     },
     verify: (token) => {
       const identity = sessions.get(token)?.identity;
-      return identity ? visibleIdentity(identity) : null;
+      return identity && identity.expiresAt > now() ? visibleIdentity(identity) : null;
     },
     bindWriteAuthority: (token, turnId) => {
       const registered = sessions.get(token);
-      if (!registered || registered.retiredWriteTurnId !== undefined) return null;
+      if (
+        !registered ||
+        registered.identity.expiresAt <= now() ||
+        registered.retiredWriteTurnId !== undefined
+      )
+        return null;
       const { identity } = registered;
+      if (identity.nativeExecution && identity.nativeExecution.attemptId !== turnId) return null;
       return {
         sessionKey: identity.sessionKey,
         threadId: identity.threadId,
@@ -137,14 +176,21 @@ export function makeAgentGatewaySessionRegistry(options?: {
       const identity = registered?.identity;
       return (
         identity !== undefined &&
+        identity.expiresAt > now() &&
         registered?.retiredWriteTurnId === undefined &&
         identity.threadId === authority.threadId &&
-        identity.provider === authority.provider
+        identity.provider === authority.provider &&
+        (!identity.nativeExecution || identity.nativeExecution.attemptId === authority.turnId)
       );
     },
     retireWriteAuthority: (token, turnId) => {
       const registered = sessions.get(token);
       if (!registered) return false;
+      if (
+        registered.identity.nativeExecution &&
+        registered.identity.nativeExecution.attemptId !== turnId
+      )
+        return false;
       if (registered.retiredWriteTurnId !== undefined) {
         return registered.retiredWriteTurnId === turnId;
       }
@@ -156,14 +202,16 @@ export function makeAgentGatewaySessionRegistry(options?: {
     },
     revoke: (token) => {
       const registered = sessions.get(token);
-      if (!registered) return;
+      if (!registered) return null;
       sessions.delete(token);
       sessionsByKey.delete(registered.identity.sessionKey);
+      return registered.identity;
     },
     listRetiredWriteAuthorities: (threadId) => {
       const retired = [];
       for (const registered of sessionsByKey.values()) {
         if (registered.retiredWriteTurnId === undefined) continue;
+        if (registered.identity.expiresAt <= now()) continue;
         if (registered.identity.threadId !== threadId) continue;
         retired.push({
           sessionKey: registered.identity.sessionKey,

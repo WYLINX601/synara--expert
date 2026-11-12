@@ -18,6 +18,7 @@ import {
   type ProviderSkillReference,
   type ProviderStartOptions,
   type RuntimeMode,
+  type SuiteRef,
   type ThreadId,
 } from "@synara/contracts";
 import * as Equal from "effect/Equal";
@@ -230,6 +231,7 @@ export interface ComposerThreadDraftState {
 export interface DraftThreadState {
   projectId: ProjectId;
   expertId?: string;
+  suiteSelection?: SuiteRef | null;
   createdAt: string;
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
@@ -249,6 +251,7 @@ export interface DraftThreadState {
 export interface DraftThreadMutationOptions {
   /** Empty string clears the expert selection before the first send. */
   expertId?: string;
+  suiteSelection?: SuiteRef | null;
   branch?: string | null;
   worktreePath?: string | null;
   workingDirectory?: string | null;
@@ -304,6 +307,7 @@ export interface ComposerDraftStoreState {
     options: {
       projectId: ProjectId;
       expertId?: string;
+      suiteSelection?: SuiteRef | null;
       createdAt?: string;
       branch?: string | null;
       worktreePath?: string | null;
@@ -527,6 +531,12 @@ export function buildDraftThreadState(input: {
   return {
     projectId: input.projectId,
     ...(nextExpertId ? { expertId: nextExpertId } : {}),
+    suiteSelection:
+      options?.suiteSelection !== undefined
+        ? options.suiteSelection
+        : options?.expertId !== undefined && options.expertId !== existingThread?.expertId
+          ? null
+          : (existingThread?.suiteSelection ?? null),
     createdAt: resolveDraftThreadCreatedAt({
       createdAt: options?.createdAt,
       existingThread,
@@ -566,6 +576,7 @@ export function draftThreadStatesEqual(
   return (
     left.projectId === right.projectId &&
     left.expertId === right.expertId &&
+    Equal.equals(left.suiteSelection ?? null, right.suiteSelection ?? null) &&
     left.createdAt === right.createdAt &&
     left.runtimeMode === right.runtimeMode &&
     left.interactionMode === right.interactionMode &&

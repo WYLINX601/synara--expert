@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 
 import * as path from "node:path";
 
-import type { ExpertSnapshot } from "@synara/contracts";
-import { Effect } from "effect";
+import { CapabilityBinding, type ExpertMcpBinding, type ExpertSnapshot } from "@synara/contracts";
+import { Effect, Schema } from "effect";
 
 import type { McpToolCallResult, McpToolDefinition } from "../agentGateway/protocol.ts";
 import type { ToolEntry } from "../agentGateway/toolRuntime.ts";
@@ -12,6 +12,7 @@ import { createExpertConnectionStore } from "./ExpertConnectionStore.ts";
 import { createExpertMcpBindingStore } from "./ExpertMcpBindingStore.ts";
 import { connectExpertMcp } from "./ExpertMcpClient.ts";
 import { createExpertStore } from "./ExpertStore.ts";
+import { capabilityBindingFingerprint } from "../suites/SuiteCompositionStore.ts";
 
 type ConnectedExpertMcp = Awaited<ReturnType<typeof connectExpertMcp>>;
 
@@ -36,11 +37,15 @@ type RuntimeConnection = {
 
 type SessionCatalog = {
   readonly sessionKey: string;
-  readonly snapshotId: string;
+  readonly authorizationKey: string;
+  readonly source:
+    | { readonly kind: "snapshot"; readonly snapshotId: string }
+    | { readonly kind: "capability"; readonly binding: CapabilityBinding };
   readonly stateDir: string;
   readonly revokedConnectionIds: Set<string>;
   readonly connections: Map<string, RuntimeConnection>;
   tools: ToolEntry[];
+  readonly toolConnectionIds: Map<string, string>;
   initializing?: Promise<void>;
   closePromise?: Promise<void>;
   closed: boolean;
@@ -496,11 +501,30 @@ export async function preflightExpertConnections(
   );
 }
 
-export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolverOptions): {
+export interface ExpertGatewayToolResolver {
   readonly resolve: (sessionKey: string, snapshotId: string) => Promise<ReadonlyArray<ToolEntry>>;
+  readonly resolveBinding: (
+    sessionKey: string,
+    binding: CapabilityBinding,
+  ) => Promise<ReadonlyArray<ToolEntry>>;
   readonly closeSession: (sessionKey: string) => Promise<void>;
   readonly closeAll: () => Promise<void>;
-} {
+}
+
+function mcpAuthorizationSelection(binding: ExpertMcpBinding) {
+  return JSON.stringify({
+    schemaVersion: binding.schemaVersion,
+    source: binding.source,
+    authorizationId: binding.authorizationId,
+    servers: binding.servers.map(
+      ({ effectiveTools: _tools, resolutionStatus: _status, ...server }) => server,
+    ),
+  });
+}
+
+export function makeExpertGatewayToolResolver(
+  options: ExpertGatewayToolResolverOptions,
+): ExpertGatewayToolResolver {
   const expertStore = createExpertStore(options.stateDir);
   const connectionStore = createExpertConnectionStore(options.stateDir);
   const bindingStore = createExpertMcpBindingStore(options.stateDir);
@@ -557,9 +581,22 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
   });
 
   const createCatalog = async (record: SessionCatalog): Promise<void> => {
-    const snapshot = await expertStore.readSnapshot(record.snapshotId);
-    if (record.closed) return;
-    const binding = await resolveSnapshotMcpBinding(snapshot, options.stateDir, connectionStore);
+    const capability = record.source.kind === "capability" ? record.source.binding : undefined;
+    let binding: ExpertMcpBinding;
+    if (capability) {
+      // Never capture current connection configuration for a capability record.
+      if (!capability.mcpBinding) return;
+      binding = await bindingStore.get(record.authorizationKey, () => capability.mcpBinding!);
+      if (mcpAuthorizationSelection(binding) !== mcpAuthorizationSelection(capability.mcpBinding))
+        throw new Error(
+          "Persisted MCP authorization does not match its immutable capability binding.",
+        );
+    } else {
+      if (record.source.kind !== "snapshot") throw new Error("MCP catalog source is invalid.");
+      const snapshot = await expertStore.readSnapshot(record.source.snapshotId);
+      if (record.closed) return;
+      binding = await resolveSnapshotMcpBinding(snapshot, options.stateDir, connectionStore);
+    }
     if (record.closed) return;
     const authorizedByConnection = new Map(
       binding.servers.map((server) => [
@@ -576,7 +613,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
     const freezeOptionalUnavailable = async (server: (typeof binding.servers)[number]) => {
       if (server.toolMode !== "all" || server.effectiveTools !== undefined) return;
       try {
-        await bindingStore.resolveToolsOnce(snapshot.snapshotId, server.id, {
+        await bindingStore.resolveToolsOnce(record.authorizationKey, server.id, {
           status: "unavailable",
           tools: [],
         });
@@ -589,6 +626,19 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
     };
     try {
       for (const server of binding.servers) {
+        // A conflicting/disabled effective selection cannot be reintroduced by
+        // the MCP directory. Capability connection failures remain local.
+        if (capability) {
+          const selection = capability.connections.find((entry) => entry.id === server.id);
+          if (
+            !selection ||
+            selection.enabled === false ||
+            (selection.toolMode ?? "selected") !== (server.toolMode ?? "selected") ||
+            JSON.stringify([...selection.tools].sort()) !== JSON.stringify([...server.tools].sort())
+          )
+            continue;
+        }
+        const required = server.required && !capability;
         if (record.closed) return;
         if (seenConnectionIds.has(server.id)) {
           throw new Error(`Expert snapshot contains duplicate connection IDs: ${server.id}`);
@@ -596,7 +646,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
         seenConnectionIds.add(server.id);
         const allMode = server.toolMode === "all";
         if (allMode && server.resolutionStatus === "unavailable") {
-          if (server.required) {
+          if (required) {
             throw new Error(
               `Required expert connection was unavailable during first enumeration: ${server.id}`,
             );
@@ -610,12 +660,12 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
           continue;
         }
         if (record.revokedConnectionIds.has(server.id)) {
-          if (server.required) throw new Error(bindingUnavailableMessage(server.id, "disabled"));
+          if (required) throw new Error(bindingUnavailableMessage(server.id, "disabled"));
           await freezeOptionalUnavailable(server);
           continue;
         }
         if (server.configRevision === undefined) {
-          if (server.required) {
+          if (required) {
             throw new Error(`Required expert connection is not configured: ${server.id}`);
           }
           await freezeOptionalUnavailable(server);
@@ -625,7 +675,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
         try {
           stateAtStart = await connectionStore.readState(server.id);
         } catch (cause) {
-          if (server.required) {
+          if (required) {
             throw new Error(`Required expert connection state is unavailable: ${server.id}`, {
               cause,
             });
@@ -634,7 +684,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
           continue;
         }
         if (stateAtStart.status !== "active") {
-          if (server.required) {
+          if (required) {
             throw new Error(bindingUnavailableMessage(server.id, stateAtStart.status));
           }
           await freezeOptionalUnavailable(server);
@@ -644,7 +694,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
         try {
           config = await connectionStore.readRevision(server.id, server.configRevision);
         } catch (cause) {
-          if (server.required) {
+          if (required) {
             throw new Error(
               `Required expert connection revision is unavailable: ${server.id}@${server.configRevision}`,
               { cause },
@@ -654,7 +704,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
           continue;
         }
         if (!config) {
-          if (server.required) {
+          if (required) {
             throw new Error(
               `Required expert connection revision is unavailable: ${server.id}@${server.configRevision}`,
             );
@@ -666,7 +716,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
         try {
           client = await connect(config);
         } catch (cause) {
-          if (server.required) {
+          if (required) {
             throw new Error(bindingUnavailableMessage(server.id), { cause });
           }
           await freezeOptionalUnavailable(server);
@@ -680,7 +730,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
         ) {
           await client.close().catch(() => undefined);
           if (record.closed) return;
-          if (server.required) {
+          if (required) {
             throw new Error(bindingUnavailableMessage(server.id, stateAfterConnect?.status));
           }
           await freezeOptionalUnavailable(server);
@@ -695,7 +745,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
             let resolvedBinding;
             try {
               resolvedBinding = await bindingStore.resolveToolsOnce(
-                snapshot.snapshotId,
+                record.authorizationKey,
                 server.id,
                 {
                   status: "resolved",
@@ -717,7 +767,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
             if (resolvedServer.resolutionStatus === "unavailable") {
               authorizedByConnection.set(server.id, resolvedServer.effectiveTools);
               await client.close().catch(() => undefined);
-              if (server.required) {
+              if (required) {
                 throw new Error(
                   `Required expert connection was unavailable during first enumeration: ${server.id}`,
                 );
@@ -745,7 +795,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
         const stateAfterIndex = await connectionStore.readState(server.id).catch(() => null);
         if (stateAfterIndex?.status !== "active") {
           revokeConnection(record, server.id, stateAfterIndex?.status ?? "disabled");
-          if (server.required) {
+          if (required) {
             throw new Error(bindingUnavailableMessage(server.id, stateAfterIndex?.status));
           }
           continue;
@@ -765,7 +815,7 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
         for (const downstreamName of authorizedTools) {
           const downstream = downstreamByName.get(downstreamName);
           if (!downstream) {
-            if (server.required) {
+            if (server.required && !capability) {
               throw new Error(
                 `Required expert connection ${server.id} does not expose ${downstreamName}.`,
               );
@@ -780,13 +830,24 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
             throw new Error(`Expert tool name collision: ${definition.name}`);
           }
           exposedNames.add(definition.name);
+          record.toolConnectionIds.set(definition.name, server.id);
           record.tools.push({
             definition,
             requiredCapability: "thread:read",
             requiresActiveTurn: true,
-            handler: (args) =>
+            handler: (args, context) =>
               Effect.tryPromise({
                 try: async (signal) => {
+                  if (capability) {
+                    if (
+                      context.callerSessionKey !== record.sessionKey ||
+                      (capability.purpose.kind === "native-delegate" &&
+                        (context.nativeExecution?.capabilityBindingId !== capability.bindingId ||
+                          context.nativeExecution.attemptId !== capability.purpose.attemptId))
+                    )
+                      throw new Error("MCP invocation does not belong to this capability session.");
+                    await Effect.runPromise(context.assertCallerTurnActive(), { signal });
+                  }
                   if (
                     record.closed ||
                     runtimeConnection.revoked ||
@@ -806,6 +867,8 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
                   ) {
                     throw new Error(bindingUnavailableMessage(server.id, "disabled"));
                   }
+                  if (capability)
+                    await Effect.runPromise(context.assertCallerTurnActive(), { signal });
                   return client
                     .callTool(
                       downstreamName,
@@ -840,20 +903,26 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
     }
   };
 
-  const makeRecord = (sessionKey: string, snapshotId: string): SessionCatalog => {
+  const makeRecord = (
+    sessionKey: string,
+    authorizationKey: string,
+    source: SessionCatalog["source"],
+  ): SessionCatalog => {
     const record: SessionCatalog = {
       sessionKey,
-      snapshotId,
+      authorizationKey,
+      source,
       stateDir: normalizedStateDir,
       revokedConnectionIds: new Set(),
       connections: new Map(),
       tools: [],
+      toolConnectionIds: new Map(),
       closed: false,
     };
     record.initializing = createCatalog(record);
     void record.initializing.catch(() => {
       const bySnapshot = sessions.get(sessionKey);
-      if (bySnapshot?.get(snapshotId) === record) bySnapshot.delete(snapshotId);
+      if (bySnapshot?.get(authorizationKey) === record) bySnapshot.delete(authorizationKey);
       if (bySnapshot?.size === 0) sessions.delete(sessionKey);
     });
     return record;
@@ -885,39 +954,65 @@ export function makeExpertGatewayToolResolver(options: ExpertGatewayToolResolver
     await Promise.all([...bySnapshot.values()].map(closeRecord));
   };
 
+  const resolveCatalog = async (
+    sessionKey: string,
+    snapshotId: string,
+    source: SessionCatalog["source"],
+  ) => {
+    if (closed || revokedSessionKeys.has(sessionKey)) return [];
+    let active = activeSnapshots.get(sessionKey);
+    if (!active || active.snapshotId !== snapshotId) {
+      active = {
+        snapshotId,
+        transition: closeOtherSnapshots(sessionKey, snapshotId),
+      };
+      activeSnapshots.set(sessionKey, active);
+    }
+    const generation = active;
+    await generation.transition;
+    if (
+      closed ||
+      revokedSessionKeys.has(sessionKey) ||
+      activeSnapshots.get(sessionKey) !== generation
+    ) {
+      return [];
+    }
+    let bySnapshot = sessions.get(sessionKey);
+    if (!bySnapshot) {
+      bySnapshot = new Map();
+      sessions.set(sessionKey, bySnapshot);
+    }
+    let record = bySnapshot.get(snapshotId);
+    if (!record) {
+      record = makeRecord(sessionKey, snapshotId, source);
+      bySnapshot.set(snapshotId, record);
+    }
+    await record.initializing;
+    if (record.closed || closed || revokedSessionKeys.has(sessionKey)) return [];
+    for (const connection of record.connections.values()) {
+      const state = await connectionStore.readState(connection.id).catch(() => null);
+      if (state?.status !== "active")
+        revokeConnection(record, connection.id, state?.status ?? "disabled");
+    }
+    return record.tools.filter((tool) => {
+      const connectionId = record.toolConnectionIds.get(tool.definition.name);
+      return (
+        connectionId !== undefined &&
+        !record.revokedConnectionIds.has(connectionId) &&
+        record.connections.get(connectionId)?.revoked === false
+      );
+    });
+  };
+
   return {
-    resolve: async (sessionKey, snapshotId) => {
-      if (closed || revokedSessionKeys.has(sessionKey)) return [];
-      let active = activeSnapshots.get(sessionKey);
-      if (!active || active.snapshotId !== snapshotId) {
-        active = {
-          snapshotId,
-          transition: closeOtherSnapshots(sessionKey, snapshotId),
-        };
-        activeSnapshots.set(sessionKey, active);
-      }
-      const generation = active;
-      await generation.transition;
-      if (
-        closed ||
-        revokedSessionKeys.has(sessionKey) ||
-        activeSnapshots.get(sessionKey) !== generation
-      ) {
-        return [];
-      }
-      let bySnapshot = sessions.get(sessionKey);
-      if (!bySnapshot) {
-        bySnapshot = new Map();
-        sessions.set(sessionKey, bySnapshot);
-      }
-      let record = bySnapshot.get(snapshotId);
-      if (!record) {
-        record = makeRecord(sessionKey, snapshotId);
-        bySnapshot.set(snapshotId, record);
-      }
-      await record.initializing;
-      if (record.closed || closed || revokedSessionKeys.has(sessionKey)) return [];
-      return record.tools;
+    resolve: (sessionKey, snapshotId) =>
+      resolveCatalog(sessionKey, snapshotId, { kind: "snapshot", snapshotId }),
+    resolveBinding: async (sessionKey, rawBinding) => {
+      const binding = Schema.decodeUnknownSync(CapabilityBinding)(rawBinding);
+      if (binding.bindingHash !== capabilityBindingFingerprint(binding))
+        throw new Error("Capability binding content is corrupt.");
+      const authorizationKey = `cap_${createHash("sha256").update(binding.bindingId).digest("hex")}`;
+      return resolveCatalog(sessionKey, authorizationKey, { kind: "capability", binding });
     },
     closeSession,
     closeAll: () => {

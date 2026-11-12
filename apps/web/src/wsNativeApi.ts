@@ -766,6 +766,15 @@ export function createWsNativeApi(): NativeApi {
       getEnvironment: () => transport.request(WS_METHODS.serverGetEnvironment),
       getSettings: () => transport.request(WS_METHODS.serverGetSettings),
       updateSettings: (input) => transport.request(WS_METHODS.serverUpdateSettings, input),
+      previewSuite: (input) => transport.request(WS_METHODS.serverPreviewSuite, input),
+      cancelSuitePreview: (input) => transport.request(WS_METHODS.serverCancelSuitePreview, input),
+      commitSuiteImport: (input) => transport.request(WS_METHODS.serverCommitSuiteImport, input),
+      getSuiteImportReceipt: (input) =>
+        transport.request(WS_METHODS.serverGetSuiteImportReceipt, input),
+      listSuites: () => transport.request(WS_METHODS.serverListSuites, {}),
+      readSuite: (input) => transport.request(WS_METHODS.serverReadSuite, input),
+      readSuiteRunConfiguration: (input) =>
+        transport.request(WS_METHODS.serverReadSuiteRunConfiguration, input),
       listExperts: () => transport.request(WS_METHODS.serverListExperts),
       readExpert: (input) => transport.request(WS_METHODS.serverReadExpert, input),
       saveExpert: (input) => transport.request(WS_METHODS.serverSaveExpert, input),

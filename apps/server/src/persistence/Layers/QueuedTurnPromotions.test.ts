@@ -138,4 +138,71 @@ layer("QueuedTurnPromotionRepository", (it) => {
         );
       }),
   );
+
+  it.effect("retires only the claimed stale context and preserves the next user message", () =>
+    Effect.gen(function* () {
+      const repository = yield* QueuedTurnPromotionRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = "thread-stale-native-context";
+      const now = "2026-11-11T10:00:00.000Z";
+      for (const [index, messageId] of ["stale-result", "next-user-request"].entries()) {
+        const [event] = yield* sql<{ readonly sequence: number }>`
+          INSERT INTO orchestration_events (
+            event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+            command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+          ) VALUES (
+            ${`evt-stale-context-${index}`}, 'thread', ${threadId}, ${index}, 'thread.turn-queued', ${now},
+            ${`cmd-stale-context-${index}`}, NULL, NULL, 'server', '{}', '{}'
+          ) RETURNING sequence`;
+        yield* repository.enqueue({
+          queuedEventSequence: event!.sequence,
+          threadId,
+          messageId,
+          dispatchMode: "queue",
+          createdAt: now,
+        });
+      }
+      const claim = yield* repository.claimNext({
+        threadId,
+        claimOwner: "current-owner",
+        claimedAt: now,
+        claimExpiresAt: "2099-01-01T00:00:00.000Z",
+      });
+      const sequence = Option.getOrThrow(claim).queuedEventSequence;
+      assert.isFalse(
+        yield* repository.cancelMessage({ threadId, messageId: "stale-result", updatedAt: now }),
+      );
+      assert.isFalse(
+        yield* repository.cancelMessage({
+          threadId,
+          messageId: "stale-result",
+          claimOwner: "foreign-owner",
+          updatedAt: now,
+        }),
+      );
+      assert.isTrue(
+        yield* repository.cancelMessage({
+          threadId,
+          messageId: "stale-result",
+          claimOwner: "current-owner",
+          updatedAt: now,
+        }),
+      );
+      assert.isFalse(
+        yield* repository.releaseClaim({
+          queuedEventSequence: sequence,
+          claimOwner: "current-owner",
+          updatedAt: now,
+        }),
+      );
+      const next = yield* repository.claimNext({
+        threadId,
+        claimOwner: "current-owner",
+        claimedAt: now,
+        claimExpiresAt: "2099-01-01T00:00:00.000Z",
+      });
+      assert.strictEqual(Option.getOrThrow(next).messageId, "next-user-request");
+      assert.isFalse(yield* repository.hasPendingMessage({ threadId, messageId: "stale-result" }));
+    }),
+  );
 });

@@ -62,6 +62,8 @@ function overview(overrides: Partial<ProjectAgentOverview> = {}): ProjectAgentOv
   return {
     projectId: PROJECT_ID,
     configured: false,
+    suiteSelectionOpen: false,
+    suite: null,
     config: null,
     goal: null,
     digest: null,
@@ -76,6 +78,7 @@ function overview(overrides: Partial<ProjectAgentOverview> = {}): ProjectAgentOv
 function configPayload(projectId: ProjectId = PROJECT_ID, revision = 1): ProjectAgentConfig {
   return ProjectAgentConfig.makeUnsafe({
     projectId,
+    suite: null,
     coordinatorThreadId: ThreadId.makeUnsafe("thread-coordinator"),
     coordinatorName: "alpha Coordinator",
     coordinatorModelSelection: { provider: "codex", model: "gpt-5-codex" },

@@ -156,6 +156,10 @@
       "types": "./src/desktopIdentity.ts",
       "import": "./src/desktopIdentity.ts"
     },
+    "./linxUpdateManifestVerification": {
+      "types": "./src/linxUpdateManifestVerification.ts",
+      "import": "./src/linxUpdateManifestVerification.ts"
+    },
     "./betaChannel": {
       "types": "./src/betaChannel.ts",
       "import": "./src/betaChannel.ts"

@@ -74,6 +74,8 @@ export * from "./rpc";
 export * from "./claudeCache";
 export * from "./todo";
 
+export * from "./linxUpdateManifest";
+
 export * from "./uiLocale";
 
 export * from "./zenMode";

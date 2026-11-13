@@ -17,8 +17,17 @@
 - Include business Expert IDs and catalog revisions in OMP native target descriptions so callers can identify exact Experts without guessing provider aliases; retain the generated names, model lock and child-only artifact declaration.
 - Resolve the WebSocket Hub Expert list through the existing Suite composition owner, keeping Suite members distinct from an independent Hub's empty roster.
 - Carry the assembly owner's actual work-scoped Run identity through Provider dispatch and stale-session recovery, preserving identity validation when an existing Hub Expert worker resumes.
+- Require a Suite-capable Provider before a Hub saves a Suite or a Suite Run starts: reject a non-OMP coordinator model or task draft at admission (before the irrevocable Hub Suite lock), keep bound Suite threads on a Suite-capable Provider, and report the exact Provider instead of a generic Run-verification failure.
 
 Implementation and the scoped OMP technical acceptance are complete; user acceptance and release are pending. Verification includes the latest compiled native lifecycle matrix, a real BMAD PM → Amelia professional task, actual Suite/Hub journeys, and the full declared workspace test suite. See the [Expert implementation supplement](docs/expert-product-technical-design.md#2026-11-11-suite-与原生委托实施补充) and [development evidence](_bmad-output/initiative-expert-suite-hub/development-readiness.md) for warnings and unverified scope.
+
+### In development: Linx signed update manifest
+
+- Add the LU-00 update manifest protocol: a strict v1 contract in `@synara/contracts`, a signature-before-decode admission pipeline in `@synara/shared`, and a publisher CLI with `generate-key`, `sign` and `verify`. Ed25519 uses `node:crypto`; no dependency was added.
+- Require exact-byte manifest signing, three-layer size caps (manifest 16 KiB, signature 256 B, key ring 16 KiB and 8 keys), a `keyId` derived from the SPKI DER, strict v1 field grammar, and a closed rejection order: `size` → `signature` → `encoding` → `schema` → `key` → `url` → `version`.
+- Publisher keys are written only outside the Git work tree at 0600, are never replaced implicitly, and never appear in output. The protocol is not wired to the app yet: no updater, renderer, IPC or install path changed, and no production public key is embedded (Q-03/Q-04 remain open).
+
+See the [LU-00 implemented protocol](docs/linx-update-development-plan.md#lu-00-已实现协议v1尚未接线到应用) section of the Linx update plan.
 
 ## 1.1.0 — 2026-11-02
 

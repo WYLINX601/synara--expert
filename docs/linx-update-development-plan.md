@@ -76,6 +76,35 @@ Linx Release 是唯一正式来源。发布不依赖 upstream tag 或候选同�
 
 固定 HTTPS 发布仓库与资产解析规则，重定向只接受明确允许的 GitHub 资产下载域；不向客户端注入 GitHub PAT，不接受用户输入的任意下载/安装路径。下载后按受签名 size/hash 重验，辅助程序替换前再次核验。正常轮换应先用旧可信密钥发布包含新公钥的版本；旧私钥泄露或丢失时停止发布并采用人工可信引导恢复，不接受来自网络的新公钥自行成为信任根。首次手动安装 B0 是信任根建立环节，必须通过维护者确认的来源取得。
 
+#### LU-00 已实现协议（v1，尚未接线到应用）
+
+本节是更新清单协议的**唯一权威位置**；LU-02/03/04 以本节为准，BMad 过程计划只是过程材料。实现文件：
+
+- `packages/contracts/src/linxUpdateManifest.ts`：字段文法、三层上限常量、严格版本比较、密钥环 schema。发布端与客户端唯一契约。
+- `packages/shared/src/linxUpdateManifestVerification.ts`：验签→解码→准入管线、密钥环加载与 `keyId` 派生。纯函数，密钥环由调用方注入。
+- `scripts/lib/linx-update-manifest-signing.ts` 与 `scripts/linx-update-manifest.ts`：发布侧密钥生成、签名与校验 CLI。仅发布环境使用，不进桌面包。
+
+**固定字段**：`schemaVersion=1`、`productId="linx"`、`channel="stable"`、`platform="darwin"`、`arch="arm64"`、`version` 为 `x.y.z`（无前导零、无预发布/构建号）、`sourceCommit` 为 40 位小写十六进制、`minOSVersion` 为最多三段数字（本切片只校验格式，系统比较属 LU-02）、`assetName` 以 `.zip` 结尾且不含路径分隔符与 `..`、`assetUrl` 为无凭据无片段的绝对 https、`size` 为 1～4 GiB 的正整数、`sha256` 为 64 位小写十六进制、`keyId` 为 16 位小写十六进制。未知字段、错误产品/频道/平台/架构、字段文法不符即拒绝。`channel: stable` 是单字面量而非可选字段；新增 Beta 频道属首发前的 schema 变更。本切片没有 `installIdentity` 字段（Q-03 未决），也不内置生产公钥（Q-04 未决）。
+
+**签名与密钥**：
+
+- 签署已发布清单文件的**原始 UTF-8 字节**；任何重序列化都会改变字节并导致验签失败。
+- `.sig` 文件内容为 64 字节 Ed25519 原始签名的 base64（容许结尾空白）。
+- `keyId` = 该公钥 SPKI DER 的 sha256 十六进制前 16 位。密钥环文件为 `keyId → base64 SPKI DER` 的 JSON 对象；加载时逐条要求 base64 恰解出 44 字节、`createPublicKey` 成功、类型为 Ed25519，且声明 `keyId` 必须与本条 DER 派生值一致，否则密钥环加载即失败（配置错误，不是清单拒绝）。
+- 验签遍历环内全部受信密钥，再要求清单声明的 `keyId` 恰是实际验签成功的密钥，避免信任未经验签字节里的 id。
+- 私钥只由发布脚本读取，禁止进入仓库、日志、协议输出或客户端。`generate-key` 拒绝覆盖既有私钥与密钥环，且拒绝把输出写进 Git 工作树（git 探测失败也按拒绝处理）。Ed25519 使用 `node:crypto`，未新增依赖。
+
+**三层上限与拒绝顺序**：清单 ≤16 KiB、签名文件 ≤256 B、密钥环 ≤16 KiB 且 ≤8 条。验签在解码之前执行，拒绝 reason 为闭集，先命中者生效：`size`（清单或签名文件超过字节上限，或签名 base64 解出的字节数不是 64）→ `signature`（签名 base64 非法或与任何受信密钥都不匹配）→ `encoding`（清单不是合法 UTF-8）→ `schema`（JSON 损坏、未知字段、字段文法不符、非 https/带凭据 URL）→ `key`（声明的 `keyId` 不是实际签名密钥或不在环内）→ `url`（允许列表为裸主机名，`assetUrl` 主机不在列表内；带非默认端口的 URL 无法匹配）→ `version`（同版或降级）。密钥环形状/密钥非法、参数缺失或当前版本不可解析属配置错误，加载即抛错，不计入清单拒绝。
+
+**CLI**（`mise exec -- bun scripts/linx-update-manifest.ts <subcommand>`）：
+
+- `generate-key --out <dir>` 写 `<dir>/linx-update-private.pem`（0600，拒绝覆盖）与 `<dir>/linx-update-keys.json`，stdout 打印 `keyId` 与公钥。
+- `sign --manifest <p> --key <p> [--out <sig>]` 默认写 `<manifest>.sig`；拒绝输入输出同路径；stdout 打印 `keyId` 与签名路径。
+- `verify --manifest <p> --signature <p> --key-ring <p> --current-version <v> --asset-hosts <h,h>`（允许列表为裸主机名，不含端口或协议）成功打印 `version`/`keyId`。
+- 退出码：`0` 成功、`1` 清单被拒绝（打印 reason 与字段）、`2` 用法或配置错误。私钥内容永不出现在 stdout/stderr。
+
+**尚未接线**：本切片不含 `electron-updater`/Squirrel 安装分支、renderer/IPC/宿主改动、自动检查或下载；应用目前不会消费该协议。资产主机允许列表仍由调用方传入，待 Q-04 固定发布源。
+
 ### AD-04：自动检查、显式下载安装
 
 建议调度初值（实现可在评审时调整）：应用启动稳定后约 60 秒检查，运行期间每 6 小时检查；持久化最近尝试时间，休眠恢复不补发积压请求。保留手动检查，自动/手动请求单飞；遵守 GitHub 限流和 Retry-After，不形成后台高频重试。应用关闭时不检查。

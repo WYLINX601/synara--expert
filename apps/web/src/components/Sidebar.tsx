@@ -357,7 +357,9 @@ import {
   getDesktopUpdateActionError,
   getDesktopUpdateAlreadyCurrentNotice,
   getDesktopUpdateErrorSignature,
+  getDesktopUpdateRefusalNotice,
   isDesktopUpdateButtonDisabled,
+  isDesktopUpdateDownloadOnClick,
   isDesktopUpdateInstallInFlight,
   resolveDesktopUpdateButtonAction,
   shouldRecommendManualDesktopDownload,
@@ -6919,12 +6921,18 @@ export default function Sidebar() {
           setInstallingDesktopUpdate(false);
           setDesktopUpdateState(nextState);
           if (nextState.status === "available") {
+            const version = nextState.availableVersion ?? t("chat:available2");
+            // Linx (workbench) only downloads after a click, so "preparing in the
+            // background" would be untrue for that flavor.
+            const downloadOnClick = isDesktopUpdateDownloadOnClick(nextState);
             toastManager.add({
               type: "info",
-              title: t("workspace:desktopUpdate_preparingUpdate"),
-              description: t("workspace:synaraIsPreparingVersionInTheBackground", {
-                value0: nextState.availableVersion ?? t("chat:available2"),
-              }),
+              title: downloadOnClick
+                ? t("workspace:desktopUpdate_available")
+                : t("workspace:desktopUpdate_preparingUpdate"),
+              description: downloadOnClick
+                ? t("workspace:desktopUpdate_availableDescription", { value0: version })
+                : t("workspace:synaraIsPreparingVersionInTheBackground", { value0: version }),
             });
             return;
           }
@@ -7035,6 +7043,15 @@ export default function Sidebar() {
               type: "info",
               title: t("git:providerUpdates_unchanged"),
               description: alreadyCurrentNotice,
+            });
+            return;
+          }
+          const refusal = getDesktopUpdateRefusalNotice(result);
+          if (refusal) {
+            toastManager.add({
+              type: "info",
+              title: t("workspace:desktopUpdate_couldNotInstallUpdate"),
+              description: refusal,
             });
             return;
           }

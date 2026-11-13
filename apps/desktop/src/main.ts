@@ -294,6 +294,17 @@ import {
   type UpdateArtifactIdentity,
 } from "./updateArtifactIdentity";
 import { buildGitHubReleasesPageUrl, resolveGitHubUpdateSource } from "./githubUpdateFeed";
+import {
+  LINX_UPDATE_CHECK_STATE_FILE_NAME,
+  LinxUpdateClient,
+  readLinxUpdateCheckRecord,
+  writeLinxUpdateCheckRecord,
+} from "./linxUpdateClient";
+import {
+  LINX_UPDATE_SOURCE_FILE_NAME,
+  resolveLinxUpdateSourceForFlavor,
+  type LinxUpdateSource,
+} from "./linxUpdateSource";
 import { isArm64HostRunningIntelBuild, resolveDesktopRuntimeInfo } from "./runtimeArch";
 import { BROWSER_SESSION_PARTITION, DesktopBrowserManager } from "./browserManager";
 import { BrowserSessionRestore } from "./browserAutomation/browserSessionRestore";
@@ -1141,6 +1152,9 @@ let activeUpdateCheck: Promise<void> | null = null;
 let settleActiveUpdateCheck: (() => void) | null = null;
 let activeUpdatePreparation: Promise<void> | null = null;
 let updaterConfigured = false;
+// Set only for the workbench flavor with a valid Linx update source; while set,
+// this client owns check/download/install IPC instead of electron-updater.
+let linxUpdateClient: LinxUpdateClient | null = null;
 let updateState: DesktopUpdateState = initialUpdateState();
 let updateBackgroundedAtMs: number | null = null;
 let updateBackgroundBlurTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1960,17 +1974,24 @@ function resolveAutoUpdateDisabledReason(): string | null {
 }
 
 function handleCheckForUpdatesMenuClick(): void {
-  const disabledReason = resolveAutoUpdateDisabledReason();
-  if (disabledReason) {
-    console.info("[desktop-updater] Manual update check requested, but updates are disabled.");
-    void dialog.showMessageBox({
-      type: "info",
-      title: t("desktop:updatesUnavailable"),
-      message: t("desktop:automaticUpdatesAreNotAvailableRightNow"),
-      detail: translateAutoUpdateDisabledReason(disabledReason),
-      buttons: [t("desktop:common_ok")],
-    });
-    return;
+  if (linxUpdateClient === null) {
+    const disabledReason = resolveAutoUpdateDisabledReason();
+    if (disabledReason) {
+      console.info("[desktop-updater] Manual update check requested, but updates are disabled.");
+      void dialog.showMessageBox({
+        type: "info",
+        title: t("desktop:updatesUnavailable"),
+        message: t("desktop:automaticUpdatesAreNotAvailableRightNow"),
+        // The workbench flavor is disabled for one concrete reason; naming the
+        // missing source is more useful than the generic feed message.
+        detail:
+          desktopFlavor === "workbench"
+            ? t("desktop:linxUpdateSourceMissing")
+            : translateAutoUpdateDisabledReason(disabledReason),
+        buttons: [t("desktop:common_ok")],
+      });
+      return;
+    }
   }
 
   if (!BrowserWindow.getAllWindows().length) {
@@ -1980,7 +2001,11 @@ function handleCheckForUpdatesMenuClick(): void {
 }
 
 async function checkForUpdatesFromMenu(): Promise<void> {
-  await checkForUpdates("menu");
+  if (linxUpdateClient !== null) {
+    await linxUpdateClient.checkManually();
+  } else {
+    await checkForUpdates("menu");
+  }
 
   if (updateState.status === "up-to-date") {
     void dialog.showMessageBox({
@@ -1995,7 +2020,11 @@ async function checkForUpdatesFromMenu(): Promise<void> {
     void dialog.showMessageBox({
       type: "info",
       title: t("desktop:updateFound"),
-      message: t("desktop:synaraIsPreparingTheUpdateInTheBackground"),
+      // Linx never downloads in the background, so it points at the button instead.
+      message:
+        desktopFlavor === "workbench"
+          ? t("desktop:updateReadyToDownloadFromSidebar")
+          : t("desktop:synaraIsPreparingTheUpdateInTheBackground"),
       buttons: [t("desktop:common_ok")],
     });
   } else if (updateState.status === "downloaded") {
@@ -3529,6 +3558,10 @@ function handleDesktopAppForegrounded(): void {
   if (!shouldCheck) {
     return;
   }
+  if (linxUpdateClient !== null) {
+    void linxUpdateClient.checkAutomatically("foreground");
+    return;
+  }
   void checkForUpdates("foreground");
 }
 
@@ -3977,13 +4010,43 @@ async function recordDownloadedUpdateIdentity(info: UpdateDownloadedEvent): Prom
   }
 }
 
+function resolveConfiguredLinxUpdateSource(): LinxUpdateSource | null {
+  const sourcePath = resolveResourcePath(LINX_UPDATE_SOURCE_FILE_NAME);
+  const source = resolveLinxUpdateSourceForFlavor({ flavor: desktopFlavor, sourcePath });
+  if (sourcePath !== null && source === null && desktopFlavor === "workbench") {
+    console.warn(
+      `[linx-updater] Ignoring invalid ${LINX_UPDATE_SOURCE_FILE_NAME}; Linx updates stay disabled.`,
+    );
+  }
+  return source;
+}
+
+function createLinxUpdateClient(source: LinxUpdateSource): LinxUpdateClient {
+  const checkRecordPath = Path.join(userDataPath, LINX_UPDATE_CHECK_STATE_FILE_NAME);
+  return new LinxUpdateClient({
+    source,
+    currentVersion: app.getVersion(),
+    stagingDir: Path.join(userDataPath, "linx-update-staging"),
+    getUpdateState: () => updateState,
+    setUpdateState,
+    readCheckRecord: () => readLinxUpdateCheckRecord(checkRecordPath),
+    writeCheckRecord: (record) => writeLinxUpdateCheckRecord(checkRecordPath, record),
+    log: (message) => console.info(message),
+  });
+}
+
 function configureAutoUpdater(): void {
   const appUpdateYml = readAppUpdateYml();
   configuredUpdaterCacheDirName = resolveElectronUpdaterCacheDirName(appUpdateYml, app.getName());
+  const linxSource = resolveConfiguredLinxUpdateSource();
   const githubUpdateSource = resolveGitHubUpdateSource(appUpdateYml);
   const releaseUrl =
-    githubUpdateSource === null ? null : buildGitHubReleasesPageUrl(githubUpdateSource);
-  const enabled = shouldEnableAutoUpdates();
+    linxSource !== null
+      ? linxSource.releaseUrl
+      : githubUpdateSource === null
+        ? null
+        : buildGitHubReleasesPageUrl(githubUpdateSource);
+  const enabled = linxSource !== null || shouldEnableAutoUpdates();
   setUpdateState({
     ...createInitialDesktopUpdateState(
       app.getVersion(),
@@ -3993,8 +4056,23 @@ function configureAutoUpdater(): void {
     enabled,
     status: enabled ? "idle" : "disabled",
     releaseUrl,
+    // The workbench flavor is disabled by design until it has its own source;
+    // say so instead of showing a bare "disabled" with no reason.
+    message:
+      desktopFlavor === "workbench" && linxSource === null
+        ? t("desktop:linxUpdateSourceMissing")
+        : null,
   });
   processInstallMarkerOnStartup();
+  if (linxSource !== null) {
+    // The workbench flavor never uses electron-updater: no Squirrel handoff and
+    // no automatic package download, only the pinned-target flow below.
+    configuredUpdaterCacheDirName = null;
+    linxUpdateClient = createLinxUpdateClient(linxSource);
+    linxUpdateClient.start();
+    console.info("[linx-updater] Linx update client started.");
+    return;
+  }
   if (!enabled) {
     configuredUpdaterCacheDirName = null;
     return;
@@ -5169,6 +5247,8 @@ async function shutdownDesktopRuntime(reason: string): Promise<void> {
       clearUpdateBackgroundBlurTimer();
       clearUpdateCheckTimeoutTimer();
       clearUpdatePollTimer();
+      // A normal quit never installs: cancel any Linx transfer and drop staging.
+      await linxUpdateClient?.dispose();
       cancelBackendReadinessWait();
       appSnapManager?.dispose();
       appSnapManager = null;
@@ -5859,13 +5939,20 @@ function registerIpcHandlers(): void {
 
   ipcMain.removeHandler(IPC.updateCheck);
   ipcMain.handle(IPC.updateCheck, async () => {
+    if (linxUpdateClient !== null) {
+      await linxUpdateClient.checkManually();
+      return updateState;
+    }
     await checkForUpdates("renderer");
     return updateState;
   });
 
   ipcMain.removeHandler(IPC.updateDownload);
   ipcMain.handle(IPC.updateDownload, async () => {
-    const result = await downloadAvailableUpdate();
+    const result =
+      linxUpdateClient !== null
+        ? await linxUpdateClient.download()
+        : await downloadAvailableUpdate();
     return {
       accepted: result.accepted,
       completed: result.completed,
@@ -5882,7 +5969,10 @@ function registerIpcHandlers(): void {
         state: updateState,
       } satisfies DesktopUpdateActionResult;
     }
-    const result = await installDownloadedUpdate();
+    // Until LU-04 ships the helper, a Linx install request is refused instead of
+    // falling through to the Squirrel handoff this flavor must never use.
+    const result =
+      linxUpdateClient !== null ? linxUpdateClient.install() : await installDownloadedUpdate();
     return {
       accepted: result.accepted,
       completed: result.completed,

@@ -8,7 +8,9 @@ import {
   getDesktopUpdateButtonTooltip,
   getDesktopUpdateDownloadPercent,
   getDesktopUpdateErrorSignature,
+  getDesktopUpdateRefusalNotice,
   isDesktopUpdateButtonDisabled,
+  isDesktopUpdateDownloadOnClick,
   isDesktopUpdateInstallInFlight,
   resolveDesktopUpdateButtonAction,
   shouldRecommendManualDesktopDownload,
@@ -427,5 +429,93 @@ describe("desktop update UI helpers", () => {
     expect(shouldShowArm64IntelBuildWarning(state)).toBe(true);
     expect(getArm64IntelBuildWarningDescription(state)).toContain("Apple Silicon");
     expect(getArm64IntelBuildWarningDescription(state)).toContain("Intel build");
+  });
+});
+
+// The workbench (Linx) flavor never downloads in the background: its `available`
+// state is a click-to-download action and its copy must not claim preparation.
+describe("workbench click-to-download updates", () => {
+  const workbenchAvailable: DesktopUpdateState = {
+    ...baseState,
+    flavor: "workbench",
+    status: "available",
+    availableVersion: "1.1.0",
+  };
+
+  it("keeps the available state clickable", () => {
+    expect(isDesktopUpdateDownloadOnClick(workbenchAvailable)).toBe(true);
+    expect(isDesktopUpdateDownloadOnClick({ ...baseState, flavor: "production" })).toBe(false);
+    expect(shouldShowDesktopUpdateButton(workbenchAvailable)).toBe(true);
+    expect(resolveDesktopUpdateButtonAction(workbenchAvailable)).toBe("download");
+    expect(isDesktopUpdateButtonDisabled(workbenchAvailable)).toBe(false);
+    expect(isDesktopUpdateButtonDisabled({ ...baseState, status: "available" })).toBe(true);
+  });
+
+  it("uses download copy instead of background preparation", () => {
+    const tooltip = getDesktopUpdateButtonTooltip(workbenchAvailable);
+    expect(tooltip).toContain("Click to download");
+    expect(tooltip).not.toContain("Preparing");
+
+    expect(
+      getDesktopUpdateButtonTooltip({
+        ...workbenchAvailable,
+        status: "downloading",
+        downloadPercent: 42.7,
+      }),
+    ).toBe("Downloading update (42%)");
+    expect(
+      getDesktopUpdateButtonTooltip({
+        ...baseState,
+        status: "available",
+        availableVersion: "1.1.0",
+      }),
+    ).toBe("Preparing update 1.1.0");
+  });
+
+  it("describes a failed download as a download failure", () => {
+    const failed: DesktopUpdateState = {
+      ...workbenchAvailable,
+      status: "error",
+      errorContext: "download",
+      message: "socket hang up",
+      canRetry: true,
+    };
+
+    expect(getDesktopUpdateButtonTooltip(failed)).toBe(
+      "Could not download update 1.1.0. Click to retry.",
+    );
+    expect(isDesktopUpdateButtonDisabled(failed)).toBe(false);
+    expect(resolveDesktopUpdateButtonAction(failed)).toBe("download");
+  });
+
+  it("surfaces the explanatory message of a refused install", () => {
+    const refused: DesktopUpdateActionResult = {
+      accepted: false,
+      completed: false,
+      state: {
+        ...workbenchAvailable,
+        status: "downloaded",
+        downloadedVersion: "1.1.0",
+        message: "Installing arrives later.",
+      },
+    };
+
+    expect(getDesktopUpdateRefusalNotice(refused)).toBe("Installing arrives later.");
+    expect(getDesktopUpdateRefusalNotice({ ...refused, accepted: true })).toBeNull();
+    expect(
+      getDesktopUpdateRefusalNotice({ ...refused, state: { ...refused.state, message: "  " } }),
+    ).toBeNull();
+  });
+
+  it("still accepts a retry click after a failed download", () => {
+    const failed: DesktopUpdateState = {
+      ...workbenchAvailable,
+      status: "error",
+      errorContext: "download",
+      canRetry: true,
+    };
+
+    expect(shouldShowDesktopUpdateButton(failed)).toBe(true);
+    expect(getDesktopUpdateErrorSignature(failed)).not.toBeNull();
   });
 });

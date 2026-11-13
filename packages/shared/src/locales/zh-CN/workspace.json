@@ -110,6 +110,8 @@
   "toast_pathUnavailable": "路径不可用",
   "pendingApproval": "等待批准",
   "desktopUpdate_preparingUpdate": "准备更新",
+  "desktopUpdate_available": "有可用更新",
+  "desktopUpdate_availableDescription": "版本 {{value0}} 已就绪，点击更新按钮即可下载。",
   "searchPalette_untitledProject": "未命名项目",
   "arm_updateBuild": "更新 ARM 构建",
   "runDialog_commandPlaceholder": "例如 npm run dev",

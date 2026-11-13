@@ -52,6 +52,8 @@
   "stage": "阶段：{{value0}}\n{{value1}}{{value2}}",
   "updatesUnavailable": "更新不可用",
   "automaticUpdatesAreNotAvailableRightNow": "目前无法自动更新。",
+  "linxUpdateSourceMissing": "未配置 Linx 更新源，因此 Linx 更新已停用。",
+  "updateReadyToDownloadFromSidebar": "更新已就绪，请使用侧边栏的更新按钮下载并查看进度。",
   "common_ok": "确定",
   "youReUpToDate": "已是最新版本！",
   "synaraIsCurrentlyTheNewestVersionAvailable": "Synara {{value0}} 目前是最新版本。",

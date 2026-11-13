@@ -84,7 +84,7 @@ Linx Release 是唯一正式来源。发布不依赖 upstream tag 或候选同�
 - `packages/shared/src/linxUpdateManifestVerification.ts`：验签→解码→准入管线、密钥环加载与 `keyId` 派生。纯函数，密钥环由调用方注入。
 - `scripts/lib/linx-update-manifest-signing.ts` 与 `scripts/linx-update-manifest.ts`：发布侧密钥生成、签名与校验 CLI。仅发布环境使用，不进桌面包。
 
-**固定字段**：`schemaVersion=1`、`productId="linx"`、`channel="stable"`、`platform="darwin"`、`arch="arm64"`、`version` 为 `x.y.z`（无前导零、无预发布/构建号）、`sourceCommit` 为 40 位小写十六进制、`minOSVersion` 为最多三段数字（本切片只校验格式，系统比较属 LU-02）、`assetName` 以 `.zip` 结尾且不含路径分隔符与 `..`、`assetUrl` 为无凭据无片段的绝对 https、`size` 为 1～4 GiB 的正整数、`sha256` 为 64 位小写十六进制、`keyId` 为 16 位小写十六进制。未知字段、错误产品/频道/平台/架构、字段文法不符即拒绝。`channel: stable` 是单字面量而非可选字段；新增 Beta 频道属首发前的 schema 变更。本切片没有 `installIdentity` 字段（Q-03 未决），也不内置生产公钥（Q-04 未决）。
+**固定字段**：`schemaVersion=1`、`productId="linx"`、`channel="stable"`、`platform="darwin"`、`arch="arm64"`、`version` 为 `x.y.z`（无前导零、无预发布/构建号）、`sourceCommit` 为 40 位小写十六进制、`minOSVersion` 为最多三段数字（本切片只校验格式，与运行系统的比较属 LU-04 安装预检）、`assetName` 以 `.zip` 结尾且不含路径分隔符与 `..`、`assetUrl` 为无凭据无片段的绝对 https、`size` 为 1～4 GiB 的正整数、`sha256` 为 64 位小写十六进制、`keyId` 为 16 位小写十六进制。未知字段、错误产品/频道/平台/架构、字段文法不符即拒绝。`channel: stable` 是单字面量而非可选字段；新增 Beta 频道属首发前的 schema 变更。本切片没有 `installIdentity` 字段（Q-03 未决），也不内置生产公钥（Q-04 未决）。
 
 **签名与密钥**：
 
@@ -103,7 +103,7 @@ Linx Release 是唯一正式来源。发布不依赖 upstream tag 或候选同�
 - `verify --manifest <p> --signature <p> --key-ring <p> --current-version <v> --asset-hosts <h,h>`（允许列表为裸主机名，不含端口或协议）成功打印 `version`/`keyId`。
 - 退出码：`0` 成功、`1` 清单被拒绝（打印 reason 与字段）、`2` 用法或配置错误。私钥内容永不出现在 stdout/stderr。
 
-**尚未接线**：本切片不含 `electron-updater`/Squirrel 安装分支、renderer/IPC/宿主改动、自动检查或下载；应用目前不会消费该协议。资产主机允许列表仍由调用方传入，待 Q-04 固定发布源。
+**接线状态**：LU-00 本身不含 `electron-updater`/Squirrel 安装分支与宿主改动。LU-02 已在 `apps/desktop/src/linxUpdate{Source,Feed,Download,Client}.ts` 中接入 workbench flavor：仅当随包 `linx-update-source.json` 存在时启用（清单/签名 URL 固定为 GitHub latest release 路径，资产主机允许列表为 `github.com` 与 `objects.githubusercontent.com`），自动/手动检查只取清单与签名，点击后才下载并流式复验 `size`/`sha256`；未配置时保持 `disabled` 且不发起请求。安装（LU-04）尚未实现，`desktop:update-install` 在客户端接管期间返回 `accepted:false`；Q-04 落定前不创建该配置文件、不内置公钥。
 
 ### AD-04：自动检查、显式下载安装
 

@@ -321,6 +321,8 @@
   "toast_pathUnavailable": "Ruta no disponible",
   "pendingApproval": "Pendiente de aprobación",
   "desktopUpdate_preparingUpdate": "Preparando actualización",
+  "desktopUpdate_available": "Actualización disponible",
+  "desktopUpdate_availableDescription": "La versión {{value0}} está lista. Haz clic en el botón de actualización para descargarla.",
   "projectRemoved": "Proyecto eliminado.",
   "providerAccount": "Cuenta del proveedor",
   "reloadFromDisk": "Recargar desde el disco",

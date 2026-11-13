@@ -7,6 +7,14 @@ import type { DesktopUpdateActionResult, DesktopUpdateState } from "@synara/cont
 
 export type DesktopUpdateButtonAction = "check" | "download" | "install" | "none";
 
+/**
+ * The workbench (Linx) flavor downloads only after the user clicks: its
+ * `available` state is an actionable download, not background preparation.
+ */
+export function isDesktopUpdateDownloadOnClick(state: DesktopUpdateState | null): boolean {
+  return state?.flavor === "workbench";
+}
+
 export function resolveDesktopUpdateButtonAction(
   state: DesktopUpdateState,
 ): DesktopUpdateButtonAction {
@@ -66,7 +74,9 @@ export function isDesktopUpdateButtonDisabled(state: DesktopUpdateState | null):
   return (
     state?.status === "downloading" ||
     state?.status === "checking" ||
-    (state?.status === "available" && state.errorContext !== "download")
+    (state?.status === "available" &&
+      !isDesktopUpdateDownloadOnClick(state) &&
+      state.errorContext !== "download")
   );
 }
 
@@ -117,18 +127,27 @@ export function getDesktopUpdateButtonTooltip(
     return `Synara restarted, but update ${state.availableVersion} was not installed. Click to try again.`;
   }
   if (state.errorContext === "download" && state.availableVersion) {
-    return `Could not prepare update ${state.availableVersion}. Click to retry.`;
+    const verb = isDesktopUpdateDownloadOnClick(state) ? "download" : "prepare";
+    return `Could not ${verb} update ${state.availableVersion}. Click to retry.`;
   }
   if (state.errorContext === "install" && (state.downloadedVersion || state.availableVersion)) {
     return `Could not install update ${state.downloadedVersion ?? state.availableVersion}. Click to retry.`;
   }
   if (state.status === "available") {
-    return `Preparing update ${state.availableVersion ?? ""}`.trim();
+    const version = state.availableVersion;
+    if (isDesktopUpdateDownloadOnClick(state)) {
+      return version
+        ? `Update ${version} is ready. Click to download it.`
+        : "Update ready. Click to download it.";
+    }
+    return `Preparing update ${version ?? ""}`.trim();
   }
   if (state.status === "downloading") {
     const progress =
       typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
-    return `Preparing update${progress}`;
+    return isDesktopUpdateDownloadOnClick(state)
+      ? `Downloading update${progress}`
+      : `Preparing update${progress}`;
   }
   if (state.status === "downloaded") {
     return `Update ${state.downloadedVersion ?? state.availableVersion ?? "ready"} is ready. Click to restart and install.`;
@@ -140,7 +159,8 @@ export function getDesktopUpdateButtonTooltip(
         : "Update check failed. Click to try again.";
     }
     if (state.errorContext === "download" && state.availableVersion) {
-      return `Could not prepare update ${state.availableVersion}. Click to retry.`;
+      const verb = isDesktopUpdateDownloadOnClick(state) ? "download" : "prepare";
+      return `Could not ${verb} update ${state.availableVersion}. Click to retry.`;
     }
     if (state.errorContext === "install" && state.downloadedVersion) {
       return `Could not install update ${state.downloadedVersion}. Click to retry.`;
@@ -155,6 +175,19 @@ export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): 
   if (typeof result.state.message !== "string") return null;
   const message = result.state.message.trim();
   return message.length > 0 ? message : null;
+}
+
+/**
+ * A refused request (Linx install before the LU-04 helper) is neither accepted
+ * nor completed, so it has no action error — but it still carries an explanatory
+ * message the user must see.
+ */
+export function getDesktopUpdateRefusalNotice(result: DesktopUpdateActionResult): string | null {
+  if (result.accepted || result.completed) return null;
+  const message = result.state.message;
+  if (typeof message !== "string") return null;
+  const trimmed = message.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 export function shouldToastDesktopUpdateActionResult(result: DesktopUpdateActionResult): boolean {

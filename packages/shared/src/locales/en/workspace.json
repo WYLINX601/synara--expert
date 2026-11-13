@@ -321,6 +321,8 @@
   "toast_pathUnavailable": "Path unavailable",
   "pendingApproval": "Pending approval",
   "desktopUpdate_preparingUpdate": "Preparing update",
+  "desktopUpdate_available": "Update available",
+  "desktopUpdate_availableDescription": "Version {{value0}} is ready. Click the update button to download it.",
   "projectRemoved": "Project removed.",
   "providerAccount": "Provider account",
   "reloadFromDisk": "Reload from disk",

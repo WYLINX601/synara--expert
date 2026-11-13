@@ -37,6 +37,8 @@
   "stage": "Etapa: {{value0}}\n{{value1}}{{value2}}",
   "updatesUnavailable": "Actualizaciones no disponibles",
   "automaticUpdatesAreNotAvailableRightNow": "Las actualizaciones automáticas no están disponibles en este momento.",
+  "linxUpdateSourceMissing": "Las actualizaciones de Linx están desactivadas porque no hay una fuente de actualización de Linx configurada.",
+  "updateReadyToDownloadFromSidebar": "La actualización está lista. Usa el botón de actualización de la barra lateral para descargarla y ver su progreso.",
   "common_ok": "Aceptar",
   "youReUpToDate": "¡Ya tienes la última versión!",
   "synaraIsCurrentlyTheNewestVersionAvailable": "Synara {{value0}} es la versión más reciente disponible.",

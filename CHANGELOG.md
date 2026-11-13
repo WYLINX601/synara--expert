@@ -5,6 +5,7 @@
 ### In development: Expert Suites
 
 - Import recognized local-folder or GitHub Suites through a preview and immutable publication boundary, preserving role identities, non-role Skills and file resources without running source scripts.
+- Add a conversation-first `create-suite` Skill: a default Expert thread interviews for members and resources, writes a validated v1 Suite source, and leaves owner import to the existing Suite entry point.
 - Select Suite Experts as task drafts and fix their capability binding on first send. New Hubs choose independent or Suite mode through the existing configuration revision and admission lock; existing Hubs and non-Suite tasks retain their original path.
 - Keep native Expert delegation business records independent of Harness wire formats. OMP support requires a verified isolated 18.16.0 source patch and exact compiled-binary provenance; it does not replace the user's executable or model configuration.
 - Revoke stale-generation native tool authority and preserve unknown execution state. Parent Stop retains the existing ACP process-tree owner and does not wait indefinitely for a native cancel/query reply.

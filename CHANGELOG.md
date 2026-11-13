@@ -25,10 +25,14 @@ Implementation and the scoped OMP technical acceptance are complete; user accept
 
 - Add the LU-00 update manifest protocol: a strict v1 contract in `@synara/contracts`, a signature-before-decode admission pipeline in `@synara/shared`, and a publisher CLI with `generate-key`, `sign` and `verify`. Ed25519 uses `node:crypto`; no dependency was added.
 - Require exact-byte manifest signing, three-layer size caps (manifest 16 KiB, signature 256 B, key ring 16 KiB and 8 keys), a `keyId` derived from the SPKI DER, strict v1 field grammar, and a closed rejection order: `size` → `signature` → `encoding` → `schema` → `key` → `url` → `version`.
-- Publisher keys are written only outside the Git work tree at 0600, are never replaced implicitly, and never appear in output. That slice changed no updater, renderer, IPC or install path and embeds no production public key (Q-03/Q-04 remain open); the client wiring arrived with LU-02 below.
+- Publisher keys are written only outside the Git work tree at 0600, are never replaced implicitly, and never appear in output. That slice changed no updater, renderer, IPC or install path and embeds no production public key; precise install identity/migration and release-source/trust provisioning remain pending. The client wiring arrived with LU-02 below.
 - Add the LU-02 Linx update client for the workbench flavor. A packaged `linx-update-source.json` (release repository plus trusted key ring) enables a 60 s startup and 6 h interval signed-manifest check, shared single-flight with the manual check and persisted attempt times; only an explicit click downloads the pinned ZIP into staging, hashing the stream and requiring the manifest `size`/`sha256` before it is promoted. Without that file the flavor stays `disabled` and makes no request; `electron-updater`, Squirrel and `quitAndInstall` are never used for workbench, and installation remains LU-04.
 
 See the [LU-00 implemented protocol](docs/linx-update-development-plan.md#lu-00-已实现协议v1尚未接线到应用) section of the Linx update plan.
+
+### Test reliability
+
+- Isolate the Windows Store VS Code discovery regression from host shell startup and the production PowerShell timeout. Preserve the no-CLI discovery assertion, restore the scoped process mock and clear discovery caches; no runtime discovery behavior or timeout changed.
 
 ## 1.1.0 — 2026-11-02
 

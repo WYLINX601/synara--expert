@@ -1,28 +1,28 @@
 # Linx 项目上下文
 
-更新日期为 2026-11-12。本文负责当前目标、任务路由、已确认决定摘要与下一步，执行规范由根 `AGENTS.md` 的 BMAD 托管块维护。
+更新日期为 2026-11-13。本文负责当前目标、任务路由、已确认决定摘要与下一步，执行规范由根 `AGENTS.md` 的 BMAD 托管块维护。
 
 ## 当前目标与已确认边界
 
 - 以 [Linx V2.0](../docs/linx-product-design-v2.md) 组织长期方向管理、专业任务执行与能力进化，复用现有源码持续演进。规划与源码实现、运行证据和用户验收分别核对。
-- Linx 按独立产品管理，产品更新消费自有已发布安装包。[更新能力计划 v0.2](../docs/linx-update-development-plan.md)已按用户决定收敛为首批 macOS Apple Silicon、自动检查但点击后才下载安装、不依赖 Apple Developer ID／公证；标签触发构建，公开 Release 前人工确认。独立更新辅助程序、自有清单签名及系统安全提示的实机验证尚未实施；Bundle ID／数据目录是否迁移仍待选择。本轮只更新方案，不代表应用、发布源或远端工作流已切换。
+- Linx 按独立产品管理，产品更新消费自有已发布安装包。[更新能力计划 v0.2](../docs/linx-update-development-plan.md)约定首批 macOS Apple Silicon、自动检查但点击后才下载安装、不依赖 Apple Developer ID／公证；标签触发构建，公开 Release 前人工确认。LU-00 清单签名协议与 LU-02 检查/点击下载已在 `main` 实现；未配置自有源时保持禁用，安装仍明确拒绝。2026-11-13 用户选择全新 Linx 内部身份与受控 CI 签名；具体标识、迁移/恢复契约、CI 密钥/审批、公钥投放、辅助安装及真实升级仍未完成。现有公开仓库是推荐发布源，尚未最终选定；没有远端发布、安装或真实数据迁移回执，不声称产品升级链路已完成。
 - 架构约束、操作与检查、实际结果各有权威记录，入口只维护摘要与链接。每项工作按准确源码与当前工作区核对证据。
 
 <a id="execution-entry"></a>
 
 ## 执行入口
 
-| 任务                       | 权威材料                                                                                                                                                                                                          | 使用方式                                                |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| Agent 规范与上下文维护     | [根规范](../AGENTS.md)、[回写 SOP](../docs/workbench-development-workflow.md#文档与-context-回写-sop)                                                                                                             | 使用 BMAD adopt/refresh/record/audit，规则逐条追踪去向  |
-| 开发、修复、UI、文档与集成 | [开发 SOP](../docs/workbench-development-workflow.md#execution-sop)、[CONTRIBUTING](../CONTRIBUTING.md)                                                                                                           | 先核对范围和已有改动，按影响选检查                      |
-| 模块、数据、路由与宿主接入 | [架构标准](../docs/workbench-adaptation-plan.md#current-standard-v11)、[接入清单](../workbench/integration-points.json)                                                                                           | 明确所有权、父布局、公共能力与失败行为                  |
-| 产品方向、对象与 Provider  | [Linx V2.0](../docs/linx-product-design-v2.md)、[core concepts](../docs/core-concepts.md)、[providers](../docs/providers.md)                                                                                      | 按具体问题分别查规划、当前契约与实现                    |
-| Linx 更新、发布与安装承接  | [更新能力计划 v0.2](../docs/linx-update-development-plan.md)、[release](../docs/release.md) | 先验证无 Apple 付费分发的辅助安装可行性；实现、真实升级和发布分别验收 |
-| Beta/Stable 与 Canary      | [BETA](../BETA.md)、[Canary](../docs/canary.md)                                                                                                                                                                   | 分别核对身份、数据、更新源和对应交付授权                |
-| 环境、交付根与恢复         | [环境生命周期](../docs/workbench-development-workflow.md#environment-lifecycle)、[应用/预览记录](../docs/application-preview-environments-2026-10-24.md)、[存储记录](../docs/delivery-storage-plan-2026-11-05.md) | 操作前复核当前现场与兼容性，历史容量仅供追溯            |
-| 上游源码导入               | [sync SOP](../docs/workbench-implementation-plan.md#sync-sop)、[来源基线](../workbench/WB-00-upstream-evidence.md)、[自动化记录](../workbench/WB-05-automation.md)                                                | 仅在对应源码导入任务中使用，核对当前候选与远端实际状态  |
-| Marketing                  | [包级规范](../apps/marketing/AGENTS.md)、[包 README](../apps/marketing/README.md)、[manifest](../apps/marketing/package.json)                                                                                     | 读取本包 Next.js 文档，单独选择 docs/browser/性能等检查 |
+| 任务                       | 权威材料                                                                                                                                                                                                          | 使用方式                                                              |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Agent 规范与上下文维护     | [根规范](../AGENTS.md)、[回写 SOP](../docs/workbench-development-workflow.md#文档与-context-回写-sop)                                                                                                             | 使用 BMAD adopt/refresh/record/audit，规则逐条追踪去向                |
+| 开发、修复、UI、文档与集成 | [开发 SOP](../docs/workbench-development-workflow.md#execution-sop)、[CONTRIBUTING](../CONTRIBUTING.md)                                                                                                           | 先核对范围和已有改动，按影响选检查                                    |
+| 模块、数据、路由与宿主接入 | [架构标准](../docs/workbench-adaptation-plan.md#current-standard-v11)、[接入清单](../workbench/integration-points.json)                                                                                           | 明确所有权、父布局、公共能力与失败行为                                |
+| 产品方向、对象与 Provider  | [Linx V2.0](../docs/linx-product-design-v2.md)、[core concepts](../docs/core-concepts.md)、[providers](../docs/providers.md)                                                                                      | 按具体问题分别查规划、当前契约与实现                                  |
+| Linx 更新、发布与安装承接  | [更新能力计划 v0.2](../docs/linx-update-development-plan.md)、[release](../docs/release.md)                                                                                                                       | 先验证无 Apple 付费分发的辅助安装可行性；实现、真实升级和发布分别验收 |
+| Beta/Stable 与 Canary      | [BETA](../BETA.md)、[Canary](../docs/canary.md)                                                                                                                                                                   | 分别核对身份、数据、更新源和对应交付授权                              |
+| 环境、交付根与恢复         | [环境生命周期](../docs/workbench-development-workflow.md#environment-lifecycle)、[应用/预览记录](../docs/application-preview-environments-2026-10-24.md)、[存储记录](../docs/delivery-storage-plan-2026-11-05.md) | 操作前复核当前现场与兼容性，历史容量仅供追溯                          |
+| 上游源码导入               | [sync SOP](../docs/workbench-implementation-plan.md#sync-sop)、[来源基线](../workbench/WB-00-upstream-evidence.md)、[自动化记录](../workbench/WB-05-automation.md)                                                | 仅在对应源码导入任务中使用，核对当前候选与远端实际状态                |
+| Marketing                  | [包级规范](../apps/marketing/AGENTS.md)、[包 README](../apps/marketing/README.md)、[manifest](../apps/marketing/package.json)                                                                                     | 读取本包 Next.js 文档，单独选择 docs/browser/性能等检查               |
 
 ## 专项工作与证据
 

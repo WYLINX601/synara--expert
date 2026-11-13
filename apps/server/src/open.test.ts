@@ -1,8 +1,11 @@
+import * as childProcess from "node:child_process";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { assertSuccess } from "@effect/vitest/utils";
 import { EDITORS } from "@synara/contracts";
 import { FileSystem, Path, Effect } from "effect";
+import { vi } from "vitest";
 
 import { launchDetached, resolveAvailableEditors, resolveEditorLaunch } from "./open";
 import {
@@ -12,20 +15,17 @@ import {
   resolveWindowsStorePackageInstallLocation,
 } from "./editorAppDiscovery";
 
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof childProcess>();
+  return { ...actual, execFileSync: vi.fn(actual.execFileSync) };
+});
+
 function encodeExpectedWindowsEditorUriPath(targetPath: string): string {
   return targetPath
     .replaceAll("\\", "/")
     .split("/")
     .map((segment) => encodeURIComponent(segment).replaceAll("%3A", ":"))
     .join("/");
-}
-
-function shellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function fakePowerShellAppxScript(installLocation: string): string {
-  return `#!/bin/sh\nprintf '%s\\n' ${shellSingleQuote(installLocation)}\n`;
 }
 
 it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
@@ -455,36 +455,35 @@ it.layer(NodeServices.layer)("resolveAvailableEditors", (it) => {
     }),
   );
 
-  it.effect("returns VS Code when the Windows Store package is installed without a CLI", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const programFiles = yield* fs.makeTempDirectoryScoped({ prefix: "synara-vscode-store-" });
-      const binDir = path.join(programFiles, "bin");
-      const installLocation = path.join(
-        programFiles,
-        "WindowsApps",
-        "Microsoft.VisualStudioCode_1.0.0.0_x64__8wekyb3d8bbwe",
+  it("returns VS Code when the Windows Store package is installed without a CLI", () => {
+    const installLocation =
+      "C:\\Program Files\\WindowsApps\\Microsoft.VisualStudioCode_1.0.0.0_x64__8wekyb3d8bbwe";
+    clearWindowsStorePackageDiscoveryCache();
+    try {
+      // Keep discovery independent of the host's process startup time and shell.
+      vi.mocked(childProcess.execFileSync).withImplementation(
+        (_file, args) => {
+          if (
+            Array.isArray(args) &&
+            String(args[2]).includes("Microsoft.VisualStudioCode_8wekyb3d8bbwe")
+          ) {
+            return `${installLocation}\r\n`;
+          }
+          throw new Error("not registered");
+        },
+        () => {
+          const editors = resolveAvailableEditors("win32", {
+            PATH: "",
+            PATHEXT: ".COM;.EXE;.BAT;.CMD",
+          });
+          assert.deepEqual(editors, ["vscode"]);
+        },
       );
-      yield* fs.makeDirectory(installLocation, { recursive: true });
-      yield* fs.makeDirectory(binDir, { recursive: true });
-      yield* fs.writeFileString(
-        path.join(binDir, "powershell.exe"),
-        fakePowerShellAppxScript(installLocation),
-      );
-      yield* fs.chmod(path.join(binDir, "powershell.exe"), 0o755);
-
+    } finally {
+      vi.mocked(childProcess.execFileSync).mockReset();
       clearWindowsStorePackageDiscoveryCache();
-
-      const editors = resolveAvailableEditors("win32", {
-        PATH: binDir,
-        PATHEXT: ".COM;.EXE;.BAT;.CMD",
-        ProgramFiles: programFiles,
-      });
-
-      assert.equal(editors.includes("vscode"), true);
-    }),
-  );
+    }
+  });
 
   it("resolves Windows Store package locations through matching AppX registration", () => {
     const editor = EDITORS.find((candidate) => candidate.id === "vscode");

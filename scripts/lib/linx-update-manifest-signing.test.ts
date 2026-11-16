@@ -40,6 +40,7 @@ function manifestBytes(keyId: string): Buffer {
     JSON.stringify({
       schemaVersion: 1,
       productId: "linx",
+      installIdentity: "com.wylinx.linx",
       channel: "stable",
       platform: "darwin",
       arch: "arm64",

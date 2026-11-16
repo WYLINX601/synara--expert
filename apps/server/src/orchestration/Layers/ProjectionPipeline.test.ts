@@ -5382,6 +5382,54 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
     }),
   );
 
+  it.effect("persists additional-folder metadata and preserves it on unrelated updates", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const projectId = ProjectId.makeUnsafe("project-folder-relocation");
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.makeUnsafe("folder-create"),
+        projectId,
+        title: "Folders",
+        workspaceRoot: "/old/primary",
+        additionalFolders: ["/old/extra"],
+        createdAt: new Date().toISOString(),
+      });
+      yield* engine.dispatch({
+        type: "project.meta.update",
+        commandId: CommandId.makeUnsafe("folder-relocate"),
+        projectId,
+        workspaceRoot: "/new/primary",
+        additionalFolders: ["/new/extra", "/external"],
+      });
+      yield* engine.dispatch({
+        type: "project.meta.update",
+        commandId: CommandId.makeUnsafe("folder-rename"),
+        projectId,
+        title: "Renamed",
+      });
+      assert.deepEqual(
+        (yield* engine.getReadModel()).projects.find((project) => project.id === projectId)
+          ?.additionalFolders,
+        ["/new/extra", "/external"],
+      );
+      assert.deepEqual(
+        yield* sql`SELECT additional_folders_json AS folders FROM projection_projects WHERE project_id = ${projectId}`,
+        [{ folders: '["/new/extra","/external"]' }],
+      );
+      yield* engine.dispatch({
+        type: "project.meta.update",
+        commandId: CommandId.makeUnsafe("folder-clear"),
+        projectId,
+        additionalFolders: [],
+      });
+      assert.deepEqual(
+        yield* sql`SELECT additional_folders_json AS folders FROM projection_projects WHERE project_id = ${projectId}`,
+        [{ folders: "[]" }],
+      );
+    }),
+  );
   it.effect("projects persist updated scripts from project.meta.update", () =>
     Effect.gen(function* () {
       const engine = yield* OrchestrationEngineService;

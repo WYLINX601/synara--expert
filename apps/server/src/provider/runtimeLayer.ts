@@ -36,6 +36,9 @@ import { OrchestrationProjectionSnapshotQueryLive } from "../orchestration/Layer
 import type { OmpNativeExpertProtocolFactory } from "./acp/OmpNativeExpertProtocol";
 import type { OmpNativeExpertBuild } from "./acp/OmpNativeExpertTransport";
 import ompNativeExpertLock from "../../../../workbench/omp-native-expert.lock.json" with { type: "json" };
+import { ProviderService } from "./Services/ProviderService";
+import { ProviderValidationError } from "./Errors";
+import { guardMaintenanceMethods } from "../serverMaintenance";
 
 const nativeExpertBuildManifest: {
   readonly binary: { readonly sha256: string } | null;
@@ -167,7 +170,36 @@ export function makeServerProviderLayer(
       Layer.provide(Layer.succeed(ServerSettingsService, serverSettings)),
     );
     return Layer.mergeAll(
-      providerServiceLayer,
+      Layer.effect(
+        ProviderService,
+        Effect.gen(function* () {
+          const provider = yield* ProviderService;
+          return guardMaintenanceMethods(
+            provider,
+            [
+              "startSession",
+              "startSessionWithOutcome",
+              "sendTurn",
+              "steerTurn",
+              "startReview",
+              "forkThread",
+              "importExternalThread",
+              "startClaudeCompaction",
+              "compactThread",
+              "rollbackConversation",
+              "backgroundTask",
+              "steerSubagent",
+              "respondToRequest",
+              "respondToUserInput",
+            ],
+            (method) =>
+              new ProviderValidationError({
+                operation: String(method),
+                issue: "Update maintenance admission is closed.",
+              }),
+          );
+        }),
+      ).pipe(Layer.provideMerge(providerServiceLayer)),
       providerDiscoveryLayer,
       adapterRegistryLayer,
       providerSessionDirectoryLayer,

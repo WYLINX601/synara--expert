@@ -17,8 +17,13 @@ import type {
 import type { QueryClient } from "@tanstack/react-query";
 import { ensureNativeApi } from "~/nativeApi";
 import {
+  assertComposerPersistenceAllowed,
+  beginComposerPersistenceOperation,
+} from "~/lib/composerPersistenceActivity";
+import {
   getWorkspaceEditorSession,
   getUnsavedWorkspaceEditorDocuments,
+  isWorkspaceEditorUpdateFrozen,
   type WorkspaceEditorSession,
 } from "~/lib/workspaceEditorSession";
 import { projectReadFileQueryOptions } from "~/lib/projectReactQuery";
@@ -144,9 +149,11 @@ export function acquireEditorModel(
       dispose: () => undefined,
     };
     let changingFromSession = false;
+    let acceptedValue = model.getValue();
     const unsubscribe = session?.subscribe(() => {
       const state = session.getSnapshot();
       if (!state.key || model.isDisposed()) return;
+      acceptedValue = state.value;
       if (state.value === model.getValue()) {
         owned.sourceVersion = state.version;
         return;
@@ -163,8 +170,18 @@ export function acquireEditorModel(
     });
     const change = model.onDidChangeContent(() => {
       if (changingFromSession) return;
+      if (isWorkspaceEditorUpdateFrozen()) {
+        changingFromSession = true;
+        try {
+          model.setValue(session?.getSnapshot().value ?? acceptedValue);
+        } finally {
+          changingFromSession = false;
+        }
+        return;
+      }
       const contents = model.getValue();
       session?.change(contents);
+      acceptedValue = contents;
       owned.listeners.forEach((listener) => listener(contents));
     });
     owned.dispose = () => {
@@ -535,17 +552,28 @@ export async function applyEditorEdits(
   source: EditorModelEntry,
   files: readonly EditorFileEdits[],
 ) {
-  const targets = await prepareEditorEdits(source, files);
-  // Recheck after awaiting preparation: another surface can edit in that microtask gap.
-  // No await between this validation and mutation; native writes still check disk versions.
-  validateEditorEditTargets(targets);
-  for (const { target, file } of targets) {
-    target.model.pushStackElement();
-    target.model.pushEditOperations(
-      [],
-      file.edits.map((edit) => ({ range: offsetRange(target.model, edit), text: edit.newText })),
-      () => null,
-    );
-    target.model.pushStackElement();
+  assertComposerPersistenceAllowed();
+  if (isWorkspaceEditorUpdateFrozen())
+    throw new Error("Editing is paused while preparing the update.");
+  const finish = beginComposerPersistenceOperation();
+  try {
+    const targets = await prepareEditorEdits(source, files);
+    assertComposerPersistenceAllowed();
+    if (isWorkspaceEditorUpdateFrozen())
+      throw new Error("Editing is paused while preparing the update.");
+    // Recheck after awaiting preparation: another surface can edit in that microtask gap.
+    // No await between this validation and mutation; native writes still check disk versions.
+    validateEditorEditTargets(targets);
+    for (const { target, file } of targets) {
+      target.model.pushStackElement();
+      target.model.pushEditOperations(
+        [],
+        file.edits.map((edit) => ({ range: offsetRange(target.model, edit), text: edit.newText })),
+        () => null,
+      );
+      target.model.pushStackElement();
+    }
+  } finally {
+    finish();
   }
 }

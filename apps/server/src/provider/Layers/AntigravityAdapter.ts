@@ -58,6 +58,7 @@ import {
   type AntigravityAdapterShape,
 } from "../Services/AntigravityAdapter.ts";
 import {
+  PROVIDER_ADAPTER_LIVE_TURN_DIFF_PATCH,
   PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY,
   type ProviderThreadSnapshot,
 } from "../Services/ProviderAdapter.ts";
@@ -3012,7 +3013,7 @@ const makeAntigravityAdapter = (dependencies: AntigravityAdapterDependencies = {
         sessionModelSwitch: "restart-session",
         conversationRollback: "restart-session",
         supportsRuntimeModelList: true,
-        supportsLiveTurnDiffPatch: false,
+        supportsLiveTurnDiffPatch: PROVIDER_ADAPTER_LIVE_TURN_DIFF_PATCH.antigravity,
       },
       startSession,
       sendTurn,

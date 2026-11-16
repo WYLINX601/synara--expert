@@ -75,6 +75,8 @@ function extensionFor(input: {
 
 export function reserveManagedAttachmentUpload(input: {
   readonly attachmentId?: string;
+  /** Internal offline import only: exclusive source/DB locks, no cleanup workers or producers. */
+  readonly offlineReplay?: true | undefined;
   readonly type: "image" | "file";
   readonly threadId: string;
   readonly name: string;
@@ -119,6 +121,7 @@ export function reserveManagedAttachmentUpload(input: {
       reservedBytes: input.reservedBytes,
       relativePath,
       now: input.now,
+      offlineReplay: input.offlineReplay,
     });
     if (result.status === "quota-exceeded") {
       return yield* Effect.fail(
@@ -142,6 +145,8 @@ export function reserveManagedAttachmentUpload(input: {
 
 export function persistReservedManagedAttachment(input: {
   readonly reservation: ManagedAttachmentBlob;
+  /** Requires a successful offline reservation under the same exclusive import locks. */
+  readonly offlineReplay?: true | undefined;
   readonly bytes: Uint8Array;
   readonly attachmentsDir: string;
   readonly now: string;
@@ -188,6 +193,14 @@ export function persistReservedManagedAttachment(input: {
           ensurePrivateDirectorySync(input.attachmentsDir);
           ensurePrivateDirectorySync(stagingDir);
           ensurePrivateDirectorySync(path.dirname(finalPath));
+          if (input.offlineReplay) {
+            // A crashed importer may leave its private partial behind. Only the
+            // successfully re-reserved identity is ours; retain the final blob
+            // until the replacement is synced and atomically renamed below.
+            await fs.unlink(temporaryPath).catch((cause: NodeJS.ErrnoException) => {
+              if (cause.code !== "ENOENT") throw cause;
+            });
+          }
           const handle = await fs.open(temporaryPath, "wx", 0o600);
           try {
             await handle.writeFile(input.bytes);

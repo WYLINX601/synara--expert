@@ -279,27 +279,39 @@ export function makeDispatchCommandNormalizer<E>(options: DispatchCommandNormali
       };
     }
 
-    if (input.command.type === "project.meta.update" && input.command.workspaceRoot !== undefined) {
-      const requestedWorkspaceRoot = yield* resolveGroupWorkspaceRoot({
-        kind: input.command.kind,
-        title: input.command.title,
-        workspaceRoot: input.command.workspaceRoot,
-        excludeProjectId: input.command.projectId,
-      });
-      const workspaceRoot = yield* options.canonicalizeProjectWorkspaceRoot(
-        requestedWorkspaceRoot,
-        {
+    if (input.command.type === "project.meta.update") {
+      const additionalFolders =
+        input.command.additionalFolders === undefined
+          ? undefined
+          : yield* Effect.forEach(
+              input.command.additionalFolders,
+              (folder) => options.canonicalizeProjectWorkspaceRoot(folder),
+              { concurrency: 1 },
+            );
+      let workspaceRoot: string | undefined;
+      if (input.command.workspaceRoot !== undefined) {
+        const requestedWorkspaceRoot = yield* resolveGroupWorkspaceRoot({
+          kind: input.command.kind,
+          title: input.command.title,
+          workspaceRoot: input.command.workspaceRoot,
+          excludeProjectId: input.command.projectId,
+        });
+        workspaceRoot = yield* options.canonicalizeProjectWorkspaceRoot(requestedWorkspaceRoot, {
           createIfMissing: input.command.createWorkspaceRootIfMissing === true,
-        },
-      );
+        });
+      }
       const command = {
         ...input.command,
-        workspaceRoot,
+        ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+        ...(additionalFolders !== undefined ? { additionalFolders } : {}),
         createWorkspaceRootIfMissing: input.command.createWorkspaceRootIfMissing === true,
       } satisfies OrchestrationCommand;
       return {
         command,
-        prepareWorkspaceRoot: deferredPrepareWorkspaceRoot(input.command, workspaceRoot),
+        prepareWorkspaceRoot:
+          workspaceRoot === undefined
+            ? null
+            : deferredPrepareWorkspaceRoot(input.command, workspaceRoot),
       };
     }
 

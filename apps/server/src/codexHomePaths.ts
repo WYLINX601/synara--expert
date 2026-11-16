@@ -5,17 +5,18 @@
 //          allowlist, image-path predictions, etc.) stay in sync with the actual
 //          runtime so they don't 404 paths Codex legitimately wrote.
 // Layer: Server utility (no IO; safe to import from anywhere)
-// Exports: overlay constants, base/overlay home resolvers, write-home + allowlist helpers.
+// Exports: overlay recognition, write-home + allowlist helpers.
 
-import { createHash } from "node:crypto";
-import { homedir } from "node:os";
 import path from "node:path";
 
-import { expandProviderAccountHomePath } from "./providerAccountHomePath.ts";
-
-export const SYNARA_CODEX_HOME_OVERLAY_DIR = "codex-home-overlay";
-export const SYNARA_CODEX_HOME_ACCOUNT_OVERLAYS_DIR = "accounts";
-export const SYNARA_CODEX_HOME_FIXED_EXPERT_DIR = "fixed-expert-native";
+import {
+  resolveBaseCodexHomePath,
+  SYNARA_CODEX_HOME_OVERLAY_DIR,
+  SYNARA_CODEX_HOME_ACCOUNT_OVERLAYS_DIR,
+  SYNARA_CODEX_HOME_FIXED_EXPERT_DIR,
+  resolveSynaraCodexHomeOverlayPath,
+  resolveCodexHomeOverlayAccountSegment,
+} from "@synara/shared/codexHomeOverlayPaths";
 
 export interface CodexHomePathsInput {
   readonly env?: NodeJS.ProcessEnv;
@@ -23,32 +24,6 @@ export interface CodexHomePathsInput {
   readonly shadowHomePath?: string;
   readonly accountId?: string;
   readonly fixedExpertNativeDiscovery?: boolean;
-}
-
-export function resolveBaseCodexHomePath(
-  env: NodeJS.ProcessEnv,
-  explicitHomePath?: string,
-): string {
-  return expandProviderAccountHomePath(
-    explicitHomePath?.trim() || env.CODEX_HOME?.trim() || path.join(homedir(), ".codex"),
-  );
-}
-
-export function resolveSynaraCodexHomeOverlayPath(
-  env: NodeJS.ProcessEnv,
-  sourceHomePath: string,
-  accountSegment?: string,
-  fixedExpertNativeDiscovery = false,
-): string {
-  const runtimeHome = env.SYNARA_HOME?.trim();
-  const overlayRoot = runtimeHome || path.join(path.dirname(sourceHomePath), ".synara", "runtime");
-  const overlayHome = path.join(overlayRoot, SYNARA_CODEX_HOME_OVERLAY_DIR);
-  const accountOverlay = accountSegment
-    ? path.join(overlayHome, SYNARA_CODEX_HOME_ACCOUNT_OVERLAYS_DIR, accountSegment)
-    : overlayHome;
-  return fixedExpertNativeDiscovery
-    ? path.join(accountOverlay, SYNARA_CODEX_HOME_FIXED_EXPERT_DIR)
-    : accountOverlay;
 }
 
 /** Recognizes Synara overlay path shapes; callers must validate ownership markers and links. */
@@ -83,27 +58,6 @@ export function isSynaraCodexHomeOverlayPath(
   return (
     parts.length === 2 || (parts.length === 3 && parts[2] === SYNARA_CODEX_HOME_FIXED_EXPERT_DIR)
   );
-}
-
-export function resolveCodexHomeOverlayAccountSegment(
-  input: Pick<CodexHomePathsInput, "accountId" | "homePath" | "shadowHomePath">,
-): string | undefined {
-  const accountId = input.accountId?.trim();
-  const shadowHomePath = input.shadowHomePath?.trim();
-  if ((!accountId || accountId === "default") && !shadowHomePath) {
-    return undefined;
-  }
-
-  const label = (accountId || "shadow").replace(/[^A-Za-z0-9_-]+/g, "-").slice(0, 32) || "codex";
-  const digest = createHash("sha256")
-    .update(accountId ?? "")
-    .update("\0")
-    .update(input.homePath ?? "")
-    .update("\0")
-    .update(shadowHomePath ?? "")
-    .digest("hex")
-    .slice(0, 12);
-  return `${label}-${digest}`;
 }
 
 /**

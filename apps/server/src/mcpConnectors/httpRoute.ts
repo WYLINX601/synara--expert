@@ -10,7 +10,7 @@
  *
  * @module mcpConnectors/httpRoute
  */
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Result } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import { readMcpJsonBody } from "../agentGateway/httpRoute.ts";
@@ -21,6 +21,7 @@ import { MCP_CONNECTOR_OAUTH_CALLBACK_PATH } from "./Layers/McpConnectors.ts";
 import type { McpConnectorProxyResult } from "./proxy.ts";
 import type { McpConnectorCallbackOutcome } from "./runtime.ts";
 import { McpConnectors } from "./Services/McpConnectors.ts";
+import { serverMaintenanceAdmission } from "../serverMaintenance.ts";
 
 const CONNECTOR_ROUTE = `${AGENT_GATEWAY_CONNECTORS_PATH}/:connectorId`;
 
@@ -76,12 +77,26 @@ const callbackRoute = HttpRouter.add(
     const url = HttpServerRequest.toURL(request);
     if (!url) return HttpServerResponse.text("Bad Request", { status: 400 });
     const param = (name: string) => url.searchParams.get(name) ?? undefined;
-    const outcome = yield* connectors.completeAuthorization({
-      state: param("state"),
-      code: param("code"),
-      error: param("error"),
-      errorDescription: param("error_description"),
-    });
+    const admitted = yield* serverMaintenanceAdmission
+      .guard(
+        Effect.suspend(() =>
+          connectors.completeAuthorization({
+            state: param("state"),
+            code: param("code"),
+            error: param("error"),
+            errorDescription: param("error_description"),
+          }),
+        ),
+        () => "maintenance-closed" as const,
+      )
+      .pipe(Effect.result);
+    if (Result.isFailure(admitted)) {
+      return HttpServerResponse.text("Update maintenance admission is closed.", {
+        status: 503,
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+    const outcome = admitted.success;
     return HttpServerResponse.text(renderConnectorCallbackPage(outcome), {
       status: outcome.ok ? 200 : 400,
       contentType: "text/html; charset=utf-8",

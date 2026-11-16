@@ -84,6 +84,12 @@ function makeProviderServiceStub(input: {
   readonly stopRuntimeSession?: NonNullable<ProviderServiceShape["stopRuntimeSession"]>;
 }): ProviderServiceShape {
   return {
+    getMaintenanceActivity: Effect.succeed({
+      dispatches: 0,
+      nativeTasks: 0,
+      runtimeCleanups: 0,
+      pendingRuntimeEvents: 0,
+    }),
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
     steerTurn: () => unsupported(),

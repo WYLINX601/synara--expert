@@ -21,12 +21,12 @@ describe("resolveElectronUpdaterCacheDirName", () => {
     ).toBe("Synara-updater");
   });
 
-  it("derives distinct fallback update-cache names from each Workbench app identity", () => {
+  it("derives distinct fallback update-cache names from each Linx app identity", () => {
     const names = (["workbench", "workbench-preview"] as const).map((flavor) =>
       resolveElectronUpdaterCacheDirName(null, synaraDesktopIdentity(flavor).displayName),
     );
     expect(new Set(names).size).toBe(2);
-    expect(names).toEqual(["Personal Workbench", "Personal Workbench Preview"]);
+    expect(names).toEqual(["Linx", "Linx Preview"]);
   });
 });
 

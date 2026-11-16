@@ -10,7 +10,7 @@ import {
   buildProviderChildEnvironment,
   providerCredentialKeysFor,
 } from "../providerChildEnvironment";
-import { expandProviderAccountHomePath } from "../providerAccountHomePath";
+import { expandProviderAccountHomePath } from "@synara/shared/providerAccountHomePath";
 import { providerHomeEnvironment } from "../provider/providerProcessEnv";
 import { ensurePrivateDirectorySync } from "../privatePathPermissions";
 import { runProcess } from "../processRunner";

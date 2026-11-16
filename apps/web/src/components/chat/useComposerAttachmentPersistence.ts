@@ -7,6 +7,11 @@ import {
 } from "../../composerDraftStore";
 import { composerImageBlobKey, persistComposerImageBlob } from "../../lib/composerImageBlobStore";
 import { readFileAsDataUrl } from "../../lib/composerSend";
+import {
+  assertComposerPersistenceAllowed,
+  beginComposerPersistenceOperation,
+  isComposerPersistenceUpdateFrozen,
+} from "../../lib/composerPersistenceActivity";
 
 // Shared by the live-composer and prompt-history attachment sync effects:
 // AppSnap images persist their bytes as IndexedDB blobs (reusing an existing
@@ -17,6 +22,8 @@ async function stagePersistedComposerImageAttachments(input: {
   images: ReadonlyArray<ComposerImageAttachment>;
   getPersistedAttachments: () => PersistedComposerImageAttachment[];
 }): Promise<PersistedComposerImageAttachment[]> {
+  assertComposerPersistenceAllowed();
+  const finish = beginComposerPersistenceOperation();
   try {
     const existingPersistedById = new Map(
       input.getPersistedAttachments().map((attachment) => [attachment.id, attachment]),
@@ -68,6 +75,8 @@ async function stagePersistedComposerImageAttachments(input: {
     return input
       .getPersistedAttachments()
       .filter((attachment) => currentImageIds.has(attachment.id));
+  } finally {
+    finish();
   }
 }
 interface ComposerAttachmentPersistenceInput {
@@ -91,6 +100,7 @@ export function useComposerAttachmentPersistence({
     (store) => store.syncPromptHistorySavedDraftPersistedAttachments,
   );
   useEffect(() => {
+    if (isComposerPersistenceUpdateFrozen()) return;
     let cancelled = false;
     void (async () => {
       if (composerImages.length === 0) {
@@ -129,6 +139,7 @@ export function useComposerAttachmentPersistence({
   ]);
 
   useEffect(() => {
+    if (isComposerPersistenceUpdateFrozen()) return;
     if (
       !composerPromptHistorySavedDraftImages ||
       composerPromptHistorySavedDraftImages.length === 0

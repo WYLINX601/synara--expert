@@ -23,6 +23,7 @@ import {
   INLINE_TERMINAL_CONTEXT_PLACEHOLDER,
   insertInlineTerminalContextPlaceholder,
 } from "./lib/terminalContext";
+import { composerPersistenceOperationCount } from "./lib/composerPersistenceActivity";
 
 describe("composerDraftStore persisted-state hydration", () => {
   it("round-trips an exact Suite selection and clears it only for a new independent Expert choice", () => {
@@ -984,6 +985,71 @@ describe("createDeferredPersistStorage", () => {
     expect(partialize).not.toHaveBeenCalled();
     expect(base.setItem).not.toHaveBeenCalled();
     expect(base.removeItem).toHaveBeenCalledWith("key");
+  });
+
+  it("retains failed deferred localStorage bytes as pending until a later successful flush", () => {
+    const baseline = composerPersistenceOperationCount();
+    const bytes = new Map<string, string>();
+    let fail = true;
+    const storage = createDeferredPersistStorage<{ value: string }>({
+      getStorage: () => ({
+        getItem: (key) => bytes.get(key) ?? null,
+        setItem: (key, value) => {
+          if (fail) throw new Error("Quota exceeded");
+          bytes.set(key, value);
+        },
+        removeItem: (key) => {
+          bytes.delete(key);
+        },
+      }),
+      partialize: (state) => state,
+    });
+    storage.setItem("durable", { state: { value: "do not discard me" }, version: 1 });
+    expect(composerPersistenceOperationCount()).toBe(baseline + 1);
+    expect(() => storage.flush()).toThrow("Quota");
+    expect(bytes.has("durable")).toBe(false);
+    expect(composerPersistenceOperationCount()).toBe(baseline + 1);
+    fail = false;
+    storage.flush();
+    expect(JSON.parse(bytes.get("durable")!).state.value).toBe("do not discard me");
+    expect(composerPersistenceOperationCount()).toBe(baseline);
+  });
+
+  it("keeps asynchronous writes and superseding pending snapshots outstanding until both commit", async () => {
+    const baseline = composerPersistenceOperationCount();
+    const bytes = new Map<string, string>();
+    const commits: (() => void)[] = [];
+    const storage = createDeferredPersistStorage<{ value: number }>({
+      getStorage: () => ({
+        getItem: (key) => bytes.get(key) ?? null,
+        setItem: (key, value) => {
+          const { promise, resolve } = Promise.withResolvers<void>();
+          commits.push(() => {
+            bytes.set(key, value);
+            resolve();
+          });
+          return promise;
+        },
+        removeItem: (key) => {
+          bytes.delete(key);
+        },
+      }),
+      partialize: (state) => state,
+    });
+    storage.setItem("durable", { state: { value: 1 }, version: 1 });
+    storage.flush();
+    storage.setItem("durable", { state: { value: 2 }, version: 1 });
+    storage.flush();
+    expect(commits).toHaveLength(1);
+    expect(composerPersistenceOperationCount()).toBe(baseline + 1);
+    commits[0]!();
+    await Promise.resolve();
+    expect(composerPersistenceOperationCount()).toBe(baseline + 1);
+    storage.flush();
+    commits[1]!();
+    await Promise.resolve();
+    expect(JSON.parse(bytes.get("durable")!).state.value).toBe(2);
+    expect(composerPersistenceOperationCount()).toBe(baseline);
   });
 });
 

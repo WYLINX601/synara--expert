@@ -424,6 +424,7 @@ final class AppSnapCaptureCoordinator {
     private let captureFeedback = AppSnapCaptureFeedback()
     private let queue = DispatchQueue(label: "dev.synara.appsnap.capture")
     private var activeCapture: OneFrameWindowCapture?
+    private var updateMaintenanceID: String?
 
     init(
         emitter: NDJSONEmitter,
@@ -435,9 +436,27 @@ final class AppSnapCaptureCoordinator {
         self.excludedBundleIdentifier = excludedBundleIdentifier
     }
 
+    // The same serial queue orders gestures, writes, and this admission barrier.
+    // An existing capture is never cancelled; busy refuses the update.
+    func handleUpdateMaintenance(requestId: String, pause: Bool) {
+        queue.async { [self] in
+            if pause {
+                if updateMaintenanceID == nil { updateMaintenanceID = requestId }
+            } else if updateMaintenanceID == requestId {
+                updateMaintenanceID = nil
+            }
+            emitter.emit([
+                "type": "update-maintenance",
+                "requestId": requestId,
+                "paused": updateMaintenanceID == requestId,
+                "ready": pause && updateMaintenanceID == requestId && activeCapture == nil,
+            ])
+        }
+    }
+
     func handleGesture() {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.updateMaintenanceID == nil else { return }
             // Resolve the target before notifying Electron. That prevents any focus
             // response to `triggered` from changing which application is captured.
             let selection = DispatchQueue.main.sync {
@@ -483,6 +502,13 @@ final class AppSnapCaptureCoordinator {
     func handleCaptureWindow(windowID: CGWindowID, requestId: String) {
         queue.async { [weak self] in
             guard let self else { return }
+            if self.updateMaintenanceID != nil {
+                self.beginCapture(
+                    selection: .failure(AppSnapFailure(code: "update-maintenance", message: "AppSnap is paused for installation.")),
+                    requestedID: requestId
+                )
+                return
+            }
             // Resolve the target before notifying Electron. That prevents any focus
             // response to `triggered` from changing which application is captured.
             let selection = DispatchQueue.main.sync {
@@ -501,6 +527,14 @@ final class AppSnapCaptureCoordinator {
     ) {
         let id = requestedID ?? UUID().uuidString.lowercased()
         let capturedAt = appSnapTimestamp()
+        guard updateMaintenanceID == nil else {
+            emitter.emitError(
+                AppSnapFailure(code: "update-maintenance", message: "AppSnap is paused for installation."),
+                capturedAt: capturedAt,
+                id: id
+            )
+            return
+        }
 
         // Overlapping chords report only the overlap error; emitting `triggered`
         // first would mis-order protocol semantics for consumers correlating ids.

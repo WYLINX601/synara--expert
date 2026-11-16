@@ -1,6 +1,6 @@
 // FILE: providerAccountHomePath.ts
 // Purpose: Expand account home shorthand consistently on Unix and Windows.
-// Layer: Shared server path utility for provider-instance homes.
+// Layer: Shared runtime path utility for provider-instance homes.
 
 import { homedir } from "node:os";
 import path from "node:path";

@@ -40,6 +40,10 @@ import { persistState, readPersistedState, rememberProjectState } from "./storeP
 import { initialState, type AppState } from "./storeState";
 import { persistThreadVisitedState } from "./threadVisitedPersistence";
 import type { Project, ThreadWorkspacePatch } from "./types";
+import {
+  beginComposerPersistenceOperation,
+  isComposerPersistenceUpdateFrozen,
+} from "./lib/composerPersistenceActivity";
 
 type ReadModelThread = OrchestrationReadModel["threads"][number];
 
@@ -60,17 +64,27 @@ export {
 } from "./storeProjection";
 export { applyOrchestrationEvents, applyOrchestrationEventsHotPath } from "./storeEventReducer";
 
+let finishAppStatePersistence: (() => void) | undefined;
+function writeAppStatePersistence(state: AppState, force: boolean): void {
+  const projectsSaved = persistState(state);
+  const visitsSaved = persistThreadVisitedState(state, { force });
+  if (!projectsSaved || !visitsSaved || state !== useStore.getState()) return;
+  debouncedPersistState.cancel();
+  const finish = finishAppStatePersistence;
+  finishAppStatePersistence = undefined;
+  finish?.();
+}
 const debouncedPersistState = new Debouncer(
-  (state: AppState) => {
-    persistState(state);
-    persistThreadVisitedState(state);
-  },
+  (state: AppState) => writeAppStatePersistence(state, false),
   { wait: 500 },
 );
 
 export function persistAppStateNow(state: AppState = useStore.getState()): void {
-  persistState(state);
-  persistThreadVisitedState(state, { force: true });
+  // A held update lease already proved the latest state durable. Do not start
+  // another metadata producer from beforeunload during the intentional handoff.
+  if (isComposerPersistenceUpdateFrozen()) return;
+  finishAppStatePersistence ??= beginComposerPersistenceOperation();
+  writeAppStatePersistence(state, true);
 }
 export function markThreadVisited(
   state: AppState,
@@ -405,6 +419,7 @@ export const useStore = create<AppStore>((set) => ({
 // produces a new array), so skip them on the streaming hot path where only thread slices move.
 let lastRememberedProjects: readonly Project[] | undefined;
 useStore.subscribe((state) => {
+  finishAppStatePersistence ??= beginComposerPersistenceOperation();
   if (state.projects !== lastRememberedProjects) {
     lastRememberedProjects = state.projects;
     rememberProjectState(state.projects);

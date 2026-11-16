@@ -182,27 +182,28 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
-    it.effect.each(["workbench", "workbench-preview"] as const)(
-      "keeps watched %s desktop home separate",
-      (flavor) =>
-        Effect.gen(function* () {
-          const env = yield* createDevRunnerEnv({
-            mode: "dev:desktop",
-            baseEnv: { SYNARA_DESKTOP_FLAVOR: flavor },
-            serverOffset: 0,
-            webOffset: 0,
-            synaraHome: undefined,
-            authToken: undefined,
-            noBrowser: undefined,
-            autoBootstrapProjectFromCwd: undefined,
-            logWebSocketEvents: undefined,
-            host: undefined,
-            port: undefined,
-            devUrl: undefined,
-          });
+    it.effect.each([
+      { flavor: "workbench", homeDirectory: ".linx" },
+      { flavor: "workbench-preview", homeDirectory: ".linx-preview" },
+    ])("keeps watched $flavor desktop home separate", ({ flavor, homeDirectory }) =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev:desktop",
+          baseEnv: { SYNARA_DESKTOP_FLAVOR: flavor },
+          serverOffset: 0,
+          webOffset: 0,
+          synaraHome: undefined,
+          authToken: undefined,
+          noBrowser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+        });
 
-          assert.equal(env.SYNARA_HOME, resolve(homedir(), `.synara-${flavor}`));
-        }),
+        assert.equal(env.SYNARA_HOME, resolve(homedir(), homeDirectory));
+      }),
     );
 
     it.effect("honors an explicit data home for a Workbench flavor", () =>

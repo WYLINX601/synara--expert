@@ -112,10 +112,19 @@ export interface PersistedProviderSessionProfile {
   readonly enableComputerControl: boolean;
 }
 
+export interface ProviderMaintenanceActivity {
+  readonly dispatches: number;
+  readonly nativeTasks: number;
+  readonly runtimeCleanups: number;
+  readonly pendingRuntimeEvents: number;
+}
+
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
 export interface ProviderServiceShape {
+  /** Canonical native ownership, including work absent from adapter session listings. */
+  readonly getMaintenanceActivity: Effect.Effect<ProviderMaintenanceActivity>;
   readonly previewExpert?: (
     input: Pick<ExpertPreviewInput, "provider" | "providerInstanceId" | "cwd"> &
       Pick<ProviderExpertCompatibilityInput, "skills">,

@@ -79,6 +79,8 @@ import type {
 } from "../hubDeliverables.ts";
 
 export interface ProjectAgentServiceShape {
+  /** Live ownership observation; defects are unknown, never an idle fallback. Future timers are paused at admission. */
+  readonly getMaintenanceActivity: Effect.Effect<{ readonly digestGenerations: number }>;
   /** Host-only validation for new mentions; never an Agent configuration tool. */
   readonly resolveParticipatingExpert?: (
     input: { readonly projectId: ProjectId; readonly expertId: string },

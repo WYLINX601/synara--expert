@@ -13,7 +13,7 @@ import {
   DatabaseLifecycleLockedError,
   releaseDatabaseLifecycleLock,
   withDatabaseLifecycleLock,
-} from "./DatabaseLifecycleLock.ts";
+} from "@synara/shared/databaseLifecycleLock";
 import { makeSqlitePersistenceLive } from "./Layers/Sqlite.ts";
 import { restoreMarkedMigrationBackup } from "./MigrationBackup.ts";
 

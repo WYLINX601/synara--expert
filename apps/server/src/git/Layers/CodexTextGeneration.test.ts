@@ -9,7 +9,7 @@ import { expect, vi } from "vitest";
 import {
   resolveCodexHomeOverlayAccountSegment,
   resolveSynaraCodexHomeOverlayPath,
-} from "../../codexHomePaths.ts";
+} from "@synara/shared/codexHomeOverlayPaths";
 import { ServerConfig } from "../../config.ts";
 import {
   CodexTextGenerationLive,

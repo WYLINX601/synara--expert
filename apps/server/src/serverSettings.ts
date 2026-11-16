@@ -27,6 +27,7 @@ import {
   resolveModelSelectionInstanceId,
 } from "@synara/shared/providerInstances";
 import { applyServerSettingsPatch } from "@synara/shared/serverSettings";
+import { providerEnvironmentSecretName } from "@synara/shared/serverSecretFiles";
 import {
   Cause,
   Deferred,
@@ -85,20 +86,16 @@ export interface ServerSettingsSnapshot {
   readonly settings: ServerSettings;
 }
 
-const SERVER_SETTINGS_MIGRATION_VERSION = 3;
+export const SERVER_SETTINGS_MIGRATION_VERSION = 3;
 const PREVIOUS_GIT_TEXT_GENERATION_MODEL = "gpt-5.4-mini";
 const PREVIOUS_LUNA_GIT_TEXT_GENERATION_MODEL = "gpt-5.6-luna";
 const providerEnvironmentTextEncoder = new TextEncoder();
 const providerEnvironmentTextDecoder = new TextDecoder();
 
-function providerEnvironmentSecretName(input: {
+export function providerConfigSecretName(input: {
   readonly instanceId: string;
-  readonly name: string;
-}): string {
-  return `provider-env-${Buffer.from(input.instanceId, "utf8").toString("base64url")}-${Buffer.from(input.name, "utf8").toString("base64url")}`;
-}
-
-function providerConfigSecretName(input: { readonly instanceId: string; readonly key: string }) {
+  readonly key: string;
+}) {
   return `provider-config-${Buffer.from(input.instanceId, "utf8").toString("base64url")}-${Buffer.from(input.key, "utf8").toString("base64url")}`;
 }
 
@@ -315,7 +312,7 @@ function environmentByName(
   return byName;
 }
 
-const SENSITIVE_PROVIDER_INSTANCE_CONFIG_KEYS = new Set(["serverPassword"]);
+export const SENSITIVE_PROVIDER_INSTANCE_CONFIG_KEYS = new Set(["serverPassword"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -612,7 +609,7 @@ function migrateRemovedKiloSettings(settings: unknown): unknown {
   return migrated;
 }
 
-function decodeSettingsFromJson(settingsPath: string, raw: string) {
+export function decodeSettingsFromJson(settingsPath: string, raw: string) {
   try {
     const parsed = JSON.parse(raw) as unknown;
     const envelope =

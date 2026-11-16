@@ -10,7 +10,12 @@ vi.mock("~/lib/gitReactQuery", () => ({
   refreshGitAfterFileWrite: vi.fn().mockResolvedValue(undefined),
 }));
 import "./editorRuntime";
-import { getWorkspaceEditorSession } from "~/lib/workspaceEditorSession";
+import {
+  getWorkspaceEditorSession,
+  freezeWorkspaceEditorsForUpdate,
+  releaseWorkspaceEditorsForUpdate,
+} from "~/lib/workspaceEditorSession";
+import { composerPersistenceOperationCount } from "~/lib/composerPersistenceActivity";
 import {
   acquireEditorModel,
   applyEditorEdits,
@@ -64,6 +69,7 @@ beforeEach(() => {
   api.projects.writeFile.mockReset();
 });
 afterEach(() => {
+  releaseWorkspaceEditorsForUpdate("editor-maintenance", "fixed-digest");
   const entries = new Set(handles.splice(0).map((handle) => handle.entry));
   for (const entry of entries) {
     entry.session?.pause();
@@ -282,4 +288,39 @@ it("reports failed navigation reads without discarding partial results or retryi
   expect(entryForUri(editorUri(queryClient, "/project", "available.ts"))?.model.getValue()).toBe(
     "// available.ts",
   );
+});
+
+it("fences programmatic model edits and refactors while the update lease is held, then resumes editing on exact release", async () => {
+  const queryClient = client();
+  const entry = open(queryClient, "main.ts", "original");
+  expect(freezeWorkspaceEditorsForUpdate("editor-maintenance", "fixed-digest")).toBe(true);
+  entry.model.setValue("must not enter the buffer");
+  expect(entry.model.getValue()).toBe("original");
+  expect(entry.session?.getSnapshot().value).toBe("original");
+  await expect(
+    applyEditorEdits(entry, [edit("main.ts", "original", "blocked refactor")]),
+  ).rejects.toThrow("paused");
+  expect(api.projects.readFile).not.toHaveBeenCalled();
+  releaseWorkspaceEditorsForUpdate("editor-maintenance", "wrong-digest");
+  entry.model.setValue("still blocked");
+  expect(entry.model.getValue()).toBe("original");
+  releaseWorkspaceEditorsForUpdate("editor-maintenance", "fixed-digest");
+  entry.model.setValue("editing resumes");
+  expect(entry.session?.getSnapshot().value).toBe("editing resumes");
+});
+
+it("counts accepted refactor preparation and refuses its late mutation if a lease intervenes", async () => {
+  const queryClient = client();
+  const entry = open(queryClient, "main.ts", "original");
+  const read = Promise.withResolvers<ProjectReadFileResult>();
+  api.projects.readFile.mockReturnValue(read.promise);
+  const baseline = composerPersistenceOperationCount();
+  const pending = applyEditorEdits(entry, [edit("main.ts", "original", "late refactor")]);
+  expect(composerPersistenceOperationCount()).toBe(baseline + 1);
+  expect(freezeWorkspaceEditorsForUpdate("editor-maintenance", "fixed-digest")).toBe(true);
+  read.resolve(data("main.ts", "original"));
+  await expect(pending).rejects.toThrow("paused");
+  expect(entry.model.getValue()).toBe("original");
+  expect(entry.session?.dirty).toBe(false);
+  expect(composerPersistenceOperationCount()).toBe(baseline);
 });

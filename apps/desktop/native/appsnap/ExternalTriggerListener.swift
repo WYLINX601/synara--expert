@@ -12,6 +12,7 @@ final class ExternalTriggerListener {
     private let onTrigger: () -> Void
     private let onListWindows: (String) -> Void
     private let onCaptureWindow: (String, CGWindowID) -> Void
+    private let onUpdateMaintenance: (String, Bool) -> Void
     private var buffer = Data()
 
     init(
@@ -19,13 +20,15 @@ final class ExternalTriggerListener {
         emitsReady: Bool,
         onTrigger: @escaping () -> Void,
         onListWindows: @escaping (String) -> Void,
-        onCaptureWindow: @escaping (String, CGWindowID) -> Void
+        onCaptureWindow: @escaping (String, CGWindowID) -> Void,
+        onUpdateMaintenance: @escaping (String, Bool) -> Void
     ) {
         self.emitter = emitter
         self.emitsReady = emitsReady
         self.onTrigger = onTrigger
         self.onListWindows = onListWindows
         self.onCaptureWindow = onCaptureWindow
+        self.onUpdateMaintenance = onUpdateMaintenance
     }
 
     func start() {
@@ -101,6 +104,16 @@ final class ExternalTriggerListener {
             let requestId = parts[1]
             DispatchQueue.main.async { [onCaptureWindow] in
                 onCaptureWindow(requestId, CGWindowID(windowID))
+            }
+        case "pause-captures" where parts.count == 2:
+            let requestId = parts[1]
+            DispatchQueue.main.async { [onUpdateMaintenance] in
+                onUpdateMaintenance(requestId, true)
+            }
+        case "resume-captures" where parts.count == 2:
+            let requestId = parts[1]
+            DispatchQueue.main.async { [onUpdateMaintenance] in
+                onUpdateMaintenance(requestId, false)
             }
         default:
             // A well-formed `list-windows <id>` line always matches the case

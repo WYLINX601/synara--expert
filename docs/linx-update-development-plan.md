@@ -3,7 +3,7 @@
 版本：0.2（LU-00 协议与 LU-02 检查下载已实现；整体待实施与验收）  
 更新日期：2026-11-13  
 负责人角色：Winston / Architect；开发与验收由用户和 Hub 协调员安排。  
-状态：用户已授权在 `main` 推进开发、不创建 PR；LU-00 协议切片与 LU-02 检查/点击下载已提交。2026-11-13 选定全新 Linx 内部身份与受控 CI 签名；精确身份/迁移契约、发布源、公钥投放、辅助安装及真实升级尚未完成。本文不是已定稿的 BMad architecture spine，不代表发布、安装或产品验收通过。
+状态：用户已授权在 `main` 推进开发、不创建 PR；LU-00 协议切片与 LU-02 检查/点击下载已提交。2026-11-13 完整实施方案已批准，新身份和公开发布仓库已冻结，工作树已补入安装身份绑定与维护/安装契约；迁移、受控发布、辅助安装及真实升级仍在开发，不代表发布、安装或产品验收通过。
 
 ## 1. 结论与已确认范围
 
@@ -28,9 +28,10 @@
 - **D-05 [ADOPTED]**：首批仅 macOS Apple Silicon。Intel Mac、Windows、Linux 不属于本批交付承诺。
 - **D-06 [ADOPTED]**：不采用 Apple 付费 Developer ID 签名与公证作为本次分发前提。必要的 ad-hoc 代码签名与 Linx 自有更新清单签名不等同于 Apple 开发者认证。
 - **D-07 [ADOPTED]**：正式标签触发发布构建，公开 Release 前由维护者确认；普通源码 push 不发布。
-- **D-08 [ADOPTED，状态补记]**：逐项收敛设计，交付供工程师实现的方案。v0.2 编写时持久身份尚未选择；2026-11-13 已按 D-09 收敛方向，精确标识与迁移/恢复契约仍须冻结。
-- **D-09 [ADOPTED，2026-11-13]**：用户选择全面迁移到全新 Linx 内部身份，不沿用 Workbench 的 Bundle ID、home/profile、scheme 或凭据命名空间。先明确各标识、受控单向迁移和恢复方案；选择方向不等于已执行或批准操作真实数据。
+- **D-08 [ADOPTED，状态补记]**：逐项收敛设计，交付供工程师实现的方案。v0.2 编写时持久身份尚未选择；2026-11-13 已批准完整剩余方案，保留 LU-00～05 与全部 12 项验收，不把部分开发当作整体完成。
+- **D-09 [ADOPTED，2026-11-13]**：用户选择并批准全新 Linx 内部身份及受控单向迁移，具体标识见 AD-02。迁移保全应用数据、草稿和受管引用，不改写历史事件、不保留旧 home 双写、不搬第三方 Keychain 条目，必要重新认证明确提示。批准本地实现与隔离演练不等于批准操作真实数据。
 - **D-10 [ADOPTED，2026-11-13]**：用户选择受控 CI 签名。生产私钥只供受保护的发布任务使用；先核对仓库实际支持的 GitHub Environment 审批能力，不把推荐的环境/审批配置视为已配置。本次未生成或配置生产私钥。
+- **D-11 [ADOPTED，2026-11-13]**：完整方案确认采用公开仓库 `WYLINX601/synara--expert` 作为 Linx 发布源；这不授权修改远端设置、推送、公开 Release 或日用安装。
 
 ### 本次包含与排除
 
@@ -64,21 +65,21 @@ Linx Release 是唯一正式来源。发布不依赖 upstream tag 或候选同�
 
 ### AD-02：品牌与持久安装身份分开
 
-正式显示名、关于页面、菜单、安装包和 Release 标题使用 Linx。用户已选择**全新 Linx 内部身份**，取代“建议保留 Workbench 身份”的待选方案。具体 Bundle ID、home/profile、scheme 与凭据命名空间尚未冻结；现有实现仍使用原身份，不把方向选择写成已完成切换。
+正式显示名、关于页面、菜单、安装包和 Release 标题使用 Linx。已批准身份为 Bundle ID `com.wylinx.linx`、home `.linx`、Electron profile `linx`、scheme `linx`、home 覆盖变量 `LINX_HOME`；Preview 对应 `com.wylinx.linx.preview`、`.linx-preview`、profile/scheme `linx-preview`、`LINX_PREVIEW_HOME`。自有凭证只进入各自 home 的 `userdata/secrets`；内部 workbench flavor/import 名不做无关重命名，Stable/Beta 权限与隔离不变。
 
-先在 LU-00 固定新旧身份映射、受控单向迁移、失败恢复与兼容边界，再实施 LU-01 和安装集成。首次 `Personal Workbench.app` → `Linx.app` 同时核对安装路径、Dock、登录项、深链、单实例锁和权限；禁止两个应用并发写同一 home。旧应用仅作为恢复产物保留，不维持双在用版本或永久双读写兼容层。没有迁移回执前不声称旧数据已经承接。
+首次 `Personal Workbench.app` → `Linx.app` 采用显式同意后的离线单向迁移，同时核对安装路径、Dock、登录项、深链、单实例锁、浏览器 origin 草稿与受管路径。禁止两个应用并发写同一 home，不覆盖已经产生数据的新 home。旧应用/旧数据仅作为恢复来源，不维持双在用版本或永久双读写兼容层；没有迁移回执前不声称已承接。
 
 ### AD-03：免费发布签名与系统信任分离
 
 LU-00 协议切片已实现 Ed25519 原字节签名与客户端验签；用户已选择在受控 CI 中托管生产签名能力。生产私钥只进入受保护的发布任务，不进仓库、客户端、日志或文档；生产公钥、环境审批与凭证引用尚未配置。这不需要 Apple 会员，不能冒充 Developer ID、公证或保证 Gatekeeper 放行。ad-hoc 签名只满足包结构/本地执行要求，不提供发布者可信身份；哈希不能单独证明来源。
 
-v1 清单契约：`schemaVersion`、`productId`、`channel`、`version`、`sourceCommit`、`platform`、`arch`、`minOSVersion`、`assetName`、`assetUrl`、`size`、`sha256`、`keyId`。固定 `productId=linx`、正式频道、`darwin/arm64`；全新身份方向已定，具体安装身份在标识和迁移契约冻结后纳入受签名字段。发布工具和客户端使用同一 schema，跨进程契约归 packages/contracts。
+v1 清单契约：`schemaVersion`、`productId`、`installIdentity`、`channel`、`version`、`sourceCommit`、`platform`、`arch`、`minOSVersion`、`assetName`、`assetUrl`、`size`、`sha256`、`keyId`。固定 `productId=linx`、`installIdentity=com.wylinx.linx`、正式频道、`darwin/arm64`。首发前按已批准身份扩展 v1，全部消费者一起迁移，不保留缺失身份字段的旧形状。发布工具和客户端使用同一 schema，跨进程契约归 packages/contracts。
 
 清单与 detached signature 分开发布：签署精确 UTF-8 文件字节，客户端先限制大小并核验原字节签名，再解析严格 schema，避免两端 JSON 重序列化差异。拒绝未知 schema/keyId、非法版本、同版/降级、错误产品/架构/安装身份、未知字段歧义及版本与包内元数据不一致。Release 只是候选发现渠道，不以 GitHub Latest 或名称直接授予安装权限；缺 Linx 有效清单不得回退到官方 feed。
 
 固定 HTTPS 发布仓库与资产解析规则，重定向只接受明确允许的 GitHub 资产下载域；不向客户端注入 GitHub PAT，不接受用户输入的任意下载/安装路径。下载后按受签名 size/hash 重验，辅助程序替换前再次核验。正常轮换应先用旧可信密钥发布包含新公钥的版本；旧私钥泄露或丢失时停止发布并采用人工可信引导恢复，不接受来自网络的新公钥自行成为信任根。首次手动安装 B0 是信任根建立环节，必须通过维护者确认的来源取得。
 
-#### LU-00 已实现协议（v1，尚未接线到应用）
+#### LU-00 已实现协议（v1）
 
 本节是更新清单协议的**唯一权威位置**；LU-02/03/04 以本节为准，BMad 过程计划只是过程材料。实现文件：
 
@@ -86,7 +87,7 @@ v1 清单契约：`schemaVersion`、`productId`、`channel`、`version`、`sourc
 - `packages/shared/src/linxUpdateManifestVerification.ts`：验签→解码→准入管线、密钥环加载与 `keyId` 派生。纯函数，密钥环由调用方注入。
 - `scripts/lib/linx-update-manifest-signing.ts` 与 `scripts/linx-update-manifest.ts`：发布侧密钥生成、签名与校验 CLI。仅发布环境使用，不进桌面包。
 
-**固定字段**：`schemaVersion=1`、`productId="linx"`、`channel="stable"`、`platform="darwin"`、`arch="arm64"`、`version` 为 `x.y.z`（无前导零、无预发布/构建号）、`sourceCommit` 为 40 位小写十六进制、`minOSVersion` 为最多三段数字（本切片只校验格式，与运行系统的比较属 LU-04 安装预检）、`assetName` 以 `.zip` 结尾且不含路径分隔符与 `..`、`assetUrl` 为无凭据无片段的绝对 https、`size` 为 1～4 GiB 的正整数、`sha256` 为 64 位小写十六进制、`keyId` 为 16 位小写十六进制。未知字段、错误产品/频道/平台/架构、字段文法不符即拒绝。`channel: stable` 是单字面量而非可选字段；新增 Beta 频道属首发前的 schema 变更。本切片没有 `installIdentity` 字段（全新身份方向已定，具体标识和迁移契约尚未冻结），也不内置生产公钥（发布源和生产公钥投放未完成）。
+**固定字段**：`schemaVersion=1`、`productId="linx"`、`installIdentity="com.wylinx.linx"`、`channel="stable"`、`platform="darwin"`、`arch="arm64"`、`version` 为 `x.y.z`（无前导零、无预发布/构建号）、`sourceCommit` 为 40 位小写十六进制、`minOSVersion` 为最多三段数字（系统比较属 LU-04 安装预检）、`assetName` 以 `.zip` 结尾且不含路径分隔符与 `..`、`assetUrl` 为无凭据无片段的绝对 https、`size` 为 1 字节至 4 GiB 的整数、`sha256` 为 64 位小写十六进制、`keyId` 为 16 位小写十六进制。未知字段、错误产品/身份/频道/平台/架构、字段文法不符即拒绝；缺失或旧 Workbench/Preview 安装身份也拒绝。`channel: stable` 是单字面量；本批不含 Beta。生产公钥尚未投放。
 
 **签名与密钥**：
 
@@ -105,7 +106,9 @@ v1 清单契约：`schemaVersion`、`productId`、`channel`、`version`、`sourc
 - `verify --manifest <p> --signature <p> --key-ring <p> --current-version <v> --asset-hosts <h,h>`（允许列表为裸主机名，不含端口或协议）成功打印 `version`/`keyId`。
 - 退出码：`0` 成功、`1` 清单被拒绝（打印 reason 与字段）、`2` 用法或配置错误。私钥内容永不出现在 stdout/stderr。
 
-**接线状态**：LU-00 本身不含 `electron-updater`/Squirrel 安装分支与宿主改动。LU-02 已在 `apps/desktop/src/linxUpdate{Source,Feed,Download,Client}.ts` 中接入 workbench flavor：仅当随包 `linx-update-source.json` 存在时启用（清单/签名 URL 固定为 GitHub latest release 路径，资产主机允许列表为 `github.com` 与 `objects.githubusercontent.com`），自动/手动检查只取清单与签名，点击后才下载并流式复验 `size`/`sha256`；未配置时保持 `disabled` 且不发起请求。安装（LU-04）尚未实现，`desktop:update-install` 在客户端接管期间返回 `accepted:false`；Q-04 落定前不创建该配置文件、不内置公钥。
+**当前接线状态（2026-11-16）**：LU-02 在 `apps/desktop/src/linxUpdate{Source,Feed,Download,Client}.ts` 接入 Linx flavor：仅随包 `linx-update-source.json` 存在且有效时启用，自动/手动检查只取清单与签名，点击后才下载并流式复验 `size`/`sha256`；未配置时保持 `disabled` 且不发起请求。LU-04 的安装 IPC 已接入 `LinxUpdateClient.install` 和独立 helper 协调器；成功交接仅返回 `accepted:true, completed:false`，不是新版健康成功。仓库已选定，但生产公钥未配置，未创建正式随包 source 文件；真实安装验收仍开放。
+
+**安装协调契约**：`packages/contracts/src/linxUpdateInstall.ts` 固定受限 request/journal、attemptId、目标清单摘要和维护/窗口响应。活跃计数非零或未知时不得编码为 `ready/committed`；窗口有未保存/保存中的编辑时不得确认 ready。绝对路径只是声明，不授予写入权限；helper 仍须独立绑定真实父进程、固定应用路径和私有 attempt，不能采用调用方公钥。主进程维护/安装接线已实现；契约、单测和隔离原生演练仍不能代替 LU-AC-07/09。
 
 ### AD-04：自动检查、显式下载安装
 
@@ -234,15 +237,15 @@ UI 实际操作、真实安装器/系统安全行为、GitHub 资产分发、迁
 
 - **Q-01 已解决**：首批 macOS Apple Silicon；其他平台不在本批范围。
 - **Q-02 已解决（产品方向）**：不购买 Apple 开发者会员、不依赖 Developer ID/公证。仍需建立自有更新清单签名和完成 AD-07 实机门禁，不代表平台可行性已经通过。
-- **Q-03 已解决方向，实施契约待冻结**：用户选择全新 Linx 内部身份。具体 Bundle ID、home/profile/scheme、凭据命名空间和单向迁移/恢复方案尚未定稿；不得声称已迁移，最终 B0 包身份仍未冻结。
-- **Q-04 实施前核对**：建议沿用现有公开仓库 `WYLINX601/synara--expert`，尚未将推荐记为用户最终选择。只读核对确认仓库公开、默认分支为 `main`；旧 `workbench-v0.1.3` 预发布未提供 Linx 清单及签名。需盘点旧 Release、候选发现与固定公钥隔离；更换仓库、改名/可见性或删除历史 Release 均须另行授权。
-- **Q-05 待视觉方案**：名称已确认，新 Logo/图标未确认；不得借改名改主布局或创作未获批准的视觉。影响品牌资产的部分先提交可审查方案。
+- **Q-03 身份与迁移设计已批准，实施/实测未完成**：具体标识按 AD-02；单向迁移必须保全草稿与受管路径，不能只复制 `userdata`。最终包和真实迁移仍须验收。
+- **Q-04 发布源已选定，受控前置配置已获授权**：用户批准沿用 `WYLINX601/synara--expert`，继续 main、不创建 PR，并授权门禁通过后的提交/推送、正式 tag/发布及隔离升级演练。更换仓库、改名/可见性或删除历史 Release 均不在授权内；日用应用和个人数据迁移仍须隔离验收通过后另行确认。
+- **Q-05 本批沿用既有图标**：名称已确认；第 1 节明确排除新 Logo 设计，因此不以新 Logo 决策阻塞本批开发，也不借改名改主布局。后续如改变视觉资产，另行提交可审查方案并取得授权。
 - **Q-06 实机阻塞门禁**：目录可写性、quarantine/Gatekeeper、helper 生命周期、跨进程锁和中断恢复必须真实验证；未通过不得声称“无需付费即可无提示自动升级”。
-- **Q-07 签名托管方向已解决，配置未执行**：用户选择受控 CI。GitHub Environment 审批能力、精确 release job 授权、密钥引用和公钥投放仍待实施核验；未生成生产密钥，未修改远端配置。
+- **Q-07 签名托管及单人显式审批已配置，正式候选未发布**：2026-11-16 用户明确允许 owner 发起并亲自批准同一发布，仍须两次 Environment 审批、固定 source/candidate digest 且禁止管理员绕过。两个真实 Environment 已指定 `WYLINX601`、`prevent_self_review: false`、`can_admins_bypass: false`，部署仅限 `v*.*.*` tag。生产 Ed25519 私钥仅存 `linx-signing` secret，实际公钥 `1113c8bdec541a20` 已写入源配置。真实 protection CLI 已通过；只读 CI 检查凭证、精确 bootstrap SHA 批准和正式候选仍未完成。
 
 ## 8. 工程交接、历史变更与验证
 
-继续完成 LU-00 的安装可行性与新身份迁移契约，再进入依赖这些契约的最终品牌/安装集成；不再次询问已明确的平台、下载时机、内部身份方向或签名托管方向。LU-00 协议和 LU-02 检查下载的完成不等于 LU-00 整体可行性已通过。按 LU-AC 编号提交证据，Hub 决定验收；不以方案生成或回合结束关闭产品任务。
+继续完成 LU-00 安装可行性及 LU-01/03/04/05 全部剩余开发；身份、发布仓库、自动检查/点击下载和 CI 托管方向已批准，不重复索取这些决定。真实数据、远端设置、推送/发布和日用安装操作分别取得授权。按 LU-AC 提交证据，未通过真实安装与升级门禁不得关闭整体目标。
 
 本文是本需求唯一开发计划；确认后的长期约束按[架构标准](./workbench-adaptation-plan.md#current-standard-v11)归档。实施时同步[发布指南](./release.md)、[开发 SOP](./workbench-development-workflow.md#execution-sop)、[项目入口](../context/PROJECT_CONTEXT.md)，历史上游材料只作追溯。当前文档不把既有代码/远端工作流伪装成已切换。
 
@@ -287,3 +290,58 @@ v0.2 实际文档检查 PASS：15 处本地链接及所含锚点可解析；8 �
 - 浏览器实际渲染 `DesktopUpdateRailButton` 与已构建 CSS：Workbench 可用态能点击，点击一次后为 42% 下载中且禁用；production 可用态仍禁用。已检查截图；状态由夹具驱动，不是完整 Sidebar、原生菜单、IPC 或真实升级证明。
 - GitHub 真实传输探测 `releases/latest/download/linx-update.json` 返回 **404**；这是没有已发布 Linx 清单的失败回执，不是正式更新成功。Node HTTPS 对 Electron 系统代理/PAC 的支持未验证，当前实现没有证明该能力。
 - 本地详细回执位于 `.synara/expert-evolution-delivery-20261029/operations/linx-update-verification/verification-8fcab5aa5.json`，原始续跑日志位于 `/tmp/linx-verification-8fcab5aa5/`。临时浏览器、夹具服务、隔离 home 和一次性源码已收尾；没有生产密钥、正式更新源配置、真实数据迁移、应用安装、PR、推送或 Release。
+
+### 2026-11-13：完整方案批准与安装身份约束
+
+- 用户已选择“批准并继续”完整剩余实施方案；设计风险为 high，不把迁移/替换失败降格为普通下载错误。
+- 必填安装身份的回归先观察到 3 项失败，修复后 49 项通过；新增安装/维护契约 26 项、共享验签 29 项、签名/CLI 19 项、原客户端 24 项通过。删除了只固定协议常量值的实现细节测试。
+- 实际运行签名 CLI：临时测试钥签署的 Linx 身份清单通过；同一测试钥有效签名的 Workbench 身份清单以 `reason=schema, field=installIdentity`、退出 1 拒绝。只验证协议和 CLI，没有验证该夹具描述的 Release/包；临时私钥与夹具已删除，没有生产密钥。
+- 独立 Bun 1.4.4 helper runtime 探针完成编译、ad-hoc 验签、私有目录执行和原件移位后的验签；两份各 89,178,064 字节已删除。未执行真实替换、Gatekeeper、quarantine 或数据迁移；不把该探针当作 LU-00 整体可行性通过。
+
+### 2026-11-16：续跑集成与原生边界验证
+
+- 仍在 main 工作树推进，未开 PR、未推送。安装授权不再复用下载前可能过期的 receipt：helper 启动前和最终交接前均在线重验同一固定候选。实际错误保持可恢复，交接只返回 accepted，不返回升级 completed。
+- 实际 Electron 43.4.1 暴露 `session.fetch({redirect:"manual"})` 对 302 抛出 `Redirect was cancelled`，已切为绑定同一 Session 的 `net.request` 手动重定向；Feed 继续逐跳执行白名单。实际系统代理、隔离 fixed/PAC、TLS 拒绝、限流、取消/超时及背压 **19/19** 通过；32 MiB 响应暂停时下游缓冲 65,536 字节。批准仓库的匿名 API 与既有 Workbench v0.1.3 provenance 资产 302→200 通过，**不是 Linx 发布验证**。未修改 OS 代理或放宽 TLS。
+- 真正编译的独立 helper 使用 mise Bun **1.4.4**，89,725,168 字节，arm64/strict ad-hoc 验签与 minimum macOS 13.0 通过；**10 个真实子进程场景**覆盖原生父进程/kernel 身份、认证 prepare→cancel、错误 nonce/digest/路径/资源/签名候选等拒绝。旧 fixture seal 保持有效，home/profile 为空。先前误用环境 Bun 1.4.0 的三份结果明确保留为 invalid-wrong-toolchain，不用于结论，也不据此抬高系统要求。未执行正式 commit、替换、LaunchServices、Gatekeeper 接受或新版健康。
+- 原生 Swift AppSnap helper 的两次新租约、两次错误/旧租约释放拒绝、两次暂停期间捕获拒绝已实跑；未截图真实屏幕或修改权限。原生 C bridge 的 5 项检查、资源叉和 provenance 保留为独立证据，不等于系统允许升级。
+- Server 维护准入及观察者 **86 项**通过；真实 Chromium 的协调器/Monaco **15 项**、IndexedDB/水合/存储失败 **8 项**通过。浏览器夹具类型修正及最终整合以后续门禁为准。最小真实更新控件实测一次点击进入 42% 禁用态、中文空间拒绝、再次点击进入准备禁用态；状态由隔离夹具驱动，不是完整 Sidebar/IPC 或真实安装证明。
+- 错误 IPC 仅传固定 failure 枚举，不回显路径、nonce、schema 输入或凭据。空间/配额、权限/只读、最低系统版本和各安装阶段使用既有本地化资源；配置验签错误同样不回显未知 key-ring 输入。
+- 原始失败和通过回执统一在 `.synara/expert-evolution-delivery-20261029/operations/linx-update-verification/`：`standalone-helper-qualification.json`、`native-proxy-qualification*.json`、`native-maintenance-qualification.json`、`update-ui-qualification.json`。相关一次性源码、测试钥、fixture 应用、原生二进制、隔离浏览器和服务已按各回执收尾。
+- 最终 workspace 测试与整合检查仍须完成；未把历史通过或单项通过改写为全目标完成。生产公钥配置、受保护 CI 的真实审批回执、正式候选/匿名完整分发、首次引导和真实 B0→B1 仍待分别授权与执行。
+
+### 2026-11-16：审查修复与剩余验收
+
+- 三轮定向源码审查发现的缺口均登记在实施记录，逐项修复而非缩减 LU-AC。当前追加迁移任务为 copied Codex generation、账号私有 overlay 和 live continuation bindings；完成实现、兼容性验证以前不关闭迁移验收。
+- 原生准备失败的旧清理路径会提前终止 helper，随后父安装器的 cancel 无法取得 ack，错误进入 recovery-required。系统版本/空间/metadata 三项单测先失败，修复后 helper 核心 **37/37** 通过；真实原生协议另行验证，不把 mock 平台单测称为原生安装证据。
+- 候选期望改为直接从受认证 ZIP 解压流计算，认证与解包共用固定文件句柄并检查最终身份；不再以可写解包目录自证。helper 的期望 SHA-256 固定在运行中的 main 构建，最终资源不得再次签名改变；目标锁保留稳定 guard，以原子 owner 记录恢复中断，guard-only 目录不是未释放的安装所有权。
+- 真实 Bun **1.4.4** / `/usr/bin/ditto` smoke 发现 `café.txt` 被解码成 `caf├⌐.txt`；原生 ZIP 未设置语言位但使用 UTF-8。严格解码原始 UTF-8、核对中央/本地头和 Unicode extra field 后，archive **25/25** 及真实文件系统四项 smoke 通过：内容 inventory、framework/Unicode 路径、独立启动复核、被替换候选拒绝。回执为 `archive-content-qualification.json`，仅为该源码快照的归档路径，不代表完整安装。
+- 非图片附件拒绝、OAuth 回调全生命周期和服务 scope 摘要计时器已补齐；当前 Chromium durability **11/11** 通过。真实 Electron renderer/preload/main 的同步只读 IPC、同步写拒绝、异步写拒绝和释放恢复 **4/4** 通过，回执 `native-ipc-qualification.json`；这是隔离窗口/夹具通道，不是完整主程序升级。
+- 当前第二轮整合的 Desktop/native/controller/migration 四个测试文件 **88/88** 通过，shared recovery **37/37** 通过。后续 continuation 迁移仍在修改，这些结果不得冒充最终 workspace 门禁。完整测试曾失败，续跑在发现新增安全缺口后主动停止；原始失败和取消状态保留，最终检查尚待整合稳定后完成。两处无关格式失败未擅自修改。
+- 2026-11-16 远端只读核验：仓库公开、默认 main；Environment 为 0，旧 `Release Desktop` / `Release desktop platform` / `Workbench weekly upstream sync` 仍 active；`v0.1.15` ref 为 404。未做任何远端更改，源码退役不等于远端退役。
+- 先前 `native-helper-commit-qualification.json` 的六场景属于其记录的旧源码快照：包括所有权交接、中断恢复和替换/LaunchServices 后等待健康超时；**没有新版健康成功**。后续内容认证与永久 guard 修复不能继承该回执作为当前完整安装资格。生产密钥、公钥配置、真实受控审批/公开分发、首次引导、B0→B1、个人数据迁移仍未执行。
+- 当前 helper 重新编译并完成五项原生资格：arm64/ad-hoc seal、无效入口拒绝、最低系统版本、认证 OS 拒绝后的 cancel/ack、完整隔离 main 构建中的最终 helper 摘要绑定。回执 `helper-build-binding-qualification.json` 记录精确源码/二进制摘要；fixture 总量 272,628,550 字节，临时钥/原生父程序/helper/main 产物已移除。未替换或运行日用 Linx。
+- 第四轮迁移修复覆盖真实 macOS contained aliases、账号私有文件/入站链接、原生 `config.toml` 的受管 root `sqlite_home`、原始 `~` 目录拼写及只读源凭据证明。源设置、敏感目录值和 copied 配置分别验证，不以新设置自行授权旧 cursor；仅同一被验证目录的 canonical/alias 拼写可等价，其他账号目录仍拒绝。Desktop 显式依赖既有 `smol-toml@1.9.0`；共享 source identity 使用异步 IO，不增加同步 IO 预算。
+- 最新 Desktop migration **41/41**、Server binding migration **26/26** 通过。原生链接先有三项失败，修复后 root `sqlite_home` 三项仍失败，分别补齐；原始拼写/源凭据先有十一项失败，canonical copied path 后又有两项失败，均已回归。多进程原生用例曾触发 5 秒测试超时及清理竞争，现只为该组设置 30 秒界限；遗留的自有临时目录经无句柄核对后删除。
+- 真实 Electron **43.4.1** / Node **24.18.1** / SQLite 演练 **7/7** 通过，关闭后重开真实 ProviderSessionDirectory 的两条绑定，验证原生 aliases/私有 auth、受管 sqlite_home、Claude/Codex 启动兼容、cursor/generation/model/fixed Expert 保留、重复迁移和旧源六类文件字节不变。回执 `continuation-migration-qualification.json` 固定源码摘要。浏览器 storage 是空适配器，未运行真实 Provider/完整 Server 启动；不得作为个人数据或 B0→B1 验收。演练脚本、打包程序、临时 profile/home/数据库/恢复集均已收尾。
+- 当前类型检查曾达到 **7/7**；静态门禁最近通过品牌、Windows 边界（368 应用文件/138 边界文件/5 补丁/9 manifest）、103 release tags 的迁移 lineage 和 140 文件的宿主边界。后续迁移修复及依赖声明后仍须执行最终门禁。最近 lint 的 **1341 warnings / 0 errors** 后同步 IO 门禁曾失败，异步修复尚待最终核验；不得把这次 lint 记录为通过。
+- 第五轮闭合审查发现合法 TOML 指令字符串可吞掉后续 root assignment；单项回归先失败，改为重叠候选且仍由完整 TOML 等价证明后 Desktop migration **42/42** 通过。真实 Electron 的三项配置迁移 smoke 验证仅 root 值变化、源/恢复配置字节不变；`native-config-qualification.json` 记录源码摘要。`desktop-bundle-qualification.json` 另证四个 Desktop 入口在直接 `smol-toml` 依赖下构建通过；隔离输出已移除，不覆盖签名/安装资格。
+- canonical source receipt 对 live cwd/folders 的 lexical 比较另有三项真实链接回归先失败；新 async ownership resolver 的真实 Bun **1.4.4** 五项 smoke 覆盖合法别名、缺失后代、源 external/dangling 链接、目标越界拒绝及源字节不变，见 `live-path-qualification.json`。完整绑定/项目联动回归仍待当前启动修复整合。
+- 崩溃导入的真实 SQLite/engine/decider 证明：未收敛 orphan turn/checkpoint 时，`project.meta.update` 因 busy-folder invariant 拒绝，不能完成迁移。正在复用原生 replay/恢复意图/settlement，在生产者未发布前完成收敛；不放宽正常准入。最初集成红测还暴露新增必需 callback 未接线，已单独保留，未把 TypeError 冒充 busy guard 证据。
+- 本轮静态门禁再次通过相同品牌/Windows/迁移 lineage/宿主扫描范围。类型检查为 **6/7**，失败为源配置对象缺少 index signature 的三条 TS7053，已补准确局部类型；该串行命令未运行 lint。当前新增启动联动仍在修改，最终 typecheck/lint/root test 尚未完成。
+- 原生启动协调已用真正的 Node **24.13.1**、磁盘 SQLite、生产 settings/engine/replay layers 在 Vitest 外完成 **6/6** 演练：accepted/pending 输出保留、orphan 中断后才通过目录准入、canonical receipt 搬迁项目别名、恢复意图持久化、历史/源字节不变及关闭重开幂等。配置与数据为隔离夹具，没有启动 transports/producers/真实 Provider；`native-startup-qualification.json` 固定执行源码摘要。临时 home、数据库、profile、脚本和 bundle 已清理。
+- 九文件聚焦检查先记录 **296 通过 / 8 失败**；八项均停在新测试夹具对未水合 summary flag 的错误断言，改为原生 thread detail 的持久 pending-interaction 状态后七项通过。图像用例随后补齐真实 group onboarding repository 与源 `userdata` 前置，实际图像迁移、Markdown 保留和源目录不变已通过，未修改生产 busy guard。
+- 最终类型检查另外暴露离线 replay 仍依赖 live ProviderService 的 diff capability；四个 Provider 的真实 journal 回归均先因 `getCapabilities` 缺失被 drain fence 拒绝。改为 Adapter 层的穷举只读协议元数据，实际 Adapter 和离线 replay 共用同一事实，在线 service 行为不变；不以 `false` fallback 隐藏差异。
+- 闭合迁移审查另外发现：`sqlite_home` 的外部路径拼写可以实际指向受管旧目录，单靠 lexical 前缀会漏迁移。回归先失败，改为先核对 native identity 后 Desktop migration **43/43**，真实 Electron 配置 smoke **4/4**；更新后的 `native-config-qualification.json` 固定此源码快照。
+- 离线图像 replay 的真实写入失败会取消固定 reservation，原逻辑后续每次启动都冲突。红测为 **17 失败 / 3 通过**，其中一项是测试夹具违反既有 SQL CHECK，已改用合法 deleting 状态而未放宽 schema；其余复现恢复、配额或 drain fence 缺口。仅排他离线路径可在完整 identity/未 claim/删除原因/配额核验后，事务替换 reservation 并移除复制的 cleanup lease；普通上传不复用。三文件 **47/47** 通过，其中 startup **13**、repository **28**、image staging **6** 项。两处测试 finalizer 类型错误修复后 repository **28/28** 再次通过。
+- 实际 Node **24.13.1** / 磁盘 SQLite 在 Vitest 外完成附件重试 **5/5**：真实目录写失败、同操作同 ID 恢复、cleanup job 删除、不重复计费、崩溃 `.part` 恢复且不碰其他 partial、源图片字节保留，见 `native-attachment-retry-qualification.json`。仅单一排他 fixture runtime，不是网络上传、个人数据或完整升级；脚本、数据库、bundle 和临时文件已清理。
+- 另以真实 Electron **43.4.1** 的三次独立进程补足非空 Chromium 存储证据：生产 extraction/transfer 保留 localStorage 草稿快照、**600001 字节**多块 IndexedDB blob 和图标记录，拒绝覆盖非空目标，冷重开仍可读，原 profile **46 个文件**字节不变。`native-browser-storage-qualification.json` 记录六项结果。首个夹具因最后窗口关闭而提前正常退出，未计为通过；补明确夹具生命周期后完成。它不替代整 home/真实用户草稿或 B0→B1，所有隔离 profile 和脚本已清理。
+- 最后静态品牌、Windows 边界、迁移 lineage、宿主边界检查均通过，扫描范围同前。最后类型检查六包通过，Server 的测试 finalizer TS2379 修正后单包通过；lint/sync IO 门禁通过。根 fmt 检查发现三文件，已修正本次拥有的 startup reconciliation 并单独检查通过；另两处无关格式问题未擅自改动。根 `bun run test` 正在执行，尚不能登记为通过。
+- 根测试本次退出失败：Desktop **1901 通过 / 26 跳过**，Contracts **410 通过**；Scripts **563 通过 / 1 失败**（原生 Node 打包 CLI 的 extensionless import），Web **6007 通过 / 1 超时 / 3 跳过**（既有 `viteConfig.test.ts` 的 5 秒配置加载用例）。Server 在五个文件通过后以 143 中断，Shared 未完成，不把它们计为通过。续跑仅覆盖剩余 Server 文件及受影响/未完成包；保留原始日志。
+- 打包 CLI 失败已追到 shared process-runtime 的三个模块及 manifest verifier 的 contracts barrel。保留共享进程边界，补可由 Node 解析的 `.ts` 后缀，并提供直接 manifest 公共子路径，避免让构建 CLI 装载整套非必要 contracts。实际 Node **24.13.1** 执行 `scripts/build-desktop-artifact.ts --help` 已成功；对应原生回归及 Shared 检查正在续跑。
+- Native TypeScript 的显式 `.ts` 路径需要所有源码消费者使用一致编译规则；只配置 Contracts/Shared 时 Desktop 仍报 TS5097。最终在共同 base 配置启用 `rewriteRelativeImportExtensions`，移除临时包级覆盖。最终 typecheck **7/7**、lint **1343 warnings / 0 errors** 和同步 IO 预算通过；Contracts 在隔离目录实际产出 ESM/CJS 与两种声明文件，原 `dist` 未覆盖，临时产物已移除。
+- Server 续跑排除原先完成的五文件，三片各 239 文件，与原五文件共 **722 个互不重叠文件**。第一片四项 Checkpoint 失败来自真实 Git 外另加的 1–3 秒测试等待：保留 gate-held 并发和顺序断言，使用外层测试期限后完整 Checkpoint **140/140** 通过，未修改生产恢复逻辑。其余两片分别 **2585 通过 / 4 跳过**、**3239 通过 / 19 跳过**；Server 去重合计 **10872 通过 / 36 跳过**。
+- Shared 首次完整包检查有四项原生 Git fixture 超过默认 5 秒，另出现超时后清理竞态；该组使用明确 30 秒测试期限后 **11/11** 通过，唯一遗留临时目录在无句柄确认后清除。Scripts 的同类 missing-tag 原生场景沿用邻例的 30 秒期限后通过。按原通过结果加失败修复、去除重跑重复，当前合计 **21017 通过 / 1 失败 / 67 跳过**；仍失败的是未修改的 Web `viteConfig.test.ts` 首个配置加载用例，另两处无关格式问题仍保留。此统计是多轮分包/续跑，不是一次完整全绿根命令；Desktop/Contracts 的早期结果不能当作后续 native import 补丁前后完全相同的源码快照。
+- 用户随后明确授权修复 Web 配置测试及两处无关格式门禁。删除只断言插件名的测试，直接验证真实 apply 策略的 opt-in/拒绝/优先级十二种边界；不改策略语义。实际 Vite 与 Synara 浏览器的开发关闭/开发开启/test/production 四种模式均完成组件 prop/state 更新，child commits 分别为 **3/1/1/1**，真实源编辑后的 Fast Refresh 保留 `Count: 1 → Clicks: 1`；五项运行演练通过，fixture、服务、浏览器页和脚本均已清理。详见 `web-compiler-policy-qualification.json`，不是整产品 UI 或升级验收。
+- 单人审批新回归先红后绿。真实 GitHub protection CLI 另暴露仓库根 API 多余 `/` 导致 404；三项子进程 HTTP 回归先全部失败，修复 URL 组装后 release 五文件 **77/77**，真实双 Environment 检查退出 0。最新去重测试汇总 **21027 通过 / 0 尚未修复失败 / 67 跳过**，仍是原根执行、分片续跑和失败修复的组合证据，不能称作一次根全绿。
+- 远端配置已执行但没有发布：三个规则集保护 main 删除/非快进、正式 tag 更新/删除，以及仅 owner 创建正式 tag；后两类限制分离，tag 不可变规则没有 bypass。旧 Release Desktop、Release desktop platform、Workbench weekly upstream sync 已停用；待当前受控源码推送并核对后才重新启用前两个同路径受控工作流。未创建 tag，未设置 bootstrap SHA，未操作日用数据。
+- 最后集中检查对应当前工作树：fmt **5739 文件通过**，lint **1343 warnings / 0 errors**、Server 同步 IO 预算通过，typecheck **7/7**。纯格式 Suite validator 已独立提交 `29832c871`；后续逻辑提交只纳入本任务 owned hunks，保留原并行 Suite/Server 和架构文档修改。已逐项审查可见界面差异，仅包括获批的 Linx 名称、既有更新控件/拒绝提示、一次性导入确认与维护期间编辑/重载保护，没有新增页面、Logo 或主布局。

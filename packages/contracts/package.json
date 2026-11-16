@@ -15,6 +15,10 @@
       "import": "./src/index.ts",
       "require": "./dist/index.cjs"
     },
+    "./linxUpdateManifest": {
+      "types": "./src/linxUpdateManifest.ts",
+      "import": "./src/linxUpdateManifest.ts"
+    },
     "./uiLocale": {
       "types": "./src/uiLocale.ts",
       "import": "./src/uiLocale.ts"

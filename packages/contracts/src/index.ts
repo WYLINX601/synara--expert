@@ -75,6 +75,11 @@ export * from "./claudeCache";
 export * from "./todo";
 
 export * from "./linxUpdateManifest";
+export * from "./linxUpdateInstall";
+export * from "./linxUpdateRecovery";
+export * from "./linxUpdateRelease";
+export * from "./linxUpdateHelperProtocol";
+export * from "./linxUpdateHomeOwnership";
 
 export * from "./uiLocale";
 

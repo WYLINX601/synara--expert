@@ -9,6 +9,11 @@ import type {
   DesktopWindowTranslucency,
   ZenModeState,
 } from "@synara/contracts";
+import {
+  LinxUpdateWindowMaintenanceRequest,
+  LinxUpdateWindowMaintenanceResponse,
+} from "@synara/contracts";
+import { Schema } from "effect";
 import { normalizeDesktopWsUrl, resolveDesktopWsUrlFromEnv } from "./desktopWsBridge";
 import { DESKTOP_IPC_CHANNELS } from "./ipcChannels";
 import {
@@ -305,6 +310,23 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     };
   },
   setMenuShortcuts: (shortcuts) => ipcRenderer.invoke(IPC.setMenuShortcuts, shortcuts),
+  updateWindowMaintenance: {
+    onRequest: (listener) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        const decoded = Schema.decodeUnknownOption(LinxUpdateWindowMaintenanceRequest)(payload);
+        if (decoded._tag === "Some") listener(decoded.value);
+      };
+      ipcRenderer.on(IPC.updateWindowMaintenanceRequest, wrapped);
+      return () => {
+        ipcRenderer.removeListener(IPC.updateWindowMaintenanceRequest, wrapped);
+      };
+    },
+    reply: (response) => {
+      const decoded = Schema.decodeUnknownOption(LinxUpdateWindowMaintenanceResponse)(response);
+      if (decoded._tag === "Some")
+        ipcRenderer.send(IPC.updateWindowMaintenanceResponse, decoded.value);
+    },
+  },
   onQuitConfirmationRequest: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
       const request = parseQuitConfirmationRequest(payload);

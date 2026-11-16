@@ -13,6 +13,9 @@ import { defineConfig } from "tsdown";
 const sourcemapEnv = process.env.SYNARA_DESKTOP_SOURCEMAP?.trim().toLowerCase();
 const buildSourcemap = sourcemapEnv === "1" || sourcemapEnv === "true";
 const windowsUpdaterPublisher = process.env.AZURE_TRUSTED_SIGNING_SUBJECT_DN?.trim() ?? "";
+const linxUpdateHelperSha256 = process.env.LINX_UPDATE_HELPER_SHA256 ?? "";
+if (linxUpdateHelperSha256 !== "" && !/^[0-9a-f]{64}$/.test(linxUpdateHelperSha256))
+  throw new Error("LINX_UPDATE_HELPER_SHA256 must identify the final signed helper bytes.");
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const migrationRuntimeSource = fs.readFileSync(
   path.join(repoRoot, "apps/server/src/persistence/Migrations.ts"),
@@ -40,6 +43,7 @@ export default defineConfig([
     define: {
       __SYNARA_WINDOWS_UPDATER_PUBLISHER__: JSON.stringify(windowsUpdaterPublisher),
       __SYNARA_MIGRATION_RUNTIME_SOURCE_DIGEST__: JSON.stringify(migrationRuntimeSourceDigest),
+      __LINX_UPDATE_HELPER_SHA256__: JSON.stringify(linxUpdateHelperSha256),
     },
     noExternal: (id) => id.startsWith("@synara/"),
   },

@@ -1,68 +1,34 @@
-// FILE: viteConfig.test.ts
-// Purpose: Verifies when Vite activates the React Compiler and retains React
-// Fast Refresh for the web development pipeline.
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import viteConfig, { applyReactCompiler } from "../vite.config";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveConfig, type InlineConfig } from "vite";
+describe("React Compiler activation policy", () => {
+  beforeAll(async () => {
+    await Promise.all(viteConfig.plugins ?? []);
+  });
 
-import viteConfig from "../vite.config";
-
-const REACT_COMPILER_PLUGIN = "@rolldown/plugin-babel";
-const REACT_FAST_REFRESH_PLUGIN = "vite:react-refresh";
-
-function inlineWebConfig(): InlineConfig {
-  return {
-    ...viteConfig,
-    // Resolve the imported config directly. Letting Vite discover the config
-    // file again would merge a second copy of every plugin into this test.
-    configFile: false,
-    plugins: viteConfig.plugins ? [...viteConfig.plugins] : [],
-  };
-}
-
-async function resolveWebPluginNames(command: "build" | "serve", mode: string) {
-  const resolved = await resolveConfig(inlineWebConfig(), command, mode);
-  return resolved.plugins.map((plugin) => plugin.name);
-}
-
-describe("web Vite React Compiler activation", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
-  it.each([undefined, "yes"])(
-    "keeps the compiler out of serve with flag %s while retaining Fast Refresh",
-    async (flag) => {
+  it.each([undefined, "", "0", "false", "yes", "true extra"])(
+    "does not enable expensive development compilation for %s",
+    (flag) => {
       vi.stubEnv("SYNARA_DEV_REACT_COMPILER", flag);
-
-      const pluginNames = await resolveWebPluginNames("serve", "development");
-
-      expect(pluginNames).not.toContain(REACT_COMPILER_PLUGIN);
-      expect(pluginNames).toContain(REACT_FAST_REFRESH_PLUGIN);
+      expect(applyReactCompiler({}, { command: "serve", mode: "development" })).toBe(false);
     },
   );
 
-  it("keeps the compiler in production builds when the development flag is disabled", async () => {
-    vi.stubEnv("SYNARA_DEV_REACT_COMPILER", "0");
-
-    const pluginNames = await resolveWebPluginNames("build", "production");
-
-    expect(pluginNames).toContain(REACT_COMPILER_PLUGIN);
-  });
-
-  it("keeps the compiler in test mode when the development flag is disabled", async () => {
-    vi.stubEnv("SYNARA_DEV_REACT_COMPILER", "0");
-
-    const pluginNames = await resolveWebPluginNames("serve", "test");
-
-    expect(pluginNames).toContain(REACT_COMPILER_PLUGIN);
-  });
-
-  it.each(["1", " TRUE "])("allows %s to opt the compiler into serve", async (flag) => {
+  it.each(["1", "true", " TRUE "])("accepts the explicit development opt-in %s", (flag) => {
     vi.stubEnv("SYNARA_DEV_REACT_COMPILER", flag);
+    expect(applyReactCompiler({}, { command: "serve", mode: "development" })).toBe(true);
+  });
 
-    const pluginNames = await resolveWebPluginNames("serve", "development");
-
-    expect(pluginNames).toContain(REACT_COMPILER_PLUGIN);
+  it.each([
+    { command: "build" as const, mode: "production" },
+    { command: "build" as const, mode: "development" },
+    { command: "serve" as const, mode: "test" },
+  ])("does not let a disabled development flag override $command/$mode", (environment) => {
+    vi.stubEnv("SYNARA_DEV_REACT_COMPILER", "0");
+    expect(applyReactCompiler({}, environment)).toBe(true);
   });
 });

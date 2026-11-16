@@ -3,6 +3,8 @@ import { Effect, FileSystem, Layer, Path } from "effect";
 import { TerminalManagerLive } from "./Layers/Manager";
 import { selectPtyAdapterRuntime, type PtyAdapterRuntime } from "./runtimeSelection";
 import { PtyAdapter } from "./Services/PTY";
+import { TerminalManager, TerminalError } from "./Services/Manager";
+import { guardMaintenanceMethods } from "../serverMaintenance";
 
 type RuntimePtyAdapterLoader = {
   layer: Layer.Layer<PtyAdapter, never, FileSystem.FileSystem | Path.Path>;
@@ -24,6 +26,14 @@ const makeRuntimePtyAdapterLayer = () =>
     return ptyAdapterModule.layer;
   }).pipe(Layer.unwrap);
 
-export const TerminalLayerLive = TerminalManagerLive.pipe(
-  Layer.provide(makeRuntimePtyAdapterLayer()),
-);
+export const TerminalLayerLive = Layer.effect(
+  TerminalManager,
+  Effect.gen(function* () {
+    const terminal = yield* TerminalManager;
+    return guardMaintenanceMethods(
+      terminal,
+      ["open", "write", "restart", "clear", "resize"],
+      () => new TerminalError({ message: "Update maintenance admission is closed." }),
+    );
+  }),
+).pipe(Layer.provide(TerminalManagerLive.pipe(Layer.provide(makeRuntimePtyAdapterLayer()))));

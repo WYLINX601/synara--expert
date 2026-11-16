@@ -31,7 +31,7 @@ import {
   syncRegularFile,
 } from "@synara/shared/filesystemPlatform";
 import { ensurePrivateDirectorySync, repairPrivateFile } from "../privatePathPermissions.ts";
-import { withDatabaseLifecycleLock } from "./DatabaseLifecycleLock.ts";
+import { withDatabaseLifecycleLock } from "@synara/shared/databaseLifecycleLock";
 import {
   createMigrationDivergenceConsentChallenge,
   MigrationDivergenceConsentRequiredError,

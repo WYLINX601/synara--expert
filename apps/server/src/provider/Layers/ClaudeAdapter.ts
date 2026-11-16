@@ -153,6 +153,7 @@ import {
 } from "../../agentGateway/computerToolPermission.ts";
 import { AgentGatewayCredentials } from "../../agentGateway/Services/AgentGatewayCredentials.ts";
 import {
+  PROVIDER_ADAPTER_LIVE_TURN_DIFF_PATCH,
   PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY,
   type ProviderExpertCompatibilityInput,
 } from "../Services/ProviderAdapter.ts";
@@ -10405,7 +10406,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         supportsPluginDiscovery: false,
         supportsRuntimeModelList: true,
         supportsTurnSteering: true,
-        supportsLiveTurnDiffPatch: false,
+        supportsLiveTurnDiffPatch: PROVIDER_ADAPTER_LIVE_TURN_DIFF_PATCH.claudeAgent,
         supportsForkThroughTurn: true,
       },
       startSession,

@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 
 import { defaultInstanceIdForDriver } from "@synara/contracts";
 
-import { expandProviderAccountHomePath } from "../providerAccountHomePath.ts";
+import { expandProviderAccountHomePath } from "@synara/shared/providerAccountHomePath";
 import { buildClaudeProcessEnv, isClaudeAccountIsolationEnvKey } from "./claudeProcessEnv.ts";
 
 const DEFAULT_CLAUDE_INSTANCE_ID = defaultInstanceIdForDriver("claudeAgent");

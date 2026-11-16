@@ -127,6 +127,7 @@ import {
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { AutomationService } from "../../automation/Services/AutomationService.ts";
 import { notifyAfterCommit } from "../../persistence/commitNotifications.ts";
+import { serverMaintenanceAdmission, guardMaintenanceMethods } from "../../serverMaintenance";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { providerDisabledSettingsMessage } from "../../provider/enabledProviderAdapter.ts";
@@ -386,6 +387,7 @@ const decodeWorkerCompletionDelivery = Schema.decodeUnknownSync(
 );
 
 export const makeProjectAgentService = Effect.gen(function* () {
+  const serviceScope = yield* Effect.scope;
   const repository = yield* ProjectAgentRepository;
   const sql = yield* SqlClient.SqlClient;
   const hubWorkRepository = yield* Effect.serviceOption(HubWorkRepository);
@@ -2330,7 +2332,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
       readonly libraryPushOnChange?: boolean | undefined;
     } | null,
   ) =>
-    Effect.forkDetach(
+    serverMaintenanceAdmission.forkAccepted(
       withLibraryQueue(
         root,
         pushLibraryIfConfigured({
@@ -2340,6 +2342,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
           libraryPushOnChange: agentConfig?.libraryPushOnChange,
         }),
       ),
+      () => new ProjectAgentServiceError({ message: "Update maintenance admission is closed." }),
     );
 
   const readGroupMemoryNoteRevisions = (projectId: ProjectId) =>
@@ -2848,6 +2851,7 @@ export const makeProjectAgentService = Effect.gen(function* () {
           return next;
         }),
       ),
+      serverMaintenanceAdmission.scheduled,
     );
 
   // Runs generations until the pending flag for this project stays clear:
@@ -2990,7 +2994,10 @@ export const makeProjectAgentService = Effect.gen(function* () {
       return true;
     });
 
-  const impl: ProjectAgentServiceShape = {
+  const unguardedImpl: ProjectAgentServiceShape = {
+    getMaintenanceActivity: Ref.get(digestInflight).pipe(
+      Effect.map((active) => ({ digestGenerations: active.size })),
+    ),
     notifyWorkItemChanged: (input) =>
       Effect.gen(function* () {
         if (Option.isNone(hubWorkRepository)) return;
@@ -5410,22 +5417,22 @@ export const makeProjectAgentService = Effect.gen(function* () {
         yield* Effect.sleep(Duration.millis(PROJECT_AGENT_DIGEST_DEBOUNCE_MS)).pipe(
           Effect.andThen(runDigestQueue(projectId)),
           Effect.catch(() => Effect.void),
-          Effect.ensuring(
+          Effect.onExit((exit) =>
             Effect.gen(function* () {
               yield* Ref.update(digestTimer, (current) => {
                 const next = new Set(current);
                 next.delete(projectId);
                 return next;
               });
-              // A schedule that landed between the last pending check and the
-              // timer release must not be dropped: re-arm so it is picked up.
+              // Re-arm work that arrived during timer release, but never
+              // resurrect a timer interrupted by service-scope shutdown.
               const pending = yield* Ref.get(digestPending);
-              if (pending.has(projectId)) {
+              if (Exit.isSuccess(exit) && pending.has(projectId)) {
                 yield* impl.scheduleDigest(projectId);
               }
             }),
           ),
-          Effect.forkChild,
+          Effect.forkIn(serviceScope),
         );
       }).pipe(Effect.asVoid, notifyAfterCommit),
 
@@ -7671,6 +7678,47 @@ export const makeProjectAgentService = Effect.gen(function* () {
         }),
       ),
   };
+  const impl: ProjectAgentServiceShape = guardMaintenanceMethods(
+    unguardedImpl,
+    [
+      "configure",
+      "linkProject",
+      "unlinkProject",
+      "linkRepository",
+      "remember",
+      "forget",
+      "libraryAdd",
+      "pauseGroup",
+      "resumeGroup",
+      "archiveGroup",
+      "unarchiveGroup",
+      "restartCoordinator",
+      "deleteGroup",
+      "startGoal",
+      "updateGoal",
+      "pauseGoal",
+      "resumeGoal",
+      "stopGoal",
+      "createTask",
+      "updateTask",
+      "writeDocument",
+      "exportDocuments",
+      "refreshDigest",
+      "excludeThread",
+      "backfillSummaries",
+      "authorizeManagedGoalCreation",
+      "recordManagedWorkerThreads",
+      "reconcilePendingWakes",
+      "inspectWorkerHealth",
+      "reportResult",
+      "ingestSettledThreadEvent",
+      "processPendingWakes",
+      "recordWorkerTurnRequest",
+      "resolveWorkerAlert",
+      "onProjectDeleted",
+    ],
+    () => new ProjectAgentServiceError({ message: "Update maintenance admission is closed." }),
+  );
 
   const unblockDependents = (accepted: ProjectTask) =>
     Effect.gen(function* () {
@@ -7950,7 +7998,14 @@ export const makeProjectAgentService = Effect.gen(function* () {
         Effect.mapError(deliveryError),
       ),
   };
-  return { ...impl, deliverables } satisfies ProjectAgentServiceShape;
+  return {
+    ...impl,
+    deliverables: guardMaintenanceMethods(
+      deliverables,
+      ["publish", "withdraw", "maintainLibraryPaths"],
+      () => new ProjectAgentServiceError({ message: "Update maintenance admission is closed." }),
+    ),
+  } satisfies ProjectAgentServiceShape;
 });
 
 // A disabled feature gets the inert face; Stable and Beta currently get the service.

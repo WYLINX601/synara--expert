@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ComposerImageAttachment } from "../composerDraftStore";
 import { ComposerImageIntakeQueue } from "./useComposerImageIntake";
+import {
+  composerPersistenceOperationCount,
+  freezeComposerPersistenceForUpdate,
+  releaseComposerPersistenceForUpdate,
+} from "../lib/composerPersistenceActivity";
 
 function preparedImage(id: string): ComposerImageAttachment {
   const file = new File([id], `${id}.png`, { type: "image/png" });
@@ -198,4 +203,50 @@ describe("ComposerImageIntakeQueue", () => {
     expect(images.map((image) => image.name)).toEqual(["new.png"]);
     expect(queue.pendingCount()).toBe(0);
   });
+});
+
+it("keeps accepted image preparation visible to durability even after the UI queue is disposed", async () => {
+  const baseline = composerPersistenceOperationCount();
+  const queue = new ComposerImageIntakeQueue();
+  const preparation = Promise.withResolvers<{ images: ComposerImageAttachment[]; error: null }>();
+  const commitImages = vi.fn(() => 1);
+  const job = queue.enqueue({
+    files: [new File(["image"], "image.png", { type: "image/png" })],
+    existingAttachmentCount: () => 0,
+    commitImages,
+    onError: () => {},
+    prepareFiles: () => preparation.promise,
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(composerPersistenceOperationCount()).toBe(baseline + 1);
+  queue.dispose();
+  expect(queue.pendingCount()).toBe(0);
+  expect(composerPersistenceOperationCount()).toBe(baseline + 1);
+  preparation.resolve({ images: [preparedImage("discarded")], error: null });
+  await job;
+  expect(commitImages).not.toHaveBeenCalled();
+  expect(composerPersistenceOperationCount()).toBe(baseline);
+});
+
+it("refuses a new intake producer during a held lease and admits it after the exact release", async () => {
+  const queue = new ComposerImageIntakeQueue();
+  const job = {
+    files: [new File(["image"], "image.png", { type: "image/png" })],
+    existingAttachmentCount: () => 0,
+    commitImages: () => 1,
+    onError: () => {},
+    prepareFiles: async () => ({ images: [preparedImage("accepted")], error: null }),
+  };
+  freezeComposerPersistenceForUpdate("image-intake", "digest");
+  try {
+    expect(() => queue.enqueue(job)).toThrow("paused");
+    expect(queue.pendingCount()).toBe(0);
+    releaseComposerPersistenceForUpdate("image-intake", "wrong");
+    expect(() => queue.enqueue(job)).toThrow("paused");
+  } finally {
+    releaseComposerPersistenceForUpdate("image-intake", "digest");
+  }
+  await queue.enqueue(job);
+  expect(queue.pendingCount()).toBe(0);
 });

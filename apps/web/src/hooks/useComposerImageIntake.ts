@@ -11,6 +11,10 @@ import {
   prepareComposerImageAttachmentsFromFiles,
   type ComposerImageBuildResult,
 } from "../lib/composerSend";
+import {
+  assertComposerPersistenceAllowed,
+  beginComposerPersistenceOperation,
+} from "../lib/composerPersistenceActivity";
 
 const ATTACHMENT_LIMIT_ERROR = "You can attach up to {{value0}} references per message.";
 
@@ -52,6 +56,8 @@ export class ComposerImageIntakeQueue {
 
   enqueue(job: ComposerImageIntakeJob): Promise<void> {
     if (this.#disposed || job.files.length === 0) return Promise.resolve();
+    assertComposerPersistenceAllowed();
+    const finish = beginComposerPersistenceOperation();
     const generation = this.#generation;
     if (this.#pendingCount === 0) this.#batchFailureCount = this.#failureCount;
     this.#setPendingCount(this.#pendingCount + job.files.length);
@@ -86,6 +92,7 @@ export class ComposerImageIntakeQueue {
         );
       })
       .finally(() => {
+        finish();
         if (this.#isStale(generation)) return;
         this.#setPendingCount(Math.max(0, this.#pendingCount - job.files.length));
       });

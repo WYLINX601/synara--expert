@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import { Effect } from "effect";
 
 import { consumeDesktopParentInput, withDesktopParentLifetime } from "../desktopParentLifetime.ts";
-import { withDatabaseLifecycleLock } from "../persistence/DatabaseLifecycleLock.ts";
+import { withDatabaseLifecycleLock } from "@synara/shared/databaseLifecycleLock";
 
 const [dbPath, statePath, mode] = process.argv.slice(2) as [string, string, string];
 const input = consumeDesktopParentInput(process.env, () => process.stdin);

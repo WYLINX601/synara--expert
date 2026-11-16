@@ -7,7 +7,8 @@ import path from "node:path";
 
 import type { ProviderKind, ProviderStartOptions } from "@synara/contracts";
 
-import { resolveActiveCodexHomeWritePath, resolveBaseCodexHomePath } from "../codexHomePaths.ts";
+import { resolveActiveCodexHomeWritePath } from "../codexHomePaths.ts";
+import { resolveBaseCodexHomePath } from "@synara/shared/codexHomeOverlayPaths";
 import { resolveCodexPathIdentity } from "../codexPathIdentity.ts";
 import {
   prepareCodexHomeOverlay,
@@ -16,7 +17,7 @@ import {
   resolveCodexProcessSourceEnvironment,
   type CodexProcessEnvInput,
 } from "../codexProcessEnv.ts";
-import { expandProviderAccountHomePath } from "../providerAccountHomePath.ts";
+import { expandProviderAccountHomePath } from "@synara/shared/providerAccountHomePath";
 
 function canonicalStoragePath(value: string): string {
   return resolveCodexPathIdentity(value);

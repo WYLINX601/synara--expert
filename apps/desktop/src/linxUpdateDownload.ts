@@ -13,7 +13,11 @@ import { pipeline } from "node:stream/promises";
 
 import { LINX_UPDATE_ASSET_MAX_BYTES } from "@synara/contracts";
 
-import { openLinxUpdateStream, LinxUpdateFeedError } from "./linxUpdateFeed";
+import {
+  openLinxUpdateStream,
+  LinxUpdateFeedError,
+  type LinxUpdateRequest,
+} from "./linxUpdateFeed";
 
 export type LinxUpdateDownloadFailureReason = "network" | "size" | "sha256" | "write" | "aborted";
 
@@ -49,6 +53,7 @@ export interface LinxUpdateDownloadOptions {
   readonly onProgress?: (percent: number) => void;
   readonly timeoutMs?: number | undefined;
   readonly signal?: AbortSignal | undefined;
+  readonly request?: LinxUpdateRequest | undefined;
   /** Overridable only so tests can use a tiny cap. */
   readonly maxBytes?: number | undefined;
 }
@@ -107,6 +112,7 @@ export async function downloadLinxUpdateAsset(
     allowedHosts: options.allowedHosts,
     timeoutMs: options.timeoutMs,
     signal: options.signal,
+    request: options.request,
   }).catch((error: unknown) => {
     // Host policy and transport failures happen before the pipeline exists.
     throw asDownloadError(error, options.signal);

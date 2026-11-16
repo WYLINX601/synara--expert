@@ -21,7 +21,9 @@ export interface ObsidianVaultDiscovery {
 }
 
 export interface SynaraInstanceDiscovery {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
+  readonly applicationId: string;
+  readonly profilePath: string;
   readonly instanceId: string;
   readonly label: string;
   readonly updatedAt: string;

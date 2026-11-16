@@ -8,12 +8,12 @@ export const SYNARA_DESKTOP_UPDATE_CHANNEL = "synara";
 export const SYNARA_PRODUCTION_BUNDLE_ID = "com.emanueledipietro.synara";
 export const SYNARA_DEVELOPMENT_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.dev`;
 export const SYNARA_CANARY_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.canary`;
-export const SYNARA_WORKBENCH_BUNDLE_ID = "com.wylinx.workbench";
-export const SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID = "com.wylinx.workbench.preview";
+export const SYNARA_WORKBENCH_BUNDLE_ID = "com.wylinx.linx";
+export const SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID = "com.wylinx.linx.preview";
 export const SYNARA_HOME_ENV = "SYNARA_HOME";
 export const SYNARA_BETA_HOME_ENV = "SYNARA_BETA_HOME";
-export const SYNARA_WORKBENCH_HOME_ENV = "SYNARA_WORKBENCH_HOME";
-export const SYNARA_WORKBENCH_PREVIEW_HOME_ENV = "SYNARA_WORKBENCH_PREVIEW_HOME";
+export const SYNARA_WORKBENCH_HOME_ENV = "LINX_HOME";
+export const SYNARA_WORKBENCH_PREVIEW_HOME_ENV = "LINX_PREVIEW_HOME";
 /** Display/setup identity of the GUI host; this value does not confer native authority. */
 export const SYNARA_DESKTOP_BUNDLE_ID_ENV = "SYNARA_DESKTOP_BUNDLE_ID";
 export const SYNARA_CANARY_DESKTOP_SCHEME = "synara-canary";
@@ -27,10 +27,10 @@ export const SYNARA_BETA_BUNDLE_ID = `${SYNARA_PRODUCTION_BUNDLE_ID}.beta`;
 export const SYNARA_BETA_DESKTOP_SCHEME = "synara-beta";
 export const SYNARA_BETA_DESKTOP_ORIGIN = `${SYNARA_BETA_DESKTOP_SCHEME}://app`;
 export const SYNARA_BETA_DESKTOP_ENTRY_URL = `${SYNARA_BETA_DESKTOP_ORIGIN}/index.html`;
-export const SYNARA_WORKBENCH_DESKTOP_SCHEME = "workbench";
+export const SYNARA_WORKBENCH_DESKTOP_SCHEME = "linx";
 export const SYNARA_WORKBENCH_DESKTOP_ORIGIN = `${SYNARA_WORKBENCH_DESKTOP_SCHEME}://app`;
 export const SYNARA_WORKBENCH_DESKTOP_ENTRY_URL = `${SYNARA_WORKBENCH_DESKTOP_ORIGIN}/index.html`;
-export const SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME = "workbench-preview";
+export const SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME = "linx-preview";
 export const SYNARA_WORKBENCH_PREVIEW_DESKTOP_ORIGIN = `${SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME}://app`;
 export const SYNARA_WORKBENCH_PREVIEW_DESKTOP_ENTRY_URL = `${SYNARA_WORKBENCH_PREVIEW_DESKTOP_ORIGIN}/index.html`;
 export const SYNARA_SOURCE_DESKTOP_BUILD_MARKER = "synara-source-desktop-build-v2";
@@ -170,26 +170,26 @@ export function synaraDesktopIdentity(flavor: SynaraDesktopFlavor): SynaraDeskto
   if (flavor === "workbench-preview") {
     return {
       flavor,
-      displayName: "Personal Workbench Preview",
+      displayName: "Linx Preview",
       bundleId: SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID,
       scheme: SYNARA_WORKBENCH_PREVIEW_DESKTOP_SCHEME,
       origin: SYNARA_WORKBENCH_PREVIEW_DESKTOP_ORIGIN,
       entryUrl: SYNARA_WORKBENCH_PREVIEW_DESKTOP_ENTRY_URL,
-      userDataDirectoryName: "workbench-preview",
-      defaultHomeDirectoryName: ".synara-workbench-preview",
+      userDataDirectoryName: "linx-preview",
+      defaultHomeDirectoryName: ".linx-preview",
       usesScriptedUpdates: true,
     };
   }
   if (flavor === "workbench") {
     return {
       flavor,
-      displayName: "Personal Workbench",
+      displayName: "Linx",
       bundleId: SYNARA_WORKBENCH_BUNDLE_ID,
       scheme: SYNARA_WORKBENCH_DESKTOP_SCHEME,
       origin: SYNARA_WORKBENCH_DESKTOP_ORIGIN,
       entryUrl: SYNARA_WORKBENCH_DESKTOP_ENTRY_URL,
-      userDataDirectoryName: "workbench",
-      defaultHomeDirectoryName: ".synara-workbench",
+      userDataDirectoryName: "linx",
+      defaultHomeDirectoryName: ".linx",
       usesScriptedUpdates: true,
     };
   }

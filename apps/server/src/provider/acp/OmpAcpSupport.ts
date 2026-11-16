@@ -21,7 +21,7 @@ import type * as Acp from "@agentclientprotocol/sdk";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { makeEffectProcessCommand } from "../../platform/effectProcessRuntime.ts";
-import { expandProviderAccountHomePath } from "../../providerAccountHomePath.ts";
+import { expandProviderAccountHomePath } from "@synara/shared/providerAccountHomePath";
 import { buildProviderChildEnvironment } from "../../providerChildEnvironment.ts";
 import { buildProviderProcessEnv } from "../providerProcessEnv.ts";
 import {

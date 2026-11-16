@@ -4,6 +4,26 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./providerAccountHomePath": {
+      "types": "./src/providerAccountHomePath.ts",
+      "import": "./src/providerAccountHomePath.ts"
+    },
+    "./codexSourceIdentity": {
+      "types": "./src/codexSourceIdentity.ts",
+      "import": "./src/codexSourceIdentity.ts"
+    },
+    "./providerDirectoryPaths": {
+      "types": "./src/providerDirectoryPaths.ts",
+      "import": "./src/providerDirectoryPaths.ts"
+    },
+    "./codexContinuationMarker": {
+      "types": "./src/codexContinuationMarker.ts",
+      "import": "./src/codexContinuationMarker.ts"
+    },
+    "./serverSecretFiles": {
+      "types": "./src/serverSecretFiles.ts",
+      "import": "./src/serverSecretFiles.ts"
+    },
     "./expertDelegationActivity": {
       "types": "./src/expertDelegationActivity.ts",
       "import": "./src/expertDelegationActivity.ts"
@@ -155,6 +175,22 @@
     "./desktopIdentity": {
       "types": "./src/desktopIdentity.ts",
       "import": "./src/desktopIdentity.ts"
+    },
+    "./databaseLifecycleLock": {
+      "types": "./src/databaseLifecycleLock.ts",
+      "import": "./src/databaseLifecycleLock.ts"
+    },
+    "./linxUpdateRecovery": {
+      "types": "./src/linxUpdateRecovery.ts",
+      "import": "./src/linxUpdateRecovery.ts"
+    },
+    "./linxUpdateHomeOwnership": {
+      "types": "./src/linxUpdateHomeOwnership.ts",
+      "import": "./src/linxUpdateHomeOwnership.ts"
+    },
+    "./linxUpdateArchive": {
+      "types": "./src/linxUpdateArchive.ts",
+      "import": "./src/linxUpdateArchive.ts"
     },
     "./linxUpdateManifestVerification": {
       "types": "./src/linxUpdateManifestVerification.ts",
@@ -360,6 +396,10 @@
       "types": "./src/providerMetadata.ts",
       "import": "./src/providerMetadata.ts"
     },
+    "./codexHomeOverlayPaths": {
+      "types": "./src/codexHomeOverlayPaths.ts",
+      "import": "./src/codexHomeOverlayPaths.ts"
+    },
     "./providerInstances": {
       "types": "./src/providerInstances.ts",
       "import": "./src/providerInstances.ts"
@@ -513,12 +553,14 @@
   },
   "dependencies": {
     "@synara/contracts": "workspace:*",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "yauzl": "3.4.0"
   },
   "devDependencies": {
     "@effect/language-service": "catalog:",
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
+    "@types/yauzl": "3.4.0",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

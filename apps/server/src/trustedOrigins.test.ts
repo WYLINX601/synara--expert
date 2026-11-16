@@ -58,14 +58,14 @@ describe("trustedOrigins", () => {
     ).toBe(true);
     expect(
       isTrustedAppOrigin({
-        origin: "workbench://app",
+        origin: "linx://app",
         requestOrigin: "http://127.0.0.1:58090",
         config,
       }),
     ).toBe(true);
     expect(
       isTrustedAppOrigin({
-        origin: "workbench-preview://app",
+        origin: "linx-preview://app",
         requestOrigin: "http://127.0.0.1:58090",
         config,
       }),
@@ -147,8 +147,8 @@ describe("trustedOrigins", () => {
     expect(normalizeCorsOrigin("synara://app/")).toBe("synara://app");
     expect(normalizeCorsOrigin("synara-canary://app/")).toBe("synara-canary://app");
     expect(normalizeCorsOrigin("synara-cua://app/")).toBe("synara-cua://app");
-    expect(normalizeCorsOrigin("workbench://app/")).toBe("workbench://app");
-    expect(normalizeCorsOrigin("workbench-preview://app/")).toBe("workbench-preview://app");
+    expect(normalizeCorsOrigin("linx://app/")).toBe("linx://app");
+    expect(normalizeCorsOrigin("linx-preview://app/")).toBe("linx-preview://app");
     expect(normalizeCorsOrigin("synara-beta://app/")).toBe("synara-beta://app");
   });
 
@@ -158,8 +158,8 @@ describe("trustedOrigins", () => {
       "synara-beta://app",
       "synara-canary://app",
       "synara-cua://app",
-      "workbench://app",
-      "workbench-preview://app",
+      "linx://app",
+      "linx-preview://app",
     ]) {
       expect(
         shouldRejectUntrustedRequestOrigin({
@@ -176,10 +176,12 @@ describe("trustedOrigins", () => {
       "synara-betas://app",
       "synara-canary://evil.test",
       "synara-cua://evil.test",
-      "workbench://evil.test",
-      "workbench-preview://evil.test",
-      "workbench-preview://app.evil.test",
-      "workbench-previews://app",
+      "linx://evil.test",
+      "linx-preview://evil.test",
+      "linx-preview://app.evil.test",
+      "linx-previews://app",
+      "workbench://app",
+      "workbench-preview://app",
     ]) {
       expect(
         shouldRejectUntrustedRequestOrigin({

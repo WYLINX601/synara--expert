@@ -4,6 +4,7 @@
 // Depends on: Desktop update IPC contracts.
 
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@synara/contracts";
+import { t } from "~/i18n";
 
 export type DesktopUpdateButtonAction = "check" | "download" | "install" | "none";
 
@@ -62,6 +63,7 @@ export function shouldShowDesktopUpdateButton(state: DesktopUpdateState | null):
     state.status === "available" ||
     state.status === "downloading" ||
     state.status === "downloaded" ||
+    state.status === "installing" ||
     (state.status === "error" && state.errorContext !== "check" && action !== "none")
   );
 }
@@ -74,6 +76,7 @@ export function isDesktopUpdateButtonDisabled(state: DesktopUpdateState | null):
   return (
     state?.status === "downloading" ||
     state?.status === "checking" ||
+    state?.status === "installing" ||
     (state?.status === "available" &&
       !isDesktopUpdateDownloadOnClick(state) &&
       state.errorContext !== "download")
@@ -111,8 +114,13 @@ export function getDesktopUpdateButtonTooltip(
   state: DesktopUpdateState,
   options?: { installing?: boolean },
 ): string {
-  if (options?.installing) {
-    return "Applying update...";
+  if (options?.installing || state.status === "installing") {
+    return isDesktopUpdateDownloadOnClick(state)
+      ? t("desktop:linxUpdateInstalling")
+      : "Applying update...";
+  }
+  if (isDesktopUpdateDownloadOnClick(state) && state.errorContext === "install" && state.message) {
+    return state.message;
   }
   if (state.status === "idle") {
     return "Check for updates";
@@ -137,12 +145,18 @@ export function getDesktopUpdateButtonTooltip(
     const version = state.availableVersion;
     if (isDesktopUpdateDownloadOnClick(state)) {
       return version
-        ? `Update ${version} is ready. Click to download it.`
-        : "Update ready. Click to download it.";
+        ? t("desktop:linxUpdateReadyVersion", { value0: version })
+        : t("desktop:linxUpdateReady");
     }
     return `Preparing update ${version ?? ""}`.trim();
   }
   if (state.status === "downloading") {
+    if (isDesktopUpdateDownloadOnClick(state)) {
+      const percent = getDesktopUpdateDownloadPercent(state);
+      return percent === null
+        ? t("desktop:linxUpdateDownloading")
+        : t("desktop:linxUpdateDownloadingPercent", { value0: percent });
+    }
     const progress =
       typeof state.downloadPercent === "number" ? ` (${Math.floor(state.downloadPercent)}%)` : "";
     return isDesktopUpdateDownloadOnClick(state)
@@ -177,13 +191,13 @@ export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): 
   return message.length > 0 ? message : null;
 }
 
-/**
- * A refused request (Linx install before the LU-04 helper) is neither accepted
- * nor completed, so it has no action error — but it still carries an explanatory
- * message the user must see.
- */
+/** Download completion does not mean its associated installation was admitted. */
 export function getDesktopUpdateRefusalNotice(result: DesktopUpdateActionResult): string | null {
-  if (result.accepted || result.completed) return null;
+  if (
+    (result.accepted || result.completed) &&
+    !(result.completed && result.state.errorContext === "install")
+  )
+    return null;
   const message = result.state.message;
   if (typeof message !== "string") return null;
   const trimmed = message.trim();
@@ -198,6 +212,7 @@ export function shouldToastDesktopUpdateActionResult(result: DesktopUpdateAction
 // the updater still reports "downloaded". That state means the install is in
 // flight, so callers must not treat the accepted-but-incomplete result as done.
 export function isDesktopUpdateInstallInFlight(result: DesktopUpdateActionResult): boolean {
+  if (result.state.status === "installing") return true;
   return (
     result.accepted &&
     !result.completed &&

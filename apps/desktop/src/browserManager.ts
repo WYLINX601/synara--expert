@@ -14,7 +14,7 @@ import {
   webContents as electronWebContents,
   WebContentsView,
 } from "electron";
-import type { WebContents } from "electron";
+import type { DownloadItem, WebContents } from "electron";
 import type {
   BrowserAnnotationCancelInput,
   BrowserAnnotationEvent,
@@ -486,6 +486,8 @@ export class DesktopBrowserManager {
   private backgroundAutomationEvictionTimer: ReturnType<typeof setTimeout> | null = null;
   private runtimeSyncFlushScheduled = false;
   private disposed = false;
+  private updateAttempt: string | null = null;
+  private readonly acceptedDownloads = new Set<DownloadItem>();
   private readonly perfCounters = {
     setPanelBoundsCalls: 0,
     setPanelBoundsNoopSkips: 0,
@@ -980,16 +982,24 @@ export class DesktopBrowserManager {
 
   private handleSessionDownload(input: BrowserSessionDownloadEvent): void {
     if (this.disposed) return;
-    const context = this.findRuntimeContext(input.webContents);
-    if (!context) {
+    if (this.updateAttempt !== null) {
+      // This is a NEW download; held preparation never cancels one already
+      // accepted, because such items make prepareForUpdate refuse.
+      input.event.preventDefault();
       return;
     }
-    const runtimeKey = buildRuntimeKey(context.threadId, context.tabId);
-    const currentHumanEpoch = this.getAutomationHumanControlEpoch(context.threadId);
-    const provenance = this.automationSideEffectProvenanceByRuntimeKey.get(runtimeKey);
-    if (!provenance || provenance.humanControlEpoch !== currentHumanEpoch) {
-      // A manual download after genuine user input remains native Electron
-      // behavior. In particular, no global partition policy blocks it.
+    const context = this.findRuntimeContext(input.webContents);
+    const runtimeKey = context ? buildRuntimeKey(context.threadId, context.tabId) : null;
+    const provenance = runtimeKey
+      ? this.automationSideEffectProvenanceByRuntimeKey.get(runtimeKey)
+      : undefined;
+    if (
+      !context ||
+      !provenance ||
+      provenance.humanControlEpoch !== this.getAutomationHumanControlEpoch(context.threadId)
+    ) {
+      this.acceptedDownloads.add(input.item);
+      input.item.once("done", () => this.acceptedDownloads.delete(input.item));
       return;
     }
 
@@ -1420,6 +1430,29 @@ export class DesktopBrowserManager {
     };
   }
 
+  /** Unknown guest forms are not an idle proof, even when their panel is hidden. */
+  prepareForUpdate(attemptId: string): boolean {
+    if (this.disposed || (this.updateAttempt !== null && this.updateAttempt !== attemptId))
+      return false;
+    if (
+      this.humanBrowserOperations !== 0 ||
+      this.acceptedDownloads.size !== 0 ||
+      this.pendingWindowOpenTasksByRuntimeKey.size !== 0 ||
+      this.pendingAutomationWindowOpenCommitsByRuntimeKey.size !== 0 ||
+      this.pendingStatePublicationsByKey.size !== 0 ||
+      this.pendingRuntimeSyncs.size !== 0 ||
+      [...this.runtimes.values()].some((runtime) => !runtime.webContents.isDestroyed()) ||
+      [...this.popupRuntimes.values()].some((runtime) => !runtime.window.isDestroyed())
+    )
+      return false;
+    this.updateAttempt = attemptId;
+    return true;
+  }
+
+  releaseUpdate(attemptId: string): void {
+    if (this.updateAttempt === attemptId) this.updateAttempt = null;
+  }
+
   getAutomationHumanControlEpoch(threadId: ThreadId): number {
     return this.humanControlEpochByThreadId.get(threadId) ?? 0;
   }
@@ -1432,6 +1465,7 @@ export class DesktopBrowserManager {
 
   /** Cookie imports affect the shared session, so pause every agent until they drain. */
   beginHumanBrowserOperation(): () => void {
+    if (this.updateAttempt !== null) throw new Error("Browser work is frozen for update handoff.");
     this.humanBrowserOperations += 1;
     for (const threadId of this.states.keys()) this.markHumanControl(threadId);
     let released = false;
@@ -1968,6 +2002,8 @@ export class DesktopBrowserManager {
   // Adopts the renderer-owned <webview> so the visible page and browser host tools
   // share one WebContents instead of racing a hidden native WebContentsView.
   attachWebview(input: BrowserAttachWebviewInput, hostWebContentsId: number): ThreadBrowserState {
+    if (this.updateAttempt !== null)
+      throw new Error("Browser guest admission is frozen for update handoff.");
     const state = this.states.get(input.threadId);
     const tab = state ? this.getTab(state, input.tabId) : null;
     if (!state?.open || !tab) {
@@ -3144,6 +3180,8 @@ export class DesktopBrowserManager {
     tabId: string,
     popupOptions?: EmbeddedPopupOptions,
   ): LiveTabRuntime {
+    if (this.updateAttempt !== null)
+      throw new Error("Browser guest admission is frozen for update handoff.");
     const view = new WebContentsView({
       ...(popupOptions?.webContents ? { webContents: popupOptions.webContents } : {}),
       webPreferences: {

@@ -70,6 +70,7 @@ import {
 } from "../../projectAgent/groupsBetaGate.ts";
 import { AutomationServiceError } from "../Errors.ts";
 import { AutomationService, type AutomationServiceShape } from "../Services/AutomationService.ts";
+import { guardMaintenanceMethods } from "../../serverMaintenance";
 import { buildAutomationProposalActivity } from "../proposalActivity.ts";
 import {
   type AutomationCompletionEvaluation,
@@ -3952,27 +3953,47 @@ export const AutomationServiceLive = Layer.effect(
         return [...deferredResults, ...results].filter(Option.isSome).map((result) => result.value);
       });
 
-    return {
-      list,
-      create,
-      createProjectManaged,
-      update,
-      delete: deleteAutomation,
-      resolveProposal,
-      getMemory,
-      listRunsForDefinition,
-      updateMemory,
-      reportResult,
-      resolveCallerRun,
-      runNow,
-      cancelRun,
-      markRunRead,
-      archiveRun,
-      runDueOnce,
-      reconcileThread,
-      reconcileActiveRuns,
-      recoverPendingRuns,
-      streamEvents: Stream.fromPubSub(events),
-    } satisfies AutomationServiceShape;
+    return guardMaintenanceMethods(
+      {
+        list,
+        create,
+        createProjectManaged,
+        update,
+        delete: deleteAutomation,
+        resolveProposal,
+        getMemory,
+        listRunsForDefinition,
+        updateMemory,
+        reportResult,
+        resolveCallerRun,
+        runNow,
+        cancelRun,
+        markRunRead,
+        archiveRun,
+        runDueOnce,
+        reconcileThread,
+        reconcileActiveRuns,
+        recoverPendingRuns,
+        streamEvents: Stream.fromPubSub(events),
+      } satisfies AutomationServiceShape,
+      [
+        "create",
+        "createProjectManaged",
+        "update",
+        "delete",
+        "resolveProposal",
+        "updateMemory",
+        "reportResult",
+        "runNow",
+        "cancelRun",
+        "markRunRead",
+        "archiveRun",
+        "runDueOnce",
+        "reconcileThread",
+        "reconcileActiveRuns",
+        "recoverPendingRuns",
+      ],
+      () => new AutomationServiceError({ message: "Update maintenance admission is closed." }),
+    );
   }),
 );

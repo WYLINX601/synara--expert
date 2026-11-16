@@ -39,6 +39,8 @@ do {
             coordinator.handleListWindows(requestId: requestId)
         } onCaptureWindow: { requestId, windowID in
             coordinator.handleCaptureWindow(windowID: windowID, requestId: requestId)
+        } onUpdateMaintenance: { requestId, pause in
+            coordinator.handleUpdateMaintenance(requestId: requestId, pause: pause)
         }
         requestListener.start()
 

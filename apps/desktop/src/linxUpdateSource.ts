@@ -24,6 +24,8 @@ export const LINX_UPDATE_SIGNATURE_FILE_NAME = `${LINX_UPDATE_MANIFEST_FILE_NAME
 export const LINX_UPDATE_RELEASE_BASE_URL = "https://github.com";
 export const LINX_UPDATE_ALLOWED_HOSTS: readonly string[] = [
   "github.com",
+  "api.github.com",
+  "release-assets.githubusercontent.com",
   "objects.githubusercontent.com",
 ];
 

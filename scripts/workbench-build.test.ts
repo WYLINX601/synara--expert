@@ -11,6 +11,7 @@ import {
   type WorkbenchBuildRequest,
 } from "./lib/workbench-build.ts";
 import { expectedCandidateBranch } from "./lib/workbench-sync/sync.ts";
+import { createDesktopArtifactIdentity } from "./lib/desktop-artifact-identity.ts";
 
 const temporaryDirectories: string[] = [];
 const OFFICIAL_REPOSITORY = "https://github.com/Emanuele-web04/synara.git";
@@ -258,7 +259,18 @@ const fakeBuilder = {
   readToolchain: () => toolchain,
   runBuilder: (_repo: string, args: readonly string[]) => {
     const outputDir = args[args.indexOf("--output-dir") + 1]!;
-    writeFileSync(join(outputDir, "Personal Workbench.AppImage"), "artifact bytes");
+    const flavor = args[args.indexOf("--flavor") + 1];
+    if (flavor !== "workbench" && flavor !== "workbench-preview") {
+      throw new Error(`Unexpected build fixture flavor: ${flavor}`);
+    }
+    const version = args[args.indexOf("--build-version") + 1]!;
+    const arch = args[args.indexOf("--arch") + 1]!;
+    const { buildConfig } = createDesktopArtifactIdentity({ platform: "linux", flavor });
+    const artifactName = buildConfig.artifactName
+      .replace("${version}", version)
+      .replace("${arch}", arch)
+      .replace("${ext}", "AppImage");
+    writeFileSync(join(outputDir, artifactName), "artifact bytes");
     writeFileSync(join(outputDir, "latest-linux.yml"), "version: 0.1.0\n");
     return { status: 0 };
   },
@@ -406,11 +418,11 @@ describe("workbench build manifest", () => {
   });
 
   it.each([
-    ["workbench", "0.1.0"],
-    ["workbench-preview", "0.1.0-preview.1"],
+    ["workbench", "0.1.0", "Linx-0.1.0-x64.AppImage"],
+    ["workbench-preview", "0.1.0-preview.1", "Linx-Preview-0.1.0-preview.1-x64.AppImage"],
   ] as const)(
     "records the independent %s version and exact artifact evidence",
-    async (flavor, version) => {
+    async (flavor, version, artifactName) => {
       const fixture = makeFixture();
       const result = await buildWorkbenchArtifact(requestFor(fixture, flavor), fakeBuilder);
       const artifactBytes = "artifact bytes";
@@ -450,12 +462,12 @@ describe("workbench build manifest", () => {
         status: "not-applicable",
       });
       expect(result.manifest.artifactProvenance.artifacts).toContainEqual({
-        fileName: "Personal Workbench.AppImage",
+        fileName: artifactName,
         size: Buffer.byteLength(artifactBytes),
         sha256: createHash("sha256").update(artifactBytes).digest("hex"),
       });
       expect(JSON.parse(readFileSync(result.manifestPath, "utf8"))).toEqual(result.manifest);
-      expect(readFileSync(result.provenancePath, "utf8")).toContain("Personal Workbench.AppImage");
+      expect(readFileSync(result.provenancePath, "utf8")).toContain(artifactName);
     },
   );
 
@@ -538,7 +550,7 @@ describe("workbench build manifest", () => {
       ),
     ).rejects.toThrow("candidate-metadata-official-tag-tag-missing");
     expect(builderCalled).toBe(false);
-  });
+  }, 30_000);
 
   it("keeps explicit upstream parameters restricted to the versioned lock without metadata", async () => {
     const fixture = makeFixture();

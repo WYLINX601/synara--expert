@@ -41,9 +41,10 @@ const refuse = () =>
  * working as plain chats. Deleting a project still cleans up its group data.
  */
 export function gateProjectAgentServiceForStable(
-  service: ProjectAgentServiceShape,
+  service: Pick<ProjectAgentServiceShape, "getMaintenanceActivity" | "onProjectDeleted">,
 ): ProjectAgentServiceShape {
   return {
+    getMaintenanceActivity: service.getMaintenanceActivity,
     notifyWorkItemChanged: () => Effect.void,
     getOverview: refuse,
     listSummaries: () => Effect.succeed({ summaries: [] }),

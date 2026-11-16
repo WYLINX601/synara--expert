@@ -16,7 +16,7 @@ import {
 
 import { buildCodexProcessEnv } from "../codexProcessEnv.ts";
 import { resolveExecutable } from "../executableLookup.ts";
-import { expandProviderAccountHomePath } from "../providerAccountHomePath.ts";
+import { expandProviderAccountHomePath } from "@synara/shared/providerAccountHomePath";
 import { buildClaudeInstanceProcessEnv } from "../provider/claudeEnvironment.ts";
 import { buildProviderProcessEnv } from "../provider/providerProcessEnv.ts";
 import type { ManagedTerminalProfile } from "./managedTerminalWrappers.ts";

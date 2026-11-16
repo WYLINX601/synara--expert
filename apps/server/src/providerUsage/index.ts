@@ -24,9 +24,9 @@ import {
 } from "@synara/shared/providerInstances";
 
 import { ServerConfig } from "../config";
-import { resolveBaseCodexHomePath } from "../codexHomePaths";
+import { resolveBaseCodexHomePath } from "@synara/shared/codexHomeOverlayPaths";
 import { prepareCodexAuthTracking } from "../codexProcessEnv";
-import { expandProviderAccountHomePath } from "../providerAccountHomePath";
+import { expandProviderAccountHomePath } from "@synara/shared/providerAccountHomePath";
 import { buildClaudeInstanceProcessEnv } from "../provider/claudeEnvironment";
 import {
   buildProviderProcessEnv,

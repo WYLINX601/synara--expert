@@ -8,6 +8,7 @@ const ipc = vi.hoisted(() => ({
   sendSync: vi.fn((): unknown => false),
   on: vi.fn((..._args: unknown[]) => undefined),
   removeListener: vi.fn((..._args: unknown[]) => undefined),
+  send: vi.fn((..._args: unknown[]) => undefined),
 }));
 vi.mock("electron", () => ({
   contextBridge: { exposeInMainWorld: ipc.expose },
@@ -15,7 +16,7 @@ vi.mock("electron", () => ({
     invoke: ipc.invoke,
     sendSync: ipc.sendSync,
     on: ipc.on,
-    send: vi.fn(),
+    send: ipc.send,
     removeListener: ipc.removeListener,
   },
   webUtils: { getPathForFile: vi.fn() },
@@ -186,4 +187,59 @@ it("reports viewport changes through the existing zoom channel only while a bubb
   } finally {
     vi.unstubAllGlobals();
   }
+});
+
+it("exposes only the schema-bound update edit lease and rejects malformed acknowledgments", async () => {
+  vi.resetModules();
+  ipc.expose.mockClear();
+  ipc.on.mockClear();
+  ipc.send.mockClear();
+  // Preload exposes the bridge at module evaluation; a static import cannot exercise a fresh IPC binding.
+  await import("./preload");
+  const bridge = ipc.expose.mock.calls[0]?.[1] as DesktopBridge;
+  const maintenance = bridge.updateWindowMaintenance!;
+  const listener = vi.fn();
+  const unsubscribe = maintenance.onRequest(listener);
+  const receive = ipc.on.mock.calls.findLast(
+    ([channel]) => channel === DESKTOP_IPC_CHANNELS.updateWindowMaintenanceRequest,
+  )?.[1] as (_event: unknown, payload: unknown) => void;
+  const request = {
+    schemaVersion: 1,
+    action: "prepare",
+    attemptId: "12345678-1234-4234-8234-123456789012",
+    probeId: "22345678-1234-4234-8234-123456789012",
+    backendStopped: false,
+    manifestDigest: "a".repeat(64),
+  };
+  receive({}, request);
+  expect(listener).toHaveBeenCalledExactlyOnceWith(request);
+  receive({}, { ...request, arbitraryPath: "/untrusted" });
+  receive({}, { ...request, action: "install" });
+  receive({}, { ...request, probeId: undefined });
+  receive({}, { ...request, backendStopped: undefined });
+  expect(listener).toHaveBeenCalledOnce();
+  const response = {
+    schemaVersion: 1 as const,
+    attemptId: request.attemptId,
+    probeId: request.probeId,
+    manifestDigest: request.manifestDigest,
+    ready: true,
+    unsavedEditors: 0,
+    savingEditors: 0,
+    message: null,
+  };
+  maintenance.reply(response);
+  expect(ipc.send).toHaveBeenCalledExactlyOnceWith(
+    DESKTOP_IPC_CHANNELS.updateWindowMaintenanceResponse,
+    response,
+  );
+  Reflect.apply(maintenance.reply, undefined, [{ ...response, unsavedEditors: 1 }]);
+  Reflect.apply(maintenance.reply, undefined, [{ ...response, unexpected: true }]);
+  Reflect.apply(maintenance.reply, undefined, [{ ...response, probeId: undefined }]);
+  expect(ipc.send).toHaveBeenCalledOnce();
+  unsubscribe();
+  expect(ipc.removeListener).toHaveBeenCalledWith(
+    DESKTOP_IPC_CHANNELS.updateWindowMaintenanceRequest,
+    receive,
+  );
 });

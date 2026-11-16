@@ -45,7 +45,10 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { CodexAdapter, type CodexAdapterShape } from "../Services/CodexAdapter.ts";
-import { PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY } from "../Services/ProviderAdapter.ts";
+import {
+  PROVIDER_ADAPTER_LIVE_TURN_DIFF_PATCH,
+  PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY,
+} from "../Services/ProviderAdapter.ts";
 import {
   CodexAppServerManager,
   CodexSessionAuthInvalidatedError,
@@ -2895,7 +2898,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         supportsPluginDiscovery: true,
         supportsRuntimeModelList: true,
         supportsTurnSteering: true,
-        supportsLiveTurnDiffPatch: true,
+        supportsLiveTurnDiffPatch: PROVIDER_ADAPTER_LIVE_TURN_DIFF_PATCH.codex,
       },
       startSession,
       didResumeSession: (input, session) => {

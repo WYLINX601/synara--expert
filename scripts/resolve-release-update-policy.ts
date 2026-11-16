@@ -21,10 +21,6 @@ const output = {
   tag: policy.tag,
   is_prerelease: String(policy.isPrerelease),
   make_latest: String(policy.makeLatest),
-  mirror_to_stable_channel: String(policy.mirrorToStableChannel),
-  release_lane: policy.lane,
-  bridge_tag: policy.bridgeTag,
-  update_channel: policy.channel,
   desktop_flavor: policy.desktopFlavor,
 };
 

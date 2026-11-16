@@ -19,9 +19,9 @@ import {
   LinxUpdateKeyRing,
   LinxUpdateManifest,
   parseLinxUpdateVersion,
-} from "@synara/contracts";
-import type { LinxUpdateManifest as LinxUpdateManifestType } from "@synara/contracts";
-import type { LinxUpdateRejectionReason } from "@synara/contracts";
+} from "@synara/contracts/linxUpdateManifest";
+import type { LinxUpdateManifest as LinxUpdateManifestType } from "@synara/contracts/linxUpdateManifest";
+import type { LinxUpdateRejectionReason } from "@synara/contracts/linxUpdateManifest";
 
 /**
  * Client-side admission pipeline for the LU-00 update manifest.
@@ -73,10 +73,8 @@ export function loadLinxUpdateKeyRing(raw: string): LinxUpdateTrustedKeys {
   let keyRing: typeof LinxUpdateKeyRing.Type;
   try {
     keyRing = Schema.decodeUnknownSync(LinxUpdateKeyRing)(parsed);
-  } catch (error) {
-    throw new LinxUpdateConfigurationError(
-      `Trusted key ring has an invalid shape: ${error instanceof Error ? error.message : String(error)}`,
-    );
+  } catch {
+    throw new LinxUpdateConfigurationError("Trusted key ring has an invalid shape.");
   }
 
   const keys = new Map<string, KeyObject>();

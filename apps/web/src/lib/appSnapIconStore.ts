@@ -4,6 +4,10 @@
 // Depends on: IndexedDB structured-clone support.
 
 import { awaitIdbRequest, openIndexedDbDatabase, waitForIdbTransaction } from "./indexedDb";
+import {
+  assertComposerPersistenceAllowed,
+  beginComposerPersistenceOperation,
+} from "./composerPersistenceActivity";
 
 const DATABASE_NAME = "synara-appsnap-icons";
 const DATABASE_VERSION = 1;
@@ -69,8 +73,11 @@ export async function persistAppSnapIcon(input: {
   const dataUrl = normalizeIconDataUrl(input.dataUrl);
   if (!bundleIdentifier || !dataUrl) return;
 
-  const database = await openAppSnapIconDatabase();
+  assertComposerPersistenceAllowed();
+  const finish = beginComposerPersistenceOperation();
+  let database: IDBDatabase | undefined;
   try {
+    database = await openAppSnapIconDatabase();
     const transaction = database.transaction(ICON_STORE_NAME, "readwrite");
     const store = transaction.objectStore(ICON_STORE_NAME);
     store.put({
@@ -87,7 +94,8 @@ export async function persistAppSnapIcon(input: {
     });
     await waitForTransaction(transaction);
   } finally {
-    database.close();
+    database?.close();
+    finish();
   }
 }
 

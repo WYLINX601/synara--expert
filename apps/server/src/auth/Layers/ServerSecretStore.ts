@@ -1,8 +1,7 @@
 import * as Crypto from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import * as fs from "node:fs/promises";
+import { readServerSecretFile, resolveServerSecretPath } from "@synara/shared/serverSecretFiles";
 
-import { Effect, FileSystem, Layer, Path } from "effect";
+import { Effect, FileSystem, Layer } from "effect";
 
 import { writeFileStringAtomically } from "../../atomicWrite";
 import { ServerConfig } from "../../config";
@@ -13,56 +12,9 @@ import {
   type ServerSecretStoreShape,
 } from "../Services/ServerSecretStore";
 
-const secretFileName = (name: string): string => `${name.replace(/[^a-zA-Z0-9_.-]/g, "_")}.bin`;
-const MAX_SECRET_FILE_BYTES = 16 * 1024 * 1024;
-
-async function readSecretFile(secretPath: string): Promise<Uint8Array | null> {
-  let before: Awaited<ReturnType<typeof fs.lstat>>;
-  try {
-    before = await fs.lstat(secretPath);
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw cause;
-  }
-  if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_SECRET_FILE_BYTES) {
-    throw new Error("Secret file is invalid.");
-  }
-
-  const flags = fsConstants.O_RDONLY | (process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW);
-  const handle = await fs.open(secretPath, flags);
-  try {
-    const opened = await handle.stat();
-    if (
-      !opened.isFile() ||
-      opened.dev !== before.dev ||
-      opened.ino !== before.ino ||
-      opened.size > MAX_SECRET_FILE_BYTES
-    ) {
-      throw new Error("Secret file is invalid.");
-    }
-
-    const chunks: Buffer[] = [];
-    let total = 0;
-    while (true) {
-      const remaining = MAX_SECRET_FILE_BYTES + 1 - total;
-      if (remaining <= 0) throw new Error("Secret file is invalid.");
-      const chunk = Buffer.alloc(Math.min(64 * 1024, remaining));
-      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
-      if (bytesRead === 0) break;
-      total += bytesRead;
-      if (total > MAX_SECRET_FILE_BYTES) throw new Error("Secret file is invalid.");
-      chunks.push(chunk.subarray(0, bytesRead));
-    }
-    return Uint8Array.from(Buffer.concat(chunks, total));
-  } finally {
-    await handle.close();
-  }
-}
-
 export const makeServerSecretStoreAt = (secretsDir: string) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
 
     yield* Effect.try({
       try: () => ensurePrivateDirectorySync(secretsDir),
@@ -70,11 +22,11 @@ export const makeServerSecretStoreAt = (secretsDir: string) =>
         new SecretStoreError({ message: "Failed to create secrets directory.", cause }),
     });
 
-    const resolveSecretPath = (name: string) => path.join(secretsDir, secretFileName(name));
+    const resolveSecretPath = (name: string) => resolveServerSecretPath(secretsDir, name);
 
     const get: ServerSecretStoreShape["get"] = (name) =>
       Effect.tryPromise({
-        try: () => readSecretFile(resolveSecretPath(name)),
+        try: () => readServerSecretFile(resolveSecretPath(name)),
         catch: (cause) =>
           new SecretStoreError({ message: `Failed to read secret ${name}.`, cause }),
       });

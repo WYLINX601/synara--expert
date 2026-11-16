@@ -24,6 +24,8 @@ async function readLocalJson(file) {
 }
 async function writeLocalJson(file, value) {
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  if (!(await privateDiscoveryRoot(path.dirname(file))))
+    throw new Error("Unsafe local discovery directory.");
   const temporary = `${file}.${randomUUID()}.tmp`;
   await fs.writeFile(temporary, JSON.stringify(value), { mode: 0o600, flag: "wx" });
   await fs.rename(temporary, file);
@@ -34,6 +36,56 @@ function appDataDirectory() {
     : process.platform === "win32"
       ? process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming")
       : process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+}
+function discoveryRoots() {
+  const appData = appDataDirectory();
+  return [
+    {
+      key: "linx",
+      directory: path.join(appData, "linx", "ambient-context-discovery"),
+      profiles: { "com.wylinx.linx": path.join(appData, "linx") },
+    },
+    {
+      key: "linx-preview",
+      directory: path.join(appData, "linx-preview", "ambient-context-discovery"),
+      profiles: { "com.wylinx.linx.preview": path.join(appData, "linx-preview") },
+    },
+    {
+      key: "synara",
+      directory: path.join(appData, "SynaraContext"),
+      profiles: {
+        "com.emanueledipietro.synara": path.join(appData, "synara"),
+        "com.emanueledipietro.synara.dev": path.join(appData, "synara-dev"),
+        "com.emanueledipietro.synara.beta": path.join(appData, "synara-beta"),
+        "com.emanueledipietro.synara.canary": path.join(appData, "synara-canary"),
+        "com.emanueledipietro.synara.cua": path.join(appData, "synara-cua"),
+      },
+    },
+  ];
+}
+async function privateDiscoveryRoot(directory) {
+  try {
+    const stat = await fs.lstat(directory);
+    const canonical = await fs.realpath(directory);
+    const windows = process.platform === "win32";
+    return (
+      path.isAbsolute(directory) &&
+      stat.isDirectory() &&
+      !stat.isSymbolicLink() &&
+      (windows || typeof process.getuid !== "function" || stat.uid === process.getuid()) &&
+      (windows || (stat.mode & 0o022) === 0) &&
+      (windows
+        ? canonical.toLowerCase() === path.resolve(directory).toLowerCase()
+        : canonical === directory)
+    );
+  } catch {
+    return false;
+  }
+}
+function localEndpoint(endpoint) {
+  if (typeof endpoint !== "string" || !ENDPOINT.test(endpoint)) return false;
+  const port = Number(endpoint.slice(endpoint.lastIndexOf(":") + 1));
+  return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 const { capture, search } = require("./capture.cjs");
 
@@ -56,19 +108,40 @@ module.exports = class SynaraContextPlugin extends Plugin {
     this.requestId = randomUUID();
     this.discoveryRevision = 0;
     this.files = null;
-    this.discoveryRoot = path.join(appDataDirectory(), "SynaraContext");
+    this.discoveryRoots = discoveryRoots();
+    this.discoveryRootKey = "";
+    this.discoveryRoot = null;
+    this.instanceId = "";
+    this.selectionKey = "";
+    this.vaultId = "";
+    this.clientHash = "";
+    const selection = await this.loadData();
     const basePath = this.basePath();
     if (basePath) {
       const canonical = await fs.realpath(basePath);
-      this.clientPath = path.join(
-        this.discoveryRoot,
-        "clients",
-        `${createHash("sha256").update(canonical).digest("hex")}.json`,
+      if (this.unloaded) return;
+      this.clientHash = createHash("sha256").update(canonical).digest("hex");
+      const selectedRoot = this.discoveryRoots.find(
+        (root) => root.key === selection?.discoveryRootKey,
       );
-      const saved = await readLocalJson(this.clientPath);
-      this.vaultId = UUID.test(saved?.vaultId || "") ? saved.vaultId : randomUUID();
-      this.instanceId = UUID.test(saved?.instanceId || "") ? saved.instanceId : "";
-      await this.saveConnectionPreference();
+      if (selection?.discoveryRootKey || selection?.instanceId) {
+        if (selectedRoot && UUID.test(selection?.instanceId || "")) {
+          await this.bindDiscoveryRoot(selectedRoot, selection.instanceId, false);
+        } else {
+          // A damaged configured binding never authorizes a different live host.
+          this.selectionKey = "unavailable";
+        }
+      } else {
+        const legacy = this.discoveryRoots.find((root) => root.key === "synara");
+        const clients = path.join(legacy.directory, "clients");
+        const saved =
+          (await privateDiscoveryRoot(legacy.directory)) && (await privateDiscoveryRoot(clients))
+            ? await readLocalJson(path.join(clients, `${this.clientHash}.json`))
+            : null;
+        if (UUID.test(saved?.vaultId || "") && UUID.test(saved?.instanceId || "")) {
+          await this.bindDiscoveryRoot(legacy, saved.instanceId, false);
+        }
+      }
     }
     if (this.unloaded) return;
     for (const event of ["create", "delete", "rename"]) {
@@ -103,9 +176,34 @@ module.exports = class SynaraContextPlugin extends Plugin {
     });
   }
 
+  async bindDiscoveryRoot(root, instanceId, persist = true) {
+    this.discoveryRootKey = root.key;
+    this.discoveryRoot = root.directory;
+    this.clientPath = path.join(root.directory, "clients", `${this.clientHash}.json`);
+    const clients = path.join(root.directory, "clients");
+    try {
+      await fs.lstat(clients);
+      if (!(await privateDiscoveryRoot(root.directory)) || !(await privateDiscoveryRoot(clients)))
+        throw new Error("Unsafe selected discovery root.");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    const saved = await readLocalJson(this.clientPath);
+    this.vaultId = UUID.test(saved?.vaultId || "") ? saved.vaultId : randomUUID();
+    this.instanceId = instanceId;
+    this.selectionKey = `${root.key}:${instanceId}`;
+    this.connectionPreferenceDirty =
+      !UUID.test(saved?.vaultId || "") || saved?.instanceId !== instanceId;
+    if (persist) await this.saveConnectionPreference();
+  }
+
   async saveConnectionPreference() {
-    if (this.clientPath)
-      await writeLocalJson(this.clientPath, { vaultId: this.vaultId, instanceId: this.instanceId });
+    if (!this.clientPath || !this.discoveryRootKey || !UUID.test(this.instanceId || "")) return;
+    await writeLocalJson(this.clientPath, { vaultId: this.vaultId, instanceId: this.instanceId });
+    // Root/instance selection is not a credential. Tokens remain exclusively in
+    // the selected application's private grant file and this live connection.
+    await this.saveData({ discoveryRootKey: this.discoveryRootKey, instanceId: this.instanceId });
+    this.connectionPreferenceDirty = false;
   }
 
   async removeDiscovery() {
@@ -115,16 +213,28 @@ module.exports = class SynaraContextPlugin extends Plugin {
         .catch(() => {});
   }
 
-  async requestConnection(instanceId = this.instanceId) {
+  async requestConnection(selectionKey = this.selectionKey) {
     this.discoveryRevision = (this.discoveryRevision || 0) + 1;
     if (this.discoveryJob) await this.discoveryJob;
     if (this.unloaded) return;
+    const selected = this.instances.find((instance) => instance.selectionKey === selectionKey);
+    if (!selected && selectionKey !== this.selectionKey)
+      throw new Error("请选择明确的本机工作台实例。");
+    if (!selectionKey) throw new Error("请选择明确的本机工作台实例。");
+    await this.removeDiscovery();
     this.disconnect();
-    this.instanceId = UUID.test(instanceId || "") ? instanceId : "";
+    this.token = "";
+    this.endpoint = "";
+    this.expectedSourceId = "";
+    if (selected) {
+      const root = this.discoveryRoots.find((entry) => entry.key === selected.rootKey);
+      if (!root || !(await privateDiscoveryRoot(root.directory)))
+        throw new Error("工作台发现目录不可用。");
+      await this.bindDiscoveryRoot(root, selected.instanceId);
+    }
     this.autoConnect = true;
     this.requestId = randomUUID();
     this.retryAt = 0;
-    await this.saveConnectionPreference();
     await this.discover();
   }
 
@@ -151,75 +261,114 @@ module.exports = class SynaraContextPlugin extends Plugin {
   }
 
   async discoverOnce() {
-    if (this.unloaded || !this.vaultId || !this.autoConnect) return;
+    if (this.unloaded || !this.clientHash || !this.autoConnect) return;
     const revision = this.discoveryRevision;
     const now = Date.now();
-    await writeLocalJson(path.join(this.discoveryRoot, "vaults", `${this.vaultId}.json`), {
+    const instances = [];
+    for (const root of this.discoveryRoots) {
+      if (!(await privateDiscoveryRoot(root.directory))) continue;
+      if (!(await privateDiscoveryRoot(path.join(root.directory, "instances")))) continue;
+      let names = [];
+      try {
+        names = await fs.readdir(path.join(root.directory, "instances"));
+      } catch {
+        continue;
+      }
+      for (const name of names
+        .filter((entry) => entry.endsWith(".json") && UUID.test(entry.slice(0, -5)))
+        .slice(0, 128)) {
+        const item = await readLocalJson(path.join(root.directory, "instances", name));
+        const age = now - Date.parse(item?.updatedAt);
+        const profile = root.profiles[item?.applicationId];
+        if (
+          item?.schemaVersion !== 2 ||
+          item.instanceId !== name.slice(0, -5) ||
+          !Number.isFinite(age) ||
+          age > 15_000 ||
+          age < -5_000 ||
+          typeof item.label !== "string" ||
+          item.label.length > 128 ||
+          !profile ||
+          item.profilePath !== profile ||
+          !Array.isArray(item.connections) ||
+          item.connections.length > 32 ||
+          !(await privateDiscoveryRoot(profile))
+        )
+          continue;
+        const identity = await readLocalJson(path.join(profile, "ambient-context-instance.json"));
+        if (identity?.schemaVersion !== 1 || identity.instanceId !== item.instanceId) continue;
+        if (
+          item.connections.some(
+            (connection) =>
+              !connection ||
+              !UUID.test(connection.vaultId || "") ||
+              typeof connection.label !== "string" ||
+              connection.label.length > 128 ||
+              !localEndpoint(connection.endpoint) ||
+              connection.id !== connection.sourceId ||
+              connection.sourceId !==
+                createHash("sha256")
+                  .update(`${item.instanceId}\0${connection.vaultId}`)
+                  .digest("hex"),
+          )
+        )
+          continue;
+        instances.push({
+          ...item,
+          rootKey: root.key,
+          selectionKey: `${root.key}:${item.instanceId}`,
+        });
+      }
+    }
+    if (this.unloaded || !this.autoConnect || revision !== this.discoveryRevision) return;
+    this.instances = instances;
+    if (!this.selectionKey && instances.length === 1) {
+      const only = instances[0];
+      const root = this.discoveryRoots.find((entry) => entry.key === only.rootKey);
+      await this.bindDiscoveryRoot(root, only.instanceId);
+    }
+    if (this.unloaded || !this.autoConnect || revision !== this.discoveryRevision) return;
+    const instance = instances.find((entry) => entry.selectionKey === this.selectionKey);
+    if (!instance) {
+      this.disconnect();
+      this.token = "";
+      this.status = this.selectionKey
+        ? "等待已选择的工作台启动"
+        : instances.length > 1
+          ? "请选择工作台"
+          : "等待工作台启动";
+      return;
+    }
+    const root = this.discoveryRoots.find((entry) => entry.key === instance.rootKey);
+    if (!root || root.key !== this.discoveryRootKey || root.directory !== this.discoveryRoot)
+      throw new Error("工作台发现绑定已更改。");
+    if (this.connectionPreferenceDirty) await this.saveConnectionPreference();
+    await writeLocalJson(path.join(root.directory, "vaults", `${this.vaultId}.json`), {
       schemaVersion: 1,
       vaultId: this.vaultId,
       requestId: this.requestId,
       label: this.app.vault.getName().slice(0, 128),
       updatedAt: new Date(now).toISOString(),
     });
-    let names = [];
-    try {
-      names = await fs.readdir(path.join(this.discoveryRoot, "instances"));
-    } catch {
-      /* No running workbench. */
-    }
-    const instances = [];
-    for (const name of names
-      .filter((entry) => entry.endsWith(".json") && UUID.test(entry.slice(0, -5)))
-      .slice(0, 128)) {
-      const item = await readLocalJson(path.join(this.discoveryRoot, "instances", name));
-      const age = now - Date.parse(item?.updatedAt);
-      if (
-        item?.schemaVersion !== 1 ||
-        item.instanceId !== name.slice(0, -5) ||
-        !Number.isFinite(age) ||
-        age > 15_000 ||
-        age < -5_000 ||
-        typeof item.label !== "string" ||
-        item.label.length > 128 ||
-        !Array.isArray(item.connections)
-      )
-        continue;
-      instances.push(item);
-    }
-    if (this.unloaded || !this.autoConnect || revision !== this.discoveryRevision) return;
-    this.instances = instances;
-    let instance = instances.find((entry) => entry.instanceId === this.instanceId);
-    if (!this.instanceId && instances.length === 1) {
-      instance = instances[0];
-      this.instanceId = instance.instanceId;
-      await this.saveConnectionPreference();
-    }
-    const connection = instance?.connections.find(
-      (entry) =>
-        entry.vaultId === this.vaultId &&
-        ENDPOINT.test(entry.endpoint) &&
-        /^[a-f0-9]{64}$/.test(entry.sourceId),
-    );
-    const grant = instance
-      ? await readLocalJson(
-          path.join(this.discoveryRoot, "grants", instance.instanceId, `${this.vaultId}.json`),
-        )
-      : null;
+    const connection = instance.connections.find((entry) => entry.vaultId === this.vaultId);
+    const grants = path.join(root.directory, "grants", instance.instanceId);
+    const grant =
+      (await privateDiscoveryRoot(path.join(root.directory, "grants"))) &&
+      (await privateDiscoveryRoot(grants))
+        ? await readLocalJson(path.join(grants, `${this.vaultId}.json`))
+        : null;
     if (this.unloaded || !this.autoConnect || revision !== this.discoveryRevision) return;
     if (
       !connection ||
-      grant?.instanceId !== instance.instanceId ||
-      grant?.vaultId !== this.vaultId ||
-      grant?.sourceId !== connection.sourceId ||
-      !/^[a-f0-9]{64}$/.test(grant?.token || "")
+      grant?.schemaVersion !== 1 ||
+      grant.instanceId !== instance.instanceId ||
+      grant.vaultId !== this.vaultId ||
+      grant.sourceId !== connection.sourceId ||
+      !/^[a-f0-9]{64}$/.test(grant.token || "")
     ) {
       this.disconnect();
       this.token = "";
-      this.status = !instance
-        ? instances.length > 1
-          ? "请选择工作台"
-          : "等待工作台启动"
-        : "等待在 Synara 应用上下文中授权";
+      this.status = "等待在 Synara 应用上下文中授权";
       return;
     }
     if (
@@ -290,10 +439,7 @@ module.exports = class SynaraContextPlugin extends Plugin {
     if (this.unloaded) return;
     this.disconnect();
     // No arbitrary network endpoints, redirects, URL credentials or path/query tokens.
-    if (
-      !/^ws:\/\/127\.0\.0\.1:[0-9]{1,5}$/.test(this.endpoint) ||
-      !/^[a-f0-9]{64}$/.test(this.token)
-    ) {
+    if (!localEndpoint(this.endpoint) || !/^[a-f0-9]{64}$/.test(this.token)) {
       new Notice("Enter the local endpoint and pairing code shown in Synara.");
       return;
     }
@@ -379,7 +525,7 @@ class ContextSettings extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
-    this.selectedInstanceId = plugin.instanceId || "";
+    this.selectedInstanceId = plugin.selectionKey || "";
     this.selectionEdited = false;
     this.busy = false;
   }
@@ -389,7 +535,7 @@ class ContextSettings extends PluginSettingTab {
     const plugin = this.plugin;
     this.statusSetting.setDesc(plugin.status || "尚未连接");
     const signature = JSON.stringify(
-      plugin.instances.map((instance) => [instance.instanceId, instance.label]),
+      plugin.instances.map((instance) => [instance.selectionKey, instance.label]),
     );
     if (signature !== this.instanceSignature && this.instanceDropdown) {
       this.instanceSignature = signature;
@@ -402,13 +548,15 @@ class ContextSettings extends PluginSettingTab {
         const duplicate =
           plugin.instances.filter((entry) => entry.label === instance.label).length > 1;
         this.instanceDropdown.addOption(
-          instance.instanceId,
-          duplicate ? `${instance.label} · ${instance.instanceId.slice(0, 8)}` : instance.label,
+          instance.selectionKey,
+          duplicate
+            ? `${instance.label} · ${instance.rootKey} ${instance.instanceId.slice(0, 8)}`
+            : instance.label,
         );
       }
       if (
         this.selectedInstanceId &&
-        !plugin.instances.some((instance) => instance.instanceId === this.selectedInstanceId)
+        !plugin.instances.some((instance) => instance.selectionKey === this.selectedInstanceId)
       ) {
         this.instanceDropdown.addOption(
           this.selectedInstanceId,
@@ -419,10 +567,10 @@ class ContextSettings extends PluginSettingTab {
     }
     if (
       !this.selectionEdited &&
-      plugin.instanceId &&
-      this.selectedInstanceId !== plugin.instanceId
+      plugin.selectionKey &&
+      this.selectedInstanceId !== plugin.selectionKey
     ) {
-      this.selectedInstanceId = plugin.instanceId;
+      this.selectedInstanceId = plugin.selectionKey;
       this.instanceDropdown?.setValue(this.selectedInstanceId);
     }
     this.instanceDropdown?.setDisabled(this.busy);
@@ -520,7 +668,7 @@ class ContextSettings extends PluginSettingTab {
     new Setting(advanced).addButton((button) => {
       button.setButtonText("手动连接").onClick(() =>
         this.runConnectionAction(async () => {
-          if (!ENDPOINT.test(manualEndpoint) || !manualToken) {
+          if (!localEndpoint(manualEndpoint) || !manualToken) {
             new Notice("请填写有效的本机地址与配对码。");
             return;
           }

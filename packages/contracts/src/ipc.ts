@@ -477,6 +477,10 @@ import type {
 } from "./stats";
 import type { BrowserAnnotationMethods } from "./browserAnnotations";
 import { type KeybindingCommand, MAX_KEYBINDING_VALUE_LENGTH } from "./keybindings";
+import type {
+  LinxUpdateWindowMaintenanceRequest,
+  LinxUpdateWindowMaintenanceResponse,
+} from "./linxUpdateInstall";
 
 export interface ContextMenuItem<T extends string = string> {
   id: T;
@@ -509,6 +513,7 @@ export type DesktopUpdateStatus =
   | "available"
   | "downloading"
   | "downloaded"
+  | "installing"
   | "error";
 
 export type DesktopRuntimeArch = "arm64" | "x64" | "other";
@@ -1067,6 +1072,11 @@ export type DesktopDiagnosticReportStatus = "queued" | "sent" | "unavailable";
 export interface DesktopBridge {
   ambientContext?: AmbientContextDesktopMethods;
   zenMode?: ZenModeDesktopMethods;
+  /** Fixed-attempt edit protection; separate from ordinary quit confirmation. */
+  updateWindowMaintenance?: {
+    onRequest: (listener: (request: LinxUpdateWindowMaintenanceRequest) => void) => () => void;
+    reply: (response: LinxUpdateWindowMaintenanceResponse) => void;
+  };
   /** Mirrors the renderer language onto native menus and startup dialogs; absent on older builds. */
   setLanguagePreference?: (preference: DesktopLanguagePreference) => Promise<void>;
   /** Current OS preference order; synchronous so bootstrap copy and native menus agree. */

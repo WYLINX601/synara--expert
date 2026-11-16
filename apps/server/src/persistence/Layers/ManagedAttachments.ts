@@ -42,7 +42,7 @@ const makeRepository = (limits: ManagedAttachmentLimits) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
 
-    const reserve: ManagedAttachmentRepositoryShape["reserve"] = (input) =>
+    const reserveFresh: ManagedAttachmentRepositoryShape["reserve"] = (input) =>
       Effect.gen(function* () {
         const inserted = yield* sql<ManagedAttachmentBlob>`
           INSERT INTO managed_attachment_blobs (
@@ -108,6 +108,113 @@ const makeRepository = (limits: ManagedAttachmentLimits) =>
           ? { status: "id-conflict" as const }
           : { status: "quota-exceeded" as const };
       }).pipe(Effect.mapError(toPersistenceSqlError("ManagedAttachment.reserve")));
+
+    const reserve: ManagedAttachmentRepositoryShape["reserve"] = (input) => {
+      if (!input.offlineReplay) return reserveFresh(input);
+      return sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const existing = yield* sql<ManagedAttachmentBlob>`
+            SELECT ${blobColumns(sql)}
+            FROM managed_attachment_blobs
+            WHERE attachment_id = ${input.attachmentId}
+               OR relative_path = ${input.relativePath}
+          `;
+            if (existing.length === 0) return yield* reserveFresh(input);
+            const previous = existing[0]!;
+            if (
+              existing.length !== 1 ||
+              previous.attachmentId !== input.attachmentId ||
+              previous.ownerThreadId !== input.ownerThreadId ||
+              previous.ownerKind !== input.ownerKind ||
+              previous.ownerId !== input.ownerId ||
+              previous.kind !== input.kind ||
+              previous.originalName !== input.originalName ||
+              previous.mimeType !== input.mimeType ||
+              previous.relativePath !== input.relativePath ||
+              previous.claimCommandId !== null ||
+              previous.claimMessageId !== null ||
+              previous.claimedAt !== null ||
+              !(
+                previous.state === "uploading" ||
+                (previous.state === "staged" &&
+                  previous.stagingExpiresAt !== null &&
+                  previous.stagingExpiresAt <= input.now) ||
+                ((previous.state === "deleting" || previous.state === "deleted") &&
+                  (previous.deleteReason === "upload-write-failed" ||
+                    previous.deleteReason === "upload-finalize-failed" ||
+                    previous.deleteReason === "assistant-image-completion-not-committed"))
+              )
+            ) {
+              return { status: "id-conflict" as const };
+            }
+            const usage = yield* sql<ManagedAttachmentUsage>`
+            SELECT
+              COALESCE(SUM(CASE WHEN state <> 'deleted' THEN
+                CASE WHEN state = 'uploading' THEN reserved_bytes
+                     ELSE COALESCE(size_bytes, reserved_bytes) END
+                ELSE 0 END), 0) AS "homeBytes",
+              COALESCE(SUM(CASE WHEN state <> 'deleted' THEN 1 ELSE 0 END), 0) AS "homeCount",
+              COALESCE(SUM(CASE
+                WHEN owner_kind = ${input.ownerKind}
+                  AND owner_id = ${input.ownerId}
+                  AND state IN ('uploading', 'staged')
+                THEN CASE WHEN state = 'uploading' THEN reserved_bytes
+                          ELSE COALESCE(size_bytes, reserved_bytes) END
+                ELSE 0 END), 0) AS "principalStagingBytes",
+              COALESCE(SUM(CASE
+                WHEN owner_kind = ${input.ownerKind}
+                  AND owner_id = ${input.ownerId}
+                  AND state IN ('uploading', 'staged')
+                THEN 1 ELSE 0 END), 0) AS "principalStagingCount"
+            FROM managed_attachment_blobs
+            WHERE attachment_id <> ${input.attachmentId}
+          `;
+            const remaining = usage[0]!;
+            if (
+              input.reservedBytes < 0 ||
+              remaining.homeBytes + input.reservedBytes > limits.homeBytes ||
+              remaining.homeCount + 1 > limits.homeCount ||
+              remaining.principalStagingBytes + input.reservedBytes >
+                limits.principalStagingBytes ||
+              remaining.principalStagingCount + 1 > limits.principalStagingCount
+            ) {
+              return { status: "quota-exceeded" as const };
+            }
+            // Immutable metadata/content/state triggers remain intact. Replace only the
+            // validated never-claimed identity, atomically with its copied cleanup lease.
+            // The caller's exclusive offline lock guarantees no live worker owns that lease.
+            yield* sql`
+            DELETE FROM managed_attachment_cleanup_jobs
+            WHERE attachment_id = ${input.attachmentId}
+          `;
+            yield* sql`
+            DELETE FROM managed_attachment_blobs
+            WHERE attachment_id = ${input.attachmentId}
+          `;
+            const restored = yield* sql<ManagedAttachmentBlob>`
+            INSERT INTO managed_attachment_blobs (
+              attachment_id, owner_thread_id, owner_kind, owner_id,
+              kind, original_name, mime_type, reserved_bytes, size_bytes, sha256,
+              relative_path, state, staging_expires_at,
+              claim_command_id, claim_message_id, claimed_at,
+              delete_reason, delete_requested_at, deleted_at,
+              created_at, updated_at
+            ) VALUES (
+              ${input.attachmentId}, ${input.ownerThreadId}, ${input.ownerKind}, ${input.ownerId},
+              ${input.kind}, ${input.originalName}, ${input.mimeType}, ${input.reservedBytes}, NULL, NULL,
+              ${input.relativePath}, 'uploading', NULL,
+              NULL, NULL, NULL,
+              NULL, NULL, NULL,
+              ${previous.createdAt}, ${input.now}
+            )
+            RETURNING ${blobColumns(sql)}
+          `;
+            return { status: "reserved" as const, attachment: restored[0]! };
+          }),
+        )
+        .pipe(Effect.mapError(toPersistenceSqlError("ManagedAttachment.reserve")));
+    };
 
     const finalizeStaged: ManagedAttachmentRepositoryShape["finalizeStaged"] = (input) =>
       sql<ManagedAttachmentBlob>`

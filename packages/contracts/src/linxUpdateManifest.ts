@@ -1,28 +1,16 @@
 import { Schema } from "effect";
 
-import { PositiveInt } from "./baseSchemas";
+import { PositiveInt } from "./baseSchemas.ts";
 
 /**
- * LU-00 update manifest protocol (v1).
- *
- * The publisher signs the exact UTF-8 bytes of the manifest file it uploads and
- * ships a detached `.sig` file containing the base64 of the 64-byte Ed25519
- * signature. The client bounds the artifact sizes, verifies the signature over
- * the raw bytes, and only then decodes this struct. Both sides import this
- * module so the field grammar cannot drift.
- *
- * Frozen for this slice:
- * - `productId`, `channel`, `platform` and `arch` are literals, not optional
- *   fields. Adding a beta channel is a schema change, not a runtime toggle.
- * - Versions have no prerelease or build suffix and no leading zeros.
- * - `keyId` is the first 16 hex characters of the sha256 of the public key's
- *   SPKI DER encoding; the derivation lives in `@synara/shared` because it
- *   needs `node:crypto`.
- * - There is no `installIdentity` field; Q-03 is still open.
+ * Fixed product, lane and installation identity prevent a valid signature from
+ * authorizing a package meant for another application. Signing the exact UTF-8
+ * bytes avoids publisher/client disagreement caused by JSON reserialization.
  */
 
 export const LINX_UPDATE_SCHEMA_VERSION = 1;
 export const LINX_UPDATE_PRODUCT_ID = "linx";
+export const LINX_UPDATE_INSTALL_IDENTITY = "com.wylinx.linx";
 export const LINX_UPDATE_CHANNEL = "stable";
 export const LINX_UPDATE_PLATFORM = "darwin";
 export const LINX_UPDATE_ARCH = "arm64";
@@ -108,6 +96,7 @@ export const LinxUpdateKeyId = Schema.String.check(Schema.isPattern(LINX_UPDATE_
 export const LinxUpdateManifest = Schema.Struct({
   schemaVersion: Schema.Literal(LINX_UPDATE_SCHEMA_VERSION),
   productId: Schema.Literal(LINX_UPDATE_PRODUCT_ID),
+  installIdentity: Schema.Literal(LINX_UPDATE_INSTALL_IDENTITY),
   channel: Schema.Literal(LINX_UPDATE_CHANNEL),
   platform: Schema.Literal(LINX_UPDATE_PLATFORM),
   arch: Schema.Literal(LINX_UPDATE_ARCH),

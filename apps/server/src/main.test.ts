@@ -140,6 +140,42 @@ afterEach(() => {
 });
 
 it.layer(testLayer)("server CLI command", (it) => {
+  it.effect(
+    "refuses a guarded Linx home before SQLite or producers without its parent's grant",
+    () =>
+      Effect.gen(function* () {
+        const home = makeTempHome("linx-main-guarded-");
+        const guard = `${home}.linx-owner`;
+        fs.mkdirSync(guard, { mode: 0o700 });
+        tempHomes.add(guard);
+        const result = yield* Effect.exit(runCli(["--home-dir", home]));
+        assert.isTrue(Exit.isFailure(result));
+        assert.equal(start.mock.calls.length, 0);
+        assert.isFalse(fs.existsSync(path.join(home, "userdata", "state.sqlite")));
+      }),
+  );
+
+  it.effect(
+    "refuses an interrupted import before SQLite or producers and preserves source evidence",
+    () =>
+      Effect.gen(function* () {
+        const home = makeTempHome("linx-main-import-");
+        const journal = `${home}.linx-migration.json`;
+        const bytes = JSON.stringify({
+          schemaVersion: 1,
+          homePath: fs.realpathSync(home),
+          status: "copying",
+        });
+        fs.writeFileSync(journal, bytes, { mode: 0o600 });
+        tempHomes.add(journal);
+        const result = yield* Effect.exit(runCli(["--home-dir", home]));
+        assert.isTrue(Exit.isFailure(result));
+        assert.equal(start.mock.calls.length, 0);
+        assert.isFalse(fs.existsSync(path.join(home, "userdata", "state.sqlite")));
+        assert.equal(fs.readFileSync(journal, "utf8"), bytes);
+      }),
+  );
+
   it.effect("parses all CLI flags and wires scoped start/stop", () =>
     Effect.gen(function* () {
       const flagHome = makeTempHome("synara-main-flag-");

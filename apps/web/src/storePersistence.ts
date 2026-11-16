@@ -196,8 +196,8 @@ export function readPersistedState(initialState: AppState): AppState {
   }
 }
 
-export function persistState(state: AppState): void {
-  if (typeof window === "undefined" || !state.threadsHydrated) return;
+export function persistState(state: AppState): boolean {
+  if (typeof window === "undefined" || !state.threadsHydrated) return false;
   try {
     const projectNamesByCwd: Record<string, string> = {};
     const projectAppearanceByCwd: Record<string, ProjectAppearance> = {};
@@ -221,9 +221,11 @@ export function persistState(state: AppState): void {
         projectAppearanceByCwd,
       }),
     );
+    return true;
   } catch (error) {
     // Quota/private-mode storage failures are not actionable in the UI; log at
     // debug level so they are observable in devtools without breaking chat UX.
     console.debug("Failed to persist renderer state", error);
+    return false;
   }
 }

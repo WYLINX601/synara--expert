@@ -10,6 +10,7 @@ import {
 } from "@synara/contracts";
 import { Schema } from "effect";
 import { AmbientContextManager } from "./AmbientContextManager";
+import { SYNARA_DEVELOPMENT_BUNDLE_ID } from "@synara/shared/desktopIdentity";
 import {
   readObsidianVaultDiscoveries,
   readOrCreateInstanceId,
@@ -51,9 +52,10 @@ interface ActiveConnection extends StoredGrant {
 }
 
 export interface DesktopAmbientContextOptions {
-  /** Shared per-user app-data root used only for nonsecret discovery and plugin grants. */
+  /** Isolated profile discovery for Linx; shared only among other Synara flavors. */
   readonly sharedDataDirectory?: string;
   readonly instanceLabel?: string;
+  readonly applicationId?: string;
   readonly now?: () => number;
   /** @internal Deterministic lifecycle gate used to exercise delayed restoration. */
   readonly initializationBarrier?: Promise<void>;
@@ -113,6 +115,7 @@ export class DesktopAmbientContext {
   private readonly userDataDirectory: string;
   private readonly sharedDataDirectory: string;
   private readonly instanceLabel: string;
+  private readonly applicationId: string;
   private readonly now: () => number;
   private readonly ready: Promise<void>;
   private writes: Promise<void> = Promise.resolve();
@@ -123,6 +126,7 @@ export class DesktopAmbientContext {
   private refreshWork: Promise<void> = Promise.resolve();
   private settingsError: string | null = null;
   private stopped = false;
+  private updateAttempt: string | null = null;
   private configurationRevision = 0;
   private instanceId = "";
   private policy: SourcePolicy = DEFAULT_POLICY;
@@ -136,13 +140,14 @@ export class DesktopAmbientContext {
     this.sharedDataDirectory =
       options.sharedDataDirectory ?? Path.join(this.userDataDirectory, "ambient-context-discovery");
     this.instanceLabel = options.instanceLabel ?? "Synara";
+    this.applicationId = options.applicationId ?? SYNARA_DEVELOPMENT_BUNDLE_ID;
     this.now = options.now ?? Date.now;
     this.manager = new AmbientContextManager({ now: this.now });
     this.unsubscribe = this.manager.subscribe(changed);
     this.ready = this.restore(options.initializationBarrier);
     void this.ready.catch(() => undefined);
     this.timer = setInterval(() => {
-      if (this.stopped) return;
+      if (this.stopped || this.updateAttempt !== null) return;
       void this.refreshDiscovery().catch(() => undefined);
       if (this.policy.enabled) this.changed();
     }, 1_000);
@@ -169,7 +174,13 @@ export class DesktopAmbientContext {
     const grants = await this.readStoredGrants();
     for (const grant of grants) {
       if (grant.id !== sourceIdFor(this.instanceId, grant.vaultId)) continue;
-      const source = new ObsidianSource(this.changed, grant.sourceId, grant.label, grant.token);
+      const source = new ObsidianSource(
+        this.changed,
+        grant.sourceId,
+        grant.label,
+        grant.token,
+        () => this.updateAttempt === null && !this.stopped,
+      );
       this.manager.registerSource(source);
       const active: ActiveConnection = {
         ...grant,
@@ -231,7 +242,7 @@ export class DesktopAmbientContext {
     const afterReady = this.ready
       .catch(() => undefined)
       .then(() => {
-        if (this.stopped) return;
+        if (this.stopped || this.updateAttempt !== null) return;
         return this.enqueueDiscoveryRefresh();
       });
     return afterReady;
@@ -247,8 +258,7 @@ export class DesktopAmbientContext {
   }
 
   private async performRefreshDiscovery(): Promise<void> {
-    if (this.stopped) return;
-    if (!this.instanceId || this.stopped) return;
+    if (!this.instanceId || this.stopped || this.updateAttempt !== null) return;
     const vaults = await readObsidianVaultDiscoveries(
       Path.join(this.sharedDataDirectory, "vaults"),
       this.now(),
@@ -260,7 +270,7 @@ export class DesktopAmbientContext {
       this.dismissedRequests.delete(id);
       if (!this.connections.has(id)) this.pending.set(id, vault);
     }
-    if (this.stopped) return;
+    if (this.stopped || this.updateAttempt !== null) return;
     await this.writeRuntimeDiscovery();
     this.changed();
   }
@@ -286,7 +296,9 @@ export class DesktopAmbientContext {
         }
       });
     const record = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
+      applicationId: this.applicationId,
+      profilePath: await Fs.realpath(this.userDataDirectory),
       instanceId: this.instanceId,
       label: this.instanceLabel,
       updatedAt: new Date(this.now()).toISOString(),
@@ -406,7 +418,13 @@ export class DesktopAmbientContext {
         approvedAt: new Date(this.now()).toISOString(),
       };
       let source: ObsidianSource;
-      source = new ObsidianSource(this.changed, sourceId, vault.label, grant.token);
+      source = new ObsidianSource(
+        this.changed,
+        sourceId,
+        vault.label,
+        grant.token,
+        () => this.updateAttempt === null && !this.stopped,
+      );
       this.manager.registerSource(source);
       this.connections.set(id, {
         ...grant,
@@ -589,6 +607,25 @@ export class DesktopAmbientContext {
     return !this.stopped && revision === this.configurationRevision
       ? results.flat().slice(0, 30)
       : [];
+  }
+
+  /** Freeze new background publications and settle accepted profile writes. */
+  async prepareForUpdate(attemptId: string): Promise<void> {
+    if (this.stopped || (this.updateAttempt !== null && this.updateAttempt !== attemptId)) {
+      throw new Error("Ambient context update lease changed.");
+    }
+    this.updateAttempt = attemptId;
+    await this.ready;
+    await this.writes;
+    await this.refreshWork;
+    if (this.stopped || this.updateAttempt !== attemptId)
+      throw new Error("Ambient context update lease was lost.");
+  }
+
+  releaseUpdate(attemptId: string): void {
+    if (this.updateAttempt !== attemptId) return;
+    this.updateAttempt = null;
+    void this.refreshDiscovery().catch(() => undefined);
   }
 
   async stop(): Promise<void> {

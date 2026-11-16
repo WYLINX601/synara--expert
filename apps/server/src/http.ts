@@ -1,3 +1,4 @@
+import { hasLinxUpdateClient, readLinxServerSourceCommit } from "./linxUpdateHealth";
 import { createSkillLibraryStore, readSkillDefinition } from "./experts/SkillLibraryStore";
 import { SKILL_FILE_LIMIT, SKILL_PACKAGE_LIMIT } from "./experts/skillLibraryArchive";
 import { SKILL_UPLOAD_ROUTE_PATH, SKILL_DOWNLOAD_ROUTE_PATH } from "@synara/shared/binaryTransfer";
@@ -18,6 +19,7 @@ import {
   ProviderKind,
   SERVER_VOICE_TRANSCRIPTION_MAX_AUDIO_BYTES,
   ThreadId,
+  LinxUpdateMaintenanceRequest,
 } from "@synara/contracts";
 import {
   ATTACHMENT_CANCEL_ROUTE_PATH,
@@ -31,7 +33,18 @@ import {
   providerStartOptionsFromInstance,
   resolveProviderInstance,
 } from "@synara/shared/providerInstances";
-import { Cause, DateTime, Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
+import {
+  Cause,
+  DateTime,
+  Effect,
+  FileSystem,
+  Layer,
+  Option,
+  Path,
+  Result,
+  Schema,
+  Stream,
+} from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import {
@@ -99,6 +112,11 @@ import {
   DESKTOP_SHUTDOWN_ROUTE_PATH,
   type ServerShutdownController,
 } from "./serverShutdown";
+import {
+  DESKTOP_MAINTENANCE_ROUTE_PATH,
+  type ServerMaintenanceAdmission,
+  type ServerMaintenanceController,
+} from "./serverMaintenance";
 import { resolveFavicon, tryParseHost } from "./siteFaviconCache";
 import {
   ifNoneMatchSatisfies,
@@ -117,6 +135,41 @@ import {
   voiceUploadAdmissionGate,
 } from "./voiceUploadAdmission";
 import { skillManagementCliEffectRouteLayer } from "./managementCli/httpRoute";
+
+/** Keep router errors separate from admission refusal, including untyped route errors. */
+export function withServerMaintenanceAdmission<E, R>(
+  httpApp: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>,
+  admission: ServerMaintenanceAdmission,
+) {
+  return Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const pathname = HttpServerRequest.toURL(request)?.pathname;
+    if (
+      request.method === "GET" ||
+      request.method === "HEAD" ||
+      request.method === "OPTIONS" ||
+      pathname === DESKTOP_MAINTENANCE_ROUTE_PATH ||
+      pathname === DESKTOP_SHUTDOWN_ROUTE_PATH ||
+      pathname === DESKTOP_COMPUTER_EMERGENCY_STOP_ROUTE_PATH
+    )
+      return yield* httpApp;
+    return yield* admission
+      .guard(Effect.result(httpApp), () => ({ _tag: "ServerMaintenanceAdmissionClosed" as const }))
+      .pipe(
+        Effect.catchTag("ServerMaintenanceAdmissionClosed", () =>
+          Effect.succeed(
+            Result.succeed(
+              HttpServerResponse.jsonUnsafe(
+                { error: "Update maintenance admission is closed." },
+                { status: 503 },
+              ),
+            ),
+          ),
+        ),
+        Effect.flatMap(Effect.fromResult),
+      );
+  });
+}
 
 const PROJECT_FAVICON_CACHE_CONTROL = "public, max-age=3600";
 const SITE_FAVICON_CACHE_CONTROL_SUCCESS = "public, max-age=86400"; // 24 h
@@ -236,10 +289,12 @@ function localPreviewCorsHeaders(input: {
 export function makeEffectHttpRouteLayer(
   readiness: ServerReadiness,
   shutdownController: ServerShutdownController,
+  maintenance?: ServerMaintenanceController,
 ) {
   return Layer.mergeAll(
     makeHealthEffectRouteLayer(readiness),
     makeDesktopShutdownEffectRouteLayer(shutdownController),
+    ...(maintenance ? [makeDesktopMaintenanceEffectRouteLayer(maintenance)] : []),
     makeDesktopComputerEmergencyStopRouteLayer(),
     authEffectRouteLayer,
     projectFaviconEffectRouteLayer,
@@ -282,6 +337,41 @@ export function makeDesktopShutdownEffectRouteLayer(shutdownController: ServerSh
       yield* shutdownController.requestStop;
       return HttpServerResponse.jsonUnsafe({ accepted: true }, { status: 202 });
     }),
+  );
+}
+
+export function makeDesktopMaintenanceEffectRouteLayer(maintenance: ServerMaintenanceController) {
+  return HttpRouter.add(
+    "POST",
+    DESKTOP_MAINTENANCE_ROUTE_PATH,
+    Effect.gen(function* () {
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const config = yield* ServerConfig;
+      const authorization = authorizeDesktopShutdown({
+        config,
+        remoteAddress: request.remoteAddress,
+        authorization: request.headers.authorization,
+      });
+      if (!authorization.authorized)
+        return HttpServerResponse.jsonUnsafe(
+          { error: authorization.reason === "unavailable" ? "Not Found" : "Unauthorized" },
+          { status: authorization.status },
+        );
+      const body = yield* readEffectJson(request, "Invalid maintenance request.");
+      const decoded = yield* Schema.decodeUnknownEffect(LinxUpdateMaintenanceRequest)(body).pipe(
+        Effect.mapError(() => ({ message: "Invalid maintenance request.", status: 400 as const })),
+      );
+      return HttpServerResponse.jsonUnsafe(yield* maintenance.handle(decoded));
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.succeed(
+          HttpServerResponse.jsonUnsafe(
+            { error: error.message },
+            { status: "status" in error ? error.status : 400 },
+          ),
+        ),
+      ),
+    ),
   );
 }
 
@@ -332,6 +422,7 @@ export function makeDesktopComputerEmergencyStopRouteLayer() {
 }
 
 export function makeHealthEffectRouteLayer(readiness: ServerReadiness) {
+  const sourceCommitPromise = readLinxServerSourceCommit();
   return HttpRouter.add(
     "GET",
     "/health",
@@ -339,6 +430,13 @@ export function makeHealthEffectRouteLayer(readiness: ServerReadiness) {
       const snapshot = yield* readiness.getSnapshot;
       const orchestrationEngine = yield* OrchestrationEngineService;
       const projection = yield* orchestrationEngine.getProjectionCatchUpStatus;
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const config = yield* ServerConfig;
+      const desktopHealthAuthorized = authorizeDesktopShutdown({
+        config,
+        remoteAddress: request.remoteAddress,
+        authorization: request.headers.authorization,
+      }).authorized;
       return HttpServerResponse.jsonUnsafe(
         {
           status: "ok",
@@ -348,6 +446,16 @@ export function makeHealthEffectRouteLayer(readiness: ServerReadiness) {
           keybindingsReady: snapshot.keybindingsReady,
           terminalSubscriptionsReady: snapshot.terminalSubscriptionsReady,
           orchestrationSubscriptionsReady: snapshot.orchestrationSubscriptionsReady,
+          ...(desktopHealthAuthorized
+            ? {
+                linxUpdate: {
+                  pid: process.pid,
+                  homePath: config.baseDir,
+                  sourceCommit: yield* Effect.promise(() => sourceCommitPromise),
+                  clientConnected: hasLinxUpdateClient(),
+                },
+              }
+            : {}),
           // /health is unauthenticated, so only shape-level diagnostics may
           // leave the process. lastFailure carries pretty-printed causes whose
           // schema-decode issues can embed raw event payloads (user prompts);

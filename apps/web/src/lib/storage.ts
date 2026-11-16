@@ -1,5 +1,6 @@
 import { Debouncer } from "@tanstack/react-pacer";
 import type { PersistStorage, StorageValue } from "zustand/middleware";
+import { beginComposerPersistenceOperation } from "./composerPersistenceActivity";
 
 export interface StateStorage<R = unknown> {
   getItem: (name: string) => string | null | Promise<string | null>;
@@ -103,23 +104,51 @@ export function createDeferredPersistStorage<State, Persisted = State>(options: 
   // zustand's persist calls setItem with the FULL store state as `value.state`
   // (there must be no `partialize` in the persist config — see the doc above), so
   // it is typed as `Persisted` per the PersistStorage contract but is really `State`.
-  let pending: { readonly name: string; readonly value: StorageValue<Persisted> } | null = null;
+  let pending:
+    | { readonly kind: "write"; readonly name: string; readonly value: StorageValue<Persisted> }
+    | { readonly kind: "remove"; readonly name: string }
+    | null = null;
+  let finishPending: (() => void) | undefined;
+  let writing = false;
+  const completeIfDurable = () => {
+    if (pending || writing) return;
+    const finish = finishPending;
+    finishPending = undefined;
+    finish?.();
+  };
 
   const writePending = (): void => {
-    if (pending === null) {
-      return;
-    }
-    const { name, value } = pending;
+    if (pending === null || writing) return;
+    const captured = pending;
     pending = null;
-    // Mirror zustand's `{ state, version }` StorageValue key order so the produced
-    // bytes stay identical to createJSONStorage for the same state.
-    getStorage().setItem(
-      name,
-      JSON.stringify({
-        state: partialize(value.state as unknown as State),
-        version: value.version,
-      }),
-    );
+    writing = true;
+    const succeeded = () => {
+      writing = false;
+      completeIfDurable();
+      if (pending) debouncedWrite.maybeExecute();
+    };
+    const failed = () => {
+      writing = false;
+      // Keep the latest state and the activity lease on quota/serialization/I/O failure.
+      pending ??= captured;
+    };
+    try {
+      const result =
+        captured.kind === "remove"
+          ? getStorage().removeItem(captured.name)
+          : getStorage().setItem(
+              captured.name,
+              JSON.stringify({
+                state: partialize(captured.value.state as unknown as State),
+                version: captured.value.version,
+              }),
+            );
+      if (result instanceof Promise) void result.then(succeeded, failed);
+      else succeeded();
+    } catch (error) {
+      failed();
+      throw error;
+    }
   };
 
   const debouncedWrite = new Debouncer(() => writePending(), { wait: debounceMs });
@@ -133,13 +162,15 @@ export function createDeferredPersistStorage<State, Persisted = State>(options: 
       return raw instanceof Promise ? raw.then(parse) : parse(raw);
     },
     setItem: (name, value) => {
-      pending = { name, value };
+      pending = { kind: "write", name, value };
+      if (!finishPending) finishPending = beginComposerPersistenceOperation();
       debouncedWrite.maybeExecute();
     },
     removeItem: (name) => {
-      pending = null;
+      pending = { kind: "remove", name };
+      if (!finishPending) finishPending = beginComposerPersistenceOperation();
       debouncedWrite.cancel();
-      getStorage().removeItem(name);
+      writePending();
     },
     flush: () => {
       debouncedWrite.cancel();

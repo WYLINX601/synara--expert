@@ -84,6 +84,79 @@ class FakeWebContents extends EventEmitter {
   getZoomFactor = () => 1;
 }
 
+describe("native browser update admission", () => {
+  it("admits a genuinely empty surface, refuses accepted work, and restores ordinary admission on abort", () => {
+    const manager = new DesktopBrowserManager();
+    try {
+      expect(manager.prepareForUpdate("attempt-one")).toBe(true);
+      expect(() => manager.beginHumanBrowserOperation()).toThrow("frozen");
+      manager.releaseUpdate("foreign");
+      expect(() => manager.beginHumanBrowserOperation()).toThrow("frozen");
+      manager.releaseUpdate("attempt-one");
+      const finish = manager.beginHumanBrowserOperation();
+      expect(manager.prepareForUpdate("attempt-two")).toBe(false);
+      finish();
+      expect(manager.prepareForUpdate("attempt-two")).toBe(true);
+      manager.releaseUpdate("attempt-two");
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it("refuses live guest forms without closing pages, even if the panel is hidden", () => {
+    const manager = new DesktopBrowserManager();
+    const webContents = new FakeWebContents();
+    const access = manager as unknown as { runtimes: Map<string, { webContents: WebContents }> };
+    access.runtimes.set("fixture-guest", { webContents: webContents as unknown as WebContents });
+    try {
+      expect(manager.prepareForUpdate("attempt-one")).toBe(false);
+      expect(webContents.close).not.toHaveBeenCalled();
+      access.runtimes.clear(); // Fixture models the user's own completed close.
+      expect(manager.prepareForUpdate("attempt-one")).toBe(true);
+      manager.releaseUpdate("attempt-one");
+    } finally {
+      access.runtimes.clear();
+      manager.dispose();
+    }
+  });
+
+  it("retains accepted downloads until actual done even after their original guest disappears", () => {
+    const manager = new DesktopBrowserManager();
+    const access = manager as unknown as {
+      handleSessionDownload(input: {
+        event: { preventDefault(): void };
+        item: EventEmitter;
+        webContents: WebContents;
+      }): void;
+    };
+    const item = Object.assign(new EventEmitter(), { cancel: vi.fn() });
+    const event = { preventDefault: vi.fn() };
+    try {
+      access.handleSessionDownload({
+        event,
+        item,
+        webContents: new FakeWebContents() as unknown as WebContents,
+      });
+      expect(manager.prepareForUpdate("attempt-one")).toBe(false);
+      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(item.cancel).not.toHaveBeenCalled();
+      item.emit("done", {}, "completed");
+      expect(manager.prepareForUpdate("attempt-one")).toBe(true);
+      const newEvent = { preventDefault: vi.fn() };
+      access.handleSessionDownload({
+        event: newEvent,
+        item: new EventEmitter(),
+        webContents: new FakeWebContents() as unknown as WebContents,
+      });
+      expect(newEvent.preventDefault).toHaveBeenCalledOnce();
+      expect(item.cancel).not.toHaveBeenCalled();
+      manager.releaseUpdate("attempt-one");
+    } finally {
+      manager.dispose();
+    }
+  });
+});
+
 describe("DesktopBrowserManager tab switching", () => {
   // Unused queued views would otherwise leak into the next describe's tests.
   afterEach(() => webContentsViewConstructor.mockReset());
@@ -798,7 +871,7 @@ describe("DesktopBrowserManager automation runtime boundary", () => {
         },
       );
       const manualDownload = { preventDefault: vi.fn() };
-      willDownloadListener.current!(manualDownload, {}, target);
+      willDownloadListener.current!(manualDownload, new EventEmitter(), target);
       expect(manualDownload.preventDefault).not.toHaveBeenCalled();
       // A popup opened after genuine human input must not inherit a spent
       // automation epoch either.
@@ -812,7 +885,7 @@ describe("DesktopBrowserManager automation runtime boundary", () => {
         });
         openPopup(child, grandchild);
         const manualChildDownload = { preventDefault: vi.fn() };
-        willDownloadListener.current!(manualChildDownload, {}, grandchild);
+        willDownloadListener.current!(manualChildDownload, new EventEmitter(), grandchild);
         expect(manualChildDownload.preventDefault).not.toHaveBeenCalled();
       }
     } finally {
@@ -1878,7 +1951,7 @@ describe("DesktopBrowserManager automation runtime boundary", () => {
     );
 
     const foreignEvent = { preventDefault: vi.fn() };
-    willDownloadListener.current?.(foreignEvent, {}, new FakeWebContents(99));
+    willDownloadListener.current?.(foreignEvent, new EventEmitter(), new FakeWebContents(99));
     expect(foreignEvent.preventDefault).not.toHaveBeenCalled();
 
     release();
@@ -1900,7 +1973,7 @@ describe("DesktopBrowserManager automation runtime boundary", () => {
       },
     );
     const afterHumanTakeoverEvent = { preventDefault: vi.fn() };
-    willDownloadListener.current?.(afterHumanTakeoverEvent, {}, webContents);
+    willDownloadListener.current?.(afterHumanTakeoverEvent, new EventEmitter(), webContents);
     expect(afterHumanTakeoverEvent.preventDefault).not.toHaveBeenCalled();
     expect(access.automationSideEffectProvenanceByRuntimeKey.size).toBe(0);
 

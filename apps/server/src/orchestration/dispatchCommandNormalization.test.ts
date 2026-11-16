@@ -46,6 +46,32 @@ async function runPrepareWorkspaceRoot<E>(result: DispatchCommandNormalizerResul
 }
 
 describe("makeDispatchCommandNormalizer", () => {
+  it("canonicalizes updated additional folders without creating them or preparing a primary root", async () => {
+    const visited: Array<{ folder: string; create: boolean }> = [];
+    const normalizer = makeDispatchCommandNormalizer<Error>({
+      attachmentsDir: "/tmp/attachments",
+      fileSystem: {} as FileSystem.FileSystem,
+      path: {} as Path.Path,
+      canonicalizeProjectWorkspaceRoot: (folder, options) => {
+        visited.push({ folder, create: options?.createIfMissing === true });
+        return Effect.succeed(`/canonical${folder}`);
+      },
+    });
+    const result = await Effect.runPromise(
+      normalizer({
+        command: {
+          type: "project.meta.update",
+          commandId: CommandId.makeUnsafe("folder-update"),
+          projectId: ProjectId.makeUnsafe("project"),
+          additionalFolders: ["/extra"],
+          createWorkspaceRootIfMissing: true,
+        },
+      }),
+    );
+    expect(visited).toEqual([{ folder: "/extra", create: false }]);
+    expect(result.command).toMatchObject({ additionalFolders: ["/canonical/extra"] });
+    expect(result.prepareWorkspaceRoot).toBeNull();
+  });
   it("returns a deferred prepare effect instead of scaffolding during normalization", async () => {
     const preparedRoots: string[] = [];
     const normalizer = makeDispatchCommandNormalizer<Error>({

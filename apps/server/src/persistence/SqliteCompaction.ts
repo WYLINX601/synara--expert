@@ -13,7 +13,7 @@ import {
 import {
   acquireDatabaseLifecycleLock,
   releaseDatabaseLifecycleLock,
-} from "./DatabaseLifecycleLock.ts";
+} from "@synara/shared/databaseLifecycleLock";
 import { requireNoPendingMigrationRecovery } from "./MigrationBackup.ts";
 
 // The child only builds and verifies a copy. The lock-owning parent alone may

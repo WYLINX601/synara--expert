@@ -9,7 +9,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { serializeReleaseGithubOutput } from "./lib/release-github-output.ts";
-import { releasePackageFiles } from "./update-release-package-versions.ts";
+import { readLinxProductVersion, readLinxReleaseSource } from "./lib/linx-release-source.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const [version, tag, publishRelease, expectedCommit, refType, refName] = process.argv.slice(2);
@@ -51,16 +51,14 @@ if (gitStatus.stdout.trim().length > 0) {
   );
 }
 
-for (const relativePath of releasePackageFiles) {
-  const packageJson = JSON.parse(readFileSync(resolve(repoRoot, relativePath), "utf8")) as {
-    version?: string;
-  };
-  if (packageJson.version !== version) {
-    throw new Error(
-      `${relativePath} version ${packageJson.version ?? "<missing>"} does not match release ${version}. Commit the aligned version before running the release.`,
-    );
-  }
+if (readLinxProductVersion(repoRoot) !== version || tag !== `v${version}`) {
+  throw new Error("Release version/tag must match workbench/build-config.json.");
 }
+readLinxReleaseSource(repoRoot);
+const onMain = spawnSync("git", ["merge-base", "--is-ancestor", sourceCommit, "origin/main"], {
+  cwd: repoRoot,
+});
+if (onMain.status !== 0) throw new Error("Release source must be an exact commit on main.");
 
 let sourceTag = "";
 if (refType === "tag" && refName === tag) {

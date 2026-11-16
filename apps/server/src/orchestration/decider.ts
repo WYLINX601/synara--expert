@@ -1355,6 +1355,7 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
         command.kind !== undefined ||
         command.title !== undefined ||
         command.workspaceRoot !== undefined ||
+        command.additionalFolders !== undefined ||
         command.defaultModelSelection !== undefined ||
         command.scripts !== undefined ||
         command.isPinned !== undefined;
@@ -1385,13 +1386,37 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
           detail: "The legacy Chats container workspace root cannot be changed.",
         });
       }
-      // Relocating the primary folder must keep the folder set distinct and un-nested.
+      // Validate the resulting folder set, including atomic home relocation.
+      const additionalFolders =
+        command.additionalFolders ?? existingProject.additionalFolders ?? [];
       if (
-        command.workspaceRoot !== undefined &&
-        (existingProject.additionalFolders ?? []).length > 0
+        command.additionalFolders !== undefined &&
+        (additionalFolders.length !== (existingProject.additionalFolders ?? []).length ||
+          additionalFolders.some(
+            (folder, index) => folder !== existingProject.additionalFolders?.[index],
+          )) &&
+        readModel.threads.some(
+          (thread) =>
+            thread.projectId === existingProject.id &&
+            thread.deletedAt === null &&
+            (threadHasInFlightTurn(thread) || threadHasCheckpointRevertInProgress(thread)),
+        )
       ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Stop active turns and wait for checkpoint restores before changing the project folders.",
+        });
+      }
+      if (additionalFolders.length > 0 && nextProjectKind !== "project") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Only ordinary projects can have additional folders.",
+        });
+      }
+      if (command.workspaceRoot !== undefined || command.additionalFolders !== undefined) {
         const folderProblem = findProjectFolderProblem(
-          [command.workspaceRoot, ...(existingProject.additionalFolders ?? [])],
+          [command.workspaceRoot ?? existingProject.workspaceRoot, ...additionalFolders],
           { platform: process.platform },
         );
         if (folderProblem !== null) {
@@ -1475,6 +1500,7 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
           ...(command.kind !== undefined ? { kind: command.kind } : {}),
           ...(command.title !== undefined ? { title: command.title } : {}),
           ...(command.workspaceRoot !== undefined ? { workspaceRoot: command.workspaceRoot } : {}),
+          ...(command.additionalFolders !== undefined ? { additionalFolders } : {}),
           ...(command.defaultModelSelection !== undefined
             ? { defaultModelSelection: command.defaultModelSelection }
             : {}),

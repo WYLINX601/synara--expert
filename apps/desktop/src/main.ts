@@ -23,6 +23,39 @@ import { COMPUTER_PERMISSION_KINDS } from "@synara/shared/computerGrants";
 import { CUA_HOST_SOCKET_ENV } from "@synara/shared/cuaDriverProtocol";
 import { MODEL_SCREEN_IMAGE_MAX_DIMENSION } from "@synara/shared/modelImageBudget";
 import { spawnProcessSync } from "@synara/shared/processRuntime";
+import {
+  acquireLinxHomeOwnership,
+  adoptLinxHomeOwnership,
+  type LinxHomeOwnership,
+} from "@synara/shared/linxUpdateHomeOwnership";
+import { canonicalLinxDataPath } from "@synara/shared/linxUpdateRecovery";
+import { LinxUpdateWindowMaintenance } from "./linxUpdateWindowMaintenance";
+import {
+  LinxUpdateInstaller,
+  requestLinxUpdateMaintenance,
+  stopLinxBackendCleanly,
+} from "./linxUpdateInstall";
+import { createLinxInstallerHelper } from "./linxUpdateController";
+import { createLinxUpdateElectronRequest } from "./linxUpdateElectronTransport";
+import { fetchLinxUpdateBytes, type LinxUpdateRequest } from "./linxUpdateFeed";
+import { revalidateLinxUpdateRelease } from "./linxUpdateRelease";
+import { linxLegacyMigrationPaths, migrateLegacyLinxHome } from "./linxHomeMigration";
+import { LINX_LEGACY_STORAGE_SCHEMES } from "./linxLegacyStorage";
+import {
+  prepareLinxUpdateProfileRecovery,
+  restoreLinxUpdatePortableProfile,
+} from "./linxUpdateProfileRecovery";
+import {
+  findLinxUpdateStartupAttempt,
+  claimLinxUpdateStartup,
+  type LinxUpdateStartupHealth,
+} from "./linxUpdateStartup";
+import { waitForLinxBackendHealth } from "./linxUpdateHealth";
+import {
+  LinxUpdateNativeAdmission,
+  createLinxUpdateNativeIpc,
+  freezeLinxUpdateNativeMenu,
+} from "./linxUpdateNativeAdmission";
 // FILE: main.ts
 // Purpose: Starts the Electron shell, backend process, native menus, IPC bridges, and updater.
 // Layer: Desktop main process
@@ -429,6 +462,7 @@ const desktopFlavor = resolveSynaraDesktopRuntimeFlavor({
   allowDevelopmentOverride: isSourceDesktopBuild,
 });
 const desktopIdentity = synaraDesktopIdentity(desktopFlavor);
+const isLinxDesktop = desktopFlavor === "workbench" || desktopFlavor === "workbench-preview";
 // Beta and Workbench flavors only honor their own home override; an inherited
 // generic SYNARA_HOME must never point them at another install's database.
 const BASE_DIR = resolveSynaraDesktopHomeDir({
@@ -477,11 +511,15 @@ const DESKTOP_BROWSER_HOST_CAPABILITY_FD = 3;
 // Set the flavor-specific profile first so Stable, Dev, and Canary never contend
 // for the same lock even when they use the same Electron executable.
 const userDataPath = resolveUserDataPath();
-app.setPath("userData", userDataPath);
+// Keep the real profile untouched until the pre-data migration/ownership gate.
+const linxBootstrapProfile = `${userDataPath}.bootstrap`;
+if (isLinxDesktop) FS.mkdirSync(linxBootstrapProfile, { recursive: true, mode: 0o700 });
+app.setPath("userData", isLinxDesktop ? linxBootstrapProfile : userDataPath);
+if (isLinxDesktop) app.setPath("sessionData", linxBootstrapProfile);
 // Match the renderer storage profile, including isolated source-build profiles.
 const DESKTOP_LANGUAGE_PREFERENCE_PATH = Path.join(userDataPath, "desktop-language.json");
 initializeDesktopI18n(
-  readDesktopLanguagePreference(DESKTOP_LANGUAGE_PREFERENCE_PATH),
+  isLinxDesktop ? "system" : readDesktopLanguagePreference(DESKTOP_LANGUAGE_PREFERENCE_PATH),
   () =>
     app.isReady()
       ? app.getPreferredSystemLanguages()
@@ -604,6 +642,39 @@ const browserPerfLoggingEnabled = process.env.SYNARA_BROWSER_PERF === "1";
 type DesktopUpdateErrorContext = DesktopUpdateState["errorContext"];
 
 let mainWindow: BrowserWindow | null = null;
+const managedApplicationWindows = new Set<BrowserWindow>();
+const windowMaintenance = new LinxUpdateWindowMaintenance({
+  getManagedWindows: () => [...managedApplicationWindows],
+  isTrustedSender: (event) => isTrustedManagedApplicationSender(event),
+});
+const nativeAdmission = new LinxUpdateNativeAdmission(() => windowMaintenance.held);
+let releaseLinxNativeMenu: (() => void) | null = null;
+const applicationIpc = createLinxUpdateNativeIpc({
+  ipc: ipcMain,
+  admission: nativeAdmission,
+  held: () => windowMaintenance.held,
+  exempt: new Set([
+    IPC.updateGetState,
+    IPC.updateCheck,
+    IPC.updateDownload,
+    IPC.updateInstall,
+    IPC.windowClose,
+    IPC.wsUrl,
+    IPC.zoomFactor,
+    IPC.windowTranslucency,
+    IPC.getSystemLanguages,
+    IPC.betaDiagnostics.enabled,
+    IPC.browser.webMcpCompatibilityPolicy,
+    IPC.storageMigration.read,
+    IPC.quitConfirmationResponse,
+  ]),
+});
+let linxHomeOwnership: LinxHomeOwnership | null = null;
+let linxStartupHealth: LinxUpdateStartupHealth | null = null;
+let linxIntentionalInstallQuit = false;
+let linxBackendMaintenance = false;
+let linxBackendCleanlyStopped = false;
+let linxBootstrapComplete = !isLinxDesktop;
 let zenModeWindowOpenInFlight: Promise<void> | null = null;
 /** Whether the live BrowserWindow was created with `frame: false` (win32/linux). */
 let customTitleBarActive = false;
@@ -657,9 +728,14 @@ const browserOsKeyStore = {
   encrypt: (value: string) => safeStorage.encryptString(value),
   decrypt: (value: Buffer) => safeStorage.decryptString(value),
 };
-const browserVault = new BrowserVault(Path.join(BASE_DIR, "browser-vault"), browserOsKeyStore);
+let browserVault: BrowserVault;
 let browserSessionRestore: BrowserSessionRestore | undefined;
-const browserVaultCapture = new BrowserVaultCapture(browserVault);
+let browserVaultCapture: BrowserVaultCapture;
+function initializeBrowserVault(): void {
+  browserVault = new BrowserVault(Path.join(BASE_DIR, "browser-vault"), browserOsKeyStore);
+  browserVaultCapture = new BrowserVaultCapture(browserVault, nativeAdmission);
+}
+if (!isLinxDesktop) initializeBrowserVault();
 const browserManager = new DesktopBrowserManager({
   onRuntimeReady: (runtime) => browserVaultCapture.register(runtime),
   onHumanControl: (threadId) => browserVaultCapture.noteHumanActivity(threadId),
@@ -1096,7 +1172,7 @@ function initializePackagedLogging(): void {
   }
 }
 
-initializePackagedLogging();
+if (!isLinxDesktop) initializePackagedLogging();
 
 function getDestructiveMenuIcon(): Electron.NativeImage | undefined {
   if (process.platform !== "darwin") return undefined;
@@ -1336,6 +1412,10 @@ function armInstallWatchdog(): void {
 }
 
 protocol.registerSchemesAsPrivileged([
+  ...LINX_LEGACY_STORAGE_SCHEMES.map((scheme) => ({
+    scheme,
+    privileges: { standard: true, secure: true, supportFetchAPI: true },
+  })),
   {
     scheme: DESKTOP_SCHEME,
     privileges: {
@@ -1420,7 +1500,8 @@ function resolveEmbeddedCommitHash(): string | null {
   try {
     const raw = FS.readFileSync(packageJsonPath, "utf8");
     const parsed = JSON.parse(raw) as { synaraCommitHash?: unknown };
-    return normalizeCommitHash(parsed.synaraCommitHash);
+    const value = parsed.synaraCommitHash;
+    return typeof value === "string" && /^[0-9a-f]{40}$/i.test(value) ? value.toLowerCase() : null;
   } catch {
     return null;
   }
@@ -1454,7 +1535,7 @@ function resolveAboutCommitHash(): string | null {
     return aboutCommitHashCache;
   }
 
-  aboutCommitHashCache = resolveEmbeddedCommitHash();
+  aboutCommitHashCache = normalizeCommitHash(resolveEmbeddedCommitHash());
 
   return aboutCommitHashCache;
 }
@@ -1839,14 +1920,21 @@ function registerDesktopProtocol(): void {
 
   const resolveStaticRequest = createDesktopStaticProtocolResolver(staticRoot);
 
-  protocol.registerFileProtocol(DESKTOP_SCHEME, (request, callback) => {
+  managedApplicationSession().protocol.registerFileProtocol(DESKTOP_SCHEME, (request, callback) => {
     callback(resolveStaticRequest(request.url, request.method));
   });
 
   desktopProtocolRegistered = true;
 }
 
+function managedApplicationSession(): Electron.Session {
+  // Never let Electron's early bootstrap/default session choose the real data
+  // root implicitly after the pre-data ownership/migration gate.
+  return isLinxDesktop ? session.fromPath(userDataPath) : session.defaultSession;
+}
+
 function dispatchMenuAction(action: string): void {
+  if (windowMaintenance.held || !linxBootstrapComplete) return;
   const existingWindow =
     BrowserWindow.getFocusedWindow() ?? mainWindow ?? BrowserWindow.getAllWindows()[0];
   const targetWindow = existingWindow ?? createWindow();
@@ -2139,8 +2227,21 @@ function configureApplicationMenu(): void {
           click: () => dispatchMenuAction("toggle-browser"),
         },
         { type: "separator" },
-        { role: "reload" },
-        { role: "forceReload" },
+        {
+          label: t("desktop:reload"),
+          accelerator: "CmdOrCtrl+R",
+          click: () => {
+            if (!windowMaintenance.held) resolveMenuTargetWindow()?.webContents.reload();
+          },
+        },
+        {
+          label: t("desktop:forceReload"),
+          accelerator: "CmdOrCtrl+Shift+R",
+          click: () => {
+            if (!windowMaintenance.held)
+              resolveMenuTargetWindow()?.webContents.reloadIgnoringCache();
+          },
+        },
         { role: "toggleDevTools" },
         { type: "separator" },
         ...zoomMenuItems,
@@ -2169,6 +2270,10 @@ function configureApplicationMenu(): void {
   const applicationMenu = Menu.buildFromTemplate(template);
   translateNativeMenuRoles(applicationMenu, APP_DISPLAY_NAME);
   Menu.setApplicationMenu(applicationMenu);
+  if (windowMaintenance.held) {
+    releaseLinxNativeMenu?.();
+    releaseLinxNativeMenu = freezeLinxUpdateNativeMenu(applicationMenu);
+  }
 }
 
 function resolveResourcePath(fileName: string): string | null {
@@ -2389,6 +2494,7 @@ function clearUnreadNotificationBadge(): void {
 // don't end up with multiple packaged instances racing the same local state.
 function requestZenModeToggle(): void {
   if (isQuitting || desktopStartupBlockedForDatabaseRestore) return;
+  if (windowMaintenance.held || !linxBootstrapComplete) return;
   if (mainWindow && !mainWindow.isDestroyed()) {
     // A shortcut that recovers a hidden bubble must not immediately toggle Zen off.
     if (zenModeManager.getState().isBubble) {
@@ -2882,7 +2988,8 @@ function applyPersistedDesktopAppIcon(
 }
 
 function enqueueDesktopAppIconJob(job: () => Promise<void>): Promise<void> {
-  const run = desktopAppIconApplyTail.then(job, job);
+  const tracked = () => nativeAdmission.run(job);
+  const run = desktopAppIconApplyTail.then(tracked, tracked);
   desktopAppIconApplyTail = run.then(
     () => undefined,
     () => undefined,
@@ -4023,12 +4130,159 @@ function resolveConfiguredLinxUpdateSource(): LinxUpdateSource | null {
 
 function createLinxUpdateClient(source: LinxUpdateSource): LinxUpdateClient {
   const checkRecordPath = Path.join(userDataPath, LINX_UPDATE_CHECK_STATE_FILE_NAME);
+  const networkSession = session.fromPartition("linx-updater-network", { cache: false });
+  const systemProxyReady = networkSession.setProxy({ mode: "system" });
+  const electronRequest = createLinxUpdateElectronRequest(networkSession);
+  const request: LinxUpdateRequest = async (url, options) => {
+    await systemProxyReady;
+    return electronRequest(url, options);
+  };
+  const installer = new LinxUpdateInstaller({
+    currentVersion: app.getVersion(),
+    createHelper: (installation, attemptId, signal) =>
+      createLinxInstallerHelper({
+        installation,
+        attemptId,
+        signal,
+        attemptsPath: `${userDataPath}.linx-updater`,
+        helperPath: Path.join(process.resourcesPath, "linx-update-helper"),
+        applicationPath: ownMacAppBundlePath(),
+        homePath: BASE_DIR,
+        userDataPath,
+        currentVersion: app.getVersion(),
+      }),
+    windows: {
+      prepare: async (attemptId, digest) => {
+        if (!browserManager.prepareForUpdate(attemptId)) {
+          return { ready: false, message: t("desktop:linxUpdateMaintenance_browser") };
+        }
+        if (appSnapManager && !(await appSnapManager.prepareForUpdate(attemptId))) {
+          return { ready: false, message: t("desktop:linxUpdateMaintenance_native") };
+        }
+        if (nativeAdmission.busy)
+          return { ready: false, message: t("desktop:linxUpdateMaintenance_native") };
+        await ambientContext?.prepareForUpdate(attemptId);
+        releaseLinxNativeMenu ??= freezeLinxUpdateNativeMenu(Menu.getApplicationMenu());
+        const result = await windowMaintenance.prepare(attemptId, digest, {
+          backendStopped: linxBackendCleanlyStopped,
+        });
+        if (!result.ready) return result;
+        if (nativeAdmission.busy)
+          return { ready: false, message: t("desktop:linxUpdateMaintenance_native") };
+        return result;
+      },
+      release: (attemptId) => {
+        browserManager.releaseUpdate(attemptId);
+        releaseLinxNativeMenu?.();
+        releaseLinxNativeMenu = null;
+        ambientContext?.releaseUpdate(attemptId);
+        appSnapManager?.releaseUpdate(attemptId);
+        windowMaintenance.release(attemptId);
+      },
+    },
+    maintenance: (maintenanceRequest, signal) => {
+      if (maintenanceRequest.action === "commit") linxBackendMaintenance = true;
+      return requestLinxUpdateMaintenance({
+        baseUrl: backendHttpUrl,
+        token: DESKTOP_BACKEND_SHUTDOWN_TOKEN,
+        request: maintenanceRequest,
+        signal,
+      });
+    },
+    stopBackend: async () => {
+      linxBackendMaintenance = true;
+      cancelBackendReadinessWait();
+      if (restartTimer) {
+        clearTimeout(restartTimer);
+        restartTimer = null;
+      }
+      await cuaDriverHost?.suspend();
+      const child = backendProcess;
+      if (!child) {
+        if (linxBackendCleanlyStopped) return;
+        throw new Error("No matching child clean-exit proof is available");
+      }
+      await stopLinxBackendCleanly({
+        child,
+        baseUrl: backendHttpUrl,
+        token: DESKTOP_BACKEND_SHUTDOWN_TOKEN,
+      });
+      linxBackendCleanlyStopped = true;
+      if (backendProcess === child) backendProcess = null;
+    },
+    restartBackend: async () => {
+      if (isQuitting) return;
+      linxBackendMaintenance = false;
+      linxBackendCleanlyStopped = false;
+      startBackend();
+      await waitForBackendHttpReady(backendHttpUrl, {
+        path: "/health",
+        timeoutMs: 30_000,
+        isReady: isBackendStartupReadyResponse,
+      });
+    },
+    snapshot: (helper) =>
+      prepareLinxUpdateProfileRecovery({
+        window: mainWindow,
+        userDataPath,
+        snapshotDirectoryPath: Path.join(helper.attemptPath, "profile-snapshot"),
+        preview: desktopFlavor === "workbench-preview",
+      }),
+    takeOwnership: () => {
+      if (!linxHomeOwnership) throw new Error("Linx home ownership is unavailable");
+      return linxHomeOwnership;
+    },
+    clearTransferredOwnership: () => {
+      linxHomeOwnership = null;
+    },
+    restoreOwnership: async (nonce) => {
+      linxHomeOwnership = await adoptLinxHomeOwnership({
+        homePath: BASE_DIR,
+        userDataPath,
+        applicationPath: ownMacAppBundlePath(),
+        version: app.getVersion(),
+        nonce,
+      });
+    },
+    revalidate: (installation, signal) =>
+      revalidateLinxUpdateRelease({
+        ...installation.target,
+        source,
+        receipt: installation.release,
+        currentVersion: app.getVersion(),
+        fetchBytes: (url, maxBytes) =>
+          fetchLinxUpdateBytes({
+            url,
+            maxBytes,
+            allowedHosts: source.allowedAssetHosts,
+            request,
+            signal,
+          }),
+      }),
+    claimHandoff: (digest) => {
+      if (!linxUpdateClient) throw new Error("Updater client disappeared before handoff");
+      linxUpdateClient.claimInstallHandoff(digest);
+    },
+    quit: () => {
+      linxIntentionalInstallQuit = true;
+      isQuitting = true;
+      app.quit();
+    },
+    message: (reason) => t(`desktop:linxUpdateInstall_${reason}`),
+    log: () =>
+      console.warn(
+        "[linx-updater] Installation refused; verified package retained for an explicit retry.",
+      ),
+  });
   return new LinxUpdateClient({
     source,
     currentVersion: app.getVersion(),
     stagingDir: Path.join(userDataPath, "linx-update-staging"),
     getUpdateState: () => updateState,
     setUpdateState,
+    request,
+    install: (installation, signal) => installer.install(installation, signal),
+    installFailureMessage: t("desktop:linxUpdateInstall_failed"),
     readCheckRecord: () => readLinxUpdateCheckRecord(checkRecordPath),
     writeCheckRecord: (record) => writeLinxUpdateCheckRecord(checkRecordPath, record),
     log: (message) => console.info(message),
@@ -4460,6 +4714,7 @@ function backendEnv(): NodeJS.ProcessEnv {
     SYNARA_HOME: BASE_DIR,
     SYNARA_AUTH_TOKEN: backendAuthToken,
     SYNARA_DESKTOP_SHUTDOWN_TOKEN: DESKTOP_BACKEND_SHUTDOWN_TOKEN,
+    LINX_HOME_OWNERSHIP_NONCE: linxHomeOwnership?.nonce,
   };
   // The backend runs the same login-shell probe at startup and does not begin listening
   // until it returns, so an unmarked child serializes a second ~1s hydration behind ours.
@@ -4469,6 +4724,7 @@ function backendEnv(): NodeJS.ProcessEnv {
 }
 
 function scheduleBackendRestart(reason: string): void {
+  if (linxBackendMaintenance) return;
   const response = backendSupervision.respondToStartFailure({
     quitting: isQuitting,
     restartPending: restartTimer !== null,
@@ -4971,6 +5227,7 @@ function maybeTrackBetaInstalled(): void {
 }
 
 function startBackend(trigger: BackendStartTrigger = "lifecycle"): void {
+  if (linxBackendMaintenance || !linxBootstrapComplete) return;
   if (isQuitting || backendProcess) return;
   // Recovery owns the database until it clears the marker. Callers that restart
   // the backend after an unrelated failure — a given-up update install, say —
@@ -5098,7 +5355,7 @@ function startBackend(trigger: BackendStartTrigger = "lifecycle"): void {
   child.on("exit", (code, signal) => {
     startupHealthMonitor.abort();
     // Output can drain after a failed stop has restored the app's running state.
-    const expectedExit = isQuitting;
+    const expectedExit = isQuitting || linxBackendMaintenance;
     if (backendListeningDetector === listeningDetector) {
       listeningDetector.fail(
         new Error(
@@ -5114,7 +5371,7 @@ function startBackend(trigger: BackendStartTrigger = "lifecycle"): void {
       closeBackendSession(
         `pid=${child.pid ?? "unknown"} code=${code ?? "null"} signal=${signal ?? "null"}`,
       );
-      if (isQuitting) return;
+      if (isQuitting || linxBackendMaintenance) return;
       const startupBlock = startupBlockDetector.read();
       if (startupBlock) {
         handleBackendStartupBlock(startupBlock);
@@ -5242,7 +5499,12 @@ async function shutdownDesktopRuntime(reason: string): Promise<void> {
   hideDesktopWindowForImmediateQuit();
   writeDesktopLogHeader(`${reason} shutdown start`);
   const shutdown = runAfterDesktopShutdown(
-    stopBackendAndWaitForExit(),
+    (async () => {
+      // Abort and settle a reversible Linx handoff before ordinary shutdown can
+      // touch its backend or release a lease transferred to the helper.
+      await linxUpdateClient?.dispose();
+      await stopBackendAndWaitForExit();
+    })(),
     async () => {
       clearUpdateBackgroundBlurTimer();
       clearUpdateCheckTimeoutTimer();
@@ -5258,8 +5520,8 @@ async function shutdownDesktopRuntime(reason: string): Promise<void> {
           await shutdownBrowserServices({
             revokeHost: () => disposeBrowserHostPipeServerForShutdown(reason),
             closePages: () => browserManager.dispose(),
-            stopCapture: () => browserVaultCapture.dispose(),
-            clearKeys: () => browserVault.dispose(),
+            stopCapture: () => browserVaultCapture?.dispose(),
+            clearKeys: () => browserVault?.dispose(),
           });
           await browserSessionRestore?.shutdown();
           restoreStdIoCapture?.();
@@ -5271,6 +5533,12 @@ async function shutdownDesktopRuntime(reason: string): Promise<void> {
         { runAfterShutdownFailure: true },
       );
       ambientContext = null;
+      windowMaintenance.dispose();
+      if (linxHomeOwnership !== null) {
+        const ownership = linxHomeOwnership;
+        linxHomeOwnership = null;
+        await ownership.release();
+      }
       desktopShutdownComplete = true;
       writeDesktopLogHeader(`${reason} shutdown complete`);
       // Release the persistent log descriptors. close() is idempotent and a
@@ -5429,20 +5697,27 @@ function registerIpcHandlers(): void {
       }
     },
     {
-      sharedDataDirectory: Path.join(app.getPath("appData"), "SynaraContext"),
+      sharedDataDirectory: isLinxDesktop
+        ? Path.join(userDataPath, "ambient-context-discovery")
+        : Path.join(app.getPath("appData"), "SynaraContext"),
       instanceLabel: desktopIdentity.displayName,
+      applicationId: desktopIdentity.bundleId,
     },
   );
   registerAmbientContextIpc(
-    ipcMain,
+    applicationIpc,
     ambientContext,
     (event) => event.sender === mainWindow?.webContents,
   );
-  registerZenModeIpc(ipcMain, zenModeManager, (event) => event.sender === mainWindow?.webContents);
+  registerZenModeIpc(
+    applicationIpc,
+    zenModeManager,
+    (event) => event.sender === mainWindow?.webContents,
+  );
   const storageSnapshotPath = resolveSynaraStorageSnapshotPath(app.getPath("userData"));
 
   ipcMain.removeAllListeners(IPC.betaDiagnostics.enabled);
-  ipcMain.on(IPC.betaDiagnostics.enabled, (event: IpcMainEvent) => {
+  applicationIpc.on(IPC.betaDiagnostics.enabled, (event: IpcMainEvent) => {
     event.returnValue = Boolean(
       betaDiagnostics &&
       event.sender === mainWindow?.webContents &&
@@ -5451,30 +5726,34 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeAllListeners(IPC.browser.webMcpCompatibilityPolicy);
-  ipcMain.on(IPC.browser.webMcpCompatibilityPolicy, (event: IpcMainEvent) => {
+  applicationIpc.on(IPC.browser.webMcpCompatibilityPolicy, (event: IpcMainEvent) => {
     event.returnValue = browserManager.isWebMcpCompatibilityAllowed(event.sender.id);
   });
 
   ipcMain.removeAllListeners(IPC.storageMigration.read);
-  ipcMain.on(IPC.storageMigration.read, (event: IpcMainEvent) => {
+  applicationIpc.on(IPC.storageMigration.read, (event: IpcMainEvent) => {
     event.returnValue = readSynaraStorageSnapshot(storageSnapshotPath);
   });
 
   ipcMain.removeHandler(IPC.storageMigration.acknowledge);
-  ipcMain.handle(IPC.storageMigration.acknowledge, async () => {
+  applicationIpc.handle(IPC.storageMigration.acknowledge, async () => {
     await acknowledgeSynaraStorageSnapshot(storageSnapshotPath);
   });
 
   ipcMain.removeAllListeners(IPC.wsUrl);
-  ipcMain.on(IPC.wsUrl, (event: IpcMainEvent) => {
+  applicationIpc.on(IPC.wsUrl, (event: IpcMainEvent) => {
     // The backend port is reserved at runtime, so preload asks main for the
     // live URL instead of trusting build-time or inherited renderer env.
+    if (isLinxDesktop && !isTrustedManagedApplicationSender(event)) {
+      event.returnValue = null;
+      return;
+    }
     event.returnValue =
       normalizeDesktopWsUrl(backendWsUrl) ?? resolveDesktopWsUrlFromEnv(process.env);
   });
 
   ipcMain.removeAllListeners(IPC.zoomFactor);
-  ipcMain.on(IPC.zoomFactor, (event: IpcMainEvent) => {
+  applicationIpc.on(IPC.zoomFactor, (event: IpcMainEvent) => {
     event.returnValue = event.sender.getZoomFactor();
     if (
       event.sender === mainWindow?.webContents &&
@@ -5486,12 +5765,12 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeAllListeners(IPC.windowTranslucency);
-  ipcMain.on(IPC.windowTranslucency, (event: IpcMainEvent) => {
+  applicationIpc.on(IPC.windowTranslucency, (event: IpcMainEvent) => {
     event.returnValue = desktopWindowTranslucency;
   });
 
   ipcMain.removeHandler(IPC.pickFolder);
-  ipcMain.handle(IPC.pickFolder, async () => {
+  applicationIpc.handle(IPC.pickFolder, async () => {
     const owner = BrowserWindow.getFocusedWindow() ?? mainWindow;
     const result = owner
       ? await dialog.showOpenDialog(owner, {
@@ -5505,7 +5784,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.saveFile);
-  ipcMain.handle(IPC.saveFile, async (_event, input: unknown) => {
+  applicationIpc.handle(IPC.saveFile, async (_event, input: unknown) => {
     if (!isSaveFileInput(input)) {
       throw new Error("Invalid save file input.");
     }
@@ -5528,7 +5807,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.confirm);
-  ipcMain.handle(IPC.confirm, async (_event, message: unknown) => {
+  applicationIpc.handle(IPC.confirm, async (_event, message: unknown) => {
     if (typeof message !== "string") {
       return false;
     }
@@ -5538,12 +5817,12 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeAllListeners(IPC.quitConfirmationResponse);
-  ipcMain.on(IPC.quitConfirmationResponse, (_event, payload: unknown) => {
+  applicationIpc.on(IPC.quitConfirmationResponse, (_event, payload: unknown) => {
     runningChatsQuitGuard.receiveResponse(payload);
   });
 
   ipcMain.removeHandler(IPC.setMenuShortcuts);
-  ipcMain.handle(IPC.setMenuShortcuts, (_event, rawShortcuts: unknown) => {
+  applicationIpc.handle(IPC.setMenuShortcuts, (_event, rawShortcuts: unknown) => {
     const accelerators = resolveReportedMenuAccelerators(rawShortcuts, process.platform);
     if (!accelerators || sameDesktopMenuAccelerators(accelerators, desktopMenuAccelerators)) return;
     desktopMenuAccelerators = accelerators;
@@ -5552,14 +5831,14 @@ function registerIpcHandlers(): void {
 
   ipcMain.removeHandler(IPC.setTheme);
   ipcMain.removeAllListeners(IPC.getSystemLanguages);
-  ipcMain.on(IPC.getSystemLanguages, (event: IpcMainEvent) => {
+  applicationIpc.on(IPC.getSystemLanguages, (event: IpcMainEvent) => {
     event.returnValue =
       event.sender === mainWindow?.webContents && event.senderFrame === event.sender.mainFrame
         ? app.getPreferredSystemLanguages()
         : [];
   });
   ipcMain.removeHandler(IPC.setLanguagePreference);
-  ipcMain.handle(IPC.setLanguagePreference, (event, rawPreference: unknown) => {
+  applicationIpc.handle(IPC.setLanguagePreference, (event, rawPreference: unknown) => {
     applyDesktopLanguagePreference(rawPreference, {
       flavor: desktopFlavor,
       isTrustedSender:
@@ -5571,7 +5850,7 @@ function registerIpcHandlers(): void {
       },
     });
   });
-  ipcMain.handle(IPC.setTheme, async (_event, rawTheme: unknown) => {
+  applicationIpc.handle(IPC.setTheme, async (_event, rawTheme: unknown) => {
     const theme = getSafeTheme(rawTheme);
     if (!theme) {
       return;
@@ -5581,7 +5860,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.setWindowMaterial);
-  ipcMain.handle(IPC.setWindowMaterial, (event, rawInput: unknown) => {
+  applicationIpc.handle(IPC.setWindowMaterial, (event, rawInput: unknown) => {
     const input = parseDesktopWindowMaterial(rawInput);
     const window = BrowserWindow.fromWebContents(event.sender);
     if (process.platform !== "darwin" || !input || !window) return false;
@@ -5589,7 +5868,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.getAppIcon);
-  ipcMain.handle(IPC.getAppIcon, () => readDesktopAppIcon());
+  applicationIpc.handle(IPC.getAppIcon, () => readDesktopAppIcon());
 
   ipcMain.removeHandler(IPC.setAppIcon);
   const enqueueDesktopAppIconApply = createExclusiveApplyQueue(async (icon: DesktopAppIcon) => {
@@ -5600,13 +5879,13 @@ function registerIpcHandlers(): void {
     if (!shouldPersist && process.platform !== "win32" && process.platform !== "darwin") return;
     await applyDesktopAppIcon(icon, mainWindow, { flushShellIconCache: true });
   });
-  ipcMain.handle(IPC.setAppIcon, async (_event, rawIcon: unknown) => {
+  applicationIpc.handle(IPC.setAppIcon, async (_event, rawIcon: unknown) => {
     if (!isDesktopAppIcon(rawIcon) || (rawIcon === "beta" && desktopFlavor !== "beta")) return;
     await enqueueDesktopAppIconApply(rawIcon);
   });
 
   ipcMain.removeHandler(IPC.contextMenu);
-  ipcMain.handle(
+  applicationIpc.handle(
     IPC.contextMenu,
     async (_event, items: unknown, position?: { x: number; y: number }) => {
       const popupPosition =
@@ -5650,7 +5929,7 @@ function registerIpcHandlers(): void {
     },
   );
 
-  registerSafariAccessIpc(ipcMain, {
+  registerSafariAccessIpc(applicationIpc, {
     platform: process.platform,
     systemVersion: process.getSystemVersion(),
     execPath: process.execPath,
@@ -5662,7 +5941,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.openExternal);
-  ipcMain.handle(IPC.openExternal, async (_event, rawUrl: unknown) => {
+  applicationIpc.handle(IPC.openExternal, async (_event, rawUrl: unknown) => {
     const externalUrl = getSafeExternalUrl(rawUrl);
     if (!externalUrl) {
       return false;
@@ -5677,7 +5956,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.clipboardWriteImage);
-  ipcMain.handle(IPC.clipboardWriteImage, async (_event, rawDataUrl: unknown) => {
+  applicationIpc.handle(IPC.clipboardWriteImage, async (_event, rawDataUrl: unknown) => {
     if (typeof rawDataUrl !== "string") {
       return false;
     }
@@ -5700,7 +5979,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.showInFolder);
-  ipcMain.handle(IPC.showInFolder, async (_event, rawPath: unknown) => {
+  applicationIpc.handle(IPC.showInFolder, async (_event, rawPath: unknown) => {
     if (typeof rawPath !== "string" || rawPath.trim().length === 0) {
       throw new Error("Missing folder path.");
     }
@@ -5717,13 +5996,13 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.windowMinimize);
-  ipcMain.handle(IPC.windowMinimize, async (event) => {
+  applicationIpc.handle(IPC.windowMinimize, async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
     window?.minimize();
   });
 
   ipcMain.removeHandler(IPC.windowToggleMaximize);
-  ipcMain.handle(IPC.windowToggleMaximize, async (event) => {
+  applicationIpc.handle(IPC.windowToggleMaximize, async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
     if (!window) {
       return { isMaximized: false, isFullscreen: false };
@@ -5739,22 +6018,22 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.windowClose);
-  ipcMain.handle(IPC.windowClose, async (event) => {
+  applicationIpc.handle(IPC.windowClose, async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
     window?.close();
   });
 
   ipcMain.removeHandler(IPC.windowGetState);
-  ipcMain.handle(IPC.windowGetState, async (event) => {
+  applicationIpc.handle(IPC.windowGetState, async (event) => {
     const window = BrowserWindow.fromWebContents(event.sender) ?? mainWindow;
     return window ? getDesktopWindowState(window) : { isMaximized: false, isFullscreen: false };
   });
 
   ipcMain.removeHandler(IPC.customTitleBarGetState);
-  ipcMain.handle(IPC.customTitleBarGetState, async () => getDesktopCustomTitleBarState());
+  applicationIpc.handle(IPC.customTitleBarGetState, async () => getDesktopCustomTitleBarState());
 
   ipcMain.removeHandler(IPC.customTitleBarSetPreference);
-  ipcMain.handle(IPC.customTitleBarSetPreference, async (_event, rawEnabled: unknown) => {
+  applicationIpc.handle(IPC.customTitleBarSetPreference, async (_event, rawEnabled: unknown) => {
     if (typeof rawEnabled !== "boolean") {
       return getDesktopCustomTitleBarState();
     }
@@ -5767,13 +6046,13 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.customTitleBarRelaunch);
-  ipcMain.handle(IPC.customTitleBarRelaunch, async () => {
+  applicationIpc.handle(IPC.customTitleBarRelaunch, async () => {
     app.relaunch();
     requestGracefulAppQuit("custom-title-bar-relaunch");
   });
 
   ipcMain.removeHandler(IPC.computerSetCursorStyle);
-  ipcMain.handle(IPC.computerSetCursorStyle, async (_event, rawStyle: unknown) => {
+  applicationIpc.handle(IPC.computerSetCursorStyle, async (_event, rawStyle: unknown) => {
     // The renderer's mirrored value is the authority for this preference: the
     // normalized style is persisted first, so even a failed live push leaves
     // the next generation correct. Stock removes the stored override.
@@ -5787,7 +6066,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeAllListeners(IPC.computerPreviewSubscribe);
-  ipcMain.on(IPC.computerPreviewSubscribe, (event: IpcMainEvent) => {
+  applicationIpc.on(IPC.computerPreviewSubscribe, (event: IpcMainEvent) => {
     const sender = event.sender;
     // Frames are only ever sent to the main window; other renderers cannot
     // consume them and must not keep the capture helper alive.
@@ -5813,12 +6092,12 @@ function registerIpcHandlers(): void {
     syncComputerFrameTapDemand();
   });
   ipcMain.removeAllListeners(IPC.computerPreviewUnsubscribe);
-  ipcMain.on(IPC.computerPreviewUnsubscribe, (event: IpcMainEvent) => {
+  applicationIpc.on(IPC.computerPreviewUnsubscribe, (event: IpcMainEvent) => {
     computerPreviewSubscribers.get(event.sender.id)?.();
   });
 
   ipcMain.removeHandler(IPC.audioLevel.setSource);
-  ipcMain.handle(
+  applicationIpc.handle(
     IPC.audioLevel.setSource,
     async (event, rawSource: unknown, rawMicrophoneId: unknown) => {
       // Authoritative gate: macOS only; channel availability follows the shared feature list.
@@ -5867,7 +6146,7 @@ function registerIpcHandlers(): void {
   );
 
   ipcMain.removeHandler(IPC.audioLevel.listMicrophones);
-  ipcMain.handle(IPC.audioLevel.listMicrophones, async () => {
+  applicationIpc.handle(IPC.audioLevel.listMicrophones, async () => {
     if (
       process.platform !== "darwin" ||
       !isBetaFeatureEnabled(AUDIO_TRAIL_BETA_FEATURE, desktopFlavor)
@@ -5892,19 +6171,21 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.beta.getState);
-  ipcMain.handle(IPC.beta.getState, async () => betaChannel.getState());
+  applicationIpc.handle(IPC.beta.getState, async () => betaChannel.getState());
 
   ipcMain.removeHandler(IPC.beta.install);
-  ipcMain.handle(IPC.beta.install, async () => betaChannel.install());
+  applicationIpc.handle(IPC.beta.install, async () => betaChannel.install());
 
   ipcMain.removeHandler(IPC.beta.launch);
-  ipcMain.handle(IPC.beta.launch, async () => betaChannel.launch());
+  applicationIpc.handle(IPC.beta.launch, async () => betaChannel.launch());
 
   ipcMain.removeHandler(IPC.beta.importAndLaunch);
-  ipcMain.handle(IPC.beta.importAndLaunch, async () => betaChannel.importAndLaunch(BASE_DIR));
+  applicationIpc.handle(IPC.beta.importAndLaunch, async () =>
+    betaChannel.importAndLaunch(BASE_DIR),
+  );
 
   ipcMain.removeHandler(IPC.beta.leave);
-  ipcMain.handle(IPC.beta.leave, async (_event, rawInput: unknown) => {
+  applicationIpc.handle(IPC.beta.leave, async (_event, rawInput: unknown) => {
     const result = await betaChannel.leave();
     if (!result.ok) return result;
     const moveToTrash =
@@ -5935,11 +6216,12 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.updateGetState);
-  ipcMain.handle(IPC.updateGetState, async () => updateState);
+  applicationIpc.handle(IPC.updateGetState, async () => updateState);
 
   ipcMain.removeHandler(IPC.updateCheck);
-  ipcMain.handle(IPC.updateCheck, async () => {
+  applicationIpc.handle(IPC.updateCheck, async (event) => {
     if (linxUpdateClient !== null) {
+      if (!isTrustedManagedApplicationSender(event)) return updateState;
       await linxUpdateClient.checkManually();
       return updateState;
     }
@@ -5948,7 +6230,14 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.updateDownload);
-  ipcMain.handle(IPC.updateDownload, async () => {
+  applicationIpc.handle(IPC.updateDownload, async (event) => {
+    if (linxUpdateClient !== null && !isTrustedManagedApplicationSender(event)) {
+      return {
+        accepted: false,
+        completed: false,
+        state: updateState,
+      } satisfies DesktopUpdateActionResult;
+    }
     const result =
       linxUpdateClient !== null
         ? await linxUpdateClient.download()
@@ -5961,18 +6250,19 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.updateInstall);
-  ipcMain.handle(IPC.updateInstall, async () => {
-    if (isQuitting) {
+  applicationIpc.handle(IPC.updateInstall, async (event) => {
+    if (isQuitting || (linxUpdateClient !== null && !isTrustedManagedApplicationSender(event))) {
       return {
         accepted: false,
         completed: false,
         state: updateState,
       } satisfies DesktopUpdateActionResult;
     }
-    // Until LU-04 ships the helper, a Linx install request is refused instead of
-    // falling through to the Squirrel handoff this flavor must never use.
+    // Linx uses only its pinned standalone-helper handoff, never Squirrel.
     const result =
-      linxUpdateClient !== null ? linxUpdateClient.install() : await installDownloadedUpdate();
+      linxUpdateClient !== null
+        ? await linxUpdateClient.install()
+        : await installDownloadedUpdate();
     return {
       accepted: result.accepted,
       completed: result.completed,
@@ -5981,10 +6271,10 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.removeHandler(IPC.notificationsIsSupported);
-  ipcMain.handle(IPC.notificationsIsSupported, async () => Notification.isSupported());
+  applicationIpc.handle(IPC.notificationsIsSupported, async () => Notification.isSupported());
 
   ipcMain.removeHandler(IPC.notificationsShow);
-  ipcMain.handle(
+  applicationIpc.handle(
     IPC.notificationsShow,
     async (
       _event,
@@ -6008,7 +6298,7 @@ function registerIpcHandlers(): void {
       }),
   );
   if (appSnapManager) {
-    registerAppSnapIpcHandlers(ipcMain, appSnapManager, {
+    registerAppSnapIpcHandlers(applicationIpc, appSnapManager, {
       openPermissionSettingsPane: (pane) => {
         const paneUrl = APP_SNAP_SETTINGS_PANE_URLS[pane];
         if (!paneUrl) return Promise.resolve(false);
@@ -6025,9 +6315,9 @@ function registerIpcHandlers(): void {
   }
   registerDesktopVoiceTranscriptionHandler();
   startBrowserPerformanceLogging();
-  registerBrowserIpcHandlers(ipcMain, browserManager);
+  registerBrowserIpcHandlers(applicationIpc, browserManager);
   registerBrowserVaultIpc(
-    ipcMain,
+    applicationIpc,
     browserManager,
     browserVault,
     () => {
@@ -6144,6 +6434,10 @@ function getDesktopCustomTitleBarState() {
 }
 
 function createWindow(): BrowserWindow {
+  if (windowMaintenance.held || !linxBootstrapComplete) {
+    if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
+    throw new Error("Application window creation is frozen during update handoff");
+  }
   const savedWindowState = readDesktopWindowState(DESKTOP_WINDOW_STATE_PATH);
   const primaryDisplay = screen.getPrimaryDisplay();
   const restoredBounds = savedWindowState
@@ -6173,6 +6467,7 @@ function createWindow(): BrowserWindow {
     ...getTitleBarOptions(),
     ...getWindowMaterialOptions(),
     webPreferences: {
+      session: managedApplicationSession(),
       preload: Path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
@@ -6181,6 +6476,14 @@ function createWindow(): BrowserWindow {
       // Let Chromium throttle renderer timers/rAF when the window is hidden.
       backgroundThrottling: true,
     },
+  });
+  managedApplicationWindows.add(window);
+  window.once("closed", () => managedApplicationWindows.delete(window));
+  window.webContents.on("will-navigate", (event) => {
+    if (windowMaintenance.held) event.preventDefault();
+  });
+  window.webContents.on("will-redirect", (event) => {
+    if (windowMaintenance.held) event.preventDefault();
   });
   browserManager.setWindow(window);
   attachDesktopZoomFactorSync(window);
@@ -6191,6 +6494,10 @@ function createWindow(): BrowserWindow {
   }
 
   window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+    if (windowMaintenance.held) {
+      event.preventDefault();
+      return;
+    }
     const partition = params.partition;
     if (
       partition === undefined ||
@@ -6207,6 +6514,7 @@ function createWindow(): BrowserWindow {
 
   window.webContents.on("context-menu", (event, params) => {
     event.preventDefault();
+    if (windowMaintenance.held) return;
 
     const menuTemplate: MenuItemConstructorOptions[] = [];
 
@@ -6240,10 +6548,19 @@ function createWindow(): BrowserWindow {
 
     const menu = Menu.buildFromTemplate(menuTemplate);
     translateNativeMenuRoles(menu, APP_DISPLAY_NAME);
-    menu.popup({ window });
+    void nativeAdmission
+      .run(() => {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        menu.popup({ window, callback: resolve });
+        return promise;
+      })
+      .catch((error: unknown) =>
+        console.warn("[desktop] Native context menu was not shown", formatErrorMessage(error)),
+      );
   });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
+    if (windowMaintenance.held) return { action: "deny" };
     const externalUrl = getSafeExternalUrl(url);
     if (externalUrl) {
       void shell.openExternal(externalUrl);
@@ -6296,6 +6613,7 @@ function createWindow(): BrowserWindow {
     );
   }
   window.on("close", (event) => {
+    if (linxIntentionalInstallQuit) return;
     try {
       const zenRestoreState = zenModeManager.getWindowStateForPersistence();
       writeDesktopWindowState(DESKTOP_WINDOW_STATE_PATH, {
@@ -6411,7 +6729,7 @@ function attachRendererCrashRecovery(window: BrowserWindow): void {
         clearReloadTimer();
         reloadTimer = setTimeout(() => {
           reloadTimer = null;
-          if (isQuitting || window.isDestroyed()) return;
+          if (isQuitting || window.isDestroyed() || windowMaintenance.held) return;
           window.webContents.reload();
         }, response.delayMs);
         return;
@@ -6485,7 +6803,7 @@ function presentRendererCrashRecovery(
       if (result.response === 0) {
         // A user-driven reload is a fresh start, not a continuation of the streak.
         rendererCrashPolicy.reset();
-        if (!window.isDestroyed()) {
+        if (!window.isDestroyed() && !windowMaintenance.held) {
           window.webContents.reload();
         }
         return;
@@ -6509,7 +6827,7 @@ function configureMediaPermissions(): void {
   };
   const permissionTargets = [
     {
-      targetSession: session.defaultSession,
+      targetSession: managedApplicationSession(),
       trustedRequester: trustedMainRenderer,
     },
     {
@@ -6571,7 +6889,7 @@ function configureMediaPermissions(): void {
 // Override Electron's userData path before the `ready` event so that
 // Chromium session data uses a filesystem-friendly directory name.
 // Must be called synchronously at the top level — before `app.whenReady()`.
-if (hasSingleInstanceLock) {
+if (hasSingleInstanceLock && !isLinxDesktop) {
   repairBrowserProfileBeforeElectronReady(userDataPath);
 }
 
@@ -6591,6 +6909,149 @@ if (!hasSingleInstanceLock) {
   app.on("second-instance", () => {
     focusMainWindow();
   });
+}
+
+function isTrustedManagedApplicationSender(
+  event: Pick<IpcMainEvent, "sender" | "senderFrame">,
+): boolean {
+  if (
+    !event.senderFrame ||
+    ![...managedApplicationWindows].some(
+      (window) => !window.isDestroyed() && window.webContents === event.sender,
+    ) ||
+    event.senderFrame !== event.sender.mainFrame
+  )
+    return false;
+  try {
+    const expected = new URL(
+      isDevelopment ? process.env.VITE_DEV_SERVER_URL! : desktopIdentity.entryUrl,
+    );
+    const actual = new URL(event.senderFrame.url);
+    return (
+      actual.protocol === expected.protocol &&
+      actual.host === expected.host &&
+      actual.username === "" &&
+      actual.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function prepareLinxDesktopBootstrap(): Promise<boolean> {
+  try {
+    const homePath = await canonicalLinxDataPath(BASE_DIR);
+    const profilePath = await canonicalLinxDataPath(userDataPath);
+    if (homePath !== BASE_DIR || profilePath !== userDataPath)
+      throw new Error("Linx data roots must be canonical");
+    const bindings = {
+      homePath,
+      userDataPath,
+      applicationPath: ownMacAppBundlePath(),
+      version: app.getVersion(),
+    };
+    const attemptPath = await findLinxUpdateStartupAttempt({
+      ...bindings,
+      attemptsPath: `${userDataPath}.linx-updater`,
+      arguments: process.argv,
+    });
+    if (attemptPath !== null) {
+      const sourceCommit = resolveEmbeddedCommitHash();
+      if (!sourceCommit) throw new Error("Installed source identity is unavailable");
+      linxStartupHealth = await claimLinxUpdateStartup({
+        ...bindings,
+        attemptPath,
+        sourceCommit,
+        helperPath: Path.join(process.resourcesPath, "linx-update-helper"),
+      });
+      linxHomeOwnership = linxStartupHealth.ownership;
+    } else {
+      linxHomeOwnership = await acquireLinxHomeOwnership(bindings);
+    }
+    const preview = desktopFlavor === "workbench-preview";
+    const legacy = linxLegacyMigrationPaths({
+      homeDirectory: OS.homedir(),
+      appDataPath: resolveDesktopAppDataBase(),
+      preview,
+    });
+    const sourceExists = FS.existsSync(
+      Path.join(legacy.sourceHomePath, "userdata", "state.sqlite"),
+    );
+    const targetHasData = [BASE_DIR, userDataPath].some(
+      (root) => FS.existsSync(root) && FS.readdirSync(root).length > 0,
+    );
+    if (sourceExists && !targetHasData && attemptPath === null) {
+      const consent = await dialog.showMessageBox({
+        type: "question",
+        title: APP_DISPLAY_NAME,
+        message: t("desktop:linxLegacyImportTitle"),
+        detail: t("desktop:linxLegacyImportConsent"),
+        buttons: [t("desktop:linxLegacyImportCancel"), t("desktop:linxLegacyImportAction")],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      });
+      if (consent.response !== 1) {
+        await linxHomeOwnership.release();
+        linxHomeOwnership = null;
+        desktopShutdownComplete = true;
+        app.quit();
+        return false;
+      }
+      const sourceVersion = parseLastLaunchVersion(
+        FS.readFileSync(resolveLaunchVersionRecordPath(legacy.sourceUserDataPath), "utf8"),
+      );
+      if (!sourceVersion)
+        throw new Error(
+          "The old application's actual launch version is required for a verified import",
+        );
+      const recoveryRoot = `${userDataPath}.linx-legacy-recovery`;
+      await FS.promises.mkdir(recoveryRoot, { recursive: true, mode: 0o700 });
+      await migrateLegacyLinxHome({
+        ...legacy,
+        consent: true,
+        homePath: BASE_DIR,
+        userDataPath,
+        preview,
+        sourceVersion,
+        recoveryDirectoryPath: Path.join(recoveryRoot, Crypto.randomUUID()),
+      });
+      await dialog.showMessageBox({
+        type: "info",
+        title: APP_DISPLAY_NAME,
+        message: t("desktop:linxLegacyImportComplete"),
+        detail: t("desktop:linxLegacyImportReauthentication"),
+        buttons: [t("desktop:common_ok")],
+      });
+    }
+    FS.mkdirSync(userDataPath, { recursive: true, mode: 0o700 });
+    app.setPath("userData", userDataPath);
+    app.setPath("sessionData", userDataPath);
+    await restoreLinxUpdatePortableProfile({ userDataPath, preview });
+    setDesktopLanguagePreference(readDesktopLanguagePreference(DESKTOP_LANGUAGE_PREFERENCE_PATH));
+    initializeBrowserVault();
+    initializePackagedLogging();
+    linxBootstrapComplete = true;
+    return true;
+  } catch {
+    desktopStartupBlockedForDatabaseRestore = true;
+    await dialog.showMessageBox({
+      type: "error",
+      title: APP_DISPLAY_NAME,
+      message: t("desktop:linxUpdateStartupBlocked"),
+      detail: t("desktop:linxUpdateStartupRecovery", { path: `${userDataPath}.linx-updater` }),
+      buttons: [t("desktop:quit3")],
+      noLink: true,
+    });
+    // Never start old code or force an active backend to exit to reclaim data.
+    if (linxHomeOwnership !== null) {
+      await linxHomeOwnership.release();
+      linxHomeOwnership = null;
+    }
+    desktopShutdownComplete = true;
+    app.quit();
+    return false;
+  }
 }
 
 async function bootstrap(): Promise<void> {
@@ -6649,6 +7110,37 @@ async function bootstrap(): Promise<void> {
   await startCuaHost();
   startBackend();
   writeDesktopLogHeader("bootstrap backend start requested");
+  if (linxStartupHealth !== null) {
+    const startupHealth = linxStartupHealth;
+    const child = backendProcess;
+    const sourceCommit = resolveEmbeddedCommitHash();
+    if (!child?.pid || !sourceCommit) throw new Error("New backend/source identity is unavailable");
+    void waitForLinxBackendHealth({
+      baseUrl: backendHttpUrl,
+      token: DESKTOP_BACKEND_SHUTDOWN_TOKEN,
+      pid: child.pid,
+      homePath: BASE_DIR,
+      sourceCommit,
+      isCurrent: () => backendProcess === child && !isQuitting,
+    })
+      .then(() =>
+        startupHealth.complete({
+          backendReady: true,
+          clientConnected: true,
+          homePath: BASE_DIR,
+          sourceCommit,
+        }),
+      )
+      .catch(() => {
+        void dialog.showMessageBox({
+          type: "warning",
+          title: APP_DISPLAY_NAME,
+          message: t("desktop:linxUpdateInstall_recovery"),
+          detail: t("desktop:linxUpdateStartupRecovery", { path: `${userDataPath}.linx-updater` }),
+          buttons: [t("desktop:common_ok")],
+        });
+      });
+  }
 
   if (isDevelopment) {
     void waitForBackendWindowReady(backendHttpUrl)
@@ -6686,6 +7178,7 @@ app.on("will-quit", () => {
 });
 
 app.on("before-quit", (event) => {
+  if (linxIntentionalInstallQuit) return;
   writeDesktopLogHeader("before-quit received");
   if (desktopShutdownComplete) {
     return;
@@ -6745,7 +7238,8 @@ app.on("before-quit", (event) => {
 if (hasSingleInstanceLock) {
   app
     .whenReady()
-    .then(() => {
+    .then(async () => {
+      if (isLinxDesktop && !(await prepareLinxDesktopBootstrap())) return;
       writeDesktopLogHeader("app ready");
       if (betaDiagnostics) {
         betaDiagnostics.start();
@@ -6817,7 +7311,12 @@ if (hasSingleInstanceLock) {
       });
 
       app.on("activate", () => {
-        if (desktopStartupBlockedForDatabaseRestore || isQuitting) {
+        if (
+          desktopStartupBlockedForDatabaseRestore ||
+          isQuitting ||
+          windowMaintenance.held ||
+          !linxBootstrapComplete
+        ) {
           return;
         }
         handleDesktopAppForegrounded();

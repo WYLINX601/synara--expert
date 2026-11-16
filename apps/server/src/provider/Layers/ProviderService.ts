@@ -64,7 +64,7 @@ import {
   providerSupportsAutoRuntimeMode,
   unsupportedAutoRuntimeModeMessage,
 } from "@synara/shared/runtimeMode";
-import { createHash, createHmac, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import * as path from "node:path";
@@ -176,13 +176,26 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { ServerSecretStore } from "../../auth/Services/ServerSecretStore.ts";
 import {
   codexSharedContinuationGeneration,
-  codexSharedContinuationIdentityIsSafeMigration,
-  parseCodexSharedContinuationIdentity,
   prepareProviderContinuationIdentity,
   prepareProviderContinuationIdentityForExplicitResume,
   prepareProviderContinuationIdentityForImport,
   providerContinuationIdentity,
 } from "../continuationIdentity.ts";
+import { serverMaintenanceAdmission } from "../../serverMaintenance";
+import {
+  PROVIDER_OPTIONS_FINGERPRINT_HMAC_SECRET,
+  credentialsFingerprintForProvider,
+  persistedContinuationMatchesLaunch,
+  persistedLaunchMatchesExactly,
+  providerInstanceIdFromBinding,
+  readPersistedContinuationIdentity,
+  readPersistedCredentialsFingerprint,
+  readPersistedModelSelection,
+  readPersistedProviderInstanceId,
+  readPersistedProviderOptions,
+  redactProviderOptionsForPersistence,
+  runtimePayloadRecord,
+} from "../continuationCompatibility.ts";
 
 // Devin and Grok report a cursor they cannot reload faithfully (missing native
 // state, or created for other process-start model flags) as resume-state-unavailable.
@@ -234,7 +247,6 @@ const PROVIDER_RUNTIME_IDLE_STOP_MS = Number.isFinite(Number(configuredProviderR
   ? Math.max(0, Number(configuredProviderRuntimeIdleStopMs))
   : DEFAULT_PROVIDER_RUNTIME_IDLE_STOP_MS;
 const MAX_TARGETED_CHILD_INTERRUPT_TOMBSTONES = 16_384;
-const PROVIDER_OPTIONS_FINGERPRINT_HMAC_SECRET = "provider-options-fingerprint-hmac-key";
 
 function validateAutoRuntimeMode(
   operation: string,
@@ -485,57 +497,6 @@ function toRuntimePayloadFromSession(
   };
 }
 
-function redactProviderOptionsForPersistence(value: unknown): unknown {
-  if (!Schema.is(ProviderStartOptions)(value)) {
-    return value;
-  }
-  return {
-    ...value,
-    ...(value.codex ? { codex: redactRuntimeEnvironment(value.codex) } : {}),
-    ...(value.claudeAgent ? { claudeAgent: redactRuntimeEnvironment(value.claudeAgent) } : {}),
-    ...(value.cursor ? { cursor: redactRuntimeEnvironment(value.cursor) } : {}),
-    ...(value.devin ? { devin: redactRuntimeEnvironment(value.devin) } : {}),
-    ...(value.antigravity ? { antigravity: redactRuntimeEnvironment(value.antigravity) } : {}),
-    ...(value.grok ? { grok: redactRuntimeEnvironment(value.grok) } : {}),
-    ...(value.droid ? { droid: redactRuntimeEnvironment(value.droid) } : {}),
-    ...(value.opencode
-      ? { opencode: withoutServerPassword(redactRuntimeEnvironment(value.opencode)) }
-      : {}),
-    ...(value.pi ? { pi: redactRuntimeEnvironment(value.pi) } : {}),
-    ...(value.omp ? { omp: redactRuntimeEnvironment(value.omp) } : {}),
-  } satisfies ProviderStartOptions;
-}
-
-function redactRuntimeEnvironment<T extends { readonly environment?: unknown }>(
-  value: T,
-): Omit<T, "environment"> & { readonly environment?: Record<string, never> } {
-  if (!Object.hasOwn(value, "environment")) {
-    return value as Omit<T, "environment"> & { readonly environment?: Record<string, never> };
-  }
-  return { ...value, environment: {} };
-}
-
-function withoutServerPassword<T extends { readonly serverPassword?: string | undefined }>(
-  value: T,
-): Omit<T, "serverPassword"> {
-  const { serverPassword: _serverPassword, ...rest } = value;
-  return rest;
-}
-
-function readPersistedModelSelection(
-  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
-): ModelSelection | undefined {
-  const raw = runtimePayloadRecord(runtimePayload).modelSelection;
-  return Option.getOrUndefined(Schema.decodeUnknownOption(ModelSelection)(raw));
-}
-
-function readPersistedProviderOptions(
-  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
-): ProviderStartOptions | undefined {
-  const raw = runtimePayloadRecord(runtimePayload).providerOptions;
-  return Option.getOrUndefined(Schema.decodeUnknownOption(ProviderStartOptions)(raw));
-}
-
 function readPersistedExpertSession(
   runtimePayload: ProviderRuntimeBinding["runtimePayload"],
 ): ProviderExpertSession | null | undefined {
@@ -629,164 +590,14 @@ function readPersistedAdditionalDirectories(
     : [];
 }
 
-// Fingerprints the credential inputs that persistence strips (environment,
-// server passwords) so resume decisions can notice account/credential changes
-// without ever persisting the secrets themselves.
-export function credentialsFingerprintForProvider(
-  provider: ProviderKind,
-  options: ProviderStartOptions | undefined,
-  key: Uint8Array,
-): string | undefined {
-  const providerOptions = options?.[provider];
-  if (!providerOptions || typeof providerOptions !== "object") {
-    return undefined;
-  }
-  const environment = "environment" in providerOptions ? providerOptions.environment : undefined;
-  const serverPassword =
-    "serverPassword" in providerOptions ? providerOptions.serverPassword : undefined;
-  const environmentEntries =
-    environment && typeof environment === "object" && !Array.isArray(environment)
-      ? Object.entries(environment as Record<string, unknown>).toSorted(([left], [right]) =>
-          left.localeCompare(right),
-        )
-      : [];
-  const password = typeof serverPassword === "string" && serverPassword ? serverPassword : null;
-  if (environmentEntries.length === 0 && password === null) {
-    return undefined;
-  }
-  return createHmac("sha256", key)
-    .update(JSON.stringify({ environment: environmentEntries, serverPassword: password }))
-    .digest("hex");
-}
-
-function readPersistedCredentialsFingerprint(
-  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
-): string | undefined {
-  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
-    return undefined;
-  }
-  const raw =
-    "providerOptionsCredentialsFingerprint" in runtimePayload
-      ? runtimePayload.providerOptionsCredentialsFingerprint
-      : undefined;
-  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
-}
-
-function readPersistedContinuationIdentity(
-  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
-): string | undefined {
-  const raw = runtimePayloadRecord(runtimePayload).continuationIdentity;
-  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
-}
-
 function readPersistedContinuationResetRequested(
   runtimePayload: ProviderRuntimeBinding["runtimePayload"],
 ): boolean {
   return runtimePayloadRecord(runtimePayload).continuationResetRequested === true;
 }
 
-// Claude launch options that only change how the runtime behaves. They never
-// decide which native session store or account owns a resume cursor, so
-// changing one in Settings (Artifacts, for example) must keep existing threads
-// resumable. Home, binary, and environment still have to match.
-function continuationOwningProviderOptions(
-  provider: ProviderKind,
-  options: ProviderStartOptions | undefined,
-): unknown {
-  if (provider !== "claudeAgent" || options?.claudeAgent === undefined) {
-    return options?.[provider];
-  }
-  const {
-    enableArtifacts: _enableArtifacts,
-    maxThinkingTokens: _maxThinkingTokens,
-    permissionMode: _permissionMode,
-    ...owning
-  } = options.claudeAgent;
-  return Object.keys(owning).length > 0 ? owning : undefined;
-}
-
-function providerStartOptionsEqualForProvider(
-  provider: ProviderKind,
-  credentialsFingerprintKey: Uint8Array,
-  persisted: {
-    readonly options: ProviderStartOptions | undefined;
-    readonly credentialsFingerprint: string | undefined;
-  },
-  current: ProviderStartOptions | undefined,
-): boolean {
-  const persistedOptions = redactProviderOptionsForPersistence(persisted.options) as
-    | ProviderStartOptions
-    | undefined;
-  const currentOptions = redactProviderOptionsForPersistence(current) as
-    | ProviderStartOptions
-    | undefined;
-  return (
-    isDeepStrictEqual(
-      continuationOwningProviderOptions(provider, persistedOptions),
-      continuationOwningProviderOptions(provider, currentOptions),
-    ) &&
-    persisted.credentialsFingerprint ===
-      credentialsFingerprintForProvider(provider, current, credentialsFingerprintKey)
-  );
-}
-
 function providerUsesProtectedNativeContinuation(provider: string): boolean {
   return provider === "codex" || provider === "claudeAgent";
-}
-
-function persistedLaunchMatchesExactly(input: {
-  readonly binding: ProviderRuntimeBinding;
-  readonly provider: ProviderKind;
-  readonly providerInstanceId: ProviderInstanceId;
-  readonly providerOptions: ProviderStartOptions | undefined;
-  readonly credentialsFingerprintKey: Uint8Array;
-}): boolean {
-  return (
-    input.binding.provider === input.provider &&
-    providerInstanceIdFromBinding(input.binding) === input.providerInstanceId &&
-    providerStartOptionsEqualForProvider(
-      input.provider,
-      input.credentialsFingerprintKey,
-      {
-        options: readPersistedProviderOptions(input.binding.runtimePayload),
-        credentialsFingerprint: readPersistedCredentialsFingerprint(input.binding.runtimePayload),
-      },
-      input.providerOptions,
-    )
-  );
-}
-
-function persistedContinuationMatchesLaunch(input: {
-  readonly binding: ProviderRuntimeBinding;
-  readonly provider: ProviderKind;
-  readonly providerInstanceId: ProviderInstanceId;
-  readonly providerOptions: ProviderStartOptions | undefined;
-  readonly credentialsFingerprintKey: Uint8Array;
-  readonly currentIdentity: string | undefined;
-}): boolean {
-  if (input.binding.provider !== input.provider) {
-    return false;
-  }
-  const persistedIdentity = readPersistedContinuationIdentity(input.binding.runtimePayload);
-  if (persistedIdentity !== undefined) {
-    if (persistedIdentity === input.currentIdentity) {
-      return input.provider !== "claudeAgent" || persistedLaunchMatchesExactly(input);
-    }
-    return (
-      input.provider === "codex" &&
-      codexSharedContinuationIdentityIsSafeMigration({
-        persistedIdentity,
-        currentIdentity: input.currentIdentity,
-      })
-    );
-  }
-  if (
-    input.provider === "codex" &&
-    parseCodexSharedContinuationIdentity(input.currentIdentity) !== undefined
-  ) {
-    return false;
-  }
-  return persistedLaunchMatchesExactly(input);
 }
 
 function prepareContinuationIdentityForCompatibility(input: {
@@ -829,17 +640,6 @@ function incompatibleContinuationMessage(input: {
   return `Cannot continue thread '${input.threadId}' from provider instance '${input.previousInstanceId}' (${input.previousProvider}) with '${input.nextInstanceId}' (${input.nextProvider}) because their native session storage is incompatible. Start a new thread or restore the original provider home.`;
 }
 
-function readPersistedProviderInstanceId(
-  runtimePayload: ProviderRuntimeBinding["runtimePayload"],
-): string | undefined {
-  if (!runtimePayload || typeof runtimePayload !== "object" || Array.isArray(runtimePayload)) {
-    return undefined;
-  }
-  const raw =
-    "providerInstanceId" in runtimePayload ? runtimePayload.providerInstanceId : undefined;
-  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : undefined;
-}
-
 // getBinding materializes the driver-default instance id onto legacy rows, and
 // default-instance sessions persist the default id in their payload. Only a
 // NON-default id (or an instance-routed model selection) proves an explicit
@@ -858,17 +658,6 @@ function bindingHasExplicitProviderInstance(input: {
       input.persistedPayloadProviderInstanceId !== defaultId) ||
     (input.persistedModelSelection !== undefined &&
       resolveModelSelectionInstanceId(input.persistedModelSelection) !== input.binding.provider)
-  );
-}
-
-function providerInstanceIdFromBinding(binding: ProviderRuntimeBinding): ProviderInstanceId {
-  const persistedModelSelection = readPersistedModelSelection(binding.runtimePayload);
-  return (
-    binding.providerInstanceId ??
-    readPersistedProviderInstanceId(binding.runtimePayload) ??
-    (persistedModelSelection
-      ? resolveModelSelectionInstanceId(persistedModelSelection)
-      : binding.provider)
   );
 }
 
@@ -949,12 +738,6 @@ function validateModelSelectionMatchesRoute(input: {
     );
   }
   return undefined;
-}
-
-function runtimePayloadRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
 }
 
 function runtimePayloadString(value: unknown, key: string): string | undefined {
@@ -3723,6 +3506,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             operation: "ProviderService.proactiveGatewayCredentialRotation",
           });
         }).pipe(
+          serverMaintenanceAdmission.scheduled,
           Effect.catchCause((cause) =>
             Effect.logWarning("provider.session.proactive_gateway_rotation_failed", {
               threadId: event.threadId,
@@ -3757,7 +3541,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           if (flush === undefined) textBatchFlushers.delete(adapter.provider);
           else textBatchFlushers.set(adapter.provider, flush);
         },
-        processEvent: processRuntimeEvent,
+        processEvent: (event) =>
+          serverMaintenanceAdmission.guard(
+            processRuntimeEvent(event),
+            () => new Error("Update maintenance admission is closed."),
+            true,
+          ),
         updateHealth: runtimeEventPumpHealth.update,
         isPermanentFailure: (cause) =>
           Option.match(Cause.findErrorOption(cause), {
@@ -7013,6 +6802,28 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
 
     const hasLiveRuntimeTasks: NonNullable<ProviderServiceShape["hasLiveRuntimeTasks"]> = (input) =>
       Effect.sync(() => (liveRuntimeTaskIds.get(input.threadId)?.size ?? 0) > 0);
+    const getMaintenanceActivity: ProviderServiceShape["getMaintenanceActivity"] = Effect.gen(
+      function* () {
+        const queuedRuntimeEvents = yield* PubSub.size(runtimeEventPubSub);
+        const pendingRuntimeEvents = Math.max(0, queuedRuntimeEvents);
+        let dispatches = 0;
+        for (const state of dispatchStateByThread.values()) {
+          dispatches +=
+            state.inFlightGenerations.size +
+            state.outstandingTurnIds.size +
+            state.successfulResults.size;
+        }
+        let nativeTasks = 0;
+        for (const tasks of liveRuntimeTaskIds.values()) nativeTasks += tasks.size;
+        return {
+          dispatches,
+          nativeTasks,
+          pendingRuntimeEvents,
+          runtimeCleanups:
+            runtimeIdleCleanupGenerations.size + retiredGatewaySessionRecoveries.size,
+        };
+      },
+    );
 
     stopIdleRuntimeSession = (threadId, generation, cleanupStarted = false) => {
       const stopEffect = Effect.gen(function* () {
@@ -7093,6 +6904,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
             cause,
           });
         }),
+        serverMaintenanceAdmission.scheduled,
       );
       const release = acquireRuntimeIdleStopFence(threadId);
       void Effect.runPromise(stopEffect).finally(release);
@@ -7551,6 +7363,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       getRuntimeSessionStopTarget,
       withRuntimeSessionStopTarget,
       hasLiveRuntimeTasks,
+      getMaintenanceActivity,
       clearSessionResumeCursor,
       listSessions,
       listRetainedSessions,

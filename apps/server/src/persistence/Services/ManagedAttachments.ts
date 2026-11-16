@@ -103,6 +103,11 @@ export interface ManagedAttachmentRepositoryShape {
     readonly reservedBytes: number;
     readonly relativePath: string;
     readonly now: string;
+    /**
+     * Internal imported-database replay only: caller holds exclusive database/source locks
+     * and has not published the engine or started cleanup workers or other producers.
+     */
+    readonly offlineReplay?: true | undefined;
   }) => Effect.Effect<ReserveManagedAttachmentResult, PersistenceSqlError>;
   readonly finalizeStaged: (input: {
     readonly attachmentId: string;

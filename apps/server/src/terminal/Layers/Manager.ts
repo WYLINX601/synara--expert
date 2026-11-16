@@ -815,6 +815,16 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   private readonly providerAuthResolver: TerminalManagerOptions["providerAuthResolver"];
   private managedProfileRefresh: Promise<void> | null = null;
 
+  getMaintenanceActivity(): number {
+    let active = this.persistQueues.size + this.persistTimers.size + this.threadLocks.size;
+    for (const session of this.sessions.values()) {
+      if (session.status === "error") return Number.NaN;
+      if (session.process !== null || session.pid !== null || session.status === "running")
+        active += 1;
+    }
+    return active;
+  }
+
   constructor(options: TerminalManagerOptions) {
     super();
     this.logsDir = options.logsDir ?? path.resolve(process.cwd(), ".logs", "terminals");
@@ -2567,6 +2577,7 @@ export const TerminalManagerLive = Layer.effect(
     );
 
     return {
+      getMaintenanceActivity: Effect.sync(() => runtime.getMaintenanceActivity()),
       open: (input) =>
         Effect.tryPromise({
           try: () => runtime.open(input),

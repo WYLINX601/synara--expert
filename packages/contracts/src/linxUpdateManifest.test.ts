@@ -7,8 +7,6 @@ import {
   isLinxUpdateVersionNewer,
   LINX_UPDATE_ASSET_MAX_BYTES,
   LINX_UPDATE_KEY_RING_MAX_KEYS,
-  LINX_UPDATE_MANIFEST_MAX_BYTES,
-  LINX_UPDATE_REJECTION_REASONS,
   LinxUpdateKeyRing,
   LinxUpdateManifest,
 } from "./linxUpdateManifest";
@@ -18,6 +16,7 @@ const decodeManifest = Schema.decodeUnknownSync(LinxUpdateManifest);
 const validManifest = {
   schemaVersion: 1,
   productId: "linx",
+  installIdentity: "com.wylinx.linx",
   channel: "stable",
   platform: "darwin",
   arch: "arm64",
@@ -32,12 +31,20 @@ const validManifest = {
 } as const;
 
 describe("Linx update manifest contract", () => {
-  it("accepts a complete v1 manifest unchanged", () => {
-    expect(decodeManifest(validManifest)).toEqual(validManifest);
+  it("accepts a manifest bound to the Linx installation", () => {
+    expect(decodeManifest(validManifest).installIdentity).toBe("com.wylinx.linx");
+  });
+
+  it("rejects manifests that do not bind an installation identity", () => {
+    const unboundManifest = { ...validManifest };
+    Reflect.deleteProperty(unboundManifest, "installIdentity");
+    expect(() => decodeManifest(unboundManifest)).toThrow();
   });
 
   it("rejects unknown fields instead of silently dropping them", () => {
-    expect(() => decodeManifest({ ...validManifest, installIdentity: "x" })).toThrow();
+    expect(() =>
+      decodeManifest({ ...validManifest, installationPath: "/Applications/Linx.app" }),
+    ).toThrow();
     expect(() => decodeManifest({ ...validManifest, signature: "abc" })).toThrow();
   });
 
@@ -45,6 +52,10 @@ describe("Linx update manifest contract", () => {
     ["schemaVersion", 2],
     ["schemaVersion", "1"],
     ["productId", "synara"],
+    ["installIdentity", "com.wylinx.workbench"],
+    ["installIdentity", "com.wylinx.linx.preview"],
+    ["installIdentity", "com.wylinx.linx\n"],
+    ["installIdentity", null],
     ["channel", "beta"],
     ["platform", "mas"],
     ["arch", "x64"],
@@ -91,19 +102,6 @@ describe("Linx update manifest contract", () => {
         assetName: `${"a".repeat(251)}.zip`,
       }),
     ).toMatchObject({ size: LINX_UPDATE_ASSET_MAX_BYTES });
-  });
-
-  it("treats manifest and signature limits as the published protocol values", () => {
-    expect(LINX_UPDATE_MANIFEST_MAX_BYTES).toBe(16 * 1024);
-    expect(LINX_UPDATE_REJECTION_REASONS).toEqual([
-      "size",
-      "signature",
-      "encoding",
-      "schema",
-      "key",
-      "url",
-      "version",
-    ]);
   });
 
   it("only accepts absolute https asset URLs without credentials or fragments", () => {

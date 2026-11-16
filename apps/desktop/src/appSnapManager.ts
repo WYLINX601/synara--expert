@@ -118,6 +118,7 @@ export type AppSnapHelperMessage =
       sourceWindowTitle?: string | null;
     }
   | { type: "windows"; requestId: string; windows: DesktopAppSnapWindowEntry[] }
+  | { type: "update-maintenance"; requestId: string; paused: boolean; ready: boolean }
   | { type: "permission-guide"; state: DesktopAppSnapPermissionGuideState }
   | {
       type: "release-held-input";
@@ -338,6 +339,19 @@ export function parseAppSnapHelperMessage(line: string): AppSnapHelperMessage | 
     return null;
   }
   if (value.type === "ready") return { type: "ready" };
+  if (
+    value.type === "update-maintenance" &&
+    typeof value.requestId === "string" &&
+    typeof value.paused === "boolean" &&
+    typeof value.ready === "boolean"
+  ) {
+    return {
+      type: "update-maintenance",
+      requestId: value.requestId,
+      paused: value.paused,
+      ready: value.ready,
+    };
+  }
   if (value.type === "triggered" && typeof value.id === "string" && value.id.length > 0) {
     return {
       type: "triggered",
@@ -590,6 +604,9 @@ export class DesktopAppSnapManager {
   #pendingCaptures: PendingAppSnapCaptureRecord[] = [];
   #pendingCapturesLoadPromise: Promise<void> | null = null;
   #captureReadQueue: Promise<void> = Promise.resolve();
+  #updateLease: { id: string; child: AppSnapHelperProcess | null; proof: Promise<boolean> } | null =
+    null;
+  #updateResponse: { id: string; resolve(ready: boolean): void } | null = null;
   #shortcut: DesktopAppSnapShortcut = DEFAULT_APP_SNAP_SHORTCUT;
   #registeredAccelerator: string | null = null;
   #pendingWindowRequests = new Map<string, PendingAppSnapRequest<DesktopAppSnapWindowEntry[]>>();
@@ -634,6 +651,64 @@ export class DesktopAppSnapManager {
     this.#status = this.#platform === "macos" ? "disabled" : "unsupported";
     this.#message =
       this.#platform === "macos" ? null : "AppSnap is available only in the macOS desktop app.";
+  }
+  /** Acknowledged native queue barrier, not a snapshot of JS-side activity. */
+  async prepareForUpdate(attemptId: string): Promise<boolean> {
+    if (this.#updateLease) {
+      return (
+        this.#updateLease.id === attemptId &&
+        this.#updateLease.child === this.#watchProcess &&
+        (await this.#updateLease.proof)
+      );
+    }
+    const { promise, resolve } = Promise.withResolvers<boolean>();
+    const lease = { id: attemptId, child: this.#watchProcess, proof: promise };
+    this.#updateLease = lease;
+    void (async () => {
+      try {
+        await this.#watchReconcilePromise;
+        lease.child = this.#watchProcess;
+        if (this.#disposed || this.#requestedCapture || this.#pendingCaptureRequests.size) {
+          resolve(false);
+          return;
+        }
+        const child = lease.child;
+        if (child) {
+          const barrier = Promise.withResolvers<boolean>();
+          this.#updateResponse = { id: attemptId, resolve: barrier.resolve };
+          const timer = setTimeout(() => barrier.resolve(false), 5_000);
+          try {
+            child.stdin?.write(`pause-captures ${attemptId}\n`);
+            if (!(await barrier.promise) || this.#watchProcess !== child) {
+              resolve(false);
+              return;
+            }
+          } finally {
+            clearTimeout(timer);
+            if (this.#updateResponse?.id === attemptId) this.#updateResponse = null;
+          }
+        }
+        // Captured messages precede the barrier on stdout. Finish their durable
+        // pending-file writes and attachment delivery before freezing renderers.
+        await this.#captureReadQueue;
+        resolve(this.#updateLease === lease && this.#watchProcess === child);
+      } catch {
+        resolve(false);
+      }
+    })();
+    return promise;
+  }
+
+  releaseUpdate(attemptId: string): void {
+    const lease = this.#updateLease;
+    if (lease?.id !== attemptId) return;
+    this.#updateLease = null;
+    this.#updateResponse?.resolve(false);
+    this.#updateResponse = null;
+    if (lease.child && this.#watchProcess === lease.child) {
+      lease.child.stdin?.write(`resume-captures ${attemptId}\n`);
+    }
+    void this.#reconcileWatchProcess();
   }
 
   getState(): DesktopAppSnapState {
@@ -845,6 +920,7 @@ export class DesktopAppSnapManager {
   }
 
   async captureWindow(windowId: number): Promise<DesktopAppSnapCapture> {
+    if (this.#updateLease) throw new Error("AppSnap is paused for installation.");
     if (!Number.isInteger(windowId) || windowId <= 0 || windowId > MAX_MACOS_WINDOW_ID) {
       throw new Error("captureWindow requires a valid macOS window id.");
     }
@@ -1247,6 +1323,7 @@ export class DesktopAppSnapManager {
 
   /** Explicit read-only request. Independent of shortcut enablement and Input Monitoring. */
   async captureCurrentApp(requestId: string): Promise<DesktopAppSnapCapture> {
+    if (this.#updateLease) throw new Error("AppSnap is paused for installation.");
     if (this.#disposed || this.#platform !== "macos") throw new Error("AppSnap is unavailable.");
     if (this.#requestedCapture) throw new Error("An AppSnap request is already in progress.");
     let cancelled = false;
@@ -1376,6 +1453,7 @@ export class DesktopAppSnapManager {
 
   dispose(): void {
     this.#disposed = true;
+    this.#updateResponse?.resolve(false);
     this.#requestedCapture?.cancel();
     this.#stopWatchProcess();
     this.#stopGuideProcess();
@@ -1623,6 +1701,7 @@ export class DesktopAppSnapManager {
 
   async #reconcileWatchProcessOnce(): Promise<void> {
     if (this.#disposed || this.#platform !== "macos") return;
+    if (this.#updateLease) return;
     if (!this.#enabled) {
       this.#stopWatchProcess();
       this.#releaseShortcutReservation();
@@ -1756,6 +1835,7 @@ export class DesktopAppSnapManager {
 
   #handleShortcutTrigger(): void {
     if (this.#disposed || !this.#enabled) return;
+    if (this.#updateLease) return;
     try {
       this.#watchProcess?.stdin?.write("trigger\n");
     } catch {
@@ -2037,6 +2117,12 @@ export class DesktopAppSnapManager {
 
   #handleWatchMessage(child: AppSnapHelperProcess, message: AppSnapHelperMessage): void {
     if (this.#disposed || this.#watchProcess !== child) return;
+    if (message.type === "update-maintenance") {
+      if (this.#updateResponse?.id === message.requestId) {
+        this.#updateResponse.resolve(message.paused && message.ready);
+      }
+      return;
+    }
     if (message.type === "ready") {
       // `ready` only proves the event tap installed, i.e. Input Monitoring.
       // Screen Recording state is owned by permission checks and capture errors.

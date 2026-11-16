@@ -22,9 +22,11 @@ import common2 from "./locales/zh-CN/common.json";
 import computer2 from "./locales/zh-CN/computer.json";
 import automation2 from "./locales/zh-CN/automation.json";
 import git2 from "./locales/zh-CN/git.json";
+import { nativeLocalizationResources } from "./nativeLocalizationResources";
 export const uiLocalizationResources = {
   en: {
     chat: chat0,
+    desktop: nativeLocalizationResources.en.desktop,
     onboarding: onboarding0,
     workspace: workspace0,
     settings: settings0,
@@ -35,6 +37,7 @@ export const uiLocalizationResources = {
   },
   es: {
     chat: chat1,
+    desktop: nativeLocalizationResources.es.desktop,
     onboarding: onboarding1,
     workspace: workspace1,
     settings: settings1,
@@ -45,6 +48,7 @@ export const uiLocalizationResources = {
   },
   "zh-CN": {
     chat: chat2,
+    desktop: nativeLocalizationResources["zh-CN"].desktop,
     onboarding: onboarding2,
     workspace: workspace2,
     settings: settings2,

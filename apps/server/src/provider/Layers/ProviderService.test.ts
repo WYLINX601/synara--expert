@@ -103,11 +103,11 @@ import {
   type ProviderSessionDirectoryShape,
 } from "../Services/ProviderSessionDirectory.ts";
 import {
-  credentialsFingerprintForProvider,
   makeProviderServiceLive as makeProviderServiceLiveRaw,
   PROVIDER_RUNTIME_QUARANTINE_CAUSE_MAX_BYTES,
   summarizeProviderRuntimeQuarantineCause,
 } from "./ProviderService.ts";
+import { credentialsFingerprintForProvider } from "../continuationCompatibility.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import { makeContextRepositoryTestLayer } from "../ContextRepositoryTestLayer.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";

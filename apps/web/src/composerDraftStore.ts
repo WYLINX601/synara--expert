@@ -41,6 +41,10 @@ import {
   flushStorageBeforePageHide,
   type StateStorage,
 } from "./lib/storage";
+import {
+  assertComposerPersistenceAllowed,
+  notifyComposerPersistenceChanged,
+} from "./lib/composerPersistenceActivity";
 
 export {
   findSupersededComposerImageBlobAttachments,
@@ -95,7 +99,24 @@ flushStorageBeforePageHide(() => composerPersistStorage.flush());
 
 export const useComposerDraftStore = create<ComposerDraftStoreState>()(
   persist(
-    createComposerDraftStoreState(() => composerPersistStorage.flush()),
+    (set, get, api): ComposerDraftStoreState => {
+      const state = createComposerDraftStoreState(() => composerPersistStorage.flush())(
+        set,
+        get,
+        api,
+      );
+      // Fence the public actions before their blob cleanup or state side effects.
+      for (const [key, action] of Object.entries(state)) {
+        if (typeof action !== "function" || key.startsWith("get")) continue;
+        Object.assign(state, {
+          [key]: (...args: unknown[]) => {
+            assertComposerPersistenceAllowed();
+            return Reflect.apply(action, state, args);
+          },
+        });
+      }
+      return state;
+    },
     {
       name: COMPOSER_DRAFT_STORAGE_KEY,
       version: COMPOSER_DRAFT_STORAGE_VERSION,
@@ -124,6 +145,47 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
     },
   ),
 );
+
+// Direct hydration/reconciliation writes must also revoke a previously acknowledged lease.
+useComposerDraftStore.subscribe(notifyComposerPersistenceChanged);
+
+/** File attachments are transient in every draft slot. Images need committed
+ * metadata, or an inline data URL for queued turns, to survive restart. */
+export function composerDraftDurabilitySnapshot(): {
+  transientAttachments: number;
+  hydrated: boolean;
+} {
+  let transientAttachments = 0;
+  for (const draft of Object.values(useComposerDraftStore.getState().draftsByThreadId)) {
+    const inspect = (
+      slot: Pick<
+        ComposerThreadDraftState,
+        "images" | "files" | "persistedAttachments" | "nonPersistedImageIds"
+      >,
+    ) => {
+      transientAttachments += slot.files.length;
+      const persisted = new Set(
+        slot.persistedAttachments
+          .filter((attachment) => attachment.blobKey || attachment.dataUrl)
+          .map((attachment) => attachment.id),
+      );
+      for (const image of slot.images) {
+        if (!persisted.has(image.id) || slot.nonPersistedImageIds.includes(image.id))
+          transientAttachments += 1;
+      }
+    };
+    inspect(draft);
+    if (draft.promptHistorySavedDraft) inspect(draft.promptHistorySavedDraft);
+    for (const turn of draft.queuedTurns) {
+      if (turn.kind !== "chat") continue;
+      transientAttachments += turn.files.length;
+      for (const image of turn.images) {
+        if (!image.previewUrl.startsWith("data:")) transientAttachments += 1;
+      }
+    }
+  }
+  return { transientAttachments, hydrated: useComposerDraftStore.persist.hasHydrated() };
+}
 
 export function useComposerThreadDraft(threadId: ThreadId): ComposerThreadDraftState {
   return useComposerDraftStore((state) => selectComposerThreadDraft(state, threadId));

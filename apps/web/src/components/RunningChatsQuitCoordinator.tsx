@@ -1,7 +1,7 @@
 // FILE: RunningChatsQuitCoordinator.tsx
-// Purpose: Answers Electron quit requests with the running-chats confirmation.
+// Purpose: Coordinates ordinary quit and the separate reversible update edit lease.
 // Layer: Root web coordinator
-// Depends on: Desktop bridge quit IPC, the orchestration store, and the quit-resume RPC.
+// Depends on: Desktop quit/update IPC, editor sessions, orchestration store, and quit-resume RPC.
 
 import { ThreadId } from "@synara/contracts";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -18,6 +18,7 @@ import { readNativeApi } from "~/nativeApi";
 import { useStore } from "~/store";
 
 import { RunningChatsQuitDialog, type RunningChatsQuitDecision } from "./RunningChatsQuitDialog";
+import { installLinxUpdateWindowMaintenance } from "~/lib/linxUpdateWindowMaintenance";
 
 export function RunningChatsQuitCoordinator() {
   const [chats, setChats] = useState<ReadonlyArray<RunningChatQuitSummary> | null>(null);
@@ -25,6 +26,7 @@ export function RunningChatsQuitCoordinator() {
   // user does not see a bare window for the bounded wait before the desktop hides it.
   const [quitting, setQuitting] = useState(false);
   const pendingRequestIdRef = useRef<string | null>(null);
+  useEffect(() => installLinxUpdateWindowMaintenance(), []);
 
   const settle = useCallback(
     (decision: RunningChatsQuitDecision | null) => {

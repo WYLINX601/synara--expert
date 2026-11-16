@@ -2,15 +2,17 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { describe, it } from "vitest";
 
+import { resolveBaseCodexHomePath } from "@synara/shared/codexHomeOverlayPaths";
 import {
-  resolveCodexHomeOverlayAccountSegment,
-  resolveBaseCodexHomePath,
   resolveCodexHomeAllowlistCandidates,
-  resolveSynaraCodexHomeOverlayPath,
   resolveActiveCodexHomeWritePath,
   isSynaraCodexHomeOverlayPath,
-  SYNARA_CODEX_HOME_FIXED_EXPERT_DIR,
 } from "./codexHomePaths.ts";
+import {
+  resolveCodexHomeOverlayAccountSegment,
+  resolveSynaraCodexHomeOverlayPath,
+  SYNARA_CODEX_HOME_FIXED_EXPERT_DIR,
+} from "@synara/shared/codexHomeOverlayPaths";
 
 describe("Codex home paths", () => {
   it("resolves the source home using explicit, environment, then default precedence", () => {

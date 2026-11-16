@@ -24,7 +24,7 @@ import {
 import {
   DatabaseLifecycleLockedError,
   withDatabaseLifecycleLock,
-} from "./DatabaseLifecycleLock.ts";
+} from "@synara/shared/databaseLifecycleLock";
 import { MigrationSchemaTooNewError } from "./Errors.ts";
 import { makeSqlitePersistenceLive } from "./Layers/Sqlite.ts";
 import * as NodeSqliteClient from "./NodeSqliteClient.ts";

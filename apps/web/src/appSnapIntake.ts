@@ -13,6 +13,10 @@ import {
   prepareComposerImageAttachmentsFromFiles,
 } from "./lib/composerSend";
 import { useComposerDraftStore } from "./composerDraftStore";
+import {
+  assertComposerPersistenceAllowed,
+  beginComposerPersistenceOperation,
+} from "./lib/composerPersistenceActivity";
 
 export async function sourceWithCachedIcon(
   source: ComposerAppSnapSource,
@@ -37,86 +41,92 @@ export async function insertAppSnapCaptureIntoDraft(
   threadId: ThreadId,
   capture: DesktopAppSnapCapture,
 ): Promise<"persisted" | "unverified"> {
-  const parsedCaptureAt = Date.parse(capture.capturedAt);
-  const captureAtMs = Number.isFinite(parsedCaptureAt) ? parsedCaptureAt : Date.now();
-  const bytes = new Uint8Array(capture.bytes);
-  if (bytes.byteLength === 0) throw new Error("The captured AppSnap is empty.");
-  const file = new File([bytes], capture.name, {
-    type: capture.mimeType,
-    lastModified: captureAtMs,
-  });
-  const draftStore = useComposerDraftStore.getState();
-  const draft = draftStore.draftsByThreadId[threadId];
-  const existingAttachmentCount = effectiveComposerAttachmentCount(draft);
-  const { images, error } = await prepareComposerImageAttachmentsFromFiles({
-    files: [file],
-    existingAttachmentCount,
-  });
-  const image = images[0];
-  if (!image) throw new Error(error ?? "Synara could not attach the captured AppSnap.");
-
-  let imageAddedToDraft = false;
-  let blobKey: string | null = null;
-  let persistenceResult: "persisted" | "unverified" = "persisted";
+  assertComposerPersistenceAllowed();
+  const finish = beginComposerPersistenceOperation();
   try {
-    const source: ComposerAppSnapSource = {
-      kind: "appsnap",
-      captureId: capture.id,
-      capturedAt: capture.capturedAt,
-      appName: capture.sourceAppName,
-      bundleIdentifier: capture.sourceBundleIdentifier,
-      appIconDataUrl: capture.sourceAppIconDataUrl,
-      windowTitle: capture.sourceWindowTitle,
-    };
-    const sourceWithIcon = await sourceWithCachedIcon(source);
-    const appSnapImage = { ...image, source: sourceWithIcon };
-    blobKey = await persistComposerImageBlob({
-      threadId,
-      imageId: appSnapImage.id,
-      file: appSnapImage.file,
+    const parsedCaptureAt = Date.parse(capture.capturedAt);
+    const captureAtMs = Number.isFinite(parsedCaptureAt) ? parsedCaptureAt : Date.now();
+    const bytes = new Uint8Array(capture.bytes);
+    if (bytes.byteLength === 0) throw new Error("The captured AppSnap is empty.");
+    const file = new File([bytes], capture.name, {
+      type: capture.mimeType,
+      lastModified: captureAtMs,
     });
+    const draftStore = useComposerDraftStore.getState();
+    const draft = draftStore.draftsByThreadId[threadId];
+    const existingAttachmentCount = effectiveComposerAttachmentCount(draft);
+    const { images, error } = await prepareComposerImageAttachmentsFromFiles({
+      files: [file],
+      existingAttachmentCount,
+    });
+    const image = images[0];
+    if (!image) throw new Error(error ?? "Synara could not attach the captured AppSnap.");
 
-    if (!draftStore.addImage(threadId, appSnapImage)) {
-      throw new Error(
-        "The AppSnap was prepared, but this message already has the maximum number of references.",
-      );
-    }
-    imageAddedToDraft = true;
-    const currentPersistedAttachments =
-      useComposerDraftStore.getState().draftsByThreadId[threadId]?.persistedAttachments ?? [];
-    const result = await draftStore.syncPersistedAttachments(threadId, [
-      ...currentPersistedAttachments.filter((attachment) => attachment.id !== appSnapImage.id),
-      {
-        id: appSnapImage.id,
-        name: appSnapImage.name,
-        mimeType: appSnapImage.mimeType,
-        sizeBytes: appSnapImage.sizeBytes,
-        blobKey,
-        source: sourceWithIcon,
-      },
-    ]);
-    if (result === "rejected") {
-      draftStore.removeImage(threadId, appSnapImage.id);
-      await deleteComposerImageBlob(blobKey).catch((cleanupError) =>
-        console.warn("[appsnap] Could not roll back rejected capture", cleanupError),
-      );
-      throw new Error("The AppSnap was captured, but its draft metadata was rejected.");
-    }
-    // Clear recalled prompt-history state only after the new attachment has
-    // survived persistence verification. A rejected mutation must leave the
-    // user's prior draft snapshot intact.
-    draftStore.setPromptHistorySavedDraft(threadId, null);
-    persistenceResult = result;
-  } catch (error) {
-    if (!imageAddedToDraft) {
-      URL.revokeObjectURL(image.previewUrl);
-      if (blobKey) {
-        await deleteComposerImageBlob(blobKey).catch((cleanupError) =>
-          console.warn("[appsnap] Could not roll back unattached capture", cleanupError),
+    let imageAddedToDraft = false;
+    let blobKey: string | null = null;
+    let persistenceResult: "persisted" | "unverified" = "persisted";
+    try {
+      const source: ComposerAppSnapSource = {
+        kind: "appsnap",
+        captureId: capture.id,
+        capturedAt: capture.capturedAt,
+        appName: capture.sourceAppName,
+        bundleIdentifier: capture.sourceBundleIdentifier,
+        appIconDataUrl: capture.sourceAppIconDataUrl,
+        windowTitle: capture.sourceWindowTitle,
+      };
+      const sourceWithIcon = await sourceWithCachedIcon(source);
+      const appSnapImage = { ...image, source: sourceWithIcon };
+      blobKey = await persistComposerImageBlob({
+        threadId,
+        imageId: appSnapImage.id,
+        file: appSnapImage.file,
+      });
+
+      if (!draftStore.addImage(threadId, appSnapImage)) {
+        throw new Error(
+          "The AppSnap was prepared, but this message already has the maximum number of references.",
         );
       }
+      imageAddedToDraft = true;
+      const currentPersistedAttachments =
+        useComposerDraftStore.getState().draftsByThreadId[threadId]?.persistedAttachments ?? [];
+      const result = await draftStore.syncPersistedAttachments(threadId, [
+        ...currentPersistedAttachments.filter((attachment) => attachment.id !== appSnapImage.id),
+        {
+          id: appSnapImage.id,
+          name: appSnapImage.name,
+          mimeType: appSnapImage.mimeType,
+          sizeBytes: appSnapImage.sizeBytes,
+          blobKey,
+          source: sourceWithIcon,
+        },
+      ]);
+      if (result === "rejected") {
+        draftStore.removeImage(threadId, appSnapImage.id);
+        await deleteComposerImageBlob(blobKey).catch((cleanupError) =>
+          console.warn("[appsnap] Could not roll back rejected capture", cleanupError),
+        );
+        throw new Error("The AppSnap was captured, but its draft metadata was rejected.");
+      }
+      // Clear recalled prompt-history state only after the new attachment has
+      // survived persistence verification. A rejected mutation must leave the
+      // user's prior draft snapshot intact.
+      draftStore.setPromptHistorySavedDraft(threadId, null);
+      persistenceResult = result;
+    } catch (error) {
+      if (!imageAddedToDraft) {
+        URL.revokeObjectURL(image.previewUrl);
+        if (blobKey) {
+          await deleteComposerImageBlob(blobKey).catch((cleanupError) =>
+            console.warn("[appsnap] Could not roll back unattached capture", cleanupError),
+          );
+        }
+      }
+      throw error;
     }
-    throw error;
+    return persistenceResult;
+  } finally {
+    finish();
   }
-  return persistenceResult;
 }

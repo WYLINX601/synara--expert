@@ -117,6 +117,8 @@ export interface TerminalCloseOpenedAtOrBeforeInput {
  * TerminalManagerShape - Service API for terminal session lifecycle operations.
  */
 export interface TerminalManagerShape {
+  /** Conservative ownership proof; live shells must be closed explicitly. */
+  readonly getMaintenanceActivity?: Effect.Effect<number>;
   /**
    * Open or attach to a terminal session.
    *

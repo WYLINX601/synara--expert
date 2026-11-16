@@ -1,573 +1,110 @@
-# Release Checklist
+# Linx controlled release
 
-This document covers publishing desktop releases from one tag and targeted
-build-only diagnosis. An ordinary release uses one publication run after its
-version, release notes and lockfile are final.
+The default release lane is **Linx, macOS Apple Silicon only**. Product version comes from `workbench/build-config.json` (`versions.workbench`), not the upstream workspace package versions. Internal `workbench` flavor keys remain intentional. Stable/Beta qualification utilities remain shared; this workflow does not publish their products.
 
-## What the workflow does
+## Authorization and current prerequisites
 
-- Triggers:
-  - Manual dispatch defaults to build-only validation and uploads workflow artifacts without publishing anything.
-  - A pushed tag matching `v*.*.*` publishes after successful builds.
-  - Manual publication requires the explicit `publish_release=true` input.
-- Runs lint, typecheck and every test in parallel with native preparation and
-  packaging. Packaging starts after exact-source preflight and its portable
-  JavaScript, Cua and icon inputs are ready; it does not wait for `quality` or
-  `server_tests`. Both GitHub and npm publication depend directly on successful
-  `quality`, all `server_tests` shards and native artifact jobs. No tests are
-  removed. Narrow `native`, `icon`, and `js` validation stages cannot publish and
-  omit these full-suite gates.
-- Builds portable JavaScript once, verifies its source/lockfile/settings and
-  output checksums on each consumer, and stages native dependencies per platform.
-- Builds four artifacts in parallel:
-  - macOS `arm64` DMG
-  - macOS `x64` DMG, cross-built on the same Apple Silicon runner type as
-    `arm64` (the Intel runner took 15-20 minutes for the same work). Every
-    Mach-O in the app must carry the `x86_64` slice. A short `qualify_intel`
-    job then downloads it and runs the startup smoke on `macos-15-intel`:
-    under Rosetta 2 the app took 135 seconds to over 180 seconds to start.
-  - Linux `x64` AppImage
-  - Windows `x64` NSIS installer
-- Each platform calls `release-platform.yml` with one native job that builds,
-  signs/notarizes where required, records verified provenance, runs Defender on
-  Windows and packaged startup smoke, then uploads the qualified `desktop-*`
-  artifact on the same runner. A first successful attempt creates no candidate
-  checkpoint and needs no second runner or candidate upload/download.
-- If a later step fails after provenance has been validated, the failure handler
-  rechecks the candidate's integrity before retaining
-  `candidate-desktop-PLATFORM-ARCH` for 30 days. A retry of the same run and SHA
-  can restore that verified candidate and skip packaging; see
-  [release recovery](#resume-a-failed-release) for the limits.
-- Publishes one versioned GitHub Release with all produced files.
-  - Versions with a suffix after `X.Y.Z` (for example `1.2.3-alpha.1`) are published as GitHub prereleases.
-  - A `beta` prerelease identifier (`vX.Y.Z-beta.N`) selects the beta lane: the desktop artifact builds with `--flavor beta`, updater manifests publish under the `beta` channel, and the release never becomes Latest, never bumps `main` versions, and never touches the npm `latest` dist-tag. See [Beta channel](../BETA.md).
-  - Stable clean-lane releases are GitHub Latest; the 0.4.x compatibility release remains historical.
-- Publishes default `latest*.yml` metadata plus byte-identical `synara*.yml` aliases on every stable release so existing packaged binaries keep working.
-- Keeps the historical 0.4.x compatibility release unchanged; current stable payloads stay on their own GitHub Latest release.
-- Publishes prerelease installers only on their versioned GitHub prerelease; prereleases never replace the stable `synara` update manifests.
-- Publishes the CLI package (`apps/server`, npm package `@synara/cli`) with OIDC trusted publishing.
-- Published macOS artifacts must be signed. Windows publication currently uses
-  an explicit version-scoped unsigned exception; otherwise Azure signing is
-  required. Build-only runs may produce unsigned artifacts when signing secrets
-  are unavailable.
+On 2026-11-16 the owner authorized production provisioning, main-only commits/pushes, formal releases and isolated upgrade qualification. Both protected Environments now exist with `WYLINX601` as required reviewer, explicit self-review permission and disabled administrator bypass; deployment policies permit only `v*.*.*` tags. Main history and release-tag rulesets are active. The production public key `1113c8bdec541a20` is recorded in `workbench/linx-update-source.json`; its private key was provisioned directly to the signing Environment without writing it to the repository. The real protection command passes. The CI read-only inspection credential and exact bootstrap-SHA approval remain outstanding; no published Linx candidate or real B0→B1 success is asserted. Daily application/personal-data migration requires separate confirmation after isolated qualification.
 
-## Desktop auto-update notes
+Before the authorized first release, maintainers must complete and verify this checklist:
 
-- Runtime updater: `electron-updater` in `apps/desktop/src/main.ts`.
-- Update UX:
-  - Background checks run on startup delay + interval.
-  - New updates are prepared/downloaded in the background after detection; install/restart stays manual.
-  - The desktop UI shows a rocket update button while preparing and switches to an install action once the update is ready.
-- Provider: GitHub Releases (`provider: github`) configured at build time.
-- Repository visibility: public. The authenticated private-repository provider does not honor custom channel filenames.
-- Runtime channel: `synara` for stable builds, `beta` for beta builds (resolved by `desktopUpdateChannel` in `packages/shared/src/desktopIdentity.ts`). Stable clean-lane releases publish both `latest` and `synara` metadata; beta releases publish `beta` channel aliases of the same default `latest` manifests, and beta builds run with `allowPrerelease=true` so they follow their own prerelease feed.
-- Repository slug source:
-  - `SYNARA_DESKTOP_UPDATE_REPOSITORY` (format `owner/repo`), if set.
-  - otherwise `GITHUB_REPOSITORY` from GitHub Actions.
-- Required Synara release assets for updater:
-  - platform installers (`.exe`, `.dmg`, `.AppImage`, plus macOS `.zip` for Squirrel.Mac update payloads)
-  - `synara-mac.yml`, `synara.yml`, and `synara-linux.yml` metadata
-  - every stable release includes both `synara-mac.yml`, `synara.yml`, `synara-linux.yml` and `latest-mac.yml`, `latest.yml`, `latest-linux.yml`
-  - `*.blockmap` files, except the macOS update ZIP, which uses a full-archive payload
-- Enforced upgrade path:
-  - Stable clean Synara releases are created with `make_latest=true` and carry both six-manifest filenames in the versioned release.
-  - The historical 0.4.x compatibility release remains available for predecessor migration and is never overwritten by a clean-lane release.
-  - Clean releases do not mirror payloads onto the historical compatibility release, so the 0.4.x line remains immutable.
-  - Clean-release publication fails closed if either the default Latest manifests or the dedicated `synara` aliases are missing.
-- Production desktop builds omit web/server/desktop source maps by default to keep update payloads small. Set `SYNARA_WEB_SOURCEMAP=1`, `SYNARA_SERVER_SOURCEMAP=1`, or `SYNARA_DESKTOP_SOURCEMAP=1` only for a diagnostic release that needs them.
-- macOS metadata note:
-  - Installed macOS apps persist alternate icon choices using `NSWorkspace` custom-icon metadata, and reapply the saved choice on launch after an update. Default removes the override so the bundled icon follows system appearance. This requires a writable app bundle; development Electron bundles are not customized.
-  - Custom icons leave signed `Contents` unchanged, but add Finder metadata that `codesign --verify --strict` rejects on a customized installation. Validate pristine distribution artifacts with the strict checks below. A local notarized app copy retained normal signature verification and Gatekeeper acceptance after customization; signed release/update testing must still cover this path.
-  - The DMG release path asks electron-builder for the DMG only. After notarization,
-    the finalizer creates the updater ZIP once with `ditto` and writes its
-    `latest-mac.yml` hash/size for each architecture; there is no preliminary ZIP
-    or ZIP blockmap to generate and discard.
-  - The workflow merges the per-arch macOS metadata, then keeps the merged manifest as `latest-mac.yml` and copies it to `synara-mac.yml` for stable releases.
-  - Finalization verifies Electron framework symlinks, extracts the ZIP and
-    validates the extracted app signature before accepting the updater artifact.
-    Retained older stages with existing metadata are updated to the final ZIP
-    bytes, and any stale `.zip.blockmap` is removed.
-  - macOS updater downloads intentionally use the full zip payload so Squirrel.Mac installs the exact signed archive validated by release build.
-- Local smoke test:
-  - Run `bun run release:smoke:mac-update -- --skip-build --build-version 0.1.5` on macOS after local desktop/server/web dist files exist.
-  - The smoke builds a mock update artifact, validates manifest hash/size, serves a HEAD-only local endpoint, confirms the manifest and zip are addressable without downloading the zip body, then cleans up its temp output.
-  - Boolean env flags for release scripts accept `true/false`, `1/0`, `yes/no`, and `on/off`; CLI flags are still preferred for repeatable local commands.
+1. Commit `workbench/linx-update-source.json` with exactly `{ "repository": "WYLINX601/synara--expert", "keyRing": { "<keyId>": "<base64 Ed25519 SPKI DER>" } }`. These are real approved public keys, not example material. The builder rejects missing/empty/invalid keys and other repositories. Never commit a private key.
+2. Configure **both** `linx-signing` and `linx-publish` Environments with the repository maintainer as a real required reviewer, explicitly allow self-review (`prevent_self_review: false`), and disable administrator bypass (`can_admins_bypass: false`). Restrict deployment branches/tags to the approved release tags and protect main/tag creation. Environment names alone do not confer protection. The workflow reads actual protection rules before entering the signing job and rechecks them before staging and promotion; missing or different rules/API access fail closed. It does not create environments.
+3. Supply `LINX_RELEASE_POLICY_TOKEN`, scoped only for authenticated repository/environment inspection. This token must have the GitHub permission required to read actual Environment protection configuration; the ordinary workflow token is not assumed sufficient. Do not grant publication or administration rights to this inspection token.
+4. Store `LINX_UPDATE_PRIVATE_KEY` **only as a `linx-signing` Environment secret**, never as a repository/organization secret available to other jobs. Only the signing step references it. Do not print it or pass it to app/helper builds. Key generation remains an explicitly authorized publisher operation, not a build side effect.
+5. For the first release only, independently approve the bootstrap trust root and set the protected Environment variable `LINX_BOOTSTRAP_SOURCE_COMMIT` to its exact main SHA. This is an explicit audited bootstrap decision, not an automatic first-key fallback. Later releases use authenticated prior release lineage regardless of that variable.
+6. Finish the applicable isolated runtime/migration qualification and real-platform gates in [the authoritative plan](linx-update-development-plan.md). Startup smoke does not substitute for the real signed-source B0→B1 update and system-protection tests.
 
-## 0) npm OIDC trusted publishing setup (CLI)
+GitHub protection capabilities and credentials must be confirmed on the actual repository under separate authorization. The source cannot prove that an administrator will never later weaken repository policy.
 
-The workflow publishes the CLI with `bun publish` from `apps/server` after bumping
-the package version to the release tag version.
+The owner explicitly selected a single-maintainer approval model on 2026-11-16: `WYLINX601` may initiate and personally approve the same release. This removes independent-person separation, not approval itself. Signing and publication still require their separate protected-Environment approvals; publication approval binds the exact candidate digest. Administrator bypass remains disabled. General permission to prepare or publish releases is not permission for an agent to approve a future, unidentified candidate.
 
-Checklist:
+## Fixed-source sequence
 
-1. Confirm the npm account controls the `@synara` scope and can publish `@synara/cli`.
-2. In npm package settings, configure Trusted Publisher:
-   - Provider: GitHub Actions
-   - Repository: this repo
-   - Workflow file: `.github/workflows/release.yml`
-   - Environment (if used): match your npm trusted publishing config
-3. Ensure npm account and org policies allow trusted publishing for the package.
-4. Create release tag `vX.Y.Z` and push; workflow will:
-   - set `apps/server/package.json` version to `X.Y.Z`
-   - build web + server
-   - run `bun publish --access public`
+1. Finalize the Linx product version, release notes, public source config, and `bun.lock` on main. Commit and review all release bytes before creating an immutable `vX.Y.Z` tag pointing to that exact main commit. Never move a release tag.
+2. Ordinary pushes/PRs retain shared CI; only pushed formal tags enter publication. Manual `Release` dispatch is build-only, with an exact configured version; it cannot publish. Neither path bumps versions, publishes npm packages, advances an official bridge, cuts Beta tags, or merges upstream.
+3. Preflight checks the exact workflow SHA, a clean committed source tree, main ancestry, matching product version/tag, and lock SHA-256. Every build/preparation/quality/sign/promotion checkout uses that fixed SHA, not a moving branch.
+4. Shared lint/typecheck/all-package tests and server shards run alongside portable JavaScript, pinned Cua and macOS icon preparation. Packaging consumes verified portable outputs and frozen dependencies. The platform lane is fixed to macOS arm64.
+5. `scripts/build-desktop-artifact.ts --flavor workbench --platform mac --arch arm64 --target dmg` stages Linx with the authoritative version. It builds the independent Bun helper, embeds the same public source in helper and app resources, uses ad-hoc signing, and produces a DMG plus finalized ZIP. No Developer ID, paid Apple membership, notarization secret, quarantine removal, or Gatekeeper override is required or performed.
+6. Qualification extracts the ZIP and mounts the DMG read-only. It checks `com.wylinx.linx`, both bundle versions, native arm64 slices, embedded public source, helper signature, deep/strict app signatures, and DMG checksum. Isolated packaged-startup smoke follows. These are **structural checks, not Gatekeeper acceptance or Apple publisher identity**.
+7. After quality and qualification succeed, the reviewer-protected `linx-signing` job computes the ZIP manifest and detached Ed25519 signature. The protected key is only present in that step. The manifest binds Linx identity, stable darwin/arm64, product version, source SHA, ZIP URL/size/hash and signing key ID.
+8. The job creates a draft with a complete inventory. `linx-candidate.json` records source SHA, exact tag/version, lock hash, CI run ID and every asset size/hash. Its canonical SHA-256 is printed in the run summary and passed directly to the promotion job. It uploads the descriptor last and downloads/hashes every staged byte before reporting a candidate.
+9. A separate `linx-publish` Environment approval is for **that exact candidate digest**, not “latest”. Review the draft, source, qualification evidence, hashes, known issues and recovery text from the run summary. Approval does not rebuild or resign anything.
+10. Promotion restores that same draft, verifies local source/run/lock bindings, the approved digest, the complete remote inventory and all remote bytes, then only changes `draft=false`. It cannot overwrite assets or change the tag/source. Post-publication validation fetches the public Release and every public asset **without credentials**, streams all bytes through SHA-256, and checks the same candidate digest. A post-publication failure is a real failure requiring operator response, not evidence of a successful public release.
 
-## Synara notes
+Required assets are exactly:
 
-- Every stable versioned release must include both the default `latest` updater metadata and the dedicated `synara` aliases alongside its installers.
-- The published release title should read `Synara vX.Y.Z`.
-- By default, the first-party desktop release path does not require CLI publish or post-release version-bump automation.
-- Optional jobs stay disabled unless repository variables enable them:
-  - `SYNARA_PUBLISH_CLI=1`
-  - `SYNARA_FINALIZE_RELEASE=1`
-  - `SYNARA_AUTO_BETA=1` — tag the next `vX.Y.(Z+1)-beta.1` on the stable commit after each stable publish (see [BETA.md](../BETA.md)).
+- `Linx-X.Y.Z-arm64.dmg`
+- `Linx-X.Y.Z-arm64.zip`
+- `artifact-mac-arm64.provenance.json`
+- `linx-update.json`
+- `linx-update.json.sig`
+- `linx-update-source.json` (public audit copy; clients do not adopt network keys)
+- `linx-candidate.json`
 
-## 1) Build-only native CI validation
+No `latest*.yml`, official channel aliases, or blockmaps are part of this candidate. The client checks only the signed Linx manifest and downloads a ZIP only after user action. Ordinary quit never installs; source or signature failure never falls back to an official feed.
 
-Use build-only mode when investigating a native failure or qualifying changes to
-packaging, signing or the release workflow. It is not a prerequisite for every
-release: a full build-only run followed by a tag run builds the installers twice.
-The tag run already performs the publication gates. Build-only artifacts are not
-automatically promoted into a later tag run.
+## Immutable retry and incident handling
 
-Build-only mode produces workflow artifacts and local updater metadata without
-creating a tag, GitHub Release, npm publication, or version-bump commit, or changing
-public updater feeds. Finalize the candidate version and lockfile first, then use
-the smallest platform and stage that can answer the diagnostic question.
+Use **rerun failed jobs in the same workflow run**, preserving successful build/sign outputs. A platform failure after verified provenance preserves a same-run checkpoint; restoration revalidates source/tag/lock/version/identity and every byte before qualification. It never treats a cross-run artifact as authorization.
 
-1. Push the release-candidate branch so GitHub Actions can check it out.
-2. Start the workflow in build-only mode:
-   - `gh workflow run release.yml --ref BRANCH -f version=X.Y.Z -f publish_release=false`
-3. Wait for `.github/workflows/release.yml` to finish.
-4. Confirm preflight and all four native matrix builds pass.
-5. Download the workflow artifacts and sanity-check installation on each OS.
+An existing complete draft is reused only when its source, lock, version and run ID match and every remote hash still matches. It is never rebuilt, resigned, or overwritten. A different candidate or another run is rejected. A partial draft lacking its last-uploaded descriptor is deliberately blocked: inspect the failure and, under separate explicit authority, retire that incomplete draft before retrying the unchanged source. Do not repair a partial draft by mixing assets from another build. A moved/deleted tag, changed asset or digest conflict is not a retryable success.
 
-To publish from a manual dispatch instead of a tag push, select the existing
-release tag and pass `publish_release=true`. Publishing from a branch is refused.
-Use only one publication trigger; do not dispatch again after pushing a tag that
-already started the workflow.
-The public updater repository lookup runs only when publication is enabled;
-build-only validation does not need that GitHub API check.
+Stage, restore, promotion and anonymous validation resolve the actual remote Git ref, including bounded annotated-tag peeling. They repeat the source check around remote-byte verification and publication; `target_commitish` alone is not proof. GitHub does not provide an atomic tag-lock/publish transaction, so a detected post-publication tag change is an incident, not a silently repaired success.
 
-For one-platform qualification, add `-f platform=mac-arm64`, `mac-x64`,
-`linux-x64`, or `win-x64`. `-f stage=artifact` (the default) still runs quality
-gates, packaging, provenance checks, and isolated startup smoke for that platform.
-For a narrower diagnosis:
+If promotion already succeeded but its response was lost, rerunning promotion only accepts the unchanged published candidate; it still hashes all bytes and performs anonymous validation. An already published version is immutable. Fixes use a strictly higher product version and new approval. Do not replace signed assets in place.
 
-```bash
-gh workflow run release.yml --ref BRANCH -f version=X.Y.Z -f publish_release=false -f platform=linux-x64 -f stage=native
-gh workflow run release.yml --ref BRANCH -f version=X.Y.Z -f publish_release=false -f platform=mac-arm64 -f stage=icon
-gh workflow run release.yml --ref BRANCH -f version=X.Y.Z -f publish_release=false -f stage=js
-gh workflow run release.yml --ref BRANCH -f version=X.Y.Z -f publish_release=false -f stage=preflight
+For a severe release, stop distribution under explicit incident authority and issue a higher-version repair. Removing a Release cannot revoke bytes already downloaded. The installer revalidates its exact public target online before handoff; offline, withdrawn or changed targets are not installed. A withdrawal race between final validation and replacement is unavoidable. Preserve recovery evidence and explain it rather than promising instantaneous recall.
+
+## Public-key lineage
+
+For every non-bootstrap release, the signer discovers the highest published stable Linx release, binds its manifest version to the exact historical Git tag/commit, requires that commit to be an ancestor of the current fixed source, loads that commit's approved public source config, and verifies the prior manifest's raw-byte signature against that config. The current signing key must be present with identical DER bytes in both that authenticated prior config and the current config.
+
+To rotate normally, release the expanded public ring **using the old key**; only a subsequent release may activate the new key. Downloading a key list, putting a new key only into the current source, or changing a key ID's DER bytes cannot authorize rotation. Loss/compromise of the old private key is a stop-and-manual-trusted-bootstrap incident, never permission to accept new network trust roots.
+
+## Helper integration and safe recovery
+
+`scripts/build-linx-update-helper.ts` exports:
+
+```ts
+buildLinxUpdateHelper({ repositoryRoot, outputPath, source: { repository, keyRing } });
+// Promise<{ filePath: string; size: number; sha256: string }>
 ```
 
-`stage=preflight` runs only the quality gates (lint, typecheck and every test
-package, with the server suite in three shards) on Ubuntu runners. Use it to
-measure or debug the gates without native builds, packaging or publication.
+It compiles `apps/desktop/src/linxUpdateHelper.ts` as `bun-darwin-arm64`, defines `__LINX_UPDATE_SOURCE_JSON__` as a **string containing JSON**, ad-hoc signs and structurally verifies the executable, and returns its streamed digest. It never receives a private key. A formal build cannot compile a missing helper entry or substitute a no-op.
 
-For a paired cold Cua build comparison, add `-f cua_benchmark_baseline=FULL_COMMIT`
-to a single-Mac `stage=native` invocation. The baseline must use the same Cua
-source/version/native revision/compiler. This experiment bypasses artifact caches,
-builds baseline then candidate on the same runner with separate empty Cargo/target
-directories, and uploads Cargo timing reports, native linkage and isolated daemon
-probe results. It checks that only the baseline emits the unused SDK dynamic
-library. No app packaging or publication runs; the native job is capped at 25 minutes.
-Validate both archived inputs locally before considering a CI dispatch:
+The staged helper/source paths are `apps/desktop/prod-resources/linx-update-helper` and `apps/desktop/prod-resources/linx-update-source.json`; electron-builder places them at `Contents/Resources/linx-update-helper` and `Contents/Resources/linx-update-source.json`. Runtime resolves both from `process.resourcesPath`. The main-process installer must copy/verify the trusted helper into its private attempt directory before moving the app, bind the immutable attempt and source, and never invoke a downloaded arbitrary script.
 
-```bash
-node scripts/benchmark-cua-build.ts FULL_COMMIT /tmp/cua-benchmark-inputs --prepare-only
-```
+The final signed helper SHA-256 is embedded in the running main bundle. Packaging builds/signs the helper before compiling that isolated main bundle, including a `--skip-build` packaging run, preserves only this helper from later re-signing, and compares the final packaged resource bytes. The controller requires the embedded digest before copying and again before spawning; a newly self-consistent on-disk ad-hoc seal cannot establish its own trusted helper identity.
 
-This preparation check includes the license, patch checksum and instrumentation
-for both snapshots and performs no native compilation or network operation.
-The [first paired attempt](release-build-optimization.md#sdk-only-follow-up-attempt)
-failed before reaching the candidate and does not establish an SDK build speedup.
+Candidate content expectations come from authenticated ZIP streams on a pinned file handle, including file digests, entry types, modes, link text and implicit directories—not from a writable extracted candidate. Startup derives the same expectation independently from the authenticated package. Native macOS ZIP filenames are strict UTF-8 even when `ditto` omits the language flag; contradictory names, traversal and collisions remain rejected.
 
-`native` verifies the pinned Cua artifact/source path only; `icon` compiles the
-macOS catalog only; `js` builds and records portable outputs only. These stages
-do not qualify an installer or provider runtime. Publication rejects any scope
-other than `platform=all, stage=artifact` and still requires every desktop gate.
-Server tarball preparation starts after exact-source preflight and portable
-JavaScript, independently of quality checks and server tests. GitHub publication
-still waits for the tarball, every desktop job and both test gates.
+Installation-target exclusion uses a permanent private directory and a never-unlinked kernel-lock guard. An atomically published owner binds an interrupted attempt; successful release removes the owner while holding the guard. A remaining guard-only directory is normal and must not be deleted as a stale lock. Preparation refusal keeps the authenticated cancel/ack path available; disconnect also releases uncommitted ownership.
 
-### Release build caches and measurements
+Recovery must keep a verified old application and data recovery set until the new version reports application/backend/data health. A package download, process exit, helper exit or unchanged version is not success. After new code may have written data, never automatically relaunch old code against it. On permissions, space, recovery verification, active tasks/approvals, unsaved edits or unknown state, retain the verified download and refuse safely; the user must explicitly try again. For system refusal, preserve logs and provide ordinary manual recovery instructions. Never clear quarantine, disable system protections, silently elevate, or force-stop user work to make a release look successful.
 
-See [build optimization evidence](release-build-optimization.md) for the measured
-baseline, signed Intel CI comparison, local measurements, remaining validation,
-and timing interpretation.
+The installer refreshes the **same pinned release receipt twice**: before helper creation (downloads and explicit retries can outlive its short validity) and after verified recovery, before committed handoff. A fresh receipt never authorizes switching to a newer target. Server maintenance is reversible until commit; after a possibly accepted commit, recovery proves clean backend exit and starts a fresh idle backend rather than reusing a quiesced engine. Failure to return ownership keeps the recovery latch held.
 
-`.github/workflows/cua-release-cache.yml` builds a credential-free Cua cache on
-relevant changes to `main` and daily, with a default-branch guard. Each successful
-producer also retains the verified unsigned directory as a workflow artifact for
-30 days, outside the Actions cache quota. Daily preparation detects runner image,
-SDK and library drift even when source files are unchanged. To warm new inputs
-before a release, dispatch it on the default branch:
+Private helper responses contain only a bounded failure code (`space`, `permissions`, `macos`, `failed`), not raw filesystem/schema errors or authorization bytes. The existing update UI reports online, preparation, backup and final-verification phases separately. Keep partial unpublished recovery copies if they could contain unique data; only a verified recovery manifest authorizes restoration.
 
-```bash
-gh workflow run cua-release-cache.yml --ref main
-```
+Run builds under the repository's mise-pinned Node/Bun versions. The 2026-11-16 real helper qualification used Bun 1.4.4 and verified native minimum macOS 13.0; an accidentally used ambient Bun 1.4.0 produced a different minimum and is explicitly invalid evidence. Do not raise deployment requirements to the build host's OS or weaken minimum-version checks to accept an incorrectly built helper.
 
-Release tags restore only exact keys. GitHub scopes caches by ref: a cache made
-on one release tag cannot seed the next tag, whereas the default-branch cache is
-visible to release jobs. On an exact cache miss, consumers look for the exact
-fingerprint in retained artifacts from a successful run of this producer on the
-default branch in the same repository. Forks, PR events, other workflows, expired
-artifacts and partial keys cannot supply binaries. Missing/stale artifacts compile
-pinned source; unavailable trust metadata and corrupt selected artifacts fail
-closed. PR workflows do not populate this cache. Keys cover the
-pinned release manifest, all patches, provisioning/validation/cache logic, actual
-Rust/compiler/OS/architecture/Xcode/SDK identity, Linux development packages, and
-build flags. Arbitrary compiler overrides/wrappers are rejected. Signing keys,
-certificates, signed release bundles and user state are never cached.
+Local native receipts prove their recorded source snapshots only. Earlier commit scenarios observed recovery ownership transfer, cancellation, interrupted-attempt recovery and a real replacement/LaunchServices attempt that timed out waiting for health; no successful new-process health was observed. Later candidate-authentication and target-lock repairs are not retroactively qualified by those receipts. Current focused native/browser/Bun checks and each source boundary are recorded in [the update plan](linx-update-development-plan.md). None proves a published Linx candidate, Gatekeeper acceptance or B0→B1.
 
-Each restore checks the build key, existing executable provenance/checksum and
-Mach-O/ELF identity, plus all Linux sidecar checksums. Non-exact matches are
-discarded before a source build. A corrupt exact hit fails instead of silently
-substituting a different binary. Delete that cache entry (and any corrupt retained
-artifact with the same key) in GitHub Actions and
-rerun the producer, or intentionally bump the `cua-v1` key schema when invalidating
-the whole cache. Never edit provenance to make a hit pass. Packaging re-signs a
-separate staged copy, preserving cached bytes.
+## Home migration and continuation proof
 
-Release native preparation starts after exact-source preflight alongside quality
-checks, portable JavaScript and icon compilation. The packaging jobs download
-only their platform's prepared artifact from the same run, recompute the build
-environment key, and repeat executable/provenance verification. Missing artifacts
-or runner drift fail instead of falling back to unrelated binaries. These temporary
-handoff artifacts expire after 30 days; signing credentials are passed only to the
-packaging step. Once preflight and the required prepared inputs pass, packaging
-can run while quality and server tests are still in progress. This can spend
-native compute on a candidate whose tests later fail. Both GitHub and npm
-publication wait directly for the full quality/server-test gates and successful
-native qualification; no tests or release acceptance gates are skipped.
+First-launch migration reads saved source settings and referenced secrets without starting or mutating the old application's services. It proves each old live binding against those original launch values, then proves the copied launch changes only verified owned directory locations. Canonical and alias spellings may match only the same relocated native directory; changing another account path or credential still fails. Cursors, generations, model selection, fixed Expert evidence and historical events are not reset to force compatibility.
 
-When deploying changes to the cache/provenance logic, run the producer on `main`
-after merge and before the next release: the exact fingerprint changes with that
-logic, so an unmerged candidate cannot reuse the old producer's artifacts. Native
-preparation within its own run still works and can be validated before merge.
+Copied Codex state retains native contained aliases and private account files, rebinds the source-home marker, and relocates an owned root `sqlite_home` in `config.toml` without rewriting unrelated TOML or external source state. The current Electron/SQLite receipt covers two persisted bindings across directory close/reopen and an idempotent second pass; it uses isolated fixture data and an empty browser-storage adapter, not personal data, a real Provider run or a complete application upgrade.
 
-Portable outputs are same-run artifacts, never cross-release caches. Import
-rejects archive links and unexpected paths before extraction into an isolated
-directory, verifies the complete file inventory, source, lockfile and build
-settings, then copies only the two allowed output roots. Frozen production
-installs, dependency patches and native ABI checks still run on each platform.
+Before relocating live project paths, the unpublished imported engine replays its durable journal and settles orphaned turns, checkpoints and approvals under the source/database locks. Explicit quit intent wins over newly captured crash intent. Providers, subscriptions, cleanup workers and other producers remain stopped until migration completes; a replay failure keeps the receipt pending.
 
-The macOS jobs no longer retry the whole artifact command. Diagnose the
-failed stage and rerun only its platform. With `--keep-stage` (used by CI), the
-logged stage directory retains Apple submission IDs and exact payload hashes
-for same-run recovery; it is not uploaded or persisted across runners. A failed
-wait does not cancel Apple's processing. With the same credentials in the
-environment, resume finalization without re-signing the app:
+Strict image replay may re-reserve only the same never-claimed attachment identity after an interrupted upload, expired staging or a recorded staging failure. It rechecks ownership, metadata and quotas and atomically replaces the eligible reservation with its copied cleanup job removed. Only that identity's private partial is discarded; the final blob stays until atomic replacement. Claimed/user-deleted assets and ordinary uploads keep their existing rules. The exclusive, quiescent migration boundary is required for this internal capability.
 
-```bash
-node scripts/notarize-mac-app.ts /PATH/TO/STAGE/app/dist/mac-arm64/Synara.app
-node scripts/finalize-mac-dmg.ts /PATH/TO/STAGE/app/dist
-```
+## Source retirement versus remote receipts
 
-The first command is for an interrupted app notarization stage; DMG finalization
-requires an already-created signed DMG. Changed payloads reject saved state;
-remove only the matching stale `.app-notary-*` or `.notary-state` entry before
-submitting changed bytes. Recovery checks Apple's status and retains signature,
-stapling, Gatekeeper and final update-ZIP validation. Startup smoke and release
-provenance checks must still pass before publication.
+The default official bridge/npm/auto-Beta publishing jobs and scheduled upstream-sync workflow plus its uncalled publisher have been removed from source. Source history, licenses, historical releases and shared platform/migration/quality utilities are preserved. This is **not** a receipt that remote workflows, old npm trusted publishers, repository variables, schedules on another branch, or already queued runs were disabled. Obtain separate authority, inspect them, and record actual remote results before closing the retirement acceptance criterion.
 
-Ticket stapling and validation retry only the observed Apple transport failure:
-exit 68 accompanied by `NSURLErrorDomain Code=-1005` (connection lost). The same
-command and payload are attempted at most four times, with waits of 5, 15 and
-30 seconds. This applies during app/DMG finalization and provenance validation.
-Every attempt retains its diagnostics. Exhausted retries, other validation errors,
-signals and process-launch errors still fail the job; notarization is not
-resubmitted and no signature, Gatekeeper or startup check is skipped. The bounded
-backoff follows [Apple's guidance for CloudKit network failures](https://developer.apple.com/documentation/cloudkit/ckerror/code/networkfailure).
+## Verification handoff
 
-### macOS release toolchains
-
-Mac application bundles declare `LSMinimumSystemVersion` 13.0 through electron-builder's
-`mac.minimumSystemVersion`. The bundled Claude and Cua executables require macOS 13;
-the application manifest must not advertise Electron's lower deployment target as the
-requirement for the complete bundle. This applies to signed, unsigned and local ad-hoc
-packages, including DMG and update ZIP payloads.
-The generated and retained macOS update feeds use Darwin `22.0.0` for this minimum,
-because electron-updater compares `os.release()` rather than the macOS product version.
-
-The [read-only v1.0.1 inspection](https://github.com/Emanuele-web04/synara/actions/runs/38163962883)
-found app/Electron metadata at 12.0 and bundled Claude/Cua at 13.0 on both architectures.
-The [actual Homebrew audit](https://github.com/Emanuele-web04/synara/actions/runs/38166229495)
-rejected a cask requiring 13 because the old app plist still declares 12. This source fix
-does not modify signed historical releases. Recheck a newly built and published DMG's
-plist and native payload before refreshing the cask; the old audit failure remains
-unresolved until a matching release is available. Metadata inspection and macOS 15
-startup checks do not establish runtime behavior on macOS 13.
-
-Both native macOS release runners use macOS 15. Native helpers and the pinned
-Cua apple-metal bridge build with Xcode 16.4's macOS 15 SDK. A separate macOS 26
-job compiles the architecture-independent Icon Composer catalog with Xcode 26.3
-from the same release checkout and passes it through a required workflow artifact.
-`SYNARA_MAC_ICON_CATALOG` points packaging at that catalog; a missing file fails
-the build. This avoids Apple's AssetRuntime framework crash on macOS 15 without
-changing the native SDK. Local builds without that variable compile icons with
-the selected Xcode on the local host.
-
-An older `actool` can exit successfully without creating `Assets.car`; that is a
-packaging failure, not permission to silently omit the Liquid Glass icon.
-
-### Linux native build dependencies
-
-The release job installs the Cua driver's OpenSSL, X11, XCB, xkbcommon and
-Wayland development libraries before provisioning. This matches the build
-prerequisites in `cua-linux-check.yml`; it does not qualify Linux Computer Use
-as a supported 0.9.0 feature.
-
-### Local DMG appearance validation
-
-On an Apple Silicon Mac, build the DMG and macOS update ZIP in `release/` with:
-
-```bash
-SYNARA_DESKTOP_UPDATE_REPOSITORY=Emanuele-web04/synara bun run dist:desktop:dmg:arm64
-```
-
-`dist:desktop:dmg:x64` builds the Intel app; on Apple Silicon, add the
-`x86_64-apple-darwin` Rust target for Cua, and launching it needs Rosetta 2. The updater repository setting is needed for
-ZIP manifest finalization outside GitHub Actions. The build passes
-`--publish never` to electron-builder and defaults to unsigned; release signing,
-notarization, and updater settings remain controlled by the existing release flow.
-
-The Dmgly layout lives in `scripts/lib/desktop-platform-build-config.ts` and uses
-`apps/desktop/resources/dmgly/assets/dmg-background.png`. The packaging script
-copies this resources directory into its staging app, keeping the background path
-valid there. `scripts/lib/desktop-runtime-resources.ts` excludes the `dmgly`
-directory from the runtime resource copy on every platform, so installer artwork
-and the reference icon stay out of the installed app and update ZIP. The supplied
-642×406 PNG is a 1× background with its text and arrow
-already baked in. Do not add duplicate text or arrows. It has no baked label
-backgrounds. The exported `app-icon.png` is retained alongside it as a reference;
-the app continues to use the existing production ICNS generation pipeline.
-
-Mount the resulting DMG in Finder and check the 642×406 window, 128px icons,
-and icon centers at (172, 135) for `Synara.app` and (514, 241) for `Applications`.
-Verify both real filename labels remain readable and unclipped. Finder renders
-the app icon and Applications link, so their appearance can differ from Dmgly's
-preview; Retina displays also scale the supplied 1× background. Local Finder
-preferences can override the DMG's saved hidden path/status bars, reducing the
-visible background and requiring scrolling to reveal the Applications label.
-
-## 2) Apple signing + notarization setup (macOS)
-
-Required secrets used by the workflow:
-
-- `CSC_LINK`
-- `CSC_KEY_PASSWORD`
-- `APPLE_API_KEY`
-- `APPLE_API_KEY_ID`
-- `APPLE_API_ISSUER`
-- `APPLE_TEAM_ID`
-
-Checklist:
-
-1. Apple Developer account access:
-   - Team has rights to create Developer ID certificates.
-2. Create `Developer ID Application` certificate.
-3. Export certificate + private key as `.p12` from Keychain.
-4. Base64-encode the `.p12` and store as `CSC_LINK`.
-5. Store the `.p12` export password as `CSC_KEY_PASSWORD`.
-6. In App Store Connect, create an API key (Team key).
-7. Add API key values:
-   - `APPLE_API_KEY`: contents of the downloaded `.p8`
-   - `APPLE_API_KEY_ID`: Key ID
-   - `APPLE_API_ISSUER`: Issuer ID
-   - `APPLE_TEAM_ID`: Developer Team ID embedded in the signed application
-8. Re-run a tag release and confirm macOS artifacts are signed/notarized.
-
-Notes:
-
-- `APPLE_API_KEY` is stored as raw key text in secrets.
-- The workflow writes it to a temporary `AuthKey_<id>.p8` file at runtime.
-
-## 3) Azure Trusted Signing setup (Windows)
-
-The current Windows release policy publishes x64 installers unsigned under an
-explicit version-scoped exception. Before pushing the release tag, set the
-repository Actions variable `SYNARA_ALLOW_UNSIGNED_WINDOWS_RELEASE` to the exact
-version without the `v` prefix (for example, `0.8.4`). The workflow checks equality
-with the resolved release version before packaging; do not use a permanent broad
-opt-out. Packaging, source provenance, startup smoke, and artifact upload must
-still pass. Missing Azure credentials are expected for this unsigned path.
-
-Before startup smoke and artifact upload, the Windows job scans each final
-installer with Microsoft Defender. The guard enables protection and removes
-the hosted image's exclusions inside that disposable runner, updates security
-intelligence, verifies the actual file is not excluded, and requires an explicit
-clean scan plus unchanged installer bytes. If the configured update source fails
-all three attempts or returns definitions older than 24 hours, the guard falls
-back to Microsoft's direct MMPC source.
-After exhausted default-source attempts, it reaches MMPC without an intervening
-Defender state snapshot, which can fail during the same service transition.
-Each source allows at most three update attempts, five seconds apart, to recover
-from transient service errors during platform updates. Every failed attempt is
-preserved as `update-SOURCE-attempt-N-error.txt`; a successful update call is still
-required. Exhausting the direct-source attempts blocks qualification before
-scanning, even if the reported signatures already appear fresh.
-An older local timestamp then requires the installed version to match the latest
-version fetched from Microsoft's security intelligence page; unavailable or
-ambiguous vendor data fails closed. Missing signatures or Defender's own
-out-of-date status also block the scan. Detection, remediation, stale
-intelligence, a missing file, or a scan error blocks publication. Scan evidence
-is retained as `windows-defender-x64`, including on failure.
-
-For this disposable GitHub-hosted public-release qualification only, the guard
-also enables cloud protection (`MAPSReporting=2`), automatic safe sample submission
-(`SubmitSamplesConsent=1`), and block at first sight. Safe samples may be sent to
-Microsoft; this does not authorize changing a user's machine or submitting private
-artifacts. The guard verifies these preferences before and after scanning, and
-requires `MpCmdRun -ValidateMapsConnection` to succeed before scanning, preserving
-its output and exit code. Configured cloud protection alone does not prove MAPS
-connectivity. These settings and the connectivity check follow Microsoft's
-[block-at-first-sight guidance](https://learn.microsoft.com/en-us/defender-endpoint/configure-block-at-first-sight-microsoft-defender-antivirus)
-and [network validation guidance](https://learn.microsoft.com/en-us/defender-endpoint/configure-network-connections-microsoft-defender-antivirus).
-This server scan does not replace Windows 11 browser-download qualification or
-prove that the cloud classified a particular installer.
-
-Run `pwsh -NoProfile -File scripts/verify-windows-defender.test.ps1` for the guard's
-19 mocked behavior tests, including disabled cloud protection, failed MAPS
-connectivity, direct-source fallback, stale or out-of-date signatures after
-fallback, changed bytes, and detections. These tests do not qualify real Windows
-behavior.
-
-Signing, provenance, and startup smoke alone do not establish Microsoft Defender
-acceptance. For a reported antivirus block, collect the exact artifact hash,
-engine/definition versions, and detected component before changing packaging;
-see [Windows Defender investigation and qualification](windows-defender-1376.md).
-
-Without the matching exception, published Windows installers must be signed with
-Azure Trusted Signing, and the workflow fails closed when a required signing
-value is absent. A requested signed release requires all of the following secrets:
-
-- `AZURE_TENANT_ID`
-- `AZURE_CLIENT_ID`
-- `AZURE_CLIENT_SECRET`
-- `AZURE_TRUSTED_SIGNING_ENDPOINT`
-- `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME`
-- `AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`
-- `AZURE_TRUSTED_SIGNING_PUBLISHER_NAME`
-- `AZURE_TRUSTED_SIGNING_SUBJECT_DN`
-
-Signing checklist:
-
-1. Create Azure Trusted Signing account and certificate profile.
-2. Record ATS values:
-   - Endpoint
-   - Account name
-   - Certificate profile name
-   - Publisher name
-   - Full certificate subject distinguished name
-3. Create/choose an Entra app registration (service principal).
-4. Grant service principal permissions required by Trusted Signing.
-5. Create a client secret for the service principal.
-6. Add Azure secrets listed above in GitHub Actions secrets.
-7. Re-run a build-only workflow and confirm the Windows installer is signed.
-
-For a signed release, run a build-only workflow and verify the generated
-installer's Authenticode identity matches both the configured publisher name and
-full subject distinguished name.
-
-## 4) Ongoing release checklist
-
-1. Inspect the checkout and current `main` CI results; preserve unrelated work.
-   Select the release source before checks. Follow [BETA.md](../BETA.md) for the
-   separate Beta version commit; Beta package versions must not land on `main`.
-2. Finalize the version with `node scripts/update-release-package-versions.ts X.Y.Z`,
-   then finish the changelog, in-app notes and documentation. Confirm the four
-   release package versions and `bun.lock` match. Prepare website copy in parallel.
-3. Use the Node and Bun versions in `.mise.toml`, with frozen dependencies. On
-   the finished candidate, run the required local `bun run fmt:check`,
-   `bun run lint`, `bun run typecheck`, `bun run release:smoke`, and affected
-   Vitest tests. Include `bun run windows-runtime:check`, `bun run migrations:check`
-   and relevant browser/native checks when their boundaries change.
-   Migration history is checked for the family selected by matching server and
-   desktop package versions: Stable and Beta share history; Remote checks its own
-   releases because its data home and updater are isolated. Legacy shared tags
-   remain protected. An unknown or mismatched package version fails the check.
-   The single tag workflow supplies the final full workspace test suite through
-   `quality` plus all three `server_tests` shards, and the desktop build through
-   `build_portable` and the native platform jobs. Do not require an additional
-   local full `bun run test` or `bun run build` solely as a release prerequisite.
-   Keep these CI results pending until the exact candidate SHA passes; a previous
-   `main` commit, another release SHA or focused rerun is not equivalent proof.
-   Full local tests/builds remain useful for diagnosis, unavailable CI or an
-   explicitly requested local check. When marketing or its build inputs change,
-   verify `bun run build:marketing` separately unless equivalent successful CI
-   proof exists for that exact candidate; it is not part of the desktop payload.
-   Retain commands, candidate SHA and results; do not restart completed checks
-   merely to resume the release conversation. Packaging can overlap these CI
-   checks; a failed quality gate or server shard blocks both GitHub and npm
-   publication through their direct dependencies.
-4. Run `node scripts/resolve-release-update-policy.ts X.Y.Z` and confirm the lane,
-   `make_latest`, and `mirror_to_stable_channel` values. Before any publication
-   trigger, configure the exact Windows unsigned exception or verify the requested
-   signing setup. Diagnose a known signing, Defender or runner failure before
-   starting another complete release run.
-5. Commit the candidate, record its full SHA, and create `vX.Y.Z` on that commit.
-   Push the branch when appropriate, then push the tag **once**. Do not add a
-   disposable full build-only run or a second publication dispatch. The tag
-   workflow validates the exact candidate and builds the installers.
-6. Record the workflow run ID, attempt, completed gates, artifact identities and
-   next action in the release's local checkpoint. Keep progress bookkeeping
-   outside tracked release inputs. Monitor the existing run through preflight,
-   quality gates, server shards, packaging, verification and publication; use the
-   recovery procedure below when a stage fails.
-7. Confirm the versioned release is public with all expected installers, manifests
-   and provenance. Stable must be GitHub Latest and carry all three `latest`
-   manifests plus byte-identical `synara` aliases; Beta must remain a prerelease
-   with its own feed. Verify the historical compatibility release is unchanged.
-8. Verify public downloads and the authorized website deployment. Report packaged
-   startup proof separately from manual installation, installed-app updates and
-   live-provider behavior; do not claim checks that were not performed.
-
-### Resume a failed release
-
-- Read the failed job's error before changing source or starting another run.
-  Preserve the version, tag, source SHA and existing successful results when the
-  failure is transient or limited to runner state.
-- For an unchanged candidate, resume the original workflow with
-  `gh run rerun RUN_ID --failed`. This retains successful jobs. If GitHub refuses
-  a rerun while the workflow is active, let the other jobs finish; do not cancel
-  their work and dispatch a second full run.
-- Build and qualification share one native job and runner. A successful first
-  attempt uploads only the qualified `desktop-*` artifact, without retaining a
-  separate candidate. If Defender, startup or a later step fails after provenance
-  was validated, the failure handler rechecks file integrity and signing policy
-  before uploading `candidate-desktop-PLATFORM-ARCH` for 30 days. A failed
-  integrity check must not preserve the candidate as reusable.
-- On a retry of the same run and source SHA, the native job looks for that
-  retained candidate and verifies its source, version, lockfile, flavor, file
-  inventory/digests and signing policy before skipping packaging. Qualification
-  runs again; successful platforms remain complete. This is same-run recovery,
-  not cross-run promotion or a cache of signing credentials.
-- A corrupt candidate or an artifact API error fails closed; neither is treated
-  as a cache miss. An absent or expired candidate requires packaging again.
-  Crashes or cancellations that prevent the failure handler from uploading a
-  validated checkpoint cannot resume from that runner's local files. Signing or
-  Apple notarization failures before validated provenance also require packaging
-  again. The local `--keep-stage` recovery described above does not persist Apple
-  wait state onto a replacement runner.
-- A source correction changes the candidate. Run the checks affected by that
-  correction, commit it and follow the unpublished-tag correction policy before
-  triggering its publication. Artifacts and test results from a different SHA
-  are not automatically reusable; never rewrite provenance to claim otherwise.
-- Do not move a tag that already produced a public release without explicit
-  authorization. For a correction to an unpublished tag, first verify its remote
-  target and release status, then use a guarded push and record the old/new SHAs.
-- A failed full suite remains a failed full suite even when focused reruns pass.
-  Record both outcomes; do not repeat unrelated passed stages to conceal or
-  replace the original result.
-
-## 5) Troubleshooting
-
-- macOS build unsigned when expected signed:
-  - Check all Apple secrets are populated and non-empty.
-- Published Windows build rejected before packaging:
-  - For the unsigned release policy, check that `SYNARA_ALLOW_UNSIGNED_WINDOWS_RELEASE` matches the exact version without `v`.
-  - For a signed release, check all eight Azure ATS, identity, and auth secrets are populated and non-empty.
-- Build fails with signing error:
-  - Re-check certificate/profile names and tenant/client credentials.
+After integration, run the authored behavioral release policy, source/lineage, candidate protection, Linx checkpoint, provenance, artifact identity and brand tests; then the workspace's formatting/lint/typecheck/test and brand/boundary/platform checks. Actual helper compilation, DMG/ZIP structural checks, protected CI staging/approval, anonymous GitHub downloads, proxy paths, and real isolated B0→B1/system-protection behavior each need their own observed evidence. None are asserted merely by this source implementation.

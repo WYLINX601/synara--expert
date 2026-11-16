@@ -4,6 +4,10 @@
 // Depends on: IndexedDB structured-clone support for Blob values.
 
 import { awaitIdbRequest, openIndexedDbDatabase, waitForIdbTransaction } from "./indexedDb";
+import {
+  assertComposerPersistenceAllowed,
+  beginComposerPersistenceOperation,
+} from "./composerPersistenceActivity";
 
 const DATABASE_NAME = "synara-composer-images";
 const DATABASE_VERSION = 1;
@@ -43,9 +47,12 @@ export async function persistComposerImageBlob(input: {
   imageId: string;
   file: File;
 }): Promise<string> {
-  const key = composerImageBlobKey(input.threadId, input.imageId);
-  const database = await openComposerImageDatabase();
+  assertComposerPersistenceAllowed();
+  const finish = beginComposerPersistenceOperation();
+  let database: IDBDatabase | undefined;
   try {
+    const key = composerImageBlobKey(input.threadId, input.imageId);
+    database = await openComposerImageDatabase();
     const transaction = database.transaction(IMAGE_STORE_NAME, "readwrite");
     transaction.objectStore(IMAGE_STORE_NAME).put({
       key,
@@ -58,7 +65,8 @@ export async function persistComposerImageBlob(input: {
     await waitForTransaction(transaction);
     return key;
   } finally {
-    database.close();
+    database?.close();
+    finish();
   }
 }
 
@@ -107,12 +115,15 @@ export async function deleteOrphanedComposerImageBlobs(input: {
   nowMs?: number;
 }): Promise<number> {
   if (typeof indexedDB === "undefined") return 0;
-  const selectionInput: OrphanedComposerImageBlobInput = {
-    isReferenced: input.isReferenced,
-    nowMs: input.nowMs ?? Date.now(),
-  };
-  const database = await openComposerImageDatabase();
+  assertComposerPersistenceAllowed();
+  const finish = beginComposerPersistenceOperation();
+  let database: IDBDatabase | undefined;
   try {
+    const selectionInput: OrphanedComposerImageBlobInput = {
+      isReferenced: input.isReferenced,
+      nowMs: input.nowMs ?? Date.now(),
+    };
+    database = await openComposerImageDatabase();
     const keysTransaction = database.transaction(IMAGE_STORE_NAME, "readonly");
     const keysCompletion = waitForTransaction(keysTransaction);
     const keys = await awaitIdbRequest(
@@ -144,18 +155,23 @@ export async function deleteOrphanedComposerImageBlobs(input: {
     await waitForTransaction(transaction);
     return deleted;
   } finally {
-    database.close();
+    database?.close();
+    finish();
   }
 }
 
 export async function deleteComposerImageBlob(key: string): Promise<void> {
   if (key.length === 0 || typeof indexedDB === "undefined") return;
-  const database = await openComposerImageDatabase();
+  assertComposerPersistenceAllowed();
+  const finish = beginComposerPersistenceOperation();
+  let database: IDBDatabase | undefined;
   try {
+    database = await openComposerImageDatabase();
     const transaction = database.transaction(IMAGE_STORE_NAME, "readwrite");
     transaction.objectStore(IMAGE_STORE_NAME).delete(key);
     await waitForTransaction(transaction);
   } finally {
-    database.close();
+    database?.close();
+    finish();
   }
 }

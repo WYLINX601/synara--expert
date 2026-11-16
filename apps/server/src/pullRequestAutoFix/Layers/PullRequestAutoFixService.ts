@@ -41,6 +41,7 @@ import {
   PullRequestAutoFixService,
   type PullRequestAutoFixServiceShape,
 } from "../Services/PullRequestAutoFixService.ts";
+import { serverMaintenanceAdmission, guardMaintenanceMethods } from "../../serverMaintenance";
 
 /** Matches the Environment panel's own PR poll, so auto-fix adds no extra GitHub cadence. */
 const PULL_REQUEST_AUTO_FIX_POLL_INTERVAL = Duration.seconds(60);
@@ -449,30 +450,32 @@ const make = Effect.gen(function* () {
     }
   });
 
-  const pollAll = repository.listActive().pipe(
-    Effect.flatMap((states) => {
-      const byThread = new Map<ThreadId, PullRequestAutoFixState[]>();
-      for (const state of states) {
-        const group = byThread.get(state.threadId);
-        if (group) group.push(state);
-        else byThread.set(state.threadId, [state]);
-      }
-      return Effect.forEach(
-        byThread,
-        ([threadId, group]) =>
-          pollThread(threadId, group).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("auto-fix CI poll failed", {
-                threadId,
-                cause: Cause.pretty(cause),
-              }),
+  const pollAll = serverMaintenanceAdmission.scheduled(
+    repository.listActive().pipe(
+      Effect.flatMap((states) => {
+        const byThread = new Map<ThreadId, PullRequestAutoFixState[]>();
+        for (const state of states) {
+          const group = byThread.get(state.threadId);
+          if (group) group.push(state);
+          else byThread.set(state.threadId, [state]);
+        }
+        return Effect.forEach(
+          byThread,
+          ([threadId, group]) =>
+            pollThread(threadId, group).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("auto-fix CI poll failed", {
+                  threadId,
+                  cause: Cause.pretty(cause),
+                }),
+              ),
             ),
-          ),
-        { concurrency: PULL_REQUEST_AUTO_FIX_THREAD_CONCURRENCY, discard: true },
-      );
-    }),
-    Effect.catchCause((cause) =>
-      Effect.logWarning("auto-fix CI poll failed", { cause: Cause.pretty(cause) }),
+          { concurrency: PULL_REQUEST_AUTO_FIX_THREAD_CONCURRENCY, discard: true },
+        );
+      }),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("auto-fix CI poll failed", { cause: Cause.pretty(cause) }),
+      ),
     ),
   );
 
@@ -515,7 +518,11 @@ const make = Effect.gen(function* () {
     );
   }
 
-  return { get, set } satisfies PullRequestAutoFixServiceShape;
+  return guardMaintenanceMethods(
+    { get, set } satisfies PullRequestAutoFixServiceShape,
+    ["set"],
+    () => new PullRequestAutoFixError({ message: "Update maintenance admission is closed." }),
+  );
 });
 
 export const PullRequestAutoFixServiceLive = Layer.effect(PullRequestAutoFixService, make);

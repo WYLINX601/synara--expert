@@ -406,6 +406,9 @@ export function makeServerApplicationLayers() {
   const agentGatewayCredentialsLayer = AgentGatewayCredentialsWithSecretsLive;
   const nativeExecutionOwnerLayer = OmpNativeExecutionOwnerLive.pipe(
     Layer.provideMerge(OmpExpertExecutionStoreLive.pipe(Layer.provideMerge(SuiteRuntimeLayerLive))),
+    // Native execution recovery may reattach providers during layer creation.
+    // It must wait for the same relocated engine as transports and reactors.
+    Layer.provideMerge(serverOrchestrationLayer),
   );
   const nativeExpertHostLayer = OmpExpertDelegationHostLive.pipe(
     Layer.provideMerge(nativeExecutionOwnerLayer),

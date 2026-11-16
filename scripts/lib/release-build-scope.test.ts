@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { resolveReleaseBuildScope } from "./release-build-scope.ts";
 describe("release validation scope", () => {
-  it("requires the complete four-platform artifact gate for publication", () => {
-    expect(resolveReleaseBuildScope("all", "artifact", true).matrix.include).toHaveLength(4);
-    for (const stage of ["native", "icon", "js"])
-      expect(() => resolveReleaseBuildScope("all", stage, true)).toThrow("Publication requires");
-    for (const platform of ["mac-arm64", "mac-x64", "linux-x64", "win-x64"])
+  it("publishes only complete Linx macOS arm64 candidates", () => {
+    expect(
+      resolveReleaseBuildScope(undefined, "artifact", true).matrix.include.map((entry) => entry.id),
+    ).toEqual(["mac-arm64"]);
+    for (const stage of ["native", "icon", "js", "preflight"])
+      expect(() => resolveReleaseBuildScope("mac-arm64", stage, true)).toThrow(
+        "Publication requires",
+      );
+    for (const platform of ["all", "mac-x64", "linux-x64", "win-x64"])
       expect(() => resolveReleaseBuildScope(platform, "artifact", true)).toThrow(
         "Publication requires",
       );

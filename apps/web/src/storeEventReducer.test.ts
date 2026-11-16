@@ -523,6 +523,7 @@ describe("store event reducer", () => {
           projectId: ProjectId.makeUnsafe("project-live"),
           title: "Renamed Remotely",
           workspaceRoot: "/tmp/renamed-project",
+          additionalFolders: ["/tmp/relocated-extra"],
           defaultModelSelection: null,
           scripts: [
             {
@@ -546,6 +547,7 @@ describe("store event reducer", () => {
       folderName: "renamed-project",
       localName: "Local Name",
       cwd: "/tmp/renamed-project",
+      additionalFolders: ["/tmp/relocated-extra"],
       defaultModelSelection: null,
       updatedAt: "2026-02-27T00:05:00.000Z",
       scripts: [

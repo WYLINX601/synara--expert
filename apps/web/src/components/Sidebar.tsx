@@ -6931,7 +6931,7 @@ export default function Sidebar() {
                 ? t("workspace:desktopUpdate_available")
                 : t("workspace:desktopUpdate_preparingUpdate"),
               description: downloadOnClick
-                ? t("workspace:desktopUpdate_availableDescription", { value0: version })
+                ? t("desktop:linxUpdateReadyVersion", { value0: version })
                 : t("workspace:synaraIsPreparingVersionInTheBackground", { value0: version }),
             });
             return;
@@ -6989,9 +6989,18 @@ export default function Sidebar() {
       void bridge
         .downloadUpdate()
         .then((result) => {
-          setInstallingDesktopUpdate(false);
+          setInstallingDesktopUpdate(isDesktopUpdateInstallInFlight(result));
           setDesktopUpdateState(result.state);
-          if (result.completed) {
+          const refusal = getDesktopUpdateRefusalNotice(result);
+          if (refusal) {
+            toastManager.add({
+              type: "info",
+              title: t("workspace:desktopUpdate_couldNotInstallUpdate"),
+              description: refusal,
+            });
+            return;
+          }
+          if (result.completed && !isDesktopUpdateDownloadOnClick(result.state)) {
             toastManager.add({
               type: "success",
               title: t("workspace:desktopUpdate_updateReady"),

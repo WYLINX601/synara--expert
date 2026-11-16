@@ -190,7 +190,7 @@ export function buildQuitResumeRecord(input: {
  * Pending human decisions and independently scheduled work must not be resumed
  * as an ordinary conversation. A failed callback read disables this fallback.
  */
-export const captureCrashResumeRecord = Effect.gen(function* () {
+export const captureCrashResumeRecordStrict = Effect.gen(function* () {
   const engine = yield* OrchestrationEngineService;
   const interactions = yield* ProjectionPendingInteractionRepository;
   const snapshots = yield* ProjectionSnapshotQuery;
@@ -214,7 +214,9 @@ export const captureCrashResumeRecord = Effect.gen(function* () {
   return record.threads.length > 0
     ? ({ kind: "record", record } as const)
     : ({ kind: "absent" } as const);
-}).pipe(
+});
+
+export const captureCrashResumeRecord = captureCrashResumeRecordStrict.pipe(
   Effect.catchCause((cause) =>
     Effect.logWarning("could not capture interrupted chats for crash recovery", { cause }).pipe(
       Effect.as({ kind: "absent" } as const),

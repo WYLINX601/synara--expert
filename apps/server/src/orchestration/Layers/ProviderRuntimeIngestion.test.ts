@@ -120,6 +120,12 @@ function createProviderServiceHarness(options?: { readonly persistedStream?: boo
 
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
+    getMaintenanceActivity: Effect.succeed({
+      dispatches: 0,
+      nativeTasks: 0,
+      runtimeCleanups: 0,
+      pendingRuntimeEvents: 0,
+    }),
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
     steerTurn: () => unsupported(),

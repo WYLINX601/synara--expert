@@ -57,6 +57,7 @@ export class ObsidianSource {
     sourceId = "obsidian",
     label = "Obsidian",
     token = randomBytes(32).toString("hex"),
+    private readonly admitPublication: () => boolean = () => true,
   ) {
     this.manifest = { ...OBSIDIAN_CONTEXT_MANIFEST, id: sourceId, label };
     this.token = token;
@@ -170,6 +171,10 @@ export class ObsidianSource {
         }
         if (peer !== this.peer || !this.policy.enabled) throw new Error("Connection revoked.");
         if (message.kind === "publish") {
+          // Native window leases do not pass through backend RPC admission.
+          // Refuse new transient context publications without closing an
+          // already paired Vault or interrupting its ongoing editing.
+          if (!this.admitPublication()) return;
           const publication = Schema.decodeUnknownSync(AmbientContextPublication)(
             message.publication,
           );

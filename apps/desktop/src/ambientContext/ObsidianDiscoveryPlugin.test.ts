@@ -3,17 +3,22 @@ import { readFileSync } from "node:fs";
 import * as Fs from "node:fs/promises";
 import * as Path from "node:path";
 import * as Os from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DesktopAmbientContext } from "./DesktopAmbientContext";
 const require = createRequire(import.meta.url);
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => Fs.rm(root, { recursive: true, force: true })));
 });
 async function setup(realpath?: () => Promise<string>) {
-  const root = await Fs.mkdtemp(Path.join(Os.tmpdir(), "synara-companion-discovery-"));
-  roots.push(root);
+  const container = await Fs.realpath(
+    await Fs.mkdtemp(Path.join(Os.tmpdir(), "synara-companion-discovery-")),
+  );
+  roots.push(container);
+  const root = Path.join(container, "SynaraContext");
+  await Fs.mkdir(root, { mode: 0o700 });
   const module = { exports: undefined as unknown };
   const opened: string[] = [];
   class Socket {
@@ -38,7 +43,7 @@ async function setup(realpath?: () => Promise<string>) {
             : id === "node:fs/promises" && realpath
               ? { ...Fs, realpath }
               : id === "node:os"
-                ? { ...Os, homedir: () => root }
+                ? { ...Os, homedir: () => container }
                 : require(id),
       process: { platform: "linux", env: {} },
       WebSocket: Socket,
@@ -46,55 +51,252 @@ async function setup(realpath?: () => Promise<string>) {
       setTimeout,
     },
   );
-  // Exercise the actual plain-JS plugin lifecycle without opening the user's Vault.
+  // Exercise the actual plain-JS plugin lifecycle only against private fixtures.
   const Plugin = module.exports as new () => any;
   const plugin = new Plugin();
+  const descriptor = { key: "synara", directory: root, profiles: {} as Record<string, string> };
   Object.assign(plugin, {
-    discoveryRoot: root,
+    discoveryRoots: [descriptor],
+    discoveryRoot: null,
+    discoveryRootKey: "",
+    selectionKey: "",
     vaultId: randomUUID(),
     requestId: randomUUID(),
     instanceId: "",
+    clientHash: "test",
     clientPath: Path.join(root, "clients", "test.json"),
     autoConnect: true,
     discoveryRevision: 0,
     retryAt: 0,
+    loadData: vi.fn(async () => ({})),
+    saveData: vi.fn(async () => {}),
     app: { vault: { getName: () => "Paper" } },
   });
-  async function instance(id = randomUUID(), token = "a".repeat(64)) {
+  await Fs.mkdir(Path.dirname(plugin.clientPath), { recursive: true, mode: 0o700 });
+  await Fs.writeFile(
+    plugin.clientPath,
+    JSON.stringify({ vaultId: plugin.vaultId, instanceId: "" }),
+    { mode: 0o600 },
+  );
+  let sequence = 0;
+  async function instance(
+    id = randomUUID(),
+    token = "a".repeat(64),
+    selectedRoot = descriptor,
+    vaultId = plugin.vaultId,
+  ) {
+    const profile = Path.join(container, `${selectedRoot.key}-profile-${sequence++}`);
+    const applicationId =
+      selectedRoot.key === "linx"
+        ? "com.wylinx.linx"
+        : selectedRoot.key === "linx-preview"
+          ? "com.wylinx.linx.preview"
+          : `com.emanueledipietro.synara.fixture${sequence}`;
+    selectedRoot.profiles[applicationId] = profile;
+    await Fs.mkdir(profile, { mode: 0o700 });
+    await Fs.writeFile(
+      Path.join(profile, "ambient-context-instance.json"),
+      JSON.stringify({ schemaVersion: 1, instanceId: id }),
+      { mode: 0o600 },
+    );
+    const sourceId = createHash("sha256").update(`${id}\0${vaultId}`).digest("hex");
     const connection = {
-      id: "b".repeat(64),
-      sourceId: "b".repeat(64),
-      vaultId: plugin.vaultId,
+      id: sourceId,
+      sourceId,
+      vaultId,
       label: "Paper",
       endpoint: "ws://127.0.0.1:12345",
     };
     const record = {
-      schemaVersion: 1,
+      schemaVersion: 2,
+      applicationId,
+      profilePath: profile,
       instanceId: id,
-      label: "Synara",
+      label: selectedRoot.key === "synara" ? "Synara" : selectedRoot.key,
       updatedAt: new Date().toISOString(),
       connections: [connection],
     };
-    await Fs.mkdir(Path.join(root, "instances"), { recursive: true });
-    await Fs.writeFile(Path.join(root, "instances", `${id}.json`), JSON.stringify(record));
+    await Fs.mkdir(Path.join(selectedRoot.directory, "instances"), {
+      recursive: true,
+      mode: 0o700,
+    });
+    const locator = Path.join(selectedRoot.directory, "instances", `${id}.json`);
+    await Fs.writeFile(locator, JSON.stringify(record), { mode: 0o600 });
     async function grant() {
-      await Fs.mkdir(Path.join(root, "grants", id), { recursive: true });
+      await Fs.mkdir(Path.join(selectedRoot.directory, "grants", id), {
+        recursive: true,
+        mode: 0o700,
+      });
       await Fs.writeFile(
-        Path.join(root, "grants", id, `${plugin.vaultId}.json`),
+        Path.join(selectedRoot.directory, "grants", id, `${vaultId}.json`),
         JSON.stringify({
           schemaVersion: 1,
           instanceId: id,
-          vaultId: plugin.vaultId,
+          vaultId,
           sourceId: connection.sourceId,
           token,
         }),
+        { mode: 0o600 },
       );
     }
-    return { id, grant, record };
+    return { id, grant, record, locator, profile, selectionKey: `${selectedRoot.key}:${id}` };
   }
-  return { root, plugin, opened, instance };
+  async function addRoot(key: string) {
+    const directory = Path.join(container, key, "ambient-context-discovery");
+    await Fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    const added = { key, directory, profiles: {} as Record<string, string> };
+    plugin.discoveryRoots.push(added);
+    const vaultId = randomUUID();
+    await Fs.mkdir(Path.join(directory, "clients"), { mode: 0o700 });
+    await Fs.writeFile(
+      Path.join(directory, "clients", "test.json"),
+      JSON.stringify({ vaultId, instanceId: "" }),
+      { mode: 0o600 },
+    );
+    return { ...added, vaultId };
+  }
+  return { root, container, plugin, opened, instance, addRoot };
 }
 describe("Companion automatic discovery", () => {
+  it("keeps Linx and Preview roots, grants and identical instance IDs separate until explicit selection", async () => {
+    const { root, plugin, opened, instance, addRoot } = await setup();
+    const primaryRoot = await addRoot("linx");
+    const previewRoot = await addRoot("linx-preview");
+    const sharedId = randomUUID();
+    const primary = await instance(sharedId, "a".repeat(64), primaryRoot, primaryRoot.vaultId);
+    const preview = await instance(sharedId, "b".repeat(64), previewRoot, previewRoot.vaultId);
+    preview.record.connections[0]!.endpoint = "ws://127.0.0.1:23456";
+    await Fs.writeFile(preview.locator, JSON.stringify(preview.record));
+    await primary.grant();
+    await preview.grant();
+    await plugin.discover();
+    expect(opened).toEqual([]);
+    expect(plugin.instances).toHaveLength(2);
+    expect(plugin.selectionKey).toBe("");
+    await expect(Fs.stat(Path.join(primaryRoot.directory, "vaults"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await plugin.requestConnection(primary.selectionKey);
+    expect(opened).toEqual(["ws://127.0.0.1:12345"]);
+    expect(plugin.discoveryRootKey).toBe("linx");
+    expect(plugin.token).toBe("a".repeat(64));
+    expect(plugin.saveData).toHaveBeenLastCalledWith({
+      discoveryRootKey: "linx",
+      instanceId: sharedId,
+    });
+    expect(JSON.stringify(plugin.saveData.mock.calls)).not.toContain("a".repeat(64));
+    expect(
+      await Fs.readFile(Path.join(primaryRoot.directory, "clients", "test.json"), "utf8"),
+    ).not.toContain("a".repeat(64));
+    await expect(
+      Fs.stat(Path.join(root, "vaults", `${primaryRoot.vaultId}.json`)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    // Even a matching filename in the other root is not a credential fallback.
+    const grantPath = Path.join(
+      primaryRoot.directory,
+      "grants",
+      sharedId,
+      `${primaryRoot.vaultId}.json`,
+    );
+    const grant = await Fs.readFile(grantPath);
+    await Fs.writeFile(
+      Path.join(previewRoot.directory, "grants", sharedId, `${primaryRoot.vaultId}.json`),
+      grant,
+    );
+    await Fs.rm(grantPath);
+    await plugin.discover();
+    expect(plugin.token).toBe("");
+    expect(plugin.socket).toBeNull();
+    expect(opened).toHaveLength(1);
+    await Fs.rm(primary.locator);
+    await plugin.discover();
+    expect(plugin.selectionKey).toBe(primary.selectionKey);
+    expect(plugin.discoveryRootKey).toBe("linx");
+    expect(opened).toHaveLength(1);
+  });
+
+  it("does not create a Linx profile or discovery directory just because no host is installed", async () => {
+    const { container, plugin, opened } = await setup();
+    const profile = Path.join(container, "not-created");
+    plugin.discoveryRoots = [
+      {
+        key: "linx",
+        directory: Path.join(profile, "ambient-context-discovery"),
+        profiles: { "com.wylinx.linx": profile },
+      },
+    ];
+    await plugin.discover();
+    expect(opened).toEqual([]);
+    await expect(Fs.stat(profile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["application", "profile", "identity", "source", "endpoint", "old-schema"] as const)(
+    "rejects a mismatched %s record before pairing",
+    async (changed) => {
+      const { plugin, instance, addRoot, opened } = await setup();
+      const owned = await addRoot("linx");
+      const server = await instance(randomUUID(), "a".repeat(64), owned, owned.vaultId);
+      await server.grant();
+      if (changed === "application") server.record.applicationId = "com.emanueledipietro.synara";
+      if (changed === "profile") server.record.profilePath += "-other";
+      if (changed === "identity")
+        await Fs.writeFile(
+          Path.join(server.profile, "ambient-context-instance.json"),
+          JSON.stringify({ schemaVersion: 1, instanceId: randomUUID() }),
+        );
+      if (changed === "source") server.record.connections[0]!.sourceId = "e".repeat(64);
+      if (changed === "endpoint") server.record.connections[0]!.endpoint = "ws://127.0.0.1:99999";
+      if (changed === "old-schema") server.record.schemaVersion = 1;
+      await Fs.writeFile(server.locator, JSON.stringify(server.record));
+      await plugin.discover();
+      expect(plugin.instances).toHaveLength(0);
+      expect(opened).toEqual([]);
+    },
+  );
+
+  it("consumes the native isolated Linx discovery/grant producer without a shared-root alias", async () => {
+    const { plugin, addRoot, opened, container } = await setup();
+    const owned = await addRoot("linx");
+    const profile = Path.join(container, "linx");
+    const applicationId = "com.wylinx.linx";
+    owned.profiles[applicationId] = profile;
+    const context = new DesktopAmbientContext(
+      Path.join(profile, "ambient-context-settings.json"),
+      () => {},
+      {
+        sharedDataDirectory: owned.directory,
+        instanceLabel: "Linx",
+        applicationId,
+      },
+    );
+    try {
+      await context.configure("obsidian", { enabled: true, allowedTypes: ["resource.identity"] });
+      await plugin.discover();
+      await expect
+        .poll(() => context.getState().then((state) => state.pendingConnections?.length), {
+          timeout: 3_000,
+        })
+        .toBe(1);
+      const pending = (await context.getState()).pendingConnections![0]!;
+      await context.approveConnection(pending.id);
+      await plugin.discover();
+      expect(plugin.discoveryRootKey).toBe("linx");
+      expect(plugin.token).toMatch(/^[a-f0-9]{64}$/);
+      expect(opened).toHaveLength(1);
+      expect(opened[0]).toMatch(/^ws:\/\/127\.0\.0\.1:[0-9]+$/);
+      const record = JSON.parse(
+        await Fs.readFile(
+          Path.join(owned.directory, "instances", `${plugin.instanceId}.json`),
+          "utf8",
+        ),
+      );
+      expect(record).toMatchObject({ schemaVersion: 2, applicationId, profilePath: profile });
+      plugin.onunload();
+    } finally {
+      await context.stop();
+    }
+  });
+
   it("waits for approval then connects without saving credentials to preferences or discovery", async () => {
     const { root, plugin, instance, opened } = await setup();
     const server = await instance();
@@ -119,7 +321,7 @@ describe("Companion automatic discovery", () => {
     await b.grant();
     await plugin.discover();
     expect(opened).toEqual([]);
-    await plugin.requestConnection(a.id);
+    await plugin.requestConnection(a.selectionKey);
     expect(opened).toHaveLength(1);
     await Fs.rm(Path.join(root, "instances", `${a.id}.json`));
     await plugin.discover();

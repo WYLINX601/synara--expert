@@ -113,11 +113,10 @@ function sameVisits(left: Readonly<Record<string, string>>, right: Record<string
 export function persistThreadVisitedState(
   state: AppState,
   options: { readonly force?: boolean } = {},
-): void {
-  if (typeof window === "undefined" || !state.threadsHydrated) return;
+): boolean {
+  if (typeof window === "undefined" || !state.threadsHydrated) return false;
   const summaries = state.sidebarThreadSummaryById;
-  if (!options.force && summaries === lastSavedSummaries) return;
-  lastSavedSummaries = summaries;
+  if (!options.force && summaries === lastSavedSummaries) return true;
 
   let watermarkMs = 0;
   let unread: SidebarThreadSummary[] = [];
@@ -149,14 +148,18 @@ export function persistThreadVisitedState(
     previous.watermarkAt === watermarkAt &&
     sameVisits(previous.byThreadId, byThreadId)
   ) {
-    return;
+    lastSavedSummaries = summaries;
+    return true;
   }
   const next = { watermarkAt, byThreadId };
   try {
     window.localStorage.setItem(THREAD_VISITED_STORAGE_KEY, JSON.stringify(next));
     persisted = next;
+    lastSavedSummaries = summaries;
+    return true;
   } catch (error) {
     // Quota/private-mode failures only cost unread state after a reload.
     console.debug("Failed to persist thread visits", error);
+    return false;
   }
 }

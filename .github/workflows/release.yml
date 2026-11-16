@@ -1,177 +1,75 @@
-name: Release Desktop
-
+name: Linx controlled release
 on:
   push:
-    tags:
-      - "v*.*.*"
+    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (for example 1.2.3 or v1.2.3)"
+        description: "Exact Linx product version; dispatch is build-only"
         required: true
         type: string
-      publish_release:
-        description: "Publish the GitHub/npm release after successful builds"
-        required: true
-        default: false
-        type: boolean
-      platform:
-        description: "Build-only platform scope (publication requires all)"
-        type: choice
-        default: all
-        options: [all, mac-arm64, mac-x64, linux-x64, win-x64]
-      stage:
-        description: "Build-only stage (publication requires artifact; preflight runs only the quality gates)"
-        type: choice
-        default: artifact
-        options: [artifact, native, icon, js, preflight]
-      cua_benchmark_baseline:
-        description: "Optional full baseline commit for paired cold Cua builds (native, one Mac only)"
-        type: string
-        default: ""
-
 permissions: {}
-
-env:
-  # The same build setting is fingerprinted on every portable-output consumer.
-  AZURE_TRUSTED_SIGNING_SUBJECT_DN: ${{ secrets.AZURE_TRUSTED_SIGNING_SUBJECT_DN }}
-
 concurrency:
-  group: synara-desktop-release
+  group: linx-controlled-release
   cancel-in-progress: false
-
 jobs:
   preflight:
-    name: Preflight
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
-      version: ${{ steps.release_meta.outputs.version }}
-      tag: ${{ steps.release_meta.outputs.tag }}
-      is_prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
-      make_latest: ${{ steps.release_meta.outputs.make_latest }}
-      mirror_to_stable_channel: ${{ steps.release_meta.outputs.mirror_to_stable_channel }}
-      publish_release: ${{ steps.release_mode.outputs.publish_release }}
-      release_lane: ${{ steps.release_meta.outputs.release_lane }}
-      bridge_tag: ${{ steps.release_meta.outputs.bridge_tag }}
-      update_channel: ${{ steps.release_meta.outputs.update_channel }}
-      desktop_flavor: ${{ steps.release_meta.outputs.desktop_flavor }}
-      source_commit: ${{ steps.source_provenance.outputs.source_commit }}
-      source_tag: ${{ steps.source_provenance.outputs.source_tag }}
-      lockfile_sha256: ${{ steps.source_provenance.outputs.lockfile_sha256 }}
-      ref: ${{ steps.source_provenance.outputs.source_commit }}
+      version: ${{ steps.policy.outputs.version }}
+      tag: ${{ steps.policy.outputs.tag }}
+      desktop_flavor: workbench
+      publish_release: ${{ github.event_name == 'push' }}
+      source_commit: ${{ steps.source.outputs.source_commit }}
+      source_tag: ${{ steps.source.outputs.source_tag }}
+      lockfile_sha256: ${{ steps.source.outputs.lockfile_sha256 }}
+      ref: ${{ steps.source.outputs.source_commit }}
       matrix: ${{ steps.scope.outputs.matrix }}
       cua_matrix: ${{ steps.scope.outputs.cua_matrix }}
-      prepare_cua: ${{ steps.scope.outputs.prepare_cua }}
-      build_icon: ${{ steps.scope.outputs.build_icon }}
-      build_js: ${{ steps.scope.outputs.build_js }}
-      build_native: ${{ steps.scope.outputs.build_native }}
-      benchmark_native: ${{ steps.scope.outputs.benchmark_native }}
-      quality_gates: ${{ steps.scope.outputs.quality_gates }}
-      package_artifacts: ${{ steps.scope.outputs.package_artifacts }}
-      build_server: ${{ steps.scope.outputs.build_server }}
+      prepare_cua: "true"
+      build_icon: "true"
+      build_js: "true"
+      benchmark_native: "false"
+      quality_gates: "true"
+      package_artifacts: "true"
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
         with:
           node-version-file: package.json
-
-      - id: release_mode
-        name: Resolve publication mode
-        shell: bash
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - id: policy
         env:
-          PUBLISH_RELEASE: ${{ github.event_name == 'push' || inputs.publish_release }}
-        run: |
-          echo "publish_release=$PUBLISH_RELEASE" >> "$GITHUB_OUTPUT"
-          if [[ "$PUBLISH_RELEASE" == "true" ]]; then
-            echo "Publication enabled."
-          else
-            echo "Build-only validation enabled; no release or package will be published."
-          fi
-
+          RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+        run: bun scripts/resolve-release-update-policy.ts "$RELEASE_VERSION"
       - id: scope
-        name: Validate build scope
         env:
-          BUILD_PLATFORM: ${{ inputs.platform || 'all' }}
-          BUILD_STAGE: ${{ inputs.stage || 'artifact' }}
-          PUBLISH_RELEASE: ${{ steps.release_mode.outputs.publish_release }}
-          CUA_BENCHMARK_BASELINE: ${{ inputs.cua_benchmark_baseline }}
-        run: node scripts/resolve-release-build-scope.ts
-
-      - id: release_meta
-        name: Resolve release policy
+          BUILD_PLATFORM: mac-arm64
+          PUBLISH_RELEASE: ${{ github.event_name == 'push' }}
+        run: bun scripts/resolve-release-build-scope.ts
+      - id: source
         env:
-          RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version || github.ref_name }}
-        run: node scripts/resolve-release-update-policy.ts "$RELEASE_VERSION"
-
-      - id: source_provenance
-        name: Verify exact release source
+          VERSION: ${{ steps.policy.outputs.version }}
+          TAG: ${{ steps.policy.outputs.tag }}
+          PUBLICATION: ${{ github.event_name == 'push' }}
+          COMMIT: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: bun scripts/verify-release-source-provenance.ts "$VERSION" "$TAG" "$PUBLICATION" "$COMMIT" "$REF_TYPE" "$REF_NAME"
+      - name: Inspect actual reviewer protection before entering secret-bearing jobs
+        if: github.event_name == 'push'
         env:
-          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
-          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
-          PUBLISH_RELEASE: ${{ steps.release_mode.outputs.publish_release }}
-          EXPECTED_COMMIT: ${{ github.sha }}
-          SOURCE_REF_TYPE: ${{ github.ref_type }}
-          SOURCE_REF_NAME: ${{ github.ref_name }}
-        run: |
-          node scripts/verify-release-source-provenance.ts \
-            "$RELEASE_VERSION" \
-            "$RELEASE_TAG" \
-            "$PUBLISH_RELEASE" \
-            "$EXPECTED_COMMIT" \
-            "$SOURCE_REF_TYPE" \
-            "$SOURCE_REF_NAME"
-
-      - name: Verify public updater repository
-        if: steps.release_mode.outputs.publish_release == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          visibility="$(gh api "repos/${GITHUB_REPOSITORY}" --jq .visibility)"
-          if [[ "$visibility" != "public" ]]; then
-            echo "The dedicated updater channel requires the public GitHub provider; repository visibility is $visibility." >&2
-            exit 1
-          fi
-
-      - name: Verify pinned compatibility feed
-        if: ${{ steps.release_meta.outputs.release_lane == 'clean' && steps.release_mode.outputs.publish_release == 'true' && steps.release_meta.outputs.mirror_to_stable_channel == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRIDGE_TAG: ${{ steps.release_meta.outputs.bridge_tag }}
-          UPDATE_CHANNEL: ${{ steps.release_meta.outputs.update_channel }}
-        run: |
-          actual_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
-          if [[ "$actual_latest" != "$BRIDGE_TAG" ]]; then
-            echo "Expected GitHub Latest to remain pinned to $BRIDGE_TAG, got $actual_latest." >&2
-            exit 1
-          fi
-
-          bridge_release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${BRIDGE_TAG}" --jq .id)"
-          bridge_assets="$(
-            gh api --paginate \
-              "repos/${GITHUB_REPOSITORY}/releases/${bridge_release_id}/assets?per_page=100" \
-              --jq '.[].name'
-          )"
-          required_assets=(
-            latest-mac.yml
-            latest.yml
-            latest-linux.yml
-            "${UPDATE_CHANNEL}-mac.yml"
-            "${UPDATE_CHANNEL}.yml"
-            "${UPDATE_CHANNEL}-linux.yml"
-          )
-          for required_asset in "${required_assets[@]}"; do
-            if ! grep -Fxq "$required_asset" <<< "$bridge_assets"; then
-              echo "Pinned compatibility feed is missing $required_asset." >&2
-              exit 1
-            fi
-          done
-
+          GH_TOKEN: ${{ secrets.LINX_RELEASE_POLICY_TOKEN }}
+        run: bun scripts/linx-release.ts protection
   # Preflight resolves policy only, so the quality gates fan out immediately.
   # The serial server suite is the longest gate; it runs in its own shards below.
   quality:
@@ -203,7 +101,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile --concurrent-scripts=1
 
-      - name: Verify Synara identity
+      - name: Verify Linx identity
         run: bun run brand:check
 
       - name: Lint
@@ -313,7 +211,6 @@ jobs:
       - name: Compile Icon Composer catalog
         env:
           DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
-          DESKTOP_FLAVOR: ${{ needs.preflight.outputs.desktop_flavor }}
         run: |
           set -euo pipefail
           xcodebuild -version
@@ -322,9 +219,6 @@ jobs:
           # desktopIconAssetPaths(flavor).macIconComposer. The .icon folder
           # must be named Synara to match CFBundleIconName in the app bundle.
           icon_source="assets/prod/Synara.icon"
-          if [[ "$DESKTOP_FLAVOR" == "beta" ]]; then
-            icon_source="assets/beta/Synara.icon"
-          fi
           xcrun actool "$icon_source" --compile "$RUNNER_TEMP/mac-icon" --platform macosx --minimum-deployment-target 26.0 --app-icon Synara --include-all-app-icons --output-partial-info-plist "$RUNNER_TEMP/icon-partial.plist" --output-format human-readable-text
           test -s "$RUNNER_TEMP/mac-icon/Assets.car"
 
@@ -341,7 +235,7 @@ jobs:
     needs: preflight
     if: needs.preflight.outputs.prepare_cua == 'true'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ needs.preflight.outputs.benchmark_native == 'true' && 25 || 30 }}
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: read
@@ -362,7 +256,6 @@ jobs:
         uses: ./.github/actions/provision-cua
         with:
           arch: ${{ matrix.arch }}
-          benchmark-baseline: ${{ inputs.cua_benchmark_baseline || '' }}
       - name: Upload prepared Cua for this candidate
         if: needs.preflight.outputs.package_artifacts == 'true'
         uses: actions/upload-artifact@v7
@@ -371,17 +264,10 @@ jobs:
           path: ${{ runner.temp }}/cua-artifact
           retention-days: 30
           if-no-files-found: error
-      - name: Upload Cua benchmark evidence
-        if: ${{ always() && needs.preflight.outputs.benchmark_native == 'true' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: cua-benchmark-${{ matrix.arch }}
-          path: ${{ runner.temp }}/cua-benchmark/evidence
-          if-no-files-found: error
 
   build:
     name: Build ${{ matrix.label }}
-    # Tests consume the same source independently; both publishers gate on them.
+    # Quality jobs consume the same fixed source; signing awaits every gate.
     needs: [preflight, build_mac_icon, build_portable, prepare_cua]
     if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.package_artifacts == 'true' && (needs.prepare_cua.result == 'success' || (needs.preflight.outputs.prepare_cua == 'false' && needs.prepare_cua.result == 'skipped')) && (needs.build_mac_icon.result == 'success' || (needs.preflight.outputs.build_icon == 'false' && needs.build_mac_icon.result == 'skipped')) && needs.build_portable.result == 'success' }}
     permissions:
@@ -402,466 +288,77 @@ jobs:
       source_commit: ${{ needs.preflight.outputs.source_commit }}
       source_tag: ${{ needs.preflight.outputs.source_tag }}
       lockfile_sha256: ${{ needs.preflight.outputs.lockfile_sha256 }}
-      allow_unsigned_windows_publication: ${{ vars.SYNARA_ALLOW_UNSIGNED_WINDOWS_RELEASE == needs.preflight.outputs.version }}
-    secrets: inherit
 
-  publish_cli:
-    name: Publish CLI to npm
-    # Prereleases (beta lane) never touch the npm `latest` dist-tag.
-    if: ${{ needs.preflight.outputs.publish_release == 'true' && vars.SYNARA_PUBLISH_CLI == '1' && needs.preflight.outputs.is_prerelease == 'false' && needs.quality.result == 'success' && needs.server_tests.result == 'success' }}
-    needs: [preflight, quality, server_tests, build, build_portable]
+  sign_candidate:
+    if: github.event_name == 'push'
+    needs: [preflight, quality, server_tests, build]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.preflight.outputs.ref }}
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: package.json
-          registry-url: https://registry.npmjs.org
-
-      - name: Install dependencies
-        # Preflight already validates lifecycle scripts; the publish job only
-        # needs dependencies available to build the package.
-        run: bun install --frozen-lockfile --ignore-scripts
-
-      - name: Restore portable outputs
-        uses: ./.github/actions/restore-portable-build
-        with:
-          source-commit: ${{ needs.preflight.outputs.source_commit }}
-
-      - name: Publish CLI package
-        run: node apps/server/scripts/cli.ts publish --tag latest --app-version "${{ needs.preflight.outputs.version }}" --verbose
-
-  build_server_tarball:
-    name: Build server tarball
-    if: needs.preflight.outputs.build_server == 'true'
-    needs: [preflight, build_portable]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.preflight.outputs.ref }}
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: package.json
-
-      - name: Install dependencies
-        # Preflight already validates lifecycle scripts; this job only needs
-        # dependencies available to build the package.
-        run: bun install --frozen-lockfile --ignore-scripts
-
-      - name: Restore portable outputs
-        uses: ./.github/actions/restore-portable-build
-        with:
-          source-commit: ${{ needs.preflight.outputs.source_commit }}
-
-      - name: Pack server tarball
-        run: node apps/server/scripts/cli.ts pack --out release-server --app-version "${{ needs.preflight.outputs.version }}"
-
-      - name: Upload server tarball
-        uses: actions/upload-artifact@v7
-        with:
-          name: server-tarball
-          retention-days: 30
-          path: release-server/*.tar.gz
-          if-no-files-found: error
-
-  release:
-    name: Publish GitHub Release
-    if: ${{ needs.preflight.outputs.publish_release == 'true' && needs.quality.result == 'success' && needs.server_tests.result == 'success' }}
-    needs: [preflight, quality, server_tests, build, build_server_tarball]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
     permissions:
       contents: write
+    environment:
+      name: linx-signing
+    outputs:
+      digest: ${{ steps.stage.outputs.digest }}
+      url: ${{ steps.stage.outputs.url }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.preflight.outputs.ref }}
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: package.json
-
-      - name: Download all desktop artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: desktop-*
-          merge-multiple: true
-          path: release-assets
-
-      - name: Download server tarball
-        uses: actions/download-artifact@v8
-        with:
-          name: server-tarball
-          path: release-assets
-
-      - name: Merge macOS updater manifests
-        run: |
-          node scripts/merge-mac-update-manifests.ts \
-            release-assets/latest-mac.yml \
-            release-assets/latest-mac-x64.yml
-          rm -f release-assets/latest-mac-x64.yml
-
-      - name: Prepare updater feed metadata
-        env:
-          UPDATE_CHANNEL: ${{ needs.preflight.outputs.update_channel }}
-        run: node scripts/prepare-release-update-feed.ts release-assets --channel "$UPDATE_CHANNEL"
-
-      - name: Prevent compatibility channel rollback
-        if: ${{ needs.preflight.outputs.release_lane == 'bridge' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRIDGE_TAG: ${{ needs.preflight.outputs.bridge_tag }}
-          BRIDGE_VERSION: ${{ needs.preflight.outputs.version }}
-          UPDATE_CHANNEL: ${{ needs.preflight.outputs.update_channel }}
-        run: |
-          set -euo pipefail
-
-          if ! bridge_release_json="$(
-            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${BRIDGE_TAG}" 2>&1
-          )"; then
-            if grep -q "HTTP 404" <<< "$bridge_release_json"; then
-              exit 0
-            fi
-            echo "$bridge_release_json" >&2
-            exit 1
-          fi
-          bridge_release_id="$(jq -r .id <<< "$bridge_release_json")"
-
-          bridge_assets="$(
-            gh api --paginate \
-              "repos/${GITHUB_REPOSITORY}/releases/${bridge_release_id}/assets?per_page=100" \
-              --jq '.[].name'
-          )"
-          channel_manifests=(
-            "${UPDATE_CHANNEL}-mac.yml"
-            "${UPDATE_CHANNEL}.yml"
-            "${UPDATE_CHANNEL}-linux.yml"
-          )
-          existing_manifests=()
-          for manifest in "${channel_manifests[@]}"; do
-            if grep -Fxq "$manifest" <<< "$bridge_assets"; then
-              existing_manifests+=("$manifest")
-            fi
-          done
-
-          if [[ "${#existing_manifests[@]}" -eq 0 ]]; then
-            exit 0
-          fi
-          if [[ "${#existing_manifests[@]}" -ne "${#channel_manifests[@]}" ]]; then
-            echo "Compatibility feed has a partial dedicated-channel manifest set: ${existing_manifests[*]}." >&2
-            exit 1
-          fi
-
-          manifest_directory="$(mktemp -d)"
-          trap 'rm -rf "$manifest_directory"' EXIT
-          for manifest in "${channel_manifests[@]}"; do
-            gh release download "$BRIDGE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --pattern "$manifest" \
-              --dir "$manifest_directory"
-            manifest_version="$(
-              sed -n 's/^version:[[:space:]]*//p' "$manifest_directory/$manifest" \
-                | head -n 1 \
-                | tr -d "[:space:]'\""
-            )"
-            if [[ "$manifest_version" != "$BRIDGE_VERSION" ]]; then
-              echo "Refusing to replace $manifest version ${manifest_version:-unknown} with compatibility version $BRIDGE_VERSION." >&2
-              exit 1
-            fi
-          done
-
-      - name: Recheck pinned compatibility feed
-        if: ${{ needs.preflight.outputs.release_lane == 'clean' && needs.preflight.outputs.mirror_to_stable_channel == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRIDGE_TAG: ${{ needs.preflight.outputs.bridge_tag }}
-        run: |
-          actual_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
-          if [[ "$actual_latest" != "$BRIDGE_TAG" ]]; then
-            echo "Expected GitHub Latest to remain pinned to $BRIDGE_TAG, got $actual_latest." >&2
-            exit 1
-          fi
-
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.preflight.outputs.tag }}
-          target_commitish: ${{ needs.preflight.outputs.ref }}
-          name: Synara v${{ needs.preflight.outputs.version }}
-          generate_release_notes: true
-          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
-          make_latest: ${{ needs.preflight.outputs.make_latest }}
-          files: |
-            release-assets/*.dmg
-            release-assets/*.zip
-            release-assets/*.AppImage
-            release-assets/*.exe
-            release-assets/*.blockmap
-            release-assets/*.yml
-            release-assets/*.provenance.json
-            release-assets/*.tar.gz
-          fail_on_unmatched_files: true
-
-      - name: Mirror Synara artifacts onto the pinned updater feed
-        if: ${{ needs.preflight.outputs.mirror_to_stable_channel == 'true' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRIDGE_TAG: ${{ needs.preflight.outputs.bridge_tag }}
-          UPDATE_CHANNEL: ${{ needs.preflight.outputs.update_channel }}
-        run: |
-          set -euo pipefail
-
-          actual_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
-          if [[ "$actual_latest" != "$BRIDGE_TAG" ]]; then
-            echo "Expected GitHub Latest to remain pinned to $BRIDGE_TAG, got $actual_latest." >&2
-            exit 1
-          fi
-
-          shopt -s nullglob
-          payloads=(
-            release-assets/*.dmg
-            release-assets/*.zip
-            release-assets/*.AppImage
-            release-assets/*.exe
-            release-assets/*.blockmap
-          )
-          manifests=(
-            "release-assets/${UPDATE_CHANNEL}-mac.yml"
-            "release-assets/${UPDATE_CHANNEL}.yml"
-            "release-assets/${UPDATE_CHANNEL}-linux.yml"
-          )
-
-          if [[ "${#payloads[@]}" -eq 0 ]]; then
-            echo "No desktop payloads found for the pinned updater feed." >&2
-            exit 1
-          fi
-          for manifest in "${manifests[@]}"; do
-            if [[ ! -f "$manifest" ]]; then
-              echo "Missing updater manifest: $manifest" >&2
-              exit 1
-            fi
-          done
-
-          # Payloads must exist before a manifest is visible, otherwise an
-          # updater can observe a version whose installer is not uploaded yet.
-          gh release upload "$BRIDGE_TAG" "${payloads[@]}" --clobber --repo "$GITHUB_REPOSITORY"
-          gh release upload "$BRIDGE_TAG" "${manifests[@]}" --clobber --repo "$GITHUB_REPOSITORY"
-
-          actual_latest="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)"
-          if [[ "$actual_latest" != "$BRIDGE_TAG" ]]; then
-            echo "Pinned updater feed moved during publication: $actual_latest." >&2
-            exit 1
-          fi
-
-  finalize:
-    name: Finalize release
-    # Prereleases (beta lane) never bump package versions on main.
-    if: ${{ needs.preflight.outputs.publish_release == 'true' && vars.SYNARA_FINALIZE_RELEASE == '1' && needs.preflight.outputs.is_prerelease == 'false' }}
-    needs: [preflight, release]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - id: app_token
-        name: Mint release app token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: main
-          fetch-depth: 0
-          token: ${{ steps.app_token.outputs.token }}
-          persist-credentials: true
-
-      - id: app_bot
-        name: Resolve GitHub App bot identity
-        env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
-          APP_SLUG: ${{ steps.app_token.outputs.app-slug }}
-        run: |
-          user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
-          echo "name=${APP_SLUG}[bot]" >> "$GITHUB_OUTPUT"
-          echo "email=${user_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: package.json
-
-      - id: update_versions
-        name: Update version strings
-        env:
-          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
-        run: node scripts/update-release-package-versions.ts "$RELEASE_VERSION" --github-output
-
-      - name: Format package.json files
-        if: steps.update_versions.outputs.changed == 'true'
-        run: bunx oxfmt apps/server/package.json apps/desktop/package.json apps/web/package.json packages/contracts/package.json
-
-      - name: Refresh lockfile
-        if: steps.update_versions.outputs.changed == 'true'
-        run: bun install --lockfile-only --ignore-scripts
-
-      - name: Commit and push version bump
-        if: steps.update_versions.outputs.changed == 'true'
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
-        run: |
-          if git diff --quiet -- apps/server/package.json apps/desktop/package.json apps/web/package.json packages/contracts/package.json bun.lock; then
-            echo "No version changes to commit."
-            exit 0
-          fi
-
-          git config user.name "${{ steps.app_bot.outputs.name }}"
-          git config user.email "${{ steps.app_bot.outputs.email }}"
-
-          git add apps/server/package.json apps/desktop/package.json apps/web/package.json packages/contracts/package.json bun.lock
-          git commit -m "chore(release): prepare $RELEASE_TAG"
-          git push origin HEAD:main
-
-  cut_next_beta:
-    name: Cut next beta
-    # Stable releases only: tag the next beta off the stable commit so beta installs are never shadowed. Never pushes to main.
-    if: ${{ needs.preflight.outputs.publish_release == 'true' && vars.SYNARA_AUTO_BETA == '1' && needs.preflight.outputs.is_prerelease == 'false' }}
-    needs: [preflight, release]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - id: app_token
-        name: Mint release app token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-
-      - name: Checkout
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.source_commit }}
           fetch-depth: 0
-          token: ${{ steps.app_token.outputs.token }}
-          persist-credentials: true
-
-      - id: app_bot
-        name: Resolve GitHub App bot identity
-        env:
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
-          APP_SLUG: ${{ steps.app_token.outputs.app-slug }}
-        run: |
-          user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
-          echo "name=${APP_SLUG}[bot]" >> "$GITHUB_OUTPUT"
-          echo "email=${user_id}+${APP_SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - uses: actions/download-artifact@v8
         with:
-          node-version-file: package.json
-
-      - id: next
-        name: Resolve next beta version
+          name: desktop-mac-arm64
+          path: release-publish
+      - name: Reinspect environment protection
         env:
-          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
-        run: |
-          if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Expected a stable X.Y.Z release version, got: $RELEASE_VERSION" >&2
-            exit 1
-          fi
-          HIGHEST="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
-          if [ "$HIGHEST" != "v${RELEASE_VERSION}" ]; then
-            echo "v${RELEASE_VERSION} is not the highest stable tag (${HIGHEST:-none}); skipping auto-beta."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "version=" >> "$GITHUB_OUTPUT"
-            echo "tag=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          BASE="${RELEASE_VERSION%.*}.$(( ${RELEASE_VERSION##*.} + 1 ))"
-          VERSION="${BASE}-beta.1"
-          TAG="v${VERSION}"
-          if git ls-remote --tags origin "refs/tags/v${BASE}-beta.*" | grep -q .; then
-            echo "A beta for ${BASE} already exists; skipping."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-      - id: update_versions
-        name: Update version strings
-        if: steps.next.outputs.skip == 'false'
+          GH_TOKEN: ${{ secrets.LINX_RELEASE_POLICY_TOKEN }}
+        run: bun scripts/linx-release.ts protection
+      - id: stage
+        name: Sign and stage complete immutable draft
         env:
-          VERSION: ${{ steps.next.outputs.version }}
-        run: node scripts/update-release-package-versions.ts "$VERSION"
+          GH_TOKEN: ${{ github.token }}
+          LINX_UPDATE_PRIVATE_KEY: ${{ secrets.LINX_UPDATE_PRIVATE_KEY }}
+          LINX_BOOTSTRAP_SOURCE_COMMIT: ${{ vars.LINX_BOOTSTRAP_SOURCE_COMMIT }}
+        run: bun scripts/linx-release.ts stage release-publish
 
-      - name: Format package.json files
-        if: steps.next.outputs.skip == 'false'
-        run: bunx oxfmt apps/server/package.json apps/desktop/package.json apps/web/package.json packages/contracts/package.json
-
-      - name: Refresh lockfile
-        if: steps.next.outputs.skip == 'false'
-        run: bun install --lockfile-only --ignore-scripts
-
-      - name: Commit and tag beta
-        if: steps.next.outputs.skip == 'false'
-        shell: bash
+  promote:
+    needs: [preflight, sign_candidate]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    environment:
+      name: linx-publish
+      url: ${{ needs.sign_candidate.outputs.url }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.source_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Reinspect actual protection
         env:
-          TAG: ${{ steps.next.outputs.tag }}
-          GIT_USER_NAME: ${{ steps.app_bot.outputs.name }}
-          GIT_USER_EMAIL: ${{ steps.app_bot.outputs.email }}
-        run: |
-          git config user.name "$GIT_USER_NAME"
-          git config user.email "$GIT_USER_EMAIL"
-
-          git add apps/server/package.json apps/desktop/package.json apps/web/package.json packages/contracts/package.json bun.lock
-          git commit -m "chore(release): prepare $TAG"
-          git tag "$TAG"
-          git push origin "refs/tags/$TAG"
+          GH_TOKEN: ${{ secrets.LINX_RELEASE_POLICY_TOKEN }}
+        run: bun scripts/linx-release.ts protection
+      - name: Restore exact draft bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ needs.sign_candidate.outputs.digest }}
+        run: mkdir -p release-candidate && bun scripts/linx-release.ts restore release-candidate "$DIGEST"
+      - name: Promote only approved digest without rebuilding or signing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ needs.sign_candidate.outputs.digest }}
+        run: bun scripts/linx-release.ts promote release-candidate "$DIGEST"
+      - name: Validate every public byte without credentials
+        env:
+          DIGEST: ${{ needs.sign_candidate.outputs.digest }}
+        run: bun scripts/linx-release.ts validate release-candidate "$DIGEST"

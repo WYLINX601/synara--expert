@@ -87,6 +87,444 @@ const reserveAndStage = (
   });
 
 layer("ManagedAttachmentRepository", (it) => {
+  for (const reason of [
+    "upload-write-failed",
+    "upload-finalize-failed",
+    "assistant-image-completion-not-committed",
+  ]) {
+    for (const completed of [false, true]) {
+      it.effect(`offline replay restores ${reason} after cleanup completed=${completed}`, () =>
+        Effect.gen(function* () {
+          yield* resetSchema;
+          const repository = yield* ManagedAttachmentRepository;
+          const sql = yield* SqlClient.SqlClient;
+          const input = yield* reserveAndStage(repository);
+          yield* repository.cancelStaged({
+            ...input,
+            reason,
+            requestedAt: "2026-07-14T10:01:00.000Z",
+          });
+          yield* repository.leaseCleanup({
+            leaseOwner: "copied-source-worker",
+            now: "2026-07-14T10:01:00.000Z",
+            leaseExpiresAt: "2026-07-15T10:00:00.000Z",
+            limit: 1,
+          });
+          if (completed) {
+            assert.isTrue(
+              yield* repository.completeCleanup({
+                attachmentId: input.attachmentId,
+                expectedLeaseOwner: "copied-source-worker",
+                disposition: "deleted",
+                completedAt: "2026-07-14T10:02:00.000Z",
+              }),
+            );
+          }
+          assert.deepStrictEqual(yield* repository.reserve(input), { status: "id-conflict" });
+          const replayInput = {
+            ...input,
+            reservedBytes: 10,
+            now: "2026-07-14T12:00:00.000Z",
+            offlineReplay: true as const,
+          };
+          const replay = yield* repository.reserve(replayInput);
+          assert.strictEqual(replay.status, "reserved");
+          if (replay.status !== "reserved") return;
+          for (const field of [
+            "attachmentId",
+            "ownerThreadId",
+            "ownerKind",
+            "ownerId",
+            "kind",
+            "originalName",
+            "mimeType",
+            "relativePath",
+          ] as const) {
+            assert.strictEqual(replay.attachment[field], input[field]);
+          }
+          assert.strictEqual(replay.attachment.state, "uploading");
+          assert.strictEqual(replay.attachment.reservedBytes, 10);
+          assert.strictEqual(replay.attachment.createdAt, input.now);
+          assert.strictEqual(replay.attachment.updatedAt, replayInput.now);
+          for (const field of [
+            "sizeBytes",
+            "sha256",
+            "stagingExpiresAt",
+            "claimCommandId",
+            "claimMessageId",
+            "claimedAt",
+            "deleteReason",
+            "deleteRequestedAt",
+            "deletedAt",
+          ] as const) {
+            assert.isNull(replay.attachment[field]);
+          }
+          assert.deepStrictEqual(yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`, []);
+          assert.deepStrictEqual(yield* repository.getUsage(input), {
+            homeBytes: 10,
+            homeCount: 1,
+            principalStagingBytes: 10,
+            principalStagingCount: 1,
+          });
+          assert.strictEqual(
+            (yield* repository.finalizeStaged({
+              ...input,
+              sizeBytes: 10,
+              sha256: "b".repeat(64),
+              stagingExpiresAt: "2026-07-14T13:00:00.000Z",
+              now: replayInput.now,
+            })).status,
+            "staged",
+          );
+        }),
+      );
+    }
+  }
+
+  it.effect(
+    "offline replay restores crash-uploading and expired staged rows without double charging",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* ManagedAttachmentRepository;
+        for (const staged of [false, true]) {
+          yield* resetSchema;
+          const input = reserveInput({ reservedBytes: 10 });
+          if (staged) {
+            yield* reserveAndStage(repository, { reservedBytes: 10 });
+            const unexpired = { ...input, offlineReplay: true as const };
+            assert.deepStrictEqual(yield* repository.reserve(unexpired), { status: "id-conflict" });
+          } else {
+            yield* repository.reserve(input);
+          }
+          assert.deepStrictEqual(yield* repository.reserve(input), { status: "id-conflict" });
+          const replay = {
+            ...input,
+            offlineReplay: true as const,
+            now: "2026-07-14T11:00:00.000Z",
+          };
+          const result = yield* repository.reserve(replay);
+          assert.strictEqual(result.status, "reserved");
+          if (result.status === "reserved") {
+            assert.strictEqual(result.attachment.state, "uploading");
+            assert.isNull(result.attachment.sizeBytes);
+            assert.isNull(result.attachment.sha256);
+            assert.isNull(result.attachment.stagingExpiresAt);
+          }
+          assert.deepStrictEqual(yield* repository.getUsage(input), {
+            homeBytes: 10,
+            homeCount: 1,
+            principalStagingBytes: 10,
+            principalStagingCount: 1,
+          });
+        }
+      }),
+  );
+
+  it.effect(
+    "offline replay rejects every identity mismatch without changing rows or copied cleanup leases",
+    () =>
+      Effect.gen(function* () {
+        yield* resetSchema;
+        const repository = yield* ManagedAttachmentRepository;
+        const sql = yield* SqlClient.SqlClient;
+        const input = yield* reserveAndStage(repository);
+        yield* repository.cancelStaged({
+          ...input,
+          reason: "upload-write-failed",
+          requestedAt: input.now,
+        });
+        yield* repository.leaseCleanup({
+          leaseOwner: "copied-source-worker",
+          now: input.now,
+          leaseExpiresAt: "2026-07-15T10:00:00.000Z",
+          limit: 1,
+        });
+        const beforeRows = yield* sql`SELECT * FROM managed_attachment_blobs`;
+        const beforeJobs = yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`;
+        for (const mismatch of [
+          { attachmentId: "other-id" },
+          { ownerThreadId: "other-thread" },
+          { ownerKind: "other-kind" },
+          { ownerId: "other-principal" },
+          { kind: "image" },
+          { originalName: "other.txt" },
+          { mimeType: "application/octet-stream" },
+          { relativePath: "attachments/other.txt" },
+        ]) {
+          const replay = { ...input, ...mismatch, offlineReplay: true as const };
+          assert.deepStrictEqual(yield* repository.reserve(replay), { status: "id-conflict" });
+          assert.deepStrictEqual(yield* sql`SELECT * FROM managed_attachment_blobs`, beforeRows);
+          assert.deepStrictEqual(
+            yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`,
+            beforeJobs,
+          );
+        }
+      }),
+  );
+
+  it.effect(
+    "offline replay never resurrects user-deleted, retained-out, or claimed attachments",
+    () =>
+      Effect.gen(function* () {
+        const repository = yield* ManagedAttachmentRepository;
+        const sql = yield* SqlClient.SqlClient;
+        for (const reason of [
+          "upload-cancelled",
+          "thread-deleted",
+          "message-removed",
+          "retention",
+          "conversation-rolled-back",
+          "staging-expired",
+          "upload-abandoned",
+        ]) {
+          for (const completed of [false, true]) {
+            yield* resetSchema;
+            const input = yield* reserveAndStage(repository);
+            yield* repository.cancelStaged({ ...input, reason, requestedAt: input.now });
+            if (completed) {
+              yield* repository.leaseCleanup({
+                leaseOwner: "worker",
+                now: input.now,
+                leaseExpiresAt: "2026-07-15T10:00:00.000Z",
+                limit: 1,
+              });
+              yield* repository.completeCleanup({
+                attachmentId: input.attachmentId,
+                expectedLeaseOwner: "worker",
+                disposition: "deleted",
+                completedAt: input.now,
+              });
+            }
+            const beforeRows = yield* sql`SELECT * FROM managed_attachment_blobs`;
+            const beforeJobs = yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`;
+            const replay = { ...input, offlineReplay: true as const };
+            assert.deepStrictEqual(yield* repository.reserve(replay), { status: "id-conflict" });
+            assert.deepStrictEqual(yield* sql`SELECT * FROM managed_attachment_blobs`, beforeRows);
+            assert.deepStrictEqual(
+              yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`,
+              beforeJobs,
+            );
+          }
+        }
+        for (const state of ["claimed", "deleting", "deleted"]) {
+          yield* resetSchema;
+          const input = yield* reserveAndStage(repository);
+          yield* repository.claimForAcceptedTurn({
+            ...input,
+            attachmentIds: [input.attachmentId],
+            commandId: "accepted-command",
+            messageId: "accepted-message",
+          });
+          if (state !== "claimed") {
+            yield* sql.withTransaction(
+              repository.markCleanupByIds({
+                attachmentIds: [input.attachmentId],
+                ownerThreadId: input.ownerThreadId,
+                reason: "assistant-image-completion-not-committed",
+                requestedAt: input.now,
+              }),
+            );
+            if (state === "deleted") {
+              yield* repository.leaseCleanup({
+                leaseOwner: "worker",
+                now: input.now,
+                leaseExpiresAt: "2026-07-15T10:00:00.000Z",
+                limit: 1,
+              });
+              yield* repository.completeCleanup({
+                attachmentId: input.attachmentId,
+                expectedLeaseOwner: "worker",
+                disposition: "deleted",
+                completedAt: input.now,
+              });
+            }
+          }
+          const beforeRows = yield* sql`SELECT * FROM managed_attachment_blobs`;
+          const beforeJobs = yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`;
+          const replay = { ...input, offlineReplay: true as const };
+          assert.deepStrictEqual(yield* repository.reserve(replay), { status: "id-conflict" });
+          assert.deepStrictEqual(yield* sql`SELECT * FROM managed_attachment_blobs`, beforeRows);
+          assert.deepStrictEqual(
+            yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`,
+            beforeJobs,
+          );
+        }
+      }),
+  );
+
+  it.effect("offline replay requires every historical claim field to be null", () =>
+    Effect.gen(function* () {
+      const repository = yield* ManagedAttachmentRepository;
+      const sql = yield* SqlClient.SqlClient;
+      for (const field of ["claim_command_id", "claim_message_id", "claimed_at"]) {
+        yield* resetSchema;
+        const input = reserveInput();
+        yield* repository.reserve(input);
+        yield* repository.cancelStaged({
+          ...input,
+          reason: "upload-write-failed",
+          requestedAt: input.now,
+        });
+        yield* sql`
+          UPDATE managed_attachment_blobs SET ${sql(field)} = 'historical-claim'
+          WHERE attachment_id = ${input.attachmentId}
+        `;
+        const before = yield* sql`SELECT * FROM managed_attachment_blobs`;
+        const replay = { ...input, offlineReplay: true as const };
+        assert.deepStrictEqual(yield* repository.reserve(replay), { status: "id-conflict" });
+        assert.deepStrictEqual(yield* sql`SELECT * FROM managed_attachment_blobs`, before);
+      }
+    }),
+  );
+
+  for (const quota of [
+    "homeBytes",
+    "homeCount",
+    "principalStagingBytes",
+    "principalStagingCount",
+  ] as const) {
+    it.effect(`offline replay rechecks ${quota} and leaves rejected cleanup untouched`, () =>
+      Effect.gen(function* () {
+        yield* resetSchema;
+        const sql = yield* SqlClient.SqlClient;
+        const repository = yield* ManagedAttachmentRepository;
+        const input = yield* reserveAndStage(repository);
+        yield* repository.cancelStaged({
+          ...input,
+          reason: "upload-write-failed",
+          requestedAt: input.now,
+        });
+        yield* repository.leaseCleanup({
+          leaseOwner: "copied-source-worker",
+          now: input.now,
+          leaseExpiresAt: "2026-07-15T10:00:00.000Z",
+          limit: 1,
+        });
+        yield* repository.reserve(
+          reserveInput({
+            attachmentId: "other",
+            relativePath: "attachments/other",
+            reservedBytes: 4,
+          }),
+        );
+        const beforeRows =
+          yield* sql`SELECT * FROM managed_attachment_blobs ORDER BY attachment_id`;
+        const beforeJobs = yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`;
+        const constrainedLimits = {
+          homeBytes: 100,
+          homeCount: 100,
+          principalStagingBytes: 100,
+          principalStagingCount: 100,
+          [quota]: quota.endsWith("Bytes") ? 9 : 1,
+        };
+        const replay = { ...input, reservedBytes: 6, offlineReplay: true as const };
+        const result = yield* Effect.gen(function* () {
+          const constrained = yield* ManagedAttachmentRepository;
+          return yield* constrained.reserve(replay);
+        }).pipe(Effect.provide(makeManagedAttachmentRepositoryLive(constrainedLimits)));
+        assert.deepStrictEqual(result, { status: "quota-exceeded" });
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM managed_attachment_blobs ORDER BY attachment_id`,
+          beforeRows,
+        );
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`,
+          beforeJobs,
+        );
+        const admitted = yield* Effect.gen(function* () {
+          const constrained = yield* ManagedAttachmentRepository;
+          return yield* constrained.reserve(replay);
+        }).pipe(
+          Effect.provide(
+            makeManagedAttachmentRepositoryLive({
+              ...constrainedLimits,
+              [quota]: quota.endsWith("Bytes") ? 10 : 2,
+            }),
+          ),
+        );
+        assert.strictEqual(admitted.status, "reserved");
+        assert.deepStrictEqual(yield* repository.getUsage(input), {
+          homeBytes: 10,
+          homeCount: 2,
+          principalStagingBytes: 10,
+          principalStagingCount: 2,
+        });
+        assert.deepStrictEqual(yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`, []);
+      }),
+    );
+  }
+
+  it.effect("offline replay rolls reservation back if copied cleanup job removal fails", () =>
+    Effect.gen(function* () {
+      yield* resetSchema;
+      const repository = yield* ManagedAttachmentRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const input = yield* reserveAndStage(repository);
+      yield* repository.cancelStaged({
+        ...input,
+        reason: "upload-write-failed",
+        requestedAt: input.now,
+      });
+      const beforeRows = yield* sql`SELECT * FROM managed_attachment_blobs`;
+      const beforeJobs = yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`;
+      yield* sql`
+        CREATE TEMP TRIGGER fail_offline_cleanup_delete
+        BEFORE DELETE ON managed_attachment_cleanup_jobs
+        BEGIN SELECT RAISE(ABORT, 'injected cleanup deletion failure'); END
+      `;
+      const replay = { ...input, offlineReplay: true as const };
+      const failed = yield* repository.reserve(replay).pipe(
+        Effect.map(() => false),
+        Effect.catch(() => Effect.succeed(true)),
+        Effect.ensuring(sql`DROP TRIGGER fail_offline_cleanup_delete`.pipe(Effect.orDie)),
+      );
+      assert.isTrue(failed);
+      assert.deepStrictEqual(yield* sql`SELECT * FROM managed_attachment_blobs`, beforeRows);
+      assert.deepStrictEqual(yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`, beforeJobs);
+    }),
+  );
+
+  it.effect(
+    "offline replay restores the old row and copied lease when replacement insertion fails",
+    () =>
+      Effect.gen(function* () {
+        yield* resetSchema;
+        const repository = yield* ManagedAttachmentRepository;
+        const sql = yield* SqlClient.SqlClient;
+        const input = yield* reserveAndStage(repository);
+        yield* repository.cancelStaged({
+          ...input,
+          reason: "upload-write-failed",
+          requestedAt: input.now,
+        });
+        yield* repository.leaseCleanup({
+          leaseOwner: "copied-source-worker",
+          now: input.now,
+          leaseExpiresAt: "2026-07-15T10:00:00.000Z",
+          limit: 1,
+        });
+        const beforeRows = yield* sql`SELECT * FROM managed_attachment_blobs`;
+        const beforeJobs = yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`;
+        yield* sql`
+        CREATE TEMP TRIGGER fail_offline_replacement
+        BEFORE INSERT ON managed_attachment_blobs
+        BEGIN SELECT RAISE(ABORT, 'injected replacement insertion failure'); END
+      `;
+        const replay = { ...input, offlineReplay: true as const };
+        const failed = yield* repository.reserve(replay).pipe(
+          Effect.map(() => false),
+          Effect.catch(() => Effect.succeed(true)),
+          Effect.ensuring(sql`DROP TRIGGER fail_offline_replacement`.pipe(Effect.orDie)),
+        );
+        assert.isTrue(failed);
+        assert.deepStrictEqual(yield* sql`SELECT * FROM managed_attachment_blobs`, beforeRows);
+        assert.deepStrictEqual(
+          yield* sql`SELECT * FROM managed_attachment_cleanup_jobs`,
+          beforeJobs,
+        );
+      }),
+  );
+
   it.effect("uses exact IDs and owners even when legacy-safe thread segments collide", () =>
     Effect.gen(function* () {
       yield* resetSchema;

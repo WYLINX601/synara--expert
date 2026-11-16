@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Effect } from "effect";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { withDatabaseLifecycleLock } from "./persistence/DatabaseLifecycleLock";
+import { withDatabaseLifecycleLock } from "@synara/shared/databaseLifecycleLock";
 
 const backendFixture = fileURLToPath(
   new URL("./fixtures/desktopParentLifetime.ts", import.meta.url),

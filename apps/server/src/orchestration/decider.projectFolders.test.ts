@@ -42,6 +42,47 @@ const createMultiFolder = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("multi-folder projects", () => {
+  it("updates, preserves and clears additional folders through native metadata events", async () => {
+    let model = await apply(createEmptyReadModel(now), createMultiFolder());
+    model = await apply(model, {
+      type: "project.meta.update",
+      commandId: "move-folders",
+      projectId: "project-1",
+      workspaceRoot: "/new/web",
+      additionalFolders: ["/new/api", "/external/shared"],
+    });
+    expect(model.projects[0]?.additionalFolders).toEqual(["/new/api", "/external/shared"]);
+    model = await apply(model, {
+      type: "project.meta.update",
+      commandId: "rename",
+      projectId: "project-1",
+      title: "Renamed",
+    });
+    expect(model.projects[0]?.additionalFolders).toEqual(["/new/api", "/external/shared"]);
+    expect(
+      await rejection(model, {
+        type: "project.meta.update",
+        commandId: "nested",
+        projectId: "project-1",
+        additionalFolders: ["/new/web/nested"],
+      }),
+    ).toContain("inside");
+    expect(
+      await rejection(model, {
+        type: "project.meta.update",
+        commandId: "container",
+        projectId: "project-1",
+        kind: "chat",
+      }),
+    ).toContain("Only ordinary projects");
+    model = await apply(model, {
+      type: "project.meta.update",
+      commandId: "clear",
+      projectId: "project-1",
+      additionalFolders: [],
+    });
+    expect(model.projects[0]?.additionalFolders).toEqual([]);
+  });
   it("keeps workspaceRoot as the primary folder and stores the extra folders in order", async () => {
     const model = await apply(createEmptyReadModel(now), createMultiFolder());
     const project = model.projects.find((entry) => entry.id === "project-1");

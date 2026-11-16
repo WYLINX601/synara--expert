@@ -12,17 +12,24 @@ import { parse as parseToml } from "smol-toml";
 
 import { readActiveCodexProviderEnvKey } from "@synara/shared/codexConfig";
 import {
+  LEGACY_SYNARA_SHARED_CONTINUATION_MARKER_FILE,
+  SYNARA_SHARED_CONTINUATION_MARKER_FILE,
+  SYNARA_SHARED_CONTINUATION_MARKER_VERSION,
+  SYNARA_SHARED_CONTINUATION_GENERATION_PATTERN,
+  parseCodexSharedContinuationMarker,
+} from "@synara/shared/codexContinuationMarker";
+import {
   readEnvironmentFromLoginShell,
   resolveLoginShell,
   type ShellEnvironmentReader,
 } from "@synara/shared/shell";
 
+import { isSynaraCodexHomeOverlayPath } from "./codexHomePaths.ts";
 import {
   resolveBaseCodexHomePath,
   resolveCodexHomeOverlayAccountSegment,
   resolveSynaraCodexHomeOverlayPath,
-  isSynaraCodexHomeOverlayPath,
-} from "./codexHomePaths.ts";
+} from "@synara/shared/codexHomeOverlayPaths";
 import {
   codexAuthFs,
   runCodexAuthIoSync,
@@ -54,11 +61,6 @@ const CODEX_ACCOUNT_PRIVATE_STATE_FILES = new Set(["auth.json", "models_cache.js
 // the same files through the same path.
 const CODEX_SQLITE_STATE_ENTRY_PATTERN = /^.+\.sqlite(?:-(?:wal|shm|journal))?$/;
 const SYNARA_CONFIG_SUPPRESSIONS_FILE = "synara-config-suppressions-v1.json";
-const LEGACY_SYNARA_SHARED_CONTINUATION_MARKER_FILE = "synara-shared-continuation-v1.json";
-const SYNARA_SHARED_CONTINUATION_MARKER_FILE = "synara-shared-continuation-v2.json";
-const SYNARA_SHARED_CONTINUATION_MARKER_VERSION = 2;
-const SHARED_CONTINUATION_GENERATION_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SYNARA_SHARED_CONTINUATION_LOCK_DIRECTORY = ".synara-shared-continuation-v1.lock";
 const SYNARA_SHARED_CONTINUATION_LOCK_OWNER_FILE = "owner.json";
 const SYNARA_SHARED_CONTINUATION_LOCK_QUARANTINE_INFIX = ".quarantine-";
@@ -838,21 +840,11 @@ function* resolveCodexProcessSourceEnvironmentIo(
       SYNARA_SHARED_CONTINUATION_MARKER_FILE,
     );
     if (markerBytes === undefined) return env;
-    const marker = JSON.parse(markerBytes.toString("utf8")) as {
-      version?: unknown;
-      sourceHomeIdentity?: unknown;
-      generation?: unknown;
-      migratedFromVersion?: unknown;
-    } | null;
-    if (
-      marker?.version !== SYNARA_SHARED_CONTINUATION_MARKER_VERSION ||
-      marker.sourceHomeIdentity !== (yield* resolveCodexPathIdentityIo(sourceHomePath)) ||
-      typeof marker.generation !== "string" ||
-      !SHARED_CONTINUATION_GENERATION_PATTERN.test(marker.generation) ||
-      (marker.migratedFromVersion !== undefined && marker.migratedFromVersion !== 1)
-    ) {
-      return env;
-    }
+    parseCodexSharedContinuationMarker(
+      markerBytes.toString("utf8"),
+      yield* resolveCodexPathIdentityIo(sourceHomePath),
+      2,
+    );
     for (const entryName of sharedContinuationIdentityEntryNames()) {
       const sourcePath = path.join(source.canonicalHomePath, entryName);
       const overlayPath = path.join(overlay.canonicalHomePath, entryName);
@@ -1842,16 +1834,8 @@ function readLegacySharedContinuationMarker(sourceHomePath: string): boolean {
   const content = readRegularSharedContinuationFile(markerPath, "legacy marker");
   if (content === undefined) return false;
   try {
-    const marker = JSON.parse(content) as {
-      readonly version?: unknown;
-      readonly sourceHomeIdentity?: unknown;
-    };
-    if (
-      marker.version === 1 &&
-      marker.sourceHomeIdentity === resolveCodexPathIdentity(sourceHomePath)
-    ) {
-      return true;
-    }
+    parseCodexSharedContinuationMarker(content, resolveCodexPathIdentity(sourceHomePath), 1);
+    return true;
   } catch {
     // Report one fail-closed error for malformed and mismatched markers.
   }
@@ -1867,21 +1851,14 @@ function readSharedContinuationV2Marker(
   const content = readRegularSharedContinuationFile(markerPath, "v2 marker");
   if (content === undefined) return undefined;
   try {
-    const marker = JSON.parse(content) as {
-      readonly version?: unknown;
-      readonly sourceHomeIdentity?: unknown;
-      readonly generation?: unknown;
-      readonly migratedFromVersion?: unknown;
-    };
-    if (
-      marker.version === SYNARA_SHARED_CONTINUATION_MARKER_VERSION &&
-      marker.sourceHomeIdentity === resolveCodexPathIdentity(sourceHomePath) &&
-      typeof marker.generation === "string" &&
-      SHARED_CONTINUATION_GENERATION_PATTERN.test(marker.generation) &&
-      (marker.migratedFromVersion === undefined || marker.migratedFromVersion === 1)
-    ) {
+    const marker = parseCodexSharedContinuationMarker(
+      content,
+      resolveCodexPathIdentity(sourceHomePath),
+      2,
+    );
+    if (marker.version === 2) {
       return {
-        generation: marker.generation.toLowerCase(),
+        generation: marker.generation,
         ...(marker.migratedFromVersion === 1 ? { migratedFromVersion: 1 as const } : {}),
       };
     }
@@ -2005,7 +1982,7 @@ async function requireSharedContinuationGenerationMetadata(
   const expectedGeneration = requirements.expectedGeneration?.toLowerCase();
   if (
     expectedGeneration !== undefined &&
-    !SHARED_CONTINUATION_GENERATION_PATTERN.test(expectedGeneration)
+    !SYNARA_SHARED_CONTINUATION_GENERATION_PATTERN.test(expectedGeneration)
   ) {
     throw new Error("Invalid expected Codex shared continuation generation.");
   }

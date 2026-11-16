@@ -147,6 +147,13 @@ describe("project relocation", () => {
       },
     });
     await expect(apply(before, relocation)).rejects.toThrow("Stop active turns");
+    await expect(
+      apply(before, {
+        ...relocation,
+        workspaceRoot: undefined,
+        additionalFolders: ["/restored/extra"],
+      }),
+    ).rejects.toThrow("Stop active turns");
     expect(before.projects[0]!.workspaceRoot).toBe("/old/repo");
   });
 

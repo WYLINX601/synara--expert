@@ -1,3 +1,4 @@
+import { takeLinxHomeOwnershipGrant } from "./linxHomeOwnershipGrant";
 /**
  * CliConfig - CLI/runtime bootstrap service definitions.
  *
@@ -90,6 +91,8 @@ import {
   embeddedMigrationRuntimeSourceDigest,
   verifyMigrationRuntimeIdentity,
 } from "./migrationBundleIdentity";
+import { joinLinxHomeOwnershipForServer } from "@synara/shared/linxUpdateHomeOwnership";
+import { assertLinxHomeMigrationReadyForDatabase } from "./linxHomeMigration";
 
 export class StartupError extends Data.TaggedError("StartupError")<{
   readonly message: string;
@@ -240,6 +243,8 @@ const ServerConfigLive = (input: CliInput) =>
       const liveProcessMigrationSourceDigest = yield* Effect.sync(() =>
         consumeProcessEnvironmentValue(MIGRATION_RUNTIME_SOURCE_DIGEST_ENV),
       );
+      // Consume before constructing any provider environment snapshot.
+      const homeOwnershipNonce = yield* Effect.sync(takeLinxHomeOwnershipGrant);
 
       const launcherMigrationSourceDigest =
         env.migrationRuntimeSourceDigest ?? liveProcessMigrationSourceDigest;
@@ -312,6 +317,30 @@ const ServerConfigLive = (input: CliInput) =>
           ),
         );
       const baseDir = yield* resolveBaseDir(configuredHome);
+      yield* Effect.acquireRelease(
+        Effect.tryPromise({
+          try: async () => {
+            const release = await joinLinxHomeOwnershipForServer({
+              homePath: baseDir,
+              parentPid: process.ppid,
+              ...(homeOwnershipNonce === undefined ? {} : { nonce: homeOwnershipNonce }),
+            });
+            try {
+              await assertLinxHomeMigrationReadyForDatabase(baseDir);
+            } catch (error) {
+              await release?.();
+              throw error;
+            }
+            return release;
+          },
+          catch: (cause) =>
+            new StartupError({ message: "Linx home ownership or migration is not ready.", cause }),
+        }),
+        (release) =>
+          Effect.promise(async () => {
+            await release?.();
+          }),
+      );
       const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
       // A "Copy my data to Beta" request from a stable install lands as a
       // marker in this home; it must be consumed before the private state

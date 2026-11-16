@@ -1,3 +1,4 @@
+import { registerLinxUpdateClient } from "./linxUpdateHealth";
 import { EditorDebugService } from "./editor/debugService";
 import { EditorLanguageService } from "./editor/languageService";
 import { requireNativeEditor } from "./editor/nativeEditorGate";
@@ -245,6 +246,7 @@ import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEve
 import { ProviderRuntimeEventRepository } from "./persistence/Services/ProviderRuntimeEvents";
 import { requireWsOwnerSession } from "./wsOwnerAuthorization";
 import { makeWsRequestAdmission } from "./wsRequestAdmission";
+import { serverMaintenanceAdmission } from "./serverMaintenance";
 import { voiceUploadAdmissionGate } from "./voiceUploadAdmission";
 import {
   provideWsConnectionSession,
@@ -323,7 +325,15 @@ const wsRequestAdmissionMiddlewareLayer = Layer.effect(
       );
       return RpcSchema.isStreamSchema(options.rpc.successSchema)
         ? scoped
-        : admission.guard(options.clientId, options.rpc._tag, scoped);
+        : serverMaintenanceAdmission.guard(
+            admission.guard(options.clientId, options.rpc._tag, scoped),
+            () =>
+              new WsRpcError({
+                message: "Update maintenance admission is closed.",
+                code: "SERVER_MAINTENANCE",
+                retryable: false,
+              }),
+          );
     }) satisfies RpcMiddleware.RpcMiddleware<never, WsRpcError, never>;
   }),
 );
@@ -3858,13 +3868,41 @@ export function makeWebsocketRpcRouteLayer<R>(
       ) =>
         Effect.gen(function* () {
           const sessionKey = yield* connectionSessions.register(session);
+          const config = yield* ServerConfig;
+          const url = HttpServerRequest.toURL(request);
+          const nativeAuthenticated =
+            config.mode === "desktop" &&
+            isLoopbackHost(config.host) &&
+            !config.publicUrl &&
+            Boolean(config.authToken) &&
+            url?.searchParams.get("token") === config.authToken;
+          const scopedRequest = request.modify({
+            headers: Headers.set(request.headers, WS_CONNECTION_SESSION_HEADER, sessionKey),
+          });
+          // Register only after an actual successful upgrade, not while merely
+          // handling a GET that might never establish a WebSocket.
+          const healthRequest = new Proxy(scopedRequest, {
+            get(target, property, receiver) {
+              if (property === "upgrade")
+                return target.upgrade.pipe(
+                  Effect.tap(() =>
+                    Effect.acquireRelease(
+                      Effect.sync(() =>
+                        registerLinxUpdateClient(
+                          sessionKey,
+                          request.headers.origin,
+                          nativeAuthenticated,
+                        ),
+                      ),
+                      (release) => Effect.sync(release),
+                    ),
+                  ),
+                );
+              return Reflect.get(target, property, receiver);
+            },
+          });
           return yield* rpcWebSocketHttpEffect.pipe(
-            Effect.provideService(
-              HttpServerRequest.HttpServerRequest,
-              request.modify({
-                headers: Headers.set(request.headers, WS_CONNECTION_SESSION_HEADER, sessionKey),
-              }),
-            ),
+            Effect.provideService(HttpServerRequest.HttpServerRequest, healthRequest),
           );
         });
       yield* router.add(

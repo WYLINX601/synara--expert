@@ -2,13 +2,12 @@
 // Purpose: The single owner of the Linx (workbench) update state — manifest checks,
 // pinned downloads, timers, and persisted attempt bookkeeping.
 // Layer: Desktop updater client
-// Depends on: the LU-00 verification pipeline, the feed transport, and the downloader.
 
 import { createHash } from "node:crypto";
 import FS from "node:fs";
 import Path from "node:path";
 
-import type { DesktopUpdateState } from "@synara/contracts";
+import type { DesktopUpdateState, LinxUpdateReleaseReceipt } from "@synara/contracts";
 import { LINX_UPDATE_MANIFEST_MAX_BYTES, LINX_UPDATE_SIGNATURE_MAX_BYTES } from "@synara/contracts";
 import {
   verifyLinxUpdateManifest,
@@ -22,7 +21,12 @@ import {
   type LinxUpdateDownloadResult,
   type LinxUpdateDownloadTarget,
 } from "./linxUpdateDownload";
-import { fetchLinxUpdateBytes, LinxUpdateFeedError } from "./linxUpdateFeed";
+import {
+  fetchLinxUpdateBytes,
+  LinxUpdateFeedError,
+  type LinxUpdateRequest,
+} from "./linxUpdateFeed";
+import { resolveLinxUpdateReleaseReceipt, type LinxUpdateSignedTarget } from "./linxUpdateRelease";
 import type { LinxUpdateSource } from "./linxUpdateSource";
 import {
   reduceDesktopUpdateStateOnDownloadComplete,
@@ -32,6 +36,8 @@ import {
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine";
 import { shouldBroadcastDownloadProgress } from "./updateState";
+
+const systemDate = (): Date => new Date();
 
 /** Startup check delay and steady-state interval, per the v0.2 schedule. */
 export const LINX_UPDATE_STARTUP_DELAY_MS = 60_000;
@@ -53,18 +59,22 @@ export const EMPTY_LINX_UPDATE_CHECK_RECORD: LinxUpdateCheckRecord = {
   retryAfterUntil: null,
 };
 
-/** Until LU-04 ships the helper, a refused install must still explain itself. */
-export const LINX_UPDATE_INSTALL_UNAVAILABLE_MESSAGE =
-  "This build cannot install updates yet. Downloading works; installing arrives in a later update.";
-
-/** The manifest entry frozen when a check found a version; never swapped mid-download. */
-export interface LinxUpdatePinnedTarget extends LinxUpdateDownloadTarget {
-  readonly manifestDigest: string;
-}
+/** The exact signed bytes and package entry shown to the user. */
+export type LinxUpdatePinnedTarget = LinxUpdateDownloadTarget & LinxUpdateSignedTarget;
 
 export interface LinxUpdateActionResult {
   readonly accepted: boolean;
   readonly completed: boolean;
+}
+
+export interface LinxUpdateInstallationTarget {
+  readonly target: LinxUpdatePinnedTarget;
+  readonly download: LinxUpdateDownloadResult;
+  readonly release: LinxUpdateReleaseReceipt;
+}
+
+export interface LinxUpdateInstallResult extends LinxUpdateActionResult {
+  readonly message: string | null;
 }
 
 export interface LinxUpdateClientOptions {
@@ -75,6 +85,12 @@ export interface LinxUpdateClientOptions {
   readonly setUpdateState: (patch: Partial<DesktopUpdateState>) => void;
   readonly readCheckRecord: () => LinxUpdateCheckRecord;
   readonly writeCheckRecord: (record: LinxUpdateCheckRecord) => void;
+  readonly install: (
+    input: LinxUpdateInstallationTarget,
+    signal: AbortSignal,
+  ) => Promise<LinxUpdateInstallResult>;
+  readonly installFailureMessage: string;
+  readonly request?: LinxUpdateRequest | undefined;
   readonly now?: () => Date;
   /** Test seam for the manifest/signature fetch. */
   readonly fetchBytes?: (url: string, maxBytes: number) => Promise<Uint8Array>;
@@ -167,6 +183,11 @@ export class LinxUpdateClient {
   private downloadAbort: AbortController | null = null;
   private pinnedTarget: LinxUpdatePinnedTarget | null = null;
   private downloadedFile: LinxUpdateDownloadResult | null = null;
+  private downloadedTarget: LinxUpdatePinnedTarget | null = null;
+  private downloadedRelease: LinxUpdateReleaseReceipt | null = null;
+  private inFlightInstall: Promise<LinxUpdateActionResult> | null = null;
+  private installAbort: AbortController | null = null;
+  private stagingHandedOff = false;
   private disposed = false;
 
   constructor(options: LinxUpdateClientOptions) {
@@ -221,23 +242,22 @@ export class LinxUpdateClient {
     return run;
   }
 
-  /**
-   * Downloads the pinned package. The second click while a transfer is running
-   * returns immediately, and a click after a completed download reports the
-   * existing artifact instead of starting another transfer.
-   */
+  /** One click pins the public release, downloads verified bytes, and attempts that installation once. */
   async download(): Promise<LinxUpdateActionResult> {
     if (this.disposed) return { accepted: false, completed: false };
     const state = this.options.getUpdateState();
-    if (this.inFlightDownload !== null || state.status === "downloading") {
+    if (
+      this.inFlightDownload !== null ||
+      this.inFlightInstall !== null ||
+      state.status === "downloading" ||
+      state.status === "installing"
+    ) {
       return { accepted: false, completed: false };
     }
     if (state.status === "downloaded") {
       return { accepted: false, completed: this.downloadedFile !== null };
     }
     const target = this.pinnedTarget;
-    // A failed download publishes `error` with the offered version kept, so the
-    // same pinned target must still be downloadable when the user retries.
     const retryable =
       state.status === "error" && state.errorContext === "download" && state.canRetry;
     if (
@@ -245,39 +265,56 @@ export class LinxUpdateClient {
       target === null ||
       target.version !== state.availableVersion
     ) {
-      this.log("[linx-updater] Ignoring download request without a pinned target.");
       return { accepted: false, completed: false };
     }
-
     const abort = new AbortController();
     this.downloadAbort = abort;
     this.options.setUpdateState(reduceDesktopUpdateStateOnDownloadStart(state));
-
-    const download = (this.options.downloadAsset ?? downloadLinxUpdateAsset)({
-      target,
-      stagingDir: this.options.stagingDir,
-      allowedHosts: this.options.source.allowedAssetHosts,
-      signal: abort.signal,
-      onProgress: (percent) => {
-        if (this.disposed) return;
-        const current = this.options.getUpdateState();
-        if (current.status !== "downloading") return;
-        if (!shouldBroadcastDownloadProgress(current, percent)) return;
-        this.options.setUpdateState(reduceDesktopUpdateStateOnDownloadProgress(current, percent));
-      },
-    });
+    let release: LinxUpdateReleaseReceipt | null = null;
+    const download = (async () => {
+      release = await resolveLinxUpdateReleaseReceipt({
+        ...target,
+        source: this.options.source,
+        fetchBytes: this.fetch,
+        now: this.options.now ?? systemDate,
+      });
+      abort.signal.throwIfAborted();
+      return (this.options.downloadAsset ?? downloadLinxUpdateAsset)({
+        target,
+        stagingDir: this.options.stagingDir,
+        allowedHosts: this.options.source.allowedAssetHosts,
+        request: this.options.request,
+        signal: abort.signal,
+        onProgress: (percent) => {
+          if (this.disposed) return;
+          const current = this.options.getUpdateState();
+          if (
+            current.status !== "downloading" ||
+            !shouldBroadcastDownloadProgress(current, percent)
+          )
+            return;
+          this.options.setUpdateState(reduceDesktopUpdateStateOnDownloadProgress(current, percent));
+        },
+      });
+    })();
     this.inFlightDownload = download;
-
     try {
       const result = await download;
       if (this.disposed) return { accepted: true, completed: false };
+      if (release === null || result.sha256 !== target.sha256 || result.size !== target.size) {
+        throw new Error("The downloaded Linx artifact does not match its pinned release.");
+      }
       this.downloadedFile = result;
+      this.downloadedTarget = target;
+      this.downloadedRelease = release;
       this.options.setUpdateState(
         reduceDesktopUpdateStateOnDownloadComplete(this.options.getUpdateState(), target.version),
       );
       this.log(
-        `[linx-updater] Downloaded ${target.assetName} (${target.version}, sha256=${result.sha256.slice(0, 16)}…).`,
+        `[linx-updater] Verified ${target.version} (sha256=${result.sha256.slice(0, 16)}…).`,
       );
+      await this.install();
+      // This result acknowledges the download, not replacement or new-version health.
       return { accepted: true, completed: true };
     } catch (error) {
       const message = describeDownloadFailure(error);
@@ -298,14 +335,76 @@ export class LinxUpdateClient {
     }
   }
 
-  /** LU-04 owns installation; this build reports the handoff as unavailable. */
-  install(): LinxUpdateActionResult {
-    this.log("[linx-updater] Install is not available yet; the LU-04 helper owns the handoff.");
-    if (!this.disposed) {
-      // Status and downloadedVersion stay untouched: the package is still ready.
-      this.options.setUpdateState({ message: LINX_UPDATE_INSTALL_UNAVAILABLE_MESSAGE });
+  async install(): Promise<LinxUpdateActionResult> {
+    const target = this.downloadedTarget;
+    const download = this.downloadedFile;
+    const release = this.downloadedRelease;
+    const state = this.options.getUpdateState();
+    if (
+      this.disposed ||
+      this.inFlightInstall !== null ||
+      state.status !== "downloaded" ||
+      target === null ||
+      download === null ||
+      release === null ||
+      state.downloadedVersion !== target.version
+    ) {
+      return { accepted: false, completed: false };
     }
-    return { accepted: false, completed: false };
+    const abort = new AbortController();
+    this.installAbort = abort;
+    this.options.setUpdateState({
+      status: "installing",
+      message: null,
+      errorContext: null,
+      canRetry: false,
+    });
+    const run = Promise.resolve().then(async (): Promise<LinxUpdateActionResult> => {
+      try {
+        abort.signal.throwIfAborted();
+        const result = await this.options.install({ target, download, release }, abort.signal);
+        if (result.accepted && !this.stagingHandedOff)
+          throw new Error("Installer accepted without claiming the pinned handoff.");
+        if (!result.accepted && !this.disposed) {
+          this.options.setUpdateState({
+            status: "downloaded",
+            errorContext: "install",
+            canRetry: true,
+            message: result.message ?? this.options.installFailureMessage,
+          });
+        }
+        return { accepted: result.accepted, completed: false };
+      } catch {
+        if (!this.disposed) {
+          this.options.setUpdateState({
+            status: "downloaded",
+            errorContext: "install",
+            canRetry: true,
+            message: this.options.installFailureMessage,
+          });
+        }
+        return { accepted: false, completed: false };
+      }
+    });
+    this.inFlightInstall = run;
+    try {
+      return await run;
+    } finally {
+      if (this.inFlightInstall === run) this.inFlightInstall = null;
+      if (this.installAbort === abort) this.installAbort = null;
+    }
+  }
+
+  claimInstallHandoff(manifestDigest: string): void {
+    if (
+      this.disposed ||
+      this.inFlightInstall === null ||
+      this.downloadedTarget?.manifestDigest !== manifestDigest ||
+      this.installAbort?.signal.aborted
+    ) {
+      throw new Error("Cannot hand off an inactive or different Linx update.");
+    }
+    this.stagingHandedOff = true;
   }
 
   /** Aborts any transfer, stops the timers, and removes staging. */
@@ -322,6 +421,9 @@ export class LinxUpdateClient {
     }
     this.downloadAbort?.abort();
     this.downloadAbort = null;
+    if (this.stagingHandedOff) return;
+    this.installAbort?.abort();
+    await this.inFlightInstall;
     try {
       await clearLinxUpdateStaging(this.options.stagingDir);
     } catch (error) {
@@ -389,7 +491,12 @@ export class LinxUpdateClient {
       return;
     }
     const state = this.options.getUpdateState();
-    if (this.inFlightDownload !== null || state.status === "downloading") {
+    if (
+      this.inFlightDownload !== null ||
+      this.inFlightInstall !== null ||
+      state.status === "downloading" ||
+      state.status === "installing"
+    ) {
       this.log(`[linx-updater] Skipping check (${reason}) while a download is active.`);
       return;
     }
@@ -439,6 +546,9 @@ export class LinxUpdateClient {
           size: manifest.size,
           sha256: manifest.sha256,
           manifestDigest: createHash("sha256").update(attempt.manifestBytes).digest("hex"),
+          manifest,
+          manifestBytes: attempt.manifestBytes,
+          signatureBytes: attempt.signatureBytes,
         };
         this.options.setUpdateState(
           reduceDesktopUpdateStateOnUpdateAvailable(
@@ -490,6 +600,7 @@ export class LinxUpdateClient {
 
   private async fetchVerifiedManifest(): Promise<{
     readonly manifestBytes: Uint8Array;
+    readonly signatureBytes: Uint8Array;
     readonly verification: LinxUpdateVerificationResult;
   }> {
     const [manifestBytes, signatureBytes] = await Promise.all([
@@ -498,6 +609,7 @@ export class LinxUpdateClient {
     ]);
     return {
       manifestBytes,
+      signatureBytes,
       verification: verifyLinxUpdateManifest({
         manifestBytes,
         signatureBytes,
@@ -508,7 +620,7 @@ export class LinxUpdateClient {
     };
   }
 
-  private fetch(url: string, maxBytes: number): Promise<Uint8Array> {
+  private fetch = (url: string, maxBytes: number): Promise<Uint8Array> => {
     if (this.options.fetchBytes !== undefined) {
       return this.options.fetchBytes(url, maxBytes);
     }
@@ -516,6 +628,7 @@ export class LinxUpdateClient {
       url,
       maxBytes,
       allowedHosts: this.options.source.allowedAssetHosts,
+      request: this.options.request,
     });
-  }
+  };
 }

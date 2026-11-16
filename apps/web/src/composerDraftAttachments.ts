@@ -25,6 +25,10 @@ import {
   toPersistedComposerImageSource,
 } from "./lib/composerImageSource";
 
+import {
+  assertComposerPersistenceAllowed,
+  beginComposerPersistenceOperation,
+} from "./lib/composerPersistenceActivity";
 const composerAttachmentPersistenceQueueByThreadId = new Map<string, Promise<void>>();
 // Tracks the newest in-flight sync per (slot, thread) so a superseded verification knows not to
 // commit. Entries are retired by `syncPersistedAttachmentsForSlot` once the newest sync settles.
@@ -198,15 +202,22 @@ export function deletePersistedComposerImageBlobs(
   // Several product flows copy composer state before the destination is ever
   // mounted. Those drafts temporarily share the source blob key, so ownership
   // must be checked after the current store mutation has committed.
-  Promise.resolve().then(() => {
-    const draftsByThreadId = getDraftsByThreadId();
-    for (const blobKey of candidateBlobKeys) {
-      if (isComposerImageBlobReferenced(draftsByThreadId, blobKey)) continue;
-      void deleteComposerImageBlob(blobKey).catch((error) => {
-        console.warn("[composer-images] Could not delete persisted image blob", error);
-      });
-    }
-  });
+  const finish = beginComposerPersistenceOperation();
+  void Promise.resolve()
+    .then(async () => {
+      const draftsByThreadId = getDraftsByThreadId();
+      await Promise.all(
+        [...candidateBlobKeys].map(async (blobKey) => {
+          if (isComposerImageBlobReferenced(draftsByThreadId, blobKey)) return;
+          try {
+            await deleteComposerImageBlob(blobKey);
+          } catch (error) {
+            console.warn("[composer-images] Could not delete persisted image blob", error);
+          }
+        }),
+      );
+    })
+    .finally(finish);
 }
 
 export function deleteDraftComposerImageBlobs(
@@ -494,6 +505,8 @@ export function syncPersistedAttachmentsForSlot(
   if (threadId.length === 0) {
     return Promise.resolve("rejected");
   }
+  assertComposerPersistenceAllowed();
+  const finish = beginComposerPersistenceOperation();
   const generationKey = `${slot.key}:${threadId}`;
   const generation = (composerAttachmentSyncGenerationByKey.get(generationKey) ?? 0) + 1;
   composerAttachmentSyncGenerationByKey.set(generationKey, generation);
@@ -530,6 +543,9 @@ export function syncPersistedAttachmentsForSlot(
     });
     deletePersistedComposerImageBlobs(supersededBlobAttachments, () => get().draftsByThreadId);
   } catch (error) {
+    finish();
+    if (composerAttachmentSyncGenerationByKey.get(generationKey) === generation)
+      composerAttachmentSyncGenerationByKey.delete(generationKey);
     return Promise.reject(error);
   }
   // Verification stays serialized per thread (across both slots) so overlapping
@@ -550,6 +566,7 @@ export function syncPersistedAttachmentsForSlot(
   // nothing left to invalidate, so drop the entry instead of leaking one per (slot, thread)
   // forever. The guard keeps an older sync's cleanup from erasing a newer generation.
   return verification.finally(() => {
+    finish();
     if (composerAttachmentSyncGenerationByKey.get(generationKey) === generation) {
       composerAttachmentSyncGenerationByKey.delete(generationKey);
     }

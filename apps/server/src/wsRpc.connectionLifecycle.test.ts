@@ -51,6 +51,7 @@ import { makeCurrentWsFeatureCompatibilitySearchParams } from "./wsCompatibility
 import { bufferLiveUiStream } from "./wsStreamBackpressure";
 import { makeCursorSafeSnapshotLiveStream } from "./wsSnapshotLiveStream";
 import { ComputerEventInterests } from "./computer/computerEventInterests";
+import { hasLinxUpdateClient } from "./linxUpdateHealth";
 
 const PingRpc = Rpc.make("test.ping", {
   payload: Schema.Struct({ label: Schema.String }),
@@ -93,10 +94,13 @@ afterEach(() => {
 
 function connect(
   url: string,
-  options?: { readonly perMessageDeflate?: boolean },
+  options?: { readonly perMessageDeflate?: boolean; readonly origin?: string },
 ): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url, { perMessageDeflate: options?.perMessageDeflate ?? false });
+    const socket = new WebSocket(url, {
+      perMessageDeflate: options?.perMessageDeflate ?? false,
+      ...(options?.origin ? { origin: options.origin } : {}),
+    });
     openSockets.add(socket);
     socket.once("open", () => resolve(socket));
     socket.once("error", reject);
@@ -203,7 +207,7 @@ function ping(socket: WebSocket, timeoutMs = 2_000): Promise<void> {
   });
 }
 
-async function startTestServer(): Promise<RunningTestServer> {
+async function startTestServer(nativeDesktop = false): Promise<RunningTestServer> {
   const baseConfigLayer = ServerConfig.layerTest(process.cwd(), {
     prefix: "synara-ws-lifecycle-test-",
   }).pipe(Layer.provide(NodeServices.layer));
@@ -211,7 +215,13 @@ async function startTestServer(): Promise<RunningTestServer> {
     ServerConfig,
     Effect.gen(function* () {
       const config = yield* ServerConfig;
-      return { ...config, authToken: "force-session-auth" };
+      return {
+        ...config,
+        authToken: "force-session-auth",
+        ...(nativeDesktop
+          ? { mode: "desktop" as const, host: "127.0.0.1", publicUrl: undefined }
+          : {}),
+      };
     }),
   ).pipe(Layer.provide(baseConfigLayer));
   const sessionsLayer = SessionCredentialServiceLive.pipe(
@@ -533,6 +543,38 @@ async function waitForObserved(predicate: () => boolean, timeoutMs = 2_000): Pro
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+describe("native update health over a real managed Linx socket", () => {
+  it("uses the existing token and trusted origin, never mere HTTP readiness, and releases on disconnect", async () => {
+    const server = await startTestServer(true);
+    try {
+      const params = makeCurrentWsFeatureCompatibilitySearchParams("linx-native-fixture");
+      params.set("token", "force-session-auth");
+      const url = `${server.origin}/ws?${params.toString()}`;
+      expect(hasLinxUpdateClient()).toBe(false);
+      await expect(connect(url, { origin: "linx://untrusted" })).rejects.toThrow();
+      expect(hasLinxUpdateClient()).toBe(false);
+      // A native token without a managed origin is not managed-client health.
+      const unclaimed = await connect(url);
+      await ping(unclaimed);
+      expect(hasLinxUpdateClient()).toBe(false);
+      const closedUnclaimed = waitForClose(unclaimed);
+      unclaimed.close();
+      await closedUnclaimed;
+      const socket = await connect(url, { origin: "linx://app" });
+      await ping(socket);
+      await waitForObserved(hasLinxUpdateClient);
+      expect(hasLinxUpdateClient()).toBe(true);
+      const closed = waitForClose(socket);
+      socket.close();
+      await closed;
+      await waitForObserved(() => !hasLinxUpdateClient());
+      expect(hasLinxUpdateClient()).toBe(false);
+    } finally {
+      await server.close();
+    }
+  });
+});
 
 describe("websocket RPC payload admission", () => {
   it("rejects feature sockets before auth or RPC decoding when negotiation is missing", async () => {

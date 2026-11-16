@@ -27,7 +27,7 @@ import { ServerConfig } from "../../config.ts";
 import {
   acquireDatabaseLifecycleLock,
   releaseDatabaseLifecycleLock,
-} from "../DatabaseLifecycleLock.ts";
+} from "@synara/shared/databaseLifecycleLock";
 
 type RuntimeSqliteLayerConfig = {
   readonly filename: string;

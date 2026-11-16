@@ -198,6 +198,12 @@ export function stageAssistantImageAttachments<R = never>(input: {
   readonly cwd: string;
   readonly sourceRoots: readonly string[];
   readonly additionalSourceRoots?: Effect.Effect<readonly string[], never, R>;
+  /**
+   * Offline import maps filesystem inputs only; Markdown/attachment aliases stay historical.
+   * Requires exclusive imported DB/source locks, an unpublished engine, and no cleanup
+   * workers or producers: failed never-claimed reservations may be revived in place.
+   */
+  readonly resolveSourcePath?: (path: string) => Effect.Effect<string, Error>;
   readonly attachmentsDir: string;
   readonly existingAttachments: readonly ChatAttachment[];
   readonly repository: ManagedAttachmentRepositoryShape;
@@ -248,9 +254,12 @@ export function stageAssistantImageAttachments<R = never>(input: {
             ? imageFromBlob(blob, sourcePath)
             : null;
         }
-        const requested = path.isAbsolute(sourcePath)
+        const historicalPath = path.isAbsolute(sourcePath)
           ? sourcePath
           : path.resolve(input.cwd, sourcePath);
+        const requested = input.resolveSourcePath
+          ? yield* input.resolveSourcePath(historicalPath)
+          : historicalPath;
         // Worktree discovery is needed only for an existing explicitly external reference.
         // A symlink escaping from inside cwd is never a reason to broaden the roots.
         if (
@@ -272,7 +281,7 @@ export function stageAssistantImageAttachments<R = never>(input: {
           }
         }
         const bytes = yield* Effect.tryPromise(() =>
-          readAuthorizedImage(sourcePath, input.cwd, realRoots),
+          readAuthorizedImage(requested, input.cwd, realRoots),
         );
         if (!bytes) return null;
         const mimeType = Mime.getType(sourcePath);
@@ -283,6 +292,7 @@ export function stageAssistantImageAttachments<R = never>(input: {
           Effect.gen(function* () {
             const reservation = yield* reserveManagedAttachmentUpload({
               attachmentId,
+              offlineReplay: input.resolveSourcePath ? true : undefined,
               type: "image",
               threadId: input.threadId,
               name: path.basename(sourcePath),
@@ -296,6 +306,7 @@ export function stageAssistantImageAttachments<R = never>(input: {
             createdIds.push(attachmentId);
             const stored = yield* persistReservedManagedAttachment({
               reservation,
+              offlineReplay: input.resolveSourcePath ? true : undefined,
               bytes,
               attachmentsDir: input.attachmentsDir,
               now,
@@ -308,7 +319,8 @@ export function stageAssistantImageAttachments<R = never>(input: {
       });
       const attachment = yield* materialize.pipe(
         Effect.catchCause((cause) => {
-          if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause);
+          if (input.resolveSourcePath || Cause.hasInterruptsOnly(cause))
+            return Effect.failCause(cause);
           // Failed snapshots never discard the answer, and never remain unowned uploads.
           return cancelAssistantImageAttachments({
             attachmentIds: createdIds,

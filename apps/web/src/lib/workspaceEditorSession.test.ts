@@ -12,9 +12,13 @@ import {
   flushWorkspaceEditors,
   getWorkspaceEditorSession,
   hasUnsavedWorkspaceEditors,
+  freezeWorkspaceEditorsForUpdate,
+  releaseWorkspaceEditorsForUpdate,
+  workspaceEditorMaintenanceSnapshot,
 } from "./workspaceEditorSession";
 import { projectQueryKeys } from "./projectReactQuery";
 
+const cleanups: Array<() => void> = [];
 const source = (contents = "original", version = "sha256:initial"): ProjectReadFileResult => ({
   relativePath: "src/file.ts",
   contents,
@@ -39,6 +43,11 @@ function setup(
   const session = getWorkspaceEditorSession(client, cwd, "src/file.ts");
   const unsubscribe = session.subscribe(() => undefined);
   session.load(source());
+  cleanups.push(() => {
+    session.pause();
+    unsubscribe();
+    client.clear();
+  });
   client.setQueryData(projectQueryKeys.readFile(cwd, "src/file.ts"), source());
   return { client, session, unsubscribe };
 }
@@ -52,6 +61,8 @@ beforeEach(() => {
   refreshGit.mockClear();
 });
 afterEach(() => {
+  for (const cleanup of cleanups.splice(0)) cleanup();
+  releaseWorkspaceEditorsForUpdate("maintenance-test", "fixed-digest");
   vi.clearAllTimers();
   vi.useRealTimers();
 });
@@ -172,5 +183,41 @@ describe("workspace editor autosave", () => {
     expect(getWorkspaceEditorSession(client, "/repo", "src/file.ts").getSnapshot().value).toBe(
       "draft",
     );
+  });
+  it("refuses saving buffers immediately and freezes new edits for the held lease", async () => {
+    const { session } = setup();
+    const pending = deferred<ProjectWriteFileResult>();
+    api.projects.writeFile.mockReturnValueOnce(pending.promise);
+    session.change("in flight");
+    const write = session.flush();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(freezeWorkspaceEditorsForUpdate("maintenance-test", "fixed-digest")).toBe(true);
+    expect(workspaceEditorMaintenanceSnapshot().savingEditors).toBeGreaterThan(0);
+    session.change("must not start a new edit");
+    expect(session.getSnapshot().value).toBe("in flight");
+    expect(await session.flush()).toBe(false);
+    releaseWorkspaceEditorsForUpdate("maintenance-test", "other-digest");
+    session.change("still frozen");
+    expect(session.getSnapshot().value).toBe("in flight");
+    releaseWorkspaceEditorsForUpdate("maintenance-test", "fixed-digest");
+    pending.resolve({ relativePath: "src/file.ts", version: "sha256:in-flight" });
+    await write;
+    session.change("editing resumes");
+    expect(session.getSnapshot().value).toBe("editing resumes");
+  });
+
+  it("holds a deferred dirty buffer without saving it for readiness and resumes only its existing autosave policy after release", async () => {
+    const { session } = setup("/deferred-maintenance");
+    session.change("deferred draft");
+    await vi.advanceTimersByTimeAsync(399);
+    expect(freezeWorkspaceEditorsForUpdate("maintenance-test", "fixed-digest")).toBe(true);
+    expect(workspaceEditorMaintenanceSnapshot().unsavedEditors).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(api.projects.writeFile).not.toHaveBeenCalled();
+    expect(session.getSnapshot().value).toBe("deferred draft");
+    releaseWorkspaceEditorsForUpdate("maintenance-test", "fixed-digest");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(api.projects.writeFile).toHaveBeenCalledOnce();
+    expect(session.dirty).toBe(false);
   });
 });

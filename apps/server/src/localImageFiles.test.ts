@@ -11,7 +11,7 @@ import { ServerConfig } from "./config";
 import { GitCoreLive } from "./git/Layers/GitCore";
 import { listLocalPreviewWorktreeRoots } from "./workspace/localPreviewWorktrees";
 
-import { resolveCodexHomeOverlayAccountSegment } from "./codexHomePaths.ts";
+import { resolveCodexHomeOverlayAccountSegment } from "@synara/shared/codexHomeOverlayPaths";
 import { createLocalPreviewGrant, resolveAllowedLocalPreviewFile } from "./localImageFiles.ts";
 
 const PreviewGitLayer = GitCoreLive.pipe(

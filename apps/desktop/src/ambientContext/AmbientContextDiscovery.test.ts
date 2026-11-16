@@ -64,7 +64,9 @@ it("keeps reusable grants out of public instance discovery records", async () =>
   const token = "f".repeat(64);
   try {
     const record = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
+      applicationId: "com.emanueledipietro.synara.beta",
+      profilePath: root,
       instanceId: INSTANCE_ID,
       label: "Synara Beta",
       updatedAt: new Date().toISOString(),

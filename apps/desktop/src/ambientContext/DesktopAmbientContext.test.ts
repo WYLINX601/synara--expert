@@ -133,6 +133,100 @@ it("does not deadlock if the discovery poll fires while preferences are restorin
   }
 });
 
+it("holds owned discovery publications during update and resumes on exact-attempt abort", async () => {
+  const paths = environment();
+  const ownedDiscovery = Path.join(paths.userData, "ambient-context-discovery");
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const context = new DesktopAmbientContext(paths.settingsPath, () => {}, {
+    sharedDataDirectory: ownedDiscovery,
+  });
+  try {
+    await context.getState();
+    await context.prepareForUpdate("attempt-one");
+    const runtimePath = Path.join(paths.userData, "ambient-context-runtime.json");
+    const before = await Fs.readFile(runtimePath, "utf8");
+    await announceVault(ownedDiscovery, VAULT_A, REQUEST_A);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(await Fs.readFile(runtimePath, "utf8")).toBe(before);
+    expect((await context.getState()).pendingConnections).toHaveLength(0);
+    context.releaseUpdate("foreign-attempt");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await context.getState()).pendingConnections).toHaveLength(0);
+    context.releaseUpdate("attempt-one");
+    await expect
+      .poll(() => context.getState().then((state) => state.pendingConnections?.length))
+      .toBe(1);
+    await expect(Fs.stat(paths.sharedData)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await context.stop();
+    vi.useRealTimers();
+    await Fs.rm(paths.root, { recursive: true, force: true });
+  }
+});
+
+it("refuses authenticated native publications under the update lease without disconnecting the user's Vault", async () => {
+  const paths = environment();
+  await announceVault(paths.sharedData, VAULT_A, REQUEST_A);
+  const context = new DesktopAmbientContext(paths.settingsPath, () => {}, {
+    sharedDataDirectory: paths.sharedData,
+  });
+  let peer: WebSocket | undefined;
+  try {
+    await context.configure("obsidian", {
+      enabled: true,
+      allowedTypes: ["resource.identity", "selection.text"],
+    });
+    const id = (await context.getState()).pendingConnections![0]!.id;
+    await context.approveConnection(id);
+    const details = await context.pairing(id);
+    peer = await openPeer(details.endpoint, details.token);
+    await publish(peer, observations("before"));
+    await expect
+      .poll(() =>
+        context
+          .getState()
+          .then((state) => state.items.some((item) => item.observation.id === "selection-before")),
+      )
+      .toBe(true);
+    await context.prepareForUpdate("attempt-one");
+    const pong = Promise.withResolvers<void>();
+    peer.once("pong", () => pong.resolve());
+    peer.send(
+      JSON.stringify({
+        kind: "publish",
+        publication: { sequence: 1, observations: observations("held") },
+      }),
+    );
+    peer.ping();
+    await pong.promise;
+    expect(peer.readyState).toBe(WebSocket.OPEN);
+    expect(
+      (await context.getState()).items.some((item) => item.observation.id === "selection-held"),
+    ).toBe(false);
+    expect(
+      (await context.getState()).items.some((item) => item.observation.id === "selection-before"),
+    ).toBe(true);
+    context.releaseUpdate("attempt-one");
+    peer.send(
+      JSON.stringify({
+        kind: "publish",
+        publication: { sequence: 2, observations: observations("resumed") },
+      }),
+    );
+    await expect
+      .poll(() =>
+        context
+          .getState()
+          .then((state) => state.items.some((item) => item.observation.id === "selection-resumed")),
+      )
+      .toBe(true);
+  } finally {
+    peer?.close();
+    await context.stop();
+    await Fs.rm(paths.root, { recursive: true, force: true });
+  }
+});
+
 it("keeps a stable device grant per app profile and requires explicit source IDs to capture", async () => {
   const paths = environment();
   await Fs.mkdir(paths.userData, { recursive: true });

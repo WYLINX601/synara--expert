@@ -58,6 +58,9 @@ export const applyProjectMetadataProjection = (input: {
             ...(input.event.payload.workspaceRoot !== undefined
               ? { workspaceRoot: input.event.payload.workspaceRoot }
               : {}),
+            ...(input.event.payload.additionalFolders !== undefined
+              ? { additionalFolders: input.event.payload.additionalFolders }
+              : {}),
             ...(input.event.payload.defaultModelSelection !== undefined
               ? { defaultModelSelection: input.event.payload.defaultModelSelection }
               : {}),

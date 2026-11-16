@@ -21,7 +21,7 @@ import {
 import { remoteAccessPolicyError, ServerConfig } from "./config";
 import { resolveListeningPort } from "./startupAccess";
 import { patchBunWebSocketCloseEventCompatibility } from "./bunWebSocketCompatibility";
-import { makeEffectHttpRouteLayer } from "./http";
+import { makeEffectHttpRouteLayer, withServerMaintenanceAdmission } from "./http";
 import { Keybindings } from "./keybindings";
 import {
   ManagedAttachmentCleanup,
@@ -66,6 +66,10 @@ import { ExternalMcpGateway } from "./externalMcp/Services/ExternalMcpGateway";
 import { ExternalMcpService } from "./externalMcp/Services/ExternalMcpService";
 import { mcpConnectorsRouteLayer } from "./mcpConnectors/httpRoute";
 import { McpConnectors } from "./mcpConnectors/Services/McpConnectors";
+import { TerminalManager } from "./terminal/Services/Manager";
+import { makeServerMaintenanceController, serverMaintenanceAdmission } from "./serverMaintenance";
+import { makeServerMaintenanceInspection } from "./serverMaintenanceState";
+import { ProjectAgentService } from "./projectAgent/Services/ProjectAgentService";
 
 export interface ServerShape {
   readonly start: Effect.Effect<
@@ -100,6 +104,8 @@ export interface ServerShape {
     | ThreadSnoozeReactor
     | UsageLimitRecoveryReactor
     | SqlClient.SqlClient
+    | TerminalManager
+    | ProjectAgentService
   >;
   readonly stopSignal: Effect.Effect<void, never>;
 }
@@ -128,6 +134,13 @@ export function closeServerRuntimePipeline(input: {
     // close drains those workers before the engine accepts its final stop.
     Effect.andThen(input.orchestrationEngine.drain),
     Effect.andThen(input.providerService.closeRuntimeEvents),
+    // Native event operations retain their real leases if their pump caller
+    // disconnects. Finish them before subscriber teardown during update handoff.
+    Effect.andThen(
+      Effect.suspend(() =>
+        serverMaintenanceAdmission.held ? serverMaintenanceAdmission.drain : Effect.void,
+      ),
+    ),
     Effect.andThen(Scope.close(input.subscriptionsScope, Exit.void)),
     Effect.andThen(input.managedAttachmentCleanup.drain),
     Effect.andThen(input.orchestrationEngine.stop),
@@ -201,6 +214,28 @@ export const createEffectServer = Effect.fn(function* (
   const threadSnoozeReactor = yield* ThreadSnoozeReactor;
   const usageLimitRecoveryReactor = yield* UsageLimitRecoveryReactor;
   const readiness = yield* makeServerReadiness;
+  const pendingInteractions = yield* ProjectionPendingInteractionRepository;
+  const maintenanceSql = yield* SqlClient.SqlClient;
+  const maintenanceTerminal = yield* TerminalManager;
+  const maintenanceProjectAgent = yield* ProjectAgentService;
+  let maintenanceRuntimeReady = false;
+  const maintenance = makeServerMaintenanceController({
+    admission: serverMaintenanceAdmission,
+    inspect: Effect.suspend(() =>
+      maintenanceRuntimeReady
+        ? makeServerMaintenanceInspection({
+            engine: orchestrationEngine,
+            provider: providerService,
+            pendingInteractions,
+            sql: maintenanceSql,
+            terminal: maintenanceTerminal,
+            projectAgent: maintenanceProjectAgent,
+            admission: serverMaintenanceAdmission,
+          })
+        : Effect.succeed(null),
+    ),
+    commit: orchestrationEngine.quiesce.pipe(Effect.andThen(orchestrationEngine.drain)),
+  });
 
   // Start the runtime before serving config snapshots. This both performs the
   // startup sync and attaches the file watcher; calling only the sync helper
@@ -231,7 +266,7 @@ export const createEffectServer = Effect.fn(function* (
   );
 
   const routesLayer = Layer.mergeAll(
-    makeEffectHttpRouteLayer(readiness, shutdownController),
+    makeEffectHttpRouteLayer(readiness, shutdownController, maintenance),
     websocketRpcRouteLayer,
     agentGatewayRouteLayer,
     externalMcpRouteLayer,
@@ -239,7 +274,7 @@ export const createEffectServer = Effect.fn(function* (
   );
   const httpApp = yield* HttpRouter.toHttpEffect(routesLayer);
   yield* httpServer
-    .serve(httpApp)
+    .serve(withServerMaintenanceAdmission(httpApp, serverMaintenanceAdmission))
     .pipe(
       Effect.mapError((cause) => new ServerLifecycleError({ operation: "httpServerServe", cause })),
     );
@@ -325,7 +360,14 @@ export const createEffectServer = Effect.fn(function* (
   yield* runtimeStartup.markCommandReady;
   // The recorded chats get their continuation turn now that the orphaned turns
   // above are settled. Forked so the (rare) dispatch work never delays readiness.
-  yield* resumeQuitInterruptedChats(quitResumeRecord).pipe(Effect.forkIn(subscriptionsScope));
+  yield* resumeQuitInterruptedChats(quitResumeRecord).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        maintenanceRuntimeReady = true;
+      }),
+    ),
+    Effect.forkIn(subscriptionsScope),
+  );
 
   yield* lifecycleEvents.publish({
     type: "welcome",

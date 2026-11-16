@@ -32,14 +32,8 @@ describe("desktop artifact identity", () => {
   it.each([
     ["canary", "Synara Canary", "synara-canary", "synara-canary", ".synara-canary"],
     ["cua", "Synara Cua", "synara-cua", "synara-cua", ".synara-cua"],
-    ["workbench", "Personal Workbench", "workbench", "workbench", ".synara-workbench"],
-    [
-      "workbench-preview",
-      "Personal Workbench Preview",
-      "workbench-preview",
-      "workbench-preview",
-      ".synara-workbench-preview",
-    ],
+    ["workbench", "Linx", "linx", "linx", ".linx"],
+    ["workbench-preview", "Linx Preview", "linx-preview", "linx-preview", ".linx-preview"],
   ] as const)(
     "keeps packaged %s metadata, native identity, origin, storage and updater policy aligned",
     (flavor, displayName, profileName, scheme, homeName) => {

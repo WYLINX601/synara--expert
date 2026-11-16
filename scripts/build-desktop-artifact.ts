@@ -49,6 +49,9 @@ import {
   RELEASE_WORKSPACE_MANIFEST_PATHS,
 } from "./lib/release-workspace-manifests.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { buildLinxUpdateHelper } from "./build-linx-update-helper.ts";
+import { readLinxProductVersion, readLinxReleaseSource } from "./lib/linx-release-source.ts";
+import { hashFile } from "./lib/file-digest.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -326,7 +329,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   const target = mergeOptions(input.target, env.target, PLATFORM_CONFIG[platform].defaultTarget);
   // Flavor is deliberately a build flag, never inherited from a source
   // launcher's SYNARA_DESKTOP_FLAVOR environment variable.
-  const flavor = Option.getOrElse(input.flavor, () => "production" as const);
+  const flavor = Option.getOrElse(input.flavor, () => "workbench" as const);
   const artifactIdentity = yield* Effect.try({
     try: () => createDesktopArtifactIdentity({ platform, flavor }),
     catch: (cause) => new BuildScriptError({ message: String(cause), cause }),
@@ -1016,6 +1019,7 @@ const stageMacNativeBuild = Effect.fn("stageMacNativeBuild")(function* (
 const assertPackagedMacDeviceHelper = Effect.fn("assertPackagedMacDeviceHelper")(function* (
   stageDistDir: string,
   productName: string,
+  linxHelperSha256?: string,
 ) {
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
@@ -1037,6 +1041,22 @@ const assertPackagedMacDeviceHelper = Effect.fn("assertPackagedMacDeviceHelper")
       (yield* fs.exists(path.join(helperRoot, "build.sh"))) &&
       (yield* fs.exists(path.join(helperRoot, "Sources/main.swift")))
     ) {
+      if (linxHelperSha256) {
+        const helperPath = path.join(
+          packagedEntryPath,
+          `${productName}.app`,
+          "Contents/Resources/linx-update-helper",
+        );
+        const packagedDigest = yield* Effect.tryPromise({
+          try: () => hashFile(helperPath),
+          catch: (cause) =>
+            new BuildScriptError({ message: "Packaged Linx update helper is missing.", cause }),
+        });
+        if (packagedDigest !== linxHelperSha256)
+          return yield* new BuildScriptError({
+            message: "Packaged Linx update helper differs from the desktop build identity.",
+          });
+      }
       return;
     }
   }
@@ -1123,7 +1143,17 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       }),
   });
 
-  const appVersion = options.version ?? serverPackageJson.version;
+  const linxVersion = options.flavor === "workbench" ? readLinxProductVersion(repoRoot) : undefined;
+  if (linxVersion && options.version && options.version !== linxVersion) {
+    return yield* new BuildScriptError({
+      message: "Linx build version must match workbench/build-config.json.",
+    });
+  }
+  if (options.flavor === "workbench" && (options.platform !== "mac" || options.arch !== "arm64")) {
+    return yield* new BuildScriptError({ message: "Linx release supports macOS arm64 only." });
+  }
+  const linxSource = options.flavor === "workbench" ? readLinxReleaseSource(repoRoot) : undefined;
+  const appVersion = linxVersion ?? options.version ?? serverPackageJson.version;
   const hasSourceCommit = options.sourceCommit !== undefined;
   const hasLockfileSha256 = options.lockfileSha256 !== undefined;
   const exactProvenanceRequested =
@@ -1301,6 +1331,35 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     path.join(stageAppDir, "apps/desktop/prod-resources"),
     { flavor: options.flavor, repositoryRoot: repoRoot },
   );
+  let linxHelperSha256: string | undefined;
+  if (linxSource) {
+    const runtimeResources = path.join(stageAppDir, "apps/desktop/prod-resources");
+    yield* fs.writeFileString(
+      path.join(runtimeResources, "linx-update-source.json"),
+      `${JSON.stringify(linxSource, null, 2)}\n`,
+    );
+    const helper = yield* Effect.tryPromise({
+      try: () =>
+        buildLinxUpdateHelper({
+          repositoryRoot: repoRoot,
+          outputPath: path.join(runtimeResources, "linx-update-helper"),
+          source: linxSource,
+        }),
+      catch: (cause) =>
+        new BuildScriptError({ message: "Linx update helper build failed.", cause }),
+    });
+    linxHelperSha256 = helper.sha256;
+    yield* timedBuildStage(
+      "linx-desktop-helper-binding",
+      runCommand(
+        ChildProcess.make({
+          cwd: path.join(repoRoot, "apps/desktop"),
+          env: { ...process.env, LINX_UPDATE_HELPER_SHA256: helper.sha256 },
+          ...commandOutputOptions(options.verbose),
+        })`bun run build --out-dir ${path.join(stageAppDir, "apps/desktop/dist-electron")}`,
+      ),
+    );
+  }
 
   const resolvedBuildConfig = yield* createBuildConfig(
     options.platform,
@@ -1311,6 +1370,22 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     options.mockUpdateServerPort,
     options.flavor,
   );
+  if (linxSource) {
+    const config = resolvedBuildConfig.buildConfig;
+    config.extraResources = [
+      ...((config.extraResources as Array<Record<string, string>> | undefined) ?? []),
+      {
+        from: "apps/desktop/prod-resources/linx-update-source.json",
+        to: "linx-update-source.json",
+      },
+      { from: "apps/desktop/prod-resources/linx-update-helper", to: "linx-update-helper" },
+    ];
+    const mac = config.mac as Record<string, unknown>;
+    mac.signIgnore = [
+      ...((mac.signIgnore as string[] | undefined) ?? []),
+      "/Contents/Resources/linx-update-helper$",
+    ];
+  }
 
   const stagePackageJson: StagePackageJson = {
     ...artifactIdentity.packageMetadata,
@@ -1321,7 +1396,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     synaraSourceTag: options.sourceTag ?? null,
     synaraWindowsPublisherSubject: resolvedBuildConfig.windowsPublisherSubject,
     private: true,
-    description: "Synara desktop build",
+    description: options.flavor === "workbench" ? "Linx desktop" : "Synara desktop build",
     author: "Emanuele Di Pietro",
     main: "apps/desktop/dist-electron/main.js",
     build: resolvedBuildConfig.buildConfig,
@@ -1405,7 +1480,11 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   if (options.platform === "mac") {
-    yield* assertPackagedMacDeviceHelper(stageDistDir, artifactIdentity.identity.displayName);
+    yield* assertPackagedMacDeviceHelper(
+      stageDistDir,
+      artifactIdentity.identity.displayName,
+      linxHelperSha256,
+    );
   }
 
   if (options.platform === "mac" && options.target === "dmg" && !options.signed) {
@@ -1548,7 +1627,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   ),
   skipBuild: Flag.boolean("skip-build").pipe(
     Flag.withDescription(
-      "Skip `bun run build:desktop` and use existing dist artifacts (env: SYNARA_DESKTOP_SKIP_BUILD).",
+      "Reuse existing dist artifacts; Linx still binds the signed helper into its staged desktop bundle (env: SYNARA_DESKTOP_SKIP_BUILD).",
     ),
     Flag.optional,
   ),

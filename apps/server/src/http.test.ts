@@ -9,7 +9,7 @@ import zlib from "node:zlib";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, Exit, Layer, Scope } from "effect";
-import { HttpRouter } from "effect/unstable/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { AuthError, ServerAuth, type ServerAuthShape } from "./auth/Services/ServerAuth";
@@ -25,9 +25,11 @@ import {
   isLegacyTokenAuthorized,
   makeDesktopComputerEmergencyStopRouteLayer,
   makeDesktopShutdownEffectRouteLayer,
+  makeDesktopMaintenanceEffectRouteLayer,
   makeHealthEffectRouteLayer,
   projectFaviconEffectRouteLayer,
   staticAndDevEffectRouteLayer,
+  withServerMaintenanceAdmission,
 } from "./http";
 import {
   ProjectFaviconResolver,
@@ -47,6 +49,13 @@ import {
   makeServerShutdownController,
   type ServerShutdownController,
 } from "./serverShutdown";
+import {
+  DESKTOP_MAINTENANCE_ROUTE_PATH,
+  makeServerMaintenanceAdmission,
+  makeServerMaintenanceController,
+  type ServerMaintenanceAdmission,
+  type ServerMaintenanceController,
+} from "./serverMaintenance";
 
 const tempDirs: string[] = [];
 
@@ -149,6 +158,12 @@ type TestedRoute =
     }
   | { readonly kind: "shutdown"; readonly controller: ServerShutdownController }
   | {
+      readonly kind: "maintenance";
+      readonly controller: ServerMaintenanceController;
+      readonly admission: ServerMaintenanceAdmission;
+      readonly write?: Effect.Effect<HttpServerResponse.HttpServerResponse>;
+    }
+  | {
       readonly kind: "emergency-stop";
       readonly computerService?: ComputerServiceShape;
     }
@@ -186,6 +201,18 @@ async function withEffectServer(
             yield* httpServer.serve(
               yield* HttpRouter.toHttpEffect(makeDesktopShutdownEffectRouteLayer(route.controller)),
             );
+          } else if (route.kind === "maintenance") {
+            const app = yield* HttpRouter.toHttpEffect(
+              Layer.mergeAll(
+                makeDesktopMaintenanceEffectRouteLayer(route.controller),
+                HttpRouter.add(
+                  "*",
+                  "/maintenance-test-write",
+                  route.write ?? Effect.die("Write route not configured in this test"),
+                ),
+              ),
+            );
+            yield* httpServer.serve(withServerMaintenanceAdmission(app, route.admission));
           } else if (route.kind === "emergency-stop") {
             yield* httpServer.serve(
               yield* HttpRouter.toHttpEffect(makeDesktopComputerEmergencyStopRouteLayer()),
@@ -278,6 +305,184 @@ describe("production Effect HTTP routes", () => {
       // payloads via pretty-printed decode causes) must never cross this route.
       expect(body.projection).not.toHaveProperty("lastFailure");
     });
+  });
+
+  it("restricts native update identity to existing desktop authority and never invents source/client readiness", async () => {
+    const token = "f".repeat(64);
+    const config = makeConfig({
+      mode: "desktop",
+      desktopShutdownToken: token,
+      authToken: "existing-browser-token",
+    });
+    await withEffectServer(config, { kind: "health", readiness }, async (origin) => {
+      const publicResponse = await fetch(`${origin}/health`);
+      expect(await publicResponse.json()).not.toHaveProperty("linxUpdate");
+      const browser = await fetch(`${origin}/health`, {
+        headers: { Authorization: "Bearer existing-browser-token" },
+      });
+      expect(await browser.json()).not.toHaveProperty("linxUpdate");
+      const native = await fetch(`${origin}/health`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(await native.json()).toMatchObject({
+        linxUpdate: {
+          pid: process.pid,
+          homePath: config.baseDir,
+          sourceCommit: null,
+          clientConnected: false,
+        },
+      });
+      // Running unbundled test source has no authenticated release SHA. A launch
+      // claim and an HTTP listener alone must never promote the update to healthy.
+    });
+  });
+
+  it("binds maintenance to the dedicated loopback shutdown authority and exact target", async () => {
+    const token = "a".repeat(64);
+    const admission = makeServerMaintenanceAdmission();
+    const controller = makeServerMaintenanceController({
+      admission,
+      commit: Effect.void,
+      inspect: Effect.sync(() => ({
+        activeTurns: 0,
+        pendingApprovals: 0,
+        pendingUserInputs: 0,
+        backgroundTasks: 0,
+        acceptedWrites: admission.active,
+      })),
+    });
+    let writes = 0;
+    const write = Effect.sync(() => {
+      writes += 1;
+      return HttpServerResponse.jsonUnsafe({ writes });
+    });
+    await withEffectServer(
+      makeConfig({ mode: "desktop", desktopShutdownToken: token, authToken: "browser-token" }),
+      { kind: "maintenance", controller, admission, write },
+      async (origin) => {
+        expect((await fetch(`${origin}/maintenance-test-write`, { method: "POST" })).status).toBe(
+          200,
+        );
+        expect(writes).toBe(1);
+        const body = {
+          schemaVersion: 1,
+          action: "prepare",
+          attemptId: "12345678-1234-4234-8234-123456789012",
+          targetVersion: "0.1.16",
+          manifestDigest: "b".repeat(64),
+        };
+        const denied = await fetch(`${origin}${DESKTOP_MAINTENANCE_ROUTE_PATH}`, {
+          method: "POST",
+          headers: { Authorization: "Bearer browser-token", "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        expect(denied.status).toBe(401);
+        expect(admission.held).toBe(false);
+        const invalid = await fetch(`${origin}${DESKTOP_MAINTENANCE_ROUTE_PATH}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ ...body, action: "install" }),
+        });
+        expect(invalid.status).toBe(400);
+        const prepared = await fetch(`${origin}${DESKTOP_MAINTENANCE_ROUTE_PATH}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        await expect(prepared.json()).resolves.toMatchObject({
+          status: "ready",
+          attemptId: body.attemptId,
+          manifestDigest: body.manifestDigest,
+        });
+        expect(admission.held).toBe(true);
+        for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+          const blocked = await fetch(`${origin}/maintenance-test-write`, { method });
+          expect(blocked.status).toBe(503);
+          await expect(blocked.json()).resolves.toEqual({
+            error: "Update maintenance admission is closed.",
+          });
+        }
+        expect(writes).toBe(1);
+        for (const method of ["GET", "HEAD", "OPTIONS"]) {
+          expect((await fetch(`${origin}/maintenance-test-write`, { method })).status).toBe(200);
+        }
+        expect(writes).toBe(4);
+        const unauthorizedAbort = await fetch(`${origin}${DESKTOP_MAINTENANCE_ROUTE_PATH}`, {
+          method: "POST",
+          headers: { Authorization: "Bearer browser-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ ...body, action: "abort" }),
+        });
+        expect(unauthorizedAbort.status).toBe(401);
+        expect(admission.held).toBe(true);
+        const released = await fetch(`${origin}${DESKTOP_MAINTENANCE_ROUTE_PATH}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ ...body, action: "abort" }),
+        });
+        await expect(released.json()).resolves.toMatchObject({ status: "released" });
+        expect(admission.held).toBe(false);
+        expect((await fetch(`${origin}/maintenance-test-write`, { method: "POST" })).status).toBe(
+          200,
+        );
+        expect(writes).toBe(5);
+        expect((await fetch(`${origin}${DESKTOP_MAINTENANCE_ROUTE_PATH}`)).status).toBe(404);
+      },
+    );
+  });
+
+  it("keeps maintenance unavailable outside a privately authenticated desktop backend", async () => {
+    const admission = makeServerMaintenanceAdmission();
+    const controller = makeServerMaintenanceController({
+      admission,
+      inspect: Effect.succeed(null),
+      commit: Effect.void,
+    });
+    await withEffectServer(
+      makeConfig({ mode: "web", desktopShutdownToken: "a".repeat(64) }),
+      { kind: "maintenance", controller, admission },
+      async (origin) => {
+        const response = await fetch(`${origin}${DESKTOP_MAINTENANCE_ROUTE_PATH}`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${"a".repeat(64)}` },
+          body: "{}",
+        });
+        expect(response.status).toBe(404);
+      },
+    );
+  });
+
+  it.each(["untyped route failure", { _tag: "ServerMaintenanceAdmissionClosed" }])(
+    "does not turn an admitted route error into maintenance 503: %j",
+    async (error) => {
+      const admission = makeServerMaintenanceAdmission();
+      const app: Effect.Effect<HttpServerResponse.HttpServerResponse, unknown> = Effect.fail(error);
+      const result = await Effect.runPromise(
+        withServerMaintenanceAdmission(app, admission).pipe(
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(new Request("http://localhost/write", { method: "POST" })),
+          ),
+          Effect.result,
+        ),
+      );
+      expect(result).toMatchObject({ _tag: "Failure", failure: error });
+      expect(admission.active).toBe(0);
+    },
+  );
+
+  it("preserves admitted HTTP defects and releases their write lease", async () => {
+    const admission = makeServerMaintenanceAdmission();
+    const app = withServerMaintenanceAdmission(
+      Effect.die(new Error("Write handler defect")),
+      admission,
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromWeb(new Request("http://localhost/write", { method: "POST" })),
+      ),
+    );
+    await expect(Effect.runPromise(app)).rejects.toThrow("Write handler defect");
+    expect(admission.active).toBe(0);
   });
 
   it("accepts and idempotently replays the dedicated desktop shutdown request", async () => {

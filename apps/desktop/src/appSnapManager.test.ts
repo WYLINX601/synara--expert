@@ -1285,6 +1285,96 @@ describe("AppSnap window picker requests", () => {
     return child.stdin.read()?.toString().trimEnd() ?? "";
   }
 
+  it("requires the exact native pause acknowledgment and reverses it without killing capture work", async () => {
+    const { manager, watchChild, dispose } = await createEnabledManager();
+    try {
+      const pausing = manager.prepareForUpdate("attempt-one");
+      await flushPromises();
+      expect(lastStdinLine(watchChild)).toBe("pause-captures attempt-one");
+      let settled = false;
+      void pausing.then(() => {
+        settled = true;
+      });
+      watchChild.stdout.write(
+        '{"type":"update-maintenance","requestId":"foreign","paused":true,"ready":true}\n',
+      );
+      await flushPromises();
+      expect(settled).toBe(false);
+      watchChild.stdout.write(
+        '{"type":"update-maintenance","requestId":"attempt-one","paused":true,"ready":false}\n',
+      );
+      await expect(pausing).resolves.toBe(false);
+      await expect(manager.captureWindow(77)).rejects.toThrow("paused for installation");
+      expect(watchChild.kill).not.toHaveBeenCalled();
+      manager.releaseUpdate("foreign");
+      expect(lastStdinLine(watchChild)).toBe("");
+      manager.releaseUpdate("attempt-one");
+      expect(lastStdinLine(watchChild)).toBe("resume-captures attempt-one");
+      expect(watchChild.kill).not.toHaveBeenCalled();
+    } finally {
+      dispose();
+    }
+  });
+
+  it("finishes queued durable capture persistence and delivery before accepting the native barrier", async () => {
+    const { manager, watchChild, captureDirectory, onCaptured, dispose } =
+      await createEnabledManager();
+    const gate = Promise.withResolvers<void>();
+    const writeFile = FS.promises.writeFile;
+    const blockedWrite = vi.spyOn(FS.promises, "writeFile").mockImplementation(async (...args) => {
+      await gate.promise;
+      return writeFile(...args);
+    });
+    try {
+      const capturePath = join(captureDirectory, "incoming.png");
+      writeFileSync(capturePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7]));
+      const pausing = manager.prepareForUpdate("attempt-two");
+      await flushPromises();
+      watchChild.stdout.write(
+        `${JSON.stringify({ type: "captured", id: "queued", path: capturePath, name: "incoming.png" })}\n`,
+      );
+      watchChild.stdout.write(
+        '{"type":"update-maintenance","requestId":"attempt-two","paused":true,"ready":true}\n',
+      );
+      let settled = false;
+      void pausing.then(() => {
+        settled = true;
+      });
+      await flushPromises();
+      expect(settled).toBe(false);
+      expect(onCaptured).not.toHaveBeenCalled();
+      gate.resolve();
+      await expect(pausing).resolves.toBe(true);
+      expect(onCaptured).toHaveBeenCalledWith(expect.objectContaining({ id: "queued" }));
+      expect(await manager.listPendingCaptures()).toHaveLength(1);
+      await expect(manager.prepareForUpdate("attempt-two")).resolves.toBe(true);
+      manager.releaseUpdate("attempt-two");
+    } finally {
+      gate.resolve();
+      blockedWrite.mockRestore();
+      dispose();
+    }
+  });
+
+  it("refuses a picker already in flight without cancelling it", async () => {
+    const { manager, watchChild, captureDirectory, dispose } = await createEnabledManager();
+    try {
+      const capture = manager.captureWindow(77);
+      const requestId = lastStdinLine(watchChild).slice("capture-window ".length, -3);
+      await expect(manager.prepareForUpdate("attempt-three")).resolves.toBe(false);
+      expect(watchChild.kill).not.toHaveBeenCalled();
+      manager.releaseUpdate("attempt-three");
+      const capturePath = join(captureDirectory, "accepted.png");
+      writeFileSync(capturePath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 7]));
+      watchChild.stdout.write(
+        `${JSON.stringify({ type: "captured", id: requestId, path: capturePath, name: "accepted.png" })}\n`,
+      );
+      await expect(capture).resolves.toMatchObject({ id: requestId });
+    } finally {
+      dispose();
+    }
+  });
+
   it("lists windows through a correlated request", async () => {
     const { manager, watchChild, dispose } = await createEnabledManager();
     try {

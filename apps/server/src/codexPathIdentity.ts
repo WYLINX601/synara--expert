@@ -3,12 +3,7 @@
 // Layer: Server filesystem utility.
 
 import { codexAuthFs, runCodexAuthIoSync, type CodexAuthIo } from "./codexAuthIo.ts";
-import path from "node:path";
-
-function normalizeIdentity(value: string): string {
-  const normalized = path.normalize(value);
-  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
-}
+import { codexSourceIdentitySteps } from "@synara/shared/codexSourceIdentity";
 
 // Resolve symlinks in every existing path component while preserving a missing tail.
 export function resolveCodexPathIdentity(inputPath: string): string {
@@ -16,25 +11,16 @@ export function resolveCodexPathIdentity(inputPath: string): string {
 }
 
 export function* resolveCodexPathIdentityIo(inputPath: string): CodexAuthIo<string> {
-  const resolvedInput = path.resolve(inputPath);
-  const missingSegments: string[] = [];
-  let candidate = resolvedInput;
-
-  while (true) {
+  const steps = codexSourceIdentitySteps(inputPath);
+  let step = steps.next();
+  while (!step.done) {
     try {
-      const realCandidate = yield* codexAuthFs.realpath(candidate);
-      const rebuilt =
-        missingSegments.length > 0 ? path.join(realCandidate, ...missingSegments) : realCandidate;
-      return normalizeIdentity(rebuilt);
-    } catch {
-      const parent = path.dirname(candidate);
-      if (parent === candidate) {
-        return normalizeIdentity(resolvedInput);
-      }
-      missingSegments.unshift(path.basename(candidate));
-      candidate = parent;
+      step = steps.next(yield* codexAuthFs.realpath(step.value));
+    } catch (error) {
+      step = steps.throw(error);
     }
   }
+  return step.value;
 }
 
 export function codexPathsReferenceSameLocation(left: string, right: string): boolean {

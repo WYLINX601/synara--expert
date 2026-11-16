@@ -2,6 +2,7 @@ import type { ProjectReadFileResult } from "@synara/contracts";
 import { isWorkspaceFileWriteConflictError } from "@synara/shared/workspaceFileWrite";
 import type { QueryClient } from "@tanstack/react-query";
 
+import { notifyComposerPersistenceChanged } from "./composerPersistenceActivity";
 import { ensureNativeApi } from "~/nativeApi";
 import { refreshGitAfterFileWrite } from "./gitReactQuery";
 import { projectQueryKeys, projectReadFileQueryOptions } from "./projectReactQuery";
@@ -17,6 +18,44 @@ import {
 export const WORKSPACE_EDITOR_AUTOSAVE_MS = 400;
 
 const sessions = new WeakMap<QueryClient, Map<string, WorkspaceEditorSession>>();
+const maintenanceSessions = new Set<WorkspaceEditorSession>();
+let updateMaintenanceLease: { attemptId: string; manifestDigest: string } | null = null;
+
+export function isWorkspaceEditorUpdateFrozen() {
+  return updateMaintenanceLease !== null;
+}
+
+export function freezeWorkspaceEditorsForUpdate(attemptId: string, manifestDigest: string) {
+  if (
+    updateMaintenanceLease &&
+    (updateMaintenanceLease.attemptId !== attemptId ||
+      updateMaintenanceLease.manifestDigest !== manifestDigest)
+  )
+    return false;
+  for (const session of maintenanceSessions) session.suspendForUpdate();
+  updateMaintenanceLease = { attemptId, manifestDigest };
+  return true;
+}
+
+export function releaseWorkspaceEditorsForUpdate(attemptId: string, manifestDigest: string) {
+  if (
+    updateMaintenanceLease?.attemptId !== attemptId ||
+    updateMaintenanceLease.manifestDigest !== manifestDigest
+  )
+    return;
+  updateMaintenanceLease = null;
+  for (const session of maintenanceSessions) session.resumeAfterUpdate();
+}
+
+export function workspaceEditorMaintenanceSnapshot() {
+  let unsavedEditors = 0;
+  let savingEditors = 0;
+  for (const session of maintenanceSessions) {
+    if (session.dirty) unsavedEditors += 1;
+    if (session.saving) savingEditors += 1;
+  }
+  return { unsavedEditors, savingEditors };
+}
 
 /** One buffer and one writer per file, shared by all editor surfaces. Failed
  * drafts survive panel unmounts; clean, unused sessions are released. */
@@ -63,6 +102,7 @@ export class WorkspaceEditorSession {
     const next = workspaceFileEditorReducer(this.state, action);
     if (next === this.state) return;
     this.state = next;
+    notifyComposerPersistenceChanged();
     for (const listener of this.listeners) listener();
   }
 
@@ -78,6 +118,7 @@ export class WorkspaceEditorSession {
   }
 
   change = (value: string) => {
+    if (updateMaintenanceLease !== null) return;
     if (value === this.state.value) return;
     this.editGeneration += 1;
     this.dispatch({ type: "changed", value });
@@ -89,7 +130,15 @@ export class WorkspaceEditorSession {
     this.timer = undefined;
   }
 
+  suspendForUpdate() {
+    this.clearTimer();
+  }
+
+  resumeAfterUpdate() {
+    if (this.listeners.size > 0) this.schedule();
+  }
   private schedule() {
+    if (updateMaintenanceLease !== null) return;
     this.clearTimer();
     if (this.paused || this.writing || !this.dirty || this.state.saveError || this.state.conflict)
       return;
@@ -109,6 +158,7 @@ export class WorkspaceEditorSession {
   /** Drains edits typed during a write too. Failure retains the draft and stops
    * automatic retries; only an explicit Save/Overwrite retries it. */
   flush = (overwrite = false): Promise<boolean> => {
+    if (updateMaintenanceLease !== null) return Promise.resolve(false);
     this.clearTimer();
     if (this.writing) return this.writing;
     if (this.paused) return Promise.resolve(!this.dirty);
@@ -171,11 +221,14 @@ export class WorkspaceEditorSession {
       .finally(() => {
         this.writing = undefined;
         this.releaseIfUnused();
+        notifyComposerPersistenceChanged();
       });
+    notifyComposerPersistenceChanged();
     return this.writing;
   };
 
   reload = async () => {
+    if (updateMaintenanceLease !== null) return;
     this.pause();
     if (this.writing) await this.writing;
     const generation = this.editGeneration;
@@ -187,7 +240,7 @@ export class WorkspaceEditorSession {
         staleTime: 0,
       });
       const format = resolveWorkspaceFileEditorFormat(file);
-      if (generation === this.editGeneration && format) {
+      if (updateMaintenanceLease === null && generation === this.editGeneration && format) {
         this.dispatch({
           type: "reloaded",
           key: workspaceFileEditorKey(this.cwd, this.relativePath)!,
@@ -228,9 +281,13 @@ export function getWorkspaceEditorSession(client: QueryClient, cwd: string, rela
   if (!session) {
     const ownedEntries = entries;
     session = new WorkspaceEditorSession(client, cwd, relativePath, () => {
-      if (ownedEntries.get(key) === session) ownedEntries.delete(key);
+      if (ownedEntries.get(key) === session) {
+        ownedEntries.delete(key);
+        if (session) maintenanceSessions.delete(session);
+      }
     });
     entries.set(key, session);
+    maintenanceSessions.add(session);
   }
   return session;
 }

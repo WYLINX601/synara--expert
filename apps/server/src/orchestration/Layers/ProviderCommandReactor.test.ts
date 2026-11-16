@@ -1027,6 +1027,12 @@ describe("ProviderCommandReactor", () => {
 
     const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
     const service: ProviderServiceShape = {
+      getMaintenanceActivity: Effect.succeed({
+        dispatches: 0,
+        nativeTasks: 0,
+        runtimeCleanups: 0,
+        pendingRuntimeEvents: 0,
+      }),
       startSession: startSession as ProviderServiceShape["startSession"],
       startSessionWithOutcome,
       completePriorTranscriptBootstrap,

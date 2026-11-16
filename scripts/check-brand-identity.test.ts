@@ -7,8 +7,10 @@ import { describe, expect, it } from "vitest";
 import {
   findBrandIdentityViolations,
   findVisualBrandAssetViolations,
+  findLiveLinxIdentityViolations,
   readTrackedFiles,
 } from "./check-brand-identity";
+import { synaraDesktopIdentity } from "@synara/shared/desktopIdentity";
 
 const characters = (...codes: number[]): string => String.fromCharCode(...codes);
 const shortName = characters(116, 51);
@@ -24,6 +26,38 @@ const releaseAttribution = `**A review of the Synara codebase found an analytics
 const inAppReleaseAttribution = `"A review of the Synara codebase found an analytics configuration that came from the original ${firstSpacedDisplayName} codebase when Synara was created as a clone in March.",`;
 
 describe("brand identity guard", () => {
+  it("preserves dated historical documentation without exempting current source or live guides", () => {
+    expect(
+      findBrandIdentityViolations([{ path: "docs/install-2026-11-04.md", contents: firstName }]),
+    ).toEqual([]);
+    expect(
+      findBrandIdentityViolations([
+        { path: "docs/release.md", contents: firstName },
+        { path: "apps/web/src/branding.ts", contents: 'displayName: "Personal Workbench"' },
+        { path: "docs/release-2026-11-13.md", contents: firstName },
+      ]),
+    ).toHaveLength(3);
+  });
+  it("rejects live stale Linx profile, home, bundle, origin and override identities", () => {
+    const stable = synaraDesktopIdentity("workbench");
+    const preview = synaraDesktopIdentity("workbench-preview");
+    expect(
+      findLiveLinxIdentityViolations([stable, preview], ["LINX_HOME", "LINX_PREVIEW_HOME"]),
+    ).toEqual([]);
+    for (const changed of [
+      { ...stable, displayName: "Personal Workbench" },
+      { ...stable, defaultHomeDirectoryName: ".old" },
+      { ...stable, scheme: "old" },
+      { ...stable, bundleId: "com.old.app" },
+      { ...stable, userDataDirectoryName: "old" },
+    ])
+      expect(
+        findLiveLinxIdentityViolations([changed, preview], ["LINX_HOME", "LINX_PREVIEW_HOME"]),
+      ).toHaveLength(1);
+    expect(
+      findLiveLinxIdentityViolations([stable, preview], ["SYNARA_HOME", "LINX_PREVIEW_HOME"]),
+    ).toHaveLength(1);
+  });
   it("scans owned files while ignoring initialized and absent gitlinks", () => {
     const cwd = mkdtempSync(join(tmpdir(), "synara-brand-"));
     const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -46,9 +80,9 @@ describe("brand identity guard", () => {
         ),
       ).toHaveLength(1);
 
-      // Missing owned files must still fail rather than silently weakening the guard.
+      // Explicit worktree retirement must not keep dead branding in the gate.
       rmSync(join(cwd, path));
-      expect(() => readTrackedFiles(cwd)).toThrow();
+      expect(readTrackedFiles(cwd)).toEqual([]);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -89,9 +123,9 @@ describe("brand identity guard", () => {
     ).toHaveLength(1);
     expect(
       findBrandIdentityViolations([
-        { path: "context/PROJECT_CONTEXT.md", contents: `保留 ${stage} 运行中修订的未验收边界。` },
+        { path: "context/PROJECT_RECORDS.md", contents: `保留 ${stage} 运行中修订的未验收边界。` },
         {
-          path: "context/PROJECT_CONTEXT.md",
+          path: "context/PROJECT_RECORDS.md",
           contents: `保留 ${stage} 运行中修订的未验收边界。${secondName}`,
         },
       ]),

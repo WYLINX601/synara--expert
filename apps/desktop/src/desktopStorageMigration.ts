@@ -60,6 +60,62 @@ export function validateSynaraStorageSnapshot(value: unknown): SynaraStorageSnap
   return snapshot;
 }
 
+/** Relocates only structured filesystem fields/keys, never draft text or historical ledger bytes. */
+export function relocateSynaraStorageSnapshotPaths(
+  snapshot: SynaraStorageSnapshot,
+  input: { sourceHomePath: string; homePath: string; sourceAliases?: readonly string[] },
+): SynaraStorageSnapshot {
+  const sources = [input.sourceHomePath, ...(input.sourceAliases ?? [])].map((value) =>
+    Path.resolve(value),
+  );
+  function relocate(value: string): string {
+    if (!Path.isAbsolute(value)) return value;
+    for (const source of sources) {
+      const relative = Path.relative(source, value);
+      if (relative === "") return input.homePath;
+      if (!Path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${Path.sep}`))
+        return Path.join(input.homePath, relative);
+    }
+    return value;
+  }
+  const pathField = /(?:Path|Paths|Directory|Directories|Dir|Dirs|Root|Roots|Cwd|Cwds)$/u;
+  const entries: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(snapshot.entries)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      entries[key] = raw;
+      continue;
+    }
+    let changed = false;
+    function visit(value: unknown, field: string): unknown {
+      if (typeof value === "string") {
+        if (!pathField.test(field) && !["path", "paths", "cwd"].includes(field)) return value;
+        const next = relocate(value);
+        if (next !== value) changed = true;
+        return next;
+      }
+      if (Array.isArray(value)) return value.map((child) => visit(child, field));
+      if (!isPlainRecord(value)) return value;
+      const result: Record<string, unknown> = Object.create(null);
+      for (const [name, child] of Object.entries(value)) {
+        const nextName = relocate(name);
+        if (nextName !== name) changed = true;
+        if (Object.hasOwn(result, nextName))
+          throw new Error("Stored path relocation would merge conflicting browser data");
+        result[nextName] = visit(child, name);
+      }
+      return result;
+    }
+    const relocated = visit(parsed, key);
+    entries[key] = changed ? JSON.stringify(relocated) : raw;
+  }
+  const result = validateSynaraStorageSnapshot({ ...snapshot, entries });
+  if (!result) throw new Error("Relocated browser handoff exceeds the existing storage bounds");
+  return result;
+}
+
 export function resolveSynaraStorageSnapshotPath(userDataPath: string): string {
   return Path.join(userDataPath, SYNARA_STORAGE_SNAPSHOT_FILE_NAME);
 }

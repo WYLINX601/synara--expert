@@ -93,33 +93,33 @@ describe("desktopIdentity", () => {
     });
   });
 
-  it("gives Workbench and Preview separate identities, profiles, homes, and scripted updates", () => {
-    expect(SYNARA_WORKBENCH_BUNDLE_ID).toBe("com.wylinx.workbench");
-    expect(SYNARA_WORKBENCH_DESKTOP_ORIGIN).toBe("workbench://app");
-    expect(SYNARA_WORKBENCH_DESKTOP_ENTRY_URL).toBe("workbench://app/index.html");
-    expect(SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID).toBe("com.wylinx.workbench.preview");
-    expect(SYNARA_WORKBENCH_PREVIEW_DESKTOP_ORIGIN).toBe("workbench-preview://app");
-    expect(SYNARA_WORKBENCH_PREVIEW_DESKTOP_ENTRY_URL).toBe("workbench-preview://app/index.html");
+  it("gives Linx and Preview separate identities, profiles, homes, and scripted updates", () => {
+    expect(SYNARA_WORKBENCH_BUNDLE_ID).toBe("com.wylinx.linx");
+    expect(SYNARA_WORKBENCH_DESKTOP_ORIGIN).toBe("linx://app");
+    expect(SYNARA_WORKBENCH_DESKTOP_ENTRY_URL).toBe("linx://app/index.html");
+    expect(SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID).toBe("com.wylinx.linx.preview");
+    expect(SYNARA_WORKBENCH_PREVIEW_DESKTOP_ORIGIN).toBe("linx-preview://app");
+    expect(SYNARA_WORKBENCH_PREVIEW_DESKTOP_ENTRY_URL).toBe("linx-preview://app/index.html");
     expect(synaraDesktopIdentity("workbench")).toEqual({
       flavor: "workbench",
-      displayName: "Personal Workbench",
+      displayName: "Linx",
       bundleId: SYNARA_WORKBENCH_BUNDLE_ID,
-      scheme: "workbench",
+      scheme: "linx",
       origin: SYNARA_WORKBENCH_DESKTOP_ORIGIN,
       entryUrl: SYNARA_WORKBENCH_DESKTOP_ENTRY_URL,
-      userDataDirectoryName: "workbench",
-      defaultHomeDirectoryName: ".synara-workbench",
+      userDataDirectoryName: "linx",
+      defaultHomeDirectoryName: ".linx",
       usesScriptedUpdates: true,
     });
     expect(synaraDesktopIdentity("workbench-preview")).toEqual({
       flavor: "workbench-preview",
-      displayName: "Personal Workbench Preview",
+      displayName: "Linx Preview",
       bundleId: SYNARA_WORKBENCH_PREVIEW_BUNDLE_ID,
-      scheme: "workbench-preview",
+      scheme: "linx-preview",
       origin: SYNARA_WORKBENCH_PREVIEW_DESKTOP_ORIGIN,
       entryUrl: SYNARA_WORKBENCH_PREVIEW_DESKTOP_ENTRY_URL,
-      userDataDirectoryName: "workbench-preview",
-      defaultHomeDirectoryName: ".synara-workbench-preview",
+      userDataDirectoryName: "linx-preview",
+      defaultHomeDirectoryName: ".linx-preview",
       usesScriptedUpdates: true,
     });
   });
@@ -185,9 +185,9 @@ describe("desktopIdentity", () => {
     expect(synaraDesktopIdentity("development").defaultHomeDirectoryName).toBe(".synara-dev");
     expect(synaraDesktopIdentity("canary").defaultHomeDirectoryName).toBe(".synara-canary");
     expect(synaraDesktopIdentity("cua").defaultHomeDirectoryName).toBe(".synara-cua");
-    expect(synaraDesktopIdentity("workbench").defaultHomeDirectoryName).toBe(".synara-workbench");
+    expect(synaraDesktopIdentity("workbench").defaultHomeDirectoryName).toBe(".linx");
     expect(synaraDesktopIdentity("workbench-preview").defaultHomeDirectoryName).toBe(
-      ".synara-workbench-preview",
+      ".linx-preview",
     );
     expect(synaraDesktopIdentity("beta").defaultHomeDirectoryName).toBe(".synara-beta");
     expect(synaraDesktopIdentity("production").defaultHomeDirectoryName).toBe(".synara");
@@ -306,6 +306,32 @@ describe("resolveSynaraDesktopHomeDir", () => {
     ).toBe(customHome);
   });
 
+  it("never aliases a legacy home or another Linx lane through inherited overrides", () => {
+    expect(SYNARA_WORKBENCH_HOME_ENV).toBe("LINX_HOME");
+    expect(SYNARA_WORKBENCH_PREVIEW_HOME_ENV).toBe("LINX_PREVIEW_HOME");
+    const env = {
+      SYNARA_WORKBENCH_HOME: "/legacy",
+      SYNARA_WORKBENCH_PREVIEW_HOME: "/legacy-preview",
+      LINX_HOME: "/linx",
+      LINX_PREVIEW_HOME: "/linx-preview",
+    };
+    expect(
+      resolveSynaraDesktopHomeDir({
+        flavor: "workbench",
+        env,
+        homeDir: "/home/test",
+        joinPath: join,
+      }),
+    ).toBe("/linx");
+    expect(
+      resolveSynaraDesktopHomeDir({
+        flavor: "workbench-preview",
+        env,
+        homeDir: "/home/test",
+        joinPath: join,
+      }),
+    ).toBe("/linx-preview");
+  });
   it("preserves Stable and Beta home overrides", () => {
     expect(
       resolveSynaraDesktopHomeDir({

@@ -3,7 +3,7 @@
   "compilerOptions": {
     "composite": true,
     "types": ["node", "electron"],
-    "lib": ["ES2023", "DOM", "esnext.disposable"]
+    "lib": ["ES2023", "ES2024.Promise", "DOM", "esnext.disposable"]
   },
   "include": ["src", "tsdown.config.mts"],
   "exclude": ["src/cuaFixtures"]

@@ -7,6 +7,9 @@
       "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/apps/server/src/persistence/Migrations.ts"],
       "outputs": ["dist-electron/**"],
     },
+    "test": {
+      "env": ["LINX_UPDATE_NATIVE_QUALIFICATION"],
+    },
     "dev": {
       "dependsOn": ["@synara/cli#build"],
       "persistent": true,

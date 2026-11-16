@@ -5,6 +5,12 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import {
+  synaraDesktopIdentity,
+  SYNARA_WORKBENCH_HOME_ENV,
+  SYNARA_WORKBENCH_PREVIEW_HOME_ENV,
+  type SynaraDesktopIdentity,
+} from "@synara/shared/desktopIdentity";
 
 const characters = (...codes: number[]): string => String.fromCharCode(...codes);
 const retiredShortName = characters(116, 51);
@@ -205,7 +211,7 @@ const approvedHubStageReferencePatterns = new Map<string, RegExp>(
     [
       ["apps/server/src/hubCollaboration/planRevisionImpact.ts", [" proposal analysis,"]],
       [
-        "context/PROJECT_CONTEXT.md",
+        "context/PROJECT_RECORDS.md",
         ["，沿用", " 实施记录", " 仍为纯修订影响分析", " 仅完成纯影响分析", " 运行中修订"],
       ],
       ["docs/hub-review-2026-10-22/Hub_技术方案_V0.8.md", [" 完整 V0.8 协作"]],
@@ -279,12 +285,82 @@ function findApprovedIdentityLine(
   );
   return index === -1 ? null : index;
 }
+/** Dated evidence is immutable history, not a current product identity declaration. */
+function isHistoricalDocument(path: string): boolean {
+  const date = /^(?:docs|_bmad-output)\/.*((?:19|20)\d{2}-\d{2}-\d{2}).*\.(?:md|txt|json)$/.exec(
+    path,
+  )?.[1];
+  return date !== undefined && date < "2026-11-13";
+}
+
+export function findLiveLinxIdentityViolations(
+  identities: readonly SynaraDesktopIdentity[],
+  homeVariables: readonly string[],
+): BrandIdentityViolation[] {
+  const violations: BrandIdentityViolation[] = [];
+  const expected = [
+    {
+      flavor: "workbench",
+      displayName: "Linx",
+      bundleId: "com.wylinx.linx",
+      scheme: "linx",
+      userDataDirectoryName: "linx",
+      defaultHomeDirectoryName: ".linx",
+      usesScriptedUpdates: true,
+    },
+    {
+      flavor: "workbench-preview",
+      displayName: "Linx Preview",
+      bundleId: "com.wylinx.linx.preview",
+      scheme: "linx-preview",
+      userDataDirectoryName: "linx-preview",
+      defaultHomeDirectoryName: ".linx-preview",
+      usesScriptedUpdates: true,
+    },
+  ] as const;
+  for (const [index, identity] of expected.entries()) {
+    const actual = identities.find((value) => value.flavor === identity.flavor);
+    const wrong = Object.entries(identity)
+      .filter(([key, value]) => actual?.[key as keyof SynaraDesktopIdentity] !== value)
+      .map(([key]) => key);
+    if (
+      actual?.origin !== `${identity.scheme}://app` ||
+      actual?.entryUrl !== `${identity.scheme}://app/index.html`
+    )
+      wrong.push("origin/entryUrl");
+    if (homeVariables[index] !== (index === 0 ? "LINX_HOME" : "LINX_PREVIEW_HOME"))
+      wrong.push("home override");
+    if (wrong.length)
+      violations.push({
+        path: "packages/shared/src/desktopIdentity.ts",
+        line: null,
+        text: `${identity.flavor}: incorrect live Linx ${wrong.join(", ")}`,
+      });
+  }
+  return violations;
+}
 
 export function findBrandIdentityViolations(
   files: readonly BrandIdentityFile[],
 ): BrandIdentityViolation[] {
   const violations: BrandIdentityViolation[] = [];
   for (const file of files) {
+    if (isHistoricalDocument(file.path)) continue;
+    if (
+      [
+        "apps/web/src/branding.ts",
+        "docs/release.md",
+        "scripts/lib/desktop-artifact-identity.ts",
+      ].includes(file.path)
+    ) {
+      for (const [index, line] of file.contents.split(/\r?\n/).entries()) {
+        if (
+          /Personal Workbench|Synara Workbench|com\.wylinx\.workbench|\.synara-workbench/.test(line)
+        ) {
+          violations.push({ path: file.path, line: index + 1, text: line.trim() });
+        }
+      }
+    }
     if (containsForbiddenIdentity(file.path)) {
       violations.push({ path: file.path, line: null, text: file.path });
     }
@@ -351,9 +427,15 @@ export function readTrackedFiles(cwd = process.cwd()): BrandIdentityBinaryFile[]
     .filter(Boolean);
   // Gitlinks name another repository, not a file owned by this checkout. They may
   // exist as directories or be absent when submodules have not been initialized.
+  // Retired source files are not live branding. Required raster assets are still
+  // enforced independently below, and unreadable surviving files remain errors.
+  const deleted = new Set(
+    execFileSync("git", ["ls-files", "--deleted", "-z"], { cwd, encoding: "utf8" }).split("\0"),
+  );
   const paths = entries
     .filter((entry) => !entry.startsWith("160000 "))
-    .map((entry) => entry.slice(entry.indexOf("\t") + 1));
+    .map((entry) => entry.slice(entry.indexOf("\t") + 1))
+    .filter((path) => !deleted.has(path));
   return paths.map((path) => ({ path, contents: readFileSync(resolve(cwd, path)) }));
 }
 
@@ -366,9 +448,13 @@ function main(): void {
   const violations = [
     ...findBrandIdentityViolations(searchableFiles),
     ...findVisualBrandAssetViolations(trackedFiles),
+    ...findLiveLinxIdentityViolations(
+      [synaraDesktopIdentity("workbench"), synaraDesktopIdentity("workbench-preview")],
+      [SYNARA_WORKBENCH_HOME_ENV, SYNARA_WORKBENCH_PREVIEW_HOME_ENV],
+    ),
   ];
   if (violations.length === 0) {
-    console.log("Synara identity check passed.");
+    console.log("Linx identity check passed (historical evidence preserved).");
     return;
   }
 

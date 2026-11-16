@@ -17,6 +17,7 @@ import {
 const baseManifest = {
   schemaVersion: 1,
   productId: "linx",
+  installIdentity: "com.wylinx.linx",
   channel: "stable",
   platform: "darwin",
   arch: "arm64",
@@ -351,6 +352,18 @@ describe("Linx update trusted key ring loading", () => {
   it("rejects malformed JSON and non-object shapes", () => {
     expect(() => loadLinxUpdateKeyRing("[]")).toThrow(LinxUpdateConfigurationError);
     expect(() => loadLinxUpdateKeyRing("{")).toThrow(LinxUpdateConfigurationError);
+  });
+
+  it("rejects malformed key records without exposing credential-like values in diagnostics", () => {
+    const marker = "credential-value-that-must-not-be-logged";
+    let failure: unknown;
+    try {
+      loadLinxUpdateKeyRing(JSON.stringify({ ["a".repeat(16)]: { privateKey: marker } }));
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(LinxUpdateConfigurationError);
+    expect(String(failure)).not.toContain(marker);
   });
 
   it("rejects keys that are not 44-byte Ed25519 SPKI DER", () => {

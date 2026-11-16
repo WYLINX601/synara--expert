@@ -37,6 +37,10 @@ import {
 import { appSnapUploadName, normalizeComposerImageSource } from "./composerImageSource";
 import { randomUUID } from "./utils";
 import { resolveWsHttpUrl } from "./wsHttpUrl";
+import {
+  assertComposerPersistenceAllowed,
+  beginComposerPersistenceOperation,
+} from "./composerPersistenceActivity";
 
 const ATTACHMENT_CANCEL_CONCURRENCY = 2;
 const ATTACHMENT_CANCEL_BODY_MAX_BYTES = 512;
@@ -113,29 +117,35 @@ export async function prepareComposerImageAttachmentsFromFiles(input: {
   files: readonly File[];
   existingAttachmentCount: number;
 }): Promise<ComposerImageBuildResult> {
-  const images: ComposerImageAttachment[] = [];
-  let error: string | null = null;
+  assertComposerPersistenceAllowed();
+  const finish = beginComposerPersistenceOperation();
+  try {
+    const images: ComposerImageAttachment[] = [];
+    let error: string | null = null;
 
-  for (const file of input.files) {
-    if (!file.type.startsWith("image/")) {
-      error = `Unsupported file type for '${file.name}'. Please attach image files only.`;
-      continue;
+    for (const file of input.files) {
+      if (!file.type.startsWith("image/")) {
+        error = `Unsupported file type for '${file.name}'. Please attach image files only.`;
+        continue;
+      }
+      if (input.existingAttachmentCount + images.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+        error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} references per message.`;
+        break;
+      }
+      try {
+        images.push(composerImageAttachmentFromFile(await prepareComposerImageFile(file)));
+      } catch (cause) {
+        error =
+          cause instanceof ComposerImagePreparationError
+            ? cause.message
+            : `Synara could not prepare '${file.name || "image"}'.`;
+      }
     }
-    if (input.existingAttachmentCount + images.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-      error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} references per message.`;
-      break;
-    }
-    try {
-      images.push(composerImageAttachmentFromFile(await prepareComposerImageFile(file)));
-    } catch (cause) {
-      error =
-        cause instanceof ComposerImagePreparationError
-          ? cause.message
-          : `Synara could not prepare '${file.name || "image"}'.`;
-    }
+
+    return { images, error };
+  } finally {
+    finish();
   }
-
-  return { images, error };
 }
 
 // Converts non-image File objects into in-memory file attachment drafts.

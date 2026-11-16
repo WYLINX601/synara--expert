@@ -3,7 +3,7 @@
   "compilerOptions": {
     "composite": true,
     "jsx": "react-jsx",
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "lib": ["ES2023", "ES2024.Promise", "DOM", "DOM.Iterable"],
     "types": ["vite/client"],
     "paths": {
       "~/*": ["./src/*"]

@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { matchesDistinguishedName } from "@synara/shared/windowsCertificate";
+import { verifyLinxReleaseBundles } from "./linx-release-bundle.ts";
 
 export type ReleaseArtifactPlatform = "linux" | "mac" | "win";
 
@@ -24,6 +25,7 @@ export interface ReleaseArtifactProvenanceInput {
   readonly lockfileSha256: string;
   readonly publication: boolean;
   readonly signed: boolean;
+  readonly adHoc?: boolean;
   readonly allowUnsignedWindowsPublication?: boolean;
   readonly expectedMacTeamId?: string;
   readonly expectedWindowsPublisher?: string;
@@ -59,6 +61,12 @@ interface MacSignatureEvidence {
 }
 
 type SigningEvidence =
+  | {
+      readonly status: "verified";
+      readonly scheme: "linx-ad-hoc";
+      readonly identity: { readonly bundleId: "com.wylinx.linx" };
+      readonly checks: ReadonlyArray<string>;
+    }
   | {
       readonly status: "verified";
       readonly scheme: "apple-developer-id";
@@ -153,6 +161,8 @@ export async function collectReleaseArtifactDigests(
 
   const artifacts: ReleaseArtifactDigest[] = [];
   for (const fileName of fileNames) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(fileName) || fileName.includes(".."))
+      throw new Error("Release asset name must be a contained basename.");
     const filePath = join(assetsDirectory, fileName);
     const entry = lstatSync(filePath);
     if (!entry.isFile() || entry.isSymbolicLink()) {
@@ -383,6 +393,24 @@ function resolveSigningEvidence(
   input: ReleaseArtifactProvenanceInput,
   artifacts: ReadonlyArray<ReleaseArtifactDigest>,
 ): SigningEvidence {
+  if (input.adHoc) {
+    if (input.platform !== "mac" || input.arch !== "arm64" || input.signed)
+      throw new Error("Linx ad-hoc qualification is macOS arm64 only.");
+    requireSingleArtifact(artifacts, ".dmg");
+    requireSingleArtifact(artifacts, ".zip");
+    verifyLinxReleaseBundles(input.assetsDirectory, input.version);
+    return {
+      status: "verified",
+      scheme: "linx-ad-hoc",
+      identity: { bundleId: "com.wylinx.linx" },
+      checks: [
+        "ZIP and read-only DMG bundle identity/version",
+        "arm64 executable/helper",
+        "deep strict codesign structural verification",
+        "DMG checksum",
+      ],
+    };
+  }
   if (input.platform === "linux") {
     if (input.signed) {
       throw new Error("Linux release provenance cannot claim an unsupported signing scheme.");

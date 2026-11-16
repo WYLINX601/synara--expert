@@ -30,7 +30,7 @@ export interface ReleaseArtifactCheckpointInput extends Pick<
   | "expectedWindowsPublisher"
   | "expectedWindowsSubjectDn"
 > {
-  readonly flavor: "production" | "beta";
+  readonly flavor: "production" | "beta" | "workbench";
 }
 
 function record(value: unknown, name: string): Record<string, unknown> {
@@ -69,6 +69,16 @@ function verifySigning(
     equal("Linux signing status", signing.status, "not-applicable");
     equal("Linux signing scheme", signing.scheme, "none");
     equal("Linux signing identity", signing.identity, null);
+    return;
+  }
+  if (input.flavor === "workbench") {
+    equal("Linx signing status", signing.status, "verified");
+    equal("Linx signing scheme", signing.scheme, "linx-ad-hoc");
+    equal(
+      "Linx bundle identity",
+      record(signing.identity, "Linx identity").bundleId,
+      "com.wylinx.linx",
+    );
     return;
   }
   if (signing.status === "verified") {
@@ -129,7 +139,11 @@ export async function verifyReleaseArtifactCheckpoint(
     input.target !== validTarget ||
     !["arm64", "x64"].includes(input.arch) ||
     (input.platform !== "mac" && input.arch !== "x64") ||
-    !["production", "beta"].includes(input.flavor) ||
+    !["production", "beta", "workbench"].includes(input.flavor) ||
+    (input.flavor === "workbench" &&
+      (input.platform !== "mac" ||
+        input.arch !== "arm64" ||
+        !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(input.version))) ||
     !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(input.version) ||
     !/^[0-9a-f]{40}$/i.test(input.sourceCommit) ||
     !/^[0-9a-f]{64}$/i.test(input.lockfileSha256) ||
@@ -157,7 +171,7 @@ export async function verifyReleaseArtifactCheckpoint(
 
   // AppImage names use the native x86_64 alias; provenance keeps the matrix arch x64.
   const fileArch = input.platform === "linux" ? "x86_64" : input.arch;
-  const stem = `${input.flavor === "beta" ? "Synara-Beta" : "Synara"}-${input.version}-${fileArch}`;
+  const stem = `${input.flavor === "workbench" ? "Linx" : input.flavor === "beta" ? "Synara-Beta" : "Synara"}-${input.version}-${fileArch}`;
   const payloads =
     input.platform === "mac"
       ? [`${stem}.dmg`, `${stem}.zip`]
@@ -166,11 +180,11 @@ export async function verifyReleaseArtifactCheckpoint(
     input.platform === "mac"
       ? `latest-mac${input.arch === "x64" ? "-x64" : ""}.yml`
       : `latest${input.platform === "linux" ? "-linux" : ""}.yml`;
-  const allowedNames = new Set([
-    ...payloads,
-    ...payloads.map((name) => `${name}.blockmap`),
-    updaterName,
-  ]);
+  const allowedNames = new Set(
+    input.flavor === "workbench"
+      ? payloads
+      : [...payloads, ...payloads.map((name) => `${name}.blockmap`), updaterName],
+  );
   if (!Array.isArray(manifest.artifacts) || manifest.artifacts.length === 0) {
     throw new Error("Checkpoint artifact inventory is missing.");
   }
@@ -198,7 +212,7 @@ export async function verifyReleaseArtifactCheckpoint(
     equal(`${fileName} size`, regularFile(path), artifact.size);
     equal(`${fileName} checksum`, await hashFile(path), artifact.sha256);
   }
-  for (const required of [...payloads, updaterName]) {
+  for (const required of [...payloads, ...(input.flavor === "workbench" ? [] : [updaterName])]) {
     if (!expectedFiles.has(required))
       throw new Error(`Checkpoint is missing required asset ${required}.`);
   }

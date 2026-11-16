@@ -36,7 +36,7 @@ const platforms = [
 ] as const;
 
 export function resolveReleaseBuildScope(
-  platform = "all",
+  platform = "mac-arm64",
   stage = "artifact",
   publish = false,
   cuaBenchmarkBaseline = "",
@@ -45,8 +45,8 @@ export function resolveReleaseBuildScope(
     throw new Error(`Unknown build stage: ${stage}`);
   const selected = platforms.filter((entry) => platform === "all" || platform === entry.id);
   if (selected.length === 0) throw new Error(`Unknown build platform: ${platform}`);
-  if (publish && (platform !== "all" || stage !== "artifact"))
-    throw new Error("Publication requires all platforms and the complete artifact stage.");
+  if (publish && (platform !== "mac-arm64" || stage !== "artifact"))
+    throw new Error("Publication requires the complete Linx mac-arm64 artifact stage.");
   if (stage === "icon" && selected.every((entry) => entry.platform !== "mac"))
     throw new Error("Icon validation requires a macOS platform or all.");
   if (stage === "native" && platform === "win-x64")

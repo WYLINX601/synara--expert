@@ -192,6 +192,12 @@ function createProviderServiceHarness(
         ] satisfies ReadonlyArray<ProviderSession>)
       : Effect.succeed([] as ReadonlyArray<ProviderSession>);
   const service: ProviderServiceShape = {
+    getMaintenanceActivity: Effect.succeed({
+      dispatches: 0,
+      nativeTasks: 0,
+      runtimeCleanups: 0,
+      pendingRuntimeEvents: 0,
+    }),
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
     steerTurn: () => unsupported(),
@@ -1614,13 +1620,8 @@ describe("CheckpointReactor", () => {
           ),
         ),
       ).toBe(true);
-      expect(
-        Option.isSome(
-          await Effect.runPromise(
-            Deferred.await(peerCaptured).pipe(Effect.timeoutOption("1 second")),
-          ),
-        ),
-      ).toBe(true);
+      // The held gate proves independence; native Git uses the test's outer deadline.
+      await Effect.runPromise(Deferred.await(peerCaptured));
       await Effect.runPromise(Effect.sleep("100 millis"));
       expect(peak).toBe(2);
     } finally {
@@ -1780,13 +1781,7 @@ describe("CheckpointReactor", () => {
             nativeCompletion("unknown-alias-peer-completed", peerThread),
           ),
         );
-        expect(
-          Option.isSome(
-            await Effect.runPromise(
-              Deferred.await(peerCaptured).pipe(Effect.timeoutOption("1 second")),
-            ),
-          ),
-        ).toBe(true);
+        await Effect.runPromise(Deferred.await(peerCaptured));
         await settleCheckpointWork(harness.reactor.drain);
         expect(
           Option.isSome(
@@ -1902,7 +1897,6 @@ describe("CheckpointReactor", () => {
       await waitForEvent(
         harness.engine,
         (event) => event.type === "thread.reverted" && event.aggregateId === peer,
-        1000,
       );
       expect(restore).toHaveBeenCalled();
       expect(fs.readFileSync(path.join(harness.cwd, "README.md"), "utf8")).toBe("v1\n");
@@ -3616,9 +3610,7 @@ describe("CheckpointReactor", () => {
   });
 
   const settleCheckpointWork = async (effect: Effect.Effect<void>) => {
-    expect(
-      Option.isSome(await Effect.runPromise(effect.pipe(Effect.timeoutOption("3 seconds")))),
-    ).toBe(true);
+    await Effect.runPromise(effect);
   };
 
   it.each(["alias", "nested directory"] as const)(

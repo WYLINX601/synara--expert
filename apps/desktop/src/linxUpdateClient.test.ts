@@ -8,10 +8,10 @@ import type { DesktopUpdateState } from "@synara/contracts";
 
 import {
   EMPTY_LINX_UPDATE_CHECK_RECORD,
-  LINX_UPDATE_INSTALL_UNAVAILABLE_MESSAGE,
   LinxUpdateClient,
   parseLinxUpdateCheckRecord,
   type LinxUpdateCheckRecord,
+  type LinxUpdateClientOptions,
 } from "./linxUpdateClient";
 import {
   LinxUpdateDownloadError,
@@ -44,6 +44,7 @@ function manifestFor(signer: Signer, overrides: Partial<Record<string, unknown>>
     JSON.stringify({
       schemaVersion: 1,
       productId: "linx",
+      installIdentity: "com.wylinx.linx",
       channel: "stable",
       platform: "darwin",
       arch: "arm64",
@@ -81,6 +82,7 @@ interface HarnessOptions {
   readonly signatureSequence?: (signer: Signer, manifest: Buffer) => readonly Buffer[];
   readonly fetchError?: unknown;
   readonly download?: (input: LinxUpdateDownloadOptions) => Promise<LinxUpdateDownloadResult>;
+  readonly install?: LinxUpdateClientOptions["install"];
   readonly stagingDir?: string;
   readonly pollIntervalMs?: number;
 }
@@ -140,10 +142,65 @@ function createHarness(options: HarnessOptions = {}): Harness {
     writeCheckRecord: (record) => {
       stored = record;
     },
+    install:
+      options.install ??
+      (async () => ({ accepted: false, completed: false, message: "Fixture busy work" })),
+    installFailureMessage: "Fixture installation failure",
     now: () => new Date(clock.getTime()),
     fetchBytes: async (url) => {
       calls.push(url);
       if (options.fetchError !== undefined) throw options.fetchError;
+      const entry = JSON.parse(manifest.toString("utf8")) as {
+        version: string;
+        sourceCommit: string;
+        assetName: string;
+        assetUrl: string;
+        size: number;
+      };
+      if (url.includes("/git/ref/tags/")) {
+        return Buffer.from(
+          JSON.stringify({
+            ref: `refs/tags/v${entry.version}`,
+            object: { type: "commit", sha: entry.sourceCommit },
+          }),
+        );
+      }
+      if (url.includes("/releases/tags/")) {
+        const base = `https://github.com/owner/repo/releases/download/v${entry.version}/`;
+        return Buffer.from(
+          JSON.stringify({
+            id: 100,
+            tag_name: `v${entry.version}`,
+            draft: false,
+            prerelease: false,
+            published_at: "2026-11-13T00:00:00Z",
+            html_url: `https://github.com/owner/repo/releases/tag/v${entry.version}`,
+            assets: [
+              {
+                id: 101,
+                name: entry.assetName,
+                size: entry.size,
+                state: "uploaded",
+                browser_download_url: entry.assetUrl,
+              },
+              {
+                id: 102,
+                name: "linx-update.json",
+                size: manifest.length,
+                state: "uploaded",
+                browser_download_url: `${base}linx-update.json`,
+              },
+              {
+                id: 103,
+                name: "linx-update.json.sig",
+                size: signature.length,
+                state: "uploaded",
+                browser_download_url: `${base}linx-update.json.sig`,
+              },
+            ],
+          }),
+        );
+      }
       if (!url.endsWith(".sig")) return manifest;
       return signatures.length > 1 ? (signatures.shift() as Buffer) : (signatures[0] as Buffer);
     },
@@ -463,10 +520,17 @@ describe("LinxUpdateClient downloads", () => {
 
   it("ignores a second click while a download is running", async () => {
     const downloaded = deferred<LinxUpdateDownloadResult>();
-    const harness = createHarness({ download: () => downloaded.promise });
+    const started = deferred<void>();
+    const harness = createHarness({
+      download: () => {
+        started.resolve();
+        return downloaded.promise;
+      },
+    });
     await harness.client.checkManually();
 
     const first = harness.client.download();
+    await started.promise;
     const second = await harness.client.download();
 
     expect(second).toEqual({ accepted: false, completed: false });
@@ -496,12 +560,13 @@ describe("LinxUpdateClient downloads", () => {
     await harness.client.checkManually();
     await harness.client.download();
     expect(harness.state().status).toBe("downloaded");
+    const callsBefore = harness.fetchCalls().length;
 
     await harness.client.checkManually();
     await harness.client.checkAutomatically("poll");
 
     expect(harness.state().status).toBe("downloaded");
-    expect(harness.fetchCalls().length).toBe(2);
+    expect(harness.fetchCalls().length).toBe(callsBefore);
   });
 
   it("refuses a download with no pinned target", async () => {
@@ -516,11 +581,13 @@ describe("LinxUpdateClient downloads", () => {
 
   it("aborts the transfer and clears staging on dispose", async () => {
     const downloaded = deferred<LinxUpdateDownloadResult>();
+    const started = deferred<void>();
     let signal: AbortSignal | undefined;
     const harness = createHarness({
       stagingDir,
       download: (input) => {
         signal = input.signal;
+        started.resolve();
         return downloaded.promise;
       },
     });
@@ -528,6 +595,7 @@ describe("LinxUpdateClient downloads", () => {
     await writeFile(join(stagingDir, "linx-0.2.0.zip.partial"), "partial", "utf8");
 
     const inFlight = harness.client.download();
+    await started.promise;
     await harness.client.dispose();
 
     expect(signal?.aborted).toBe(true);
@@ -537,15 +605,58 @@ describe("LinxUpdateClient downloads", () => {
     expect(harness.state().status).not.toBe("downloaded");
   });
 
-  it("refuses install until the LU-04 helper exists and says why", () => {
-    const harness = createHarness();
-    harness.patchState({ status: "downloaded", downloadedVersion: "0.2.0" });
+  it("keeps a busy package for a fresh explicit install click without another download", async () => {
+    let attempts = 0;
+    const harness = createHarness({
+      install: async () => {
+        attempts += 1;
+        return { accepted: false, completed: false, message: "Busy work" };
+      },
+    });
+    await harness.client.checkManually();
+    await harness.client.download();
+    expect(harness.state()).toMatchObject({
+      status: "downloaded",
+      downloadedVersion: "0.2.0",
+      errorContext: "install",
+      canRetry: true,
+    });
+    expect(attempts).toBe(1);
+    await harness.client.checkAutomatically("foreground");
+    expect(attempts).toBe(1);
+    await harness.client.install();
+    expect(attempts).toBe(2);
+    expect(harness.downloadCalls()).toBe(1);
+  });
 
-    expect(harness.client.install()).toEqual({ accepted: false, completed: false });
-    const state = harness.state();
-    expect(state.status).toBe("downloaded");
-    expect(state.downloadedVersion).toBe("0.2.0");
-    expect(state.message).toBe(LINX_UPDATE_INSTALL_UNAVAILABLE_MESSAGE);
+  it("does not install a version asserted only by UI state", async () => {
+    let attempts = 0;
+    const harness = createHarness({
+      install: async () => {
+        attempts += 1;
+        return { accepted: false, completed: false, message: null };
+      },
+    });
+    harness.patchState({ status: "downloaded", downloadedVersion: "0.2.0" });
+    expect(await harness.client.install()).toEqual({ accepted: false, completed: false });
+    expect(attempts).toBe(0);
+  });
+
+  it("retains staged bytes only after a matching active handoff", async () => {
+    let harness: Harness;
+    harness = createHarness({
+      stagingDir,
+      install: async ({ target }) => {
+        expect(() => harness.client.claimInstallHandoff("0".repeat(64))).toThrow();
+        harness.client.claimInstallHandoff(target.manifestDigest);
+        return { accepted: true, completed: false, message: null };
+      },
+    });
+    await writeFile(join(stagingDir, "linx-0.2.0.zip"), "preserved");
+    await harness.client.checkManually();
+    await harness.client.download();
+    await harness.client.dispose();
+    expect((await stat(join(stagingDir, "linx-0.2.0.zip"))).size).toBe(9);
   });
 });
 

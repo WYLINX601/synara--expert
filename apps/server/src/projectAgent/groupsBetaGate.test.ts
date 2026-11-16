@@ -12,9 +12,13 @@ import type { ProjectAgentServiceShape } from "./Services/ProjectAgentService";
 const PROJECT_ID = ProjectId.makeUnsafe("project-group");
 const THREAD_ID = ThreadId.makeUnsafe("thread-coordinator");
 
-function gatedService() {
+function gatedService(
+  getMaintenanceActivity: ProjectAgentServiceShape["getMaintenanceActivity"] = Effect.die(
+    "Activity observer not configured in this test",
+  ),
+) {
   const onProjectDeleted = vi.fn(() => Effect.void);
-  const service = { onProjectDeleted } as unknown as ProjectAgentServiceShape;
+  const service = { onProjectDeleted, getMaintenanceActivity };
   return { gated: gateProjectAgentServiceForStable(service), onProjectDeleted };
 }
 
@@ -53,6 +57,25 @@ describe("gateProjectAgentServiceForStable", () => {
     const { gated, onProjectDeleted } = gatedService();
     await Effect.runPromise(gated.onProjectDeleted(PROJECT_ID));
     expect(onProjectDeleted).toHaveBeenCalledWith(PROJECT_ID);
+  });
+
+  it("preserves live ownership observations when group APIs are disabled", async () => {
+    let digestGenerations = 1;
+    const observer = Effect.sync(() => ({ digestGenerations }));
+    const { gated } = gatedService(observer);
+    expect(gated.getMaintenanceActivity).toBe(observer);
+    expect(await Effect.runPromise(gated.getMaintenanceActivity)).toEqual({ digestGenerations: 1 });
+    digestGenerations = 0;
+    expect(await Effect.runPromise(gated.getMaintenanceActivity)).toEqual({ digestGenerations: 0 });
+  });
+
+  it("preserves observation defects instead of manufacturing idle activity", async () => {
+    const observer = Effect.die(new Error("Digest ownership unavailable"));
+    const { gated } = gatedService(observer);
+    expect(gated.getMaintenanceActivity).toBe(observer);
+    await expect(Effect.runPromise(gated.getMaintenanceActivity)).rejects.toThrow(
+      "Digest ownership unavailable",
+    );
   });
 });
 

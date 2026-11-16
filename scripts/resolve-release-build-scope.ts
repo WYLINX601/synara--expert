@@ -2,7 +2,7 @@ import { appendFileSync } from "node:fs";
 import { resolveReleaseBuildScope } from "./lib/release-build-scope.ts";
 
 const scope = resolveReleaseBuildScope(
-  process.env.BUILD_PLATFORM || "all",
+  process.env.BUILD_PLATFORM || "mac-arm64",
   process.env.BUILD_STAGE || "artifact",
   process.env.PUBLISH_RELEASE === "true",
   process.env.CUA_BENCHMARK_BASELINE || "",

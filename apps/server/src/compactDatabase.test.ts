@@ -12,7 +12,7 @@ import { runCompactDatabaseCli } from "./compactDatabase.ts";
 import {
   acquireDatabaseLifecycleLock,
   releaseDatabaseLifecycleLock,
-} from "./persistence/DatabaseLifecycleLock.ts";
+} from "@synara/shared/databaseLifecycleLock";
 import { migrationRecoveryMarkerPath } from "./persistence/MigrationBackup.ts";
 import { reclaimLegacySqliteDatabase } from "./persistence/SqliteReclamation.ts";
 

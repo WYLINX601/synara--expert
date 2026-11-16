@@ -78,6 +78,8 @@ export const DESKTOP_IPC_CHANNELS = {
   updateCheck: "desktop:update-check",
   updateDownload: "desktop:update-download",
   updateInstall: "desktop:update-install",
+  updateWindowMaintenanceRequest: "desktop:update-window-maintenance-request",
+  updateWindowMaintenanceResponse: "desktop:update-window-maintenance-response",
   notificationsIsSupported: "desktop:notifications-is-supported",
   notificationsShow: "desktop:notifications-show",
   zoomFactor: "desktop:zoom-factor",

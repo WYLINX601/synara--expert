@@ -11,7 +11,7 @@ import tailwindcss from "@tailwindcss/vite";
 import react, { reactCompilerPreset } from "@vitejs/plugin-react";
 import babel from "@rolldown/plugin-babel";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig, type ConfigEnv, type Plugin, type UserConfig } from "vite";
 import pkg from "./package.json" with { type: "json" };
 import { listFiles, pruneProductionIcons } from "./scripts/production-assets";
 
@@ -137,6 +137,14 @@ function precompressPlugin(): Plugin {
   };
 }
 
+export function applyReactCompiler(_config: UserConfig, { command, mode }: ConfigEnv): boolean {
+  return (
+    command === "build" ||
+    mode === "test" ||
+    /^(1|true)$/i.test(process.env.SYNARA_DEV_REACT_COMPILER?.trim() ?? "")
+  );
+}
+
 export default defineConfig({
   plugins: [
     tanstackRouter({
@@ -157,12 +165,7 @@ export default defineConfig({
       // edit. Oxc still provides JSX/TypeScript transforms and Fast Refresh.
       // Keep production builds and browser tests compiled, with an opt-in for
       // debugging compiler-specific behavior in the development app.
-      apply: ((_config, { command, mode }) =>
-        command === "build" ||
-        mode === "test" ||
-        /^(1|true)$/i.test(
-          process.env.SYNARA_DEV_REACT_COMPILER?.trim() ?? "",
-        )) satisfies Plugin["apply"],
+      apply: applyReactCompiler,
     })),
     tailwindcss(),
     centralIconPrunePlugin(),

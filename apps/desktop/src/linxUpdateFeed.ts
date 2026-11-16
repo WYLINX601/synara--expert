@@ -10,6 +10,7 @@ import {
   type RequestOptions,
 } from "node:http";
 import { request as httpsRequest } from "node:https";
+import type { Readable } from "node:stream";
 
 export const LINX_UPDATE_FEED_TIMEOUT_MS = 15_000;
 export const LINX_UPDATE_FEED_MAX_REDIRECTS = 5;
@@ -120,6 +121,20 @@ function createAbortError(): LinxUpdateFeedError {
   return new LinxUpdateFeedError("aborted", "The update request was cancelled.");
 }
 
+export interface LinxUpdateHttpResponse extends Readable {
+  readonly statusCode?: number | undefined;
+  readonly headers: IncomingHttpHeaders;
+}
+
+export type LinxUpdateRequest = (
+  url: URL,
+  options: {
+    readonly timeoutMs: number;
+    readonly signal?: AbortSignal | undefined;
+    readonly accept: string;
+  },
+) => Promise<LinxUpdateHttpResponse>;
+
 function requestLinxUpdateUrl(
   url: URL,
   options: {
@@ -147,6 +162,7 @@ function requestLinxUpdateUrl(
   };
   const onResponse = (response: IncomingMessage): void => {
     options.signal?.removeEventListener("abort", onAbort);
+    clearTimeout(connectTimer);
     resolve(response);
   };
   const request =
@@ -156,8 +172,13 @@ function requestLinxUpdateUrl(
   const onAbort = (): void => {
     request.destroy(createAbortError());
   };
+  const connectTimer = setTimeout(() => {
+    request.destroy(new LinxUpdateFeedError("timeout", `Timed out connecting to ${url.hostname}.`));
+  }, options.timeoutMs);
+  connectTimer.unref?.();
   options.signal?.addEventListener("abort", onAbort, { once: true });
   request.on("error", (error) => {
+    clearTimeout(connectTimer);
     options.signal?.removeEventListener("abort", onAbort);
     reject(
       error instanceof LinxUpdateFeedError
@@ -170,7 +191,7 @@ function requestLinxUpdateUrl(
     );
   });
   request.setTimeout(options.timeoutMs, () => {
-    request.destroy(new LinxUpdateFeedError("timeout", `Timed out requesting ${url.toString()}.`));
+    request.destroy(new LinxUpdateFeedError("timeout", `Timed out requesting ${url.hostname}.`));
   });
   request.end();
   return promise;
@@ -181,7 +202,7 @@ function requestLinxUpdateUrl(
  * IncomingMessage with an error is what makes a pending read (or `pipeline`)
  * fail immediately instead of waiting for the socket to time out.
  */
-function bindAbortToStream(stream: IncomingMessage, signal: AbortSignal | undefined): void {
+function bindAbortToStream(stream: Readable, signal: AbortSignal | undefined): void {
   if (signal === undefined) return;
   const onAbort = (): void => {
     stream.destroy(createAbortError());
@@ -196,9 +217,9 @@ function bindAbortToStream(stream: IncomingMessage, signal: AbortSignal | undefi
 
 // A discarded body still needs an error listener: an aborted keep-alive socket
 // would otherwise surface as an unhandled "error" event.
-function discardResponse(response: IncomingMessage): void {
+function discardResponse(response: LinxUpdateHttpResponse): void {
   response.on("error", () => {});
-  response.resume();
+  response.destroy();
 }
 
 export interface LinxUpdateStreamInput {
@@ -209,6 +230,8 @@ export interface LinxUpdateStreamInput {
   readonly maxRedirects?: number | undefined;
   readonly accept?: string | undefined;
   readonly signal?: AbortSignal | undefined;
+  /** Electron supplies its system-proxy/PAC-aware transport; policy stays shared. */
+  readonly request?: LinxUpdateRequest | undefined;
 }
 
 export interface LinxUpdateStream {
@@ -217,7 +240,7 @@ export interface LinxUpdateStream {
   /** Declared body size, when the server sends one. */
   readonly contentLength: number | null;
   /** Open body stream; the caller consumes and destroys it. */
-  readonly stream: IncomingMessage;
+  readonly stream: Readable;
 }
 
 /**
@@ -239,7 +262,7 @@ export async function openLinxUpdateStream(
 
   for (let hop = 0; hop <= maxRedirects; hop += 1) {
     assertLinxUpdateUrlAllowed(url, input.allowedHosts);
-    const response = await requestLinxUpdateUrl(url, {
+    const response = await (input.request ?? requestLinxUpdateUrl)(url, {
       timeoutMs,
       signal: input.signal,
       accept: input.accept ?? "application/octet-stream",

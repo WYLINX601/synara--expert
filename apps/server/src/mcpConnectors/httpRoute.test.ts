@@ -14,11 +14,15 @@ import {
 import { mcpConnectorsRouteLayer, renderConnectorCallbackPage } from "./httpRoute.ts";
 import type { McpConnectorForwardRequest } from "./runtime.ts";
 import { McpConnectors, type McpConnectorsShape } from "./Services/McpConnectors.ts";
+import { serverMaintenanceAdmission } from "../serverMaintenance.ts";
 
 const VALID_TOKEN = "sagw_session_connector_route_test";
 
 async function withConnectorServer(
-  options: { readonly enabled: boolean },
+  options: {
+    readonly enabled: boolean;
+    readonly authorize?: McpConnectorsShape["completeAuthorization"];
+  },
   run: (input: {
     readonly origin: string;
     readonly forwarded: ReadonlyArray<{ connectorId: string; request: McpConnectorForwardRequest }>;
@@ -54,6 +58,7 @@ async function withConnectorServer(
       setup: () => Effect.succeed({ redirectUrl: "http://127.0.0.1/oauth/mcp/callback" }),
       completeAuthorization: (query) => {
         callbacks.push(query);
+        if (options.authorize) return options.authorize(query);
         return Effect.succeed(
           query.code === "good"
             ? { ok: true as const, name: "<Acme>" }
@@ -108,6 +113,56 @@ async function withConnectorServer(
 const call = { jsonrpc: "2.0", id: 1, method: "tools/list" };
 
 describe("mcpConnectorsRouteLayer", () => {
+  it("drains an admitted OAuth exchange and refuses later GET callbacks before consuming their codes", async () => {
+    const started = Promise.withResolvers<void>();
+    const exchange = Promise.withResolvers<void>();
+    const binding = {
+      attemptId: "oauth-maintenance-test",
+      targetVersion: "0.1.16",
+      manifestDigest: "a".repeat(64),
+    };
+    try {
+      await withConnectorServer(
+        {
+          enabled: true,
+          authorize: () =>
+            Effect.promise(async () => {
+              started.resolve();
+              await exchange.promise;
+              return { ok: true as const, name: "Fixture connector" };
+            }),
+        },
+        async ({ origin, callbacks }) => {
+          const accepted = fetch(`${origin}/oauth/mcp/callback?state=accepted&code=good`);
+          try {
+            await started.promise;
+            expect(serverMaintenanceAdmission.active).toBe(1);
+            expect(serverMaintenanceAdmission.close(binding)).toBe(true);
+            const refused = await fetch(`${origin}/oauth/mcp/callback?state=later&code=unused`);
+            expect(refused.status).toBe(503);
+            expect(callbacks.map((query) => query.code)).toEqual(["good"]);
+            let drained = false;
+            const drain = Effect.runPromise(serverMaintenanceAdmission.drain).then(() => {
+              drained = true;
+            });
+            await Promise.resolve();
+            expect(drained).toBe(false);
+            exchange.resolve();
+            expect((await accepted).status).toBe(200);
+            await drain;
+            expect(serverMaintenanceAdmission.active).toBe(0);
+          } finally {
+            exchange.resolve();
+            await accepted;
+          }
+        },
+      );
+    } finally {
+      exchange.resolve();
+      serverMaintenanceAdmission.release(binding);
+    }
+  });
+
   it("answers 404 everywhere when connectors are disabled", async () => {
     await withConnectorServer({ enabled: false }, async ({ origin, forwarded, callbacks }) => {
       const post = await fetch(`${origin}/mcp/connectors/mcp_conn_1`, {

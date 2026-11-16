@@ -66,6 +66,24 @@ export type ProviderSessionModelSwitchMode = "in-session" | "restart-session" | 
 export const PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY = 2_048;
 
 /**
+ * Built-in protocol metadata shared by adapter declarations and offline journal
+ * replay. Reading a recorded diff must not require constructing live runtimes.
+ * Keep this exhaustive so new providers explicitly declare their wire format.
+ */
+export const PROVIDER_ADAPTER_LIVE_TURN_DIFF_PATCH = {
+  codex: true,
+  claudeAgent: false,
+  cursor: false,
+  antigravity: false,
+  grok: false,
+  droid: false,
+  opencode: false,
+  pi: false,
+  devin: false,
+  omp: false,
+} as const satisfies Readonly<Record<ProviderKind, boolean>>;
+
+/**
  * Structured payload for steering a running subagent. Mirrors the turn-input
  * context fields so adapters can project attachments/skills/mentions into the
  * provider-native steering channel (which is typically text-only).

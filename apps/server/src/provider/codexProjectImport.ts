@@ -5,7 +5,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import { resolveBaseCodexHomePath } from "../codexHomePaths";
+import { resolveBaseCodexHomePath } from "@synara/shared/codexHomeOverlayPaths";
 import type {
   NativeImportProject,
   NativeImportSession,

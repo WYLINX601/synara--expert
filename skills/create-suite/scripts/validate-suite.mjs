@@ -14,10 +14,8 @@ if (!ROOT) {
 }
 
 const suiteRoot = path.resolve(ROOT);
-const isObject = (value) =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-const isNonEmptyString = (value) =>
-  typeof value === "string" && value.trim().length > 0;
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const isNonEmptyString = (value) => typeof value === "string" && value.trim().length > 0;
 const safeRelative = (value, label, { allowDot = false } = {}) => {
   if (typeof value !== "string" || !value.trim()) {
     fail(`${label} must be a non-empty string.`);
@@ -31,13 +29,9 @@ const safeRelative = (value, label, { allowDot = false } = {}) => {
     value !== value.normalize("NFC") ||
     value.startsWith("/") ||
     value.endsWith("/") ||
-    value
-      .split("/")
-      .some((part) => part === "" || part === "." || part === "..")
+    value.split("/").some((part) => part === "" || part === "." || part === "..")
   ) {
-    fail(
-      `${label} must be a safe relative path inside the suite source: ${value}`,
-    );
+    fail(`${label} must be a safe relative path inside the suite source: ${value}`);
     return false;
   }
   return true;
@@ -47,16 +41,13 @@ const lstatPath = async (target, label) => {
   try {
     return await lstat(target);
   } catch (cause) {
-    fail(
-      `${label} is missing: ${target}${cause?.code ? ` (${cause.code})` : ""}`,
-    );
+    fail(`${label} is missing: ${target}${cause?.code ? ` (${cause.code})` : ""}`);
     return null;
   }
 };
 
 const checkPath = async (relative, label, kind) => {
-  if (!safeRelative(relative, label, { allowDot: kind === "directory" }))
-    return;
+  if (!safeRelative(relative, label, { allowDot: kind === "directory" })) return;
   const target = path.resolve(suiteRoot, relative);
   const within = path.relative(suiteRoot, target);
   if (within.startsWith("..") || path.isAbsolute(within)) {
@@ -74,8 +65,7 @@ const checkPath = async (relative, label, kind) => {
     }
     const final = index === parts.length - 1;
     if (final) {
-      if (kind === "file" && !stat.isFile())
-        fail(`${label} must be a regular file: ${relative}`);
+      if (kind === "file" && !stat.isFile()) fail(`${label} must be a regular file: ${relative}`);
       if (kind === "directory" && !stat.isDirectory())
         fail(`${label} must be a directory: ${relative}`);
     } else if (!stat.isDirectory()) {
@@ -89,8 +79,7 @@ const readUtf8 = async (relative, label) => {
   const target = path.resolve(suiteRoot, relative);
   const bytes = await readFile(target);
   const text = bytes.toString("utf8");
-  if (!Buffer.from(text).equals(bytes))
-    fail(`${label} must be UTF-8: ${relative}`);
+  if (!Buffer.from(text).equals(bytes)) fail(`${label} must be UTF-8: ${relative}`);
   return text;
 };
 
@@ -108,8 +97,7 @@ const checkOptionalStringArray = (value, label) => {
     fail(`${label} must be an array.`);
     return;
   }
-  for (const [index, item] of value.entries())
-    checkString(item, `${label}[${index}]`, 200);
+  for (const [index, item] of value.entries()) checkString(item, `${label}[${index}]`, 200);
 };
 
 const allowedTop = new Set([
@@ -142,26 +130,18 @@ const allowedResource = new Set([
   "tools",
   "resourceRef",
 ]);
-const filePurposes = new Set([
-  "instructions",
-  "reference",
-  "template",
-  "workflow",
-]);
+const filePurposes = new Set(["instructions", "reference", "template", "workflow"]);
 const refKinds = new Set(["skill", "managed-skill", "files", "connection"]);
 
 const checkUnknown = (value, allowed, label) => {
   for (const key of Object.keys(value))
-    if (!allowed.has(key))
-      warn(`${label} has unsupported field "${key}"; it is preserved only.`);
+    if (!allowed.has(key)) warn(`${label} has unsupported field "${key}"; it is preserved only.`);
 };
 
 try {
   const rootStat = await lstatPath(suiteRoot, "Suite source");
   if (rootStat && (!rootStat.isDirectory() || rootStat.isSymbolicLink()))
-    fail(
-      `Suite source must be a real directory, not a symlink or file: ${suiteRoot}`,
-    );
+    fail(`Suite source must be a real directory, not a symlink or file: ${suiteRoot}`);
   if (!rootStat) throw new Error("suite root unavailable");
 
   const manifestPath = path.join(suiteRoot, "synara-suite.json");
@@ -172,8 +152,7 @@ try {
 
   const rawBytes = await readFile(manifestPath);
   const rawText = rawBytes.toString("utf8");
-  if (!Buffer.from(rawText).equals(rawBytes))
-    fail("synara-suite.json must be UTF-8.");
+  if (!Buffer.from(rawText).equals(rawBytes)) fail("synara-suite.json must be UTF-8.");
   let manifest;
   try {
     manifest = JSON.parse(rawText);
@@ -189,10 +168,8 @@ try {
   checkUnknown(manifest, allowedTop, "manifest");
   if (manifest.schemaVersion !== 1) fail("schemaVersion must be 1.");
   checkString(manifest.name, "name", 200);
-  if (typeof manifest.description !== "string")
-    fail("description must be a string.");
-  else if (manifest.description.length > 16_000)
-    fail("description exceeds 16000 characters.");
+  if (typeof manifest.description !== "string") fail("description must be a string.");
+  else if (manifest.description.length > 16_000) fail("description exceeds 16000 characters.");
 
   if (!Array.isArray(manifest.experts) || manifest.experts.length === 0)
     fail("experts must be a non-empty array.");
@@ -223,11 +200,7 @@ try {
       fail(`${label} must be an object.`);
       continue;
     }
-    checkUnknown(
-      expert,
-      expert.kind === "reference" ? allowedReference : allowedExpert,
-      label,
-    );
+    checkUnknown(expert, expert.kind === "reference" ? allowedReference : allowedExpert, label);
     addKey(expert.key, label);
     if (expert.kind === "reference") {
       checkString(expert.expertId, `${label}.expertId`, 200);
@@ -238,23 +211,17 @@ try {
       continue;
     }
     checkString(expert.name, `${label}.name`, 200);
-    if (typeof expert.description !== "string")
-      fail(`${label}.description must be a string.`);
+    if (typeof expert.description !== "string") fail(`${label}.description must be a string.`);
     else if (expert.description.length > 16_000)
       fail(`${label}.description exceeds 16000 characters.`);
     if (safeRelative(expert.personaPath, `${label}.personaPath`)) {
       await checkPath(expert.personaPath, `${label}.personaPath`, "file");
       try {
-        const persona = await readUtf8(
-          expert.personaPath,
-          `${label}.personaPath`,
-        );
+        const persona = await readUtf8(expert.personaPath, `${label}.personaPath`);
         if (!persona.trim()) fail(`${label}.personaPath is empty.`);
-        if (persona.length > 32_000)
-          fail(`${label}.personaPath exceeds 32000 characters.`);
+        if (persona.length > 32_000) fail(`${label}.personaPath exceeds 32000 characters.`);
       } catch (cause) {
-        if (cause?.code !== "ENOENT")
-          fail(`${label}.personaPath cannot be read: ${cause.message}`);
+        if (cause?.code !== "ENOENT") fail(`${label}.personaPath cannot be read: ${cause.message}`);
       }
     }
     checkOptionalStringArray(expert.resourceKeys, `${label}.resourceKeys`);
@@ -269,36 +236,25 @@ try {
     checkUnknown(resource, allowedResource, label);
     addKey(resource.key, label);
     if (typeof resource.key === "string") resourceKeys.add(resource.key);
-    if (
-      !["skill", "files", "connection", "resource-reference"].includes(
-        resource.kind,
-      )
-    ) {
+    if (!["skill", "files", "connection", "resource-reference"].includes(resource.kind)) {
       fail(`${label}.kind is unsupported.`);
       continue;
     }
     if (resource.kind === "skill") {
       const packageRoot = resource.packageRoot;
-      if (
-        !safeRelative(packageRoot, `${label}.packageRoot`, { allowDot: true })
-      )
-        continue;
+      if (!safeRelative(packageRoot, `${label}.packageRoot`, { allowDot: true })) continue;
       await checkPath(packageRoot, `${label}.packageRoot`, "directory");
       if (safeRelative(resource.entryPath, `${label}.entryPath`)) {
         if (path.posix.basename(resource.entryPath) !== "SKILL.md")
           fail(`${label}.entryPath must end with SKILL.md.`);
         const entry =
-          packageRoot === "."
-            ? resource.entryPath
-            : `${packageRoot}/${resource.entryPath}`;
+          packageRoot === "." ? resource.entryPath : `${packageRoot}/${resource.entryPath}`;
         await checkPath(entry, `${label}.entryPath`, "file");
       }
     } else if (resource.kind === "files") {
-      if (!safeRelative(resource.root, `${label}.root`, { allowDot: true }))
-        continue;
+      if (!safeRelative(resource.root, `${label}.root`, { allowDot: true })) continue;
       await checkPath(resource.root, `${label}.root`, "directory");
-      if (!filePurposes.has(resource.purpose))
-        fail(`${label}.purpose is unsupported.`);
+      if (!filePurposes.has(resource.purpose)) fail(`${label}.purpose is unsupported.`);
     } else if (resource.kind === "connection") {
       checkString(resource.connectionId, `${label}.connectionId`, 200);
       if (!isObject(resource.tools)) fail(`${label}.tools must be an object.`);
@@ -306,18 +262,9 @@ try {
         if (resource.tools.names !== undefined)
           warn(`${label}.tools.names is ignored when mode is "all".`);
       } else if (resource.tools.mode === "selected") {
-        if (
-          !Array.isArray(resource.tools.names) ||
-          resource.tools.names.length === 0
-        )
-          fail(
-            `${label}.tools.names must be a non-empty array when mode is "selected".`,
-          );
-        else
-          checkOptionalStringArray(
-            resource.tools.names,
-            `${label}.tools.names`,
-          );
+        if (!Array.isArray(resource.tools.names) || resource.tools.names.length === 0)
+          fail(`${label}.tools.names must be a non-empty array when mode is "selected".`);
+        else checkOptionalStringArray(resource.tools.names, `${label}.tools.names`);
       } else fail(`${label}.tools.mode must be "all" or "selected".`);
       warn(
         `${label} references connection "${resource.connectionId}" outside this source; existence is checked on import.`,
@@ -325,43 +272,23 @@ try {
     } else {
       const ref = resource.resourceRef;
       if (!isObject(ref)) fail(`${label}.resourceRef must be an object.`);
-      else if (!refKinds.has(ref.kind))
-        fail(`${label}.resourceRef.kind is unsupported.`);
+      else if (!refKinds.has(ref.kind)) fail(`${label}.resourceRef.kind is unsupported.`);
       else {
         checkString(ref.sourceId, `${label}.resourceRef.sourceId`, 4000);
         if (ref.kind === "skill") {
-          if (!isObject(ref.selection))
-            fail(`${label}.resourceRef.selection must be an object.`);
+          if (!isObject(ref.selection)) fail(`${label}.resourceRef.selection must be an object.`);
           else {
-            checkString(
-              ref.selection.packageId,
-              `${label}.resourceRef.selection.packageId`,
-              200,
-            );
-            safeRelative(
-              ref.selection.entryPath,
-              `${label}.resourceRef.selection.entryPath`,
-            );
+            checkString(ref.selection.packageId, `${label}.resourceRef.selection.packageId`, 200);
+            safeRelative(ref.selection.entryPath, `${label}.resourceRef.selection.entryPath`);
           }
         } else if (ref.kind === "managed-skill") {
-          checkString(
-            ref.managedSkillId,
-            `${label}.resourceRef.managedSkillId`,
-            200,
-          );
+          checkString(ref.managedSkillId, `${label}.resourceRef.managedSkillId`, 200);
         } else if (ref.kind === "files") {
           checkString(ref.resourceId, `${label}.resourceRef.resourceId`, 200);
-          if (!filePurposes.has(ref.purpose))
-            fail(`${label}.resourceRef.purpose is unsupported.`);
+          if (!filePurposes.has(ref.purpose)) fail(`${label}.resourceRef.purpose is unsupported.`);
         } else {
-          if (!isObject(ref.connection))
-            fail(`${label}.resourceRef.connection must be an object.`);
-          else
-            checkString(
-              ref.connection.id,
-              `${label}.resourceRef.connection.id`,
-              200,
-            );
+          if (!isObject(ref.connection)) fail(`${label}.resourceRef.connection must be an object.`);
+          else checkString(ref.connection.id, `${label}.resourceRef.connection.id`, 200);
         }
         warn(
           `${label} references existing ${ref.kind} data outside this source; existence is checked on import.`,
@@ -390,9 +317,7 @@ try {
     if (!isObject(expert) || !Array.isArray(expert.resourceKeys)) continue;
     for (const key of expert.resourceKeys)
       if (typeof key === "string" && !resourceKeys.has(key))
-        fail(
-          `experts[${index}].resourceKeys references an undeclared resource: ${key}`,
-        );
+        fail(`experts[${index}].resourceKeys references an undeclared resource: ${key}`);
   }
 
   if (manifest.defaults !== undefined) {
@@ -407,15 +332,12 @@ try {
         if (typeof manifest.defaults.outputDirectory !== "string")
           fail("defaults.outputDirectory must be a string.");
         else if (path.isAbsolute(manifest.defaults.outputDirectory))
-          warn(
-            "defaults.outputDirectory is absolute; it may be rejected by the project boundary.",
-          );
+          warn("defaults.outputDirectory is absolute; it may be rejected by the project boundary.");
       }
     }
   }
 } catch (cause) {
-  if (errors.length === 0)
-    fail(cause instanceof Error ? cause.message : String(cause));
+  if (errors.length === 0) fail(cause instanceof Error ? cause.message : String(cause));
 }
 
 if (warnings.length) {

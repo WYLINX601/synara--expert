@@ -421,7 +421,7 @@ function output(candidate: LinxReleaseCandidate, release: GitHubRelease) {
     );
 }
 if (command === "protection") {
-  if (!token) throw new Error("Authenticated read-only environment inspection token required.");
+  if (!token) throw new Error("Authenticated environment inspection token required.");
   const repo = Schema.decodeUnknownSync(Schema.Struct({ visibility: Schema.String }))(
     await api(""),
   );

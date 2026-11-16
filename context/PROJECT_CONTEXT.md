@@ -5,7 +5,7 @@
 ## 当前目标与已确认边界
 
 - 以 [Linx V2.0](../docs/linx-product-design-v2.md) 组织长期方向管理、专业任务执行与能力进化，复用现有源码持续演进。规划与源码实现、运行证据和用户验收分别核对。
-- Linx 按独立产品管理，产品更新消费自有已发布安装包。[更新能力计划 v0.2](../docs/linx-update-development-plan.md)约定首批 macOS Apple Silicon、自动检查但点击后才下载安装、不依赖 Apple Developer ID／公证；标签触发构建，公开 Release 前人工确认。2026-11-13 已批准完整方案及 `com.wylinx.linx`／`.linx`／profile 和 scheme `linx`／`LINX_HOME`，发布仓库沿用 `WYLINX601/synara--expert`，选择受控 CI 签名。身份迁移、维护准入、独立 helper、重启健康与受控发布实现已进入 main 工作树，尚未整体交付。2026-11-16 已实测独立 helper 的准备/取消与拒绝边界、Electron 系统代理/PAC/真实 GitHub 重定向、Chromium 持久化/编辑保护及最小更新控件；另有真实 Electron/SQLite 的 copied Codex aliases、私有账号目录及两条 live continuation 绑定迁移/重开证据。完整质量门禁和逐项验收以计划末尾记录为准。用户随后批准 main 提交/推送、生产前置配置、正式发布与隔离升级，并选择单人显式审批；真实公钥、仅签名环境持有的私钥、两个审批 Environment 与 main/tag 保护已配置，旧默认工作流已停用。CI 只读检查凭证、精确 bootstrap/candidate 批准、公开发布与真实 B0→B1 尚未完成；日用安装和个人数据待隔离通过后另行确认，不以本地夹具或配置通过替代正式升级。
+- Linx 按独立产品管理，产品更新消费自有已发布安装包。[更新能力计划 v0.2](../docs/linx-update-development-plan.md)约定首批 macOS Apple Silicon、自动检查但点击后才下载安装、不依赖 Apple Developer ID／公证；标签触发构建，公开 Release 前人工确认。2026-11-13 已批准完整方案及 `com.wylinx.linx`／`.linx`／profile 和 scheme `linx`／`LINX_HOME`，发布仓库沿用 `WYLINX601/synara--expert`，选择受控 CI 签名。身份迁移、维护准入、独立 helper、重启健康与受控发布实现已提交并推送 main，尚未整体交付。2026-11-16 已实测独立 helper 的准备/取消与拒绝边界、Electron 系统代理/PAC/真实 GitHub 重定向、Chromium 持久化/编辑保护及最小更新控件；另有真实 Electron/SQLite 的 copied Codex aliases、私有账号目录及两条 live continuation 绑定迁移/重开证据。完整质量门禁和逐项验收以计划末尾记录为准。用户批准生产前置配置、正式发布与隔离升级，选择单人显式审批和短期工作流令牌；真实公钥、仅签名环境持有的私钥、两个审批 Environment 与 main/tag 保护已配置，旧默认流程已退役。真实 CI 令牌能力、精确 bootstrap/candidate 批准、公开发布与 B0→B1 尚未完成；日用安装和个人数据待隔离通过后另行确认，不以本地夹具或配置通过替代正式升级。
 - 架构约束、操作与检查、实际结果各有权威记录，入口只维护摘要与链接。每项工作按准确源码与当前工作区核对证据。
 
 <a id="execution-entry"></a>

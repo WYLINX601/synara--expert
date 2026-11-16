@@ -38,6 +38,7 @@ Implementation and the scoped OMP technical acceptance are complete; user accept
 - Keep the packaging CLI usable under native Node TypeScript: expose the manifest contract through an explicit public entry and use resolvable file extensions throughout its shared process-runtime dependency path.
 - Replace the default release lane with immutable Linx candidates and separate protected signing/publication approvals. The authorized single-maintainer policy permits explicit self-review while rejecting missing reviewers or administrator bypass. Production public trust and remote protection have now been provisioned; public release, daily installation and real B0→B1 qualification remain open.
 - Keep real GitHub protection inspection reachable through the canonical repository endpoint, without an extra trailing slash.
+- Inspect release protection using short-lived per-job GitHub tokens with explicit Actions-read permission instead of a separately maintained PAT. Preflight remains read-only; signing and publication inspections share their jobs' existing Contents-write capability, without changing required human approvals or secret exposure.
 
 See the [LU-00 implemented protocol](docs/linx-update-development-plan.md#lu-00-已实现协议v1) section of the Linx update plan.
 

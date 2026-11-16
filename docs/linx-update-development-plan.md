@@ -87,7 +87,7 @@ v1 清单契约：`schemaVersion`、`productId`、`installIdentity`、`channel`�
 - `packages/shared/src/linxUpdateManifestVerification.ts`：验签→解码→准入管线、密钥环加载与 `keyId` 派生。纯函数，密钥环由调用方注入。
 - `scripts/lib/linx-update-manifest-signing.ts` 与 `scripts/linx-update-manifest.ts`：发布侧密钥生成、签名与校验 CLI。仅发布环境使用，不进桌面包。
 
-**固定字段**：`schemaVersion=1`、`productId="linx"`、`installIdentity="com.wylinx.linx"`、`channel="stable"`、`platform="darwin"`、`arch="arm64"`、`version` 为 `x.y.z`（无前导零、无预发布/构建号）、`sourceCommit` 为 40 位小写十六进制、`minOSVersion` 为最多三段数字（系统比较属 LU-04 安装预检）、`assetName` 以 `.zip` 结尾且不含路径分隔符与 `..`、`assetUrl` 为无凭据无片段的绝对 https、`size` 为 1 字节至 4 GiB 的整数、`sha256` 为 64 位小写十六进制、`keyId` 为 16 位小写十六进制。未知字段、错误产品/身份/频道/平台/架构、字段文法不符即拒绝；缺失或旧 Workbench/Preview 安装身份也拒绝。`channel: stable` 是单字面量；本批不含 Beta。生产公钥尚未投放。
+**固定字段**：`schemaVersion=1`、`productId="linx"`、`installIdentity="com.wylinx.linx"`、`channel="stable"`、`platform="darwin"`、`arch="arm64"`、`version` 为 `x.y.z`（无前导零、无预发布/构建号）、`sourceCommit` 为 40 位小写十六进制、`minOSVersion` 为最多三段数字（系统比较属 LU-04 安装预检）、`assetName` 以 `.zip` 结尾且不含路径分隔符与 `..`、`assetUrl` 为无凭据无片段的绝对 https、`size` 为 1 字节至 4 GiB 的整数、`sha256` 为 64 位小写十六进制、`keyId` 为 16 位小写十六进制。未知字段、错误产品/身份/频道/平台/架构、字段文法不符即拒绝；缺失或旧 Workbench/Preview 安装身份也拒绝。`channel: stable` 是单字面量；本批不含 Beta。生产公钥已提交，尚无正式分发包。
 
 **签名与密钥**：
 
@@ -106,7 +106,7 @@ v1 清单契约：`schemaVersion`、`productId`、`installIdentity`、`channel`�
 - `verify --manifest <p> --signature <p> --key-ring <p> --current-version <v> --asset-hosts <h,h>`（允许列表为裸主机名，不含端口或协议）成功打印 `version`/`keyId`。
 - 退出码：`0` 成功、`1` 清单被拒绝（打印 reason 与字段）、`2` 用法或配置错误。私钥内容永不出现在 stdout/stderr。
 
-**当前接线状态（2026-11-16）**：LU-02 在 `apps/desktop/src/linxUpdate{Source,Feed,Download,Client}.ts` 接入 Linx flavor：仅随包 `linx-update-source.json` 存在且有效时启用，自动/手动检查只取清单与签名，点击后才下载并流式复验 `size`/`sha256`；未配置时保持 `disabled` 且不发起请求。LU-04 的安装 IPC 已接入 `LinxUpdateClient.install` 和独立 helper 协调器；成功交接仅返回 `accepted:true, completed:false`，不是新版健康成功。仓库已选定，但生产公钥未配置，未创建正式随包 source 文件；真实安装验收仍开放。
+**当前接线状态（2026-11-16）**：LU-02 在 `apps/desktop/src/linxUpdate{Source,Feed,Download,Client}.ts` 接入 Linx flavor：仅随包 `linx-update-source.json` 存在且有效时启用，自动/手动检查只取清单与签名，点击后才下载并流式复验 `size`/`sha256`；未配置时保持 `disabled` 且不发起请求。LU-04 的安装 IPC 已接入 `LinxUpdateClient.install` 和独立 helper 协调器；成功交接仅返回 `accepted:true, completed:false`，不是新版健康成功。已提交获批仓库和生产公钥的 source 配置，私钥仅在受保护签名 Environment；真实安装验收仍开放。
 
 **安装协调契约**：`packages/contracts/src/linxUpdateInstall.ts` 固定受限 request/journal、attemptId、目标清单摘要和维护/窗口响应。活跃计数非零或未知时不得编码为 `ready/committed`；窗口有未保存/保存中的编辑时不得确认 ready。绝对路径只是声明，不授予写入权限；helper 仍须独立绑定真实父进程、固定应用路径和私有 attempt，不能采用调用方公钥。主进程维护/安装接线已实现；契约、单测和隔离原生演练仍不能代替 LU-AC-07/09。
 
@@ -241,7 +241,7 @@ UI 实际操作、真实安装器/系统安全行为、GitHub 资产分发、迁
 - **Q-04 发布源已选定，受控前置配置已获授权**：用户批准沿用 `WYLINX601/synara--expert`，继续 main、不创建 PR，并授权门禁通过后的提交/推送、正式 tag/发布及隔离升级演练。更换仓库、改名/可见性或删除历史 Release 均不在授权内；日用应用和个人数据迁移仍须隔离验收通过后另行确认。
 - **Q-05 本批沿用既有图标**：名称已确认；第 1 节明确排除新 Logo 设计，因此不以新 Logo 决策阻塞本批开发，也不借改名改主布局。后续如改变视觉资产，另行提交可审查方案并取得授权。
 - **Q-06 实机阻塞门禁**：目录可写性、quarantine/Gatekeeper、helper 生命周期、跨进程锁和中断恢复必须真实验证；未通过不得声称“无需付费即可无提示自动升级”。
-- **Q-07 签名托管及单人显式审批已配置，正式候选未发布**：2026-11-16 用户明确允许 owner 发起并亲自批准同一发布，仍须两次 Environment 审批、固定 source/candidate digest 且禁止管理员绕过。两个真实 Environment 已指定 `WYLINX601`、`prevent_self_review: false`、`can_admins_bypass: false`，部署仅限 `v*.*.*` tag。生产 Ed25519 私钥仅存 `linx-signing` secret，实际公钥 `1113c8bdec541a20` 已写入源配置。真实 protection CLI 已通过；只读 CI 检查凭证、精确 bootstrap SHA 批准和正式候选仍未完成。
+- **Q-07 签名托管及单人显式审批已配置，正式候选未发布**：2026-11-16 用户明确允许 owner 发起并亲自批准同一发布，仍须两次 Environment 审批、固定 source/candidate digest 且禁止管理员绕过。两个真实 Environment 已指定 `WYLINX601`、`prevent_self_review: false`、`can_admins_bypass: false`，部署仅限 `v*.*.*` tag。生产 Ed25519 私钥仅存 `linx-signing` secret，实际公钥 `1113c8bdec541a20` 已提交。用户选择短期 `GITHUB_TOKEN`：预检只读，签名/发布复检共享该任务已有写权限，不配置长期 PAT；真实 workflow-token 能力、精确 bootstrap SHA 批准和正式候选仍待验收。
 
 ## 8. 工程交接、历史变更与验证
 
@@ -345,3 +345,6 @@ v0.2 实际文档检查 PASS：15 处本地链接及所含锚点可解析；8 �
 - 单人审批新回归先红后绿。真实 GitHub protection CLI 另暴露仓库根 API 多余 `/` 导致 404；三项子进程 HTTP 回归先全部失败，修复 URL 组装后 release 五文件 **77/77**，真实双 Environment 检查退出 0。最新去重测试汇总 **21027 通过 / 0 尚未修复失败 / 67 跳过**，仍是原根执行、分片续跑和失败修复的组合证据，不能称作一次根全绿。
 - 远端配置已执行但没有发布：三个规则集保护 main 删除/非快进、正式 tag 更新/删除，以及仅 owner 创建正式 tag；后两类限制分离，tag 不可变规则没有 bypass。旧 Release Desktop、Release desktop platform、Workbench weekly upstream sync 已停用；待当前受控源码推送并核对后才重新启用前两个同路径受控工作流。未创建 tag，未设置 bootstrap SHA，未操作日用数据。
 - 最后集中检查对应当前工作树：fmt **5739 文件通过**，lint **1343 warnings / 0 errors**、Server 同步 IO 预算通过，typecheck **7/7**。纯格式 Suite validator 已独立提交 `29832c871`；后续逻辑提交只纳入本任务 owned hunks，保留原并行 Suite/Server 和架构文档修改。已逐项审查可见界面差异，仅包括获批的 Linx 名称、既有更新控件/拒绝提示、一次性导入确认与维护期间编辑/重载保护，没有新增页面、Logo 或主布局。
+- 逻辑提交 `10f3abad983d5e1804752bcc19eb91f555fab41b` 已推送 main，未开 PR。四个混合文件仅提交 owned hunks，其余原用户修改留在工作区；三个不明归属 `.bun-build` 文件未提交或删除。远端已核对同路径工作流切为 `Linx controlled release` / `Qualify Linx macOS arm64` 后才重新启用，旧周同步源入口已删除。该 SHA 的 Marketing CI 全通过；主 CI 仍在运行。
+- 用户另选短期工作流令牌而非长期只读 PAT。发布预检使用 `contents: read` / `actions: read`；签名与提升保持既有 `contents: write` 并增加 `actions: read`，检查步骤共享所在任务权限。无个人管理凭证复制、无审批绕过，也不修改候选绑定；正式运行必须实测 API 能力，失败即停止。
+- 手动仅构建入口也执行同一只读 protection 检查，用于实测短期令牌和产出 AD-07 真实隔离包；不触发签名或公开。先完成两个真实包的辅助安装可行性门禁，再进入正式候选及 LU-AC-07 的公开升级，不能用先前夹具健康超时代替通过。

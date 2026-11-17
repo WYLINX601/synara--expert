@@ -15,6 +15,7 @@ import { expertPreviewQueryKey } from "../settings/expertSettingsQueries";
 import { ComposerPickerMenuPopup } from "./ComposerPickerMenuPopup";
 import { COMPOSER_TOOLBAR_PICKER_TRIGGER_CLASS_NAME } from "./composerPickerStyles";
 import { suiteQueryKey } from "../settings/expertSettingsQueries";
+import { useTranslation } from "~/i18n";
 
 const EXPERTS_QUERY_KEY = ["server", "experts"] as const;
 
@@ -56,16 +57,18 @@ export function useExpertDefinitions(enabled: boolean) {
   });
 }
 
-function statusLabel(status: ExpertPreview["status"]): string | null {
+type Translate = (message: string, values?: Record<string, unknown>) => string;
+
+function statusLabel(status: ExpertPreview["status"], t: Translate): string | null {
   switch (status) {
     case "available":
       return null;
     case "partial":
-      return "部分可用";
+      return t("chat:expertPreviewPartial");
     case "blocked":
-      return "需连接";
+      return t("chat:expertPreviewNeedsConnection");
     case "incompatible":
-      return "不兼容";
+      return t("chat:expertPreviewIncompatible");
   }
 }
 
@@ -113,17 +116,25 @@ export function ExpertComposerPicker({
         ? "incompatible"
         : preview?.status
       : undefined;
-  const expertLabel = selectedExpert?.name ?? (expertId ? "已选专家" : "通用");
+  const { t } = useTranslation();
+  const expertLabel =
+    selectedExpert?.name ??
+    (expertId ? t("chat:expertPickerSelectedExpert") : t("chat:expertPickerGeneral"));
   const triggerLabel = suiteSelection
-    ? `${expertLabel} · ${suite.data?.name ?? "Suite"}`
+    ? `${expertLabel} · ${suite.data?.name ?? t("common:suiteTerm")}`
     : expertLabel;
   const previewSummary = suiteSelection
     ? null
-    : ((selectedStatus ? statusLabel(selectedStatus) : null) ??
-      (previewFetching ? "正在检查" : previewError ? "检查失败" : null));
+    : ((selectedStatus ? statusLabel(selectedStatus, t) : null) ??
+      (previewFetching
+        ? t("chat:expertPickerChecking")
+        : previewError
+          ? t("chat:expertPickerCheckFailed")
+          : null));
   const footerStatus = unsupportedProvider
-    ? "当前 Provider 不支持专家"
-    : (previewSummary ?? (selectedStatus === "available" ? null : "等待预览结果"));
+    ? t("chat:expertPickerProviderUnsupported")
+    : (previewSummary ??
+      (selectedStatus === "available" ? null : t("chat:expertPickerWaitingPreview")));
   const showPreviewFooter = Boolean(
     expertId &&
     !suiteSelection &&
@@ -142,11 +153,15 @@ export function ExpertComposerPicker({
           <button
             type="button"
             className={COMPOSER_TOOLBAR_PICKER_TRIGGER_CLASS_NAME}
-            aria-label={selectedExpert ? `专家：${selectedExpert.name}` : "选择专家"}
+            aria-label={
+              selectedExpert
+                ? t("chat:expertPickerAriaSelected", { name: selectedExpert.name })
+                : t("chat:expertPickerAriaSelect")
+            }
             title={
               selectedStatus && previewSummary
                 ? `${triggerLabel} · ${previewSummary}`
-                : `${triggerLabel} · 选择要用于新任务的专家`
+                : t("chat:expertPickerTitleSelect", { label: triggerLabel })
             }
           />
         }
@@ -163,21 +178,25 @@ export function ExpertComposerPicker({
       </MenuTrigger>
       <ComposerPickerMenuPopup align="start" side="top" sideOffset={6} className="w-72">
         <MenuGroup>
-          <MenuGroupLabel>任务专家</MenuGroupLabel>
+          <MenuGroupLabel>{t("chat:expertPickerTaskExperts")}</MenuGroupLabel>
           <MenuItem onClick={() => commitSelection(undefined)}>
-            <span className="min-w-0 flex-1">通用</span>
+            <span className="min-w-0 flex-1">{t("chat:expertPickerGeneral")}</span>
             {!expertId ? (
               <CheckIcon className="size-3.5 shrink-0 text-[var(--color-text-foreground)]" />
             ) : null}
           </MenuItem>
           {expertsQuery.isLoading ? (
-            <div className="px-2 py-1.5 text-ui-sm text-muted-foreground">正在读取专家…</div>
+            <div className="px-2 py-1.5 text-ui-sm text-muted-foreground">
+              {t("chat:expertPickerLoading")}
+            </div>
           ) : expertsQuery.isError ? (
             <div className="px-2 py-1.5 text-ui-sm text-[var(--color-text-destructive)]">
-              无法读取专家列表。
+              {t("chat:expertPickerUnavailable")}
             </div>
           ) : activeExperts.length === 0 ? (
-            <div className="px-2 py-1.5 text-ui-sm text-muted-foreground">还没有可用的专家。</div>
+            <div className="px-2 py-1.5 text-ui-sm text-muted-foreground">
+              {t("chat:expertPickerEmpty")}
+            </div>
           ) : (
             activeExperts.map((expert: ExpertDefinition) => (
               <MenuItem key={expert.id} onClick={() => commitSelection(expert.id)}>
@@ -191,8 +210,9 @@ export function ExpertComposerPicker({
         </MenuGroup>
         {suiteSelection ? (
           <div className="border-t border-border/60 px-2.5 py-2 text-ui-sm text-muted-foreground">
-            {suite.data?.name ?? (suite.isError ? "Suite 名称暂不可读取" : "正在读取 Suite…")} · r
-            {suiteSelection.revision}
+            {suite.data?.name ??
+              (suite.isError ? t("chat:suiteNameUnavailable") : t("chat:suiteLoading"))}{" "}
+            {t("chat:expertPickerSuiteRevision", { revision: suiteSelection.revision })}
           </div>
         ) : null}
         {showPreviewFooter ? (
@@ -211,7 +231,9 @@ export function ExpertComposerPicker({
                 ))}
               </ul>
             ) : previewError ? (
-              <p className="text-ui-xs text-muted-foreground">预览检查失败，发送时会再次检查。</p>
+              <p className="text-ui-xs text-muted-foreground">
+                {t("chat:expertPickerPreviewFailed")}
+              </p>
             ) : null}
           </div>
         ) : null}

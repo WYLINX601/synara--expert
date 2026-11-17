@@ -6,6 +6,7 @@ import { SuiteSummary, suiteErrorText } from "~/components/settings/SuiteSummary
 import { SUITES_QUERY_KEY, suiteQueryKey } from "~/components/settings/expertSettingsQueries";
 import { SelectItem } from "~/components/ui/select";
 import { Button } from "~/components/ui/button";
+import { useTranslation } from "~/i18n";
 
 export function GroupSuiteSection({
   suite,
@@ -27,14 +28,17 @@ export function GroupSuiteSection({
     enabled: suite !== null,
   });
   const key = suite ? `${suite.suiteId}:${suite.revision}` : "none";
+  const { t } = useTranslation();
   return (
-    <section className="space-y-3 text-ui" aria-label="Hub Suite">
-      <h3 className="font-medium">Suite</h3>
+    <section className="space-y-3 text-ui" aria-label={t("chat:groupSuiteAria")}>
+      <h3 className="font-medium">{t("common:suiteTerm")}</h3>
       {!readonly ? (
         <SettingsSelectControl
           value={key}
-          ariaLabel="选择 Suite"
-          valueContent={suite ? (record.data?.name ?? "正在读取 Suite…") : "不使用 Suite"}
+          ariaLabel={t("chat:groupSuiteSelectAria")}
+          valueContent={
+            suite ? (record.data?.name ?? t("chat:suiteLoading")) : t("chat:groupSuiteNone")
+          }
           triggerClassName="w-full"
           onValueChange={(value) => {
             if (value === "none") onChange?.(null);
@@ -46,7 +50,7 @@ export function GroupSuiteSection({
             }
           }}
         >
-          <SelectItem value="none">不使用 Suite</SelectItem>
+          <SelectItem value="none">{t("chat:groupSuiteNone")}</SelectItem>
           {catalog.data?.map((entry) => (
             <SelectItem
               key={`${entry.ref.suiteId}:${entry.ref.revision}`}
@@ -59,14 +63,17 @@ export function GroupSuiteSection({
       ) : null}
       {catalog.isError && !readonly ? (
         <div role="alert" className="text-ui-sm">
-          <p>暂时无法读取 Suite 目录；仍可不使用 Suite 创建 Hub。{suiteErrorText(catalog.error)}</p>
+          <p>
+            {t("chat:groupSuiteCatalogUnavailable")}
+            {suiteErrorText(catalog.error)}
+          </p>
           <Button variant="outline" onClick={() => void catalog.refetch()}>
-            重试目录
+            {t("chat:groupSuiteRetryCatalog")}
           </Button>
         </div>
       ) : catalog.isPending && !readonly ? (
         <p role="status" className="text-ui-sm text-muted-foreground">
-          正在读取 Suite 目录…
+          {t("chat:groupSuiteLoadingCatalog")}
         </p>
       ) : null}
       {record.data ? (
@@ -79,11 +86,11 @@ export function GroupSuiteSection({
           <div role="alert">
             <p>{suiteErrorText(record.error)}</p>
             <Button variant="outline" onClick={() => void record.refetch()}>
-              重试读取
+              {t("chat:groupSuiteRetryRead")}
             </Button>
           </div>
         ) : (
-          <p role="status">正在读取用途与成员…</p>
+          <p role="status">{t("chat:groupSuiteLoadingMembers")}</p>
         )
       ) : null}
     </section>

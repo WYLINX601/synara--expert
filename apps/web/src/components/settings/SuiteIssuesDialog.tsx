@@ -11,6 +11,7 @@ import {
   DialogPanel,
   DialogFooter,
 } from "../ui/dialog";
+import { useTranslation } from "~/i18n";
 
 export function SuiteIssuesDialog({
   issues,
@@ -25,12 +26,13 @@ export function SuiteIssuesDialog({
   onRetry: () => void;
   finalFocus: RefObject<HTMLButtonElement | null>;
 }) {
+  const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup finalFocus={finalFocus}>
         <DialogHeader>
-          <DialogTitle>识别问题</DialogTitle>
-          <DialogDescription>问题只影响列出的动作或能力；返回预览不会代替保存。</DialogDescription>
+          <DialogTitle>{t("settings:suiteIssuesTitle")}</DialogTitle>
+          <DialogDescription>{t("settings:suiteIssuesDescription")}</DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <ul className="space-y-4 text-ui">
@@ -43,10 +45,10 @@ export function SuiteIssuesDialog({
                 </p>
                 <p className="text-ui-sm text-muted-foreground">
                   {issue.effect === "deny-action"
-                    ? "仅当前动作无法执行，请处理对应问题。"
+                    ? t("settings:suiteIssueDeny")
                     : issue.effect === "limit-capability"
-                      ? "此能力受到限制，其余可执行工作可以继续。"
-                      : "暂未完成检查，不代表能力已通过或全部不可用。"}
+                      ? t("settings:suiteIssueLimit")
+                      : t("settings:suiteIssueUnknown")}
                 </p>
                 {issue.subject.kind === "connection" ? (
                   <Link
@@ -56,7 +58,7 @@ export function SuiteIssuesDialog({
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    处理连接
+                    {t("settings:suiteIssueFixConnection")}
                   </Link>
                 ) : null}
               </li>
@@ -71,9 +73,11 @@ export function SuiteIssuesDialog({
               onRetry();
             }}
           >
-            重新读取检查
+            {t("settings:suiteIssueRefresh")}
           </Button>
-          <Button onClick={() => onOpenChange(false)}>返回预览</Button>
+          <Button onClick={() => onOpenChange(false)}>
+            {t("settings:suiteIssueBackToPreview")}
+          </Button>
         </DialogFooter>
       </DialogPopup>
     </Dialog>

@@ -32,12 +32,14 @@ import {
 } from "./suiteImportJournal";
 import { SuiteDisclosure } from "./SuiteDisclosure";
 import { SuiteIssuesDialog } from "./SuiteIssuesDialog";
+import { useTranslation } from "~/i18n";
 
 export function SuiteCatalog({
   onUseExpert,
 }: {
   onUseExpert?: (selection: ExpertDraftSelection) => Promise<void>;
 }) {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const suites = useQuery({
     queryKey: SUITES_QUERY_KEY,
@@ -79,7 +81,7 @@ export function SuiteCatalog({
       try {
         clearSuiteImportJournal();
       } catch (cause) {
-        setStorageError(`导入已完成，但无法清除本地恢复记录：${suiteErrorText(cause)}`);
+        setStorageError(t("settings:suiteRecoveryClearFailed", { detail: suiteErrorText(cause) }));
       }
       operationRef.current = null;
       setOperation(null);
@@ -124,7 +126,7 @@ export function SuiteCatalog({
         void reconcile(journal.request);
       }
     } catch (cause) {
-      setStorageError(`无法恢复导入记录：${suiteErrorText(cause)}`);
+      setStorageError(t("settings:suiteRestoreRecordFailed", { detail: suiteErrorText(cause) }));
     }
     return () => {
       requestId.current = null;
@@ -209,7 +211,7 @@ export function SuiteCatalog({
     try {
       writeSuiteImportJournal({ request: accepted, preview, github, folder, channel });
     } catch (cause) {
-      setError(`无法保存恢复记录，尚未提交：${suiteErrorText(cause)}`);
+      setError(t("settings:suiteSaveRecoveryFailed", { detail: suiteErrorText(cause) }));
       return;
     }
     operationRef.current = accepted;
@@ -220,7 +222,7 @@ export function SuiteCatalog({
     try {
       acceptReceipt(await ensureExpertClient().commitSuiteImport(accepted));
     } catch (cause) {
-      setError(`暂时无法确认是否已保存：${suiteErrorText(cause)}`);
+      setError(t("settings:suiteConfirmSavedUnknown", { detail: suiteErrorText(cause) }));
       try {
         acceptReceipt(
           await ensureExpertClient().getSuiteImportReceipt({ operationId: accepted.operationId }),
@@ -242,7 +244,7 @@ export function SuiteCatalog({
     try {
       const catalog = await client.listSuites();
       const records = await Promise.all(catalog.map((entry) => client.readSuite(entry.ref)));
-      if (client !== ensureExpertClient()) throw new Error("连接已改变，请重新确认原导入结果。");
+      if (client !== ensureExpertClient()) throw new Error(t("settings:suiteConnectionChanged"));
       setExisting(
         records.filter(
           (suite) =>
@@ -290,9 +292,9 @@ export function SuiteCatalog({
       (issue.action === "commit" || issue.action === "preview") && issue.effect === "deny-action",
   );
   return (
-    <section className="space-y-4 text-ui" aria-label="Suite 目录">
+    <section className="space-y-4 text-ui" aria-label={t("settings:suiteCatalogAria")}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="font-medium">Suite</h2>
+        <h2 className="font-medium">{t("common:suiteTerm")}</h2>
         <Button
           ref={importButtonRef}
           disabled={Boolean(storageError)}
@@ -301,7 +303,7 @@ export function SuiteCatalog({
             if (operationRef.current) void reconcile();
           }}
         >
-          {operation ? "确认导入结果" : "导入 Suite"}
+          {operation ? t("settings:suiteConfirmResult") : t("settings:suiteImport")}
         </Button>
       </div>
       {storageError ? (
@@ -310,15 +312,17 @@ export function SuiteCatalog({
         </p>
       ) : null}
       {receipt?.state === "committed" ? (
-        <p role="status">{receipt.reused ? "已打开已有套件。" : "Suite 已导入。"}</p>
+        <p role="status">
+          {receipt.reused ? t("settings:suiteOpenedExisting") : t("settings:suiteImported")}
+        </p>
       ) : null}
       {suites.isPending ? (
-        <p role="status">正在读取 Suite…</p>
+        <p role="status">{t("chat:suiteLoading")}</p>
       ) : suites.isError ? (
         <div role="alert">
           <p>{suiteErrorText(suites.error)}</p>
           <Button variant="outline" onClick={() => void suites.refetch()}>
-            重试
+            {t("common:common_retry")}
           </Button>
         </div>
       ) : suites.data?.length ? (
@@ -340,7 +344,7 @@ export function SuiteCatalog({
           ))}
         </ul>
       ) : (
-        <p className="text-muted-foreground">尚无 Suite，可从 GitHub 或本地文件夹导入。</p>
+        <p className="text-muted-foreground">{t("settings:suiteEmpty")}</p>
       )}
       <Dialog
         open={selected !== null}
@@ -350,8 +354,8 @@ export function SuiteCatalog({
       >
         <DialogPopup finalFocus={selectionReturnFocus}>
           <DialogHeader>
-            <DialogTitle>{selectedSuite.data?.name ?? "Suite"}</DialogTitle>
-            <DialogDescription>用途与成员预览</DialogDescription>
+            <DialogTitle>{selectedSuite.data?.name ?? t("common:suiteTerm")}</DialogTitle>
+            <DialogDescription>{t("settings:suitePreviewMembers")}</DialogDescription>
           </DialogHeader>
           <DialogPanel>
             {selectedSuite.data ? (
@@ -360,16 +364,16 @@ export function SuiteCatalog({
               <div role="alert">
                 <p>{suiteErrorText(selectedSuite.error)}</p>
                 <Button variant="outline" onClick={() => void selectedSuite.refetch()}>
-                  重试
+                  {t("common:common_retry")}
                 </Button>
               </div>
             ) : (
-              <p role="status">正在读取 Suite…</p>
+              <p role="status">{t("chat:suiteLoading")}</p>
             )}
           </DialogPanel>
           <DialogFooter>
             <Button variant="outline" onClick={() => setSelected(null)}>
-              关闭
+              {t("common:app_close")}
             </Button>
           </DialogFooter>
         </DialogPopup>
@@ -382,19 +386,23 @@ export function SuiteCatalog({
       >
         <DialogPopup finalFocus={importButtonRef} showCloseButton={!saving}>
           <DialogHeader>
-            <DialogTitle>导入 Suite</DialogTitle>
+            <DialogTitle>{t("settings:suiteImport")}</DialogTitle>
             <DialogDescription>
               {saving
-                ? "正在保存，请勿重复提交。"
+                ? t("settings:suiteSaving")
                 : operation
-                  ? "按原提交记录确认结果，不会创建第二次导入。"
-                  : "读取支持的套件结构，不执行来源脚本或授予权限。"}
+                  ? t("settings:suiteConfirmExisting")
+                  : t("settings:suiteReadStructure")}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4">
             {operation ? (
               <div className="space-y-3" role="status">
-                <p>{receipt?.state === "failed" ? "此次导入未完成" : "正在确认导入结果…"}</p>
+                <p>
+                  {receipt?.state === "failed"
+                    ? t("settings:suiteImportIncomplete")
+                    : t("settings:suiteConfirming")}
+                </p>
                 <p className="break-all text-ui-sm text-muted-foreground">
                   {operation.operationId}
                 </p>
@@ -402,7 +410,7 @@ export function SuiteCatalog({
                   <p>{receipt.issue.message}</p>
                 ) : (
                   <p className="text-ui-sm text-muted-foreground">
-                    连接中断或结果未知不代表已取消。返回目录后仍保留本次记录。
+                    {t("settings:suiteOutcomeUnknown")}
                   </p>
                 )}
               </div>
@@ -414,16 +422,18 @@ export function SuiteCatalog({
                     clearPreview();
                     setChannel(value);
                   }}
-                  ariaLabel="Suite 来源渠道"
+                  ariaLabel={t("settings:suiteSourceChannelAria")}
                   options={[
                     { value: "github", label: "GitHub" },
-                    { value: "local-folder", label: "本地文件夹" },
+                    { value: "local-folder", label: t("settings:suiteLocalFolder") },
                   ]}
                 />
                 {!preview ? (
                   <div className="space-y-2">
                     <label className="block" htmlFor="suite-source">
-                      {channel === "github" ? "仓库或目录链接" : "服务端可访问的套件文件夹"}
+                      {channel === "github"
+                        ? t("settings:suiteSourceLabelGithub")
+                        : t("settings:suiteSourceLabelFolder")}
                     </label>
                     <Input
                       id="suite-source"
@@ -434,7 +444,9 @@ export function SuiteCatalog({
                         else setFolder(event.target.value);
                       }}
                       placeholder={
-                        channel === "github" ? "https://github.com/org/suite" : "套件文件夹绝对路径"
+                        channel === "github"
+                          ? "https://github.com/org/suite"
+                          : t("settings:suiteSourcePlaceholderFolder")
                       }
                     />
                     {channel === "local-folder" ? (
@@ -458,24 +470,24 @@ export function SuiteCatalog({
                               .catch((cause: unknown) => setError(suiteErrorText(cause)));
                           }}
                         >
-                          选择文件夹
+                          {t("settings:suiteChooseFolder")}
                         </Button>
                         <p className="text-ui-sm text-muted-foreground">
-                          文件夹必须可由当前服务端读取；浏览器不能上传或访问任意本机目录。
+                          {t("settings:suiteFolderHint")}
                         </p>
                       </>
                     ) : null}
-                    {reading ? <p role="status">正在读取并识别来源…</p> : null}
+                    {reading ? <p role="status">{t("settings:suiteReadingSource")}</p> : null}
                   </div>
                 ) : (
                   <div className="space-y-3">
                     <h3 className="font-medium">{preview.name}</h3>
                     <p className="whitespace-pre-wrap">{preview.description}</p>
-                    <SuiteDisclosure label="来源与内容基线">
+                    <SuiteDisclosure label={t("settings:suiteSourceBaseline")}>
                       <p className="break-all text-ui-sm">
                         {preview.source.kind === "github"
                           ? `${preview.source.repository}/${preview.source.subdirectory} · ${preview.source.resolvedCommit}`
-                          : "本地文件夹"}
+                          : t("settings:suiteLocalFolder")}
                       </p>
                       <p className="break-all text-ui-sm">{preview.contentHash}</p>
                     </SuiteDisclosure>
@@ -490,7 +502,11 @@ export function SuiteCatalog({
                         </li>
                       ))}
                     </ul>
-                    <SuiteDisclosure label={`能力与包含内容（${preview.resourceKeys.length}）`}>
+                    <SuiteDisclosure
+                      label={t("settings:suiteContentsAria", {
+                        count: preview.resourceKeys.length,
+                      })}
+                    >
                       <ul className="text-ui-sm">
                         {preview.resourceKeys.map((key) => (
                           <li key={key}>{key}</li>
@@ -503,19 +519,17 @@ export function SuiteCatalog({
                         variant="outline"
                         onClick={() => setIssuesOpen(true)}
                       >
-                        查看识别问题（{preview.issues.length}）
+                        {t("settings:suiteViewIssues", { count: preview.issues.length })}
                       </Button>
                     ) : null}
                     {identical ? (
-                      <p>此来源与内容已导入。</p>
+                      <p>{t("settings:suiteIdentical")}</p>
                     ) : existing.length ? (
                       <div className="space-y-1 text-ui-sm">
-                        <p>
-                          此来源已有其他版本。新套件独立保存，原套件、Expert 和已有任务保持不变。
-                        </p>
+                        <p>{t("settings:suiteExistingVersions")}</p>
                         {existing.map((suite) => (
                           <p key={suite.ref.suiteId} className="break-all">
-                            已有：
+                            {t("settings:suiteExistingLabel")}
                             {suite.source.kind === "github"
                               ? `${suite.source.resolvedCommit} · `
                               : ""}
@@ -523,7 +537,7 @@ export function SuiteCatalog({
                           </p>
                         ))}
                         <p className="break-all">
-                          本次：
+                          {t("settings:suiteThisImportLabel")}
                           {preview.source.kind === "github"
                             ? `${preview.source.resolvedCommit} · `
                             : ""}
@@ -543,27 +557,27 @@ export function SuiteCatalog({
           </DialogPanel>
           <DialogFooter>
             <Button variant="outline" disabled={saving} onClick={close}>
-              {operation ? "返回目录" : "取消"}
+              {operation ? t("settings:suiteBackToCatalog") : t("common:form_cancel")}
             </Button>
             {operation ? (
               <>
                 <Button disabled={saving} onClick={() => void reconcile()}>
-                  {saving ? "正在确认…" : "重试确认"}
+                  {saving ? t("settings:suiteConfirming") : t("settings:suiteRetryConfirm")}
                 </Button>
                 {receipt?.state === "failed" ? (
                   <Button variant="outline" onClick={returnToPreview}>
-                    返回预览
+                    {t("settings:suiteBackToPreview")}
                   </Button>
                 ) : confirmedAbsent ? (
                   <Button variant="outline" disabled={saving} onClick={resendOriginal}>
-                    重送原提交
+                    {t("settings:suiteResendOriginal")}
                   </Button>
                 ) : null}
               </>
             ) : preview ? (
               <>
                 <Button variant="outline" onClick={clearPreview}>
-                  返回来源
+                  {t("settings:suiteBackToSource")}
                 </Button>
                 {identical ? (
                   <Button
@@ -573,11 +587,13 @@ export function SuiteCatalog({
                       close();
                     }}
                   >
-                    打开已有套件
+                    {t("settings:suiteOpenExisting")}
                   </Button>
                 ) : (
                   <Button disabled={denied || reading} onClick={() => void submit()}>
-                    {existing.length ? "作为新套件导入" : "导入"}
+                    {existing.length
+                      ? t("settings:suiteImportAsNew")
+                      : t("settings:suiteImportShort")}
                   </Button>
                 )}
               </>
@@ -586,7 +602,7 @@ export function SuiteCatalog({
                 disabled={reading || !(channel === "github" ? github.trim() : folder.trim())}
                 onClick={() => void readSource()}
               >
-                读取来源
+                {t("settings:suiteReadSource")}
               </Button>
             )}
           </DialogFooter>

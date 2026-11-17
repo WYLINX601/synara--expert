@@ -11853,10 +11853,16 @@ describe("ChatView transcript geometry (full app)", () => {
         );
       const sends = () => wsRequests.filter((candidate) => turnStartText(candidate) !== null);
       const expectRetryAction = async () => {
-        const draft = useComposerDraftStore.getState().draftsByThreadId[THREAD_ID];
-        expect(draft?.prompt).toBe(originalPrompt);
+        // Recording the request happens before the rejected send restores its
+        // draft. An empty prompt also matches the in-flight cleared composer,
+        // so wait for the complete retry state, including plan mode and files.
+        await vi.waitFor(() => {
+          const draft = useComposerDraftStore.getState().draftsByThreadId[THREAD_ID];
+          expect(draft?.prompt).toBe(originalPrompt);
+          if (livePlan) expect(draft?.interactionMode).toBe("plan");
+          if (attachFile) expect(draft?.files[0]?.file).toBe(file);
+        });
         if (livePlan) {
-          expect(draft?.interactionMode).toBe("plan");
           await expect
             .element(
               page.getByRole("button", {
@@ -11871,7 +11877,6 @@ describe("ChatView transcript geometry (full app)", () => {
             (document.querySelector('[data-testid="composer-editor"]') as HTMLElement).textContent,
           ).toBe(originalPrompt),
         );
-        if (attachFile) expect(draft?.files[0]?.file).toBe(file);
       };
       try {
         const editor = await waitForComposerEditor();
@@ -11914,11 +11919,6 @@ describe("ChatView transcript geometry (full app)", () => {
         await vi.waitFor(() => expect(retry.disabled).toBe(false));
         retry.click();
         await vi.waitFor(() => expect(sends()).toHaveLength(2));
-        await vi.waitFor(() =>
-          expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
-            originalPrompt,
-          ),
-        );
         expect(
           (sends()[1]!.command as { message: { ambientContext?: unknown } }).message.ambientContext,
         ).toEqual(sentSnapshotA);
@@ -12105,8 +12105,21 @@ describe("ChatView transcript geometry (full app)", () => {
           useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.ambientContext,
         ).toBeUndefined();
         expect(bridge.capture).not.toHaveBeenCalled();
+        // Binding removes the mention through a controlled Lexical update.
+        // Let that commit before replacing the prompt, then wait for the new
+        // editor value and send eligibility rather than clicking a merely
+        // mounted (possibly still disabled) DOM button.
+        await expect.poll(() => editor.element().textContent).toBe("Explain ");
         await editor.fill(sendPrompt);
-        (await waitForSendButton()).click();
+        await vi.waitFor(() => {
+          expect(editor.element().textContent).toBe(sendPrompt);
+          expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt ?? "").toBe(
+            sendPrompt,
+          );
+        });
+        const sendButton = page.getByRole("button", { name: "Send message", exact: true });
+        await expect.element(sendButton).toBeEnabled();
+        await sendButton.click();
         await vi.waitFor(() => {
           const request = wsRequests.find((candidate) => turnStartText(candidate) === sendPrompt);
           expect(request).toBeTruthy();

@@ -399,60 +399,6 @@
       "count": 1
     },
     {
-      "file": "apps/web/src/components/chat/ExpertComposerPicker.tsx",
-      "code": "ui-literal",
-      "message": "Untranslated UI candidate: \"专家：\"",
-      "count": 1
-    },
-    {
-      "file": "apps/web/src/components/chat/ExpertComposerPicker.tsx",
-      "code": "ui-literal",
-      "message": "Untranslated UI candidate: \"选择专家\"",
-      "count": 1
-    },
-    {
-      "file": "apps/web/src/components/chat/ExpertComposerPicker.tsx",
-      "code": "ui-literal",
-      "message": "Untranslated UI candidate: \"· 选择要用于新任务的专家\"",
-      "count": 1
-    },
-    {
-      "file": "apps/web/src/components/chat/ExpertComposerPicker.tsx",
-      "code": "ui-literal",
-      "message": "Untranslated UI candidate: \"任务专家\"",
-      "count": 1
-    },
-    {
-      "file": "apps/web/src/components/chat/ExpertComposerPicker.tsx",
-      "code": "ui-literal",
-      "message": "Untranslated UI candidate: \"通用\"",
-      "count": 1
-    },
-    {
-      "file": "apps/web/src/components/chat/ExpertComposerPicker.tsx",
-      "code": "ui-literal",
-      "message": "Untranslated UI candidate: \"正在读取专家…\"",
-      "count": 1
-    },
-    {
-      "file": "apps/web/src/components/chat/ExpertComposerPicker.tsx",
-      "code": "ui-literal",
-      "message": "Untranslated UI candidate: \"无法读取专家列表。\"",
-      "count": 1
-    },
-    {
-      "file": "apps/web/src/components/chat/ExpertComposerPicker.tsx",
-      "code": "ui-literal",
-      "message": "Untranslated UI candidate: \"还没有可用的专家。\"",
-      "count": 1
-    },
-    {
-      "file": "apps/web/src/components/chat/ExpertComposerPicker.tsx",
-      "code": "ui-literal",
-      "message": "Untranslated UI candidate: \"预览检查失败，发送时会再次检查。\"",
-      "count": 1
-    },
-    {
       "file": "apps/web/src/components/chat/ExpertTaskControl.tsx",
       "code": "ui-literal",
       "message": "Untranslated UI candidate: \"本任务固定使用专家版本 v\"",

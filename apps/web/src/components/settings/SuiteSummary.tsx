@@ -5,9 +5,10 @@ import { ensureExpertClient } from "~/workbench/host/expertClient";
 import { Button } from "../ui/button";
 import { EXPERTS_QUERY_KEY } from "./expertSettingsQueries";
 import { SuiteDisclosure } from "./SuiteDisclosure";
+import { t as translateMessage, useTranslation } from "~/i18n";
 
 export const suiteErrorText = (error: unknown) =>
-  error instanceof Error ? error.message : "读取失败，请重试。";
+  error instanceof Error ? error.message : translateMessage("settings:suiteErrorFallback");
 
 export function SuiteSummary({
   suite,
@@ -16,6 +17,7 @@ export function SuiteSummary({
   suite: SuiteComposition;
   onUseExpert?: (selection: ExpertDraftSelection) => Promise<void>;
 }) {
+  const { t } = useTranslation();
   const experts = useQuery({
     queryKey: EXPERTS_QUERY_KEY,
     queryFn: () => ensureExpertClient().listExperts(),
@@ -46,14 +48,17 @@ export function SuiteSummary({
                 ) : (
                   <p className="text-ui-sm" role="status">
                     {experts.isPending
-                      ? "正在读取职责…"
+                      ? t("settings:suiteSummaryLoadingDuties")
                       : experts.error
                         ? suiteErrorText(experts.error)
-                        : "该成员当前不可读取。"}
+                        : t("settings:suiteSummaryMemberUnreadable")}
                   </p>
                 )}
                 {resources.length ? (
-                  <ul className="space-y-1 text-ui-sm text-muted-foreground" aria-label="主要能力">
+                  <ul
+                    className="space-y-1 text-ui-sm text-muted-foreground"
+                    aria-label={t("settings:suiteSummaryCapabilitiesAria")}
+                  >
                     {resources.map((resource) => (
                       <li key={resource.key}>
                         {resource.key}
@@ -72,7 +77,8 @@ export function SuiteSummary({
                 ) : null}
                 {expert?.skills.length ? (
                   <p className="text-ui-sm text-muted-foreground">
-                    自身 Skills：{expert.skills.map((skill) => skill.name).join("、")}
+                    {t("settings:suiteSummaryOwnSkills")}
+                    {expert.skills.map((skill) => skill.name).join("、")}
                   </p>
                 ) : null}
               </SuiteDisclosure>
@@ -82,14 +88,14 @@ export function SuiteSummary({
       </ul>
       {experts.isError ? (
         <Button variant="outline" onClick={() => void experts.refetch()}>
-          重试读取成员
+          {t("settings:suiteSummaryRetryMember")}
         </Button>
       ) : null}
-      <SuiteDisclosure label="来源">
+      <SuiteDisclosure label={t("settings:suiteSummarySource")}>
         <p className="break-all text-ui-sm text-muted-foreground">
           {suite.source.kind === "github"
             ? `${suite.source.repository}/${suite.source.subdirectory} · ${suite.source.resolvedCommit}`
-            : "本地文件夹内容基线"}
+            : t("settings:suiteSummaryLocalBaseline")}
         </p>
         <p className="break-all text-ui-sm text-muted-foreground">{suite.source.contentHash}</p>
       </SuiteDisclosure>
@@ -111,6 +117,7 @@ function SuiteMemberUse({
   const pending = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { t } = useTranslation();
   return (
     <>
       <Button
@@ -128,7 +135,7 @@ function SuiteMemberUse({
             });
         }}
       >
-        {busy ? "正在打开…" : "使用此 Expert"}
+        {busy ? t("settings:suiteSummaryOpening") : t("settings:suiteSummaryUseExpert")}
       </Button>
       {error ? (
         <p role="alert" className="text-ui-sm text-destructive">

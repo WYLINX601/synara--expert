@@ -422,7 +422,9 @@ export function findVisualBrandAssetViolations(
 }
 
 export function readTrackedFiles(cwd = process.cwd()): BrandIdentityBinaryFile[] {
-  const entries = execFileSync("git", ["ls-files", "--stage", "-z"], { cwd, encoding: "utf8" })
+  // A complete monorepo index exceeds Node's default 1 MiB command buffer.
+  const gitOptions = { cwd, encoding: "utf8" as const, maxBuffer: 16 * 1024 * 1024 };
+  const entries = execFileSync("git", ["ls-files", "--stage", "-z"], gitOptions)
     .split("\0")
     .filter(Boolean);
   // Gitlinks name another repository, not a file owned by this checkout. They may
@@ -430,7 +432,7 @@ export function readTrackedFiles(cwd = process.cwd()): BrandIdentityBinaryFile[]
   // Retired source files are not live branding. Required raster assets are still
   // enforced independently below, and unreadable surviving files remain errors.
   const deleted = new Set(
-    execFileSync("git", ["ls-files", "--deleted", "-z"], { cwd, encoding: "utf8" }).split("\0"),
+    execFileSync("git", ["ls-files", "--deleted", "-z"], gitOptions).split("\0"),
   );
   const paths = entries
     .filter((entry) => !entry.startsWith("160000 "))

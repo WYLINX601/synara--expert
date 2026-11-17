@@ -11,6 +11,7 @@ import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { SuiteCatalog } from "./SuiteCatalog";
+import { t } from "~/i18n";
 import { clearSuiteImportJournal, readSuiteImportJournal } from "./suiteImportJournal";
 
 const server = vi.hoisted(() => ({
@@ -113,10 +114,10 @@ async function mount(onUseExpert = vi.fn(async () => {})) {
   return onUseExpert;
 }
 async function readLocal() {
-  await page.getByRole("button", { name: "导入 Suite", exact: true }).click();
-  await page.getByRole("radio", { name: "本地文件夹", exact: true }).click();
-  await page.getByLabelText("服务端可访问的套件文件夹").fill("/fixtures/suite");
-  await page.getByRole("button", { name: "读取来源", exact: true }).click();
+  await page.getByRole("button", { name: t("settings:suiteImport"), exact: true }).click();
+  await page.getByRole("radio", { name: t("settings:suiteLocalFolder"), exact: true }).click();
+  await page.getByLabelText(t("settings:suiteSourceLabelFolder")).fill("/fixtures/suite");
+  await page.getByRole("button", { name: t("settings:suiteReadSource"), exact: true }).click();
   await expect.poll(() => server.previewSuite.mock.calls.length).toBe(1);
 }
 
@@ -126,15 +127,17 @@ describe("Suite import and direct use", () => {
     server.commitSuiteImport.mockReturnValueOnce(promise);
     await mount();
     await readLocal();
-    await page.getByRole("button", { name: "导入", exact: true }).click();
+    await page.getByRole("button", { name: t("settings:suiteImportShort"), exact: true }).click();
     await expect.poll(() => server.commitSuiteImport.mock.calls.length).toBe(1);
     await expect
-      .element(page.getByRole("button", { name: "返回目录", exact: true }))
+      .element(page.getByRole("button", { name: t("settings:suiteBackToCatalog"), exact: true }))
       .toBeDisabled();
     expect(page.getByRole("radio", { name: "GitHub", exact: true }).elements()).toHaveLength(0);
     const request = server.commitSuiteImport.mock.calls[0]![0];
     resolve({ operationId: request.operationId, requestHash: "d".repeat(64), state: "pending" });
-    await expect.element(page.getByRole("button", { name: "返回目录", exact: true })).toBeEnabled();
+    await expect
+      .element(page.getByRole("button", { name: t("settings:suiteBackToCatalog"), exact: true }))
+      .toBeEnabled();
     expect(server.commitSuiteImport).toHaveBeenCalledTimes(1);
     expect(readSuiteImportJournal()?.request).toEqual(request);
   });
@@ -164,36 +167,40 @@ describe("Suite import and direct use", () => {
     await mount();
     await readLocal();
     await expect
-      .element(page.getByRole("heading", { name: "识别问题", exact: true }))
+      .element(page.getByRole("heading", { name: t("settings:suiteIssuesTitle"), exact: true }))
       .toBeVisible();
-    await page.getByRole("button", { name: "返回预览", exact: true }).click();
+    await page
+      .getByRole("button", { name: t("settings:suiteIssueBackToPreview"), exact: true })
+      .click();
     expect(server.commitSuiteImport).not.toHaveBeenCalled();
-    await page.getByRole("button", { name: "导入", exact: true }).click();
+    await page.getByRole("button", { name: t("settings:suiteImportShort"), exact: true }).click();
     await expect.poll(() => server.commitSuiteImport.mock.calls.length).toBe(1);
   });
   it("keeps each source input and discards a late preview after switching channels", async () => {
     const { promise, resolve } = deferred<SuitePreview>();
     server.previewSuite.mockReturnValueOnce(promise);
     await mount();
-    await page.getByRole("button", { name: "导入 Suite", exact: true }).click();
-    await page.getByLabelText("仓库或目录链接").fill("https://github.com/org/suite");
-    await page.getByRole("button", { name: "读取来源", exact: true }).click();
+    await page.getByRole("button", { name: t("settings:suiteImport"), exact: true }).click();
+    await page
+      .getByLabelText(t("settings:suiteSourceLabelGithub"))
+      .fill("https://github.com/org/suite");
+    await page.getByRole("button", { name: t("settings:suiteReadSource"), exact: true }).click();
     await expect.poll(() => server.previewSuite.mock.calls.length).toBe(1);
     const requestId = server.previewSuite.mock.calls[0]![0].requestId;
-    await page.getByRole("radio", { name: "本地文件夹", exact: true }).click();
-    await page.getByLabelText("服务端可访问的套件文件夹").fill("/local/retained");
+    await page.getByRole("radio", { name: t("settings:suiteLocalFolder"), exact: true }).click();
+    await page.getByLabelText(t("settings:suiteSourceLabelFolder")).fill("/local/retained");
     resolve(preview(requestId));
     await expect.poll(() => server.cancelSuitePreview.mock.calls.length).toBe(1);
     await expect
-      .element(page.getByRole("button", { name: "导入", exact: true }))
+      .element(page.getByRole("button", { name: t("settings:suiteImportShort"), exact: true }))
       .not.toBeInTheDocument();
     await page.getByRole("radio", { name: "GitHub", exact: true }).click();
     await expect
-      .element(page.getByLabelText("仓库或目录链接"))
+      .element(page.getByLabelText(t("settings:suiteSourceLabelGithub")))
       .toHaveValue("https://github.com/org/suite");
-    await page.getByRole("radio", { name: "本地文件夹", exact: true }).click();
+    await page.getByRole("radio", { name: t("settings:suiteLocalFolder"), exact: true }).click();
     await expect
-      .element(page.getByLabelText("服务端可访问的套件文件夹"))
+      .element(page.getByLabelText(t("settings:suiteSourceLabelFolder")))
       .toHaveValue("/local/retained");
     expect(server.commitSuiteImport).not.toHaveBeenCalled();
   });
@@ -203,9 +210,11 @@ describe("Suite import and direct use", () => {
     ]);
     const onUse = await mount();
     await readLocal();
-    await page.getByRole("button", { name: "打开已有套件", exact: true }).click();
+    await page.getByRole("button", { name: t("settings:suiteOpenExisting"), exact: true }).click();
     await page.getByRole("button", { name: expert.name, exact: true }).click();
-    await page.getByRole("button", { name: "使用此 Expert", exact: true }).click();
+    await page
+      .getByRole("button", { name: t("settings:suiteSummaryUseExpert"), exact: true })
+      .click();
     expect(onUse).toHaveBeenCalledWith({ expertId: expert.id, suite: ref });
     expect(server.commitSuiteImport).not.toHaveBeenCalled();
   });
@@ -224,21 +233,23 @@ describe("Suite import and direct use", () => {
     }));
     await mount();
     await readLocal();
-    await page.getByRole("button", { name: "作为新套件导入", exact: true }).click();
+    await page.getByRole("button", { name: t("settings:suiteImportAsNew"), exact: true }).click();
     await expect.poll(() => server.commitSuiteImport.mock.calls.length).toBe(1);
     expect(server.commitSuiteImport.mock.calls[0]![0].mode).toBe("independent-new-content");
     expect(readSuiteImportJournal()?.request).toEqual(server.commitSuiteImport.mock.calls[0]![0]);
-    expect(page.getByText("Suite 已导入。", { exact: true }).elements()).toHaveLength(0);
+    expect(page.getByText(t("settings:suiteImported"), { exact: true }).elements()).toHaveLength(0);
   });
   it("retains an unknown request and reconciles its receipt after remount without resubmitting", async () => {
     server.commitSuiteImport.mockRejectedValue(new Error("connection lost"));
     server.getSuiteImportReceipt.mockRejectedValue(new Error("offline"));
     await mount();
     await readLocal();
-    await page.getByRole("button", { name: "导入", exact: true }).click();
-    await expect.element(page.getByRole("button", { name: "返回目录", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: t("settings:suiteImportShort"), exact: true }).click();
+    await expect
+      .element(page.getByRole("button", { name: t("settings:suiteBackToCatalog"), exact: true }))
+      .toBeEnabled();
     const accepted = readSuiteImportJournal()!.request;
-    await page.getByRole("button", { name: "返回目录", exact: true }).click();
+    await page.getByRole("button", { name: t("settings:suiteBackToCatalog"), exact: true }).click();
     await unmount!();
     client?.clear();
     unmount = undefined;
@@ -250,7 +261,9 @@ describe("Suite import and direct use", () => {
       reused: false,
     });
     await mount();
-    await expect.element(page.getByText("Suite 已导入。", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText(t("settings:suiteImported"), { exact: true }))
+      .toBeVisible();
     expect(server.commitSuiteImport).toHaveBeenCalledTimes(1);
     expect(server.getSuiteImportReceipt).toHaveBeenLastCalledWith({
       operationId: accepted.operationId,

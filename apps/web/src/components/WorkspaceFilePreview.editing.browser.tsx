@@ -816,12 +816,20 @@ it("keeps the editor gutter aligned through horizontal and vertical scrolling", 
         ),
       )
       .toBeLessThan(1);
-    editor.revealLineInCenter(100, monaco.editor.ScrollType.Immediate);
-    // The engine measures the widest rendered line on its next frame; scrolling
-    // before that clamps scrollLeft to the viewport width.
+    // Width measurement also adds the horizontal scrollbar to scrollHeight.
+    // Settle it before revealing the last line, not just before scrolling right:
+    // otherwise the vertical reveal races the scrollbar's 8px height adjustment.
     await expect
       .poll(() => editor.getScrollWidth())
       .toBeGreaterThan(editor.getLayoutInfo().contentWidth);
+    await expect
+      .poll(() => editor.getScrollHeight())
+      .toBe(
+        editor.getBottomForLineNumber(100) +
+          editor.getOption(monaco.editor.EditorOption.padding).bottom +
+          editor.getOption(monaco.editor.EditorOption.scrollbar).horizontalScrollbarSize,
+      );
+    editor.revealLineInCenter(100, monaco.editor.ScrollType.Immediate);
     editor.setScrollPosition(
       {
         scrollLeft: editor.getScrollWidth(),

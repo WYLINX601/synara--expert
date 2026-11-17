@@ -133,6 +133,7 @@ const SPANISH_INVARIANT_MESSAGES = new Set([
   "Local",
   "Zoom",
   "General",
+  "Suite",
   "Personal",
   "Color",
   "Variables",

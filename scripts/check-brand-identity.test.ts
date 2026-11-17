@@ -88,6 +88,38 @@ describe("brand identity guard", () => {
     }
   });
 
+  it("scans surviving source beyond a large index without losing retired-file handling", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "synara-brand-large-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+    try {
+      git("init", "--quiet");
+      const path = "z-source.ts";
+      const contents = `const value = "${secondName}:state";`;
+      writeFileSync(join(cwd, path), contents);
+      git("add", "--", path);
+      const oid = git("hash-object", "-w", path);
+      // Index-only retired files make both Git inventories exceed the default
+      // subprocess buffer without creating thousands of unrelated disk fixtures.
+      const removed = Array.from(
+        { length: 10_000 },
+        (_, index) => `100644 ${oid}\tremoved/${index}-${"x".repeat(160)}.ts\0`,
+      ).join("");
+      execFileSync("git", ["update-index", "-z", "--index-info"], { cwd, input: removed });
+      const files = readTrackedFiles(cwd);
+      expect(
+        files.map((file) => ({
+          path: file.path,
+          contents: Buffer.from(file.contents).toString("utf8"),
+        })),
+      ).toEqual([{ path, contents }]);
+      expect(findBrandIdentityViolations([{ path: files[0]!.path, contents }])).toEqual([
+        { path, line: 1, text: contents },
+      ]);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("detects retired names in paths and text", () => {
     const violations = findBrandIdentityViolations([
       { path: `docs/${firstName}.md`, contents: "Synara" },

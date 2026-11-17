@@ -2228,7 +2228,7 @@ function configureApplicationMenu(): void {
         },
         { type: "separator" },
         {
-          label: t("desktop:reload"),
+          label: t("desktop:panel_reload"),
           accelerator: "CmdOrCtrl+R",
           click: () => {
             if (!windowMaintenance.held) resolveMenuTargetWindow()?.webContents.reload();

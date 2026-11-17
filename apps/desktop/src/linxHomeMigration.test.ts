@@ -319,15 +319,30 @@ describe("one-way Linx legacy import", () => {
   });
 
   it.each([
-    { external: false, sensitive: false },
-    { external: false, sensitive: true },
-    { external: true, sensitive: false },
-    { external: true, sensitive: true },
+    { external: false, sensitive: false, aliased: false },
+    { external: false, sensitive: true, aliased: false },
+    { external: true, sensitive: false, aliased: false },
+    { external: true, sensitive: true, aliased: false },
+    { external: false, sensitive: false, aliased: true },
+    { external: false, sensitive: true, aliased: true },
+    { external: true, sensitive: false, aliased: true },
+    { external: true, sensitive: true, aliased: true },
   ])(
-    "rebinds prepared markers and private account state ($external, $sensitive)",
-    async ({ external, sensitive }) => {
+    "rebinds prepared markers and private account state ($external, $sensitive, $aliased)",
+    async ({ external, sensitive, aliased }) => {
       const input = await fixture();
-      const source = path.join(external ? input.root : input.sourceHomePath, "codex-source");
+      // Exercise canonical and aliased parents on every host, rather than
+      // depending on macOS's /var -> /private/var temporary-directory alias.
+      input.sourceHomePath = await fs.realpath(input.sourceHomePath);
+      if (aliased) {
+        const parentAlias = path.join(input.root, "source-parent");
+        await fs.symlink(await fs.realpath(input.root), parentAlias, "dir");
+        input.sourceHomePath = path.join(parentAlias, ".synara-workbench");
+      }
+      const source = path.join(
+        external ? await fs.realpath(input.root) : input.sourceHomePath,
+        "codex-source",
+      );
       await fs.mkdir(source);
       await fs.writeFile(path.join(source, "auth.json"), "default-account-auth");
       const environment = [
@@ -355,6 +370,15 @@ describe("one-way Linx legacy import", () => {
       const env = { SYNARA_HOME: input.sourceHomePath, CODEX_HOME: source };
       const prepared = await buildCodexProcessEnv({ env, accountId: "work", platform: "win32" });
       const oldOverlay = prepared.CODEX_HOME!;
+      const continuationEntries = [
+        { alias: "sessions", file: path.join("sessions", "existing.jsonl") },
+        { alias: "archived_sessions", file: path.join("archived_sessions", "existing.jsonl") },
+        { alias: "history.jsonl", file: "history.jsonl" },
+        { alias: "session_index.jsonl", file: "session_index.jsonl" },
+      ];
+      for (const { file } of continuationEntries) {
+        await fs.writeFile(path.join(source, file), "legacy-continuation\n");
+      }
       await fs.writeFile(path.join(oldOverlay, "auth.json"), "private-account-auth", {
         mode: 0o600,
       });
@@ -395,15 +419,49 @@ describe("one-way Linx legacy import", () => {
         migratedFromVersion: 1,
         sourceHomeIdentity: await fs.realpath(newSource),
       });
-      // Recovery omits generated aliases. Normal preparation must recreate them,
-      // not copy an alias that could still write through to the legacy source.
-      await expect(fs.lstat(path.join(newOverlay, "sessions"))).rejects.toThrow();
+      // Recovery omits external/lexically escaping generated aliases, but
+      // preserves contained aliases rebound into the copied home. Neither may
+      // leave a writable route back into the legacy copied source.
+      for (const { alias, file } of continuationEntries) {
+        expect(await fs.readFile(path.join(source, file), "utf8")).toBe("legacy-continuation\n");
+        if (external || aliased) {
+          await expect(fs.lstat(path.join(newOverlay, alias))).rejects.toMatchObject({
+            code: "ENOENT",
+          });
+        } else {
+          expect(await fs.realpath(path.join(newOverlay, alias))).toBe(
+            await fs.realpath(path.join(newSource, alias)),
+          );
+          await fs.writeFile(path.join(newOverlay, file), "copied-continuation\n");
+          expect(await fs.readFile(path.join(newSource, file), "utf8")).toBe(
+            "copied-continuation\n",
+          );
+          expect(await fs.readFile(path.join(source, file), "utf8")).toBe("legacy-continuation\n");
+        }
+      }
       const launched = await buildCodexProcessEnv({
         env: newEnv,
         accountId: "work",
         platform: "win32",
         expectedSharedContinuationGeneration: marker.generation,
       });
+      expect(launched.CODEX_HOME).toBe(newOverlay);
+      for (const { alias, file } of continuationEntries) {
+        expect(await fs.realpath(path.join(launched.CODEX_HOME!, alias))).toBe(
+          await fs.realpath(path.join(newSource, alias)),
+        );
+        await fs.writeFile(path.join(launched.CODEX_HOME!, file), "launched-continuation\n");
+        expect(await fs.readFile(path.join(newSource, file), "utf8")).toBe(
+          "launched-continuation\n",
+        );
+        expect(await fs.readFile(path.join(source, file), "utf8")).toBe(
+          external ? "launched-continuation\n" : "legacy-continuation\n",
+        );
+      }
+      expect(await fs.readFile(markerPath, "utf8")).toBe(original);
+      expect(await fs.readFile(path.join(oldOverlay, "auth.json"), "utf8")).toBe(
+        "private-account-auth",
+      );
       expect(await fs.readFile(path.join(launched.CODEX_HOME!, "auth.json"), "utf8")).toBe(
         "private-account-auth",
       );

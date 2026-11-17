@@ -18,6 +18,7 @@
 - Resolve the WebSocket Hub Expert list through the existing Suite composition owner, keeping Suite members distinct from an independent Hub's empty roster.
 - Carry the assembly owner's actual work-scoped Run identity through Provider dispatch and stale-session recovery, preserving identity validation when an existing Hub Expert worker resumes.
 - Require a Suite-capable Provider before a Hub saves a Suite or a Suite Run starts: reject a non-OMP coordinator model or task draft at admission (before the irrevocable Hub Suite lock), keep bound Suite threads on a Suite-capable Provider, and report the exact Provider instead of a generic Run-verification failure.
+- Localize the existing Suite surfaces — catalog and import flow, issues dialog, member summary, Hub Suite selector and label, run configuration, and the composer expert picker — across English, Simplified Chinese and Spanish without changing layout or interaction. The workbench coverage gate drops from 97 regressions to zero new untranslated UI literals, and its legacy allowance shrinks by the nine translated picker entries.
 
 Implementation and the scoped OMP technical acceptance are complete; user acceptance and release are pending. Verification includes the latest compiled native lifecycle matrix, a real BMAD PM → Amelia professional task, actual Suite/Hub journeys, and the full declared workspace test suite. See the [Expert implementation supplement](docs/expert-product-technical-design.md#2026-11-11-suite-与原生委托实施补充) and [development evidence](_bmad-output/initiative-expert-suite-hub/development-readiness.md) for warnings and unverified scope.
 
@@ -46,6 +47,9 @@ See the [LU-00 implemented protocol](docs/linx-update-development-plan.md#lu-00-
 
 - Isolate the Windows Store VS Code discovery regression from host shell startup and the production PowerShell timeout. Preserve the no-CLI discovery assertion, restore the scoped process mock and clear discovery caches; no runtime discovery behavior or timeout changed.
 - Replace Web plugin-name assertions with compiler activation boundary tests. Actual development/test/production rendering and a state-preserving Fast Refresh exercise validate the unchanged configuration behavior.
+- Keep the complete Git-index brand scan bounded above Node's default 1 MiB output limit, preserving deleted-file and gitlink handling. Reuse the existing localized Reload label for the maintenance-aware desktop action.
+- Make migration coverage independent of the host's temporary-directory aliases: verify both retained and recreated continuation links by writing through them and checking that copied legacy sources remain unchanged.
+- Wait for committed composer text, send eligibility and complete failed-send restoration in browser regressions; settle horizontal-scrollbar geometry before checking vertical editor alignment. Keep exact context, retry-mode and sub-pixel alignment assertions without changing product behavior.
 
 ## 1.1.0 — 2026-11-02
 

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 
 import { ExpertComposerPicker } from "./ExpertComposerPicker";
+import { t } from "~/i18n";
 
 const expertsQueryKey = ["server", "experts"] as const;
 const expert: ExpertDefinition = {
@@ -64,41 +65,55 @@ function preview(status: ExpertPreview["status"], issues: string[] = []): Expert
 describe("expert composer picker status feedback", () => {
   it("keeps healthy status out of the trigger and omits the empty footer", async () => {
     await renderPicker({ preview: preview("available") });
-    const trigger = page.getByRole("button", { name: "专家：规划专家", exact: true });
+    const trigger = page.getByRole("button", {
+      name: t("chat:expertPickerAriaSelected", { name: "规划专家" }),
+      exact: true,
+    });
 
-    await expect.element(trigger).toHaveAttribute("title", "规划专家 · 选择要用于新任务的专家");
-    await expect.element(trigger).not.toHaveTextContent("可用");
+    await expect
+      .element(trigger)
+      .toHaveAttribute("title", t("chat:expertPickerTitleSelect", { label: "规划专家" }));
+    await expect.element(trigger).not.toHaveTextContent(t("chat:expertPreviewPartial"));
     await trigger.click();
 
-    expect(page.getByText("可用", { exact: true }).elements()).toHaveLength(0);
+    expect(page.getByText(t("chat:expertPreviewPartial"), { exact: true }).elements()).toHaveLength(
+      0,
+    );
     expect(document.querySelector('[data-slot="menu-popup"] .border-t')).toBeNull();
   });
 
   it("shows healthy preview issues without restoring the available label", async () => {
     await renderPicker({ preview: preview("available", ["预览警告：未找到可选技能"]) });
-    const trigger = page.getByRole("button", { name: "专家：规划专家", exact: true });
+    const trigger = page.getByRole("button", {
+      name: t("chat:expertPickerAriaSelected", { name: "规划专家" }),
+      exact: true,
+    });
 
-    await expect.element(trigger).not.toHaveTextContent("可用");
-    await expect.element(trigger).toHaveAttribute("title", "规划专家 · 选择要用于新任务的专家");
+    await expect.element(trigger).not.toHaveTextContent(t("chat:expertPreviewPartial"));
+    await expect
+      .element(trigger)
+      .toHaveAttribute("title", t("chat:expertPickerTitleSelect", { label: "规划专家" }));
     await trigger.click();
 
     await expect.element(page.getByText("预览警告：未找到可选技能", { exact: true })).toBeVisible();
     expect(document.querySelector('[data-slot="menu-popup"] .border-t')).not.toBeNull();
-    expect(page.getByText("可用", { exact: true }).elements()).toHaveLength(0);
+    expect(page.getByText(t("chat:expertPreviewPartial"), { exact: true }).elements()).toHaveLength(
+      0,
+    );
   });
 
   it.each([
     {
-      feedback: "正在检查",
+      feedback: t("chat:expertPickerChecking"),
       previewFetching: true,
       previewError: false,
       detail: undefined,
     },
     {
-      feedback: "检查失败",
+      feedback: t("chat:expertPickerCheckFailed"),
       previewFetching: false,
       previewError: true,
-      detail: "预览检查失败，发送时会再次检查。",
+      detail: t("chat:expertPickerPreviewFailed"),
     },
   ])(
     "preserves $feedback feedback for a cached available preview",
@@ -108,11 +123,14 @@ describe("expert composer picker status feedback", () => {
         previewFetching,
         previewError,
       });
-      const trigger = page.getByRole("button", { name: "专家：规划专家", exact: true });
+      const trigger = page.getByRole("button", {
+        name: t("chat:expertPickerAriaSelected", { name: "规划专家" }),
+        exact: true,
+      });
 
       await expect.element(trigger).toHaveTextContent(feedback);
       await expect.element(trigger).toHaveAttribute("title", `规划专家 · ${feedback}`);
-      await expect.element(trigger).not.toHaveTextContent("可用");
+      await expect.element(trigger).not.toHaveTextContent(t("chat:expertPreviewPartial"));
       await trigger.click();
 
       const menu = page.getByRole("menu");
@@ -123,12 +141,15 @@ describe("expert composer picker status feedback", () => {
   );
 
   it.each([
-    ["partial", "部分可用"],
-    ["blocked", "需连接"],
-    ["incompatible", "不兼容"],
+    ["partial", t("chat:expertPreviewPartial")],
+    ["blocked", t("chat:expertPreviewNeedsConnection")],
+    ["incompatible", t("chat:expertPreviewIncompatible")],
   ] as const)("shows %s status and its preview issues", async (status, label) => {
     await renderPicker({ preview: preview(status, ["需要连接 Linear"]) });
-    const trigger = page.getByRole("button", { name: "专家：规划专家", exact: true });
+    const trigger = page.getByRole("button", {
+      name: t("chat:expertPickerAriaSelected", { name: "规划专家" }),
+      exact: true,
+    });
 
     await expect.element(trigger).toHaveTextContent(label);
     await expect.element(trigger).toHaveAttribute("title", `规划专家 · ${label}`);
@@ -140,12 +161,15 @@ describe("expert composer picker status feedback", () => {
 
   it("keeps loading and preview errors visible in the trigger and menu", async () => {
     await renderPicker({ previewFetching: true });
-    const trigger = page.getByRole("button", { name: "专家：规划专家", exact: true });
+    const trigger = page.getByRole("button", {
+      name: t("chat:expertPickerAriaSelected", { name: "规划专家" }),
+      exact: true,
+    });
 
-    await expect.element(trigger).toHaveTextContent("正在检查");
+    await expect.element(trigger).toHaveTextContent(t("chat:expertPickerChecking"));
     await trigger.click();
     await expect
-      .element(page.getByRole("menu").getByText("正在检查", { exact: true }))
+      .element(page.getByRole("menu").getByText(t("chat:expertPickerChecking"), { exact: true }))
       .toBeVisible();
     await unmount?.();
     unmount = undefined;
@@ -153,11 +177,14 @@ describe("expert composer picker status feedback", () => {
     queryClient = undefined;
 
     await renderPicker({ previewError: true });
-    const errorTrigger = page.getByRole("button", { name: "专家：规划专家", exact: true });
-    await expect.element(errorTrigger).toHaveTextContent("检查失败");
+    const errorTrigger = page.getByRole("button", {
+      name: t("chat:expertPickerAriaSelected", { name: "规划专家" }),
+      exact: true,
+    });
+    await expect.element(errorTrigger).toHaveTextContent(t("chat:expertPickerCheckFailed"));
     await errorTrigger.click();
     await expect
-      .element(page.getByRole("menu").getByText("检查失败", { exact: true }))
+      .element(page.getByRole("menu").getByText(t("chat:expertPickerCheckFailed"), { exact: true }))
       .toBeVisible();
   });
 
@@ -165,7 +192,12 @@ describe("expert composer picker status feedback", () => {
     const onSelect = vi.fn();
     const onSelectionCommitted = vi.fn();
     await renderPicker({ onSelect, onSelectionCommitted });
-    await page.getByRole("button", { name: "专家：规划专家", exact: true }).click();
+    await page
+      .getByRole("button", {
+        name: t("chat:expertPickerAriaSelected", { name: "规划专家" }),
+        exact: true,
+      })
+      .click();
 
     const selectedItem = page.getByRole("menuitem", { name: "规划专家", exact: true });
     const selectedRow = Array.from(

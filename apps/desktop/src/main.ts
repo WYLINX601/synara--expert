@@ -6940,10 +6940,11 @@ function isTrustedManagedApplicationSender(
 
 async function prepareLinxDesktopBootstrap(): Promise<boolean> {
   try {
+    // A canonical ancestor (macOS resolves /var through /private/var) is safe:
+    // both bindings use the resolved path, and ownership records canonicalize
+    // again. A symlinked root itself still fails in canonicalLinxDataPath.
     const homePath = await canonicalLinxDataPath(BASE_DIR);
     const profilePath = await canonicalLinxDataPath(userDataPath);
-    if (homePath !== BASE_DIR || profilePath !== userDataPath)
-      throw new Error("Linx data roots must be canonical");
     const bindings = {
       homePath,
       userDataPath,
@@ -7030,7 +7031,6 @@ async function prepareLinxDesktopBootstrap(): Promise<boolean> {
     await restoreLinxUpdatePortableProfile({ userDataPath, preview });
     setDesktopLanguagePreference(readDesktopLanguagePreference(DESKTOP_LANGUAGE_PREFERENCE_PATH));
     initializeBrowserVault();
-    initializePackagedLogging();
     linxBootstrapComplete = true;
     return true;
   } catch {
@@ -7239,6 +7239,7 @@ if (hasSingleInstanceLock) {
   app
     .whenReady()
     .then(async () => {
+      if (isLinxDesktop) initializePackagedLogging();
       if (isLinxDesktop && !(await prepareLinxDesktopBootstrap())) return;
       writeDesktopLogHeader("app ready");
       if (betaDiagnostics) {

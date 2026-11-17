@@ -52,6 +52,7 @@ See the [LU-00 implemented protocol](docs/linx-update-development-plan.md#lu-00-
 - Make migration coverage independent of the host's temporary-directory aliases: verify both retained and recreated continuation links by writing through them and checking that copied legacy sources remain unchanged.
 - Wait for committed composer text, send eligibility and complete failed-send restoration in browser regressions; settle horizontal-scrollbar geometry before checking vertical editor alignment. Keep exact context, retry-mode and sub-pixel alignment assertions without changing product behavior.
 - Pin the controlled release workflows to the exact Node version in `.mise.toml` instead of resolving `package.json`'s range, and reject candidate preparation or binding when the actual toolchain differs from the mise pin. Release-lane sync tests now inject the pinned toolchain rather than reading the runner's.
+- Reproduce and resolve a packaged-startup regression: the Linx bootstrap gate rejected data roots whose existing parent resolves through a system alias (macOS `/var` → `/private/var`), then blocked on a modal error dialog with logging not yet enabled.
 
 ## 1.1.0 — 2026-11-02
 

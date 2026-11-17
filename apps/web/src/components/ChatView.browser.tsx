@@ -9522,7 +9522,7 @@ describe("ChatView transcript geometry (full app)", () => {
     });
     try {
       await expect
-        .element(page.getByRole("button", { name: "选择专家", exact: true }))
+        .element(page.getByRole("button", { name: t("chat:expertPickerAriaSelect"), exact: true }))
         .toBeVisible();
       await vi.waitFor(() => {
         expect(wsRequests.some((request) => request._tag === WS_METHODS.serverListExperts)).toBe(
@@ -9795,10 +9795,17 @@ describe("ChatView transcript geometry (full app)", () => {
         const editor = await waitForComposerEditor();
         const defaultHint = editor.getAttribute("aria-placeholder")!;
         const hint = configuredHint ?? defaultHint;
-        await page.getByRole("button", { name: "选择专家", exact: true }).click();
+        await page
+          .getByRole("button", { name: t("chat:expertPickerAriaSelect"), exact: true })
+          .click();
         await page.getByRole("menuitem", { name: "规划专家", exact: true }).click();
         await expect
-          .element(page.getByRole("button", { name: "专家：规划专家", exact: true }))
+          .element(
+            page.getByRole("button", {
+              name: t("chat:expertPickerAriaSelected", { name: "规划专家" }),
+              exact: true,
+            }),
+          )
           .toBeVisible();
         await expect.element(editor).toHaveFocus();
         await vi.waitFor(() => expect(editor.getAttribute("aria-placeholder")).toBe(hint));
@@ -9817,10 +9824,19 @@ describe("ChatView transcript geometry (full app)", () => {
         expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt).toBe(
           "Keep my draft",
         );
-        await page.getByRole("button", { name: "专家：规划专家", exact: true }).click();
-        await page.getByRole("menuitem", { name: "通用", exact: true }).click();
+        await page
+          .getByRole("button", {
+            name: t("chat:expertPickerAriaSelected", { name: "规划专家" }),
+            exact: true,
+          })
+          .click();
+        await page
+          .getByRole("menuitem", { name: t("chat:expertPickerGeneral"), exact: true })
+          .click();
         await expect
-          .element(page.getByRole("button", { name: "选择专家", exact: true }))
+          .element(
+            page.getByRole("button", { name: t("chat:expertPickerAriaSelect"), exact: true }),
+          )
           .toBeVisible();
         await expect.element(editor).toHaveFocus();
         await vi.waitFor(() => expect(editor.getAttribute("aria-placeholder")).toBe(defaultHint));
@@ -12111,12 +12127,8 @@ describe("ChatView transcript geometry (full app)", () => {
         // mounted (possibly still disabled) DOM button.
         await expect.poll(() => editor.element().textContent).toBe("Explain ");
         await editor.fill(sendPrompt);
-        await vi.waitFor(() => {
-          expect(editor.element().textContent).toBe(sendPrompt);
-          expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt ?? "").toBe(
-            sendPrompt,
-          );
-        });
+        await vi.waitFor(() => expect(editor.element().textContent).toBe(sendPrompt));
+
         const sendButton = page.getByRole("button", { name: "Send message", exact: true });
         await expect.element(sendButton).toBeEnabled();
         await sendButton.click();

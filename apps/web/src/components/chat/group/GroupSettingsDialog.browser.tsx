@@ -6,6 +6,7 @@ import type { ExpertDefinition, NativeApi, ProjectAgentOverview } from "@synara/
 import { page } from "vitest/browser";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
+import { t } from "~/i18n";
 
 const PROJECT_ID = ProjectId.makeUnsafe("project-group-1");
 const LINKED_ID = ProjectId.makeUnsafe("project-linked");
@@ -170,9 +171,9 @@ describe("GroupSettingsDialog", () => {
     );
     await renderDialog({ mode: "onboarding", allowSuiteSelection: true });
     await expect.element(page.getByLabelText("Hub name")).toBeInTheDocument();
-    expect(page.getByRole("combobox", { name: "选择 Suite", exact: true }).elements()).toHaveLength(
-      0,
-    );
+    expect(
+      page.getByRole("combobox", { name: t("chat:groupSuiteSelectAria"), exact: true }).elements(),
+    ).toHaveLength(0);
     expect(api.server.listSuites).not.toHaveBeenCalled();
   });
   it("selects a Suite only during onboarding, previews members and keeps other creation fields", async () => {
@@ -200,7 +201,7 @@ describe("GroupSettingsDialog", () => {
     api.server.listExperts.mockResolvedValue([expert({ id: "writer", name: "规范作者" })]);
     await renderDialog({ mode: "onboarding" });
     await page.getByLabelText("Hub goal").fill("保留这个目标");
-    await page.getByRole("combobox", { name: "选择 Suite", exact: true }).click();
+    await page.getByRole("combobox", { name: t("chat:groupSuiteSelectAria"), exact: true }).click();
     await page.getByRole("option", { name: "规范套件", exact: true }).click();
     await expect.element(page.getByText("编写并审阅规范", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "规范作者", exact: true }).click();

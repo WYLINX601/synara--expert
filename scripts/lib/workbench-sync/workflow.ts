@@ -585,7 +585,7 @@ export async function prepareWorkbenchCandidate(input: {
   readonly targetTag: string;
   readonly targetSha: string;
   readonly mainRef?: string;
-  readonly dependencies?: Pick<WorkflowDependencies, "repository">;
+  readonly dependencies?: Pick<WorkflowDependencies, "repository" | "readToolchain">;
 }): Promise<PrepareWorkflowReport> {
   const repoRoot = await realpath(input.repoRoot);
   const checkout = await realpath(input.checkout);
@@ -826,7 +826,27 @@ export async function prepareWorkbenchCandidate(input: {
       };
     }
     const lockfileHashes = await collectLockfileHashes(checkout);
-    const toolchain = defaultReadToolchain(checkout);
+    const readToolchain = input.dependencies?.readToolchain ?? defaultReadToolchain;
+    const toolchain = readToolchain(checkout);
+    const pinnedToolchain = readPinnedToolchain(checkout);
+    if (
+      !toolchain ||
+      !pinnedToolchain ||
+      toolchain.node !== pinnedToolchain.node ||
+      toolchain.bun !== pinnedToolchain.bun
+    ) {
+      return prepareRejected(
+        "prepare-failed",
+        "toolchain-resolution",
+        baseSha,
+        input.targetTag,
+        targetSha,
+        mainRef,
+        mainSha,
+        report.branch,
+        "install-the-mise-pinned-node-and-bun-before-preparing",
+      );
+    }
     const candidate: ActiveCandidate = {
       status: "awaiting-verification",
       checkoutPath: canonicalCheckout,
@@ -838,7 +858,7 @@ export async function prepareWorkbenchCandidate(input: {
       candidateSha,
       ...(report.mergeCommitSha ? { mergeCommitSha: report.mergeCommitSha } : {}),
       lockfileHashes,
-      ...(toolchain ? { toolchain } : {}),
+      toolchain,
       updatedAt: new Date().toISOString(),
     };
     await writeWorkbenchSyncState(paths.stateFile, { ...state, activeCandidate: candidate });
@@ -1004,6 +1024,17 @@ export async function bindWorkbenchCandidate(input: {
         "candidate-merge-in-progress",
         "finish-the-current-merge-manually-before-binding",
       );
+    const toolchain =
+      input.dependencies?.readToolchain?.(checkout) ?? defaultReadToolchain(checkout);
+    const pinnedToolchain = readPinnedToolchain(checkout);
+    if (
+      !toolchain ||
+      !pinnedToolchain ||
+      toolchain.node !== pinnedToolchain.node ||
+      toolchain.bun !== pinnedToolchain.bun
+    ) {
+      return reject("toolchain-resolution", "install-the-mise-pinned-node-and-bun-before-binding");
+    }
 
     const targetExists = runGit(checkout, ["cat-file", "-e", `${targetSha}^{commit}`]);
     if (!targetExists.ok)
@@ -1073,8 +1104,6 @@ export async function bindWorkbenchCandidate(input: {
       );
     }
     const lockfileHashes = await collectLockfileHashes(checkout);
-    const toolchain =
-      input.dependencies?.readToolchain?.(checkout) ?? defaultReadToolchain(checkout);
     const candidate: ActiveCandidate = {
       status: "awaiting-verification",
       checkoutPath: checkout,
@@ -1086,7 +1115,7 @@ export async function bindWorkbenchCandidate(input: {
       candidateSha,
       mergeCommitSha: mergeSha,
       lockfileHashes,
-      ...(toolchain ? { toolchain } : {}),
+      toolchain,
       updatedAt: new Date().toISOString(),
     };
     await writeWorkbenchSyncState(paths.stateFile, { ...state, activeCandidate: candidate });

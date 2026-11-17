@@ -51,6 +51,7 @@ See the [LU-00 implemented protocol](docs/linx-update-development-plan.md#lu-00-
 - Keep the complete Git-index brand scan bounded above Node's default 1 MiB output limit, preserving deleted-file and gitlink handling. Reuse the existing localized Reload label for the maintenance-aware desktop action.
 - Make migration coverage independent of the host's temporary-directory aliases: verify both retained and recreated continuation links by writing through them and checking that copied legacy sources remain unchanged.
 - Wait for committed composer text, send eligibility and complete failed-send restoration in browser regressions; settle horizontal-scrollbar geometry before checking vertical editor alignment. Keep exact context, retry-mode and sub-pixel alignment assertions without changing product behavior.
+- Pin the controlled release workflows to the exact Node version in `.mise.toml` instead of resolving `package.json`'s range, and reject candidate preparation when the actual toolchain differs from the mise pin. Release-lane sync tests now inject the pinned toolchain rather than reading the runner's.
 
 ## 1.1.0 — 2026-11-02
 

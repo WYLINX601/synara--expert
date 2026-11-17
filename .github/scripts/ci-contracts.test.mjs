@@ -225,3 +225,21 @@ test("measured critical-path distribution stays three-way and skips redundant ap
   assert.ok(browser.includes("./node_modules/.bin/playwright install chromium"));
   assert.ok(!browser.includes("playwright install --with-deps chromium"));
 });
+
+test("release workflows pin Node from mise instead of a package range", () => {
+  for (const relative of ["../workflows/release.yml", "../workflows/release-platform.yml"]) {
+    const text = read(relative);
+    assert.ok(!text.includes("node-version-file:"), relative);
+    const setupNodes = [...text.matchAll(/uses: actions\/setup-node@v6/g)];
+    assert.ok(setupNodes.length > 0, relative);
+    for (const match of setupNodes) {
+      const prefix = text.slice(0, match.index);
+      const readerIndex = prefix.lastIndexOf("id: toolchain");
+      assert.ok(readerIndex >= 0 && match.index - readerIndex <= 800, relative);
+      const pinIndex = prefix.lastIndexOf('read-toolchain-pins.mjs .mise.toml >> "$GITHUB_OUTPUT"');
+      assert.ok(pinIndex >= 0 && match.index - pinIndex <= 800, `${relative} must read mise pins`);
+      const step = text.slice(match.index, match.index + 200);
+      assert.ok(step.includes("${{ steps.toolchain.outputs.node }}"), relative);
+    }
+  }
+});

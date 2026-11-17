@@ -165,7 +165,7 @@ async function checkedAndPrepared(fixture: Fixture) {
     baseSha,
     targetTag: "v0.9.2",
     targetSha: fixture.targetSha,
-    dependencies: { repository: fixture.remote },
+    dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
   });
   expect(prepare.status).toBe("candidate-ready");
   expect(prepare.candidateSha).toBeTruthy();
@@ -315,7 +315,7 @@ describe("workbench sync persisted workflow", () => {
       baseSha: currentMain,
       targetTag: "v0.9.2",
       targetSha: fixture.targetSha,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
     expect(preparation.stage).toBe("baseline-review-required");
     const binding = await bindWorkbenchCandidate({
@@ -325,7 +325,7 @@ describe("workbench sync persisted workflow", () => {
       targetTag: "v0.9.2",
       targetSha: fixture.targetSha,
       candidateSha: prepare.candidateSha!,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
     expect(binding.stage).toBe("baseline-review-required");
     expect(await readFile(paths.stateFile, "utf8")).toBe(beforeState);
@@ -386,7 +386,7 @@ describe("workbench sync persisted workflow", () => {
       baseSha: check.mainSha!,
       targetTag: "v0.9.3",
       targetSha: nextTargetSha,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
     expect(prepare.status).toBe("candidate-ready");
     const metadata = {
@@ -410,7 +410,7 @@ describe("workbench sync persisted workflow", () => {
       targetTag: "v0.9.3",
       targetSha: nextTargetSha,
       candidateSha,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
 
     expect(bind.status).toBe("candidate-bound");
@@ -455,7 +455,7 @@ describe("workbench sync persisted workflow", () => {
       targetTag: "v0.9.1",
       targetSha: fixture.baseSha,
       candidateSha: candidateHead,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
 
     expect(bind.status).toBe("bind-rejected");
@@ -496,7 +496,7 @@ describe("workbench sync persisted workflow", () => {
       targetTag: "v0.9.3",
       targetSha: divergentSha,
       candidateSha: candidateHead,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
 
     expect(bind.status).toBe("bind-rejected");
@@ -755,7 +755,7 @@ describe("workbench sync persisted workflow", () => {
       baseSha: unmergedCheck.mainSha!,
       targetTag: "v0.9.3",
       targetSha: nextTargetSha,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
     expect(blockedPrepare.status).toBe("candidate-busy");
     expect(blockedPrepare.stage).toBe("another-active-candidate");
@@ -802,7 +802,7 @@ describe("workbench sync persisted workflow", () => {
       baseSha: integratedCheck.mainSha!,
       targetTag: "v0.9.3",
       targetSha: nextTargetSha,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
     expect(nextPrepare.status).toBe("candidate-ready");
     expect(nextPrepare.target).toEqual({ tag: "v0.9.3", commit: nextTargetSha });
@@ -859,7 +859,7 @@ describe("workbench sync persisted workflow", () => {
       baseSha,
       targetTag: "v0.9.2",
       targetSha: fixture.targetSha,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
     expect(report.status, verifyDiagnostic(report)).toBe("candidate-busy");
     expect(report.stage).toBe("candidate-rebind-required");
@@ -907,6 +907,52 @@ describe("workbench sync persisted workflow", () => {
     ).toBe("rebind-required");
   }, 30_000);
 
+  it("refuses to bind a candidate whose actual toolchain is not the mise pin", async () => {
+    const fixture = await makeFixture();
+    const check = await checkWorkbenchSyncWorkflow({
+      repoRoot: fixture.repo,
+      dependencies: { repository: fixture.remote, fetcher: fakeFetcher() },
+    });
+    const prepare = await prepareWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: check.mainSha!,
+      targetTag: "v0.9.2",
+      targetSha: fixture.targetSha,
+      dependencies: {
+        repository: fixture.remote,
+        readToolchain: () => ({ node: "24.14.0", bun: "1.4.4" }),
+      },
+    });
+    expect(prepare.status).toBe("prepare-failed");
+    expect(prepare.stage).toBe("toolchain-resolution");
+    expect(prepare.retryAction).toBe("install-the-mise-pinned-node-and-bun-before-preparing");
+    const paths = await resolveRepositoryStatePaths(fixture.repo);
+    const state = JSON.parse(await readFile(paths.stateFile, "utf8")) as {
+      readonly activeCandidate?: unknown;
+    };
+    expect(state.activeCandidate).toBeUndefined();
+  });
+
+  it("refuses to bind a candidate whose actual toolchain is not the mise pin", async () => {
+    const fixture = await makeFixture();
+    const prepared = await checkedAndPrepared(fixture);
+    const bind = await bindWorkbenchCandidate({
+      repoRoot: fixture.repo,
+      checkout: fixture.checkout,
+      baseSha: prepared.baseSha,
+      targetTag: "v0.9.2",
+      targetSha: fixture.targetSha,
+      candidateSha: prepared.prepare.candidateSha!,
+      dependencies: {
+        repository: fixture.remote,
+        readToolchain: () => ({ node: "24.14.0", bun: "1.4.4" }),
+      },
+    });
+    expect(bind.status).toBe("bind-rejected");
+    expect(bind.stage).toBe("toolchain-resolution");
+  });
+
   it("refuses prepare when the official tag moved after the successful check", async () => {
     const fixture = await makeFixture();
     const check = await checkWorkbenchSyncWorkflow({
@@ -923,7 +969,7 @@ describe("workbench sync persisted workflow", () => {
       baseSha: check.mainSha!,
       targetTag: "v0.9.2",
       targetSha: fixture.targetSha,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
     expect(prepare.status).toBe("candidate-target-moved");
     expect(prepare.stage).toBe("official-tag-tag-moved");
@@ -943,7 +989,7 @@ describe("workbench sync persisted workflow", () => {
       baseSha: check.mainSha!,
       targetTag: "v0.9.2",
       targetSha: fixture.targetSha,
-      dependencies: { repository: fixture.remote },
+      dependencies: { repository: fixture.remote, readToolchain: () => toolchain },
     });
     expect(prepare.status).toBe("candidate-conflict");
     expect(git(fixture.checkout, "rev-parse", "MERGE_HEAD")).toBe(fixture.targetSha);

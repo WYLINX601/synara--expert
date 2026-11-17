@@ -41,9 +41,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - id: toolchain
+        name: Read pinned toolchain
+        run: node .github/scripts/read-toolchain-pins.mjs .mise.toml >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
-          node-version-file: package.json
+          node-version: ${{ steps.toolchain.outputs.node }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
@@ -85,10 +88,13 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.ref }}
 
+      - id: toolchain
+        name: Read pinned toolchain
+        run: node .github/scripts/read-toolchain-pins.mjs .mise.toml >> "$GITHUB_OUTPUT"
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version-file: package.json
+          node-version: ${{ steps.toolchain.outputs.node }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -139,10 +145,13 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.ref }}
 
+      - id: toolchain
+        name: Read pinned toolchain
+        run: node .github/scripts/read-toolchain-pins.mjs .mise.toml >> "$GITHUB_OUTPUT"
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
-          node-version-file: package.json
+          node-version: ${{ steps.toolchain.outputs.node }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -170,9 +179,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
+      - id: toolchain
+        name: Read pinned toolchain
+        run: node .github/scripts/read-toolchain-pins.mjs .mise.toml >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
-          node-version-file: package.json
+          node-version: ${{ steps.toolchain.outputs.node }}
       - name: Report runner capacity
         run: node scripts/report-build-runner.ts
       - name: Install frozen dependencies
@@ -247,9 +259,12 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.ref }}
           fetch-depth: 0
+      - id: toolchain
+        name: Read pinned toolchain
+        run: node .github/scripts/read-toolchain-pins.mjs .mise.toml >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
         with:
-          node-version-file: package.json
+          node-version: ${{ steps.toolchain.outputs.node }}
       - name: Report runner capacity
         run: node scripts/report-build-runner.ts
       - name: Provision verified Cua

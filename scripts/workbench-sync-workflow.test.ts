@@ -174,6 +174,18 @@ async function checkedAndPrepared(fixture: Fixture) {
 }
 
 const toolchain = { node: "24.13.1", bun: "1.4.4" };
+/** Surfaces the failing precondition instead of only the mismatched status. */
+function verifyDiagnostic(report: {
+  readonly status: string;
+  readonly stage: string;
+  readonly checks?: readonly { readonly reason?: string }[];
+}): string {
+  const reasons = [
+    ...new Set((report.checks ?? []).flatMap((check) => (check.reason ? [check.reason] : []))),
+  ];
+  return `${report.status} at ${report.stage}: ${reasons.join(", ") || "no check reason"}`;
+}
+
 const allPassing = () => ({ exitCode: 0, stdout: "", stderr: "" });
 
 async function runtimeEvidenceFor(
@@ -237,7 +249,7 @@ describe("workbench sync persisted workflow", () => {
       repoRoot: fixture.repo,
       dependencies: { readToolchain: () => toolchain },
     });
-    expect(report.status).toBe("baseline-review-required");
+    expect(report.status, verifyDiagnostic(report)).toBe("baseline-review-required");
     expect(report.candidate).toMatchObject({ status: "ready", mainRef: historicalRef });
     expect(report.baseline).toMatchObject({
       requestedMainRef: "refs/heads/main",
@@ -341,7 +353,7 @@ describe("workbench sync persisted workflow", () => {
       repoRoot: fixture.repo,
       dependencies: { readToolchain: () => toolchain },
     });
-    expect(report.status).toBe("rebind-required");
+    expect(report.status, verifyDiagnostic(report)).toBe("rebind-required");
     expect(report.invalidations).toContain("automatic-checks-incomplete-or-invalid");
     expect(AUTOMATIC_CHECKS).toContainEqual({
       id: "workbench-boundaries",
@@ -515,7 +527,7 @@ describe("workbench sync persisted workflow", () => {
       },
     });
     expect(commands).toEqual(AUTOMATIC_CHECKS.map(({ script }) => `bun run ${script}`));
-    expect(verified.status).toBe("awaiting-runtime");
+    expect(verified.status, verifyDiagnostic(verified)).toBe("awaiting-runtime");
     expect(verified.checks.every((check) => check.status === "passed")).toBe(true);
     expect(verified.runtimeEvidence).toEqual({
       status: "missing",
@@ -572,7 +584,7 @@ describe("workbench sync persisted workflow", () => {
     });
 
     expect(calls).toBe(AUTOMATIC_CHECKS.length);
-    expect(verified.status).toBe("checks-failed");
+    expect(verified.status, verifyDiagnostic(verified)).toBe("checks-failed");
     expect(verified.verificationLogs?.status).toBe("saved");
     expect(verified.verificationLogs?.indexPath).toBe(
       `workbench-sync/verification-logs/${prepare.candidateSha}/${verified.verificationLogs?.runId}/index.json`,
@@ -693,7 +705,7 @@ describe("workbench sync persisted workflow", () => {
     expect(calls).toBe(AUTOMATIC_CHECKS.length);
     expect(verified.checks.every((check) => check.status === "passed")).toBe(true);
     expect(verified.runtimeEvidence.status).toBe("accepted");
-    expect(verified.status).toBe("checks-failed");
+    expect(verified.status, verifyDiagnostic(verified)).toBe("checks-failed");
     expect(verified.exitCode).toBe(1);
     expect(verified.verificationLogs).toMatchObject({
       status: "failed",
@@ -812,7 +824,7 @@ describe("workbench sync persisted workflow", () => {
       },
     });
     expect(calls).toBe(AUTOMATIC_CHECKS.length);
-    expect(verified.status).toBe("checks-failed");
+    expect(verified.status, verifyDiagnostic(verified)).toBe("checks-failed");
     expect(verified.checks.map((check) => check.status)).toEqual([
       "passed",
       "failed",
@@ -849,7 +861,7 @@ describe("workbench sync persisted workflow", () => {
       targetSha: fixture.targetSha,
       dependencies: { repository: fixture.remote },
     });
-    expect(report.status).toBe("candidate-busy");
+    expect(report.status, verifyDiagnostic(report)).toBe("candidate-busy");
     expect(report.stage).toBe("candidate-rebind-required");
     expect(git(fixture.checkout, "rev-parse", "HEAD")).toBe(appendedSha);
     await expect(readFile(join(fixture.checkout, "manual-review.txt"), "utf8")).resolves.toBe(
@@ -955,7 +967,7 @@ describe("workbench sync persisted workflow", () => {
       runtimeEvidencePath: evidencePath,
       dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
     });
-    expect(verified.status).toBe("ready");
+    expect(verified.status, verifyDiagnostic(verified)).toBe("ready");
     expect(verified.runtimeEvidence.status).toBe("accepted");
 
     const incomplete = {
@@ -997,7 +1009,7 @@ describe("workbench sync persisted workflow", () => {
       runtimeEvidencePath: evidencePath,
       dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
     });
-    expect(verified.status).toBe("ready");
+    expect(verified.status, verifyDiagnostic(verified)).toBe("ready");
 
     const statePaths = await resolveRepositoryStatePaths(fixture.repo);
     const originalState = JSON.parse(await readFile(statePaths.stateFile, "utf8")) as {
@@ -1069,7 +1081,7 @@ describe("workbench sync persisted workflow", () => {
       runtimeEvidencePath: evidencePath,
       dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
     });
-    expect(ready.status).toBe("ready");
+    expect(ready.status, verifyDiagnostic(ready)).toBe("ready");
 
     const advancedMain = await commitFile(
       fixture.repo,
@@ -1166,7 +1178,7 @@ describe("workbench sync persisted workflow", () => {
       candidateSha: prepare.candidateSha!,
       dependencies: { readToolchain: () => toolchain, commandRunner: () => allPassing() },
     });
-    expect(report.status).toBe("candidate-stale");
+    expect(report.status, verifyDiagnostic(report)).toBe("candidate-stale");
   });
 });
 

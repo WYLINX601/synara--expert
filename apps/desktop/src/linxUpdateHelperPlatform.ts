@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { assertArm64MachO } from "@synara/shared/machOArchitecture";
 import { spawnProcess, spawnProcessSync } from "@synara/shared/processRuntime";
 import { syncDirectoryEntry } from "@synara/shared/filesystemPlatform";
 import type { LinxUpdateManifest } from "@synara/contracts";
@@ -194,7 +195,7 @@ export async function createLinxDarwinHelperPlatform(
     }
   }
   runLinxPlatformCommand("/usr/bin/codesign", ["--verify", "--strict", bridge]);
-  runLinxPlatformCommand("/usr/bin/lipo", ["-verify_arch", "arm64", bridge]);
+  assertArm64MachO(bridge, runLinxPlatformCommand("/usr/bin/lipo", ["-archs", bridge]));
   const trusted = parseLinxUpdateSource(sourceJson);
   if (!trusted) throw new Error("Invalid embedded trust source");
   return {
@@ -363,7 +364,10 @@ export async function createLinxDarwinHelperPlatform(
       ]);
       const executablePath = join(path, "Contents/MacOS", executable);
       await requireCanonicalPath(executablePath);
-      runLinxPlatformCommand("/usr/bin/lipo", ["-verify_arch", "arm64", executablePath]);
+      assertArm64MachO(
+        executablePath,
+        runLinxPlatformCommand("/usr/bin/lipo", ["-archs", executablePath]),
+      );
       const resources = join(path, "Contents/Resources");
       await requireCanonicalPath(resources);
       const source = parseLinxUpdateSource(

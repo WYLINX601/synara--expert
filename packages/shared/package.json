@@ -4,6 +4,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./machOArchitecture": {
+      "types": "./src/machOArchitecture.ts",
+      "import": "./src/machOArchitecture.ts"
+    },
     "./providerAccountHomePath": {
       "types": "./src/providerAccountHomePath.ts",
       "import": "./src/providerAccountHomePath.ts"

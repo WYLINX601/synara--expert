@@ -177,13 +177,13 @@ const toolchain = { node: "24.13.1", bun: "1.4.4" };
 /** Surfaces the failing precondition instead of only the mismatched status. */
 function verifyDiagnostic(report: {
   readonly status: string;
-  readonly stage: string;
+  readonly stage?: string;
   readonly checks?: readonly { readonly reason?: string }[];
 }): string {
   const reasons = [
     ...new Set((report.checks ?? []).flatMap((check) => (check.reason ? [check.reason] : []))),
   ];
-  return `${report.status} at ${report.stage}: ${reasons.join(", ") || "no check reason"}`;
+  return `${report.status}${report.stage ? ` at ${report.stage}` : ""}: ${reasons.join(", ") || "no check reason"}`;
 }
 
 const allPassing = () => ({ exitCode: 0, stdout: "", stderr: "" });
@@ -249,7 +249,7 @@ describe("workbench sync persisted workflow", () => {
       repoRoot: fixture.repo,
       dependencies: { readToolchain: () => toolchain },
     });
-    expect(report.status, verifyDiagnostic(report)).toBe("baseline-review-required");
+    expect(report.status).toBe("baseline-review-required");
     expect(report.candidate).toMatchObject({ status: "ready", mainRef: historicalRef });
     expect(report.baseline).toMatchObject({
       requestedMainRef: "refs/heads/main",
@@ -353,7 +353,7 @@ describe("workbench sync persisted workflow", () => {
       repoRoot: fixture.repo,
       dependencies: { readToolchain: () => toolchain },
     });
-    expect(report.status, verifyDiagnostic(report)).toBe("rebind-required");
+    expect(report.status).toBe("rebind-required");
     expect(report.invalidations).toContain("automatic-checks-incomplete-or-invalid");
     expect(AUTOMATIC_CHECKS).toContainEqual({
       id: "workbench-boundaries",

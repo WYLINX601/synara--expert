@@ -10,7 +10,8 @@ const native = vi.hoisted(() => ({
 vi.mock("@synara/shared/processRuntime", () => ({
   spawnProcessSync: vi.fn((command: string, args: readonly string[]) => ({
     status: 0,
-    stdout: native.output(command, args) ?? "",
+    // The bridge fixture stands in for a real arm64 Mach-O.
+    stdout: command === "/usr/bin/lipo" ? "arm64" : (native.output(command, args) ?? ""),
     stderr: "",
   })),
 }));

@@ -9,6 +9,7 @@ import {
   type LinxUpdateHelperCommand,
   type LinxUpdateReleaseReceipt,
 } from "@synara/contracts";
+import { assertArm64MachO } from "@synara/shared/machOArchitecture";
 import { spawnProcess, spawnProcessSync } from "@synara/shared/processRuntime";
 import { syncDirectoryEntry } from "@synara/shared/filesystemPlatform";
 import type { LinxUpdateInstallationTarget } from "./linxUpdateClient";
@@ -17,10 +18,11 @@ import { LinxUpdateOperationError } from "./linxUpdateFailure";
 
 declare const __LINX_UPDATE_HELPER_SHA256__: string;
 
-function native(command: string, args: string[]): void {
+function native(command: string, args: string[]): string {
   const result = spawnProcessSync(command, args, { encoding: "utf8", timeout: 60_000 });
   if (result.error || result.status !== 0)
     throw new Error(`Native update preparation failed: ${path.basename(command)}`);
+  return typeof result.stdout === "string" ? result.stdout.trim() : "";
 }
 async function digest(filePath: string): Promise<string> {
   const hash = createHash("sha256");
@@ -76,7 +78,7 @@ export async function createLinxInstallerHelper(input: {
   if ((await digest(input.helperPath)) !== expectedHelperSha256)
     throw new Error("Bundled helper does not match this desktop build");
   native("/usr/bin/codesign", ["--verify", "--strict", input.helperPath]);
-  native("/usr/bin/lipo", ["-verify_arch", "arm64", input.helperPath]);
+  assertArm64MachO(input.helperPath, native("/usr/bin/lipo", ["-archs", input.helperPath]));
   native("/usr/bin/codesign", ["--verify", "--deep", "--strict", input.applicationPath]);
   await fs.copyFile(input.helperPath, helperPath, fs.constants.COPYFILE_EXCL);
   await fs.chmod(helperPath, 0o700);

@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { spawnProcessSync } from "@synara/shared/processRuntime";
+import { assertArm64MachO } from "@synara/shared/machOArchitecture";
 import { hashFile } from "./lib/file-digest.ts";
 import { validateLinxReleaseSource, type LinxReleaseSource } from "./lib/linx-release-source.ts";
 
@@ -26,6 +27,19 @@ export async function buildLinxUpdateHelper(input: {
       throw new Error(
         `${command} failed: ${result.stderr || result.error?.message || "unknown error"}`,
       );
+  };
+  const runLipoArchCheck = (binary: string) => {
+    const result = spawnProcessSync("/usr/bin/lipo", ["-archs", binary], {
+      cwd: input.repositoryRoot,
+      encoding: "utf8",
+      timeout: 300_000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    if (result.error || result.status !== 0)
+      throw new Error(
+        `/usr/bin/lipo -archs failed: ${result.stderr || result.error?.message || "unknown error"}`,
+      );
+    assertArm64MachO(binary, result.stdout);
   };
   // The bridge is independently signed before embedding; no runtime compiler or
   // resource inside the moving old application is needed after handoff.
@@ -54,7 +68,7 @@ export async function buildLinxUpdateHelper(input: {
     chmodSync(bridge, 0o700);
     run("/usr/bin/codesign", ["--force", "--sign", "-", "--timestamp=none", bridge]);
     run("/usr/bin/codesign", ["--verify", "--strict", "--verbose=4", bridge]);
-    run("/usr/bin/lipo", ["-verify_arch", "arm64", bridge]);
+    runLipoArchCheck(bridge);
     const bridgeBytes = readFileSync(bridge);
     const bridgeDigest = createHash("sha256").update(bridgeBytes).digest("hex");
     // Bun's define is a JavaScript expression; all three embedded inputs are strings.
@@ -75,7 +89,7 @@ export async function buildLinxUpdateHelper(input: {
     chmodSync(input.outputPath, 0o755);
     run("/usr/bin/codesign", ["--force", "--sign", "-", "--timestamp=none", input.outputPath]);
     run("/usr/bin/codesign", ["--verify", "--strict", "--verbose=4", input.outputPath]);
-    run("/usr/bin/lipo", ["-verify_arch", "arm64", input.outputPath]);
+    runLipoArchCheck(input.outputPath);
     return {
       filePath: input.outputPath,
       size: statSync(input.outputPath).size,

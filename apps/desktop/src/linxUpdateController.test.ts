@@ -22,7 +22,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   seams.sync.mockImplementation((command: string, args: string[]) => {
     if (command === "/usr/bin/ditto") copyFileSync(args[2]!, args[3]!);
-    return { status: 0, error: undefined };
+    // The architecture check reads lipo's slice list; fixtures are arm64.
+    return { status: 0, stdout: command === "/usr/bin/lipo" ? "arm64" : "", error: undefined };
   });
 });
 afterEach(async () => {
@@ -253,7 +254,7 @@ export const spawnProcessSync = (...args) => globalThis.__linxControllerBuildSea
     seams.sync.mockImplementation((command: string, args: string[]) => {
       if (command === "/usr/bin/codesign" && args.at(-1) === f.input.applicationPath)
         writeFileSync(f.input.helperPath, "substituted during copy");
-      return { status: 0, error: undefined };
+      return { status: 0, stdout: command === "/usr/bin/lipo" ? "arm64" : "", error: undefined };
     });
     await expect(createLinxInstallerHelper(f.input)).rejects.toThrow(
       "Standalone helper does not match this desktop build",
@@ -273,7 +274,7 @@ export const spawnProcessSync = (...args) => globalThis.__linxControllerBuildSea
             "substituted before spawn",
           );
         }
-        return { status: 0, error: undefined };
+        return { status: 0, stdout: command === "/usr/bin/lipo" ? "arm64" : "", error: undefined };
       });
       await expect(createLinxInstallerHelper(f.input)).rejects.toThrow(
         "Standalone helper does not match this desktop build",
@@ -293,6 +294,7 @@ export const spawnProcessSync = (...args) => globalThis.__linxControllerBuildSea
       seams.sync.mockImplementation((command: string, args: string[]) => ({
         status:
           command === "/usr/bin/codesign" && args.at(-1) === other.input.applicationPath ? 1 : 0,
+        stdout: command === "/usr/bin/lipo" ? "arm64" : "",
       }));
       await expect(createLinxInstallerHelper(other.input)).rejects.toThrow(
         "Native update preparation failed",

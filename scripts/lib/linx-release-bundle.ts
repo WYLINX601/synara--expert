@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { assertArm64MachO } from "@synara/shared/machOArchitecture";
 import { findMacBundleArchitectureMismatches } from "./mac-bundle-architecture.ts";
 import { readLinxReleaseSource } from "./linx-release-source.ts";
 
@@ -25,7 +26,10 @@ export function verifyLinxReleaseBundles(assetsDirectory: string, version: strin
     )
       throw new Error("Linx bundle identity/version mismatch.");
     run("codesign", ["--verify", "--deep", "--strict", "--verbose=4", app]);
-    run("lipo", ["-verify_arch", "arm64", join(app, "Contents/MacOS", read("CFBundleExecutable"))]);
+    assertArm64MachO(
+      join(app, "Contents/MacOS", read("CFBundleExecutable")),
+      run("/usr/bin/lipo", ["-archs", join(app, "Contents/MacOS", read("CFBundleExecutable"))]),
+    );
     run("codesign", ["--verify", "--strict", join(app, "Contents/Resources/linx-update-helper")]);
     const mismatches = findMacBundleArchitectureMismatches(app, "arm64");
     if (mismatches.length)
@@ -36,7 +40,10 @@ export function verifyLinxReleaseBundles(assetsDirectory: string, version: strin
     );
     if (JSON.stringify(bundledSource) !== JSON.stringify(source))
       throw new Error("Bundle trusted source differs from fixed source config.");
-    run("lipo", ["-verify_arch", "arm64", join(app, "Contents/Resources/linx-update-helper")]);
+    assertArm64MachO(
+      join(app, "Contents/Resources/linx-update-helper"),
+      run("/usr/bin/lipo", ["-archs", join(app, "Contents/Resources/linx-update-helper")]),
+    );
   };
   const stem = `Linx-${version}-arm64`;
   const root = mkdtempSync(join(tmpdir(), "linx-qualification-"));

@@ -16,6 +16,7 @@ import serverPackageJson from "../apps/server/package.json" with { type: "json" 
 
 import { startBuildStage } from "./lib/build-timing.ts";
 import { verifyPortableBuild } from "./lib/portable-build.ts";
+import { assertSandboxedPreloadBundle } from "./lib/sandboxed-preload.ts";
 import {
   BETA_ASSET_PATHS,
   desktopIconAssetPaths,
@@ -1264,6 +1265,15 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       message: `Missing bundled server client at ${bundledClientEntry}. Run 'bun run build:desktop' first.`,
     });
   }
+
+  yield* Effect.try({
+    try: () =>
+      assertSandboxedPreloadBundle(
+        readFileSync(path.join(distDirs.desktopDist, "preload.js"), "utf8"),
+      ),
+    catch: (cause) =>
+      new BuildScriptError({ message: "Sandboxed preload verification failed.", cause }),
+  });
 
   yield* validateBundledClientAssets(path.dirname(bundledClientEntry));
 

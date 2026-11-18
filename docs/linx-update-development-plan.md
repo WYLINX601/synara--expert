@@ -392,3 +392,9 @@ v0.2 实际文档检查 PASS：15 处本地链接及所含锚点可解析；8 �
 - 候选摘要 `83d44b0c9fa427800c1da1622fdfc0b77cf7ef32a1723d7b13ed5eafb349a9eb`；ZIP `10ee84d7…`、DMG `92b0954e…`；来源 `39f3c76e85d11c6d66c19390376594950174f26e`。`promote` 内的无凭据校验步骤成功，公开字节与已批准摘要一致。
 - 本机下载同一公开资产后执行 release checkpoint 结构资格与打包启动 smoke 通过；清单 Ed25519 验签通过（keyId `1113c8bdec541a20`）。
 - 剩余实机门禁：手动安装 B0 `v0.1.15`，由 B0 自动发现并升级到 `v0.1.16`，记录退出、替换、重启、后端健康、系统保护与数据保留结果。安装前需确认安装位置与是否使用日用数据。
+
+### 2026-11-18：B0 实机阻断与修复
+
+- 公开 `v0.1.15`/`v0.1.16` 的 packaged preload 在 Electron 沙箱中执行 `require("effect")`，而沙箱只允许 `electron`；渲染器报 `Error: module not found: effect`，`window.desktopBridge` 不存在，所有 IPC 与更新入口不可用。该缺陷不是安装或数据问题。源码已改为本地契约解析器（`apps/desktop/src/preloadMaintenance.ts`），新增与 contracts schema 的 21 项对照测试，并在打包时拒绝除 `electron` 外的 preload runtime require；重建后的 preload 仅 34.5 kB 且只含 `require("electron")`。公开的 0.1.15/0.1.16 不包含此修复，不能作为 B0/B1 验收对象。
+- 修复 preload 后仍复现约 2 分钟一次的 `SIGTRAP`：崩溃线程 `Chrome_IOThread`，首帧 `ares_dns_rr_get_ttl`，系统为 macOS 27.2.1 (26B131)，Electron 43.4.1。移除 `linx-update-source.json` 后同一应用稳定超过 3 分钟；Linx updater 使用 Electron `net.request` + `session.setProxy({ mode: "system" })`，是当前唯一差异。已排除 `LINX_HOME`、缓存、AsyncDns、QUIC、系统代理绕过、`--no-sandbox` 与 DNS 置空；旧 Personal Workbench（Chrome 150）持续运行 3 小时，说明不是通用 Electron 启动崩溃。
+- 当前源码已将 `0.1.17` 作为包含 preload 修复的候选版本，但尚未创建 tag 或发布。B0/B1 实机验收需在 updater 传输或受支持系统版本上继续，不以 0.1.15/0.1.16 通过。

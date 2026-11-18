@@ -378,3 +378,10 @@ v0.2 实际文档检查 PASS：15 处本地链接及所含锚点可解析；8 �
 | LU-AC-10 退役与资源   | 通过               | 旧工作流停用/受控工作流核对、恢复引用与交付根记录                                                       |
 | LU-AC-11 辅助程序边界 | 隔离资格通过       | 历史原生资格（含范围声明）与当前候选结构/启动资格；真实替换待 LU-AC-07                                  |
 | LU-AC-12 撤回与密钥   | 协议/测试通过      | 未知密钥拒绝、降级/同版拒绝、密钥环约束；真实撤回未演练                                                 |
+
+### 2026-11-18：v0.1.15 公开发布与 B1 候选
+
+- `v0.1.15` 已在 `44052108856` 两次 Environment 审批后公开发布；恢复、发布和匿名校验均使用同一 run ID 与已批准摘要 `b2fd1da4…`。首次 promote 的 404 已按上节修复，未重建、未重签、未移动 tag。
+- B0 候选为公开 `v0.1.15`；B1 版本已提交为 `0.1.16`，`v0.1.16` annotated tag 指向 `39f3c76e8`（`workbench/build-config.json` 已核验）。正式运行 `44235880704` 的 preflight、quality、三个 Server shard、portable、Cua、图标与 macOS 打包全部成功，当前等待 `linx-signing` 审批。
+- 该 tag 的主 CI 首次在 `KeybindingsToast.browser.tsx` 冷挂载上连续失败：组件分片在负载较高的 runner 上超过 60s 订阅 backstop。仅调整该测试的时间预算（cold mount 120s、文件 test timeout 180s），本机同一用例 159s 通过；新 main CI `44234579675` 全绿。未改产品代码或界面。
+- 剩余人工门禁：`linx-signing` 审批、`linx-publish` 审批、真实 Release 资产验收、手动安装 B0（`v0.1.15`）、B0 自动发现并升级到 B1，以及系统保护/数据保留实测。日用安装与个人数据迁移仍需单独授权。

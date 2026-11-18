@@ -7,15 +7,16 @@ import type {
   DesktopComputerPreviewFrame,
   DesktopDiagnosticActivity,
   DesktopWindowTranslucency,
-  ZenModeState,
-} from "@synara/contracts";
-import {
   LinxUpdateWindowMaintenanceRequest,
   LinxUpdateWindowMaintenanceResponse,
+  ZenModeState,
 } from "@synara/contracts";
-import { Schema } from "effect";
 import { normalizeDesktopWsUrl, resolveDesktopWsUrlFromEnv } from "./desktopWsBridge";
 import { DESKTOP_IPC_CHANNELS } from "./ipcChannels";
+import {
+  parseLinxUpdateWindowMaintenanceRequest,
+  parseLinxUpdateWindowMaintenanceResponse,
+} from "./preloadMaintenance";
 import {
   parseQuitConfirmationRequest,
   parseQuitConfirmationResponse,
@@ -313,8 +314,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   updateWindowMaintenance: {
     onRequest: (listener) => {
       const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) => {
-        const decoded = Schema.decodeUnknownOption(LinxUpdateWindowMaintenanceRequest)(payload);
-        if (decoded._tag === "Some") listener(decoded.value);
+        const request = parseLinxUpdateWindowMaintenanceRequest(payload);
+        if (request) listener(request);
       };
       ipcRenderer.on(IPC.updateWindowMaintenanceRequest, wrapped);
       return () => {
@@ -322,9 +323,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       };
     },
     reply: (response) => {
-      const decoded = Schema.decodeUnknownOption(LinxUpdateWindowMaintenanceResponse)(response);
-      if (decoded._tag === "Some")
-        ipcRenderer.send(IPC.updateWindowMaintenanceResponse, decoded.value);
+      const parsed = parseLinxUpdateWindowMaintenanceResponse(response);
+      if (parsed) ipcRenderer.send(IPC.updateWindowMaintenanceResponse, parsed);
     },
   },
   onQuitConfirmationRequest: (listener) => {

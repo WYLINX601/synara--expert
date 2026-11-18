@@ -9,6 +9,22 @@ const GitObject = Schema.Struct({
 const Reference = Schema.Struct({ ref: Schema.String, object: GitObject });
 const Tag = Schema.Struct({ sha: LinxUpdateSourceCommit, object: GitObject });
 
+/**
+ * GitHub's `releases/tags/{tag}` endpoint hides drafts even from authenticated
+ * owners, so callers must select from the release list instead.
+ */
+export function selectLinxRelease<T extends { tag_name: string; draft: boolean }>(
+  releases: readonly T[],
+  tag: string,
+  includeDrafts: boolean,
+): T | null {
+  const matches = releases.filter(
+    (release) => release.tag_name === tag && (includeDrafts || !release.draft),
+  );
+  if (matches.length > 1) throw new Error(`Multiple GitHub releases share ${tag}.`);
+  return matches[0] ?? null;
+}
+
 /** Reuse the release CLI's API transport, including its explicit anonymous mode. */
 export async function verifyLinxReleaseOperation(input: {
   release: { tag_name: string; target_commitish: string; prerelease: boolean };

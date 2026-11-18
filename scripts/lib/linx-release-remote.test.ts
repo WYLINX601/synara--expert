@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, type Mock } from "vitest";
-import { verifyLinxReleaseOperation } from "./linx-release-remote.ts";
+import { selectLinxRelease, verifyLinxReleaseOperation } from "./linx-release-remote.ts";
 
 const sourceCommit = "a".repeat(40);
 const movedCommit = "b".repeat(40);
@@ -107,6 +107,30 @@ describe.each(operations)("remote source gate: $name", ({ anonymous, publishes }
         [`git/tags/${nestedTagSha}`, { anonymous }],
       ]).flat(),
     );
+  });
+});
+
+describe("release lookup", () => {
+  const draft = { tag_name: "v0.1.15", draft: true };
+  const published = { tag_name: "v0.1.15", draft: false };
+
+  it("selects an unpublished candidate for authenticated operations", () => {
+    expect(selectLinxRelease([draft], "v0.1.15", true)).toBe(draft);
+  });
+
+  it("excludes drafts from anonymous validation", () => {
+    expect(selectLinxRelease([draft], "v0.1.15", false)).toBeNull();
+    expect(selectLinxRelease([draft, published], "v0.1.15", false)).toBe(published);
+  });
+
+  it("rejects ambiguous releases sharing a tag", () => {
+    expect(() => selectLinxRelease([draft, { ...draft, draft: false }], "v0.1.15", true)).toThrow(
+      "Multiple GitHub releases share v0.1.15",
+    );
+  });
+
+  it("returns null for a different tag", () => {
+    expect(selectLinxRelease([published], "v0.1.16", true)).toBeNull();
   });
 });
 

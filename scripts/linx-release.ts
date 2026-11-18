@@ -41,7 +41,7 @@ import {
   type LinxReleaseCandidate,
 } from "./lib/linx-release-candidate.ts";
 import { verifyReleaseArtifactCheckpoint } from "./lib/release-artifact-checkpoint.ts";
-import { verifyLinxReleaseOperation } from "./lib/linx-release-remote.ts";
+import { selectLinxRelease, verifyLinxReleaseOperation } from "./lib/linx-release-remote.ts";
 const Asset = Schema.Struct({
   id: Schema.Number,
   name: Schema.String,
@@ -81,7 +81,7 @@ const headers = (anonymous = false): Record<string, string> => ({
 });
 async function api(
   path: string,
-  options: { method?: string; body?: unknown; anonymous?: boolean; allow404?: boolean } = {},
+  options: { method?: string; body?: unknown; anonymous?: boolean } = {},
 ): Promise<unknown> {
   const response = await fetch(path ? `${apiRoot}/${path}` : apiRoot, {
     method: options.method || "GET",
@@ -92,7 +92,6 @@ async function api(
     ...(options.body ? { body: JSON.stringify(options.body) } : {}),
     signal: AbortSignal.timeout(60_000),
   });
-  if (options.allow404 && response.status === 404) return null;
   if (!response.ok)
     throw new Error(`GitHub ${options.method || "GET"} ${path}: ${response.status}`);
   return response.status === 204 ? null : response.json();
@@ -108,6 +107,17 @@ async function assetBytes(asset: GitHubAsset | undefined, anonymous = false): Pr
   const bytes = new Uint8Array(await response.arrayBuffer());
   if (bytes.length !== asset.size) throw new Error("Metadata size changed.");
   return bytes;
+}
+async function allReleases(anonymous = false): Promise<GitHubRelease[]> {
+  const releases: GitHubRelease[] = [];
+  for (let page = 1; ; page++) {
+    const batch = decodeReleases(await api(`releases?per_page=100&page=${page}`, { anonymous }));
+    releases.push(...batch);
+    if (batch.length < 100) return releases;
+  }
+}
+async function findReleaseByTag(tag: string, anonymous = false): Promise<GitHubRelease | null> {
+  return selectLinxRelease(await allReleases(anonymous), tag, !anonymous);
 }
 async function inventory(release: GitHubRelease): Promise<GitHubAsset[]> {
   const assets: GitHubAsset[] = [];
@@ -187,25 +197,21 @@ function git(...args: string[]): string {
 }
 async function priorSource(source: LinxReleaseSource, version: string) {
   let previous: GitHubRelease | null = null;
-  for (let page = 1; ; page++) {
-    const releases = decodeReleases(await api(`releases?per_page=100&page=${page}`));
-    for (const release of releases) {
-      if (
-        release.draft ||
-        release.prerelease ||
-        !release.assets.some((asset) => asset.name === "linx-update.json")
-      )
-        continue;
-      if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(release.tag_name))
-        throw new Error("Invalid prior Linx release tag.");
-      const order =
-        previous === null
-          ? 1
-          : compareLinxUpdateVersions(release.tag_name.slice(1), previous.tag_name.slice(1));
-      if (order === null) throw new Error("Invalid prior Linx release version.");
-      if (order > 0) previous = release;
-    }
-    if (releases.length < 100) break;
+  for (const release of await allReleases()) {
+    if (
+      release.draft ||
+      release.prerelease ||
+      !release.assets.some((asset) => asset.name === "linx-update.json")
+    )
+      continue;
+    if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(release.tag_name))
+      throw new Error("Invalid prior Linx release tag.");
+    const order =
+      previous === null
+        ? 1
+        : compareLinxUpdateVersions(release.tag_name.slice(1), previous.tag_name.slice(1));
+    if (order === null) throw new Error("Invalid prior Linx release version.");
+    if (order > 0) previous = release;
   }
   if (!previous) {
     if (process.env.LINX_BOOTSTRAP_SOURCE_COMMIT !== git("rev-parse", "HEAD"))
@@ -296,9 +302,9 @@ async function stage() {
   const version = readLinxProductVersion(root);
   const source = readLinxReleaseSource(root);
   const tag = `v${version}`;
-  const found = await api(`releases/tags/${tag}`, { allow404: true });
+  const found = await findReleaseByTag(tag);
   if (found) {
-    const existing = decodeRelease(found);
+    const existing = found;
     // Never rebuild, resign, or overwrite an existing candidate. Restore exact bytes.
     const assets = await inventory(existing);
     const descriptor = assets.find((asset) => asset.name === "linx-candidate.json");
@@ -435,9 +441,8 @@ if (command === "protection") {
   const candidate = await readCandidate();
   if (candidateDigest(candidate) !== digestArg)
     throw new Error("Approved candidate digest mismatch.");
-  const release = decodeRelease(
-    await api(`releases/tags/${candidate.tag}`, { anonymous: command === "validate" }),
-  );
+  const release = await findReleaseByTag(candidate.tag, command === "validate");
+  if (!release) throw new Error(`Release ${candidate.tag} is unavailable.`);
   if (command === "promote") {
     await verifyRemote(
       release,
@@ -457,7 +462,9 @@ if (command === "protection") {
     await verifyRemote(release, candidate, true);
   }
 } else if (command === "restore") {
-  const release = decodeRelease(await api(`releases/tags/v${readLinxProductVersion(root)}`));
+  const tag = `v${readLinxProductVersion(root)}`;
+  const release = await findReleaseByTag(tag);
+  if (!release) throw new Error(`Release ${tag} is unavailable.`);
   const assets = await inventory(release);
   const descriptor = assets.find((asset) => asset.name === "linx-candidate.json");
   const descriptorBytes = await assetBytes(descriptor);

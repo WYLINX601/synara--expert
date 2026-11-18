@@ -1,4 +1,6 @@
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { spawnProcessSync } from "@synara/shared/processRuntime";
 
@@ -48,6 +50,47 @@ function inspectProtection(unprotectedEnvironment?: string) {
   );
 }
 
+function restoreDraft(directory: string) {
+  const version = JSON.parse(readFileSync(resolve(root, "workbench/build-config.json"), "utf8"))
+    .versions.workbench;
+  return spawnProcessSync(
+    "bun",
+    [
+      "-e",
+      `const base = "https://api.github.com/repos/WYLINX601/synara--expert";
+       const release = {
+         id: 1,
+         tag_name: "v${version}",
+         target_commitish: "a".repeat(40),
+         draft: true,
+         prerelease: false,
+         html_url: "https://github.com/WYLINX601/synara--expert/releases/tag/untagged-test",
+         upload_url: "https://uploads.github.com/repos/WYLINX601/synara--expert/releases/1/assets{?name,label}",
+         assets: [],
+       };
+       globalThis.fetch = async (input) => {
+         const url = String(input);
+         if (url.startsWith(base + "/releases?")) return Response.json([release]);
+         if (url.startsWith(base + "/releases/1/assets?")) return Response.json([]);
+         return new Response("Not Found", { status: 404 });
+       };
+       process.argv = [process.argv[0], "linx-release.ts", "restore", ${JSON.stringify(directory)}, "d".repeat(64)];
+       await import(${JSON.stringify(resolve(root, "scripts/linx-release.ts"))});`,
+    ],
+    {
+      cwd: root,
+      env: {
+        ...process.env,
+        GH_TOKEN: "isolated-test-token",
+        GITHUB_REPOSITORY: "WYLINX601/synara--expert",
+        GITHUB_RUN_ID: "1",
+      },
+      encoding: "utf8",
+      timeout: 30_000,
+    },
+  );
+}
+
 describe("release protection command", () => {
   it("accepts the canonical repository endpoint and both protected environments", () => {
     const result = inspectProtection();
@@ -59,5 +102,19 @@ describe("release protection command", () => {
     const result = inspectProtection(name);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("disabled admin bypass");
+  });
+});
+
+describe("release candidate lookup", () => {
+  it("restores an unpublished draft that the tag endpoint hides", () => {
+    const directory = mkdtempSync(join(tmpdir(), "linx-release-cli-"));
+    try {
+      const result = restoreDraft(directory);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Required release asset is missing.");
+      expect(result.stderr).not.toContain("404");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

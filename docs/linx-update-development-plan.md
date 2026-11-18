@@ -385,3 +385,10 @@ v0.2 实际文档检查 PASS：15 处本地链接及所含锚点可解析；8 �
 - B0 候选为公开 `v0.1.15`；B1 版本已提交为 `0.1.16`，`v0.1.16` annotated tag 指向 `39f3c76e8`（`workbench/build-config.json` 已核验）。正式运行 `44235880704` 的 preflight、quality、三个 Server shard、portable、Cua、图标与 macOS 打包全部成功，当前等待 `linx-signing` 审批。
 - 该 tag 的主 CI 首次在 `KeybindingsToast.browser.tsx` 冷挂载上连续失败：组件分片在负载较高的 runner 上超过 60s 订阅 backstop。仅调整该测试的时间预算（cold mount 120s、文件 test timeout 180s），本机同一用例 159s 通过；新 main CI `44234579675` 全绿。未改产品代码或界面。
 - 剩余人工门禁：`linx-signing` 审批、`linx-publish` 审批、真实 Release 资产验收、手动安装 B0（`v0.1.15`）、B0 自动发现并升级到 B1，以及系统保护/数据保留实测。日用安装与个人数据迁移仍需单独授权。
+
+#### B1 发布结果
+
+- `v0.1.16` 正式运行 `44235880704` 全绿：`linx-signing` 与 `linx-publish` 两次审批后，`sign_candidate` 与 `promote` 成功；公开 Release <https://github.com/WYLINX601/synara--expert/releases/tag/v0.1.16>，非 draft、非 prerelease。
+- 候选摘要 `83d44b0c9fa427800c1da1622fdfc0b77cf7ef32a1723d7b13ed5eafb349a9eb`；ZIP `10ee84d7…`、DMG `92b0954e…`；来源 `39f3c76e85d11c6d66c19390376594950174f26e`。`promote` 内的无凭据校验步骤成功，公开字节与已批准摘要一致。
+- 本机下载同一公开资产后执行 release checkpoint 结构资格与打包启动 smoke 通过；清单 Ed25519 验签通过（keyId `1113c8bdec541a20`）。
+- 剩余实机门禁：手动安装 B0 `v0.1.15`，由 B0 自动发现并升级到 `v0.1.16`，记录退出、替换、重启、后端健康、系统保护与数据保留结果。安装前需确认安装位置与是否使用日用数据。

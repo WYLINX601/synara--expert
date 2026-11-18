@@ -31,7 +31,10 @@ const response = {
   message: null,
 } as const;
 
-function contractAccepts<A, I>(schema: Schema.Schema<A, I>, value: unknown): boolean {
+function contractAccepts(
+  schema: Schema.Top & { readonly DecodingServices: never },
+  value: unknown,
+): boolean {
   return Schema.decodeUnknownOption(schema)(value)._tag === "Some";
 }
 

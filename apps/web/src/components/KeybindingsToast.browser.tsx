@@ -51,8 +51,10 @@ let serverConfigStreamClient: EffectRpcWebSocketClient | null = null;
 let serverConfigStreamRequestId: string | null = null;
 // Subscription budget stays generous: slow CI still needs tens of seconds for
 // WS sequencing after a cold start. Route-chunk warming happens in beforeAll
-// below, so this is a backstop, not the cold path.
-const COLD_MOUNT_SUBSCRIPTION_TIMEOUT_MS = 60_000;
+// below, so this is a backstop, not the cold path. A loaded Ubuntu runner took
+// over 60s for the first real mount after an incomplete warmup; keep the
+// backstop above the measured worst case instead of failing on runner load.
+const COLD_MOUNT_SUBSCRIPTION_TIMEOUT_MS = 120_000;
 const SUBSCRIPTION_POLL_INTERVAL_MS = 16;
 // Warmup budget: absorbs the bulk of a cold chunk transform so the real
 // mounts start warm. Sized under the 90s hook budget with room for worker
@@ -387,8 +389,9 @@ async function mountApp(
 }
 
 // beforeAll worst case (30s activation + 80s warmup + worker start) exceeds the
-// 90s hookTimeout in vitest.browser.config.ts, so raise it for this file.
-vi.setConfig({ hookTimeout: 150_000 });
+// 90s hookTimeout in vitest.browser.config.ts. The test backstop also exceeds
+// the global 90s testTimeout on a loaded runner, so raise both for this file.
+vi.setConfig({ hookTimeout: 150_000, testTimeout: 180_000 });
 
 describe("Keybindings update toast", () => {
   beforeAll(async () => {

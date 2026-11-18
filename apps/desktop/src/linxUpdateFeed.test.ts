@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   assertLinxUpdateUrlAllowed,
+  createLinxUpdateRequest,
   fetchLinxUpdateBytes,
   LinxUpdateFeedError,
   openLinxUpdateStream,
@@ -86,6 +87,24 @@ describe("parseLinxUpdateRetryAfterMs", () => {
 });
 
 describe("fetchLinxUpdateBytes", () => {
+  it("uses the configured HTTP proxy for the request", async () => {
+    let absoluteForm = false;
+    const proxyUrl = await startServer((request, response) => {
+      absoluteForm = request.url?.startsWith("http://") === true;
+      response.end("proxied-manifest");
+    });
+
+    const bytes = await fetchLinxUpdateBytes({
+      url: `${proxyUrl}/linx-update.json`,
+      allowedHosts: ["127.0.0.1"],
+      maxBytes: 100,
+      request: createLinxUpdateRequest(proxyUrl),
+    });
+
+    expect(Buffer.from(bytes).toString("utf8")).toBe("proxied-manifest");
+    expect(absoluteForm).toBe(true);
+  });
+
   it("refuses a loopback host that is not in the source allow list", async () => {
     const baseUrl = await startServer((_request, response) => response.end("should not be read"));
 

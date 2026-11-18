@@ -36,8 +36,8 @@ import {
   stopLinxBackendCleanly,
 } from "./linxUpdateInstall";
 import { createLinxInstallerHelper } from "./linxUpdateController";
-import { createLinxUpdateElectronRequest } from "./linxUpdateElectronTransport";
-import { fetchLinxUpdateBytes, type LinxUpdateRequest } from "./linxUpdateFeed";
+import { createLinxUpdateRequest, fetchLinxUpdateBytes } from "./linxUpdateFeed";
+import { resolveLinxUpdateProxyUrl } from "./linxUpdateProxy";
 import { revalidateLinxUpdateRelease } from "./linxUpdateRelease";
 import { linxLegacyMigrationPaths, migrateLegacyLinxHome } from "./linxHomeMigration";
 import { LINX_LEGACY_STORAGE_SCHEMES } from "./linxLegacyStorage";
@@ -4130,13 +4130,7 @@ function resolveConfiguredLinxUpdateSource(): LinxUpdateSource | null {
 
 function createLinxUpdateClient(source: LinxUpdateSource): LinxUpdateClient {
   const checkRecordPath = Path.join(userDataPath, LINX_UPDATE_CHECK_STATE_FILE_NAME);
-  const networkSession = session.fromPartition("linx-updater-network", { cache: false });
-  const systemProxyReady = networkSession.setProxy({ mode: "system" });
-  const electronRequest = createLinxUpdateElectronRequest(networkSession);
-  const request: LinxUpdateRequest = async (url, options) => {
-    await systemProxyReady;
-    return electronRequest(url, options);
-  };
+  const request = createLinxUpdateRequest(resolveLinxUpdateProxyUrl());
   const installer = new LinxUpdateInstaller({
     currentVersion: app.getVersion(),
     createHelper: (installation, attemptId, signal) =>
@@ -4250,13 +4244,14 @@ function createLinxUpdateClient(source: LinxUpdateSource): LinxUpdateClient {
         source,
         receipt: installation.release,
         currentVersion: app.getVersion(),
-        fetchBytes: (url, maxBytes) =>
+        fetchBytes: (url, maxBytes, accept) =>
           fetchLinxUpdateBytes({
             url,
             maxBytes,
             allowedHosts: source.allowedAssetHosts,
             request,
             signal,
+            ...(accept ? { accept } : {}),
           }),
       }),
     claimHandoff: (digest) => {

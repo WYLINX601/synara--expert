@@ -76,7 +76,13 @@ function fixture() {
     ref: "refs/tags/v0.2.0",
     object: { type: "commit", sha: manifest.sourceCommit },
   };
-  const fetchBytes = async (url: string): Promise<Uint8Array> => {
+  const accepts = new Map<string, string | undefined>();
+  const fetchBytes = async (
+    url: string,
+    _maxBytes: number,
+    accept?: string,
+  ): Promise<Uint8Array> => {
+    accepts.set(url, accept);
     if (url.endsWith("/releases/tags/v0.2.0")) return Buffer.from(JSON.stringify(release));
     if (url.endsWith("/git/ref/tags/v0.2.0")) return Buffer.from(JSON.stringify(reference));
     if (url.endsWith("/linx-update.json.sig")) return signatureBytes;
@@ -84,13 +90,19 @@ function fixture() {
     throw new Error("Unexpected fixture route");
   };
   const input = { source, manifest, manifestDigest, manifestBytes, signatureBytes, fetchBytes };
-  return { input, release, reference };
+  return { input, release, reference, accepts };
 }
 
 describe("pinned public Linx release", () => {
   it("binds the package, signed pair, release and exact tag commit", async () => {
-    const { input } = fixture();
+    const { input, accepts } = fixture();
     const receipt = await resolveLinxUpdateReleaseReceipt(input);
+    expect(accepts.get("https://api.github.com/repos/owner/repo/releases/tags/v0.2.0")).toBe(
+      "application/vnd.github+json",
+    );
+    expect(accepts.get("https://api.github.com/repos/owner/repo/git/ref/tags/v0.2.0")).toBe(
+      "application/vnd.github+json",
+    );
     expect(receipt).toMatchObject({
       releaseId: 101,
       packageAssetId: 201,
@@ -166,7 +178,7 @@ describe("pinned public Linx release", () => {
     const fetchBytes = async (url: string) =>
       url.endsWith("/linx-update.json")
         ? Buffer.from(JSON.stringify({ ...input.manifest, version: "0.3.0" }))
-        : input.fetchBytes(url);
+        : input.fetchBytes(url, 1024);
     await expect(
       revalidateLinxUpdateRelease({ ...input, receipt, fetchBytes, currentVersion: "0.1.0" }),
     ).rejects.toThrow();

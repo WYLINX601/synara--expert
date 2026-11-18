@@ -10,7 +10,8 @@ import {
   type RequestOptions,
 } from "node:http";
 import { request as httpsRequest } from "node:https";
-import type { Readable } from "node:stream";
+import { Readable } from "node:stream";
+import { fetch as undiciFetch, ProxyAgent, Socks5ProxyAgent, type Dispatcher } from "undici";
 
 export const LINX_UPDATE_FEED_TIMEOUT_MS = 15_000;
 export const LINX_UPDATE_FEED_MAX_REDIRECTS = 5;
@@ -134,6 +135,63 @@ export type LinxUpdateRequest = (
     readonly accept: string;
   },
 ) => Promise<LinxUpdateHttpResponse>;
+
+export function createLinxUpdateRequest(proxyUrl: string | null): LinxUpdateRequest {
+  return proxyUrl === null
+    ? requestLinxUpdateUrl
+    : (url, options) => requestLinxUpdateUrlThroughProxy(url, options, proxyUrl);
+}
+
+async function requestLinxUpdateUrlThroughProxy(
+  url: URL,
+  options: {
+    readonly timeoutMs: number;
+    readonly signal?: AbortSignal | undefined;
+    readonly accept: string;
+  },
+  proxyUrl: string,
+): Promise<LinxUpdateHttpResponse> {
+  const dispatcher: Dispatcher =
+    proxyUrl.startsWith("socks5://") || proxyUrl.startsWith("socks5h://")
+      ? new Socks5ProxyAgent(proxyUrl, {
+          headersTimeout: options.timeoutMs,
+          bodyTimeout: options.timeoutMs,
+        })
+      : new ProxyAgent({
+          uri: proxyUrl,
+          headersTimeout: options.timeoutMs,
+          bodyTimeout: options.timeoutMs,
+        });
+  try {
+    const response = await undiciFetch(url, {
+      method: "GET",
+      redirect: "manual",
+      headers: { "user-agent": "linx-desktop", accept: options.accept },
+      signal: options.signal ?? null,
+      dispatcher,
+    });
+    const headers = Object.fromEntries(response.headers) as IncomingHttpHeaders;
+    if (response.body === null) {
+      void dispatcher.close();
+      return Object.assign(Readable.from([]), { statusCode: response.status, headers });
+    }
+    const stream = Readable.fromWeb(
+      response.body as unknown as Parameters<typeof Readable.fromWeb>[0],
+    );
+    stream.once("close", () => void dispatcher.close());
+    return Object.assign(stream, { statusCode: response.status, headers });
+  } catch (error) {
+    void dispatcher.close();
+    if (options.signal?.aborted) throw createAbortError();
+    if (error instanceof LinxUpdateFeedError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new LinxUpdateFeedError(
+      /timeout/iu.test(message) ? "timeout" : "network",
+      `Update request failed: ${message}`,
+      { cause: error },
+    );
+  }
+}
 
 function requestLinxUpdateUrl(
   url: URL,

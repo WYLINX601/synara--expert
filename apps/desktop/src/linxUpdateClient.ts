@@ -93,7 +93,7 @@ export interface LinxUpdateClientOptions {
   readonly request?: LinxUpdateRequest | undefined;
   readonly now?: () => Date;
   /** Test seam for the manifest/signature fetch. */
-  readonly fetchBytes?: (url: string, maxBytes: number) => Promise<Uint8Array>;
+  readonly fetchBytes?: (url: string, maxBytes: number, accept?: string) => Promise<Uint8Array>;
   /** Test seam for the package download. */
   readonly downloadAsset?: (
     options: LinxUpdateDownloadOptions,
@@ -620,15 +620,16 @@ export class LinxUpdateClient {
     };
   }
 
-  private fetch = (url: string, maxBytes: number): Promise<Uint8Array> => {
+  private fetch = (url: string, maxBytes: number, accept?: string): Promise<Uint8Array> => {
     if (this.options.fetchBytes !== undefined) {
-      return this.options.fetchBytes(url, maxBytes);
+      return this.options.fetchBytes(url, maxBytes, accept);
     }
     return fetchLinxUpdateBytes({
       url,
       maxBytes,
       allowedHosts: this.options.source.allowedAssetHosts,
       request: this.options.request,
+      ...(accept ? { accept } : {}),
     });
   };
 }

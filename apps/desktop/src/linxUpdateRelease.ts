@@ -66,14 +66,20 @@ export interface LinxUpdateSignedTarget {
 
 interface ReleaseInput extends LinxUpdateSignedTarget {
   readonly source: LinxUpdateSource;
-  readonly fetchBytes?: (url: string, maxBytes: number) => Promise<Uint8Array>;
+  readonly fetchBytes?: (url: string, maxBytes: number, accept?: string) => Promise<Uint8Array>;
   readonly now?: () => Date;
 }
+const GITHUB_API_ACCEPT = "application/vnd.github+json";
 
-function fetchBytes(input: ReleaseInput, url: string, maxBytes: number): Promise<Uint8Array> {
+function fetchBytes(
+  input: ReleaseInput,
+  url: string,
+  maxBytes: number,
+  accept = "application/octet-stream",
+): Promise<Uint8Array> {
   return input.fetchBytes !== undefined
-    ? input.fetchBytes(url, maxBytes)
-    : fetchLinxUpdateBytes({ url, maxBytes, allowedHosts: input.source.allowedAssetHosts });
+    ? input.fetchBytes(url, maxBytes, accept)
+    : fetchLinxUpdateBytes({ url, maxBytes, allowedHosts: input.source.allowedAssetHosts, accept });
 }
 
 /** Fixed tag URLs cannot silently switch an already approved target to `latest`. */
@@ -94,6 +100,7 @@ export async function resolveLinxUpdateReleaseReceipt(
           input,
           `${api}/releases/tags/${encodeURIComponent(tagName)}`,
           METADATA_MAX_BYTES,
+          GITHUB_API_ACCEPT,
         ),
       ),
     ),
@@ -114,6 +121,7 @@ export async function resolveLinxUpdateReleaseReceipt(
           input,
           `${api}/git/ref/tags/${encodeURIComponent(tagName)}`,
           METADATA_MAX_BYTES,
+          GITHUB_API_ACCEPT,
         ),
       ),
     ),
@@ -125,7 +133,14 @@ export async function resolveLinxUpdateReleaseReceipt(
     if (depth >= 5) throw new Error("The Linx annotated tag chain exceeds the allowed depth.");
     const tag = Schema.decodeUnknownSync(Tag)(
       JSON.parse(
-        utf8.decode(await fetchBytes(input, `${api}/git/tags/${object.sha}`, METADATA_MAX_BYTES)),
+        utf8.decode(
+          await fetchBytes(
+            input,
+            `${api}/git/tags/${object.sha}`,
+            METADATA_MAX_BYTES,
+            GITHUB_API_ACCEPT,
+          ),
+        ),
       ),
     );
     if (tag.sha !== object.sha)

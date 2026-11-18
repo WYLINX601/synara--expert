@@ -399,3 +399,7 @@ v0.2 实际文档检查 PASS：15 处本地链接及所含锚点可解析；8 �
 - 修复 preload 后仍复现约 2 分钟一次的 `SIGTRAP`：崩溃线程 `Chrome_IOThread`，首帧 `ares_dns_rr_get_ttl`，系统为 macOS 27.2.1 (26B131)，Electron 43.4.1。移除 `linx-update-source.json` 后同一应用稳定超过 3 分钟；Linx updater 使用 Electron `net.request` + `session.setProxy({ mode: "system" })`，是当前唯一差异。已排除 `LINX_HOME`、缓存、AsyncDns、QUIC、系统代理绕过、`--no-sandbox` 与 DNS 置空；旧 Personal Workbench（Chrome 150）持续运行 3 小时，说明不是通用 Electron 启动崩溃。
 - 已将 updater 切到既有的 `node:http/https` Feed 传输，代理从环境变量或 macOS `scutil --proxy` 解析；显式 HTTP/HTTPS 代理经 `undici.ProxyAgent`，SOCKS5 经 `Socks5ProxyAgent`。`api.github.com` 使用 `application/vnd.github+json`，避免 Node 传输下 Release receipt 返回 HTTP 415。真实 Clash HTTP 代理环境已验证发现 0.1.16 并完成 369 MB 下载到 100%，应用持续运行且无新崩溃；测试重打包的 helper 摘要与正式构建不匹配，安装阶段被拒绝，该安装失败不代表正式候选。PAC 脚本本版不求值；只有显式代理时才使用代理。
 - 当前源码已将 `0.1.17` 作为包含 preload 与 updater 传输修复的候选版本，但尚未创建 tag 或发布。B0/B1 实机验收需在正式 0.1.17 安装包上继续，不以 0.1.15/0.1.16 通过。
+
+#### B0 0.1.17 发布阻断（基础设施）
+
+- `v0.1.17` tag/run `44284337941` 已创建；preflight、quality、三个 Server shard、portable 与 icon 均成功，但 `Prepare Cua macOS arm64` 多次排队后由 GitHub 取消，`Build macOS arm64` 因此 skipped，签名与发布未进入。日志显示请求 `macos-15` runner 后 15 分钟无机器接单；这与 GitHub Actions 已知的 macOS 15 Arm64 hosted runner 间歇性不可用一致（actions/runner-images#15291）。不是本次源码或 workflow 逻辑失败。重跑通常可恢复，但已连续多次未命中。

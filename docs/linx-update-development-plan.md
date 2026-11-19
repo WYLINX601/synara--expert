@@ -403,3 +403,10 @@ v0.2 实际文档检查 PASS：15 处本地链接及所含锚点可解析；8 �
 #### B0 0.1.17 发布阻断（基础设施）
 
 - `v0.1.17` tag/run `44284337941` 已创建；preflight、quality、三个 Server shard、portable 与 icon 均成功，但 `Prepare Cua macOS arm64` 多次排队后由 GitHub 取消，`Build macOS arm64` 因此 skipped，签名与发布未进入。日志显示请求 `macos-15` runner 后 15 分钟无机器接单；这与 GitHub Actions 已知的 macOS 15 Arm64 hosted runner 间歇性不可用一致（actions/runner-images#15291）。不是本次源码或 workflow 逻辑失败。重跑通常可恢复，但已连续多次未命中。
+
+#### B0 0.1.19 与 B1 0.1.20
+
+- `v0.1.17` 的安装失败已定位为 helper 的 ASAR 头上限 4 MiB，而自身 `app.asar` 头为 4,595,656 字节；helper 在写 journal 前退出，应用保留旧版本与数据。上限已提高到 16 MiB 并加边界测试。
+- `v0.1.19` 已公开；发布后的匿名校验步骤因 GitHub 对 runner 的未认证 API 限流返回 403，但 Release 已公开。无凭据下载 DMG/ZIP 的 SHA-256 与 Release 资产一致，本机 checkpoint 和打包启动 smoke 通过。
+- `validate` 已改为不依赖 REST API：用 `git ls-remote` 校验 tag，再直接流式下载并哈希固定公开资产 URL；以无 `GH_TOKEN` 的本机运行验证 `v0.1.19` 通过。
+- `v0.1.18` 作为 B1 已被 `v0.1.20` 取代；B0 使用 `v0.1.19`，B1 使用 `v0.1.20` 完成真实升级验收。

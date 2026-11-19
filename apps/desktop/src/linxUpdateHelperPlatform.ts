@@ -17,6 +17,12 @@ import { validateLinxMachOMinimum } from "./linxUpdateHelperMachO";
 
 declare const __LINX_UPDATE_DARWIN_BRIDGE_BASE64__: string;
 declare const __LINX_UPDATE_DARWIN_BRIDGE_SHA256__: string;
+/** The packaged node_modules table has crossed 4 MiB; keep the read bounded but realistic. */
+export const LINX_ASAR_HEADER_MAX_BYTES = 16 * 1024 * 1024;
+export function assertAsarHeaderBounds(headerSize: number, jsonSize: number): void {
+  if (headerSize < 8 || headerSize > LINX_ASAR_HEADER_MAX_BYTES || jsonSize > headerSize - 8)
+    throw new Error("Invalid ASAR header");
+}
 export function runLinxPlatformCommand(command: string, args: readonly string[]): string {
   const result = spawnProcessSync(command, args, {
     encoding: "utf8",
@@ -102,8 +108,7 @@ async function readBundlePackage(resources: string): Promise<Record<string, unkn
     if ((await handle.read(prefix, 0, 16, 0)).bytesRead !== 16) throw new Error("Truncated ASAR");
     const headerSize = prefix.readUInt32LE(4);
     const jsonSize = prefix.readUInt32LE(12);
-    if (headerSize < 8 || headerSize > 4 * 1024 * 1024 || jsonSize > headerSize - 8)
-      throw new Error("Invalid ASAR header");
+    assertAsarHeaderBounds(headerSize, jsonSize);
     const bytes = Buffer.alloc(jsonSize);
     if ((await handle.read(bytes, 0, jsonSize, 16)).bytesRead !== jsonSize)
       throw new Error("Truncated ASAR table");

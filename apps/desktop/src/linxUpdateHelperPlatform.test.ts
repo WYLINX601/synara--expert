@@ -16,7 +16,27 @@ vi.mock("@synara/shared/processRuntime", () => ({
   })),
 }));
 import { spawnProcessSync } from "@synara/shared/processRuntime";
-import { createLinxDarwinHelperPlatform } from "./linxUpdateHelperPlatform";
+import {
+  assertAsarHeaderBounds,
+  createLinxDarwinHelperPlatform,
+  LINX_ASAR_HEADER_MAX_BYTES,
+} from "./linxUpdateHelperPlatform";
+
+describe("bounded ASAR header", () => {
+  it("accepts the packaged table that exceeded the old four-megabyte bound", () => {
+    expect(() => assertAsarHeaderBounds(4_595_656, 4_595_648)).not.toThrow();
+  });
+
+  it("rejects a header above the hard bound", () => {
+    expect(() => assertAsarHeaderBounds(LINX_ASAR_HEADER_MAX_BYTES + 1, 64)).toThrow(
+      "Invalid ASAR header",
+    );
+  });
+
+  it("rejects a JSON table larger than its header", () => {
+    expect(() => assertAsarHeaderBounds(1_024, 1_024)).toThrow("Invalid ASAR header");
+  });
+});
 
 const roots: string[] = [];
 afterEach(async () => {

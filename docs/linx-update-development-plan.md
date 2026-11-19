@@ -412,3 +412,4 @@ v0.2 实际文档检查 PASS：15 处本地链接及所含锚点可解析；8 �
 - `v0.1.18` 作为 B1 已被 `v0.1.20` 取代；B0 使用 `v0.1.19`，B1 使用 `v0.1.20` 完成真实升级验收。
 - `v0.1.20` 已公开发布，`promote` 与新的无 REST API 匿名校验均成功；本机对公开 DMG/ZIP/provenance 执行 checkpoint 与打包启动 smoke 通过。B0 `v0.1.19` 已安装，启动检查已发现 `0.1.20`，等待用户点击更新完成真实 B0→B1。
 - B0 `0.1.19` 尝试安装 `0.1.20` 时在 prepare 阶段失败：严格原生架构扫描遍历到 `node-pty` 与 `pi-tui` 的 `prebuilds/darwin-x64` 可选预编译文件，因不含 arm64 而拒绝整包。arm64 单架构打包现排除 `darwin-x64` 预编译，helper 严格扫描也跳过可选 x64 预编译；`v0.1.21` 作为新的 B1 候选。
+- 真实 `v0.1.19 → v0.1.21` 升级：helper 完成替换并保留旧应用；首次启动进入 `recovery-required`，未用旧版本打开数据。以更新日志中的已认证 `package.zip` 恢复同一 0.1.21 包并重新启动后，startup 验证通过，`linx-update-install.json` 进入 `healthy`，home ownership 由新进程接管，后端 `/health` 为 `ok` 且 migrations 为空。旧应用与恢复集暂时保留供数据核对。

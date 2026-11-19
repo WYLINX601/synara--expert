@@ -410,3 +410,4 @@ v0.2 实际文档检查 PASS：15 处本地链接及所含锚点可解析；8 �
 - `v0.1.19` 已公开；发布后的匿名校验步骤因 GitHub 对 runner 的未认证 API 限流返回 403，但 Release 已公开。无凭据下载 DMG/ZIP 的 SHA-256 与 Release 资产一致，本机 checkpoint 和打包启动 smoke 通过。
 - `validate` 已改为不依赖 REST API：用 `git ls-remote` 校验 tag，再直接流式下载并哈希固定公开资产 URL；以无 `GH_TOKEN` 的本机运行验证 `v0.1.19` 通过。
 - `v0.1.18` 作为 B1 已被 `v0.1.20` 取代；B0 使用 `v0.1.19`，B1 使用 `v0.1.20` 完成真实升级验收。
+- `v0.1.20` 已公开发布，`promote` 与新的无 REST API 匿名校验均成功；本机对公开 DMG/ZIP/provenance 执行 checkpoint 与打包启动 smoke 通过。B0 `v0.1.19` 已安装，启动检查已发现 `0.1.20`，等待用户点击更新完成真实 B0→B1。

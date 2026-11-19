@@ -183,6 +183,92 @@ async function verifyRemote(
     ...(publish ? { publish } : {}),
   });
 }
+/**
+ * Post-publication proof does not need the REST API: resolve the immutable tag
+ * with git, then stream every public asset by its fixed release URL. This keeps
+ * validation working when GitHub rate-limits anonymous API callers.
+ */
+async function verifyPublicCandidate(candidate: LinxReleaseCandidate): Promise<void> {
+  const tags = spawnProcessSync(
+    "git",
+    [
+      "-c",
+      "credential.helper=",
+      "ls-remote",
+      "--tags",
+      `https://github.com/${repository}.git`,
+      `refs/tags/${candidate.tag}`,
+      `refs/tags/${candidate.tag}^{}`,
+    ],
+    {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 1024 * 1024,
+      timeout: 60_000,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    },
+  );
+  if (tags.error || tags.status !== 0)
+    throw new Error(`Unable to resolve the public ${candidate.tag} tag.`);
+  const rows = tags.stdout
+    .trim()
+    .split("\n")
+    .map((line) => line.split("\t"))
+    .filter((row) => row.length === 2 && row[1]!.startsWith("refs/tags/"));
+  const direct = rows.find(([, ref]) => ref === `refs/tags/${candidate.tag}`)?.[0];
+  const peeled = rows.find(([, ref]) => ref === `refs/tags/${candidate.tag}^{}`)?.[0];
+  if ((peeled ?? direct) !== candidate.sourceCommit)
+    throw new Error("The public tag does not name the candidate source commit.");
+
+  const manifest = Schema.decodeUnknownSync(LinxUpdateManifest)(
+    JSON.parse(readFileSync(join(directory, "linx-update.json"), "utf8")),
+  );
+  if (
+    manifest.channel !== "stable" ||
+    manifest.version !== candidate.version ||
+    manifest.sourceCommit !== candidate.sourceCommit ||
+    manifest.assetName !== `Linx-${candidate.version}-arm64.zip`
+  )
+    throw new Error("The public manifest is not the stable candidate.");
+
+  const allowedHosts = new Set([
+    "github.com",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+  ]);
+  const expectedNames = [...candidate.assets.map((asset) => asset.fileName), "linx-candidate.json"];
+  for (const name of expectedNames) {
+    const response = await fetch(
+      `https://github.com/${repository}/releases/download/${candidate.tag}/${encodeURIComponent(name)}`,
+      {
+        headers: { "user-agent": "linx-release-validator", Accept: "application/octet-stream" },
+        signal: AbortSignal.timeout(30 * 60_000),
+      },
+    );
+    if (!response.ok || !response.body)
+      throw new Error(`Public asset unavailable: ${name} (${response.status})`);
+    const finalHost = new URL(response.url).hostname;
+    if (!allowedHosts.has(finalHost)) throw new Error(`Unexpected public asset host: ${finalHost}`);
+    let size = 0;
+    const hash = createHash("sha256");
+    for await (const chunk of nodeBody(response.body)) {
+      size += chunk.length;
+      hash.update(chunk);
+    }
+    const expected = name === "linx-candidate.json" ? Buffer.from(candidateBytes(candidate)) : null;
+    const asset = candidate.assets.find((entry) => entry.fileName === name);
+    if (expected) {
+      if (
+        size !== expected.byteLength ||
+        hash.digest("hex") !== createHash("sha256").update(expected).digest("hex")
+      )
+        throw new Error(`Public candidate descriptor changed: ${name}`);
+    } else if (!asset || size !== asset.size || hash.digest("hex") !== asset.sha256) {
+      throw new Error(`Public candidate asset changed: ${name}`);
+    }
+  }
+}
 function git(...args: string[]): string {
   const result = spawnProcessSync("git", args, {
     cwd: root,
@@ -441,9 +527,11 @@ if (command === "protection") {
   const candidate = await readCandidate();
   if (candidateDigest(candidate) !== digestArg)
     throw new Error("Approved candidate digest mismatch.");
-  const release = await findReleaseByTag(candidate.tag, command === "validate");
-  if (!release) throw new Error(`Release ${candidate.tag} is unavailable.`);
-  if (command === "promote") {
+  if (command === "validate") {
+    await verifyPublicCandidate(candidate);
+  } else {
+    const release = await findReleaseByTag(candidate.tag);
+    if (!release) throw new Error(`Release ${candidate.tag} is unavailable.`);
     await verifyRemote(
       release,
       candidate,
@@ -457,9 +545,6 @@ if (command === "protection") {
           }
         : undefined,
     );
-  } else {
-    if (release.draft || release.prerelease) throw new Error("Candidate is not public stable.");
-    await verifyRemote(release, candidate, true);
   }
 } else if (command === "restore") {
   const tag = `v${readLinxProductVersion(root)}`;

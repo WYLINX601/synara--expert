@@ -8519,6 +8519,35 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect("rejects Suite execution on a provider that cannot materialize it", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      routing.codex.startSession.mockClear();
+      const threadId = asThreadId("thread-suite-provider");
+      const result = yield* Effect.result(
+        provider.startSession(threadId, {
+          provider: "codex",
+          threadId,
+          runtimeMode: "full-access",
+          suiteExecution: {
+            kind: "expert",
+            capabilityBindingId: "cap_test",
+            assemblyId: "sca_test",
+            rootRunId: "run_test",
+          },
+        }),
+      );
+      assertFailure(
+        result,
+        new ProviderValidationError({
+          operation: "ProviderService.startSession",
+          issue: "Suite execution does not support provider 'codex'.",
+        }),
+      );
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+    }),
+  );
+
   it.effect("rejects provider and provider-instance driver mismatches", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService;

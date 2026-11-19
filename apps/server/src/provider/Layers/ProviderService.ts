@@ -963,37 +963,43 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       threadId: ThreadId,
       provider: string,
     ) =>
-      Effect.tryPromise({
-        try: async () => {
-          if (!execution) return undefined;
-          if (!supportsSuiteRuntime(provider))
-            throw new Error("Suite runtime materialization is supported only by OMP.");
-          if (!runSkillAssemblyStore) throw new Error("Suite Run storage is unavailable.");
-          const record = await runSkillAssemblyStore.read(execution.rootRunId);
-          if (
-            !record ||
-            record.schemaVersion !== 2 ||
-            record.threadId !== threadId ||
-            record.bindingId !== execution.capabilityBindingId ||
-            record.assemblyId !== execution.assemblyId ||
-            (execution.kind === "hub-coordinator") !== (record.baseSnapshotId === null)
-          )
-            throw new Error("Suite execution does not match its durable Run.");
-          if (Option.isNone(projectionSnapshotQuery))
-            throw new Error("Suite thread authorization context is unavailable.");
-          const shell = Option.getOrUndefined(
-            await Effect.runPromise(projectionSnapshotQuery.value.getThreadShellById(threadId)),
-          );
-          if (!shell || shell.capabilityBindingId !== record.bindingId)
-            throw new Error("Suite execution is not bound to this thread.");
-          return runSkillAssemblyStore.runtimeContext(record);
-        },
-        catch: (cause) =>
-          toValidationError(
+      Effect.gen(function* () {
+        if (!execution) return undefined;
+        if (!supportsSuiteRuntime(provider))
+          return yield* toValidationError(
             "ProviderService.startSession",
-            "Suite Run resources could not be verified.",
-            cause,
-          ),
+            `Suite execution does not support provider '${provider}'.`,
+          );
+        const suite = execution;
+        return yield* Effect.tryPromise({
+          try: async () => {
+            if (!runSkillAssemblyStore) throw new Error("Suite Run storage is unavailable.");
+            const record = await runSkillAssemblyStore.read(suite.rootRunId);
+            if (
+              !record ||
+              record.schemaVersion !== 2 ||
+              record.threadId !== threadId ||
+              record.bindingId !== suite.capabilityBindingId ||
+              record.assemblyId !== suite.assemblyId ||
+              (suite.kind === "hub-coordinator") !== (record.baseSnapshotId === null)
+            )
+              throw new Error("Suite execution does not match its durable Run.");
+            if (Option.isNone(projectionSnapshotQuery))
+              throw new Error("Suite thread authorization context is unavailable.");
+            const shell = Option.getOrUndefined(
+              await Effect.runPromise(projectionSnapshotQuery.value.getThreadShellById(threadId)),
+            );
+            if (!shell || shell.capabilityBindingId !== record.bindingId)
+              throw new Error("Suite execution is not bound to this thread.");
+            return runSkillAssemblyStore.runtimeContext(record);
+          },
+          catch: (cause) =>
+            toValidationError(
+              "ProviderService.startSession",
+              "Suite Run resources could not be verified.",
+              cause,
+            ),
+        });
       });
     const verifySuiteReceipt = (
       context: SuiteRuntimeContext | undefined,

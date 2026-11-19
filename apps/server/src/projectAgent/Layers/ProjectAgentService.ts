@@ -54,6 +54,7 @@ import { HubWorkRepository } from "../../persistence/Services/HubWorkRepository"
 import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { SuiteCompositionStore } from "../../suites/SuiteCompositionStore";
 import { canonicalSuiteJson, suiteContentDigest } from "../../suites/suiteIdentity";
+import { supportsSuiteRuntime } from "../../workbench/host/providerCapabilities";
 import { resolveHubExpertCandidates } from "../../agentGateway/hubExpertDispatch";
 import { coordinatorCheckinTurnReport } from "@synara/shared/coordinatorCheckin";
 import { resolveThreadWorkspaceCwd } from "@synara/shared/threadEnvironment";
@@ -3266,6 +3267,17 @@ export const makeProjectAgentService = Effect.gen(function* () {
             if (!composition)
               return yield* Effect.fail(fail("Selected Suite revision does not exist.", "invalid"));
           }
+          // The Suite Run is materialized by the coordinator's own Provider
+          // session, so a coordinator model that cannot project it would wedge
+          // every check-in behind a failed start. Reject the save instead and
+          // keep the working configuration.
+          if (suite !== null && !supportsSuiteRuntime(input.coordinatorModelSelection.provider))
+            return yield* Effect.fail(
+              fail(
+                `Suite execution does not support provider '${input.coordinatorModelSelection.provider}'. Choose ${PROVIDER_DISPLAY_NAMES.omp} or clear the Suite.`,
+                "invalid",
+              ),
+            );
           const expertIds = [
             ...new Set(
               input.expertIds ?? (Option.isSome(existing) ? (existing.value.expertIds ?? []) : []),

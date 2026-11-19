@@ -20,6 +20,7 @@ import {
   type ProjectAgentStreamEvent,
   type ServerProviderStatus,
   type ServerSettings,
+  type SuiteComposition,
 } from "@synara/contracts";
 import { MEMORY_AUTO_DOCUMENT_PATH, memoryThreadDocumentPath } from "@synara/shared/projectAgent";
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Stream } from "effect";
@@ -31,6 +32,8 @@ import { AgentGatewayOperationRepository } from "../../agentGateway/Services/Age
 import { AgentGatewayOperationRepositoryLive } from "../../agentGateway/Layers/AgentGatewayOperationRepository.ts";
 
 import { ServerConfig } from "../../config.ts";
+import { SuiteCompositionStoreLive } from "../../suites/SuiteCompositionStore.ts";
+import { suiteContentDigest } from "../../suites/suiteIdentity.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { TextGeneration } from "../../git/Services/TextGeneration.ts";
 import { GitCore } from "../../git/Services/GitCore.ts";
@@ -657,6 +660,7 @@ function makeTestLayer(options?: {
       ),
       Layer.provideMerge(ProjectAgentRepositoryLive),
       Layer.provideMerge(HubWorkRepositoryLive),
+      Layer.provideMerge(SuiteCompositionStoreLive),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "pa-group-" })),
       Layer.provideMerge(NodeServices.layer),
@@ -827,6 +831,63 @@ it.effect("projects only the durable Suite lock when unfinished onboarding is re
     const historical = yield* service.getOverview({ projectId: groupId2 }, { kind: "user" });
     assert.equal(historical.configured, false);
     assert.equal(historical.suiteSelectionOpen, false);
+  }).pipe(Effect.provide(harness.layer));
+});
+
+it.effect("rejects a Hub Suite selection whose coordinator provider cannot run Suite Runs", () => {
+  const harness = makeTestLayer();
+  return Effect.gen(function* () {
+    const service = yield* ProjectAgentService;
+    const repository = yield* ProjectAgentRepository;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO projection_projects (project_id, kind, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES (${groupId}, 'group', 'Hub', '/tmp/suite-provider-hub', '[]', ${now}, ${now})`;
+    yield* repository.beginSuiteOnboarding(groupId);
+    const content = {
+      schemaVersion: 1 as const,
+      ref: { suiteId: "suite_00000000-0000-0000-0000-000000000031", revision: 1 },
+      name: "Provider suite",
+      description: "",
+      source: {
+        kind: "local-folder" as const,
+        sourceId: "fixture-source",
+        contentHash: "a".repeat(64),
+      },
+      adapterId: "fixture",
+      adapterVersion: 1,
+      members: [{ key: "author", expertId: "expert_fixture", roleSourcePath: null }],
+      resources: [],
+      defaults: {},
+    };
+    const composition: SuiteComposition = {
+      ...content,
+      compositionHash: suiteContentDigest(content),
+      createdAt: now,
+    };
+    yield* sql`INSERT INTO suite_compositions(suite_id, revision, composition_hash, record_json)
+          VALUES (${composition.ref.suiteId}, 1, ${composition.compositionHash}, ${JSON.stringify(composition)})`;
+    const base = { projectId: groupId, suite: composition.ref };
+    const refused = yield* Effect.flip(
+      service.configure(
+        {
+          ...base,
+          requestId: "suite-provider-unsupported",
+          coordinatorModelSelection: modelSelection,
+        },
+        { kind: "user" },
+      ),
+    );
+    assert.match(refused.message, /Suite execution does not support provider 'codex'/);
+    const accepted = yield* service.configure(
+      {
+        ...base,
+        requestId: "suite-provider-omp",
+        coordinatorModelSelection: { provider: "omp", instanceId: "omp", model: "fixture" },
+      },
+      { kind: "user" },
+    );
+    assert.deepEqual(accepted.suite, composition.ref);
+    assert.deepEqual(accepted.config?.suite, composition.ref);
   }).pipe(Effect.provide(harness.layer));
 });
 

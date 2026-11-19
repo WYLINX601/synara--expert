@@ -31,6 +31,7 @@ import {
   deriveAssociatedWorktreeMetadataPatch,
   workspaceRootsEqual,
 } from "@synara/shared/threadWorkspace";
+import { supportsSuiteRuntime } from "../workbench/host/providerCapabilities.ts";
 import { collectSubagentDescendants } from "@synara/shared/threadHierarchy";
 import { isSidechatThread } from "@synara/shared/sidechatThread";
 import { autoRuntimeModeSelectionIssue } from "@synara/shared/runtimeMode";
@@ -2124,6 +2125,19 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
       // provider's own subagent, so the Auto-mode capability check doesn't apply.
       if (command.modelSelection !== undefined && thread.creationSource !== "provider_native") {
         yield* validateAutoRuntimeMode(command, command.modelSelection, thread.runtimeMode);
+      }
+      // A bound Suite thread materializes its Run through the Provider session,
+      // so switching away from a Suite-capable provider would wedge every later
+      // turn on a start that cannot project the Run.
+      if (
+        command.modelSelection !== undefined &&
+        thread.capabilityBindingId != null &&
+        !supportsSuiteRuntime(command.modelSelection.provider)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Suite execution does not support provider '${command.modelSelection.provider}'.`,
+        });
       }
       if (command.providerHandoff === true) {
         yield* validateProviderHandoff(command, thread);

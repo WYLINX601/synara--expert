@@ -6,6 +6,10 @@
 调研日期：2026-09-24。代码基线：`eaa61eded31b6755d4f30ba8eabc5d905cf817cb`。  
 范围：在现有 Synara 内增加跨 Provider 的专家能力。Codex / Pi 是首版基线；Claude Code / oh-my-pi 扩展见第 7.4 节。暂按个人使用优先、以后可分享专家包设计；团队权限和公开市场不作为首版前提。
 
+## 2026-11-13 后续架构修订入口
+
+用户已确认原生临时 Expert 委托简化及 Pi Hub 协调方向，见 [架构主干](../_bmad-output/planning-artifacts/architecture/architecture-synara-expert-2026-11-09/ARCHITECTURE-SPINE.md)。这是待实施的新契约，不是当前运行状态：独立 Expert 与 Hub worker 的固定 Skill/工具绑定保持；仅临时子 Agent 放宽方法发现，公开接口支持则原生加载，否则文本按需加载；生命周期归 harness，不保留旧临时执行器/补丁分支。下文 2026-11-11 实施补充及历史验收继续证明原实现，新方案不得引用其结果宣称已通过。
+
 ## 2026-11-11 Suite 与原生委托实施补充
 
 本轮依据 [开发冻结附件 r2](../_bmad-output/planning-artifacts/architecture/architecture-synara-expert-2026-11-09/DEVELOPMENT-CONTRACT.md) 实施；该附件的 C-6／G-1～G-6 为公共语义，OMP 的 ACP／Task 握手仅属于 Adapter。首版 Expert、旧任务快照与 v1 Run hash 继续保留，不能用本轮实现记录改写下文历史验收范围。

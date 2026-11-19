@@ -38,6 +38,7 @@ import { ServerConfig } from "../../config.ts";
 import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { SuiteBindingResolver } from "../../suites/SuiteBindingResolver.ts";
 import { SuiteCompositionStore } from "../../suites/SuiteCompositionStore.ts";
+import { supportsSuiteRuntime } from "../../workbench/host/providerCapabilities.ts";
 import { ProjectAgentRepository } from "../../persistence/Services/ProjectAgentRepository.ts";
 import {
   ContextRepository,
@@ -1491,6 +1492,17 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 command.suiteSelection?.revision !== hub.suite?.revision)
             )
               return yield* invalid("A Hub coordinator must use its saved Suite selection.");
+            // The mode lock below is irrevocable, so a provider that cannot
+            // materialize the Suite must fail before it is taken.
+            if (
+              hub.suite != null &&
+              !supportsSuiteRuntime(
+                command.modelSelection?.provider ?? thread.modelSelection.provider,
+              )
+            )
+              return yield* invalid(
+                `Suite execution does not support provider '${command.modelSelection?.provider ?? thread.modelSelection.provider}'.`,
+              );
             const admission = yield* projectAgents
               .admitSuiteExecution({
                 projectId: hub.projectId,
@@ -1515,6 +1527,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             Effect.gen(function* () {
               if (!isExpertProvider(provider))
                 return yield* invalid(`Experts do not support '${provider}'.`);
+              if (suite && !supportsSuiteRuntime(provider))
+                return yield* invalid(`Suite execution does not support provider '${provider}'.`);
               if (!suite) {
                 const preview = yield* Effect.tryPromise({
                   try: () => expertStore.preview({ expertId, provider, cwd }),
@@ -1549,6 +1563,13 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               );
             if (!isExpertProvider(command.modelSelection.provider))
               return yield* invalid(`Experts do not support '${command.modelSelection.provider}'.`);
+            if (
+              envelope.hubCapabilityBindingId !== undefined &&
+              !supportsSuiteRuntime(command.modelSelection.provider)
+            )
+              return yield* invalid(
+                `Suite execution does not support provider '${command.modelSelection.provider}'.`,
+              );
             expertBinding = envelope.hubExpertBinding;
             if (expertBinding) {
               const binding = expertBinding;

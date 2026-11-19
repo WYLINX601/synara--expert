@@ -5180,6 +5180,116 @@ describe("first-send Suite capability ownership", () => {
     }
   });
 
+  it("rejects a Suite send on a provider that cannot materialize it before binding", async () => {
+    const f = await createSuiteEngineFixture();
+    try {
+      const create = {
+        ...f.create("suite-unsupported-provider"),
+        modelSelection: { provider: "pi" as const, model: "fixture" },
+      };
+      await f.run(f.engine.dispatch(create));
+      await expect(
+        f.run(
+          f.engine.dispatch({
+            ...f.start(create.threadId, "unsupported-provider"),
+            expertId: f.definition.id,
+            suiteSelection: f.composition.ref,
+          }),
+        ),
+      ).rejects.toThrow("Suite execution does not support provider 'pi'");
+      const draft = Option.getOrThrow(
+        await f.run(f.snapshotQuery.getThreadShellById(create.threadId)),
+      );
+      expect(draft.capabilityBindingId).toBeNull();
+      expect(draft.expertBinding).toBeNull();
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("rejects switching a bound Suite thread to a provider that cannot materialize it", async () => {
+    const f = await createSuiteEngineFixture();
+    try {
+      const create = f.create("suite-bound-switch");
+      await f.run(f.engine.dispatch(create));
+      await f.run(
+        f.engine.dispatch({
+          ...f.start(create.threadId, "bound-switch"),
+          expertId: f.definition.id,
+          suiteSelection: f.composition.ref,
+        }),
+      );
+      await expect(
+        f.run(
+          f.engine.dispatch({
+            type: "thread.meta.update",
+            commandId: CommandId.makeUnsafe("suite-bound-switch-model"),
+            threadId: create.threadId,
+            modelSelection: { provider: "pi", model: "fixture" },
+          }),
+        ),
+      ).rejects.toThrow("Suite execution does not support provider 'pi'");
+      const bound = Option.getOrThrow(
+        await f.run(f.snapshotQuery.getThreadShellById(create.threadId)),
+      );
+      expect(bound.capabilityBindingId).toBeTruthy();
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("rejects a Suite Hub coordinator on a provider that cannot materialize it before locking the Suite", async () => {
+    const f = await createSuiteEngineFixture();
+    try {
+      const hubId = asProjectId("suite-unsupported-hub");
+      const coordinatorId = ThreadId.makeUnsafe("suite-unsupported-coordinator");
+      await f.run(
+        f.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.makeUnsafe("suite-unsupported-hub-create"),
+          projectId: hubId,
+          kind: "group",
+          title: "Suite Hub",
+          workspaceRoot: path.join(f.stateDir, "hub-unsupported"),
+          createdAt: now(),
+        }),
+      );
+      const config: ProjectAgentConfig = {
+        projectId: hubId,
+        suite: f.composition.ref,
+        coordinatorThreadId: coordinatorId,
+        coordinatorName: "Coordinator",
+        coordinatorModelSelection: { provider: "pi", model: "fixture" },
+        limits: { ...DEFAULT_PROJECT_AGENT_LIMITS },
+        captureEnabled: true,
+        enabled: true,
+        automationId: null,
+        revision: 1,
+        createdAt: now(),
+        updatedAt: now(),
+        disabledAt: null,
+      };
+      await f.run(f.projectAgents.saveConfig(config, null));
+      await f.run(
+        f.engine.dispatch({
+          ...f.create(coordinatorId, false),
+          projectId: hubId,
+          modelSelection: { provider: "pi", model: "fixture" },
+        }),
+      );
+      await expect(
+        f.run(f.engine.dispatch(f.start(coordinatorId, "coordinator-unsupported"))),
+      ).rejects.toThrow("Suite execution does not support provider 'pi'");
+      expect(await f.run(f.projectAgents.isSuiteSelectionOpen(hubId))).toBe(true);
+      const coordinator = Option.getOrThrow(
+        await f.run(f.snapshotQuery.getThreadShellById(coordinatorId)),
+      );
+      expect(coordinator.capabilityBindingId).toBeNull();
+    } finally {
+      await f.dispose();
+    }
+  });
+
   it("creates only a trusted accepted Suite worker and rejects using coordinator authority as a worker", async () => {
     const f = await createSuiteEngineFixture();
     try {

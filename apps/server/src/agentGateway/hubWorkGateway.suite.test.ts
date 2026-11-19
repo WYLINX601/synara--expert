@@ -76,7 +76,7 @@ const targetCases: TargetCase[] = [
   {
     name: "accepts explicit OMP without replacing the saved unsupported Suite model",
     suite: true,
-    callerTarget: fixtureTarget("codex"),
+    callerTarget: fixtureTarget("omp"),
     savedTarget: fixtureTarget("pi"),
     explicitTarget: fixtureTarget("omp"),
     consumer: "dispatch",
@@ -90,8 +90,10 @@ const targetCases: TargetCase[] = [
     supported: true,
   },
 ];
+// A Suite Hub's coordinator must itself run on the Suite-capable provider, so an
+// unsupported caller-scoped default cannot exist; the reachable unsupported
+// Suite inputs are the saved Expert model and an explicit target.
 for (const [source, provider] of [
-  ["caller", "codex"],
   ["saved", "pi"],
   ["explicit", "claudeAgent"],
 ] as const) {
@@ -101,7 +103,7 @@ for (const [source, provider] of [
     targetCases.push({
       name: `${consumer} rejects ${source} ${provider} Suite target before accepted work or a fixed spec`,
       suite: true,
-      callerTarget: fixtureTarget(source === "caller" ? provider : "omp"),
+      callerTarget: fixtureTarget("omp"),
       ...(source === "saved" ? { savedTarget: fixtureTarget(provider) } : {}),
       ...(source === "explicit"
         ? { savedTarget: fixtureTarget("omp"), explicitTarget: fixtureTarget(provider) }

@@ -896,6 +896,7 @@ const installFrozenStageDependencies = Effect.fn("installFrozenStageDependencies
 const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   platform: typeof BuildPlatform.Type,
   target: string,
+  arch: typeof BuildArch.Type,
   artifactIdentity: ReturnType<typeof createDesktopArtifactIdentity>,
   signed: boolean,
   mockUpdates: boolean,
@@ -937,6 +938,7 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const platformBuildConfigInput = {
     platform,
     target,
+    arch,
     signed,
     adHocSign: artifactIdentity.identity.usesScriptedUpdates && !signed,
     flavor,
@@ -1374,6 +1376,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const resolvedBuildConfig = yield* createBuildConfig(
     options.platform,
     options.target,
+    options.arch,
     artifactIdentity,
     options.signed,
     options.mockUpdates,

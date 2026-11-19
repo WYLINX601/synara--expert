@@ -22,14 +22,23 @@ export function preserveDependencyDiagnostics(env: NodeJS.ProcessEnv): boolean {
 
 export function createDesktopBundleFilePatterns(
   platform: "mac" | "linux" | "win",
-  options: { readonly diagnostics?: boolean; readonly linuxGlibc?: boolean } = {},
+  options: {
+    readonly diagnostics?: boolean;
+    readonly linuxGlibc?: boolean;
+    readonly macArch?: "arm64" | "x64" | "universal";
+  } = {},
 ): string[] {
   const files = ["**/*"];
   if (!options.diagnostics) files.push(...DIAGNOSTIC_FILES);
 
   // node-pty is rebuilt before packaging. Its platform prebuilds are not
-  // interchangeable; retain both same-platform architectures for universal Mac.
+  // interchangeable; a single-architecture Mac build keeps only its own
+  // optional prebuilds. Universal builds retain both.
   if (platform !== "mac") files.push("!node_modules/node-pty/prebuilds/darwin-*/**");
+  if (platform === "mac" && options.macArch === "arm64")
+    files.push("!node_modules/**/prebuilds/darwin-x64/**");
+  if (platform === "mac" && options.macArch === "x64")
+    files.push("!node_modules/**/prebuilds/darwin-arm64/**");
   if (platform !== "win") files.push("!node_modules/node-pty/prebuilds/win32-*/**");
   files.push("!node_modules/node-pty/lib/*.test.js");
   // MSVC leaves incremental-link inputs and build logs next to the rebuilt

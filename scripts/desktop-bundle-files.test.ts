@@ -139,6 +139,17 @@ describe("desktop bundle file selection", () => {
     expect(excluded("node_modules/node-pty/prebuilds/darwin-arm64/pty.node", mac)).toBe(false);
     expect(excluded("node_modules/node-pty/prebuilds/darwin-x64/spawn-helper", mac)).toBe(false);
     expect(excluded("node_modules/node-pty/prebuilds/win32-x64/pty.node", mac)).toBe(true);
+    const arm64Mac = createDesktopBundleFilePatterns("mac", { macArch: "arm64" });
+    expect(excluded("node_modules/node-pty/prebuilds/darwin-arm64/pty.node", arm64Mac)).toBe(false);
+    expect(excluded("node_modules/node-pty/prebuilds/darwin-x64/spawn-helper", arm64Mac)).toBe(
+      true,
+    );
+    expect(
+      excluded(
+        "node_modules/@earendil-works/pi-tui/native/darwin/prebuilds/darwin-x64/darwin-platform.node",
+        arm64Mac,
+      ),
+    ).toBe(true);
     const win = createDesktopBundleFilePatterns("win");
     expect(excluded("node_modules/node-pty/prebuilds/win32-x64/conpty.node", win)).toBe(false);
     expect(excluded("node_modules/node-pty/prebuilds/darwin-arm64/pty.node", win)).toBe(true);

@@ -69,6 +69,7 @@ export interface DesktopPlatformBuildConfig {
 export interface CreateDesktopPlatformBuildConfigInput {
   readonly platform: "linux" | "mac" | "win";
   readonly target: string;
+  readonly arch?: "arm64" | "x64" | "universal";
   readonly signed?: boolean;
   /** Seal isolated local bundles without selecting a release certificate. */
   readonly adHocSign?: boolean;
@@ -114,6 +115,7 @@ export function createDesktopPlatformBuildConfig(
   const files = createDesktopBundleFilePatterns(input.platform, {
     diagnostics: preserveDependencyDiagnostics(process.env),
     linuxGlibc: typeof report?.header?.glibcVersionRuntime === "string",
+    ...(input.platform === "mac" ? { macArch: input.arch ?? "arm64" } : {}),
   });
   const nativePackaging = {
     asarUnpack: [...NODE_PTY_ASAR_UNPACK_GLOBS],

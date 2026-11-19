@@ -151,6 +151,8 @@ async function verifyNativeArchitectures(
       continue;
     }
     if (!entry.isFile()) throw new Error("Special file in candidate application");
+    // Optional foreign-architecture prebuilds are never loaded on this host.
+    if (/(?:^|\/)prebuilds\/darwin-x64\//u.test(path)) continue;
     await validateLinxMachOMinimum(path, signedMinimum, actualVersion);
   }
 }

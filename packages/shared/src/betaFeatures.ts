@@ -58,7 +58,17 @@ export const NATIVE_EDITOR_BETA_FEATURE = "native-editor";
 /** Simplified Chinese interface, native menus and app-authored permission explanations. */
 export const CHINESE_UI_BETA_FEATURE = "chinese-ui";
 
-export const BETA_ONLY_FEATURES: readonly BetaOnlyFeature[] = [CHINESE_UI_BETA_FEATURE];
+/** Importing `.claude/agents/*.md` through the Suite source adapters. */
+export const CLAUDE_AGENTS_IMPORT_BETA_FEATURE = "claude-agents-import";
+
+/** Zero-token learning signal gate before automatic Skill/Memory cycles. */
+export const EXPERT_EVOLUTION_GATE_BETA_FEATURE = "expert-evolution-gate";
+
+export const BETA_ONLY_FEATURES: readonly BetaOnlyFeature[] = [
+  CHINESE_UI_BETA_FEATURE,
+  CLAUDE_AGENTS_IMPORT_BETA_FEATURE,
+  EXPERT_EVOLUTION_GATE_BETA_FEATURE,
+];
 
 /**
  * Whether a Beta-only feature is on for this host. Only the Stable

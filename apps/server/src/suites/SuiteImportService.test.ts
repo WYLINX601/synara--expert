@@ -1069,4 +1069,72 @@ describe("durable Suite import with real owners and SQL", () => {
       }).pipe(Effect.provide(environment), Effect.scoped),
     );
   });
+  it("imports .claude/agents as Experts and reuses the plan on replay", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* Effect.promise(async () => {
+          await fs.rm(path.join(f.source, "synara-suite.json"), { force: true });
+          await fs.rm(path.join(f.source, "author.md"), { force: true });
+          await fs.mkdir(path.join(f.source, ".claude", "agents"), { recursive: true });
+          await fs.writeFile(
+            path.join(f.source, ".claude", "agents", "reviewer.md"),
+            [
+              "---",
+              "name: Claude Reviewer",
+              "description: Reviews changes.",
+              "tools: Read, Grep",
+              "---",
+              "Review carefully.",
+            ].join("\n"),
+          );
+        });
+        const preview = yield* f.preview("claude-agents");
+        expect(preview).toMatchObject({
+          adapterId: "claude-agents-v1",
+          members: [{ key: "reviewer", name: "Claude Reviewer" }],
+        });
+        expect(preview.issues).toContainEqual(
+          expect.objectContaining({
+            code: "unsupported_capability",
+            subject: expect.objectContaining({ id: "reviewer" }),
+          }),
+        );
+        const request: SuiteImportRequest = {
+          operationId: "claude-agents",
+          previewId: preview.previewId,
+          contentHash: preview.contentHash,
+          mode: "reuse-or-create",
+        };
+        const receipt = yield* f.service.commit(request);
+        if (receipt.state !== "committed") throw new Error("Expected committed import");
+        expect(receipt.reused).toBe(false);
+        const suite = yield* f.service.read(receipt.suite);
+        const experts = yield* Effect.promise(() => f.runtime.experts.list());
+        const imported = experts.find((expert) =>
+          suite.members.some((member) => member.expertId === expert.id),
+        );
+        expect(imported).toMatchObject({
+          name: "Claude Reviewer",
+          description: "Reviews changes.",
+          persona: "Review carefully.",
+        });
+        const expertCount = experts.length;
+
+        const replay = yield* f.preview("claude-agents-replay");
+        const replayed = yield* f.service.commit({
+          operationId: "claude-agents-replay",
+          previewId: replay.previewId,
+          contentHash: replay.contentHash,
+          mode: "reuse-or-create",
+        });
+        expect(replayed).toMatchObject({
+          state: "committed",
+          suite: receipt.suite,
+          reused: true,
+        });
+        expect(yield* Effect.promise(() => f.runtime.experts.list())).toHaveLength(expertCount);
+      }).pipe(Effect.provide(environment), Effect.scoped),
+    );
+  });
 });

@@ -6,7 +6,11 @@ import {
   SYNARA_DESKTOP_BUNDLE_ID_ENV,
   SYNARA_PRODUCTION_BUNDLE_ID,
 } from "@synara/shared/desktopIdentity";
-import { CHINESE_UI_BETA_FEATURE } from "@synara/shared/betaFeatures";
+import {
+  CHINESE_UI_BETA_FEATURE,
+  CLAUDE_AGENTS_IMPORT_BETA_FEATURE,
+  EXPERT_EVOLUTION_GATE_BETA_FEATURE,
+} from "@synara/shared/betaFeatures";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -23,5 +27,20 @@ it.each([
     vi.resetModules();
     const { isServerBetaFeatureEnabled } = await import("./betaFeatureGate");
     expect(isServerBetaFeatureEnabled(CHINESE_UI_BETA_FEATURE)).toBe(enabled);
+  },
+);
+
+it.each([CLAUDE_AGENTS_IMPORT_BETA_FEATURE, EXPERT_EVOLUTION_GATE_BETA_FEATURE])(
+  "keeps %s off in the Stable host and on in Beta",
+  async (feature) => {
+    vi.stubEnv(SYNARA_DESKTOP_BUNDLE_ID_ENV, SYNARA_PRODUCTION_BUNDLE_ID);
+    vi.resetModules();
+    const stable = await import("./betaFeatureGate");
+    expect(stable.isServerBetaFeatureEnabled(feature)).toBe(false);
+
+    vi.stubEnv(SYNARA_DESKTOP_BUNDLE_ID_ENV, SYNARA_BETA_BUNDLE_ID);
+    vi.resetModules();
+    const beta = await import("./betaFeatureGate");
+    expect(beta.isServerBetaFeatureEnabled(feature)).toBe(true);
   },
 );

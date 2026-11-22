@@ -1,7 +1,11 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  SYNARA_DESKTOP_BUNDLE_ID_ENV,
+  SYNARA_PRODUCTION_BUNDLE_ID,
+} from "@synara/shared/desktopIdentity";
 import { analyzeSuiteSource, compileBmadRole, mergeBmadCustomization } from "./SuiteSourceAdapters";
 import { createSuiteSourceSnapshot } from "./SuiteSourceSnapshot";
 import { expertResourceFiles } from "../experts/ExpertStore";
@@ -10,6 +14,8 @@ import { BMAD_ROLE_PRESETS } from "../experts/bmadSkillPreset";
 
 const roots: string[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
+  vi.resetModules();
   for (const root of roots.splice(0)) await expertResourceFiles.removeStaging(root);
 });
 
@@ -197,6 +203,88 @@ describe("Suite source adaptation", () => {
     await expect(analyzeSuiteSource(root, source)).rejects.toMatchObject({
       issue: { code: "invalid_manifest", effect: "deny-action" },
     });
+  });
+
+  it("imports .claude/agents Markdown as identities and reports unmapped harness fields", async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "suite-claude-")));
+    roots.push(root);
+    const source = path.join(root, "source");
+    await fs.mkdir(path.join(source, ".claude", "agents"), { recursive: true });
+    await fs.writeFile(
+      path.join(source, ".claude", "agents", "planner.md"),
+      [
+        "---",
+        "name: Launch Planner",
+        "description: Plans launches.",
+        "tools: Read, Grep",
+        "model: opus",
+        "---",
+        "Plan before acting.",
+      ].join("\n"),
+    );
+    await fs.writeFile(
+      path.join(source, ".claude", "agents", "writer.md"),
+      [
+        "---",
+        "name: Release Writer",
+        "description: Writes notes.",
+        "---",
+        "Write concise notes.",
+      ].join("\n"),
+    );
+    const captured = await createSuiteSourceSnapshot(path.join(root, "state")).capture({
+      kind: "local-folder",
+      path: source,
+    });
+    const analyzed = await analyzeSuiteSource(captured.rootPath, captured.source);
+
+    expect(analyzed.adapterId).toBe("claude-agents-v1");
+    expect(analyzed.manifest.name).toBe("Claude Agents");
+    expect(analyzed.roles.planner).toEqual({
+      name: "Launch Planner",
+      description: "Plans launches.",
+      persona: "Plan before acting.",
+      useCases: "",
+      outputRequirements: "",
+    });
+    expect(analyzed.manifest.experts).toEqual([
+      expect.objectContaining({ key: "planner", personaPath: ".claude/agents/planner.md" }),
+      expect.objectContaining({ key: "writer", personaPath: ".claude/agents/writer.md" }),
+    ]);
+    expect(analyzed.issues).toEqual([
+      expect.objectContaining({
+        code: "unsupported_capability",
+        effect: "limit-capability",
+        subject: expect.objectContaining({ kind: "expert", id: "planner" }),
+        message: expect.stringContaining("'tools'"),
+      }),
+      expect.objectContaining({
+        code: "unsupported_capability",
+        effect: "limit-capability",
+        subject: expect.objectContaining({ kind: "expert", id: "planner" }),
+        message: expect.stringContaining("'model'"),
+      }),
+    ]);
+  });
+
+  it("keeps .claude/agents detection Beta-only", async () => {
+    const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), "suite-claude-stable-")));
+    roots.push(root);
+    await fs.mkdir(path.join(root, ".claude", "agents"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, ".claude", "agents", "reviewer.md"),
+      ["---", "name: Stable Reviewer", "description: Reviews.", "---", "Review."].join("\n"),
+    );
+    vi.stubEnv(SYNARA_DESKTOP_BUNDLE_ID_ENV, SYNARA_PRODUCTION_BUNDLE_ID);
+    vi.resetModules();
+    const stable = await import("./SuiteSourceAdapters");
+    await expect(
+      stable.analyzeSuiteSource(root, {
+        kind: "local-folder",
+        sourceId: "source-stable",
+        contentHash: "a".repeat(64),
+      }),
+    ).rejects.toMatchObject({ issue: { code: "unsupported_format" } });
   });
 
   it("merges scalars, deep tables, keyed replacements and ordinary array appends", () => {

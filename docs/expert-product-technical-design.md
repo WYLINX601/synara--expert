@@ -15,6 +15,8 @@
 本轮依据 [开发冻结附件 r2](../_bmad-output/planning-artifacts/architecture/architecture-synara-expert-2026-11-09/DEVELOPMENT-CONTRACT.md) 实施；该附件的 C-6／G-1～G-6 为公共语义，OMP 的 ACP／Task 握手仅属于 Adapter。首版 Expert、旧任务快照与 v1 Run hash 继续保留，不能用本轮实现记录改写下文历史验收范围。
 
 - Suite 是不可变组合，不是另一种运行器。服务端识别 `synara-suite.json` 或固定 BMAD 结构；本地目录与 GitHub 先生成只读内容快照，预览不执行来源脚本。角色内化为 Expert，非角色 Skill 与纯文件资源保留完整依赖。唯一导入计划、原 SQL journal 与 `committed` 发布屏障共同控制文件／数据库可见性；相同来源和内容重放复用原组合。
+- 2026-11-20 增补：本地文件夹还可识别 `.claude/agents/*.md`（`claude-agents-v1`，Beta-only）。只映射 frontmatter `name`、`description` 与正文 persona；`tools`、`model` 作为 `unsupported_capability` 导入诊断返回，不映射权限或模型。不执行来源脚本、不安装依赖；同内容重放复用原组合与 Expert，不同内容不覆盖旧对象。`.expert.zip` 与社区晋升导出仍不支持。
+- 2026-11-22 归档：Expert 契约字段、首轮槽位、建议性章节提示、契约 UI 与契约 proposal 全部移出本次交付，产品方案与代码恢复说明见 [Expert 契约与契约提案（归档）](./backlog/expert-contract.md)。当前交付只保留 `.claude/agents` 导入与零 Token 进化信号门。
 - 预览的 100 项准入与到期回收使用同一资产生命周期队列；捕获前检查预算，取消／到期只能释放未被导入计划、组合、Run 或成果引用的来源包。Suite 所有者通过成果所有者的引用端口查询保护集，不读取其他模块的 SQL 表；成果封存与引用提交也在该队列内。
 - 固定 Skill 引用按不可变包／入口归属授权，不相信 `sourceId`、导入成员或新生成的快照。归属事实随版本替换保留；旧记录可从已提交回执与带 managed ID 的固定装配恢复，无法恢复则局部限制该资源。新 Expert 在持久化前排除无权／归属不明的选择；仅显式完成的宿主包导入回执或本次已捕获资产可补足未知来源证明。无来源标记的旧包导入回执不自动升级为共享授权，不宣称所有历史归属均可重建。
 - 新任务的选择先存草稿，首次发送才固定 Expert 基础快照和 Suite 能力绑定。逻辑 Run 在原装配所有者中固定资源、技能与有效配置；恢复不重新读取最新 Suite。新 Hub 通过原配置 revision／mode lock 决定独立或 Suite 模式，首次准入与保存共享事务；旧 Hub 不重新开放模式选择，Coordinator 不伪造 Expert。

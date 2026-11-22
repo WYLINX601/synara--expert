@@ -8,6 +8,7 @@ import {
   type SkillEvolutionRun,
   type SkillEvolutionOpportunity,
 } from "@synara/contracts";
+import { EXPERT_EVOLUTION_GATE_BETA_FEATURE } from "@synara/shared/betaFeatures";
 import { Effect, Schema } from "effect";
 import type { ManagedAttachmentPrincipal } from "../../managedAttachmentPrincipal";
 import { withExpertLearningCommit, installExpertLearningReconciler } from "../expertLearningCommit";
@@ -25,6 +26,8 @@ import {
 import type { SpaceMemoryServiceShape } from "../../spaceMemory/SpaceMemoryService";
 import type { ExpertLearningActionsShape } from "./ExpertLearningActions";
 import { handledLearningSignal, learningSignalSources } from "./LearningSignals";
+import { evaluateEvolutionSignal } from "./EvolutionSignalGate";
+import { isServerBetaFeatureEnabled } from "../../betaFeatureGate.ts";
 
 const Id = Schema.String.check(Schema.isMaxLength(200));
 const Cycle = Schema.Struct({
@@ -51,6 +54,8 @@ const Cycle = Schema.Struct({
     "failed",
     "cancelled",
   ]),
+  signalScore: Schema.optional(Schema.Number),
+  signalReasons: Schema.optional(Schema.Array(Id).check(Schema.isMaxLength(8))),
   updatedAt: Schema.String,
   error: Schema.optional(Schema.String),
 });
@@ -648,6 +653,10 @@ export function createExpertLearningService(input: {
           continue;
         const cycleId = key(row.ownerId + ":" + source.evidenceId + ":" + record.state.epoch);
         if (await run(input.repository.readCycle(cycleId))) continue;
+        const signal = isServerBetaFeatureEnabled(EXPERT_EVOLUTION_GATE_BETA_FEATURE)
+          ? evaluateEvolutionSignal(evidence)
+          : undefined;
+        if (signal && !signal.thresholdMet) continue;
         await saveCycle({
           cycleId,
           ownerId: row.ownerId,
@@ -660,6 +669,7 @@ export function createExpertLearningService(input: {
           applied: 0,
           attempt: 0,
           status: "queued",
+          ...(signal ? { signalScore: signal.score, signalReasons: signal.reasons } : {}),
           updatedAt: now(),
         });
         return;

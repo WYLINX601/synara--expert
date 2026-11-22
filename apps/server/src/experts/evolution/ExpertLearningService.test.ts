@@ -215,6 +215,12 @@ function evidence(input: {
         text: "Use verified evidence and keep a decision log.",
         role: "user",
       },
+      {
+        id: "message-correction",
+        kind: "message",
+        text: "That's not right; correct the decision log.",
+        role: "user",
+      },
     ],
     coverage: ["user_feedback"],
     completedAt: timestamp,
@@ -986,6 +992,31 @@ describe("ExpertLearningService", () => {
     expect(evolution.calls.filter((call) => call.action === "startAutomatic")[0]).toMatchObject({
       context: { cycleId: expect.any(String), epoch: 1, evidence: { evidenceId: item.evidenceId } },
     });
+  });
+
+  it("keeps evidence but creates no automatic cycle for an ordinary completed turn", async () => {
+    const expertId = "expert-learning-neutral";
+    const thread = sourceThread({ expertId, threadId: "thread-learning-neutral" });
+    const fixture = await serviceFixture({ expertId, thread, evolution: fakeEvolution() });
+    await enable(fixture);
+    const neutral = evidence({ expertId, threadId: "thread-learning-neutral" });
+    putEvidence(fixture.repository, {
+      ...neutral,
+      items: [
+        {
+          id: "message-neutral",
+          kind: "message",
+          text: "Summarize the release notes.",
+          role: "user",
+        },
+      ],
+    });
+
+    await fixture.service.tick();
+    await fixture.service.tick();
+
+    expect(fixture.repository.cycles.size).toBe(0);
+    expect(fixture.repository.evidence.size).toBe(1);
   });
 
   it.each(["snapshot", "project"] as const)(

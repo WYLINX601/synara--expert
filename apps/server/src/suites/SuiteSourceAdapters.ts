@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import type { Dirent } from "node:fs";
+import { CLAUDE_AGENTS_IMPORT_BETA_FEATURE } from "@synara/shared/betaFeatures";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Schema } from "effect";
@@ -14,6 +16,7 @@ import {
 import { expertResourceFiles } from "../experts/ExpertStore";
 import { compareResourcePaths } from "../experts/FileResourceStore";
 import { assertSkillResourcePath, SKILL_PACKAGE_LIMIT } from "../experts/skillLibraryArchive";
+import { isServerBetaFeatureEnabled } from "../betaFeatureGate";
 import { BMAD_PINNED_FILES } from "./bmadPinnedFiles";
 import { sourceIssue, SuiteSourceError } from "./SuiteSourceSnapshot";
 
@@ -354,6 +357,196 @@ export async function compileBmadRole(input: {
   }
 }
 
+const CLAUDE_AGENTS_ROOT = ".claude/agents";
+const CLAUDE_AGENTS_LIMIT = 200;
+const CLAUDE_AGENT_PERSONA_LIMIT = 32_000;
+
+/**
+ * Claude Code agent Markdown is a cold-start identity source, not a runtime
+ * adapter: only name/description/body are mapped. `tools` and `model` stay
+ * visible as import issues so the import never claims permissions it did not apply.
+ */
+async function analyzeClaudeAgentsSource(
+  rootPath: string,
+  sourceId: string,
+  issues: SuiteIssue[],
+): Promise<AnalyzedSuiteSource | null> {
+  const addIssue = (issue: SuiteIssue) => {
+    if (issues.length >= 200)
+      throw new SuiteSourceError(
+        sourceIssue("invalid_manifest", "Source diagnostics exceed 200 entries.", {
+          kind: "suite",
+          id: sourceId,
+          path: null,
+        }),
+      );
+    issues.push(issue);
+  };
+  let entries: Dirent[];
+  try {
+    const stat = await fs.lstat(path.join(rootPath, CLAUDE_AGENTS_ROOT));
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new SuiteSourceError(
+        sourceIssue("unsafe_path", "The .claude/agents root must be a real directory.", {
+          kind: "suite",
+          id: sourceId,
+          path: CLAUDE_AGENTS_ROOT,
+        }),
+      );
+    }
+    entries = await fs.readdir(path.join(rootPath, CLAUDE_AGENTS_ROOT), { withFileTypes: true });
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw cause;
+  }
+  const files = entries
+    .filter((entry) => entry.name.endsWith(".md") && !entry.isDirectory())
+    .sort((left, right) => left.name.localeCompare(right.name));
+  if (files.length > CLAUDE_AGENTS_LIMIT)
+    throw new SuiteSourceError(
+      sourceIssue(
+        "unsupported_format",
+        `No more than ${CLAUDE_AGENTS_LIMIT} .claude/agents Markdown files are supported.`,
+        { kind: "suite", id: sourceId, path: CLAUDE_AGENTS_ROOT },
+      ),
+    );
+  const roles: Record<string, CompiledSuiteRole> = Object.create(null);
+  const experts: Array<SuiteManifestV1["experts"][number]> = [];
+  for (const entry of files) {
+    const relative = `${CLAUDE_AGENTS_ROOT}/${entry.name}`;
+    const key = entry.name.slice(0, -".md".length);
+    const subject = { kind: "expert" as const, id: key, path: relative };
+    if (entry.isSymbolicLink()) {
+      addIssue(
+        sourceIssue(
+          "unsafe_path",
+          "Symlinked agent files are not imported.",
+          subject,
+          "deny-action",
+        ),
+      );
+      continue;
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(key)) {
+      addIssue(
+        sourceIssue(
+          "invalid_manifest",
+          "Agent file names may contain letters, digits, dot, underscore and hyphen only.",
+          subject,
+        ),
+      );
+      continue;
+    }
+    if (roles[key]) {
+      addIssue(
+        sourceIssue("invalid_manifest", "Duplicate agent file name.", subject, "deny-action"),
+      );
+      continue;
+    }
+    let markdown: string;
+    try {
+      markdown = utf8(await readSuiteSourceFile(rootPath, relative));
+    } catch (cause) {
+      addIssue(
+        sourceIssue(
+          "source_unreadable",
+          cause instanceof Error ? cause.message : String(cause),
+          subject,
+          "deny-action",
+        ),
+      );
+      continue;
+    }
+    const front = /^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(markdown);
+    let metadata: Record<string, unknown>;
+    try {
+      const parsed: unknown = front ? YAML.parse(front[1]!) : null;
+      if (!table(parsed)) throw new Error("Agent Markdown needs YAML frontmatter.");
+      metadata = parsed;
+    } catch (cause) {
+      addIssue(
+        sourceIssue(
+          "invalid_manifest",
+          cause instanceof Error ? cause.message : String(cause),
+          subject,
+          "deny-action",
+        ),
+      );
+      continue;
+    }
+    const name = typeof metadata.name === "string" ? metadata.name.trim() : key;
+    const description = typeof metadata.description === "string" ? metadata.description : "";
+    const persona = markdown.slice(front![0].length).trim();
+    if (!name || name.length > 200 || description.length > 16_000) {
+      addIssue(
+        sourceIssue(
+          "invalid_manifest",
+          "Agent name must be 1-200 characters and description at most 16,000.",
+          subject,
+          "deny-action",
+        ),
+      );
+      continue;
+    }
+    if (!persona || persona.length > CLAUDE_AGENT_PERSONA_LIMIT) {
+      addIssue(
+        sourceIssue(
+          "identity_unavailable",
+          `The agent body must contain 1-${CLAUDE_AGENT_PERSONA_LIMIT} characters.`,
+          subject,
+          "deny-action",
+        ),
+      );
+      continue;
+    }
+    for (const field of ["tools", "model"] as const) {
+      if (metadata[field] === undefined) continue;
+      addIssue({
+        ...sourceIssue(
+          "unsupported_capability",
+          `${relative} declares '${field}'; it is preserved in source only and was not mapped.`,
+          subject,
+          "limit-capability",
+        ),
+        action: "run",
+      });
+    }
+    roles[key] = {
+      name,
+      description,
+      persona,
+      useCases: "",
+      outputRequirements: "",
+    };
+    experts.push({
+      key,
+      kind: "definition",
+      name,
+      description,
+      personaPath: relative,
+      resourceKeys: [],
+    });
+  }
+  if (experts.length === 0)
+    throw new SuiteSourceError(
+      sourceIssue("unsupported_format", "No readable .claude/agents Markdown could be imported.", {
+        kind: "suite",
+        id: sourceId,
+        path: CLAUDE_AGENTS_ROOT,
+      }),
+    );
+  const manifest: SuiteManifestV1 = {
+    schemaVersion: 1,
+    name: "Claude Agents",
+    description: "Imported Claude Code agent definitions",
+    experts,
+    resources: [],
+    sharedResourceKeys: [],
+    coordinatorResourceKeys: [],
+  };
+  return { adapterId: "claude-agents-v1", adapterVersion: 1, manifest, roles, issues };
+}
+
 export async function analyzeSuiteSource(
   rootPath: string,
   source: SuiteSource,
@@ -627,14 +820,21 @@ export async function analyzeSuiteSource(
       }
     }
   }
-  if (!hasRole)
+  if (!hasRole) {
+    // A recognizable BMAD root wins; a bare .claude/agents folder is the
+    // second explicit cold-start source.
+    if (isServerBetaFeatureEnabled(CLAUDE_AGENTS_IMPORT_BETA_FEATURE)) {
+      const claudeAgents = await analyzeClaudeAgentsSource(rootPath, source.sourceId, issues);
+      if (claudeAgents) return claudeAgents;
+    }
     throw new SuiteSourceError(
       sourceIssue(
         "unsupported_format",
-        "No root synara-suite.json or registered fixed BMAD skills root was recognized.",
+        "No root synara-suite.json, registered fixed BMAD skills root or .claude/agents folder was recognized.",
         { kind: "suite", id: source.sourceId, path: null },
       ),
     );
+  }
   const skillsRoot = path.join(rootPath, skillsPrefix);
   const verifiedFiles = new Set<string>();
   const unavailable = new Set<string>();

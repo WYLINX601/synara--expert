@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CLAUDE_AGENTS_IMPORT_BETA_FEATURE,
   desktopFlavorFromBundleId,
   desktopFlavorFromProtocol,
+  EXPERT_EVOLUTION_GATE_BETA_FEATURE,
   GROUPS_BETA_FEATURE,
   INLINE_VISUALS_BETA_FEATURE,
   isBetaFeatureEnabled,
@@ -90,6 +92,16 @@ describe("isBetaFeatureEnabled", () => {
     expect(isBetaFeatureEnabled("audio-trail", "beta")).toBe(true);
     expect(isBetaFeatureEnabled("audio-trail", "production")).toBe(true);
   });
+
+  it.each([CLAUDE_AGENTS_IMPORT_BETA_FEATURE, EXPERT_EVOLUTION_GATE_BETA_FEATURE])(
+    "keeps %s Beta-only",
+    (feature) => {
+      expect(isBetaFeatureEnabled(feature, "production")).toBe(false);
+      for (const flavor of ["beta", "development", "canary", "cua", "unknown"] as const) {
+        expect(isBetaFeatureEnabled(feature, flavor)).toBe(true);
+      }
+    },
+  );
 
   it("leaves unlisted features enabled everywhere", () => {
     // The list is the whole gate: a feature not present is enabled everywhere,

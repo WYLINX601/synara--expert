@@ -746,6 +746,7 @@ export async function migrateLegacyLinxHome(input: {
       userDataPath: sourceUserDataPath,
       userDataSnapshotPath: offlineProfilePath,
       userDataSnapshotFormat: "offline-profile",
+      legacyWorkbenchImport: true,
       sourceVersion: input.sourceVersion,
       attemptId,
     });

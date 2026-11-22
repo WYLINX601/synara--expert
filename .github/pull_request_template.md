@@ -1,14 +1,12 @@
 <!--
-⚠️ READ BEFORE OPENING ⚠️
+Focused contributions are welcome. This repository is WYLINX601/synara--expert;
+PRs target its main branch, not upstream.
 
-We are not actively accepting contributions right now.
-
-You can still open a PR, but please do so knowing there is a high chance
-we may close it without merging it, or never review it.
-
-- Small, focused PRs are strongly preferred. Bug fixes are most likely to be merged.
-- New features will most likely just annoy us.
-- 1,000+ line PRs with a bunch of new features will probably get you banned from the repo.
+- Small, focused PRs are strongly preferred. Bug fixes, reliability fixes, and maintenance work are most likely to be merged.
+- Open a draft PR with a short proposal first for non-trivial changes.
+- Large, unfocused, or out-of-scope PRs may be closed without review.
+- UI changes must stay within the authorized scope and include before/after evidence.
+- Do not include credentials, user data, provider logs, diagnostics, or real databases.
 -->
 
 ## What Changed
@@ -32,7 +30,11 @@ we may close it without merging it, or never review it.
 
 ## Checklist
 
-- [ ] This PR is small and focused
-- [ ] I explained what changed and why
-- [ ] I included before/after screenshots for any UI changes
-- [ ] I included a video for animation/interaction changes
+- [ ] This PR targets `origin/main`, not an upstream branch
+- [ ] This PR is small and focused; unrelated changes are excluded
+- [ ] I linked an issue or story, or explained why one is not needed
+- [ ] I ran the checks required for this change and recorded their results
+- [ ] UI changes stay within the authorized scope and include before/after screenshots
+- [ ] I included a video for animation or interaction changes
+- [ ] This PR contains no credentials, user data, provider logs, diagnostics, or real databases
+- [ ] This branch is rebased on latest `main`, or the PR explains why a shared-branch merge was used

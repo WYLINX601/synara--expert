@@ -1,10 +1,25 @@
 # Contributing
 
+## This Repository
+
+This is the `WYLINX601/synara--expert` fork. All contributions target its `main` branch; Stable and Beta share that branch, so there is no Beta branch.
+
+- **Invited collaborators** work from an agreed issue or story, use a task branch, and open a PR. Do not push directly to `main`; the repository ruleset blocks force-push and deletion.
+- **External contributors** fork this repository, branch from `main`, and open a PR. Expect `vouch:unvouched` until a maintainer adds you to [.github/VOUCHED.td](.github/VOUCHED.td) or grants write access.
+- **Upstream** [Emanuele-web04/synara](https://github.com/Emanuele-web04/synara) is not the default PR target. Upstream sync and upstream PRs are maintainer tasks; do not send this fork's changes upstream without the sync owner.
+- **Before a non-trivial change**, open a draft PR with a short proposal (GitHub Issues are disabled on this fork), or use the agreed team story if you have access. UI or core-flow changes need design confirmation before implementation.
+- **One PR, one slice.** Link the issue or story if one exists, record the checks you ran, and rebase on the latest `main`. Do not mix unrelated formatting or drive-by refactors. Wait for the aggregate CI gate `Format, Lint, Typecheck, Test, Browser Test, Build` on the PR head.
+- **Review**: once the repository has more than one active developer with write access, every code PR needs at least one non-author approval from a write-access reviewer. Authors never self-approve.
+- **Security**: never include credentials, user data, provider logs, diagnostics, or real databases in issues, PRs, screenshots, or test artifacts. Use an isolated home and ports for tests.
+- **Releases**: `v*.*.*` tags are maintainer-only and immutable. Contributors do not create tags or publish releases.
+
+The detailed team workflow, ownership rules, and merge queue live in [the development SOP](docs/workbench-development-workflow.md#multi-contributor). The scope guidance below still applies to unsolicited contributions.
+
 ## Read This First
 
 We are accepting focused contributions, especially small bug fixes, reliability fixes, performance improvements, and maintenance work.
 
-You can open an issue or PR, but please do so knowing that Synara is still early and we are keeping scope, quality, and direction tight.
+You can open a pull request; fork-specific proposals start as a draft PR. Reproducible upstream bugs belong in the upstream issue tracker. Please do so knowing that Synara is still early and we are keeping scope, quality, and direction tight.
 
 Large, unfocused, or direction-changing PRs may still be closed quickly.
 
@@ -52,11 +67,11 @@ If the change depends on motion, timing, transitions, or interaction details, in
 
 If we have to guess what changed, we are much less likely to review it.
 
-## Issues First
+## Proposals First
 
-If you are thinking about a non-trivial change, open an issue first.
+If you are thinking about a non-trivial change, open a draft PR with a short proposal first. GitHub Issues are disabled on this fork; if you have access to the team story tracker, use that instead.
 
-That gives you a chance to check whether the direction fits before spending time on a larger patch.
+That gives you a chance to check whether the direction fits before spending time on a larger patch. Reproducible upstream bugs belong in the upstream issue tracker.
 
 ## Testing
 

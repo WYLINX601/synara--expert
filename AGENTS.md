@@ -25,7 +25,7 @@ Linx 基于 Synara 持续演进，包含 Web、Server/CLI、Desktop、Marketing 
 - 每项 Linx 工作从 [项目路由](context/PROJECT_CONTEXT.md#execution-entry) 选择当前目标与材料，只读相关章节。产品规划读取 [Linx V2.0](docs/linx-product-design-v2.md)，运行与验收结论核对当前源码及对应证据。
 - 产品/对象所有权读取 [core concepts](docs/core-concepts.md) 与 [providers](docs/providers.md)。模块、路由/布局和宿主接入读取 [架构标准](docs/workbench-adaptation-plan.md#current-standard-v11)，并核对 `workbench/integration-points.json`。
 - Expert、Skill、MCP 或 Task handoff 变动时读取 [既有 Expert 契约](docs/expert-product-technical-design.md)、[Expert 中心方案](docs/expert-center-product-plan-2026-10-28.md) 与对应专项验收，并按其各自版本范围核对。涉及跨 Provider 接续时先查 [接管记录](context/BMAD_CONTEXT_ADOPTION.md) 的文档对齐待办。
-- 开发、修复、集成、检查选择、环境收尾与文档回写读取 [开发 SOP](docs/workbench-development-workflow.md#execution-sop)。外部贡献同时遵循 [CONTRIBUTING](CONTRIBUTING.md) 与受影响包的 manifest。
+- 开发、修复、集成、检查选择、环境收尾与文档回写读取 [开发 SOP](docs/workbench-development-workflow.md#execution-sop)。外部贡献与多人协作遵循 [CONTRIBUTING](CONTRIBUTING.md) 的提交路径和 [多人协作规则](docs/workbench-development-workflow.md#multi-contributor)，并遵循受影响包的 manifest。
 - 上游源码导入任务读取 [sync SOP](docs/workbench-implementation-plan.md#sync-sop)、[基线证据](workbench/WB-00-upstream-evidence.md#2026-10-16-baseline-audit) 和 [自动化记录](workbench/WB-05-automation.md#2026-10-16-remote-read-only-audit)。先核对 Git ancestry、锁、候选状态与准确源码验收，历史 ready 只用于其原候选，锁的修改必须有真实候选核验依据。
 - 安装、签名与发布读取 [发布指南](docs/release.md)，Beta/Stable 工作同时读 [BETA](BETA.md)，Canary 操作读 [Canary](docs/canary.md)。Linx 产品更新按项目路由中的独立发布计划执行。
 - 在 `apps/marketing/` 工作时显式读取 [该包规范](apps/marketing/AGENTS.md)，按其要求从该包解析 Next.js 附带文档并遵循弃用说明。Next.js 管理自己的生成规则区。
@@ -58,7 +58,7 @@ Linx 基于 Synara 持续演进，包含 Web、Server/CLI、Desktop、Marketing 
 
 ## 环境、交付与已知陷阱
 
-- 按 [环境生命周期](docs/workbench-development-workflow.md#environment-lifecycle) 复用主 checkout 与开发预览，临时树须有隔离需要及预算依据，聊天或子 Agent 本身不能触发新建。
+- 按 [环境生命周期](docs/workbench-development-workflow.md#environment-lifecycle) 复用主 checkout 与开发预览；并行任务按已授权的 checkout 预算分配独立 worktree，每棵树只允许一个写入 owner，聊天或子 Agent 本身不能自行扩增。
 - 跨任务和版本复用一个长期交付根，材料保存在仓库内受管位置。按 [单一交付根](docs/workbench-development-workflow.md#single-delivery-root) 先盘点输出，验证替代并更新恢复引用后轮换，交付时关闭暂存，报告受阻清理及恢复条件。
 - 按 [Git 与恢复保留](docs/workbench-development-workflow.md#git-first-storage) 保存源码历史，普通开发额外打包或完整数据复制须有交付需要。退役安装解压副本前核验完整 bundle、元数据及恢复能力，压缩/解压恢复应用避免长期重复保留。用户数据和固定迁移恢复点单独核验保留。
 - 切换、刷新、删除或归档前核对任务所有者、tracked/untracked/ignored 工作、Git 历史、数据兼容与实际进程/文件使用，串行处理冲突。已合并分支或过期所有权本身不能授权删除。原生 worktree 归档前保全唯一 ignored 数据，回收已核验可重建资源，并分别报告代码交付与资源收尾。

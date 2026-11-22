@@ -2,6 +2,8 @@
 
 状态：2026-11-06 已执行重复应用清理与流程优化；历史数据恢复点仍有待核验项。长期规则见[环境与存储规则](workbench-development-workflow.md#environment-lifecycle)和[Git 管历史](workbench-development-workflow.md#git-first-storage)，本文记录本机结果，不代表自动轮换已实现。
 
+> 2026-11-19 存储扩容后容量预算已上调，见[环境与存储规则](workbench-development-workflow.md#environment-lifecycle)；本文的 20 GiB 阈值与容量结论保留为 2026-11-05／06 当时记录。
+
 ## 2026-11-06 实际结果
 
 用户要求减少浪费、避免重复版本、历史源码通过 Git 管理。现场核对发现：Git 跟踪的 9,800 个路径对应文件合计约 **128 MiB**，`.git` 约 **384 MiB**，根依赖约 **2.7 GiB**。大目录主要由应用包、用户数据备份、浏览器 profile 和演练副本构成，不能把整个开发目录与 GitHub 源码体积直接比较。

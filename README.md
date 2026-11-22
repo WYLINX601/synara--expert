@@ -156,7 +156,7 @@ the root `typecheck` command also ensures that patch is applied before checking.
 
 Bug fixes, reliability improvements, performance work, documentation, and maintenance changes are welcome.
 
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull request. For a reproducible problem, [open an issue](https://github.com/Emanuele-web04/synara/issues/new/choose) with the Synara version, operating system, runtime, and relevant logs.
+Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull request. Fork-specific proposals start as a draft PR; reproducible upstream bugs belong in the [upstream issue tracker](https://github.com/Emanuele-web04/synara/issues/new/choose) with the Synara version, operating system, runtime, and relevant logs.
 
 ## License
 

@@ -216,17 +216,19 @@ function isRegenerableCodexAlias(
   relative: string,
   target: string,
   policies: ReadonlyMap<string, readonly string[]>,
+  legacyWorkbenchImport: boolean,
 ): boolean {
   const directory = path.posix.dirname(relative);
   const policy = policies.get(directory);
   if (!policy) return false;
   const name = path.posix.basename(relative);
-  // config.toml is generated as a real file, not an alias. SQLite state and
-  // ownership markers are explicitly excluded by the provider's linker.
+  // Old Workbench overlays linked the marker from the selected Codex source.
+  // The source still owns it. Preserve real marker files and never copy or
+  // re-create a link to an external marker in the restored home.
   if (
     name === "config.toml" ||
     /^.+\.sqlite(?:-(?:wal|shm|journal))?$/u.test(name) ||
-    /^synara-shared-continuation-v[12]\.json$/u.test(name) ||
+    (!legacyWorkbenchImport && /^synara-shared-continuation-v[12]\.json$/u.test(name)) ||
     name.startsWith(".synara-shared-continuation-v1.lock") ||
     (directory.endsWith(`/${SYNARA_CODEX_HOME_FIXED_EXPERT_DIR}`) &&
       (name === "skills" || name === "plugins"))
@@ -288,6 +290,7 @@ async function inventory(
   rootPath: string,
   skipRuntime: boolean,
   allowMissing = false,
+  legacyWorkbenchImport = false,
 ): Promise<LinxUpdateRecoveryEntry[]> {
   const entries: LinxUpdateRecoveryEntry[] = [];
   if (allowMissing) {
@@ -356,7 +359,9 @@ async function inventory(
         !inside(rootPath, resolvedTarget)
       ) {
         overlayAliases ??= await codexOverlayAliasPolicy(rootPath);
-        if (isRegenerableCodexAlias(relative, resolvedTarget, overlayAliases)) {
+        if (
+          isRegenerableCodexAlias(relative, resolvedTarget, overlayAliases, legacyWorkbenchImport)
+        ) {
           if (!unchanged(before, await fs.lstat(absolute)))
             throw new Error(`Link changed during recovery: ${absolute}`);
           return;
@@ -518,10 +523,23 @@ export async function createLinxUpdateRecoverySet(input: {
   /** Immutable prepared export, required instead of copying a live Chromium database. */
   userDataSnapshotPath?: string;
   userDataSnapshotFormat?: "offline-profile" | "portable-app-storage";
+  legacyWorkbenchImport?: true;
 }): Promise<LinxUpdateRecoveryManifest> {
   const recovery = await canonicalLinxDataPath(input.recoveryDirectoryPath);
   const home = await canonicalLinxDataPath(input.homePath);
   const userData = await canonicalLinxDataPath(input.userDataPath);
+  const legacyWorkbenchImport = input.legacyWorkbenchImport === true;
+  if (
+    legacyWorkbenchImport &&
+    ![
+      [".synara-workbench", "workbench"],
+      [".synara-workbench-preview", "workbench-preview"],
+    ].some(
+      ([legacyHome, legacyProfile]) =>
+        path.basename(home) === legacyHome && path.basename(userData) === legacyProfile,
+    )
+  )
+    throw new Error("Legacy alias policy requires the Workbench home and profile");
   const profileSource =
     input.userDataSnapshotPath === undefined
       ? userData
@@ -556,7 +574,7 @@ export async function createLinxUpdateRecoverySet(input: {
     copyFile: copyVerifiedFile,
   });
   const dataEntries = [
-    ...(await inventory("home", home, true, true)),
+    ...(await inventory("home", home, true, true, legacyWorkbenchImport)),
     ...(await inventory("userData", profileSource, true, true)),
   ];
   const entries = managedRepositories.length
@@ -586,7 +604,7 @@ export async function createLinxUpdateRecoverySet(input: {
   );
   if (
     !sameInventory(dataEntries, [
-      ...(await inventory("home", home, true, true)),
+      ...(await inventory("home", home, true, true, legacyWorkbenchImport)),
       ...(await inventory("userData", profileSource, true, true)),
     ])
   ) {

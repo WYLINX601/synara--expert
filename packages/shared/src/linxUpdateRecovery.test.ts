@@ -25,11 +25,11 @@ afterEach(async () => {
     temporary.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })),
   );
 });
-async function fixture() {
+async function fixture(homeName = "home", profileName = "profile") {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "linx-recovery-test-"));
   temporary.push(root);
-  const homePath = path.join(root, "home");
-  const userDataPath = path.join(root, "profile");
+  const homePath = path.join(root, homeName);
+  const userDataPath = path.join(root, profileName);
   await fs.mkdir(path.join(homePath, "userdata", "secrets"), { recursive: true, mode: 0o700 });
   await fs.mkdir(userDataPath, { mode: 0o700 });
   await fs.writeFile(path.join(homePath, "userdata", "state.sqlite"), "database-and-ledger");
@@ -277,6 +277,45 @@ describe("verified Linx recovery sets", () => {
         "utf8",
       ),
     ).toBe("{damaged settings");
+  });
+  it("allows the legacy Workbench marker alias only to its configured Codex source", async () => {
+    const input = await fixture(".synara-workbench", "workbench");
+    const source = path.join(input.root, "codex");
+    const overlay = path.join(input.homePath, "codex-home-overlay");
+    const marker = "synara-shared-continuation-v2.json";
+    const original = path.join(source, marker);
+    const alias = path.join(overlay, marker);
+    await fs.mkdir(source);
+    await fs.mkdir(overlay);
+    await fs.writeFile(original, "external marker");
+    await fs.writeFile(
+      path.join(input.homePath, "userdata", "settings.json"),
+      JSON.stringify({ providers: { codex: { homePath: source } } }),
+    );
+    await fs.symlink(original, alias);
+    await expect(
+      createLinxUpdateRecoverySet({
+        ...input,
+        recoveryDirectoryPath: path.join(input.root, "normal-recovery"),
+      }),
+    ).rejects.toThrow("Escaping recovery link");
+    const manifest = await createLinxUpdateRecoverySet({ ...input, legacyWorkbenchImport: true });
+    expect(manifest.entries.some((entry) => entry.path.endsWith(marker))).toBe(false);
+    await verifyLinxUpdateRecoverySet(input.recoveryDirectoryPath);
+    expect(await fs.readlink(alias)).toBe(original);
+    expect(await fs.readFile(original, "utf8")).toBe("external marker");
+
+    await fs.unlink(alias);
+    const unrelated = path.join(input.root, marker);
+    await fs.writeFile(unrelated, "unrelated marker");
+    await fs.symlink(unrelated, alias);
+    await expect(
+      createLinxUpdateRecoverySet({
+        ...input,
+        recoveryDirectoryPath: path.join(input.root, "unrelated-recovery"),
+        legacyWorkbenchImport: true,
+      }),
+    ).rejects.toThrow("Escaping recovery link");
   });
   it.each(["config.toml", "state.sqlite", "nested/auth.json"])(
     "does not exempt a non-generated alias even with a configured source (%s)",

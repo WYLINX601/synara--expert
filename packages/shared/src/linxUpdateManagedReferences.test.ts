@@ -43,7 +43,7 @@ async function fixture(splitIndex = false) {
   const checkout = path.join(homePath, "worktrees", "thread");
   await git(repository, ["worktree", "add", "-b", "managed-thread", checkout]);
   const threadId = "owned-thread";
-  const checkpointRef = `refs/synara/checkpoints/${Buffer.from(threadId).toString("base64url")}/turn/1`;
+  const checkpointRef = `refs/legacy-workbench/checkpoints/${Buffer.from(threadId).toString("base64url")}/turn/1`;
   await fs.writeFile(path.join(checkout, "tracked"), "unique checkpoint bytes");
   await git(checkout, ["add", "tracked"]);
   const tree = await git(checkout, ["write-tree"]);
@@ -77,10 +77,10 @@ async function fixture(splitIndex = false) {
   const common = path.join(repository, ".git");
   const db = new DatabaseSync(path.join(homePath, "userdata", "state.sqlite"));
   db.exec(
-    "CREATE TABLE projection_threads (thread_id TEXT, worktree_path TEXT, associated_worktree_path TEXT); CREATE TABLE projection_checkpoints (thread_id TEXT, checkpoint_ref TEXT)",
+    "CREATE TABLE projection_threads (thread_id TEXT, worktree_path TEXT, associated_worktree_path TEXT); CREATE TABLE projection_turns (thread_id TEXT, checkpoint_ref TEXT)",
   );
   db.prepare("INSERT INTO projection_threads VALUES (?, ?, ?)").run(threadId, checkout, checkout);
-  db.prepare("INSERT INTO projection_checkpoints VALUES (?, ?)").run(threadId, checkpointRef);
+  db.prepare("INSERT INTO projection_turns VALUES (?, ?)").run(threadId, checkpointRef);
   db.close();
   return {
     root,

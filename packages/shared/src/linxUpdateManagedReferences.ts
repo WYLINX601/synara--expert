@@ -283,7 +283,9 @@ async function checkpointFamilies(home: string): Promise<Map<string, Set<string>
     if (threads.length > 200_000)
       throw new Error("Managed reference thread inventory exceeds bounds");
     const checkpoints = database
-      .prepare("SELECT thread_id, checkpoint_ref FROM projection_checkpoints LIMIT 200001")
+      .prepare(
+        "SELECT thread_id, checkpoint_ref FROM projection_turns WHERE checkpoint_ref IS NOT NULL LIMIT 200001",
+      )
       .all() as { thread_id: string; checkpoint_ref: string }[];
     if (checkpoints.length > 200_000)
       throw new Error("Managed checkpoint inventory exceeds bounds");

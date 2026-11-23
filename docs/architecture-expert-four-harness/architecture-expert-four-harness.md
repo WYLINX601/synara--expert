@@ -88,6 +88,8 @@ flowchart LR
 - **Codex：** CLI 0.170.0 能提交 `developerInstructions`；公开 `thread/start`、`thread/read` 和恢复协议未返回已生效指令或其哈希。现有原生 Skill 验证不证明完整 Suite 投影。保持 Suite 门禁关闭。
 - **原生委派：** Claude 的公开 SDK 能把 Agent 类型、工具调用与实际 task ID 关联；Codex 能用子线程 ID 查角色，但它们尚未证明本方案所需的固定 Profile、生效范围与父会话授权。OMP 18.16.0 的公开 Task/扩展可观察子执行，未证明 ACP 下的 Gateway 代次关联与终态边界；因此未开启新路径，也未排空或退役旧 OMP。Pi 仍等待公开内置子 Agent。
 
+Claude Code 与 Codex 的公开接入、证据边界和开放顺序见[两端开放方案](./claude-codex-integration.md)。该方案不更改当前门禁。
+
 ## 延后事项
 
 跨 harness 原生子委派不在范围；跨 Provider 迁移、Suite 来源扩展、UI 重构与模型选择保持既有契约。Pi 原生委派的下一次评估以公开的内置接口发布为条件；无 SDK 扩展或自建执行器替代方案。

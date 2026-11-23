@@ -82,6 +82,12 @@ sources: [四端架构主干 AD-1–5, ProviderService, Claude Agent SDK 0.3.296
 
 第 1 步的传输验证已有结果，**放行门禁未通过**。未进入第 2、3 步：无两端 Suite worker／协调者、四端混合 Hub、真实 Gateway 权限、在途 Stop 或新原生委派的验收结论。保持 Pi／OMP 现有准入，无产品代码、配置或界面改动。
 
+### 独立复核：替代接口和准入
+
+- **Claude CLI `2.1.296`：** 在无用户轮次、独立 home 的会话调用 `getContextUsage({ detail: "full" })`。回环夹具收到 12 次 token 计数请求，其中 1 次包含测试用固定段；SDK 只返回用量分类，未返回该段或摘要。无模型生成请求。`full` 既不能作为生效回执，也不是纯本地读取：实际配置会向所选计数端点发送内容。另查 [SDK `0.3.330` 发布包](https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.330.tgz) 的公开类型，初始化、`system/init` 和用量明细仍未提供所需证明；未执行该版本。
+- **Codex CLI `0.170.0`：** 给进程默认配置和 `thread/start.developerInstructions` 分别传入不同的合成值。`config/read` 返回的是进程默认值，不是线程传入值；启动与 `thread/read` 回执均不返回线程值或指令摘要。无模型轮次。静态检查 [`0.171.0` 协议](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/app-server-protocol/src/protocol/v2/thread.rs)：启动、恢复和读取回执仍无所需证明；实验性的 [`thread/sample`](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/app-server-protocol/src/protocol/v2/thread_sample.rs) 会生成模型响应，不是派发前的只读核验；未执行该版本。
+- **服务端：** 独立 Expert 四端仍可准入；专业 Suite 和协调 Suite 门禁仍只允许 Pi／OMP。工作流测试通过 3 项：首次发送不绑定、已绑定任务不接受不支持的 Provider、协调者不提前锁定 Suite。未验证真实 Suite worker、协调者或原生委派，未修改开放门禁。
+
 ### 最小上游接口需求（提案，未对外提交）
 
 - **Claude SDK：** 提供 query 作用域的公开只读证明，返回实际会话 ID 与渲染后的宿主管控 `append` 段摘要。必须在首个模型请求前可取；恢复或压缩后从最终使用的系统提示生成，若旧快照覆盖当前段，必须反映实际结果或标记不可验证。

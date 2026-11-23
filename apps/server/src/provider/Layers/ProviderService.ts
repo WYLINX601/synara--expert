@@ -962,12 +962,21 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
       execution: ProviderSessionStartInput["suiteExecution"],
       threadId: ThreadId,
       provider: string,
+      expertSession: ProviderExpertSession | undefined,
+      operation: string,
     ) =>
       Effect.gen(function* () {
-        if (!execution) return undefined;
-        if (!supportsSuiteRuntime(provider))
+        if (!execution) {
+          if (expertSession?.skillAssemblyId?.startsWith("sca_"))
+            return yield* toValidationError(
+              operation,
+              "A Suite Expert requires its complete trusted Run reference.",
+            );
+          return undefined;
+        }
+        if (!supportsSuiteRuntime(provider, execution.kind))
           return yield* toValidationError(
-            "ProviderService.startSession",
+            operation,
             `Suite execution does not support provider '${provider}'.`,
           );
         const suite = execution;
@@ -984,27 +993,36 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
               (suite.kind === "hub-coordinator") !== (record.baseSnapshotId === null)
             )
               throw new Error("Suite execution does not match its durable Run.");
+            if (
+              record.baseSnapshotId !== (expertSession?.snapshotId ?? null) ||
+              (expertSession &&
+                (expertSession.skillAssemblyId !== suite.assemblyId ||
+                  expertSession.skillRootRunId !== suite.rootRunId))
+            )
+              throw new Error("Suite runtime and Expert session identities disagree.");
             if (Option.isNone(projectionSnapshotQuery))
               throw new Error("Suite thread authorization context is unavailable.");
             const shell = Option.getOrUndefined(
               await Effect.runPromise(projectionSnapshotQuery.value.getThreadShellById(threadId)),
             );
-            if (!shell || shell.capabilityBindingId !== record.bindingId)
+            if (
+              !shell ||
+              shell.capabilityBindingId !== record.bindingId ||
+              (shell.expertBinding?.snapshotId ?? null) !== record.baseSnapshotId
+            )
               throw new Error("Suite execution is not bound to this thread.");
             return runSkillAssemblyStore.runtimeContext(record);
           },
           catch: (cause) =>
-            toValidationError(
-              "ProviderService.startSession",
-              "Suite Run resources could not be verified.",
-              cause,
-            ),
+            toValidationError(operation, "Suite Run resources could not be verified.", cause),
         });
       });
     const verifySuiteReceipt = (
       context: SuiteRuntimeContext | undefined,
-      session: ProviderSession,
-    ) => {
+      session: ProviderSession | undefined,
+      operation: string,
+      lifecycleGeneration: string | undefined,
+    ): Effect.Effect<void, ProviderValidationError> => {
       if (!context) return Effect.void;
       const expected = {
         capabilityBindingId: context.bindingId,
@@ -1014,15 +1032,38 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         resourceHashes: context.resources.map((resource) => resource.contentHash),
         contextFileHashes: context.contextFiles.map((file) => file.contentHash),
       };
-      return isDeepStrictEqual(session.suiteApplication, expected)
+      return lifecycleGeneration !== undefined &&
+        session?.lifecycleGeneration === lifecycleGeneration &&
+        isDeepStrictEqual(session.suiteApplication, expected)
         ? Effect.void
         : Effect.fail(
             toValidationError(
-              "ProviderService.startSession",
-              "OMP did not acknowledge the complete Suite runtime projection.",
+              operation,
+              "The provider did not acknowledge the complete Suite runtime projection for this lifecycle.",
             ),
           );
     };
+    const verifySuiteStartOrRetire = (
+      adapter: ProviderAdapterShape<ProviderAdapterError>,
+      context: SuiteRuntimeContext | undefined,
+      session: ProviderSession,
+      operation: string,
+      lifecycleGeneration: string | undefined,
+    ) =>
+      verifySuiteReceipt(context, session, operation, lifecycleGeneration).pipe(
+        Effect.tapError(() =>
+          adapter.stopSession(session.threadId).pipe(
+            Effect.timeoutOption(PROVIDER_STOP_SESSION_TIMEOUT),
+            Effect.catchCause((cause) =>
+              Effect.logError("Could not retire an unverified Suite runtime", {
+                threadId: session.threadId,
+                provider: adapter.provider,
+                cause: Cause.pretty(cause),
+              }),
+            ),
+          ),
+        ),
+      );
     const canonicalEventLogger =
       options?.canonicalEventLogger ??
       (options?.canonicalEventLogPath !== undefined
@@ -1674,7 +1715,15 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         "ProviderService.startSession",
         () =>
           Effect.suspend(() => startSession(startInput)).pipe(
-            Effect.tap((session) => verifySuiteReceipt(startInput.suiteRuntimeContext, session)),
+            Effect.tap((session) =>
+              verifySuiteStartOrRetire(
+                adapter,
+                startInput.suiteRuntimeContext,
+                session,
+                "ProviderService.startSession",
+                startInput.lifecycleGeneration,
+              ),
+            ),
             Effect.map((session) => ({ session, staleSessionFallbackOccurred: false })),
             Effect.catchIf(
               (error) =>
@@ -1688,7 +1737,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     const { resumeCursor: _staleResumeCursor, ...freshStartInput } = startInput;
                     return Effect.suspend(() => adapter.startSession(freshStartInput)).pipe(
                       Effect.tap((session) =>
-                        verifySuiteReceipt(startInput.suiteRuntimeContext, session),
+                        verifySuiteStartOrRetire(
+                          adapter,
+                          startInput.suiteRuntimeContext,
+                          session,
+                          "ProviderService.startSession",
+                          startInput.lifecycleGeneration,
+                        ),
                       ),
                       Effect.map((session) => ({ session, staleSessionFallbackOccurred: true })),
                     );
@@ -3178,19 +3233,6 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                     schema: ProviderSuiteExecution,
                     payload: rawSuiteExecution,
                   });
-            const suiteRuntimeContext = yield* prepareSuiteRuntime(
-              persistedSuiteExecution,
-              threadId,
-              binding.provider,
-            );
-            if (
-              persistedExpertSession?.skillAssemblyId?.startsWith("sca_") &&
-              !persistedSuiteExecution
-            )
-              return yield* toValidationError(
-                input.operation,
-                "The persisted Suite Run reference is missing.",
-              );
             if (persistedExpertSession === null) {
               return yield* toValidationError(
                 input.operation,
@@ -3226,6 +3268,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 ...(persistedCwd ? { cwd: persistedCwd } : {}),
                 runtimeNotices: persistedExpertRuntimeNotices,
               },
+            );
+            const suiteRuntimeContext = yield* prepareSuiteRuntime(
+              persistedSuiteExecution,
+              threadId,
+              binding.provider,
+              verifiedExpertSession,
+              input.operation,
             );
             const persistedModelSelection = readPersistedModelSelection(binding.runtimePayload);
             const persistedProviderOptions = readPersistedProviderOptions(binding.runtimePayload);
@@ -3320,6 +3369,13 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                 persistedProviderInstanceId,
               )
             ) {
+              yield* verifySuiteStartOrRetire(
+                adapter,
+                suiteRuntimeContext,
+                activeSession,
+                input.operation,
+                binding.lifecycleGeneration ?? "legacy",
+              );
               lease.adopt(binding.lifecycleGeneration ?? "legacy");
               return adapter;
             }
@@ -3400,9 +3456,21 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                   ? { skillRootRunId: persistedSuiteExecution.rootRunId }
                   : undefined),
               input.operation,
-              () => adapter.startSession(resumeStartInput),
+              () =>
+                adapter
+                  .startSession(resumeStartInput)
+                  .pipe(
+                    Effect.tap((session) =>
+                      verifySuiteStartOrRetire(
+                        adapter,
+                        suiteRuntimeContext,
+                        session,
+                        input.operation,
+                        lease.generation,
+                      ),
+                    ),
+                  ),
             );
-            yield* verifySuiteReceipt(suiteRuntimeContext, startedSession);
             inheritedRuntimeGenerations.delete(threadId);
             const resumed: ProviderSession = startedSession;
             if (resumed.provider !== adapter.provider) {
@@ -4127,23 +4195,9 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           input.suiteExecution,
           threadId,
           input.provider,
+          verifiedExpertSession,
+          "ProviderService.startSession",
         );
-        if (input.expertSession?.skillAssemblyId?.startsWith("sca_") && !input.suiteExecution)
-          return yield* toValidationError(
-            "ProviderService.startSession",
-            "A Suite Expert requires its complete trusted Run reference.",
-          );
-        if (
-          input.suiteExecution &&
-          (input.suiteExecution.kind === "hub-coordinator"
-            ? input.expertSession !== undefined
-            : input.expertSession?.skillAssemblyId !== input.suiteExecution.assemblyId ||
-              input.expertSession?.skillRootRunId !== input.suiteExecution.rootRunId)
-        )
-          return yield* toValidationError(
-            "ProviderService.startSession",
-            "Suite runtime and Expert session identities disagree.",
-          );
         const { expertRuntimeNotices: _expertRuntimeNotices, ...adapterInputWithoutNotices } =
           input;
         const adapterInput = {
@@ -4692,6 +4746,8 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                           previousSuiteExecution,
                           threadId,
                           persistedBinding.provider,
+                          restoredExpertSession,
+                          "ProviderService.startSession.restore",
                         );
                         const restored: ProviderSession = yield* withRunSkillAssemblyInitialization(
                           restoredExpertSession ??
@@ -4700,46 +4756,57 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
                               : undefined),
                           "ProviderService.startSession.restore",
                           () =>
-                            previousAdapter.startSession({
-                              threadId,
-                              provider: persistedBinding.provider,
-                              ...(persistedProviderInstanceId
-                                ? { providerInstanceId: persistedProviderInstanceId }
-                                : {}),
-                              lifecycleGeneration: previousGeneration,
-                              runtimeMode: persistedBinding.runtimeMode ?? "full-access",
-                              ...(previousCwd !== undefined ? { cwd: previousCwd } : {}),
-                              ...(previousModelSelection !== undefined
-                                ? { modelSelection: previousModelSelection }
-                                : {}),
-                              ...(previousProviderOptions !== undefined
-                                ? { providerOptions: previousProviderOptions }
-                                : {}),
-                              ...(restoredExpertSession !== undefined
-                                ? { expertSession: restoredExpertSession }
-                                : {}),
-                              ...(previousSuiteExecution
-                                ? { suiteExecution: previousSuiteExecution }
-                                : {}),
-                              ...(previousSuiteRuntimeContext
-                                ? { suiteRuntimeContext: previousSuiteRuntimeContext }
-                                : {}),
-                              ...(previousContextSession !== undefined
-                                ? { contextSession: previousContextSession }
-                                : {}),
-                              ...(restoredComputerControl ? { enableComputerControl: true } : {}),
-                              ...(restoredAutoApproveSynaraTools
-                                ? { autoApproveSynaraTools: true }
-                                : {}),
-                              ...(previousAdditionalDirectories.length > 0
-                                ? { additionalDirectories: previousAdditionalDirectories }
-                                : {}),
-                              ...(persistedBinding.resumeCursor !== undefined
-                                ? { resumeCursor: persistedBinding.resumeCursor }
-                                : {}),
-                            }),
+                            previousAdapter
+                              .startSession({
+                                threadId,
+                                provider: persistedBinding.provider,
+                                ...(persistedProviderInstanceId
+                                  ? { providerInstanceId: persistedProviderInstanceId }
+                                  : {}),
+                                lifecycleGeneration: previousGeneration,
+                                runtimeMode: persistedBinding.runtimeMode ?? "full-access",
+                                ...(previousCwd !== undefined ? { cwd: previousCwd } : {}),
+                                ...(previousModelSelection !== undefined
+                                  ? { modelSelection: previousModelSelection }
+                                  : {}),
+                                ...(previousProviderOptions !== undefined
+                                  ? { providerOptions: previousProviderOptions }
+                                  : {}),
+                                ...(restoredExpertSession !== undefined
+                                  ? { expertSession: restoredExpertSession }
+                                  : {}),
+                                ...(previousSuiteExecution
+                                  ? { suiteExecution: previousSuiteExecution }
+                                  : {}),
+                                ...(previousSuiteRuntimeContext
+                                  ? { suiteRuntimeContext: previousSuiteRuntimeContext }
+                                  : {}),
+                                ...(previousContextSession !== undefined
+                                  ? { contextSession: previousContextSession }
+                                  : {}),
+                                ...(restoredComputerControl ? { enableComputerControl: true } : {}),
+                                ...(restoredAutoApproveSynaraTools
+                                  ? { autoApproveSynaraTools: true }
+                                  : {}),
+                                ...(previousAdditionalDirectories.length > 0
+                                  ? { additionalDirectories: previousAdditionalDirectories }
+                                  : {}),
+                                ...(persistedBinding.resumeCursor !== undefined
+                                  ? { resumeCursor: persistedBinding.resumeCursor }
+                                  : {}),
+                              })
+                              .pipe(
+                                Effect.tap((session) =>
+                                  verifySuiteStartOrRetire(
+                                    previousAdapter,
+                                    previousSuiteRuntimeContext,
+                                    session,
+                                    "ProviderService.startSession.restore",
+                                    previousGeneration,
+                                  ),
+                                ),
+                              ),
                         );
-                        yield* verifySuiteReceipt(previousSuiteRuntimeContext, restored);
                         if (restored.provider !== previousAdapter.provider) {
                           return yield* toValidationError(
                             "ProviderService.startSession",
@@ -5127,6 +5194,8 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           input.suiteExecution,
           input.threadId,
           resolvedSource.instance.driver,
+          verifiedExpertSession,
+          "ProviderService.forkThread",
         );
         const { expertRuntimeNotices: _expertRuntimeNotices, ...adapterInputWithoutNotices } =
           input;
@@ -5172,6 +5241,12 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
 
             const forkedSession = (yield* adapter.listSessions()).find(
               (session) => session.threadId === input.threadId,
+            );
+            yield* verifySuiteReceipt(
+              suiteRuntimeContext,
+              forkedSession,
+              "ProviderService.forkThread",
+              lease.generation,
             );
             if (
               effectiveContextSession?.hasContent &&

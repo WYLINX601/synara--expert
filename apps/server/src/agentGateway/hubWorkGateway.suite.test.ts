@@ -62,30 +62,31 @@ const fixtureTarget = (provider: ExpertProviderKind): ExpertTarget => ({
   provider,
   model: "fixture-model",
 });
-const unsupportedSuiteProviders = ["codex", "pi", "claudeAgent"] as const;
+const fixtureProviders = ["omp", "codex", "pi", "claudeAgent"] as const;
 const targetCases: TargetCase[] = [
   {
-    name: "creates a queued Suite worker from its original accepted binding after Expert and Hub edits",
+    name: "starts an accepted Pi worker in an OMP Suite Hub with its original binding after edits",
     suite: true,
     callerTarget: fixtureTarget("omp"),
-    savedTarget: fixtureTarget("omp"),
+    savedTarget: fixtureTarget("pi"),
     consumer: "dispatch",
     supported: true,
     freeze: true,
   },
   {
-    name: "accepts explicit OMP without replacing the saved unsupported Suite model",
+    name: "accepts an explicit OMP worker in a Pi Suite Hub without replacing the saved model",
     suite: true,
-    callerTarget: fixtureTarget("omp"),
-    savedTarget: fixtureTarget("pi"),
+    callerTarget: fixtureTarget("pi"),
+    savedTarget: fixtureTarget("codex"),
     explicitTarget: fixtureTarget("omp"),
     consumer: "dispatch",
     supported: true,
   },
   {
-    name: "advertises supported OMP Suite members without binding or accepting work",
+    name: "advertises Pi Suite workers without binding or accepting work",
     suite: true,
     callerTarget: fixtureTarget("omp"),
+    savedTarget: fixtureTarget("pi"),
     consumer: "catalogue",
     supported: true,
   },
@@ -94,7 +95,7 @@ const targetCases: TargetCase[] = [
 // unsupported caller-scoped default cannot exist; the reachable unsupported
 // Suite inputs are the saved Expert model and an explicit target.
 for (const [source, provider] of [
-  ["saved", "pi"],
+  ["saved", "codex"],
   ["explicit", "claudeAgent"],
 ] as const) {
   for (const consumer of ["dispatch", "catalogue"] as const) {
@@ -271,10 +272,7 @@ it.each(targetCases)("$name", async (testCase) => {
         } as unknown as ProviderDiscoveryServiceShape;
         const availabilities = Effect.succeed(
           new Map(
-            (["omp", ...unsupportedSuiteProviders] as const).map((provider) => [
-              provider,
-              { enabled: true, available: true },
-            ]),
+            fixtureProviders.map((provider) => [provider, { enabled: true, available: true }]),
           ),
         );
         const projectAgentService = {

@@ -191,13 +191,19 @@ export async function verifyFixedExpertAssembly(
     (session.skillPolicy.version === 2 && session.skillPolicy.nativeSubagents !== "inherit")
   )
     throw new Error("Unsupported Expert Skill policy.");
-  const entries = skillRuntimeEntries(session);
   if (session.skillResourceRefs !== undefined)
     await verifySkillRunResources(
       skillPackageStateDir(session),
       session.skillEntries ?? [],
       session.skillResourceRefs,
     );
+  await verifyFixedNativeSkillEntries(skillRuntimeEntries(session), active);
+}
+
+export async function verifyFixedNativeSkillEntries(
+  entries: ReadonlyArray<ResolvedExpertSkillEntry>,
+  active: ReadonlyArray<{ readonly name: string; readonly path: string }>,
+): Promise<void> {
   if (
     active.length !== entries.length ||
     new Set(active.map((entry) => path.resolve(entry.path))).size !== active.length

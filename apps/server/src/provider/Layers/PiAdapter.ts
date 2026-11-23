@@ -57,12 +57,16 @@ import {
   projectSelectedSkillReferences,
   recordVerifiedNativeSkillAssembly,
   invalidateNativeSkillAssemblyVerification,
+  verifyFixedNativeSkillEntries,
 } from "../expertSkillCatalog.ts";
 import {
   skillPackageStateDir,
   skillRuntimeEntries,
   verifySkillRunResources,
 } from "../../experts/skillRunResources";
+import type { SuiteRuntimeContext } from "../../experts/SuiteRunMaterialization.ts";
+import { suiteContentDigest } from "../../suites/suiteIdentity.ts";
+import { renderSuiteRuntimeInstructions } from "../suiteRuntimeInstructions.ts";
 import { Effect, FileSystem, Layer, Option, Queue, Stream } from "effect";
 
 import {
@@ -242,6 +246,7 @@ type PiShellConfig = ReturnType<PiCodingAgentModule["getShellConfig"]>;
 export function piResourceLoaderOptionsForSession(input: {
   readonly expertSession?: ProviderExpertSession;
   readonly contextSession?: ContextSession;
+  readonly suiteRuntimeContext?: SuiteRuntimeContext;
   readonly noExtensions?: boolean;
   readonly executionPurpose?: ProviderSessionStartInput["executionPurpose"];
 }):
@@ -262,15 +267,22 @@ export function piResourceLoaderOptionsForSession(input: {
       appendSystemPrompt: [],
     };
   }
-  if (!input.expertSession && !input.contextSession?.hasContent && !input.noExtensions) {
+  const suite = input.suiteRuntimeContext;
+  if (!suite && !input.expertSession && !input.contextSession?.hasContent && !input.noExtensions) {
     return undefined;
   }
-  const fixedSkills = input.expertSession?.skillPolicy
-    ? skillRuntimeEntries(input.expertSession)
-    : [];
+  const fixed = suite !== undefined || input.expertSession?.skillPolicy !== undefined;
+  const fixedSkills =
+    suite?.skillEntries ??
+    (input.expertSession?.skillPolicy ? skillRuntimeEntries(input.expertSession) : []);
+  const baseInstructions = composeProviderBaseInstructions({
+    expertPersona: input.expertSession?.persona,
+    contextInstructions: input.contextSession?.hasContent ? input.contextSession.text : undefined,
+  });
   return {
-    ...(input.noExtensions || input.expertSession?.skillPolicy ? { noExtensions: true } : {}),
-    ...(input.expertSession?.skillPolicy
+    ...(input.noExtensions || fixed ? { noExtensions: true } : {}),
+    ...(suite ? { noContextFiles: true, noPromptTemplates: true, noThemes: true } : {}),
+    ...(fixed
       ? {
           noSkills: true,
           additionalSkillPaths: fixedSkills.map((skill) => skill.path),
@@ -286,20 +298,16 @@ export function piResourceLoaderOptionsForSession(input: {
           }),
         }
       : {}),
-    ...(input.expertSession || input.contextSession?.hasContent
+    ...(suite || input.expertSession || input.contextSession?.hasContent
       ? {
           appendSystemPrompt: [
-            composeProviderBaseInstructions({
-              expertPersona: input.expertSession?.persona,
-              contextInstructions: input.contextSession?.hasContent
-                ? input.contextSession.text
-                : undefined,
-            }) ?? "",
-          ].filter(Boolean),
-          ...(input.expertSession?.skillLoading !== "index" && input.expertSession?.skillsRoot
-            ? { additionalSkillPaths: [input.expertSession.skillsRoot] }
-            : {}),
+            ...(baseInstructions ? [baseInstructions] : []),
+            ...(suite ? [renderSuiteRuntimeInstructions(suite)] : []),
+          ],
         }
+      : {}),
+    ...(!fixed && input.expertSession?.skillLoading !== "index" && input.expertSession?.skillsRoot
+      ? { additionalSkillPaths: [input.expertSession.skillsRoot] }
       : {}),
   };
 }
@@ -488,6 +496,7 @@ const loadPiCodingAgentModule: () => Promise<PiCodingAgentModule> = lazyModule(
 
 interface PiSessionContext {
   readonly executionPurpose?: ProviderSessionStartInput["executionPurpose"];
+  readonly suiteRuntimeContext?: SuiteRuntimeContext;
   readonly fixedExpertSession?: ProviderExpertSession;
   harnessPolicyDelivered?: boolean;
   readonly enableComputerControl?: boolean;
@@ -1073,6 +1082,9 @@ function makeSessionSnapshot(
       : {}),
     ...(context.session.expertApplication
       ? { expertApplication: context.session.expertApplication }
+      : {}),
+    ...(context.session.suiteApplication
+      ? { suiteApplication: context.session.suiteApplication }
       : {}),
     ...(context.session.contextAppliedSnapshotId
       ? { contextAppliedSnapshotId: context.session.contextAppliedSnapshotId }
@@ -3374,6 +3386,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       processSupervisor: PiBashProcessSupervisor;
       gatewayTools?: ReadonlyArray<ToolDefinition>;
       expertSession?: Parameters<PiAdapterShape["startSession"]>[0]["expertSession"];
+      suiteRuntimeContext?: SuiteRuntimeContext;
       executionPurpose?: ProviderSessionStartInput["executionPurpose"];
       lifecycleGeneration?: string;
       contextSession?: Parameters<PiAdapterShape["startSession"]>[0]["contextSession"];
@@ -3395,6 +3408,8 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
         { stateDir: serverConfig.stateDir, homeDir: serverConfig.homeDir },
       );
       input.signal?.throwIfAborted();
+      const suite = input.suiteRuntimeContext;
+      const coordinator = suite !== undefined && input.expertSession === undefined;
       const createRuntime: CreateAgentSessionRuntimeFactory = async ({
         cwd,
         agentDir,
@@ -3403,6 +3418,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       }) => {
         const resourceLoaderOptions = piResourceLoaderOptionsForSession({
           ...(input.expertSession ? { expertSession: input.expertSession } : {}),
+          ...(suite ? { suiteRuntimeContext: suite } : {}),
           ...(input.contextSession ? { contextSession: input.contextSession } : {}),
           ...(input.noExtensions ? { noExtensions: true } : {}),
           ...(input.executionPurpose ? { executionPurpose: input.executionPurpose } : {}),
@@ -3413,14 +3429,17 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           modelRuntime,
           ...(resourceLoaderOptions ? { resourceLoaderOptions } : {}),
         });
-        if (input.expertSession?.skillPolicy) {
-          await recordVerifiedNativeSkillAssembly(
-            input.expertSession,
-            services.resourceLoader
-              .getSkills()
-              .skills.map((skill) => ({ name: skill.name, path: skill.filePath })),
-            input.lifecycleGeneration!,
-          );
+        if (input.expertSession?.skillPolicy || coordinator) {
+          const loadedSkills = services.resourceLoader
+            .getSkills()
+            .skills.map((skill) => ({ name: skill.name, path: skill.filePath }));
+          if (input.expertSession?.skillPolicy)
+            await recordVerifiedNativeSkillAssembly(
+              input.expertSession,
+              loadedSkills,
+              input.lifecycleGeneration!,
+            );
+          else if (suite) await verifyFixedNativeSkillEntries(suite.skillEntries, loadedSkills);
         }
         if (input.expertSession?.skillLoading !== "index" && input.expertSession?.skills.length) {
           const loadedSkills = services.resourceLoader.getSkills().skills;
@@ -3454,11 +3473,15 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           );
         }
         const skillEvolution = input.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE;
-        const shellPath = skillEvolution ? undefined : services.settingsManager.getShellPath();
-        const commandPrefix = skillEvolution
-          ? undefined
-          : services.settingsManager.getShellCommandPrefix();
-        if (!skillEvolution) input.processSupervisor.setShellPath(shellPath);
+        const includeShell = !skillEvolution && !coordinator;
+        const shellPath = includeShell ? services.settingsManager.getShellPath() : undefined;
+        const commandPrefix = includeShell
+          ? services.settingsManager.getShellCommandPrefix()
+          : undefined;
+        if (includeShell) input.processSupervisor.setShellPath(shellPath);
+        const coordinatorTools = coordinator
+          ? ["read", ...(input.gatewayTools ?? []).map((tool) => tool.name)]
+          : undefined;
         const sessionResult = await input.sdk.createAgentSessionFromServices({
           services,
           sessionManager,
@@ -3466,16 +3489,22 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           ...(model ? { model } : {}),
           thinkingLevel: input.thinkingLevel ?? DEFAULT_PI_THINKING_LEVEL,
           ...(skillEvolution ? { noTools: "all" as const, tools: [] } : {}),
+          ...(coordinatorTools ? { tools: coordinatorTools } : {}),
+          ...(suite ? { excludeTools: ["mcp__*"] } : {}),
           customTools: skillEvolution
             ? []
             : [
-                input.sdk.defineTool(
-                  input.sdk.createBashToolDefinition(cwd, {
-                    operations: input.processSupervisor.operations,
-                    ...(commandPrefix === undefined ? {} : { commandPrefix }),
-                    ...(shellPath === undefined ? {} : { shellPath }),
-                  }),
-                ),
+                ...(includeShell
+                  ? [
+                      input.sdk.defineTool(
+                        input.sdk.createBashToolDefinition(cwd, {
+                          operations: input.processSupervisor.operations,
+                          ...(commandPrefix === undefined ? {} : { commandPrefix }),
+                          ...(shellPath === undefined ? {} : { shellPath }),
+                        }),
+                      ),
+                    ]
+                  : []),
                 ...(input.gatewayTools ?? []),
               ],
         });
@@ -3496,6 +3525,23 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           // lifecycle callback tries to reselect tools before the first turn.
           sessionResult.session.setActiveToolsByName([]);
         }
+        if (suite) {
+          const session = sessionResult.session;
+          const toolNames = coordinatorTools ? session.getActiveToolNames() : undefined;
+          if (
+            !resourceLoaderOptions?.appendSystemPrompt?.every((section) =>
+              session.systemPrompt.includes(section),
+            ) ||
+            sessionResult.extensionsResult.extensions.length > 0 ||
+            (coordinatorTools &&
+              toolNames &&
+              (toolNames.length !== coordinatorTools.length ||
+                coordinatorTools.some((name) => !toolNames.includes(name))))
+          ) {
+            session.dispose();
+            throw new Error("Pi did not apply the complete fixed Suite projection.");
+          }
+        }
         return {
           ...sessionResult,
           services,
@@ -3510,6 +3556,18 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       return {
         runtime,
         modelRegistry: modelRegistryFacade(runtime.services.modelRuntime, input.sdk),
+        ...(suite
+          ? {
+              suiteApplication: {
+                capabilityBindingId: suite.bindingId,
+                assemblyId: suite.assemblyId,
+                rootRunId: suite.rootRunId,
+                configHash: suiteContentDigest(suite.effectiveConfig),
+                resourceHashes: suite.resources.map((resource) => resource.contentHash),
+                contextFileHashes: suite.contextFiles.map((file) => file.contentHash),
+              },
+            }
+          : {}),
       };
     };
 
@@ -3521,6 +3579,29 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
       Effect.gen(function* () {
         const input = providerSessionStartInputForSkillEvolution(startInput);
         const skillEvolution = input.executionPurpose === SKILL_EVOLUTION_EXECUTION_PURPOSE;
+        const suite = startInput.suiteRuntimeContext;
+        const execution = input.suiteExecution;
+        if (
+          (suite || execution) &&
+          (!suite ||
+            !execution ||
+            skillEvolution ||
+            !input.lifecycleGeneration ||
+            execution.capabilityBindingId !== suite.bindingId ||
+            execution.assemblyId !== suite.assemblyId ||
+            execution.rootRunId !== suite.rootRunId ||
+            (execution.kind === "hub-coordinator"
+              ? input.expertSession !== undefined
+              : !input.expertSession?.skillPolicy ||
+                input.expertSession.skillAssemblyId !== suite.assemblyId ||
+                input.expertSession.skillRootRunId !== suite.rootRunId))
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "session/start",
+            issue: "Pi Suite requires a verified Run projection for the requested role.",
+          });
+        }
         if (input.expertSession?.skillLoading === "index" && !input.lifecycleGeneration) {
           return yield* new ProviderAdapterRequestError({
             provider: PROVIDER,
@@ -3675,46 +3756,55 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
         const gatewayControlAvailable = gatewayTools.length > 0;
         if (!gatewayControlAvailable) {
           agentGatewaySessionLease?.release();
+          if (execution?.kind === "hub-coordinator") {
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session/start",
+              detail: "Pi Suite coordinator requires thread-scoped Synara Gateway tools.",
+            });
+          }
         }
-        const { runtime, modelRegistry } = yield* releaseAgentGatewaySessionLeaseOnInterrupt(
-          agentGatewaySessionLease,
-          Effect.tryPromise({
-            try: (signal) =>
-              createSdkRuntime({
-                signal,
-                ...(input.lifecycleGeneration
-                  ? { lifecycleGeneration: input.lifecycleGeneration }
-                  : {}),
-                sdk: piSdk,
-                cwd,
-                agentDir,
-                ...(piEnvironment !== undefined ? { environment: piEnvironment } : {}),
-                ...(providerInstanceId !== undefined ? { instanceId: providerInstanceId } : {}),
-                sessionManager,
-                ...(noExtensions ? { noExtensions: true } : {}),
-                ...(input.executionPurpose ? { executionPurpose: input.executionPurpose } : {}),
-                ...(modelId ? { modelId } : {}),
-                ...(thinkingLevel ? { thinkingLevel } : {}),
-                processSupervisor,
-                ...(gatewayControlAvailable ? { gatewayTools } : {}),
-                ...(input.expertSession ? { expertSession: input.expertSession } : {}),
-                ...(input.contextSession ? { contextSession: input.contextSession } : {}),
-              }),
-            catch: (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session/start",
-                detail: toMessage(cause, "Failed to start Pi session."),
-                cause,
-              }),
-          }),
-        ).pipe(
-          Effect.tapError(() =>
-            Effect.sync(() => {
-              agentGatewaySessionLease?.release();
+        const { runtime, modelRegistry, suiteApplication } =
+          yield* releaseAgentGatewaySessionLeaseOnInterrupt(
+            agentGatewaySessionLease,
+            Effect.tryPromise({
+              try: (signal) =>
+                createSdkRuntime({
+                  signal,
+                  ...(input.lifecycleGeneration
+                    ? { lifecycleGeneration: input.lifecycleGeneration }
+                    : {}),
+                  sdk: piSdk,
+                  cwd,
+                  agentDir,
+                  ...(piEnvironment !== undefined ? { environment: piEnvironment } : {}),
+                  ...(providerInstanceId !== undefined ? { instanceId: providerInstanceId } : {}),
+                  sessionManager,
+                  ...(noExtensions ? { noExtensions: true } : {}),
+                  ...(input.executionPurpose ? { executionPurpose: input.executionPurpose } : {}),
+                  ...(modelId ? { modelId } : {}),
+                  ...(thinkingLevel ? { thinkingLevel } : {}),
+                  processSupervisor,
+                  ...(gatewayControlAvailable ? { gatewayTools } : {}),
+                  ...(input.expertSession ? { expertSession: input.expertSession } : {}),
+                  ...(suite ? { suiteRuntimeContext: suite } : {}),
+                  ...(input.contextSession ? { contextSession: input.contextSession } : {}),
+                }),
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session/start",
+                  detail: toMessage(cause, "Failed to start Pi session."),
+                  cause,
+                }),
             }),
-          ),
-        );
+          ).pipe(
+            Effect.tapError(() =>
+              Effect.sync(() => {
+                agentGatewaySessionLease?.release();
+              }),
+            ),
+          );
         const now = new Date().toISOString();
         const model = runtime.session.model
           ? `${runtime.session.model.provider}/${runtime.session.model.id}`
@@ -3745,6 +3835,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
                 }),
               }
             : {}),
+          ...(suiteApplication ? { suiteApplication } : {}),
           cwd,
           threadId: input.threadId,
           createdAt: now,
@@ -3755,6 +3846,7 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
         const context: PiSessionContext = {
           ...(input.executionPurpose ? { executionPurpose: input.executionPurpose } : {}),
           ...(input.expertSession?.skillPolicy ? { fixedExpertSession: input.expertSession } : {}),
+          ...(suite ? { suiteRuntimeContext: suite } : {}),
           enableComputerControl: input.enableComputerControl === true,
           gatewayCapabilityInput: captureAgentGatewayCapabilityInput(input),
           ...(input.lifecycleGeneration !== undefined
@@ -3785,7 +3877,8 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
           stopped: false,
           lastKnownTokenUsage: undefined,
           unsubscribe: undefined,
-          extensionsEnabled: !skillEvolution && !noExtensions && !input.expertSession?.skillPolicy,
+          extensionsEnabled:
+            !skillEvolution && !suite && !noExtensions && !input.expertSession?.skillPolicy,
         };
         context.unsubscribe = runtime.session.subscribe((event) =>
           handleSessionEvent(context, event),
@@ -3985,17 +4078,24 @@ const makePiAdapter = (options?: PiAdapterLiveOptions) =>
         input.threadId,
         Effect.gen(function* () {
           const context = yield* requireSession(input.threadId);
-          if (context.fixedExpertSession)
+          const fixedExpert = context.fixedExpertSession;
+          const suite = context.suiteRuntimeContext;
+          if (fixedExpert || suite)
             yield* Effect.tryPromise({
-              try: () => {
-                invalidateNativeSkillAssemblyVerification(context.fixedExpertSession!);
-                return recordVerifiedNativeSkillAssembly(
-                  context.fixedExpertSession!,
-                  context.runtime.session.resourceLoader
-                    .getSkills()
-                    .skills.map((skill) => ({ name: skill.name, path: skill.filePath })),
-                  context.lifecycleGeneration!,
-                );
+              try: async () => {
+                if (fixedExpert) invalidateNativeSkillAssemblyVerification(fixedExpert);
+                const active = context.runtime.session.resourceLoader
+                  .getSkills()
+                  .skills.map((skill) => ({ name: skill.name, path: skill.filePath }));
+                if (fixedExpert) {
+                  await recordVerifiedNativeSkillAssembly(
+                    fixedExpert,
+                    active,
+                    context.lifecycleGeneration!,
+                  );
+                } else if (suite) {
+                  await verifyFixedNativeSkillEntries(suite.skillEntries, active);
+                }
               },
               catch: (cause) =>
                 new ProviderAdapterRequestError({

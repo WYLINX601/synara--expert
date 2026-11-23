@@ -34,6 +34,8 @@ import {
 import type { AgentGatewayMcpFetch } from "../../agentGateway/mcpInjection.ts";
 import { SYNARA_COMPUTER_TOOL_NAMES } from "../../agentGateway/computerToolPermission.ts";
 import { ServerConfig } from "../../config.ts";
+import { suiteContentDigest } from "../../suites/suiteIdentity.ts";
+import type { ProviderAdapterSessionStartInput } from "../Services/ProviderAdapter.ts";
 import { PiAdapter, type PiAdapterShape } from "../Services/PiAdapter.ts";
 import { makePiAdapterLive } from "./PiAdapter.ts";
 import { SKILL_EVOLUTION_SYSTEM_PROMPT } from "../skillEvolutionConstraints.ts";
@@ -183,6 +185,8 @@ async function withAdapter(
     readonly expertSession?: ProviderSessionStartInput["expertSession"];
     readonly contextSession?: ProviderSessionStartInput["contextSession"];
     readonly lifecycleGeneration?: string;
+    readonly suiteExecution?: ProviderAdapterSessionStartInput["suiteExecution"];
+    readonly suiteRuntimeContext?: ProviderAdapterSessionStartInput["suiteRuntimeContext"];
     readonly prepareCwd?: (cwd: string) => void;
     readonly executionPurpose?: ProviderSessionStartInput["executionPurpose"];
   },
@@ -258,6 +262,12 @@ async function withAdapter(
           : {}),
         ...(startSessionOverrides?.contextSession
           ? { contextSession: startSessionOverrides.contextSession }
+          : {}),
+        ...(startSessionOverrides?.suiteExecution
+          ? { suiteExecution: startSessionOverrides.suiteExecution }
+          : {}),
+        ...(startSessionOverrides?.suiteRuntimeContext
+          ? { suiteRuntimeContext: startSessionOverrides.suiteRuntimeContext }
           : {}),
         ...(startSessionOverrides?.lifecycleGeneration !== undefined
           ? { lifecycleGeneration: startSessionOverrides.lifecycleGeneration }
@@ -1694,6 +1704,124 @@ it.each([false, true])(
             'throw new Error("Unselected native extension executed");',
           );
         },
+      },
+    );
+  },
+);
+
+it.each(["hub-coordinator", "expert"] as const)(
+  "applies and re-verifies the frozen Pi Suite projection as %s",
+  async (kind) => {
+    responses("success", "success");
+    const root = mkdtempSync(path.join(tmpdir(), "synara-pi-suite-"));
+    dirs.push(root);
+    const file = path.join(root, "SKILL.md");
+    const body = "---\nname: suite-method\ndescription: Frozen method\n---\nFixed method\n";
+    writeFileSync(file, body);
+    const skill = {
+      name: "suite-method",
+      path: file,
+      entryPath: "SKILL.md",
+      packageId: `pkg_${"a".repeat(64)}`,
+      description: "Frozen method",
+      sha256: createHash("sha256").update(body).digest("hex"),
+    };
+    const instruction = "Use only the frozen Suite incident policy.";
+    const instructionPath = path.join(root, "policy.md");
+    writeFileSync(instructionPath, instruction);
+    const instructionHash = createHash("sha256").update(instruction).digest("hex");
+    const suiteExecution = {
+      kind,
+      capabilityBindingId: "cap_suite",
+      assemblyId: "sca_suite",
+      rootRunId: "run_suite",
+    };
+    const suiteRuntimeContext = {
+      bindingId: suiteExecution.capabilityBindingId,
+      assemblyId: suiteExecution.assemblyId,
+      rootRunId: suiteExecution.rootRunId,
+      effectiveConfig: { language: "French", outputDirectory: null, provenance: [], issues: [] },
+      resources: [],
+      skillEntries: [skill],
+      contextFiles: [{ path: instructionPath, contentHash: instructionHash, content: instruction }],
+      resourceRoots: [],
+    };
+    const fixedInput = {
+      suiteExecution,
+      suiteRuntimeContext,
+      ...(kind === "expert"
+        ? {
+            expertSession: {
+              snapshotId: "exp_suite",
+              persona: "Fixed specialist",
+              skillPolicy: FIXED_EXPERT_SKILL_POLICY,
+              skillLoading: "index" as const,
+              skillAssemblyId: suiteExecution.assemblyId,
+              skillRootRunId: suiteExecution.rootRunId,
+              skills: [{ name: skill.name, path: skill.path }],
+              skillEntries: [skill],
+              references: [],
+            },
+          }
+        : {}),
+    };
+    const receipt = {
+      capabilityBindingId: suiteExecution.capabilityBindingId,
+      assemblyId: suiteExecution.assemblyId,
+      rootRunId: suiteExecution.rootRunId,
+      configHash: suiteContentDigest(suiteRuntimeContext.effectiveConfig),
+      resourceHashes: [],
+      contextFileHashes: [instructionHash],
+    };
+    await withAdapter(
+      async (adapter, events, cwd) => {
+        const [initial] = await Effect.runPromise(adapter.listSessions());
+        expect(initial?.suiteApplication).toEqual(receipt);
+        await send(adapter);
+        await waitFor(() => expect(completions(events)).toHaveLength(1));
+        expect(captured.modelSystemPrompts[0]).toContain("Fixed language: French");
+        expect(captured.modelSystemPrompts[0]).toContain(instruction);
+        expect(captured.modelSystemPrompts[0]).toContain("suite-method");
+        expect(captured.modelSystemPrompts[0]).not.toContain("Ambient policy must not load");
+        const tools = captured.modelTools[0]!.map(({ name }) => name);
+        expect(tools).toContain("synara_list_threads");
+        expect(tools.includes("bash")).toBe(kind === "expert");
+        expect(captured.modelSystemPrompts[0]!.includes("Fixed specialist")).toBe(
+          kind === "expert",
+        );
+        const [running] = await Effect.runPromise(adapter.listSessions());
+        await Effect.runPromise(adapter.stopSession(threadId));
+        const reopen = {
+          ...fixedInput,
+          cwd,
+          threadId,
+          runtimeMode: "full-access" as const,
+          modelSelection: { provider: "pi" as const, model: "openai/gpt-4o" },
+          providerOptions: { pi: { agentDir: cwd } },
+          resumeCursor: running!.resumeCursor,
+          lifecycleGeneration: "pi-suite-resumed",
+        };
+        expect((await Effect.runPromise(adapter.startSession(reopen))).suiteApplication).toEqual(
+          receipt,
+        );
+        await send(adapter);
+        await waitFor(() => expect(completions(events)).toHaveLength(2));
+        expect(captured.modelSystemPrompts[1]).toContain(instruction);
+        await Effect.runPromise(adapter.stopSession(threadId));
+        writeFileSync(file, body + "Changed");
+        await expect(
+          Effect.runPromise(
+            adapter.startSession({ ...reopen, lifecycleGeneration: "pi-suite-bad" }),
+          ),
+        ).rejects.toThrow(/fixed skill content changed/iu);
+      },
+      100,
+      gatewayCredentials(),
+      {
+        ...fixedInput,
+        lifecycleGeneration: "pi-suite-start",
+        prepareCwd: (cwd) =>
+          writeFileSync(path.join(cwd, "AGENTS.md"), "Ambient policy must not load"),
       },
     );
   },

@@ -3271,10 +3271,13 @@ export const makeProjectAgentService = Effect.gen(function* () {
           // session, so a coordinator model that cannot project it would wedge
           // every check-in behind a failed start. Reject the save instead and
           // keep the working configuration.
-          if (suite !== null && !supportsSuiteRuntime(input.coordinatorModelSelection.provider))
+          if (
+            suite !== null &&
+            !supportsSuiteRuntime(input.coordinatorModelSelection.provider, "hub-coordinator")
+          )
             return yield* Effect.fail(
               fail(
-                `Suite execution does not support provider '${input.coordinatorModelSelection.provider}'. Choose ${PROVIDER_DISPLAY_NAMES.omp} or clear the Suite.`,
+                `Suite execution does not support provider '${input.coordinatorModelSelection.provider}'.`,
                 "invalid",
               ),
             );

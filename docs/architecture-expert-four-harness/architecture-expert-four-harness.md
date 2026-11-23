@@ -36,7 +36,7 @@ flowchart LR
 
 - 现有 initiative `initiative-expert-suite-hub` 与 2026-11-13 主干来自主 checkout 的 BMad 产物；项目中的[既有契约](../expert-product-technical-design.md#2026-11-13-后续架构修订入口)登记了该主干的路径和适用范围。
 - 保留原主干 AD-7/8、AD-12/13、AD-17–20 的对象、授权、生命周期、子级 Skill 作用域和切换规则。原 AD-15 的「Pi 永不建设原生子 Agent」改为「列入目标，上游提供内置接口并验收后开放」；不改变其公开接口、Skill 文本后备与禁止模拟执行的约束。下面是本增补自己的 AD 编号。
-- 本文冻结方案和边界，不改变当前产品支持声明。[当前 Suite 门禁](../../apps/server/src/provider/suiteRuntimeSupport.ts)仍限制 OMP；[ProviderService](../../apps/server/src/provider/Layers/ProviderService.ts)已核对持久 Run 身份并比对 `suiteApplication`，但当前只认 OMP 路径。当前 OMP 专用补丁的既有证据不能验收新公开接口。
+- 本文冻结方案和边界。初始实现仅 OMP；当前源码和证据见下文[实施记录](#实施记录)。当前 OMP 专用补丁的既有证据不能验收新公开接口。
 
 ## 不变量与规则
 
@@ -78,6 +78,15 @@ flowchart LR
 4. **运维：** 每端登记真实运行组件版本、能力和正反结果；隔离 home、配置信息和测试资源，不修改日用安装。兼容性降级不改变权限边界。单独登记源码集成、真实 Provider、旧执行排空、安装与发布；诊断不保存提示词、文件内容、项目名或凭据。当前方案不授权改 UI、账户/模型、安装、发布或生产切换。
 
 技术来源：[Claude 自定义子 Agent](https://code.claude.com/docs/en/sub-agents)、[Codex 自定义子 Agent](https://learn.chatgpt.com/docs/agent-configuration/subagents)、[Pi SDK](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/sdk.md)与[官方扩展示例](https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/extensions/subagent)、[OMP 上游 Task 执行](https://github.com/can1357/oh-my-pi/blob/650f3a108229ee11bf68ba3377f4e8c3391cd424/packages/coding-agent/src/task/executor.ts)。架构不指定新最低版本；当前依赖以[服务端 manifest](../../apps/server/package.json)为准，实际支持阈值由每端公开接口验证确定。
+
+## 实施记录
+
+2026-11-23：Pi SDK 1.4.0 已接入 Suite 直属 Expert／worker 与协调者。服务端按用途准入，保留原 binding、Run 和 HubWork；协调者不加载 Expert 身份，也不从成员继承连接。Pi Adapter 使用 SDK 的固定资源装配，核对实际系统提示、Skill 目录与内容；协调者只装配只读工具和已授权的 Gateway 工具。缺失、错 Run 或错代次的回执拒绝执行。
+
+- **验证边界：** 用真实 Pi SDK、替换模型传输的隔离测试，核对两个角色的系统提示、工具、Stop、恢复原装配和篡改拒绝。持久化夹具证明 OMP 协调者启动原 Pi work、Pi 协调者受理 OMP work，以及不支持的目标在受理前失败。这不是公网模型、四端混合 Hub 或真实成果端到端验收。
+- **Claude Code：** Agent SDK 0.3.296 / CLI 2.1.296 可提交附加系统指令，但没有可在首回合前核验已生效内容的回执；恢复可能复用旧系统提示快照。保持 Suite 门禁关闭。
+- **Codex：** CLI 0.170.0 能提交 `developerInstructions`；公开 `thread/start`、`thread/read` 和恢复协议未返回已生效指令或其哈希。现有原生 Skill 验证不证明完整 Suite 投影。保持 Suite 门禁关闭。
+- **原生委派：** Claude 的公开 SDK 能把 Agent 类型、工具调用与实际 task ID 关联；Codex 能用子线程 ID 查角色，但它们尚未证明本方案所需的固定 Profile、生效范围与父会话授权。OMP 18.16.0 的公开 Task/扩展可观察子执行，未证明 ACP 下的 Gateway 代次关联与终态边界；因此未开启新路径，也未排空或退役旧 OMP。Pi 仍等待公开内置子 Agent。
 
 ## 延后事项
 

@@ -51,6 +51,7 @@ flowchart LR
 - **Binds:** Suite 直属任务、Hub 协调者、四端 worker、恢复。
 - **Prevents:** 套件或 Adapter 绕过资源所有者、从当前模板重建旧工作、按协调者 harness 派所有 worker。
 - **Rule:** 保留首次发送固定的 Expert/Suite 绑定、Hub 模式锁及真实 `rootRunId`。已有装配所有者解析并校验角色与 Run 内容；Adapter 只投影已验证的同一 binding、assembly、配置及资源。使用现有 `suiteApplication` 比对投影，不能用请求字段回显作为生效证明；缺失或不一致拒绝该 Run。协调者不伪造专业 Expert 快照；worker 固定其目标 Expert 和有效工具，停止、恢复及补充指令继续使用原工作与原装配。混合运行以 `HubWork` 创建/继续目标 worker；一个 Hub 的协调者与 worker 可使用不同 harness，其结果仍走原 HubWork/成果关系。
+- **Claude／Codex 的证据来源：** 在[托管接入方案](./claude-codex-integration.md#不变量与规则)中，以按版本验收的原生行为和逐代次托管装配检查共同满足此条；指令证明来源必须明确，不要求伪造或等待原生逐会话摘要。资源、身份、权限和错误回执仍须拒绝不一致；此决定不扩大原生委派权限。
 
 ### AD-3 — 独立 Expert 与专业 worker 保留固定边界 [ADOPTED]
 
@@ -88,7 +89,7 @@ flowchart LR
 - **Codex：** CLI 0.170.0 能提交 `developerInstructions`；公开 `thread/start`、`thread/read` 和恢复协议未返回已生效指令或其哈希。现有原生 Skill 验证不证明完整 Suite 投影。保持 Suite 门禁关闭。
 - **原生委派：** Claude 的公开 SDK 能把 Agent 类型、工具调用与实际 task ID 关联；Codex 能用子线程 ID 查角色，但它们尚未证明本方案所需的固定 Profile、生效范围与父会话授权。OMP 18.16.0 的公开 Task/扩展可观察子执行，未证明 ACP 下的 Gateway 代次关联与终态边界；因此未开启新路径，也未排空或退役旧 OMP。Pi 仍等待公开内置子 Agent。
 
-Claude Code 与 Codex 的公开接入、证据边界和开放顺序见[两端开放方案](./claude-codex-integration.md)。该方案不更改当前门禁。
+Claude Code 与 Codex 的固定装配、验证证据和开放顺序见[两端托管接入方案](./claude-codex-integration.md)。该方案已定稿，托管运行尚未实施，当前门禁未变。
 
 ## 延后事项
 

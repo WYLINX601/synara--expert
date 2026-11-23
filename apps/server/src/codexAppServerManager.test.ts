@@ -7975,6 +7975,63 @@ describe("Codex fixed native Skill wiring", () => {
     makeDirectoriesWritable(root);
     rmSync(root, { recursive: true, force: true });
   }
+  it.each(["ambient-file", "fixed-file-alias", "scan-root"] as const)(
+    "attributes native %s errors without weakening fixed Skill attestation",
+    async (source) => {
+      const selected = await fixture();
+      const ambient = path.join(selected.root, ".agents", "skills", "broken", "SKILL.md");
+      mkdirSync(path.dirname(ambient), { recursive: true });
+      writeFileSync(ambient, "Missing frontmatter.");
+      const fixedAlias = path.join(selected.root, "fixed-package-alias");
+      symlinkSync(path.dirname(selected.file), fixedAlias, "junction");
+      const scanRoot = path.join(selected.root, "scan-root", "SKILL.md");
+      mkdirSync(scanRoot, { recursive: true });
+      const rejectedPath = {
+        "ambient-file": realpathSync(ambient),
+        "fixed-file-alias": path.join(fixedAlias, "SKILL.md"),
+        "scan-root": scanRoot,
+      }[source];
+      const fake = createSyntheticCodexAppServer({
+        fixedNative: {
+          ambient: [],
+          catalog: (cwd, skills) => ({
+            data: [
+              { cwd, skills, errors: [{ path: rejectedPath, message: "Native load failed" }] },
+            ],
+          }),
+        },
+      });
+      const { manager } = createSyntheticCodexManager(
+        fake,
+        undefined,
+        undefined,
+        selected.stateDir,
+      );
+      try {
+        const startup = manager.startSession({
+          threadId: asThreadId("fixed-native-diagnostic"),
+          cwd: selected.root,
+          runtimeMode: "full-access",
+          expertSession: selected.expertSession,
+          lifecycleGeneration: "fixed-native-diagnostic-generation",
+          agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+        });
+        if (source === "ambient-file") {
+          const session = await startup;
+          expect(session.skillApplication).toMatchObject({
+            enforcement: "native-fixed",
+            activeEntries: [{ path: selected.file }],
+          });
+        } else {
+          await expect(startup).rejects.toThrow(/catalog/iu);
+          expect(fake.requests.some((request) => request.method === "thread/start")).toBe(false);
+        }
+      } finally {
+        await manager.stopAll();
+        removeFixedFixture(selected.root);
+      }
+    },
+  );
   it.each(["default", "account", "custom-home"] as const)(
     "isolates probe lifecycle and owns projections independently of %s launch home",
     async (mode) => {

@@ -1250,6 +1250,7 @@
         "apps/server/src/agentGateway/hubExpertCatalog.ts",
         "apps/server/src/provider/suiteRuntimeSupport.ts",
         "apps/server/src/provider/Layers/ProviderService.ts",
+        "apps/server/src/provider/Layers/PiAdapter.ts",
         "apps/server/src/workbench/host/providerCapabilities.ts",
         "apps/server/src/agentGateway/hubWorkGateway.ts",
         "apps/server/src/agentGateway/creationCoordinator.ts",
@@ -1257,10 +1258,12 @@
         "apps/server/src/serverLayers.ts",
         "apps/server/src/suites/runtimeLayer.ts"
       ],
-      "responsibility": "Hub acceptance uses the application's shared Suite resolver to freeze the worker capability binding and exact Suite revision in the original HubWork creationSpec. Catalog, dispatch preflight and Provider execution consult the same Provider-owned Suite support predicate; unsupported targets are rejected before immutable acceptance, never silently substituted. Queue consumption removes both private references from public create parameters and passes only those persisted references through trusted creation context to the existing engine. Replays reuse the accepted identity, target and binding rather than current Expert or Hub defaults; non-Suite work retains its original path.",
+      "responsibility": "Hub acceptance freezes the worker capability binding, exact Suite revision and worker target in the original HubWork creationSpec. Catalogue, dispatch preflight, coordinator configuration and Provider execution share a role-aware Suite gate. Pi and OMP Suite workers can be paired with either coordinator without inheriting its harness. Provider startup, recovery and fork require a Suite receipt for the authoritative Run and lifecycle before accepting the native session. Pi verifies the fixed Skill catalogue and effective SDK instructions with no ambient extensions; the coordinator uses its own scoped Gateway with no Expert identity. Replays reuse the accepted identity rather than current defaults. Non-Suite work retains its original path.",
       "tests": [
         "apps/server/src/agentGateway/hubWorkGateway.suite.test.ts",
         "apps/server/src/persistence/Layers/HubSuiteAdmission.test.ts",
+        "apps/server/src/provider/Layers/PiAdapter.lifecycle.test.ts",
+        "apps/server/src/provider/Layers/ProviderService.test.ts",
         "apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts"
       ]
     },

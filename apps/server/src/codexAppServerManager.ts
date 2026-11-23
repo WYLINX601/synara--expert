@@ -2,7 +2,7 @@ import { providerProcessPriorityEnabled } from "./providerProcessPriority";
 import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import * as nodePath from "node:path";
 
 import {
@@ -1041,6 +1041,13 @@ export function fixedCodexSkillRoots(projection: FixedSkillProjection): string[]
   return [...roots].toSorted((left, right) => (left < right ? -1 : left > right ? 1 : 0));
 }
 
+function isWithinCodexSkillRoot(root: string, path: string): boolean {
+  const relative = nodePath.relative(root, path);
+  return (
+    relative !== ".." && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative)
+  );
+}
+
 async function fixedCodexEntryForNativeSkill(
   projection: FixedSkillProjection,
   skill: { readonly name: string; readonly path: string },
@@ -1555,9 +1562,8 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       invalidateNativeSkillAssemblyVerification(expertSession);
       const projection = context.fixedSkillProjection;
       if (!projection) throw new Error("Fixed Codex Skill projection is missing.");
-      await this.sendRequest(context, "skills/extraRoots/set", {
-        extraRoots: fixedCodexSkillRoots(projection),
-      });
+      const roots = fixedCodexSkillRoots(projection);
+      await this.sendRequest(context, "skills/extraRoots/set", { extraRoots: roots });
       const cwd = context.session.cwd ?? process.cwd();
       const response = await this.sendRequest<Record<string, unknown>>(context, "skills/list", {
         cwds: [cwd],
@@ -1574,14 +1580,41 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       )
         throw new Error("Codex fixed Skill catalog response is missing or malformed.");
       const scoped = this.readObject(data[0]);
+      if (!scoped || !Array.isArray(scoped.skills))
+        throw new Error("Codex fixed Skill catalog scope is missing or malformed.");
+      if (scoped.cwd !== cwd)
+        throw new Error("Codex fixed Skill catalog returned a different working directory.");
       if (
-        !scoped ||
         scoped.error !== undefined ||
-        scoped.cwd !== cwd ||
-        !Array.isArray(scoped.skills) ||
-        (scoped.errors !== undefined && (!Array.isArray(scoped.errors) || scoped.errors.length))
+        (scoped.errors !== undefined && !Array.isArray(scoped.errors))
       )
-        throw new Error("Codex fixed Skill catalog has an incorrect cwd or native errors.");
+        throw new Error("Codex fixed Skill catalog has an invalid native error response.");
+      if (scoped.errors?.length) {
+        // Codex reports individually rejected documents alongside the successfully loaded
+        // catalog. An unrelated rejected file cannot contribute a selectable entry.
+        const canonicalRoots = await Promise.all(roots.map((root) => realpath(root)));
+        for (const value of scoped.errors) {
+          const diagnostic = this.readObject(value);
+          const path = diagnostic?.path;
+          if (
+            typeof path !== "string" ||
+            !nodePath.isAbsolute(path) ||
+            path.includes("\0") ||
+            nodePath.basename(path) !== "SKILL.md" ||
+            typeof diagnostic?.message !== "string" ||
+            !diagnostic.message.trim()
+          )
+            throw new Error("Codex fixed Skill catalog reported an unscoped native error.");
+          const canonicalPath = await realpath(path).catch(() => undefined);
+          if (!canonicalPath || !(await stat(canonicalPath).catch(() => undefined))?.isFile())
+            throw new Error("Codex fixed Skill catalog could not identify a rejected document.");
+          if (
+            roots.some((root) => isWithinCodexSkillRoot(root, path)) ||
+            canonicalRoots.some((root) => isWithinCodexSkillRoot(root, canonicalPath))
+          )
+            throw new Error("Codex fixed Skill catalog failed to load a fixed package document.");
+        }
+      }
       const strictSkills = scoped.skills.map((value) => {
         const skill = this.readObject(value);
         if (

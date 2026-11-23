@@ -1498,6 +1498,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               hub.suite != null &&
               !supportsSuiteRuntime(
                 command.modelSelection?.provider ?? thread.modelSelection.provider,
+                "hub-coordinator",
               )
             )
               return yield* invalid(
@@ -1527,7 +1528,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             Effect.gen(function* () {
               if (!isExpertProvider(provider))
                 return yield* invalid(`Experts do not support '${provider}'.`);
-              if (suite && !supportsSuiteRuntime(provider))
+              if (suite && !supportsSuiteRuntime(provider, "expert"))
                 return yield* invalid(`Suite execution does not support provider '${provider}'.`);
               if (!suite) {
                 const preview = yield* Effect.tryPromise({
@@ -1565,7 +1566,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               return yield* invalid(`Experts do not support '${command.modelSelection.provider}'.`);
             if (
               envelope.hubCapabilityBindingId !== undefined &&
-              !supportsSuiteRuntime(command.modelSelection.provider)
+              !supportsSuiteRuntime(command.modelSelection.provider, "expert")
             )
               return yield* invalid(
                 `Suite execution does not support provider '${command.modelSelection.provider}'.`,

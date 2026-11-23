@@ -133,6 +133,12 @@ import { createExpertStore } from "../../experts/ExpertStore.ts";
 import { createSkillLibraryStore } from "../../experts/SkillLibraryStore.ts";
 import { createRunSkillAssemblyStore } from "../../experts/RunSkillAssemblyStore.ts";
 import { createSkillPackageStore } from "../../experts/SkillPackageStore.ts";
+import {
+  SuiteCompositionStore,
+  capabilityBindingFingerprint,
+  type SuiteCompositionStoreShape,
+} from "../../suites/SuiteCompositionStore.ts";
+import { suiteContentDigest } from "../../suites/suiteIdentity.ts";
 import { createExpertSkillApplication } from "../expertSkillCatalog.ts";
 import {
   SkillEvolutionRepository,
@@ -955,6 +961,7 @@ function makeProviderServiceLayer(
     readonly expertLearningRepository?: ExpertLearningRepositoryShape;
     readonly spaceMemoryService?: SpaceMemoryServiceShape;
     readonly nativeExpertReexecutionGate?: NativeExpertReexecutionGateShape;
+    readonly suiteStore?: Pick<SuiteCompositionStoreShape, "readBinding">;
     readonly projectionSnapshotQuery?: Pick<
       ProjectionSnapshotQueryShape,
       "getThreadShellById" | "getProjectShellById"
@@ -1076,6 +1083,11 @@ function makeProviderServiceLayer(
       Layer.provide(spaceMemoryServiceLayer),
       Layer.provide(projectionSnapshotQueryLayer),
       Layer.provide(
+        providers?.suiteStore
+          ? Layer.succeed(SuiteCompositionStore, providers.suiteStore as SuiteCompositionStoreShape)
+          : Layer.empty,
+      ),
+      Layer.provide(
         providers?.nativeExpertReexecutionGate
           ? Layer.succeed(NativeExpertReexecutionGate, providers.nativeExpertReexecutionGate)
           : Layer.empty,
@@ -1101,6 +1113,126 @@ function makeProviderServiceLayer(
     providerAdapterLayer,
   };
 }
+
+const suiteThread = asThreadId("suite-verified-thread");
+const suiteBindingDraft = {
+  schemaVersion: 1 as const,
+  bindingId: "cap_suite-provider-fixture",
+  bindingHash: "",
+  suite: null,
+  purpose: { kind: "hub-coordinator" as const, hubId: "hub-fixture", hubConfigRevision: 1 },
+  projectId: ProjectId.makeUnsafe("hub-fixture"),
+  connections: [],
+  mcpBinding: null,
+  createdAt: "2026-11-23T00:00:00.000Z",
+};
+const suiteBinding = {
+  ...suiteBindingDraft,
+  bindingHash: capabilityBindingFingerprint(suiteBindingDraft),
+};
+const suiteStore = {
+  readBinding: (id: string) => Effect.succeed(id === suiteBinding.bindingId ? suiteBinding : null),
+  read: () => Effect.succeed(null),
+  readFileRevision: () => Effect.succeed(null),
+  publishedSkillPackages: () => Effect.succeed(new Set<string>()),
+} satisfies Pick<
+  SuiteCompositionStoreShape,
+  "readBinding" | "read" | "readFileRevision" | "publishedSkillPackages"
+>;
+const suiteRouting = makeProviderServiceLayer(undefined, {
+  includePi: true,
+  suiteStore,
+  projectionSnapshotQuery: {
+    getThreadShellById: (id) =>
+      Effect.succeed(
+        id === suiteThread
+          ? Option.some({ id, capabilityBindingId: suiteBinding.bindingId } as never)
+          : Option.none(),
+      ),
+    getProjectShellById: () => Effect.succeed(Option.none()),
+  },
+});
+
+suiteRouting.layer("ProviderService Suite launch", (it) => {
+  it.effect(
+    "retires a runtime with an invalid receipt and verifies the original Run on recovery",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const directory = yield* ProviderSessionDirectory;
+        const assemblies = createRunSkillAssemblyStore(strictExpertTestState, { suiteStore });
+        const run = yield* Effect.promise(() =>
+          assemblies.prepare({
+            threadId: suiteThread,
+            rootRunId: "suite-provider-original",
+            baseSnapshotId: null,
+            capabilityBindingId: suiteBinding.bindingId,
+            createdAt: suiteBinding.createdAt,
+          }),
+        );
+        const input = {
+          threadId: suiteThread,
+          provider: "pi" as const,
+          runtimeMode: "full-access" as const,
+          suiteExecution: {
+            kind: "hub-coordinator" as const,
+            capabilityBindingId: suiteBinding.bindingId,
+            assemblyId: run.assemblyId,
+            rootRunId: run.rootRunId,
+          },
+        };
+        const start = suiteRouting.pi.startSession.getMockImplementation()!;
+        const reply = (rootRunId: string) =>
+          suiteRouting.pi.startSession.mockImplementationOnce((launch) =>
+            start(launch).pipe(
+              Effect.map((session): ProviderSession => {
+                const applied = {
+                  ...session,
+                  suiteApplication: {
+                    capabilityBindingId: suiteBinding.bindingId,
+                    assemblyId: run.assemblyId,
+                    rootRunId,
+                    configHash: suiteContentDigest(run.effectiveConfig!),
+                    resourceHashes: [],
+                    contextFileHashes: [],
+                  },
+                };
+                suiteRouting.pi.updateSession(suiteThread, () => applied);
+                return applied;
+              }),
+            ),
+          );
+
+        reply("another-run");
+        const failedStart = yield* Effect.exit(provider.startSession(suiteThread, input));
+        assert.isTrue(Exit.isFailure(failedStart));
+        assert.isFalse(yield* suiteRouting.pi.hasSession(suiteThread));
+
+        reply(run.rootRunId);
+        const started = yield* provider.startSession(suiteThread, input);
+        assert.equal(started.suiteApplication?.rootRunId, run.rootRunId);
+        yield* suiteRouting.pi.stopSession(suiteThread);
+        const persisted = Option.getOrThrow(yield* directory.getBinding(suiteThread));
+        assert.deepInclude(persisted.runtimePayload, { suiteExecution: input.suiteExecution });
+
+        const failedRecovery = yield* Effect.exit(
+          provider.sendTurn({ threadId: suiteThread, input: "Continue" }),
+        );
+        assert.isTrue(Exit.isFailure(failedRecovery));
+        assert.isFalse(yield* suiteRouting.pi.hasSession(suiteThread));
+
+        reply(run.rootRunId);
+        suiteRouting.pi.sendTurn.mockClear();
+        yield* provider.sendTurn({ threadId: suiteThread, input: "Continue" });
+        assert.lengthOf(suiteRouting.pi.sendTurn.mock.calls, 1);
+        const recovered = (yield* provider.listSessions()).find(
+          (session) => session.threadId === suiteThread,
+        );
+        assert.equal(recovered?.suiteApplication?.rootRunId, run.rootRunId);
+        assert.notEqual(recovered?.lifecycleGeneration, started.lifecycleGeneration);
+      }),
+  );
+});
 
 type TestContextSession = NonNullable<ProviderSessionStartInput["contextSession"]>;
 

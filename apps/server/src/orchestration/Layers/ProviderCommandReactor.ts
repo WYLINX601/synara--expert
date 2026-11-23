@@ -2894,8 +2894,11 @@ const make = Effect.gen(function* () {
     const skillAssemblyChanged =
       runSkillAssembly !== undefined &&
       activeSessionBeforeEnsure !== undefined &&
-      (activeSessionBeforeEnsure.skillApplication?.skillAssemblyId ??
-        threadSkillAssemblyIds.get(threadId)) !== runSkillAssembly.assemblyId;
+      (runSkillAssembly.schemaVersion === 2
+        ? activeSessionBeforeEnsure.suiteApplication?.assemblyId !== runSkillAssembly.assemblyId ||
+          activeSessionBeforeEnsure.suiteApplication?.rootRunId !== runSkillAssembly.rootRunId
+        : (activeSessionBeforeEnsure.skillApplication?.skillAssemblyId ??
+            threadSkillAssemblyIds.get(threadId)) !== runSkillAssembly.assemblyId);
     const desiredKnowledgeManifestId = expertSession?.knowledge?.manifestId;
     const knowledgeManifestChanged =
       runSkillAssembly !== undefined &&

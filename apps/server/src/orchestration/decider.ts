@@ -2132,7 +2132,10 @@ const decideCommand = Effect.fn("decideOrchestrationCommand")(function* ({
       if (
         command.modelSelection !== undefined &&
         thread.capabilityBindingId != null &&
-        !supportsSuiteRuntime(command.modelSelection.provider)
+        !supportsSuiteRuntime(
+          command.modelSelection.provider,
+          thread.expertBinding == null ? "hub-coordinator" : "expert",
+        )
       ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,

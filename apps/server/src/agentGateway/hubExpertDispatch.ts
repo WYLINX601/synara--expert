@@ -293,7 +293,7 @@ export function resolveHubCreationSpec(input: {
     }).pipe(Effect.mapError((error: AgentGatewayTargetError) => new ToolInputError(error.message)));
     if (!input.hub?.config.suite)
       yield* validateExpertPreview(dependencies.expertStore, definition.id, target, cwd);
-    else if (!supportsSuiteRuntime(target.provider))
+    else if (!supportsSuiteRuntime(target.provider, "expert"))
       return yield* Effect.fail(
         new ToolInputError(`Suite execution does not support provider "${target.provider}".`),
       );
@@ -444,7 +444,7 @@ export function listHubExpertSummaries(input: {
             ...(providerAvailability !== undefined ? { availability: providerAvailability } : {}),
             cwd: workspaceRoot,
           });
-          if (resolved.suite !== null && !supportsSuiteRuntime(targetSelection.provider))
+          if (resolved.suite !== null && !supportsSuiteRuntime(targetSelection.provider, "expert"))
             return candidateIssue(
               definition.id,
               "unsupported_capability",

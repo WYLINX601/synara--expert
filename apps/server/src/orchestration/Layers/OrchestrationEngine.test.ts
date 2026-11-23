@@ -5104,88 +5104,97 @@ describe("first-send Suite capability ownership", () => {
     }
   });
 
-  it("opens onboarding only for a genuinely new Hub and binds its coordinator without an Expert", async () => {
-    const f = await createSuiteEngineFixture();
-    try {
-      const hubId = asProjectId("suite-engine-hub");
-      const coordinatorId = ThreadId.makeUnsafe("suite-engine-coordinator");
-      await f.run(
-        f.engine.dispatch({
-          type: "project.create",
-          commandId: CommandId.makeUnsafe("suite-hub-create"),
-          projectId: hubId,
-          kind: "group",
-          title: "Suite Hub",
-          workspaceRoot: path.join(f.stateDir, "hub"),
-          createdAt: now(),
-        }),
-      );
-      expect(await f.run(f.projectAgents.isSuiteSelectionOpen(hubId))).toBe(true);
-      const config: ProjectAgentConfig = {
-        projectId: hubId,
-        suite: f.composition.ref,
-        coordinatorThreadId: coordinatorId,
-        coordinatorName: "Coordinator",
-        coordinatorModelSelection: { provider: "omp", model: "fixture" },
-        limits: { ...DEFAULT_PROJECT_AGENT_LIMITS },
-        captureEnabled: true,
-        enabled: true,
-        automationId: null,
-        revision: 1,
-        createdAt: now(),
-        updatedAt: now(),
-        disabledAt: null,
-      };
-      await f.run(f.projectAgents.saveConfig(config, null));
-      await f.run(f.engine.dispatch({ ...f.create(coordinatorId, false), projectId: hubId }));
-      await expect(
-        f.run(
+  it.each(["omp", "pi"] as const)(
+    "opens onboarding and binds a %s Suite coordinator without an Expert",
+    async (provider) => {
+      const f = await createSuiteEngineFixture();
+      try {
+        const hubId = asProjectId("suite-engine-hub");
+        const coordinatorId = ThreadId.makeUnsafe("suite-engine-coordinator");
+        await f.run(
           f.engine.dispatch({
-            ...f.start(coordinatorId, "forged-coordinator"),
-            expertId: f.definition.id,
+            type: "project.create",
+            commandId: CommandId.makeUnsafe("suite-hub-create"),
+            projectId: hubId,
+            kind: "group",
+            title: "Suite Hub",
+            workspaceRoot: path.join(f.stateDir, "hub"),
+            createdAt: now(),
           }),
-        ),
-      ).rejects.toThrow("cannot adopt");
-      await f.run(f.engine.dispatch(f.start(coordinatorId, "coordinator")));
-      const coordinator = Option.getOrThrow(
-        await f.run(f.snapshotQuery.getThreadShellById(coordinatorId)),
-      );
-      expect(coordinator.expertBinding).toBeNull();
-      const binding = await f.run(f.suites.readBinding(coordinator.capabilityBindingId!));
-      expect(binding?.purpose).toEqual({ kind: "hub-coordinator", hubId, hubConfigRevision: 1 });
-      expect(await f.run(f.projectAgents.isSuiteSelectionOpen(hubId))).toBe(false);
-      await expect(
-        f.run(f.projectAgents.saveConfig({ ...config, suite: null, revision: 2 }, 1)),
-      ).rejects.toThrow();
+        );
+        expect(await f.run(f.projectAgents.isSuiteSelectionOpen(hubId))).toBe(true);
+        const config: ProjectAgentConfig = {
+          projectId: hubId,
+          suite: f.composition.ref,
+          coordinatorThreadId: coordinatorId,
+          coordinatorName: "Coordinator",
+          coordinatorModelSelection: { provider, model: "fixture" },
+          limits: { ...DEFAULT_PROJECT_AGENT_LIMITS },
+          captureEnabled: true,
+          enabled: true,
+          automationId: null,
+          revision: 1,
+          createdAt: now(),
+          updatedAt: now(),
+          disabledAt: null,
+        };
+        await f.run(f.projectAgents.saveConfig(config, null));
+        await f.run(
+          f.engine.dispatch({
+            ...f.create(coordinatorId, false),
+            projectId: hubId,
+            modelSelection: config.coordinatorModelSelection,
+          }),
+        );
+        await expect(
+          f.run(
+            f.engine.dispatch({
+              ...f.start(coordinatorId, "forged-coordinator"),
+              expertId: f.definition.id,
+            }),
+          ),
+        ).rejects.toThrow("cannot adopt");
+        await f.run(f.engine.dispatch(f.start(coordinatorId, "coordinator")));
+        const coordinator = Option.getOrThrow(
+          await f.run(f.snapshotQuery.getThreadShellById(coordinatorId)),
+        );
+        expect(coordinator.expertBinding).toBeNull();
+        const binding = await f.run(f.suites.readBinding(coordinator.capabilityBindingId!));
+        expect(binding?.purpose).toEqual({ kind: "hub-coordinator", hubId, hubConfigRevision: 1 });
+        expect(await f.run(f.projectAgents.isSuiteSelectionOpen(hubId))).toBe(false);
+        await expect(
+          f.run(f.projectAgents.saveConfig({ ...config, suite: null, revision: 2 }, 1)),
+        ).rejects.toThrow();
 
-      const historicalHubId = asProjectId("suite-historical-hub");
-      await f.run(f.sql`INSERT INTO projection_projects(project_id, kind, title, workspace_root, scripts_json, created_at, updated_at)
+        const historicalHubId = asProjectId("suite-historical-hub");
+        await f.run(f.sql`INSERT INTO projection_projects(project_id, kind, title, workspace_root, scripts_json, created_at, updated_at)
         VALUES (${historicalHubId}, 'group', 'Historical Hub', '/fixture/old-hub', '[]', ${now()}, ${now()})`);
-      const historical = {
-        ...config,
-        projectId: historicalHubId,
-        coordinatorThreadId: ThreadId.makeUnsafe("historical-coordinator"),
-        suite: null,
-      };
-      await f.run(f.projectAgents.saveConfig(historical, null));
-      await f.run(f.engine.refreshCommandReadModel());
-      expect(await f.run(f.projectAgents.isSuiteSelectionOpen(historicalHubId))).toBe(false);
-      await expect(
-        f.run(
-          f.projectAgents.saveConfig({ ...historical, suite: f.composition.ref, revision: 2 }, 1),
-        ),
-      ).rejects.toThrow();
-    } finally {
-      await f.dispose();
-    }
-  });
+        const historical = {
+          ...config,
+          projectId: historicalHubId,
+          coordinatorThreadId: ThreadId.makeUnsafe("historical-coordinator"),
+          suite: null,
+        };
+        await f.run(f.projectAgents.saveConfig(historical, null));
+        await f.run(f.engine.refreshCommandReadModel());
+        expect(await f.run(f.projectAgents.isSuiteSelectionOpen(historicalHubId))).toBe(false);
+        await expect(
+          f.run(
+            f.projectAgents.saveConfig({ ...historical, suite: f.composition.ref, revision: 2 }, 1),
+          ),
+        ).rejects.toThrow();
+      } finally {
+        await f.dispose();
+      }
+    },
+  );
 
   it("rejects a Suite send on a provider that cannot materialize it before binding", async () => {
     const f = await createSuiteEngineFixture();
     try {
       const create = {
         ...f.create("suite-unsupported-provider"),
-        modelSelection: { provider: "pi" as const, model: "fixture" },
+        modelSelection: { provider: "codex" as const, model: "fixture" },
       };
       await f.run(f.engine.dispatch(create));
       await expect(
@@ -5196,7 +5205,7 @@ describe("first-send Suite capability ownership", () => {
             suiteSelection: f.composition.ref,
           }),
         ),
-      ).rejects.toThrow("Suite execution does not support provider 'pi'");
+      ).rejects.toThrow("Suite execution does not support provider 'codex'");
       const draft = Option.getOrThrow(
         await f.run(f.snapshotQuery.getThreadShellById(create.threadId)),
       );
@@ -5225,10 +5234,10 @@ describe("first-send Suite capability ownership", () => {
             type: "thread.meta.update",
             commandId: CommandId.makeUnsafe("suite-bound-switch-model"),
             threadId: create.threadId,
-            modelSelection: { provider: "pi", model: "fixture" },
+            modelSelection: { provider: "codex", model: "fixture" },
           }),
         ),
-      ).rejects.toThrow("Suite execution does not support provider 'pi'");
+      ).rejects.toThrow("Suite execution does not support provider 'codex'");
       const bound = Option.getOrThrow(
         await f.run(f.snapshotQuery.getThreadShellById(create.threadId)),
       );
@@ -5259,7 +5268,7 @@ describe("first-send Suite capability ownership", () => {
         suite: f.composition.ref,
         coordinatorThreadId: coordinatorId,
         coordinatorName: "Coordinator",
-        coordinatorModelSelection: { provider: "pi", model: "fixture" },
+        coordinatorModelSelection: { provider: "codex", model: "fixture" },
         limits: { ...DEFAULT_PROJECT_AGENT_LIMITS },
         captureEnabled: true,
         enabled: true,
@@ -5274,12 +5283,12 @@ describe("first-send Suite capability ownership", () => {
         f.engine.dispatch({
           ...f.create(coordinatorId, false),
           projectId: hubId,
-          modelSelection: { provider: "pi", model: "fixture" },
+          modelSelection: { provider: "codex", model: "fixture" },
         }),
       );
       await expect(
         f.run(f.engine.dispatch(f.start(coordinatorId, "coordinator-unsupported"))),
-      ).rejects.toThrow("Suite execution does not support provider 'pi'");
+      ).rejects.toThrow("Suite execution does not support provider 'codex'");
       expect(await f.run(f.projectAgents.isSuiteSelectionOpen(hubId))).toBe(true);
       const coordinator = Option.getOrThrow(
         await f.run(f.snapshotQuery.getThreadShellById(coordinatorId)),

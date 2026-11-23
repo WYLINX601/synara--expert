@@ -10,6 +10,8 @@
 
 用户已确认原生临时 Expert 委托简化及 Pi Hub 协调方向，见 [架构主干](../_bmad-output/planning-artifacts/architecture/architecture-synara-expert-2026-11-09/ARCHITECTURE-SPINE.md)。这是待实施的新契约，不是当前运行状态：独立 Expert 与 Hub worker 的固定 Skill/工具绑定保持；仅临时子 Agent 放宽方法发现，公开接口支持则原生加载，否则文本按需加载；生命周期归 harness，不保留旧临时执行器/补丁分支。下文 2026-11-11 实施补充及历史验收继续证明原实现，新方案不得引用其结果宣称已通过。
 
+四端通用的新增目标与验收边界见[四端架构主干](./architecture-expert-four-harness/architecture-expert-four-harness.md)：独立 Expert 与 Suite 覆盖四端，同一 Hub 可混用四端 worker；原生委派不跨 harness，Pi 等上游内置支持。该增补不表示运行能力已开放。
+
 ## 2026-11-11 Suite 与原生委托实施补充
 
 本轮依据 [开发冻结附件 r2](../_bmad-output/planning-artifacts/architecture/architecture-synara-expert-2026-11-09/DEVELOPMENT-CONTRACT.md) 实施；该附件的 C-6／G-1～G-6 为公共语义，OMP 的 ACP／Task 握手仅属于 Adapter。首版 Expert、旧任务快照与 v1 Run hash 继续保留，不能用本轮实现记录改写下文历史验收范围。
